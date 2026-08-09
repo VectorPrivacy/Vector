@@ -95,6 +95,10 @@ function generateChatlistStateHash() {
             profile?.avatar,
             profile?.avatar_cached,
             chat.muted,
+            // Pin state, not just position: pinning the chat that already sits
+            // at the top changes no order, so without this the glyph would
+            // never paint (the hash would match and the render be skipped).
+            arrPinnedChats.includes(chatPinKey(chat)),
             profile?.is_blocked,
             isGroup ? chat.metadata?.avatar_cached : undefined,
             isGroup ? chat.metadata?.custom_fields?.name : undefined,
@@ -111,10 +115,12 @@ function generateChatlistStateHash() {
 function renderChatlist() {
     if (fInit) return;
 
-    // Newest-first with creation/join-time fallback for message-less communities — the one
-    // chokepoint that guarantees order no matter which path added a chat (create, join,
-    // boot, message). Without it a freshly-surfaced chat stays wherever it was appended.
-    arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+    // Pinned first, then newest-first with a creation/join-time fallback for
+    // message-less communities — the one chokepoint that guarantees order no
+    // matter which path added a chat (create, join, boot, message). Without it a
+    // freshly-surfaced chat stays wherever it was appended, and a pin set by any
+    // other path is undone by the next render.
+    sortChats();
 
     // Generate a hash of the current RENDERABLE state
     const currentStateHash = generateChatlistStateHash();

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-unpin-chat"
+description = "Enables the unpin_chat command without any pre-configured scope."
+commands.allow = ["unpin_chat"]
+
+[[permission]]
+identifier = "deny-unpin-chat"
+description = "Denies the unpin_chat command without any pre-configured scope."
+commands.deny = ["unpin_chat"]

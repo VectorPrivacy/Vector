@@ -1768,6 +1768,76 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
 }
 
 /**
+ * Pinned chat ids, in pin order — the account's favourites, synced across its
+ * own devices. Ids are opaque: a DM's npub, or a Community's id.
+ * @type {string[]}
+ */
+let arrPinnedChats = [];
+
+/**
+ * The id a chat is pinned BY. A Community is pinned as the community, not as
+ * the channel row that represents it, so its `general` row is what gets hoisted.
+ * @param {Chat} chat
+ * @returns {string}
+ */
+function chatPinKey(chat) {
+    if (chat.chat_type === 'Community') {
+        return chat.metadata?.custom_fields?.community_id || chat.id;
+    }
+    return chat.id;
+}
+
+/**
+ * Pin rank, or -1 when unpinned. Looked up per render rather than stamped onto
+ * chats when they sync, so a chat that arrives AFTER its pin is pinned on its
+ * first paint with no restart and no retro-pass.
+ * @param {Chat} chat
+ * @returns {number}
+ */
+function chatPinRank(chat) {
+    return arrPinnedChats.indexOf(chatPinKey(chat));
+}
+
+/** Has the pinned list been pulled from the backend this session? */
+let _pinnedLoaded = false;
+
+/**
+ * Pull the pinned list once, from whichever path paints the chat list first.
+ *
+ * There are three boot paths — login (`init_finished`), `init()`, and dev
+ * hot-reload, which hydrates and renders without either — so hooking them
+ * individually leaves whichever one nobody remembered painting unpinned.
+ */
+async function ensurePinnedLoaded() {
+    if (_pinnedLoaded) return;
+    _pinnedLoaded = true;
+    try {
+        arrPinnedChats = await invoke('get_pinned_chats') || [];
+        sortChats();
+        renderChatlist();
+    } catch (e) {
+        _pinnedLoaded = false; // a failed load must be retryable, not latched
+        console.error('Failed to load pinned chats:', e);
+    }
+}
+
+/**
+ * The one chat-list ordering: pinned first in pin order, then newest activity.
+ */
+function sortChats() {
+    ensurePinnedLoaded();
+    arrChats.sort((a, b) => {
+        const ra = chatPinRank(a), rb = chatPinRank(b);
+        if (ra !== rb) {
+            if (ra === -1) return 1;
+            if (rb === -1) return -1;
+            return ra - rb;
+        }
+        return getChatSortTimestamp(b) - getChatSortTimestamp(a);
+    });
+}
+
+/**
  * Compute a timestamp for sorting chats, falling back to metadata for empty groups.
  * @param {Chat} chat
  * @returns {number}
@@ -2216,7 +2286,7 @@ async function acceptCommunityInvite(communityId) {
         chat._joining = true; // renders locked
         // Re-sort so the fresh created_at floats the joining row to the TOP (renderChatlist itself
         // renders arrChats in order; the new chat was pushed to the end).
-        arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+        sortChats();
     }
     updateChatBackNotification();
     renderChatlist();
@@ -3137,6 +3207,15 @@ async function setupRustListeners() {
     // the section live, instead of waiting for the next panel open.
     _on('emoji_packs_updated', () => loadEmojiPacks());
 
+    // Another device pinned or unpinned a chat. Re-sort and repaint — the pin
+    // may name a chat this device has not synced yet, which is fine: the rank
+    // lookup simply finds it when it arrives.
+    _on('pinned_chats_updated', (evt) => {
+        arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];
+        sortChats();
+        renderChatlist();
+    });
+
     // The boot DM-relay-list sync adopted/retired relays; repaint the Network
     // panel so an already-open list reflects them without a reopen.
     _on('relay_list_updated', () => renderRelayList());
@@ -4004,7 +4083,7 @@ async function setupRustListeners() {
         // Newest-first chat list sort (independent of how the message landed
         // in chat.messages).
         if (newMessage.at >= (chat.messages[chat.messages.length - 1]?.at ?? 0)) {
-            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+            sortChats();
         }
 
         // If this user has the open chat, then update the chat too
@@ -5386,6 +5465,12 @@ async function login(skipAnimations = false) {
             // The backend now sends both profiles (without messages) and chats (with messages)
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
+
+            // Pinned favourites, from the LOCAL mirror so the first paint is
+            // already in pin order; the self-sync subscription streams any
+            // sibling-device edit in afterwards.
+            _pinnedLoaded = false; // a fresh account's pins are not the last one's
+            await ensurePinnedLoaded();
 
             // Seed unread badges from the DB — boot loads only the last message per chat into RAM,
             // so the in-memory walk can't see a backlog received in a prior session. Fire-and-render

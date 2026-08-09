@@ -2555,7 +2555,8 @@ html, body {
   display: inline-block;
   background-color: rgba(255, 255, 255, 0.55);
 }
-.chatlist-contact-header .chatlist-type-icon.icon-bot {
+.chatlist-contact-header .chatlist-type-icon.icon-bot,
+.chatlist-contact-header .chatlist-type-icon.icon-pin {
   background-color: var(--icon-color-primary, #59fcb3);
 }
 /* Inline time-ago (unread rows). Sits flush after the type icon, slightly

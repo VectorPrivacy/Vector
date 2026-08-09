@@ -29,6 +29,7 @@ pub mod encryption;
 pub mod audio;
 pub mod tor;
 pub mod emoji_packs;
+pub mod pinned;
 pub mod wallpaper;
 pub mod community;
 pub mod clipboard;

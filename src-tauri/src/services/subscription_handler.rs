@@ -62,6 +62,7 @@ pub(crate) async fn subscribe_self_sync() {
         .identifiers([
             vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
             vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
+            vector_core::pinned_chats::PINNED_D_TAG.to_string(),
         ]);
     match client.subscribe(self_lists_filter).await {
         Ok(out) => new_ids.push(out.value),
@@ -113,13 +114,16 @@ async fn handle_self_sync_event(event: Event) {
     }
     match event.kind.as_u16() {
         k if k == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC => {
-            // Both lists are kind 30078 — route by `d`-tag.
-            let is_invite = event.tags.identifier().as_deref()
-                == Some(vector_core::community::invite_list::INVITE_LIST_D_TAG);
+            // Several lists share kind 30078 — route by `d`-tag, and match each
+            // explicitly: an unrecognised tag must fall through, not land on
+            // whichever ingest happens to be the else-branch.
+            let d = event.tags.identifier().unwrap_or_default().to_string();
             vector_core::db::spawn_bound(async move {
-                if is_invite {
+                if d == vector_core::community::invite_list::INVITE_LIST_D_TAG {
                     crate::commands::community::ingest_invite_list_update(event).await;
-                } else {
+                } else if d == vector_core::pinned_chats::PINNED_D_TAG {
+                    crate::commands::pinned::ingest_pinned_chats_update(event).await;
+                } else if d == vector_core::community::list::COMMUNITY_LIST_D_TAG {
                     crate::commands::community::ingest_community_list_update(event).await;
                 }
             });

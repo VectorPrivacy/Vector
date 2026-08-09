@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-pinned-chats"
+description = "Enables the get_pinned_chats command without any pre-configured scope."
+commands.allow = ["get_pinned_chats"]
+
+[[permission]]
+identifier = "deny-get-pinned-chats"
+description = "Denies the get_pinned_chats command without any pre-configured scope."
+commands.deny = ["get_pinned_chats"]
