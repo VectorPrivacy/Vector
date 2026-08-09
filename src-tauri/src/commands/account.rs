@@ -421,7 +421,6 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
             vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
         }
 
-        if !session.is_valid() { return; }
 
         let _ = account_manager::set_current_account(remote_npub.clone());
 
@@ -2032,8 +2031,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
 /// Broadcast a pending invite acceptance event to trusted relays.
 /// First-invite-wins: the invite is consumed before the spawn so a
 /// double-fire of `setup_encryption`/`skip_encryption` can't broadcast
-/// twice. SessionGuard ensures a mid-flight swap drops the publish
-/// instead of signing under the wrong key.
+/// twice.
 fn broadcast_pending_invite_if_any() {
     // Order matters: peek → check client → THEN clear. Clearing before
     // the client check would silently drop invites during the transient
@@ -2044,9 +2042,7 @@ fn broadcast_pending_invite_if_any() {
     crate::state::clear_pending_invite();
     let invite_code = pending_invite.invite_code;
     let inviter_pubkey = pending_invite.inviter_pubkey;
-    let session = vector_core::state::SessionGuard::capture();
     vector_core::db::spawn_bound(async move {
-        if !session.is_valid() { return; }
         // `l:vector` tag is part of the published event shape; external
         // indexers / relay filters may key on it.
         let event_builder = EventBuilder::new(Kind::ApplicationSpecificData, "vector_invite_accepted")
@@ -2055,7 +2051,6 @@ fn broadcast_pending_invite_if_any() {
             .tag(Tag::public_key(inviter_pubkey));
         match vector_core::sign_builder(event_builder).await {
             Ok(event) => {
-                if !session.is_valid() { return; }
                 match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
                     Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                     Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),

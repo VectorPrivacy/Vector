@@ -207,11 +207,9 @@ static REPUBLISH_GEN: AtomicU64 = AtomicU64::new(0);
 /// the next boot.
 pub fn republish_blossom_servers_debounced() {
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-        if !session.is_valid() { return; }
         let client = match nostr_client() {
             Some(c) => c,
             None => return,
@@ -220,7 +218,6 @@ pub fn republish_blossom_servers_debounced() {
             crate::log_warn!("[BlossomServers] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if !session.is_valid() { return; }
             if let Err(e2) = publish_blossom_servers(&client).await {
                 crate::log_warn!("[BlossomServers] Republish retry failed: {}", e2);
             }
@@ -266,7 +263,6 @@ pub fn merge_urls_into_customs(
 pub async fn fetch_and_merge_own_list(
     client: &Client,
     my_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
 ) -> Result<usize, String> {
     let filter = Filter::new()
         .author(my_pubkey)
@@ -277,7 +273,6 @@ pub async fn fetch_and_merge_own_list(
         .await
         .map_err(|e| format!("Failed to fetch kind 10063: {}", e))?;
 
-    if !session.is_valid() { return Ok(0); }
 
     let event = match events.into_iter().max_by_key(|e| e.created_at) {
         Some(e) => e,
@@ -324,14 +319,12 @@ pub async fn fetch_and_merge_own_list(
 
     let any_changes = customs_added > 0 || defaults_changed;
     if any_changes {
-        if !session.is_valid() { return Ok(0); }
         if defaults_changed {
             save_disabled_default_blossom_servers(&disabled)?;
         }
         if customs_added > 0 {
             save_custom_blossom_servers(&new_customs)?;
         }
-        if !session.is_valid() { return Ok(customs_added); }
         refresh_cache();
         crate::traits::emit_event("blossom_servers_updated", &());
         crate::log_info!(

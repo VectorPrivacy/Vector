@@ -1392,12 +1392,8 @@ pub async fn preload_community(invite: &super::invite::CommunityInvite) {
     // in the pool forever (#297). A genuine Join re-warms them via its subscription, so this is safe.
     let prune_relays = community.relays.clone();
     let prune_id = community.id;
-    let guard = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         tokio::time::sleep(crate::community::cache::PRELOAD_TTL).await;
-        if !guard.is_valid() {
-            return;
-        }
         // Joined within the window? Its relays are legitimate now (and its preload entry was already
         // taken on accept) — leave them.
         if matches!(crate::db::community::load_community(&prune_id), Ok(Some(_))) {

@@ -206,9 +206,6 @@ pub async fn refresh_own_badges() {
     for attempt in 1..=ATTEMPTS {
         match has_fawkes_badge(&pk).await {
             Ok(true) => {
-                if !session.is_valid() {
-                    return;
-                }
                 crate::log_info!("[Badges] vector badge confirmed (attempt {})", attempt);
                 let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
                 return;
@@ -219,9 +216,6 @@ pub async fn refresh_own_badges() {
             Err(e) => {
                 crate::log_warn!("[Badges] refresh attempt {}/{} failed: {}", attempt, ATTEMPTS, e);
             }
-        }
-        if !session.is_valid() {
-            return;
         }
         if attempt < ATTEMPTS {
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
@@ -377,10 +371,8 @@ fn write_cached_award_ids(ids: &[EventId]) {
 /// upgrades apply immediately; a downgrade is honored ONLY on a seen revocation,
 /// never a mere absent award (flaky relay). The ids of the awards backing the
 /// current tier are cached so a revocation still resolves after the relays purge
-/// the award itself (NIP-09 deletion). SessionGuard straddles the fetch so a
-/// mid-fetch account swap can't write account A's tier into account B.
+/// the award itself (NIP-09 deletion).
 pub async fn refresh_own_bug_hunter() {
-    let session = crate::state::SessionGuard::capture();
     let Some(pk) = crate::state::my_public_key() else {
         return;
     };
@@ -392,9 +384,6 @@ pub async fn refresh_own_bug_hunter() {
             return;
         }
     };
-    if !session.is_valid() {
-        return;
-    }
 
     // Highest non-revoked seen tier + the award ids backing it.
     let mut seen_tier = 0u8;

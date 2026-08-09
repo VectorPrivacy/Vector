@@ -211,12 +211,8 @@ async fn ensure_unread_seeded() {
     }
     // The DB read straddles an await; a swap could land, so guard the seed against writing account
     // A's counts into account B's freshly-swapped state.
-    let session = vector_core::state::SessionGuard::capture();
     let counts = crate::db::unread_counts().await.unwrap_or_default();
     let mut state = STATE.lock().await;
-    if !session.is_valid() {
-        return;
-    }
     if !state.unread_seeded {
         state.unread_seed(counts);
     }
@@ -226,12 +222,8 @@ async fn ensure_unread_seeded() {
 /// cache. Used where an O(1) delta would be unsafe: a delete, a mark-unread retreat, or a batch
 /// backfill that adds messages outside the live inbound path.
 pub async fn reconcile_chat_unread(chat_id: &str) {
-    let session = vector_core::state::SessionGuard::capture();
     let count = vector_core::db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
     let mut state = STATE.lock().await;
-    if !session.is_valid() {
-        return;
-    }
     // Before the seed the whole map is (re)built from the DB anyway, so only patch a live cache.
     if state.unread_seeded {
         state.unread_set(chat_id, count);

@@ -808,10 +808,8 @@ async fn run_subscribe_loop(
                     let topic_copy = topic;
                     // Capture BEFORE the sleep: the topic→chat_id mapping belongs to the
                     // account current now, and 2s is plenty of time for a swap.
-                    let session = vector_core::state::SessionGuard::capture();
                     vector_core::db::spawn_bound(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        if !session.is_valid() { return; }
                         let state = app.state::<crate::miniapps::state::MiniAppsState>();
                         if !state.has_realtime_channel_for_topic(&topic_copy).await { return; }
                         if let Ok(iroh) = state.realtime.get_or_init().await {

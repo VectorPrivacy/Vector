@@ -607,9 +607,6 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
             inflight.remove(&chat_id);
         }
         let Ok(found) = fetched else { return }; // transient failure: stay stale, next `/` retries
-        if !session.is_valid() {
-            return;
-        }
         for (pk, manifest, created_at) in &found {
             if let Ok(json) = serde_json::to_string(manifest) {
                 let _ = crate::db::bots::upsert_bot_manifest(&pk.to_hex(), &json, *created_at);
@@ -617,9 +614,6 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
         }
         let bot_hexes: Vec<String> = bots.iter().map(|p| p.to_hex()).collect();
         let commands = assemble_from_store(&bot_hexes);
-        if !session.is_valid() {
-            return;
-        }
         mark_commands_fresh(&chat_id, session.generation(), &bot_hexes);
         crate::traits::emit_event(
             "chat_commands_updated",

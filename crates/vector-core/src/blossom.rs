@@ -577,7 +577,6 @@ where
     let mime_for_routing = mime_type.unwrap_or("application/octet-stream");
     let ranked = crate::blossom_capabilities::rank_servers(server_urls, mime_for_routing, is_encrypted, size_bytes);
     // Pin capability writes to the account that started the upload.
-    let upload_session = crate::state::SessionGuard::capture();
 
     for (index, server_url_str) in ranked.iter().enumerate() {
         if let Some(ref flag) = cancel_flag {
@@ -620,7 +619,7 @@ where
                 }
                 crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
                 if let Err(err) = crate::blossom_capabilities::record_accepted(
-                    server_url_str, mime_for_routing, is_encrypted, size_bytes, upload_session,
+                    server_url_str, mime_for_routing, is_encrypted, size_bytes,
                 ) {
                     crate::log_warn!("[Blossom Cap] record_accepted failed: {}", err);
                 }
@@ -636,13 +635,13 @@ where
                 // blob); route around it exactly like a hard MIME rejection.
                 if e.contains("[INTEGRITY]") || crate::blossom_capabilities::is_mime_rejection(status, &e) {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, mime_for_routing, is_encrypted, upload_session,
+                        server_url_str, mime_for_routing, is_encrypted,
                     ) {
                         crate::log_warn!("[Blossom Cap] record_rejected_mime failed: {}", err);
                     }
                 } else if crate::blossom_capabilities::is_size_rejection(status) {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_size(
-                        server_url_str, mime_for_routing, is_encrypted, size_bytes, upload_session,
+                        server_url_str, mime_for_routing, is_encrypted, size_bytes,
                     ) {
                         crate::log_warn!("[Blossom Cap] record_rejected_size failed: {}", err);
                     }
@@ -995,13 +994,11 @@ where
 pub async fn probe_servers_for_octet_stream<T>(
     signer: T,
     server_urls: Vec<String>,
-    session: crate::state::SessionGuard,
 ) -> Result<usize, String>
 where
     T: VectorSigner + Clone,
 {
     use rand::RngCore;
-    if !session.is_valid() { return Ok(0); }
     if server_urls.is_empty() { return Ok(0); }
 
     const PROBE_MIME: &str = "application/octet-stream";
@@ -1012,7 +1009,6 @@ where
 
     let mut probed = 0usize;
     for server_url_str in &server_urls {
-        if !session.is_valid() { return Ok(probed); }
         if crate::blossom_capabilities::has_fresh_capability_for(server_url_str, PROBE_MIME, true) {
             continue;
         }
@@ -1064,7 +1060,7 @@ where
                 );
                 if refuses_deletion {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, PROBE_MIME, true, session,
+                        server_url_str, PROBE_MIME, true,
                     ) {
                         crate::log_warn!("[Blossom Probe] record_rejected_mime failed: {}", err);
                     }
@@ -1072,7 +1068,7 @@ where
                     crate::log_info!("[Blossom Probe] {} refuses deletion; routing around", server_url_str);
                 } else {
                     if let Err(e) = crate::blossom_capabilities::record_accepted(
-                        server_url_str, PROBE_MIME, true, payload_size, session,
+                        server_url_str, PROBE_MIME, true, payload_size,
                     ) {
                         crate::log_warn!("[Blossom Probe] record_accepted failed: {}", e);
                     }
@@ -1089,7 +1085,7 @@ where
                         continue;
                     }
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, PROBE_MIME, true, session,
+                        server_url_str, PROBE_MIME, true,
                     ) {
                         crate::log_warn!("[Blossom Probe] record_rejected_mime failed: {}", err);
                     }

@@ -285,7 +285,6 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     // Capture session at entry — the upload + gift-wrap send below take
     // seconds, and a mid-publish account swap must not write this
     // wallpaper into the new account (re-checked before the STATE/DB write).
-    let session = crate::state::SessionGuard::capture();
 
     let blur = blur.min(30);
     let dim = dim.min(100);
@@ -441,9 +440,6 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     // Account swapped during upload/send: the rumor already went to the
     // original recipient, but the local commit below (preview promotion,
     // STATE, DB) would land in the new account's storage. Skip it.
-    if !session.is_valid() {
-        return Ok(());
-    }
 
     // Send succeeded — promote the preview file to the active slot.
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
@@ -567,7 +563,6 @@ pub async fn apply_received_wallpaper(
     // Capture session NOW — the download below can take seconds, and a
     // mid-fetch account swap must not let us write account A's wallpaper
     // into account B's STATE/DB (re-checked before every write below).
-    let session = crate::state::SessionGuard::capture();
 
     let blur = blur.unwrap_or(0).min(30);
     let dim = dim.unwrap_or(50).min(100);
@@ -660,10 +655,6 @@ pub async fn apply_received_wallpaper(
 
     // Account swap during the download invalidates everything below — the
     // chat npub, the DB pool, and the per-account wallpapers dir all belong
-    // to a session that may no longer be active. Bail before any write.
-    if !session.is_valid() {
-        return Ok(());
-    }
 
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
     clean_chat_files(chat_npub, FileKind::Active, None)?;
@@ -864,7 +855,6 @@ async fn emit_wallpaper_removed(
 /// recipient and our other devices clear it too (latest-write-wins by
 /// `created_at`), then DELETEs our blob and wipes local STATE/DB.
 pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
 
     let my_pk = crate::state::my_public_key().ok_or("Public key not set")?;
     let recipient_pk = PublicKey::from_bech32(chat_npub)
@@ -902,9 +892,6 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
 
     // Account swapped mid-send — the tombstone already went out, but the
     // local commit below would land in the new account's storage. Skip it.
-    if !session.is_valid() {
-        return Ok(());
-    }
 
     clean_chat_files(chat_npub, FileKind::Active, None)?;
     let me_npub = my_pk.to_bech32().unwrap_or_default();

@@ -248,14 +248,9 @@ pub async fn persist_chat_event(
     event: &ChatEvent,
     channel_id: &str,
     my_pubkey: &PublicKey,
-    session: &crate::state::SessionGuard,
 ) -> Option<ChatPersist> {
     let outcome = {
         let mut st = crate::state::STATE.lock().await;
-        // A swap can land on the lock await: only mutate THIS account's STATE.
-        if !session.is_valid() {
-            return None;
-        }
         apply_chat_to_state(&mut st, event, channel_id, my_pubkey)
     }?;
     // Resolve a reply's preview (content/npub) from the DB before persist + emit
@@ -271,9 +266,6 @@ pub async fn persist_chat_event(
         o => o,
     };
     // …and only persist to THIS account's DB (the save straddles an await).
-    if !session.is_valid() {
-        return None;
-    }
     persist_chat(channel_id, &outcome).await;
     // §7 pin duties: a deleted pinned message wants the omitting edition, an
     // edited one a refreshed proof bundle. Fired only from a PERSISTED outcome
@@ -608,8 +600,7 @@ mod tests {
         };
         assert_eq!(channel_id, cid);
 
-        let session = crate::state::SessionGuard::capture();
-        let outcome = persist_chat_event(&event, &channel_id, &me.public_key(), &session).await;
+        let outcome = persist_chat_event(&event, &channel_id, &me.public_key()).await;
         let Some(ChatPersist::New(msg)) = outcome else {
             panic!("the first delivery persists as New");
         };
@@ -624,7 +615,7 @@ mod tests {
             panic!("the re-wrap still opens");
         };
         assert!(
-            persist_chat_event(&dup, &channel_id, &me.public_key(), &session).await.is_none(),
+            persist_chat_event(&dup, &channel_id, &me.public_key()).await.is_none(),
             "a re-wrapped duplicate yields no outcome (nothing re-fires)"
         );
     }
@@ -736,7 +727,6 @@ mod tests {
         let community = service::create_community(&relay, "Rekeyed", vec!["wss://r".into()], None).await.unwrap();
         let general = community.channels[0].id;
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
-        let session = crate::state::SessionGuard::capture();
 
         // Epoch-0 message, opened under the epoch-0 public key, persisted.
         let member = Keys::generate();
@@ -745,7 +735,7 @@ mod tests {
         let msg_id = msg.id.unwrap().to_hex();
         let (mw, _) = chat::seal_chat_rumor(&msg, &g0, &member, Timestamp::from_secs(5), false).unwrap();
         let ev = chat::open_chat_event(&mw, &g0, &general, community.root_epoch).unwrap();
-        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await, Some(ChatPersist::New(_))));
+        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
 
         // Epoch-1 reaction (same root, next epoch → a distinct channel key) to that
         // epoch-0 message, opened under the epoch-1 key.
@@ -754,7 +744,7 @@ mod tests {
         let reaction = chat::build_reaction_rumor(member.public_key(), &general, next, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🎉", None, 6_000);
         let (rw, _) = chat::seal_chat_rumor(&reaction, &g1, &member, Timestamp::from_secs(6), false).unwrap();
         let rev = chat::open_chat_event(&rw, &g1, &general, next).unwrap();
-        let outcome = persist_chat_event(&rev, &cid, &me.public_key(), &session).await;
+        let outcome = persist_chat_event(&rev, &cid, &me.public_key()).await;
         assert!(matches!(outcome, Some(ChatPersist::Updated { .. })), "the cross-epoch reaction updates the target");
 
         let reaction_author = {
@@ -776,7 +766,6 @@ mod tests {
         let community = service::create_community(&relay, "UnReact", vec!["wss://r".into()], None).await.unwrap();
         let general = community.channels[0].id;
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
-        let session = crate::state::SessionGuard::capture();
         let (secret, epoch) = community.channel_secret(&community.channels[0]);
         let group = super::super::derive::channel_group_key(&secret, &general, epoch);
 
@@ -786,27 +775,27 @@ mod tests {
         let msg_id = msg.id.unwrap().to_hex();
         let (mw, _) = chat::seal_chat_rumor(&msg, &group, &member, Timestamp::from_secs(5), false).unwrap();
         let ev = chat::open_chat_event(&mw, &group, &general, epoch).unwrap();
-        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await, Some(ChatPersist::New(_))));
+        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
 
         let reaction = chat::build_reaction_rumor(member.public_key(), &general, epoch, &msg_id, &member.public_key().to_hex(), super::super::kind::MESSAGE, "🔥", None, 6_000);
         let reaction_id = reaction.id.unwrap().to_hex();
         let (rw, _) = chat::seal_chat_rumor(&reaction, &group, &member, Timestamp::from_secs(6), false).unwrap();
         let rev = chat::open_chat_event(&rw, &group, &general, epoch).unwrap();
-        assert!(matches!(persist_chat_event(&rev, &cid, &me.public_key(), &session).await, Some(ChatPersist::Updated { .. })));
+        assert!(matches!(persist_chat_event(&rev, &cid, &me.public_key()).await, Some(ChatPersist::Updated { .. })));
 
         // A NON-reactor's delete targeting the reaction is dropped outright.
         let outsider = Keys::generate();
         let forged = chat::build_delete_rumor(outsider.public_key(), &general, epoch, &reaction_id, super::super::kind::MESSAGE, 7_000, None);
         let (fw, _) = chat::seal_chat_rumor(&forged, &group, &outsider, Timestamp::from_secs(7), false).unwrap();
         let fev = chat::open_chat_event(&fw, &group, &general, epoch).unwrap();
-        assert!(persist_chat_event(&fev, &cid, &me.public_key(), &session).await.is_none(), "only the reactor revokes their reaction");
+        assert!(persist_chat_event(&fev, &cid, &me.public_key()).await.is_none(), "only the reactor revokes their reaction");
 
         // The REACTOR's delete removes it: STATE chip gone, kind-7 row gone
         // (a lingering row would resurrect the chip on the next load), parent intact.
         let revoke = chat::build_delete_rumor(member.public_key(), &general, epoch, &reaction_id, super::super::kind::MESSAGE, 8_000, None);
         let (vw, _) = chat::seal_chat_rumor(&revoke, &group, &member, Timestamp::from_secs(8), false).unwrap();
         let vev = chat::open_chat_event(&vw, &group, &general, epoch).unwrap();
-        assert!(matches!(persist_chat_event(&vev, &cid, &me.public_key(), &session).await, Some(ChatPersist::ReactionRemoved { .. })));
+        assert!(matches!(persist_chat_event(&vev, &cid, &me.public_key()).await, Some(ChatPersist::ReactionRemoved { .. })));
         let (has_reaction, parent_alive) = {
             let st = crate::state::STATE.lock().await;
             (
@@ -937,7 +926,6 @@ mod tests {
         let general = community.channels[0].id;
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
         let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
-        let session = crate::state::SessionGuard::capture();
 
         // Build a valid NIP-92 imeta tag via the same encoder the v2 file pipeline
         // uses, so the round-trip mirrors production exactly.
@@ -964,7 +952,7 @@ mod tests {
         let (wrap, _) = chat::seal_chat_rumor(&rumor, &group, &member, Timestamp::from_secs(5), false).unwrap();
         let ev = chat::open_chat_event(&wrap, &group, &general, community.root_epoch).unwrap();
 
-        let outcome = persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+        let outcome = persist_chat_event(&ev, &cid, &me.public_key()).await;
         let Some(ChatPersist::New(msg)) = outcome else {
             panic!("the file message persists as new");
         };
@@ -987,7 +975,6 @@ mod tests {
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
-        let session = crate::state::SessionGuard::capture();
         let rogue = Keys::generate();
 
         // Pre-ban: the rogue's message folds like anyone's.
@@ -995,7 +982,7 @@ mod tests {
         let m1_id = m1.id.unwrap().to_hex();
         let (w1, _) = chat::seal_chat_rumor(&m1, &group, &rogue, Timestamp::from_secs(5), false).unwrap();
         let ev = chat::open_chat_event(&w1, &group, &general, community.root_epoch).unwrap();
-        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await, Some(ChatPersist::New(_))));
+        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
 
         // The ban lands (the fold's persisted banlist).
         crate::db::community::set_community_banlist(&cid_hex, &[rogue.public_key().to_hex()], 1_000).unwrap();
@@ -1004,17 +991,17 @@ mod tests {
         let m2 = chat::build_message_rumor(rogue.public_key(), &general, community.root_epoch, "post-ban", None, &[], vec![], 6_000);
         let (w2, _) = chat::seal_chat_rumor(&m2, &group, &rogue, Timestamp::from_secs(6), false).unwrap();
         let ev = chat::open_chat_event(&w2, &group, &general, community.root_epoch).unwrap();
-        assert!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(), "a banned message is dropped");
+        assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned message is dropped");
 
         let edit = chat::build_edit_rumor(rogue.public_key(), &general, community.root_epoch, &m1_id, "rewritten", 7_000);
         let (we, _) = chat::seal_chat_rumor(&edit, &group, &rogue, Timestamp::from_secs(7), false).unwrap();
         let ev = chat::open_chat_event(&we, &group, &general, community.root_epoch).unwrap();
-        assert!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(), "a banned edit is dropped");
+        assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned edit is dropped");
 
         let del = chat::build_delete_rumor(rogue.public_key(), &general, community.root_epoch, &m1_id, super::super::kind::MESSAGE, 8_000, None);
         let (wd, _) = chat::seal_chat_rumor(&del, &group, &rogue, Timestamp::from_secs(8), false).unwrap();
         let ev = chat::open_chat_event(&wd, &group, &general, community.root_epoch).unwrap();
-        assert!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(), "a banned delete is dropped");
+        assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned delete is dropped");
         assert!(
             crate::state::STATE.lock().await.find_message(&m1_id).is_some(),
             "their pre-ban message survives their own post-ban delete"
@@ -1040,7 +1027,7 @@ mod tests {
         let m3 = chat::build_message_rumor(innocent.public_key(), &general, community.root_epoch, "innocent", None, &[], vec![], 11_000);
         let (w3, _) = chat::seal_chat_rumor(&m3, &group, &innocent, Timestamp::from_secs(11), false).unwrap();
         let ev = chat::open_chat_event(&w3, &group, &general, community.root_epoch).unwrap();
-        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await, Some(ChatPersist::New(_))));
+        assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
     }
 
     #[tokio::test]
@@ -1052,7 +1039,6 @@ mod tests {
         let general = community.channels[0].id;
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
         let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
-        let session = crate::state::SessionGuard::capture();
 
         // A member posts a root message, then a kind-1111 threaded reply to it
         // (the shape Armada sends).
@@ -1077,7 +1063,7 @@ mod tests {
 
         for w in [&rw, &tw] {
             let ev = chat::open_chat_event(w, &group, &general, community.root_epoch).unwrap();
-            let outcome = persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+            let outcome = persist_chat_event(&ev, &cid, &me.public_key()).await;
             assert!(matches!(outcome, Some(ChatPersist::New(_))), "both persist as new messages");
         }
         // The reply row carries its parent as inline reply context, resolved
@@ -1094,7 +1080,7 @@ mod tests {
         let del = chat::build_delete_rumor(member.public_key(), &general, community.root_epoch, &reply_id, super::super::kind::COMMENT, 7_000, None);
         let (dw, _) = chat::seal_chat_rumor(&del, &group, &member, Timestamp::from_secs(7), false).unwrap();
         let ev = chat::open_chat_event(&dw, &group, &general, community.root_epoch).unwrap();
-        let outcome = persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+        let outcome = persist_chat_event(&ev, &cid, &me.public_key()).await;
         assert!(matches!(outcome, Some(ChatPersist::Removed(id)) if id == reply_id), "the author's delete removes their thread reply");
     }
 
@@ -1107,7 +1093,6 @@ mod tests {
         let general = community.channels[0].id;
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
         let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
-        let session = crate::state::SessionGuard::capture();
 
         // Another member posts, then edits their own message.
         let member = Keys::generate();
@@ -1118,7 +1103,7 @@ mod tests {
         let (ew, _) = chat::seal_chat_rumor(&edit, &group, &member, Timestamp::from_secs(6), false).unwrap();
         for w in [&mw, &ew] {
             if let Ok(ev) = chat::open_chat_event(w, &group, &general, community.root_epoch) {
-                let _ = persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+                let _ = persist_chat_event(&ev, &cid, &me.public_key()).await;
             }
         }
 
@@ -1128,7 +1113,7 @@ mod tests {
         assert_ne!(replay.id, ew.id, "a re-wrap is a distinct outer event");
         let ev = chat::open_chat_event(&replay, &group, &general, community.root_epoch).unwrap();
         assert!(
-            persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(),
+            persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(),
             "a replayed edit yields no outcome (no handler re-fire)"
         );
     }
@@ -1145,7 +1130,6 @@ mod tests {
         let general = community.channels[0].id;
         let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
         let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
-        let session = crate::state::SessionGuard::capture();
 
         // The real author posts a message.
         let author = Keys::generate();
@@ -1153,14 +1137,14 @@ mod tests {
         let msg_id = msg.id.unwrap().to_hex();
         let (mw, _) = chat::seal_chat_rumor(&msg, &group, &author, Timestamp::from_secs(5), false).unwrap();
         let ev = chat::open_chat_event(&mw, &group, &general, community.root_epoch).unwrap();
-        persist_chat_event(&ev, &cid, &me.public_key(), &session).await;
+        persist_chat_event(&ev, &cid, &me.public_key()).await;
 
         // A stranger (member, holds the key) forges an edit of the author's message.
         let stranger = Keys::generate();
         let edit = chat::build_edit_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, "TAMPERED", 6_000);
         let (ew, _) = chat::seal_chat_rumor(&edit, &group, &stranger, Timestamp::from_secs(6), false).unwrap();
         let ev = chat::open_chat_event(&ew, &group, &general, community.root_epoch).unwrap();
-        assert!(persist_chat_event(&ev, &cid, &me.public_key(), &session).await.is_none(), "a forged edit yields no outcome");
+        assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a forged edit yields no outcome");
 
         let content = {
             let st = crate::state::STATE.lock().await;
@@ -1184,7 +1168,6 @@ mod tests {
         let chan_b = service::create_public_channel(&relay, &community, "b").await.unwrap();
         community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         let a_hex = crate::simd::hex::bytes_to_hex_32(&chan_a.0);
-        let session = crate::state::SessionGuard::capture();
 
         // A message lives in channel B.
         let author = Keys::generate();
@@ -1193,7 +1176,7 @@ mod tests {
         let msg_id = msg.id.unwrap().to_hex();
         let (mw, _) = chat::seal_chat_rumor(&msg, &gb, &author, Timestamp::from_secs(5), false).unwrap();
         let bev = chat::open_chat_event(&mw, &gb, &chan_b, community.root_epoch).unwrap();
-        persist_chat_event(&bev, &crate::simd::hex::bytes_to_hex_32(&chan_b.0), &me.public_key(), &session).await;
+        persist_chat_event(&bev, &crate::simd::hex::bytes_to_hex_32(&chan_b.0), &me.public_key()).await;
 
         // A reaction sealed in channel A, targeting the channel-B message.
         let ga = super::super::derive::channel_group_key(&community.community_root, &chan_a, community.root_epoch);
@@ -1201,7 +1184,7 @@ mod tests {
         let (rw, _) = chat::seal_chat_rumor(&reaction, &ga, &author, Timestamp::from_secs(6), false).unwrap();
         let aev = chat::open_chat_event(&rw, &ga, &chan_a, community.root_epoch).unwrap();
         // Applied under channel A (where it was sealed) — the target is in B.
-        let outcome = persist_chat_event(&aev, &a_hex, &me.public_key(), &session).await;
+        let outcome = persist_chat_event(&aev, &a_hex, &me.public_key()).await;
         assert!(outcome.is_none(), "a cross-channel reaction is dropped");
         let reacted = {
             let st = crate::state::STATE.lock().await;

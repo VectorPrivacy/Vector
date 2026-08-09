@@ -1648,9 +1648,6 @@ pub async fn fetch_subscribed_packs(
         crate::log_info!("[EmojiPacks] {} subscribed pack(s) deleted by their creator", tombstoned);
     }
 
-    if !session.is_valid() {
-        return Ok(fresh);
-    }
 
     // Health verdicts BEFORE the save loop: save_pack's REPLACE resets the
     // health columns, so `Found` must read the pre-save status or a revival
@@ -1767,7 +1764,6 @@ pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, S
         let naddr_owned = naddr.to_string();
         let session = crate::state::SessionGuard::capture();
         crate::db::spawn_bound(async move {
-            if !session.is_valid() { return; }
             let Some(client) = nostr_client() else { return };
             if let Ok(parsed) = parse_naddr(&naddr_owned) {
                 if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
@@ -1904,11 +1900,9 @@ pub fn republish_emoji_list_debounced() {
         Timestamp::now().as_secs().to_string(),
     );
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-        if !session.is_valid() { return; }
         let client = match nostr_client() {
             Some(c) => c,
             None => return,
@@ -1917,7 +1911,6 @@ pub fn republish_emoji_list_debounced() {
             crate::log_warn!("[EmojiPacks] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if !session.is_valid() { return; }
             if let Err(e2) = publish_emoji_list(&client).await {
                 crate::log_warn!("[EmojiPacks] Republish retry failed: {}", e2);
             }

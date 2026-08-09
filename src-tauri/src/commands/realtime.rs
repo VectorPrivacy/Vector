@@ -44,7 +44,6 @@ pub async fn send_webxdc_peer_advertisement(
 ) -> bool {
     // The receiver/chat_id was captured by the caller under the CURRENT account; a swap
     // mid-await would sign + publish the NEW account's identity into the OLD account's chat.
-    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
@@ -64,9 +63,6 @@ pub async fn send_webxdc_peer_advertisement(
                 .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
-            if !session.is_valid() {
-                return false;
-            }
             // Gift Wrap and send to receiver via our Trusted Relays
             match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
@@ -74,7 +70,7 @@ pub async fn send_webxdc_peer_advertisement(
             }
         }
         // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
-        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, Some(&node_addr), &session).await,
+        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, Some(&node_addr)).await,
     }
 }
 
@@ -85,7 +81,6 @@ pub async fn send_webxdc_peer_left(
     topic_id: String,
 ) -> bool {
     // Same swap exposure as the advertisement — see send_webxdc_peer_advertisement.
-    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
@@ -100,16 +95,13 @@ pub async fn send_webxdc_peer_left(
                 .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
-            if !session.is_valid() {
-                return false;
-            }
             match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }
         }
         // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
-        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, None, &session).await,
+        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, None).await,
     }
 }
 
@@ -120,7 +112,6 @@ async fn send_community_webxdc_signal(
     channel_id: &str,
     topic_id: &str,
     node_addr: Option<&str>,
-    session: &vector_core::state::SessionGuard,
 ) -> bool {
     use vector_core::community::{service, transport::LiveTransport};
     // Dual-stack: a v2 channel seals the SAME 3310 content on its chat plane.
@@ -138,9 +129,6 @@ async fn send_community_webxdc_signal(
             ) else {
                 return false;
             };
-            if !session.is_valid() {
-                return false;
-            }
             let ch = vector_core::community::ChannelId(vector_core::simd::hex::hex_to_bytes_32(channel_id));
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             return match vector_core::community::v2::service::send_webxdc_signal(&transport, &community, &ch, topic_id, node_addr).await {
@@ -161,9 +149,6 @@ async fn send_community_webxdc_signal(
     };
     // Re-check after the DB resolve: a swap here would publish the NEW account's identity
     // (both accounts can be members of the same community) under the OLD caller's intent.
-    if !session.is_valid() {
-        return false;
-    }
     let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
     match service::publish_webxdc_signal(&transport, &community, &channel, topic_id, node_addr).await {
         Ok(()) => true,

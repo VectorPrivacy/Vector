@@ -11,10 +11,8 @@ pub use vector_core::{ChatType, SerializableChat};
 pub async fn mark_as_read_headless(chat_id: &str) -> bool {
     // A swap can land while awaiting the STATE lock; re-check inside so an answered-elsewhere read
     // never writes account A's last_read into account B's freshly-swapped DB.
-    let session = vector_core::state::SessionGuard::capture();
     let (slim, last_read_hex) = {
         let mut state = crate::STATE.lock().await;
-        if !session.is_valid() { return false; }
         let idx = match state.chats.iter().position(|c| c.id == chat_id) {
             Some(i) => i,
             None => return false,
@@ -109,7 +107,6 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
     use vector_core::db::events::{compute_unread_anchor, UnreadMark};
     // The DB read + STATE write straddle an await; re-check the session so a mid-flight account swap
     // never writes account A's last_read into account B's chat.
-    let session = vector_core::state::SessionGuard::capture();
 
     let (last_read, last_read_hex, is_clear) = match compute_unread_anchor(&chat_id).await {
         Ok(UnreadMark::Anchor(id)) => (encode_message_id(&id), id, false),
@@ -119,7 +116,6 @@ pub async fn mark_as_unread(chat_id: String) -> Option<String> {
 
     let slim = {
         let mut state = crate::STATE.lock().await;
-        if !session.is_valid() { return None; }
         let idx = match state.chats.iter().position(|c| c.id == chat_id) {
             Some(i) => i,
             None => return None,

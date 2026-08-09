@@ -133,11 +133,9 @@ impl SendCallback for TauriSendCallback {
     fn on_persist(&self, chat_id: &str, msg: &Message) {
         let chat_id = chat_id.to_string();
         let msg = msg.clone();
-        // SessionGuard so a swap before the DB write doesn't persist
-        // account A's outgoing message as a phantom chat row in B's DB.
-        let session = vector_core::state::SessionGuard::capture();
+        // Bound, so a swap before the write persists account A's outgoing
+        // message to A's database rather than as a phantom row in B's.
         vector_core::db::spawn_bound(async move {
-            if !session.is_valid() { return; }
             let _ = crate::db::save_message(&chat_id, &msg).await;
         });
     }

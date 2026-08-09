@@ -783,6 +783,20 @@ where
     tokio::spawn(TASK_SESSION.scope(session, fut))
 }
 
+/// Whether the work running here belongs to the account currently on screen.
+///
+/// There is exactly one UI, showing one account. A task bound to a previous
+/// account keeps working correctly — its database, its chats, its client — but
+/// what it produces must not be painted into the account the user is now
+/// looking at. Every emission asks this, which is why almost none of them has
+/// to ask it by hand.
+pub fn session_is_live() -> bool {
+    Arc::ptr_eq(
+        &current_session(),
+        &CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()),
+    )
+}
+
 /// Install a fresh session, dropping the reference to the previous one. Any
 /// guard still outstanding against the old session returns its connection
 /// there, and that pool closes with it.

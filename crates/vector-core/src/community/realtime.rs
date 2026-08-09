@@ -313,9 +313,6 @@ pub async fn dispatch_event(
     let Some(channel) = COMMUNITY_ROUTES.lock().await.get(&pseudonym).cloned() else {
         return;
     };
-    if !session.is_valid() {
-        return;
-    }
 
     let outcome = {
         let mut state = crate::state::STATE.lock().await;
@@ -323,9 +320,6 @@ pub async fn dispatch_event(
         // event's authority against the NEW account's synced grant heads (an
         // uncited hide is honored or dropped on the wrong account's state) and
         // write the result into the wrong STATE.
-        if !session.is_valid() {
-            return;
-        }
         inbound::process_incoming(&mut state, &event, &channel, &my_pk)
     };
     let chat_id = channel.id.to_hex();
@@ -427,16 +421,13 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
     // control plane there, so walk the rotation BEFORE folding control. An AUTHORIZED rotation that
     // excluded us is a removal → tear down locally.
     if let Ok(c) = service::catch_up_server_root(&bt, &community).await {
-        if !session.is_valid() { return; }
         if c.removed {
             crate::log_warn!("[v1:teardown {}] catch_up_server_root says REMOVED (v1 rekey walk)", &community_id[..8.min(community_id.len())]);
             handler.on_community_self_removed(&community_id); return;
         }
     }
-    if !session.is_valid() { return; }
     let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
     let _ = service::fetch_and_apply_control(&bt, &community).await;
-    if !session.is_valid() { return; }
     // Banned by the just-folded banlist → torn down, nothing more to do.
     if let Some(c) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() {
         if service::am_i_banned(&c) {
@@ -445,7 +436,6 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
             return;
         }
     }
-    if !session.is_valid() { return; }
 
     // Walk each channel's rekey chain. A re-founding rotates base AND every channel once; the channel
     // rekey publishes right after the base rekey, so a single fetch can race propagation — retry with a
@@ -453,7 +443,6 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
     let base_delta = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
         .map(|c| c.server_root_epoch.0).unwrap_or(pre_server_epoch).saturating_sub(pre_server_epoch);
     for attempt in 0..CHANNEL_FOLLOW_MAX_ATTEMPTS {
-        if !session.is_valid() { return; }
         let Some(cur) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { break; };
         for ch in &cur.channels {
             let _ = service::catch_up_channel_rekeys(&bt, &cur, &ch.id).await;
@@ -469,10 +458,8 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
             tokio::time::sleep(Duration::from_millis(CHANNEL_FOLLOW_BACKOFF_MS)).await;
         }
     }
-    if !session.is_valid() { return; }
     let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
     let _ = service::retry_pending_read_cut(&bt, &community).await;
-    if !session.is_valid() { return; }
     let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
 
     // If an epoch advanced, rebuild the FULL subscription so realtime delivery resumes at the new
@@ -488,7 +475,6 @@ pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEvent
     } else {
         let _ = rebuild_routes().await;
     }
-    if !session.is_valid() { return; }
     crate::community::list::refresh_membership_current(&community);
     handler.on_community_refreshed(&community_id);
 }

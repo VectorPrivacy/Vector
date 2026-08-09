@@ -346,7 +346,6 @@ pub fn republish_invite_list_debounced() {
     crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-        if !session.is_valid() { return; }
         let client = match crate::state::nostr_client() {
             Some(c) => c,
             None => return,
@@ -355,7 +354,6 @@ pub fn republish_invite_list_debounced() {
             crate::log_warn!("[InviteList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if !session.is_valid() { return; }
             if let Err(e) = publish_invite_list(&client, session).await {
                 crate::log_warn!("[InviteList] Republish retry failed: {}", e);
             }

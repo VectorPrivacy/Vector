@@ -1137,7 +1137,6 @@ impl LiveTransport {
             let seen: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
             // Captured BEFORE the drain spawn: the drain can outlive an account swap, and
             // stragglers fetched under the prior session must not feed the new one's ingest.
-            let session = crate::state::SessionGuard::capture();
             crate::db::spawn_bound(async move {
                 let mut extra: Vec<Event> = Vec::new();
                 let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
@@ -1155,9 +1154,6 @@ impl LiveTransport {
                             }
                         }
                     }
-                }
-                if !session.is_valid() {
-                    return;
                 }
                 submit_stragglers(extra);
             });
@@ -1179,8 +1175,7 @@ impl Transport for LiveTransport {
         // Fan out one send per relay and RETURN on the first ACK — never wait for the slowest relay (a
         // distant/ratelimited one must not gate a reaction/edit/message). Each send is SPAWNED, so the rest
         // keep delivering to every relay after we return (dropping a JoinHandle detaches, it doesn't abort).
-        // Single attempt — durable retry is publish_durable's job. The sends only touch relays, no per-account
-        // state, so no SessionGuard is needed.
+        // Single attempt — durable retry is publish_durable's job.
         use futures_util::stream::{FuturesUnordered, StreamExt};
         let mut sends: FuturesUnordered<_> = targets
             .into_iter()

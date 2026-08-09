@@ -793,13 +793,10 @@ impl VectorCore {
         // Self-wrap for multi-device recovery + retain its key too, so another
         // device (or this one) can later revoke. Bail on account swap.
         let self_wrap_client = client.clone();
-        let self_wrap_session = state::SessionGuard::capture();
         db::spawn_bound(async move {
-            if !self_wrap_session.is_valid() { return; }
             if let Ok(self_outcome) = inbox_relays::send_gift_wrap_retained(
                 &self_wrap_client, &my_public_key, rumor, [],
             ).await {
-                if !self_wrap_session.is_valid() { return; }
                 if !self_outcome.output.success.is_empty() {
                     if let Some(rid) = inner_rumor_id {
                         let _ = db::nip17_keys::store_wrap_key(
@@ -1266,11 +1263,6 @@ pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::co
             slims
         };
         // Persist the rows so a fresh boot reloads each channel's name/metadata
-        // instead of the bare auto-created anchor. Session re-check: don't write
-        // account A's rows into a swapped-in account B's DB.
-        if !session.is_valid() {
-            return;
-        }
         for slim in &slims {
             let _ = crate::db::chats::save_slim_chat(slim);
         }
@@ -1305,9 +1297,6 @@ impl VectorCore {
                 let seed_session = state::SessionGuard::capture();
                 let seed_community = community.clone();
                 db::spawn_bound(async move {
-                    if !seed_session.is_valid() {
-                        return;
-                    }
                     let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
                     if matches!(
                         crate::community::v2::service::sync_guestbook(&transport, &seed_community, &seed_session).await,
@@ -1931,16 +1920,11 @@ impl VectorCore {
         let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let signer = crate::signer::active_signer().map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
         let inner = unsigned.finalize_async(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
-        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
             .await
             .map_err(VectorError::Other)?;
         // Local echo so get_messages reflects the send (the relay echo dedups on inner id).
-        // A swap during the publish must not echo account A's message into account B.
-        if !session.is_valid() {
-            return Ok(message_id);
-        }
         let echoed = {
             let mut st = state::STATE.lock().await;
             inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
@@ -2212,7 +2196,6 @@ impl VectorCore {
     /// peers hide it, plus best-effort attachment cleanup.
     pub async fn delete_community_message_in(&self, channel_id: &str, message_id: &str) -> Result<()> {
         use crate::community::{service, transport::LiveTransport};
-        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
         // Attachment URLs come from local state when held (a headless v2 consumer
@@ -2254,11 +2237,6 @@ impl VectorCore {
                 }
             }
         }
-        // Local removal — the publishes above straddled awaits; a swap must not let this
-        // strip the message from a swapped-in account's STATE + DB (message_id is global).
-        if !session.is_valid() {
-            return Ok(());
-        }
         let removed_chat = {
             let mut st = state::STATE.lock().await;
             st.remove_message(message_id).map(|(cid, _)| cid)
@@ -2277,7 +2255,6 @@ impl VectorCore {
     /// claim peers verify, never a local suppression.
     pub async fn hide_community_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
         use crate::community::transport::LiveTransport;
-        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
         // You can only moderate a message you can see: the author resolves from
@@ -2326,11 +2303,6 @@ impl VectorCore {
                 .map_err(VectorError::Other)?;
         }
 
-        // The publish straddled a multi-second await; a swap must not strip the
-        // message from the swapped-in account's STATE + DB (message_id is global).
-        if !session.is_valid() {
-            return Ok(());
-        }
         let removed_chat = {
             let mut st = state::STATE.lock().await;
             st.remove_message(message_id).map(|(cid, _)| cid)
@@ -2366,15 +2338,11 @@ impl VectorCore {
         let _client = state::nostr_client().ok_or_else(|| VectorError::Other("Not logged in".into()))?;
         let signer = crate::signer::active_signer().map_err(|e| VectorError::Other(format!("Signer unavailable: {e}")))?;
         let inner = unsigned.finalize_async(&signer).await.map_err(|e| VectorError::Other(format!("sign: {e}")))?;
-        let session = state::SessionGuard::capture();
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         let outer = service::send_signed_message(&transport, &community, &channel, &inner)
             .await.map_err(VectorError::Other)?;
         // Local echo + persist + emit (relay echo dedups on inner id). A swap during the
         // publish must not echo account A's control event into account B.
-        if !session.is_valid() {
-            return Ok(());
-        }
         let outcome = {
             let mut st = state::STATE.lock().await;
             inbound::process_incoming(&mut st, &outer, &channel, &author_pk)
@@ -2726,9 +2694,6 @@ impl VectorCore {
                         let session = state::SessionGuard::capture();
                         let c2 = community.clone();
                         db::spawn_bound(async move {
-                            if !session.is_valid() {
-                                return;
-                            }
                             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
                             if matches!(crate::community::v2::service::sync_guestbook(&transport, &c2, &session).await, Ok(fresh) if !fresh.is_empty()) {
                                 emit_event("community_refreshed", &serde_json::json!({ "community_id": cid_hex }));
@@ -2894,10 +2859,6 @@ impl VectorCore {
         // Pass 1 — apply to STATE (per-item lock) and COLLECT outcomes in wire order.
         let mut outcomes: Vec<ChatPersist> = Vec::with_capacity(page.len());
         for f in &page {
-            // Re-check every iteration — STATE mutates per item, and a swap can land between them.
-            if !session.is_valid() {
-                break;
-            }
             // A backfilled WebXDC peer ad persists through the shared 30078 row
             // (recency-gated at read) so a reopening lobby lists peers who
             // advertised while this device was closed — v1 sync parity. Own
@@ -3235,9 +3196,6 @@ impl VectorCore {
         community_id: &str,
         session: &crate::state::SessionGuard,
     ) {
-        if !session.is_valid() {
-            return;
-        }
         // Reload rather than reuse the caller's clone: the publish advanced edition floors,
         // and a rekey/refound may have moved the control address under us.
         if let Ok(Some(fresh)) = Self::load_v2_if_v2(community_id) {
@@ -3742,7 +3700,6 @@ impl VectorCore {
                         // Straddles the stream: a swap mid-drain must not push
                         // the old account's wrappers through the new account's
                         // pipeline (ErrorSkip would ledger them there).
-                        if !cap_session.is_valid() { break; }
                         if !seen.insert(event.id.to_bytes()) { continue; }
                         total_events += 1;
                         let prepared = event_handler::prepare_event(event, &client, my_pk).await;
@@ -3991,15 +3948,11 @@ impl VectorCore {
         // diff) and re-track the realtime sub at the current epochs. Idle when healthy. Stops on swap.
         if let Some(monitor) = client.monitor() {
             let mut rx = monitor.subscribe();
-            let session = state::SessionGuard::capture();
             db::spawn_bound(async move {
                 // Debounce reconnect bursts: StatusChanged is per-relay, but one catch-up queries the
                 // whole pool — so coalesce Connected transitions within a short window into one resync.
                 let mut last_resync: Option<std::time::Instant> = None;
                 while let Ok(notification) = rx.recv().await {
-                    if !session.is_valid() {
-                        return;
-                    }
                     let MonitorNotification::StatusChanged { status, .. } = notification;
                     if status == RelayStatus::Connected {
                         if last_resync.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
@@ -4022,13 +3975,9 @@ impl VectorCore {
         // → catch-up), and Disconnected/Terminated relays are reconnected directly.
         {
             let client_health = client.clone();
-            let session = state::SessionGuard::capture();
             db::spawn_bound(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await; // warm-up
                 loop {
-                    if !session.is_valid() {
-                        return;
-                    }
                     for (url, relay) in client_health.relays().await {
                         match relay.status() {
                             RelayStatus::Connected => {

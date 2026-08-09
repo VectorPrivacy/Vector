@@ -247,9 +247,6 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
 /// Flip an already-failed message back to Sent — a late relay OK proved
 /// the wrap was delivered.
 async fn rescue_failed_as_sent(entry: &WrapConfirm) {
-    if !entry.session.is_valid() {
-        return;
-    }
     let finalized = {
         let mut state = STATE.lock().await;
         state.update_message(&entry.pending_id, |msg| {
@@ -277,18 +274,13 @@ async fn rescue_failed_as_sent(entry: &WrapConfirm) {
 }
 
 /// Fire-and-forget the self-send recovery copy + persist its wrap key.
-/// SessionGuard skips publish + DB write on swap; without it account A's
-/// wrap key would corrupt account B's nip17_keys delete-history.
 fn spawn_self_send(client: Client, my_pk: PublicKey, rumor: UnsignedEvent) {
     let rid_for_self = rumor.id;
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
-        if !session.is_valid() { return; }
         match crate::inbox_relays::send_gift_wrap_retained(
             &client, &my_pk, rumor, [],
         ).await {
             Ok(self_outcome) if !self_outcome.output.success.is_empty() => {
-                if !session.is_valid() { return; }
                 if let Some(rid) = rid_for_self {
                     if let Err(e) = crate::db::nip17_keys::store_wrap_key(
                         &self_outcome.wrap_event_id,
@@ -720,7 +712,6 @@ pub async fn resend_failed_dm(
     // is this account's; a swap before the STATE flip must abort (returning
     // "handled" so the caller never falls back to a fresh send in the WRONG
     // account). retry_send_gift_wrap re-guards its own STATE/DB writes.
-    let session = crate::state::SessionGuard::capture();
     let payload = match crate::db::nip17_keys::get_resend_payload_by_pending(failed_msg_id)? {
         Some(p) => p,
         None => return Ok(false),
@@ -728,9 +719,6 @@ pub async fn resend_failed_dm(
     let client = nostr_client().ok_or("Not logged in")?;
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
-    if !session.is_valid() {
-        return Ok(true);
-    }
 
     // Flip the red row back to "sending"; the retry loop's own fail/finalize
     // path returns it to red or promotes it to sent.

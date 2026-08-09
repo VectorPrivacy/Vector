@@ -80,7 +80,6 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     let client = nostr_client().ok_or("Not logged in")?;
     // Session captured for the relay-nuke loop — without this, an
     // account-A wrap-key purge could land in account B's nip17_keys.
-    let session = crate::state::SessionGuard::capture();
     // Durable tombstone FIRST: NIP-09 is best-effort and relays ignore it
     // freely — without this, a surviving wrap re-served after a restart
     // re-ingests cleanly (the events row is gone, the session set is empty)
@@ -150,14 +149,11 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // retained wrap keys for this rumor.
     for stored in keys.iter() {
         let client = client.clone();
-        let task_session = session;
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
         crate::db::spawn_bound(async move {
-            if !task_session.is_valid() { return; }
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
-            if !task_session.is_valid() { return; }
             if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
                 crate::log_warn!("[NIP-17 delete] failed to purge wrap key: {}", e);
             }
@@ -224,7 +220,6 @@ pub async fn delete_own_reaction(
     recipient: PublicKey,
 ) -> Result<DeleteOutcome, String> {
     let client = nostr_client().ok_or("Not logged in")?;
-    let session = crate::state::SessionGuard::capture();
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(reaction_id)
         .unwrap_or_default();
 
@@ -234,14 +229,11 @@ pub async fn delete_own_reaction(
     // Layer 1 — relay-level nuke per retained wrap key.
     for stored in keys.iter() {
         let client = client.clone();
-        let task_session = session;
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
         crate::db::spawn_bound(async move {
-            if !task_session.is_valid() { return; }
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
-            if !task_session.is_valid() { return; }
             if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
                 crate::log_warn!("[reaction delete] failed to purge wrap key: {}", e);
             }

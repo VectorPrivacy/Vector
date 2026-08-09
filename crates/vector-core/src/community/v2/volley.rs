@@ -445,9 +445,6 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         }
     }
     for (job_idx, mut page) in fb_pages {
-        if !session.is_valid() {
-            break;
-        }
         page.sort_by_key(|f| f.event.opened().at_ms);
         let new = crate::VectorCore::v2_ingest_chat_page(
             &jobs[job_idx].channel_hex,

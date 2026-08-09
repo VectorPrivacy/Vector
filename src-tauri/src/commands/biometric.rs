@@ -32,8 +32,8 @@ fn keystore_alias(npub: &str) -> String {
 }
 
 /// Clear the enrollment: settings row + keystore key. Idempotent, best-effort.
-/// Callers that run after an await MUST have re-validated their SessionGuard —
-/// this touches the CURRENT account's row and alias.
+/// Touches the CURRENT account's row and keystore alias — the enrollment is the
+/// one thing here still resolved late rather than through the session.
 pub(crate) fn clear_biometric_enrollment() {
     let _ = vector_core::db::remove_setting(WRAPPED_KEY_SETTING);
     #[cfg(target_os = "android")]

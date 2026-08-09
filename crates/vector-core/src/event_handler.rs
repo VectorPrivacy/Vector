@@ -522,7 +522,6 @@ fn park_catch_up_channel_keys(
     community_id: &str,
     bundle_json: &str,
     inviter: &str,
-    session: &crate::state::SessionGuard,
 ) {
     use crate::community::v2::invite::CommunityInvite;
     let Ok(bundle) = CommunityInvite::from_bundle_json(bundle_json) else { return };
@@ -544,9 +543,6 @@ fn park_catch_up_channel_keys(
     // The commit path's guard was captured before an await; re-check before the
     // writes below or a swap mid-commit parks account A's channel key into
     // account B's database.
-    if !session.is_valid() {
-        return;
-    }
     let held = crate::db::community::load_community_v2(&crate::community::CommunityId(cid)).ok().flatten();
     let mut parked_any = false;
     for grant in &bundle.channels {
@@ -874,7 +870,7 @@ pub async fn commit_prepared_event(
             // rule on after the next control fold — dropping it here is why a
             // granted member (or bot) stayed silently keyless.
             if crate::db::community::community_exists(&held).unwrap_or(false) {
-                park_catch_up_channel_keys(&community_id, &bundle_json, &inviter, &session);
+                park_catch_up_channel_keys(&community_id, &bundle_json, &inviter);
                 return false;
             }
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {

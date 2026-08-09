@@ -31,6 +31,9 @@ pub fn set_event_emitter(emitter: Box<dyn EventEmitter>) {
 
 /// Emit an event to the UI layer. No-op if no emitter is registered.
 pub fn emit_event<T: serde::Serialize>(event: &str, payload: &T) {
+    if !crate::db::session_is_live() {
+        return;
+    }
     if let Some(emitter) = EVENT_EMITTER.get() {
         if let Ok(value) = serde_json::to_value(payload) {
             emitter.emit(event, value);
@@ -40,6 +43,9 @@ pub fn emit_event<T: serde::Serialize>(event: &str, payload: &T) {
 
 /// Emit a raw JSON value event to the UI layer.
 pub fn emit_event_json(event: &str, payload: serde_json::Value) {
+    if !crate::db::session_is_live() {
+        return;
+    }
     if let Some(emitter) = EVENT_EMITTER.get() {
         emitter.emit(event, payload);
     }

@@ -588,9 +588,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         i += 1;
         if i == candidates.len() && !hash_swap_tried {
             hash_swap_tried = true;
-            if !session.is_valid() {
-                break;
-            }
             // BUD-03 hash-swap, the last resort: every embedded URL died,
             // but the author's advertised servers may still hold the blob
             // under the same content-address. DMs resolve the author to
@@ -645,9 +642,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         return false;
     };
 
-    if !session.is_valid() {
-        return false;
-    }
 
     // Update state with successful download
     let path_str = hash_file_path.to_string_lossy().to_string();
@@ -739,9 +733,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             // Drop the STATE lock before performing async I/O
             drop(state);
 
-            if !session.is_valid() {
-                return true;
-            }
             let _ = db::save_message(&npub, &updated_message).await;
 
             // Backfill other messages with the same attachment hash

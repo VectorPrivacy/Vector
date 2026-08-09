@@ -41,9 +41,8 @@ pub fn neg_supported_cached(relay_url: &str) -> Option<bool> {
     (now_secs().saturating_sub(checked_at) < NEG_CAP_TTL_SECS).then_some(supported)
 }
 
-/// Persist a fresh verdict (value format: `0|1:<unix seconds>`). Callers gate
-/// on a valid `SessionGuard`; the verdict is relay-global truth, so a raced
-/// write is wasted work rather than cross-account damage.
+/// Persist a fresh verdict (value format: `0|1:<unix seconds>`). The verdict is
+/// relay-global truth, so a raced write is wasted work, never wrong data.
 pub fn record_neg_support(relay_url: &str, supported: bool) {
     let _ = crate::db::set_sql_setting(
         cap_key(relay_url),
@@ -114,10 +113,7 @@ pub fn reconcile_cursor(relay_url: &str) -> Option<u64> {
 /// IMMEDIATELY before the write: a swap landing after the caller's own check
 /// must not stamp this account's cursor into the next account's KV — that
 /// would both skew its quick window and silently skip its bootstrap.
-pub fn advance_reconcile_cursor(relay_url: &str, anchor_secs: u64, session: &crate::state::SessionGuard) {
-    if !session.is_valid() {
-        return;
-    }
+pub fn advance_reconcile_cursor(relay_url: &str, anchor_secs: u64) {
     let _ = crate::db::advance_u64_setting(cursor_key(relay_url), anchor_secs);
 }
 

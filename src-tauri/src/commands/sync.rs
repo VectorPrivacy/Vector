@@ -129,7 +129,6 @@ async fn windowed_req_catchup(
             tokio::pin!(stream);
             while let Some((_relay, res)) = stream.next().await {
                 let Ok(event) = res else { continue };
-                if !session.is_valid() { break; }
                 if !seen.insert(event.id.to_bytes()) { continue; }
                 fetched += 1;
                 let prepared = vector_core::event_handler::prepare_event(
@@ -379,7 +378,7 @@ pub async fn fetch_messages<R: Runtime>(
                 if recon_session.is_valid() {
                     vector_core::negentropy::record_neg_support(&url, true);
                     if ids.is_empty() && cursor.is_some() {
-                        vector_core::negentropy::advance_reconcile_cursor(&url, recon_anchor, &recon_session);
+                        vector_core::negentropy::advance_reconcile_cursor(&url, recon_anchor);
                     }
                 }
                 ids
@@ -537,9 +536,7 @@ pub async fn fetch_messages<R: Runtime>(
                 println!("[Boot] Profile merge in {:?}", merge_start.elapsed());
 
                 // Spawn background task to cache profile images for offline support
-                let img_session = vector_core::state::SessionGuard::capture();
                 vector_core::db::spawn_bound(async move {
-                    if !img_session.is_valid() { return; }
                     profile::cache_all_profile_images().await;
                 });
 
@@ -687,12 +684,9 @@ pub async fn fetch_messages<R: Runtime>(
                 // reconcile any missing files against in-memory STATE + the frontend — boot preloads
                 // messages before this runs, so a missing file on a preloaded message would otherwise
                 // stay a broken image until a full reload.
-                let integrity_session = vector_core::state::SessionGuard::capture();
                 vector_core::db::spawn_bound(async move {
-                    if !integrity_session.is_valid() { return; }
                     match db::check_downloaded_attachments_integrity().await {
                         Ok((_, missing, _, affected)) if missing > 0 => {
-                            if !integrity_session.is_valid() { return; }
                             crate::commands::attachments::reconcile_missing_attachments_in_state(&affected).await;
                         }
                         Ok(_) => {}
@@ -748,7 +742,6 @@ pub async fn fetch_messages<R: Runtime>(
             // justified solely by a bootstrap candidate (NEG-capable relay with
             // no cursor). Older wraps that still arrive dedup through the DB
             // fallback in handle_event.
-            let wrapper_session = vector_core::state::SessionGuard::capture();
             let wrapper_client = client.clone();
             vector_core::db::spawn_bound(async move {
                 let t = std::time::Instant::now();
@@ -777,7 +770,6 @@ pub async fn fetch_messages<R: Runtime>(
                 };
                 // Re-validate after the DB reads — a swap mid-boot must not repopulate the
                 // just-cleared cache with the prior account's wrapper ids.
-                if !wrapper_session.is_valid() { return; }
                 // Fast cursor boots can finish before this load completes;
                 // populating then would leave the cache resident with nobody
                 // left to dump it.
@@ -928,9 +920,6 @@ pub async fn fetch_messages<R: Runtime>(
         any_eose = true;
         first_eose.get_or_insert_with(std::time::Instant::now);
         for event in events {
-            if !quick_session.is_valid() {
-                break;
-            }
             if !seen.insert(event.id.to_bytes()) {
                 continue;
             }
@@ -974,9 +963,6 @@ pub async fn fetch_messages<R: Runtime>(
                 let Some((events, complete)) = result else { continue };
                 let mut n = 0u32;
                 for event in events {
-                    if !det_session.is_valid() {
-                        return;
-                    }
                     if !seen.insert(event.id.to_bytes()) {
                         continue;
                     }
@@ -1000,7 +986,7 @@ pub async fn fetch_messages<R: Runtime>(
             ok &= batcher.try_flush(&det_session).await.is_ok();
             if ok && det_session.is_valid() {
                 for url in &clean {
-                    vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor, &det_session);
+                    vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor);
                 }
             }
         });
@@ -1010,7 +996,7 @@ pub async fn fetch_messages<R: Runtime>(
     // zero-missing reconcile gave: relay and ledger agree through the anchor.
     if flushes_ok && quick_session.is_valid() {
         for url in &clean_relays {
-            vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor, &quick_session);
+            vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor);
         }
     }
 
@@ -1035,7 +1021,7 @@ pub async fn fetch_messages<R: Runtime>(
         let session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
             if !session.is_valid() { return; }
-            match vector_core::blossom_servers::fetch_and_merge_own_list(&bg_client, my_public_key, session).await {
+            match vector_core::blossom_servers::fetch_and_merge_own_list(&bg_client, my_public_key).await {
                 Ok(0) => {}
                 Ok(n) => vector_core::log_info!("[BlossomServers] Bootstrap merged {} server(s)", n),
                 Err(e) => vector_core::log_warn!("[BlossomServers] Bootstrap fetch failed: {}", e),
@@ -1048,7 +1034,7 @@ pub async fn fetch_messages<R: Runtime>(
             let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
             let enabled_servers = vector_core::state::get_blossom_servers();
             match vector_core::blossom::probe_servers_for_octet_stream(
-                signer, enabled_servers, session,
+                signer, enabled_servers,
             ).await {
                 Ok(0) => {}
                 Ok(n) => {
@@ -1075,7 +1061,6 @@ pub async fn fetch_messages<R: Runtime>(
         // community sweep would run against the new account. Bail early on swap.
         let archive_session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
-            if !archive_session.is_valid() { return; }
             let archive_start = std::time::Instant::now();
             let mut archive_new = 0u32;
 
@@ -1125,7 +1110,6 @@ pub async fn fetch_messages<R: Runtime>(
                 return;
             }
 
-            if !archive_session.is_valid() { return; }
 
             // Reload items (includes anything saved during quick phase)
             let items = db::load_negentropy_items().unwrap_or_default();
@@ -1243,7 +1227,7 @@ pub async fn fetch_messages<R: Runtime>(
                             if count == 0 {
                                 // Full history verified against the ledger —
                                 // this relay's cursor is born here.
-                                vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor, &archive_session);
+                                vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor);
                             } else {
                                 cursor_pending.push(url.to_string());
                             }
@@ -1278,7 +1262,6 @@ pub async fn fetch_messages<R: Runtime>(
                 let primary_set: std::collections::HashSet<EventId> =
                     all_missing.iter().copied().collect();
                 vector_core::db::spawn_bound(async move {
-                    if !det_session.is_valid() { return; }
                     let mut extra: Vec<EventId> = Vec::new();
                     while let Some((url, result)) = futs.next().await {
                         let Some(result) = result else {
@@ -1293,7 +1276,7 @@ pub async fn fetch_messages<R: Runtime>(
                                     // a straggler that found events spans two fetch
                                     // pipelines, so it re-bootstraps next boot.
                                     if recon.remote.is_empty() {
-                                        vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor, &det_session);
+                                        vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor);
                                     }
                                 }
                                 let new: Vec<EventId> = recon.remote.into_iter()
@@ -1332,7 +1315,6 @@ pub async fn fetch_messages<R: Runtime>(
                                 tokio::pin!(stream);
                                 while let Some((_relay, res)) = stream.next().await {
                                     let Ok(event) = res else { continue };
-                                    if !det_session.is_valid() { return; }
                                     let prepared = vector_core::event_handler::prepare_event(
                                         event, &det_client, my_public_key,
                                     ).await;
@@ -1344,7 +1326,6 @@ pub async fn fetch_messages<R: Runtime>(
                             }
                             Err(e) => eprintln!("[Sync][BG] Archive straggler fetch error: {}", e),
                         }
-                        if !det_session.is_valid() { return; }
                     }
                     det_batcher.flush(&det_session).await;
                     println!("[Sync][BG] Archive stragglers complete");
@@ -1405,7 +1386,6 @@ pub async fn fetch_messages<R: Runtime>(
                         }
                         Err(e) => eprintln!("[Sync] Archive: batch fetch error: {}", e),
                     }
-                    if !archive_session.is_valid() { return; }
                 }
                 flushes_ok &= archive_batcher.try_flush(&archive_session).await.is_ok();
 
@@ -1415,7 +1395,7 @@ pub async fn fetch_messages<R: Runtime>(
                 // over a lost batch would skip those events forever.
                 if archive_session.is_valid() && flushes_ok && received.len() == ids.len() {
                     for u in &cursor_pending {
-                        vector_core::negentropy::advance_reconcile_cursor(u, archive_anchor, &archive_session);
+                        vector_core::negentropy::advance_reconcile_cursor(u, archive_anchor);
                     }
                 } else if !cursor_pending.is_empty() {
                     println!("[Sync] Archive: {}/{} received, flushes_ok={} — cursor birth deferred to next boot",
@@ -1473,11 +1453,9 @@ pub async fn fetch_messages<R: Runtime>(
 
             // Post-sync: weekly vacuum + daily planner-stats refresh.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if !archive_session.is_valid() { return; }
             if let Err(e) = db::check_and_vacuum_if_needed().await {
                 eprintln!("[Maintenance] Weekly VACUUM check failed: {}", e);
             }
-            if !archive_session.is_valid() { return; }
             if let Err(e) = db::check_and_optimize_if_needed().await {
                 eprintln!("[Maintenance] Daily optimize check failed: {}", e);
             }

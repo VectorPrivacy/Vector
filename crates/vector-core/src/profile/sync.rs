@@ -254,7 +254,6 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
     // fetches can sleep multi-second; we re-check before writing back
     // to STATE / DB so a mid-fetch swap doesn't land account A's
     // profile in account B's storage.
-    let session = crate::state::SessionGuard::capture();
 
     let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
         Ok(pk) => pk,
@@ -331,8 +330,6 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 .and_then(|e| Metadata::from_json(&e.content).ok())
         });
 
-    // Abandon the fetch result if a swap happened during the await.
-    if !session.is_valid() { return false; }
 
     match fetch_result {
         Ok(meta) => {
@@ -788,12 +785,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
         // Session captured per-batch so a swap aborts the loop before
         // account A's queue work lands in account B's DB. The next
         // outer-loop iteration picks up the new session's queue cleanly.
-        let batch_session = crate::state::SessionGuard::capture();
 
         for entry in &batch {
-            if !batch_session.is_valid() {
-                break;
-            }
             load_profile(entry.npub.clone(), handler.as_ref()).await;
 
             {

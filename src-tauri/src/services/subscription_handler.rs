@@ -96,10 +96,7 @@ pub(crate) async fn subscribe_self_sync() {
 /// Route an arriving self-sync list event (our own replaceable settings): a Community List update folds +
 /// rehydrates (so a join on another device appears live); an emoji-list update refreshes the pack set.
 /// Spawned off the notification loop — both run several relay fetches and must not head-of-line-block it.
-async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, event: Event) {
-    if !session.is_valid() {
-        return;
-    }
+async fn handle_self_sync_event(__session: &vector_core::state::SessionGuard, event: Event) {
     // Per-list dedup key: the `d`-tag for kind-30078 lists (Community vs Invite share the kind), else the
     // kind. Coalesces multi-relay re-delivery of the SAME replaceable event so one update = one sweep.
     let dedup_key = if event.kind.as_u16() == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC {
@@ -188,9 +185,6 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
         let session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
             for event in events {
-                if !session.is_valid() {
-                    return;
-                }
                 handle_community_event(&session, event).await;
             }
         });
@@ -370,13 +364,9 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // on open-sub replay; v2's consensus planes need the explicit fold.
     if let Some(monitor) = client.monitor() {
         let mut rx = monitor.subscribe();
-        let monitor_session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
             let mut last: Option<std::time::Instant> = None;
             while let Ok(n) = rx.recv().await {
-                if !monitor_session.is_valid() {
-                    return;
-                }
                 let MonitorNotification::StatusChanged { status, .. } = n;
                 if status == RelayStatus::Connected {
                     if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
@@ -401,7 +391,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     let mut notifications = client.notifications();
     while let Some(notification) = notifications.next().await {
         {
-            if !session.is_valid() { break; }
             match notification {
                 ClientNotification::Event { event, subscription_id, .. } => {
                     let k = event.kind.as_u16();

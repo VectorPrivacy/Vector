@@ -156,8 +156,8 @@ pub async fn clear() {
     *V2_POOLWIDE_SUB_ID.lock().await = None;
     V2_SUB_SET.lock().await.clear();
     V2_SEEN_WRAPS.lock().await.clear();
-    // Drop the queue sender so the worker's channel closes and it exits (its
-    // SessionGuard also invalidates); the next login spawns a fresh worker.
+    // Drop the queue sender so the worker's channel closes and it exits; the
+    // next login spawns a fresh worker.
     *V2_FOLLOW_TX.lock().unwrap() = None;
     V2_FOLLOW_PENDING.lock().unwrap().clear();
     V2_FOLLOW_LOCKS.lock().unwrap().clear();
@@ -416,9 +416,6 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
     let Some(my_pk) = crate::my_public_key() else {
         return;
     };
-    if !session.is_valid() {
-        return;
-    }
     // Fire EXACTLY ONCE per wrap: the pool re-delivers the same event under both
     // subs and from every relay. `insert` returns false if already dispatched.
     {
@@ -464,10 +461,7 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
             // own send, or a forged edit/delete yields no outcome and re-fires
             // nothing.
             inbound::DispatchedV2::Chat { channel_id, event } => {
-                if !session.is_valid() {
-                    return;
-                }
-                match inbound::persist_chat_event(&event, &channel_id, &my_pk, session).await {
+                match inbound::persist_chat_event(&event, &channel_id, &my_pk).await {
                     Some(inbound::ChatPersist::New(message)) => handler.on_community_message(&channel_id, &message, true),
                     // A reaction or an edit: the folded TARGET row (its id is the
                     // target's) — the same payload v1 hands this callback. Both come
@@ -493,9 +487,6 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 // the memberlist stays a local read (the presence callback already
                 // fired inline). Reopen here — the dispatcher stays pure — and
                 // refresh the overview when it lands.
-                if !session.is_valid() {
-                    return;
-                }
                 let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
                 if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
                     if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
@@ -508,16 +499,10 @@ pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<d
                 return;
             }
             inbound::DispatchedV2::Kick { target } => {
-                if !session.is_valid() {
-                    return;
-                }
                 let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
                 let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
                 let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
                 if !super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
-                    return;
-                }
-                if !session.is_valid() {
                     return;
                 }
                 let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);
@@ -607,9 +592,6 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let session = SessionGuard::capture();
     crate::db::spawn_bound(async move {
         while let Some(id) = rx.recv().await {
-            if !session.is_valid() {
-                break;
-            }
             // Remove from pending BEFORE running, so a trigger arriving DURING the
             // follow re-enqueues (and is processed after) rather than being lost.
             V2_FOLLOW_PENDING.lock().unwrap().remove(&id.0);
@@ -643,17 +625,11 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
         // A tombstone surfaced during catch-up (an offline member learning of a
         // death) — the flag is set; seal + surface, and stop following.
         Ok(follow) if follow.dissolved => {
-            if !session.is_valid() {
-                return;
-            }
             crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
             handler.on_community_dissolved(&community_id);
             return;
         }
         Ok(follow) if follow.self_removed => {
-            if !session.is_valid() {
-                return;
-            }
             crate::log_warn!("[v2:teardown {}] REKEY EXCLUSION: an authorized rotation left us out", &community_id[..8.min(community_id.len())]);
             let _ = crate::db::community::delete_community(&community_id);
             refresh_subscription(&client).await;
@@ -661,9 +637,6 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
             return;
         }
         Ok(follow) if follow.updated.is_some() => {
-            if !session.is_valid() {
-                return;
-            }
             refresh_subscription(&client).await;
             handler.on_community_refreshed(&community_id);
         }
@@ -685,9 +658,6 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
         super::service::follow_control(&transport, &current, session).await,
         Ok(Some(_))
     );
-    if !session.is_valid() {
-        return;
-    }
     // Re-judge parked key vends on EVERY pass, not only when the fold moved. A
     // vend that lands AFTER its Grant folded has nothing left to change the
     // control plane, so gating this on `changed` strands it until some unrelated
@@ -718,9 +688,6 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
                 crate::community::transport::Evidence::Fast, 12,
             )
             .await;
-            if !session.is_valid() {
-                return;
-            }
             handler.on_channel_keyed(&community_id, &hex, backfilled);
         }
     }
@@ -745,9 +712,6 @@ async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dy
     // v1 has done this since it shipped (`am_i_banned` in its own realtime refresh).
     if let Some(me) = crate::my_public_key() {
         if crate::db::community::is_author_banned(&community_id, &me) {
-            if !session.is_valid() {
-                return;
-            }
             crate::log_warn!("[v2:teardown {}] SELF-BAN: our npub is in the folded banlist", &community_id[..8.min(community_id.len())]);
             handler.on_community_self_removed(&community_id);
             return;

@@ -760,7 +760,6 @@ pub async fn miniapp_open(
                     // chat_id belongs to the account current NOW — bail in the task if it swaps.
                     let session = vector_core::state::SessionGuard::capture();
                     vector_core::db::spawn_bound(async move {
-                        if !session.is_valid() { return; }
                         crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
                     });
                 }
@@ -848,7 +847,6 @@ pub async fn miniapp_open(
         let label_pc = window_label.clone();
         // chat_id_pc belongs to the account current NOW; preconnect spans Iroh init
         // (seconds) — bail before the session-scoped writes/sends if the account swaps.
-        let pc_session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
             log_info!("[WEBXDC] Preconnect: scanning '{}' for realtime API (path: {:?})", pkg_name, pkg_path);
             let uses_rt = tokio::task::spawn_blocking(move || {
@@ -912,8 +910,6 @@ pub async fn miniapp_open(
             }).await;
 
             // Send advertisement so peers know we're online (skip if the account
-            // swapped during Iroh init — chat_id_pc belongs to the old session).
-            if !pc_session.is_valid() { return; }
             let node_addr = iroh.get_node_addr();
             if let Ok(encoded) = super::realtime::encode_node_addr(&node_addr) {
                 crate::commands::realtime::send_webxdc_peer_advertisement(
@@ -1283,9 +1279,7 @@ pub async fn miniapp_close(
             // Send peer-left via Nostr
             let chat_id_clone = chat_id.clone();
             // chat_id belongs to the account current NOW — bail in the task if it swaps.
-            let session = vector_core::state::SessionGuard::capture();
             vector_core::db::spawn_bound(async move {
-                if !session.is_valid() { return; }
                 crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
             });
         }

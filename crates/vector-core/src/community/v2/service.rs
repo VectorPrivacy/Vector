@@ -497,9 +497,6 @@ async fn publish_chat<T: Transport + ?Sized>(
     // Frozen per-message so later rekeys can't strand it. Session-gated: the publish
     // straddled network I/O.
     if !ephemeral {
-        if !session.is_valid() {
-            return Ok(rumor_id);
-        }
         crate::db::community::store_message_key(&rumor_id, &wrap.id.to_hex(), group.keys(), &community.relays)?;
     }
     // Local echo (v1 parity): open our OWN wrap through the exact inbound path so
@@ -517,9 +514,6 @@ async fn publish_chat<T: Transport + ?Sized>(
                 super::inbound::apply_chat_to_state(&mut st, &event, &channel_hex, &author_pk)
             };
             if let Some(outcome) = outcome {
-                if !session.is_valid() {
-                    return Ok(rumor_id);
-                }
                 super::inbound::persist_chat(&channel_hex, &outcome).await;
             }
         }
@@ -3234,18 +3228,14 @@ const LIST_REPUBLISH_BACKOFF_SECS: [u64; 6] = [2, 5, 15, 45, 120, 300];
 /// tombstone out-ranks it, the community is stranded until a manual leave+rejoin.
 ///
 /// Non-blocking. Skipped entirely without a live client (headless/unit tests drive the
-/// generic fn directly). The `SessionGuard` is captured BEFORE the spawn and re-checked
-/// before every attempt, so an account swap mid-backoff can't publish A's list from B.
+/// generic fn directly). Bound to its account, so a swap mid-backoff leaves it
+/// publishing A's list from A's client rather than from B's.
 pub fn republish_community_list_durable(just_joined: Option<crate::community::CommunityId>) {
     if crate::state::nostr_client().is_none() {
         return;
     }
-    let session = SessionGuard::capture();
     crate::db::spawn_bound(async move {
         for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
-            if !session.is_valid() {
-                return;
-            }
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             match republish_community_list(&transport, just_joined.as_ref()).await {
                 Ok(true) => {
@@ -3579,9 +3569,6 @@ async fn publish_control_edition<T: Transport + ?Sized>(
     // Re-check the session AFTER the publish await: a swap mid-publish means the
     // pool now points at another account's DB — skipping is safe (the next own
     // edit rebuilds the same head from the relay's copy).
-    if !session.is_valid() {
-        return Ok(());
-    }
     if let Ok((ed, _)) = control::open_control_edition(&wrap, &control) {
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &entity_hex, ed.version, &ed.self_hash, &ed.inner_id, community.root_epoch.0)?;
     }
@@ -3911,13 +3898,9 @@ pub async fn persist_community_image(
     id: &crate::community::CommunityId,
     img: control::ImageRef,
     is_banner: bool,
-    session: &SessionGuard,
 ) -> Option<CommunityV2> {
     let lock = super::realtime::follow_lock(id);
     let _guard = lock.lock().await;
-    if !session.is_valid() {
-        return None;
-    }
     let mut fresh = crate::db::community::load_community_v2(id).ok()??;
     if is_banner {
         fresh.banner = Some(img);
@@ -3952,9 +3935,6 @@ pub async fn edit_channel_metadata<T: Transport + ?Sized>(transport: &T, communi
     // Apply locally too. The fold is the authority but runs later, so without this
     // an edit we just made reads back stale until some future control pass — the
     // rename appears to have silently failed.
-    if !session.is_valid() {
-        return Ok(());
-    }
     if let Ok(Some(mut held)) = crate::db::community::load_community_v2(community.id()) {
         if let Some(ch) = held.channels.iter_mut().find(|c| c.id.0 == channel_id.0) {
             ch.name = meta.name.clone();
@@ -4001,9 +3981,6 @@ async fn rename_channel_access_role<T: Transport + ?Sized>(
         if !roster.roles.iter().any(|x| x.role_id == r.role_id) {
             roster.roles.push(r);
         }
-    }
-    if !session.is_valid() {
-        return;
     }
     // MANAGE_CHANNELS got us the rename; the role edition needs MANAGE_ROLES + outrank
     // of its own. Publishing one readers reject would wedge our later, legitimate role
@@ -6875,9 +6852,6 @@ async fn run_pin_duty<T: Transport + ?Sized>(
             h = h.wrapping_mul(31).wrapping_add(u32::from(b));
         }
         tokio::time::sleep(std::time::Duration::from_secs(5 + u64::from(h % 21))).await;
-        if !session.is_valid() {
-            return Ok(());
-        }
     }
 
     // Re-read after the stagger: another curator's edition may have landed.
@@ -6937,9 +6911,6 @@ async fn run_pin_duty<T: Transport + ?Sized>(
         }
     };
 
-    if !session.is_valid() {
-        return Ok(());
-    }
     crate::log_info!(
         "[pins] duty {} for target {} in channel {}",
         if edit.is_some() { "edit-refresh" } else { "omission" },

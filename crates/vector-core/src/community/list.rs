@@ -511,7 +511,6 @@ pub fn republish_community_list_debounced() {
     crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-        if !session.is_valid() { return; }
         let client = match crate::state::nostr_client() {
             Some(c) => c,
             None => return,
@@ -520,7 +519,6 @@ pub fn republish_community_list_debounced() {
             crate::log_warn!("[CommunityList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if !session.is_valid() { return; }
             if let Err(e) = publish_community_list(&client, session).await {
                 crate::log_warn!("[CommunityList] Republish retry failed: {}", e);
             }
@@ -776,7 +774,6 @@ pub async fn rehydrate_community_from_seed<T: super::transport::Transport + ?Siz
 pub async fn backfill_history_from_seed<T: super::transport::Transport + ?Sized>(
     transport: &T,
     entry: &CommunityListEntry,
-    session: crate::state::SessionGuard,
 ) -> Result<bool, String> {
     // Only meaningful when `current` sits above `seed` — i.e. the instant view jumped past earlier epochs.
     if entry.current().server_root_epoch <= entry.seed.server_root_epoch {
@@ -789,9 +786,6 @@ pub async fn backfill_history_from_seed<T: super::transport::Transport + ?Sized>
     }
     // In-memory view at the seed epoch — drives the walk from the bottom; NEVER saved.
     let seed_view = super::invite::accept_invite(&entry.seed)?;
-    if !session.is_valid() {
-        return Ok(false);
-    }
     // Archive the SEED epoch's own keys. The catch_up walk archives only the epochs it walks TO
     // (seed+1..head), never its STARTING epoch — and we never `save_community(seed_view)` (which is what
     // normally archives a bundle's keys), so without this the seed/join epoch's channel key is absent from
@@ -808,14 +802,8 @@ pub async fn backfill_history_from_seed<T: super::transport::Transport + ?Sized>
     }
     // Base first: archives every prior server root (the channel-rekey walk opens rekeys under held roots).
     let _ = super::service::catch_up_server_root(transport, &seed_view).await;
-    if !session.is_valid() {
-        return Ok(false);
-    }
     // Then each channel: archives every prior channel key. Monotonic advance keeps the live head intact.
     for ch in &seed_view.channels {
-        if !session.is_valid() {
-            return Ok(false);
-        }
         let _ = super::service::catch_up_channel_rekeys(transport, &seed_view, &ch.id).await;
     }
     Ok(true)

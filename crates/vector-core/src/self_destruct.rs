@@ -72,10 +72,6 @@ pub async fn sweep_expired() -> Option<u64> {
     }
     let _guard = SweepGuard;
 
-    // Snapshot the session so a mid-sweep account swap can't purge account A's
-    // rows against account B's DB (see SessionGuard contract).
-    let session = crate::state::SessionGuard::capture();
-
     let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(_) => return None,
@@ -103,9 +99,6 @@ pub async fn sweep_expired() -> Option<u64> {
         }
         ids
     };
-    if !session.is_valid() {
-        return None;
-    }
     if expired_ids.is_empty() {
         return soonest;
     }
@@ -190,12 +183,8 @@ pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
     if expired.is_empty() {
         return;
     }
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         for (id, attachments, mine) in expired {
-            if !session.is_valid() {
-                return;
-            }
             purge_one(&id, Some((attachments, mine))).await;
         }
     });

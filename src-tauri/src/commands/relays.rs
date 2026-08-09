@@ -500,7 +500,7 @@ fn spawn_probe_for_server(server_url: String) {
         let _client = match crate::nostr_client() { Some(c) => c, None => return };
         let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
         match vector_core::blossom::probe_servers_for_octet_stream(
-            signer, vec![server_url], session,
+            signer, vec![server_url],
         ).await {
             Ok(0) => {}
             Ok(_) => {
@@ -868,11 +868,6 @@ pub async fn reconcile_dm_relay_list<R: Runtime>(handle: AppHandle<R>) {
         }
     };
 
-    // The fetch can straddle an account swap; nothing below may touch the
-    // per-account stores or KV on a stale session.
-    if !session.is_valid() {
-        return;
-    }
 
     if let Some((remote, remote_ts)) = fetched.clone() {
         let (ours, declined) = local_relay_view(&handle).await;
@@ -901,9 +896,6 @@ pub async fn reconcile_dm_relay_list<R: Runtime>(handle: AppHandle<R>) {
         }
     }
 
-    if !session.is_valid() {
-        return;
-    }
     // Publish against the store-derived list, not pool state (the pool can
     // transiently hold a DM recipient's relays and miss a failed-connect
     // adoptee).
@@ -1008,9 +1000,6 @@ async fn apply_inbound_reconcile<R: Runtime>(
 
     // The loads above await; a swap could have landed since the caller's
     // check. Nothing before this line has side effects.
-    if !session.is_valid() {
-        return;
-    }
     if customs_dirty {
         let _ = save_custom_relays(handle, &customs).await;
     }

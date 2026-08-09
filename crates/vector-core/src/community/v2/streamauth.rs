@@ -150,8 +150,8 @@ fn resub_cooldown_elapsed(relay: &RelayUrl) -> bool {
     }
 }
 
-/// Forget every registered stream key (on session swap). The responder task exits
-/// on its own when its `SessionGuard` invalidates.
+/// Forget every registered stream key (on session swap). The responder task
+/// exits on its own once the registry it serves is empty.
 pub fn clear() {
     REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clear();
     CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -204,13 +204,9 @@ pub fn ensure_responder(client: &Client) {
         return; // already running this session
     }
     let client = client.clone();
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         let mut notifications = client.notifications();
         while let Some(n) = notifications.next().await {
-            if !session.is_valid() {
-                break;
-            }
             if let ClientNotification::Message { relay_url, message } = n {
                 if let nostr_sdk::prelude::RelayMessage::Auth { challenge } = *message {
                     let challenge = challenge.into_owned();
