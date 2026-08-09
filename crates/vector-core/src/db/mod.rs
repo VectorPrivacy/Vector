@@ -605,6 +605,13 @@ mod active_account_tests {
 /// the reference to the old one, whose pool closes when the last in-flight
 /// guard finishes with it. Nothing to clear, nothing to remember to clear.
 pub struct Session {
+    /// Identity for "is this the account on screen?".
+    ///
+    /// Not the `Arc` address: binding a session to a database builds a new one
+    /// holding the same state (see `rebound`), and a task bound to the session
+    /// it grew from is still that account's. Comparing addresses would make
+    /// those tasks silently stop painting after a re-initialise.
+    id: u64,
     /// The database this session opens, resolved ONCE when it is built.
     /// `None` only before an account is bound, where there is nothing better
     /// than the ambient lookup to fall back to.
@@ -621,6 +628,7 @@ pub struct Session {
 impl Session {
     fn empty() -> Arc<Self> {
         Arc::new(Session {
+            id: next_session_id(),
             db_path: None,
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
@@ -633,6 +641,7 @@ impl Session {
     /// state — the caller loads it from that database.
     fn bound(db_path: PathBuf) -> Arc<Self> {
         Arc::new(Session {
+            id: next_session_id(),
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
@@ -653,6 +662,7 @@ impl Session {
     /// a PIN. Binding the session it was filling is a promotion, not a swap.
     fn rebound(&self, db_path: PathBuf) -> Arc<Self> {
         Arc::new(Session {
+            id: self.id,
             db_path: Some(db_path),
             read_pool: Mutex::new(Vec::new()),
             write_conn: Mutex::new(None),
@@ -791,10 +801,12 @@ where
 /// looking at. Every emission asks this, which is why almost none of them has
 /// to ask it by hand.
 pub fn session_is_live() -> bool {
-    Arc::ptr_eq(
-        &current_session(),
-        &CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()),
-    )
+    current_session().id == CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner()).id
+}
+
+fn next_session_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Install a fresh session, dropping the reference to the previous one. Any
@@ -1439,6 +1451,7 @@ mod pool_generation_tests {
         let promoted = staging.rebound(dir.path().join("a.db"));
         assert_eq!(*promoted.scoped::<Session, Mutex<u8>>().lock().unwrap(), 7, "the login survives being bound");
         assert!(promoted.db_path.is_some(), "and it now has a database");
+        assert_eq!(promoted.id, staging.id, "and it is still the same account, so its tasks keep painting");
     }
 
     #[tokio::test]
