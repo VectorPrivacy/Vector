@@ -285,15 +285,11 @@ pub async fn fetch_invite_list(
 /// device survives), persist, hydrate the read model, then publish self-encrypted.
 pub async fn publish_invite_list(
     client: &Client,
-    session: crate::state::SessionGuard,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
         let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
         let relay = fetch_invite_list(client, my_pk).await;
-        if !session.is_valid() {
-            return Ok(());
-        }
         let merged = load_local_invite_list().merge(&relay);
         save_local_invite_list(&merged)?;
         hydrate_read_model(&merged);
@@ -342,7 +338,6 @@ pub fn republish_invite_list_debounced() {
     use std::sync::atomic::Ordering;
     stamp_published_now();
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
@@ -350,11 +345,11 @@ pub fn republish_invite_list_debounced() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = publish_invite_list(&client, session).await {
+        if let Err(e) = publish_invite_list(&client).await {
             crate::log_warn!("[InviteList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if let Err(e) = publish_invite_list(&client, session).await {
+            if let Err(e) = publish_invite_list(&client).await {
                 crate::log_warn!("[InviteList] Republish retry failed: {}", e);
             }
         }

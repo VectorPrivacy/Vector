@@ -197,7 +197,6 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
 async fn clear_attachment_files<R: Runtime>(
     handle: &AppHandle<R>,
     exts: Option<&std::collections::HashSet<String>>,
-    session: &vector_core::state::SessionGuard,
 ) -> Result<usize, String> {
     vector_core::db::scoped(async move {
         // Deletion is confined to the download dir: a stale or symlinked
@@ -281,9 +280,6 @@ async fn clear_attachment_files<R: Runtime>(
                 })
                 .collect();
 
-            if !session.is_valid() {
-                return Err("Session changed during storage clear".to_string());
-            }
 
             // Save updated messages to database
             db::save_chat_messages(&chat_id, &messages_to_update).await
@@ -377,13 +373,12 @@ fn sweep_dir_by_ext(dir: &std::path::Path, exts: &std::collections::HashSet<Stri
 /// Clear all downloaded attachments from messages and return freed storage space
 #[tauri::command]
 pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_json::Value, String> {
-    let session = vector_core::state::SessionGuard::capture();
 
     // First, get the total storage size before clearing
     let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
     let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
 
-    let updated_chats = clear_attachment_files(&handle, None, &session).await?;
+    let updated_chats = clear_attachment_files(&handle, None).await?;
     clear_media_caches(&handle).await?;
     // Attachment deletion can strand Mini App history rows pointing at nothing
     let _ = crate::db::prune_dangling_miniapp_history();
@@ -412,7 +407,6 @@ pub async fn clear_storage_category<R: Runtime>(
     category: String,
     exts: Vec<String>,
 ) -> Result<serde_json::Value, String> {
-    let session = vector_core::state::SessionGuard::capture();
 
     let storage_info_before = get_storage_info().await.map_err(|e| format!("Failed to get storage info before clearing: {}", e))?;
     let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
@@ -433,7 +427,7 @@ pub async fn clear_storage_category<R: Runtime>(
             if ext_set.is_empty() {
                 return Err("No file types to clear".to_string());
             }
-            clear_attachment_files(&handle, Some(&ext_set), &session).await?;
+            clear_attachment_files(&handle, Some(&ext_set)).await?;
             sweep_dir_by_ext(&vector_core::db::get_download_dir(), &ext_set);
             // Marketplace installs live in app data, not the download dir;
             // wiping the Apps slice must uninstall them too, or the library

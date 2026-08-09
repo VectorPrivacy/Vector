@@ -161,12 +161,11 @@ async fn handle_community_event(
 /// persist-gated callbacks), so a v2 message emits to the frontend identically
 /// to a v1 one.
 async fn handle_community_v2_event(
-    session: &vector_core::state::SessionGuard,
     event: Event,
 ) {
     let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
         std::sync::Arc::new(super::event_handler::TauriEventHandler);
-    vector_core::community::v2::realtime::dispatch_event(session, event, handler).await;
+    vector_core::community::v2::realtime::dispatch_event(event, handler).await;
 }
 
 /// Routes "straggler" community events — ones a slower relay returned after a racing
@@ -317,7 +316,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Session captured at subscription start; every notification short-
     // circuits on swap so account A's inbound events don't persist into
     // account B's DB.
-    let session = vector_core::state::SessionGuard::capture();
 
     // Backstop: reap retained resend bodies for messages left red and untouched
     // past a week, so a pile of never-retried failures can't grow unbounded (the
@@ -406,7 +404,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // v2 wraps (plane-key authors). DM gift wraps matched the gift sub above;
                         // any other wrap-kind event tries the v2 route — the dispatcher dedups by
                         // wrap id and drops NotOurs (e.g. a stray DM copy on another sub) for free.
-                        handle_community_v2_event(&session, *event).await;
+                        handle_community_v2_event(*event).await;
                     } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
                         handle_self_sync_event(*event).await;
                     }

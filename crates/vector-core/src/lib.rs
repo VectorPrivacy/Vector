@@ -1217,14 +1217,14 @@ impl VectorCore {
     /// is captured by the caller BEFORE its network I/O, so this STATE write is
     /// skipped if the account swapped mid-flight (else we'd write A's community
     /// into B's in-memory chats).
-    pub async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, session: &state::SessionGuard) {
-        register_v2_chats_inner(community, session).await
+    pub async fn register_v2_chats(&self, community: &crate::community::v2::community::CommunityV2, __session: &state::SessionGuard) {
+        register_v2_chats_inner(community).await
     }
 }
 
 /// Free-function body of [`VectorCore::register_v2_chats`] — also the migration finalize's
 /// chat stamp (it runs from a spawned task with no facade handle; only globals are touched).
-pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::community::CommunityV2, __session: &state::SessionGuard) {
+pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::community::CommunityV2) {
     crate::db::scoped(async move {
         let owner_npub = community.owner().ok().and_then(|p| ToBech32::to_bech32(&p).ok());
             let me = state::my_public_key();
@@ -4037,8 +4037,7 @@ impl VectorCore {
                         || community::v2::realtime::poolwide_subscription_id().await.as_ref() == Some(&subscription_id)
                     {
                         // Concord v2 plane events (authors-addressed kind-1059/21059).
-                        let session = state::SessionGuard::capture();
-                        community::v2::realtime::dispatch_event(&session, *event, handler.clone()).await;
+                        community::v2::realtime::dispatch_event(*event, handler.clone()).await;
                     }
                 }
             }

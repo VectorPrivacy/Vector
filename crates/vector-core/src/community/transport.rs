@@ -571,7 +571,7 @@ fn demotion_allowed() -> bool {
 /// relay's NIP-42 challenge round) inside its own wall time. Fire-and-forget.
 /// Session-gated between the per-account DB reads and the shared-client
 /// mutation: a swap mid-read must not warm account A's relays under B.
-pub async fn prewarm_held_communities(__session: crate::state::SessionGuard) {
+pub async fn prewarm_held_communities() {
     crate::db::scoped(async move {
         let mut relays: Vec<String> = Vec::new();
         for id in crate::db::community::list_community_ids().unwrap_or_default() {

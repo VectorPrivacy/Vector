@@ -446,16 +446,12 @@ async fn decrypt_list_event(_client: &Client, my_pk: &PublicKey, event: &nostr_s
 /// is deterministic, so every device converges on identical bytes regardless of publish order.
 pub async fn publish_community_list(
     client: &Client,
-    session: crate::state::SessionGuard,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
         let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
         // Fold the relay's copy first so we don't drop a sibling device's change.
         let relay = fetch_community_list(client, my_pk).await.unwrap_or_default();
-        if !session.is_valid() {
-            return Ok(());
-        }
         let merged = load_local_list().merge(&relay);
         save_local_list(&merged)?;
 
@@ -508,7 +504,6 @@ pub fn republish_community_list_debounced() {
     use std::sync::atomic::Ordering;
     stamp_published_now();
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
@@ -516,11 +511,11 @@ pub fn republish_community_list_debounced() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = publish_community_list(&client, session).await {
+        if let Err(e) = publish_community_list(&client).await {
             crate::log_warn!("[CommunityList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if let Err(e) = publish_community_list(&client, session).await {
+            if let Err(e) = publish_community_list(&client).await {
                 crate::log_warn!("[CommunityList] Republish retry failed: {}", e);
             }
         }

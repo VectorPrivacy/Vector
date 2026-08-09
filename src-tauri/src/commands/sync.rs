@@ -492,9 +492,8 @@ pub async fn fetch_messages<R: Runtime>(
                         // Dial community relay sockets NOW, overlapping the DB
                         // load below — by volley time they're up and the gating
                         // relays' challenges are already remembered.
-                        let warm_session = vector_core::state::SessionGuard::capture();
                         vector_core::db::spawn_bound(async move {
-                            vector_core::community::transport::prewarm_held_communities(warm_session).await;
+                            vector_core::community::transport::prewarm_held_communities().await;
                         });
                     }
                 }
@@ -925,7 +924,7 @@ pub async fn fetch_messages<R: Runtime>(
                     new_messages_count += 1;
                 }
                 if batcher.buffered() >= PERSIST_BATCH {
-                    flushes_ok &= batcher.try_flush(&quick_session).await.is_ok();
+                    flushes_ok &= batcher.try_flush().await.is_ok();
                 }
             }
             // Cursor birth stays archive-only: a windowed pass cannot vouch for
@@ -939,13 +938,12 @@ pub async fn fetch_messages<R: Runtime>(
                 first_eose = Some(std::time::Instant::now());
             }
         }
-        flushes_ok &= batcher.try_flush(&quick_session).await.is_ok();
+        flushes_ok &= batcher.try_flush().await.is_ok();
 
         // Detached stragglers: same pipeline, own batcher/flush gate, off-path.
         if !relay_futs.is_empty() {
             println!("[Sync] detaching {} quick straggler(s)", relay_futs.len());
             let det_client = client.clone();
-            let det_session = quick_session;
             vector_core::db::spawn_bound(async move {
                 let inner = crate::services::event_handler::TauriEventHandler;
                 let batcher = vector_core::event_handler::BatchingPersist::new(&inner);
@@ -967,7 +965,7 @@ pub async fn fetch_messages<R: Runtime>(
                             n += 1;
                         }
                         if batcher.buffered() >= PERSIST_BATCH {
-                            ok &= batcher.try_flush(&det_session).await.is_ok();
+                            ok &= batcher.try_flush().await.is_ok();
                         }
                     }
                     if n > 0 {
@@ -977,7 +975,7 @@ pub async fn fetch_messages<R: Runtime>(
                         clean.push(url);
                     }
                 }
-                ok &= batcher.try_flush(&det_session).await.is_ok();
+                ok &= batcher.try_flush().await.is_ok();
                 if ok {
                     for url in &clean {
                         vector_core::negentropy::advance_reconcile_cursor(url.as_str(), sync_anchor);
@@ -1014,7 +1012,6 @@ pub async fn fetch_messages<R: Runtime>(
             let bg_client = client.clone();
             let session = vector_core::state::SessionGuard::capture();
             vector_core::db::spawn_bound(async move {
-                if !session.is_valid() { return; }
                 match vector_core::blossom_servers::fetch_and_merge_own_list(&bg_client, my_public_key).await {
                     Ok(0) => {}
                     Ok(n) => vector_core::log_info!("[BlossomServers] Bootstrap merged {} server(s)", n),
@@ -1366,14 +1363,14 @@ pub async fn fetch_messages<R: Runtime>(
                                         archive_new += 1;
                                     }
                                     if archive_batcher.buffered() >= PERSIST_BATCH {
-                                        flushes_ok &= archive_batcher.try_flush(&archive_session).await.is_ok();
+                                        flushes_ok &= archive_batcher.try_flush().await.is_ok();
                                     }
                                 }
                             }
                             Err(e) => eprintln!("[Sync] Archive: batch fetch error: {}", e),
                         }
                     }
-                    flushes_ok &= archive_batcher.try_flush(&archive_session).await.is_ok();
+                    flushes_ok &= archive_batcher.try_flush().await.is_ok();
 
                     // Bootstrap cursors are earned only when every requested event
                     // arrived AND every batch landed: commit/skip both ledger the

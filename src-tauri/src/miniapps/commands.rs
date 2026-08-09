@@ -1145,9 +1145,7 @@ pub async fn miniapp_open(
                                 let chat_id = instance.chat_id.clone();
                                 let topic_for_left = topic_encoded.clone();
                                 // chat_id belongs to the account current NOW — bail if it swaps.
-                                let session = vector_core::state::SessionGuard::capture();
                                 vector_core::db::spawn_bound(async move {
-                                    if !session.is_valid() { return; }
                                     if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
                                         log_warn!("[WEBXDC] Failed to send peer-left signal");
                                     }
@@ -1520,9 +1518,7 @@ pub async fn miniapp_join_realtime_channel(
                 let chat_id = instance.chat_id.clone();
                 let te = topic_encoded.clone();
                 // chat_id belongs to the account current NOW — bail in the task if it swaps.
-                let session = vector_core::state::SessionGuard::capture();
                 vector_core::db::spawn_bound(async move {
-                    if !session.is_valid() { return; }
                     crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, te, encoded).await;
                 });
             }

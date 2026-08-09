@@ -863,7 +863,6 @@ pub async fn update_relay_mode<R: Runtime>(handle: AppHandle<R>, url: String, mo
 /// entries, revive re-listed ones, retire ones a newer list dropped), then
 /// run the merge-publish for any outbound diff.
 pub async fn reconcile_dm_relay_list<R: Runtime>(handle: AppHandle<R>) {
-    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return };
 
     let fetched = match vector_core::inbox_relays::fetch_own_inbox_list(&client).await {
@@ -898,7 +897,7 @@ pub async fn reconcile_dm_relay_list<R: Runtime>(handle: AppHandle<R>) {
         if plan.adopt.is_empty() && plan.revive.is_empty() && plan.retire.is_empty() {
             vector_core::inbox_relays::note_list_seen(remote_ts);
         } else {
-            apply_inbound_reconcile(&handle, &client, &session, plan, remote_ts).await;
+            apply_inbound_reconcile(&handle, &client, plan, remote_ts).await;
         }
     }
 
@@ -944,7 +943,6 @@ async fn local_relay_view<R: Runtime>(handle: &AppHandle<R>) -> (Vec<String>, Ve
 async fn apply_inbound_reconcile<R: Runtime>(
     handle: &AppHandle<R>,
     client: &nostr_sdk::prelude::Client,
-    session: &vector_core::state::SessionGuard,
     plan: vector_core::inbox_relays::InboundReconcile,
     remote_ts: u64,
 ) {
@@ -1038,9 +1036,6 @@ async fn apply_inbound_reconcile<R: Runtime>(
             add_relay_log(url, "info", "Disabled (removed from your DM relay list elsewhere)");
         }
 
-        if !session.is_valid() {
-            return;
-        }
         let mut contributed = applied_adopts;
         contributed.extend(applied_revives);
         vector_core::inbox_relays::note_contributed(&contributed);

@@ -274,7 +274,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         // The multi-source walk (mirrors + hash-swap) can run for minutes against
         // dead hosts — an account swap mid-walk must never write this account's
         // download into the swapped-in account's STATE/DB.
-        let session = vector_core::state::SessionGuard::capture();
         // The UI raises its spinner on invoke and only lowers it on this event, so an
         // exit that emits nothing spins forever with no progress and no error — and
         // every retry (or reload) takes the same silent path. Any refusal must speak,
@@ -560,9 +559,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             "[AttachmentDownload] terminal failure: {} (msg {}, attachment {}, source {})",
                             reason, msg_id, attachment_id, url
                         );
-                        if !session.is_valid() {
-                            return false;
-                        }
                         let mut state = STATE.lock().await;
                         state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
                             att.set_downloading(false);
@@ -623,9 +619,6 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
                 last_error, msg_id, attachment_id, candidates.len(), &*attachment.url
             );
-            if !session.is_valid() {
-                return false;
-            }
             let mut state = STATE.lock().await;
             state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
                 att.set_downloading(false);

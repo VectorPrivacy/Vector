@@ -708,7 +708,7 @@ pub fn spawn_finalize_migration(v1_cid: String, v2_hex: String) {
         if !session.is_valid() {
             return;
         }
-        crate::register_v2_chats_inner(&twin, &session).await;
+        crate::register_v2_chats_inner(&twin).await;
         // Subscribe to the v2 twin's realtime planes — the flip re-pointed the DB but a
         // migrating MEMBER was never live-listening on the new community, so the owner's
         // subsequent messages wouldn't arrive (they can still SEND — that path is stateless).

@@ -409,7 +409,7 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
 /// and fire the matching handler callback (via the shared bridge). Persistence to
 /// the local DB is deferred (bots deliver via the callback; GUI history is v1 for
 /// now). `session` gates against a mid-flight account swap.
-pub async fn dispatch_event(__session: &SessionGuard, event: Event, handler: Arc<dyn InboundEventHandler>) {
+pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>) {
     crate::db::scoped(async move {
         let Some(my_pk) = crate::my_public_key() else {
             return;
@@ -906,10 +906,9 @@ mod tests {
         // must fire EXACTLY ONCE (no duplicate bot replies) — and only AFTER the
         // persist outcome (the callbacks-from-persist model).
         let rec = Arc::new(Recorder::default());
-        let session = SessionGuard::capture();
         crate::community::v2::realtime::clear().await; // fresh seen-set for the test
-        dispatch_event(&session, wrap.clone(), rec.clone()).await;
-        dispatch_event(&session, wrap, rec.clone()).await;
+        dispatch_event(wrap.clone(), rec.clone()).await;
+        dispatch_event(wrap, rec.clone()).await;
 
         let got = rec.got.lock().unwrap();
         assert_eq!(got.len(), 1, "a re-delivered wrap fires the handler exactly once");
@@ -1005,12 +1004,11 @@ mod tests {
         assert!(!crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap(), "not yet locally sealed");
 
         let rec = Arc::new(Recorder::default());
-        let session = SessionGuard::capture();
         clear().await;
         // Fire the SAME tombstone twice AND a fresh re-wrap of its verified seal
         // (distinct outer id) — death must be announced exactly once.
-        dispatch_event(&session, tombstone.clone(), rec.clone()).await;
-        dispatch_event(&session, tombstone, rec.clone()).await;
+        dispatch_event(tombstone.clone(), rec.clone()).await;
+        dispatch_event(tombstone, rec.clone()).await;
         assert!(crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap());
 
         // A member posts a fresh message to #general AFTER the tombstone. It must
@@ -1020,7 +1018,7 @@ mod tests {
         let cgroup = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
         let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "into the grave", None, &[], vec![], 9_000);
         let (mw, _) = super::super::chat::seal_chat_rumor(&rumor, &cgroup, &member, nostr_sdk::prelude::Timestamp::from_secs(9), false).unwrap();
-        dispatch_event(&session, mw, rec.clone()).await;
+        dispatch_event(mw, rec.clone()).await;
 
         assert_eq!(rec.deaths.lock().unwrap().len(), 1, "death is announced exactly once");
         assert!(rec.messages.lock().unwrap().is_empty(), "a post-tombstone message is never honored (CORD-02 §9)");

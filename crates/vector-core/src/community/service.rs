@@ -56,7 +56,6 @@ pub async fn create_community<T: Transport + ?Sized>(
     relays: Vec<String>,
 ) -> Result<Community, String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         enforce_community_cap()?;
         let mut community = Community::create(name, default_channel_name, relays);
         // Owner attestation — MANDATORY: a community cannot exist without the root that anchors its
@@ -83,9 +82,6 @@ pub async fn create_community<T: Transport + ?Sized>(
         };
         community.owner_attestation = Some(attestation.as_json());
         // Minting + the DB write straddle the (above) signer round-trip, so re-check before persist.
-        if !session.is_valid() {
-            return Err("account changed during community creation".to_string());
-        }
         // CREATION is the deliberate exception to publish-first: we save locally BEFORE publishing because
         // (a) no peers exist yet, so there is no shared view to diverge from, and (b) the keys are
         // fresh-random — losing them (e.g. by rolling back on a publish hiccup) would orphan the community

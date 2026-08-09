@@ -143,11 +143,22 @@ struct BufferedDm {
 pub struct BatchingPersist<'a> {
     inner: &'a dyn InboundEventHandler,
     buf: std::sync::Mutex<Vec<BufferedDm>>,
+    /// The account whose messages are in the buffer.
+    ///
+    /// Held rather than resolved at flush time: this outlives the calls that
+    /// fill it, and a flush reached after a swap would otherwise write one
+    /// account's inbox into another's. Holding it means the buffer always
+    /// drains where it was filled, from any caller, bound or not.
+    session: std::sync::Arc<crate::db::Session>,
 }
 
 impl<'a> BatchingPersist<'a> {
     pub fn new(inner: &'a dyn InboundEventHandler) -> Self {
-        Self { inner, buf: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            inner,
+            buf: std::sync::Mutex::new(Vec::new()),
+            session: crate::db::current_session(),
+        }
     }
 
     /// How many messages are waiting — the loop's flush-threshold probe.
@@ -155,20 +166,18 @@ impl<'a> BatchingPersist<'a> {
         self.buf.lock().map(|b| b.len()).unwrap_or(0)
     }
 
-    /// Drain the buffer into batched transactions (grouped by chat, arrival order kept).
-    /// On a stale session the drained messages are DROPPED, never written into the next
-    /// account's DB — their wrappers stay unledgered, so negentropy re-delivers them when
-    /// the original account returns.
-    pub async fn flush(&self, session: &crate::state::SessionGuard) -> usize {
-        self.try_flush(session).await.unwrap_or(0)
+    /// Drain the buffer into batched transactions (grouped by chat, arrival order kept),
+    /// against the account that filled it.
+    pub async fn flush(&self) -> usize {
+        self.try_flush().await.unwrap_or(0)
     }
 
     /// [`Self::flush`], but a persist failure is distinguishable from "nothing
     /// to write" — callers that gate follow-on effects on the ledger actually
     /// holding the batch (reconcile-cursor births) need the difference: an
     /// advance over an unledgered batch skips those events forever.
-    pub async fn try_flush(&self, session: &crate::state::SessionGuard) -> Result<usize, String> {
-        crate::db::scoped(async move {
+    pub async fn try_flush(&self) -> Result<usize, String> {
+        crate::db::with_session(self.session.clone(), async move {
             let mut drained: Vec<BufferedDm> = match self.buf.lock() {
                 Ok(mut b) => b.drain(..).collect(),
                 Err(_) => return Ok(0),
@@ -195,7 +204,7 @@ impl<'a> BatchingPersist<'a> {
                     None => groups.push((e.chat_id.clone(), vec![(&e.msg, e.wrapper)])),
                 }
             }
-            match crate::db::events::save_messages_batch_multi(&groups, Some(session)).await {
+            match crate::db::events::save_messages_batch_multi(&groups).await {
                 Ok(n) => Ok(n),
                 Err(e) => {
                     crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);

@@ -1041,7 +1041,6 @@ pub async fn start_nostrconnect_session<R: Runtime>(
     // render QR + copy button, and wait for `bunker_session_staged`.
     let handle_for_task = handle.clone();
     let uri_for_log = uri_string.clone();
-    let session = vector_core::state::SessionGuard::capture();
     vector_core::db::spawn_bound(async move {
         vector_core::log_debug!("[bunker] start_nostrconnect_session: background task spawned");
         vector_core::log_debug!("[bunker] nostrconnect URI: {}", uri_for_log);
@@ -1140,14 +1139,8 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             // during the long pairing wait.
             account_manager::set_pending_account(remote_npub.clone())?;
             crate::commands::tor::stop_and_join_if_running().await;
-            if !session.is_valid() {
-                return Err("Session changed during pairing".to_string());
-            }
             account_manager::init_profile_database(&handle_for_task, &remote_npub).await?;
 
-            if !session.is_valid() {
-                return Err("Session changed during pairing".to_string());
-            }
             *PENDING_NSEC.lock().unwrap() = Some(String::clone(&client_nsec));
             vector_core::set_pending_bunker_setup(storage_url, remote_pk_hex);
 

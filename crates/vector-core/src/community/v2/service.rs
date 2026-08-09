@@ -298,7 +298,7 @@ pub async fn send_chat_message_at<T: Transport + ?Sized>(
     extra_tags: Vec<nostr_sdk::prelude::Tag>,
     at_ms: u64,
 ) -> Result<String, String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let rumor = chat::build_message_rumor(author_pk, channel_id, epoch, content, reply_to, emoji, extra_tags, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
@@ -318,7 +318,7 @@ pub async fn send_reaction<T: Transport + ?Sized>(
     emoji_content: &str,
     emoji: Option<(&str, &str)>,
 ) -> Result<String, String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = next_send_ms();
     let rumor =
         chat::build_reaction_rumor(author_pk, channel_id, epoch, target_id_hex, target_author_hex, target_kind, emoji_content, emoji, at_ms);
@@ -335,7 +335,7 @@ pub async fn send_edit<T: Transport + ?Sized>(
     target_id_hex: &str,
     new_content: &str,
 ) -> Result<String, String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = next_send_ms();
     let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
@@ -351,7 +351,7 @@ pub async fn send_delete<T: Transport + ?Sized>(
     target_id_hex: &str,
     target_kind: u16,
 ) -> Result<String, String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = next_send_ms();
     let rumor = chat::build_delete_rumor(author_pk, channel_id, epoch, target_id_hex, target_kind, at_ms, None);
     let id = publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await?;
@@ -381,7 +381,7 @@ pub async fn moderation_delete<T: Transport + ?Sized>(
     target_kind: u16,
     target_author: &PublicKey,
 ) -> Result<String, String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
         return Err("this community is dissolved — it accepts no new moderation actions".to_string());
@@ -421,7 +421,7 @@ pub async fn send_webxdc_signal<T: Transport + ?Sized>(
     topic_id: &str,
     node_addr: Option<&str>,
 ) -> Result<(), String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let content = crate::webxdc::peer_signal_content(topic_id, node_addr);
     let rumor = chat::build_webxdc_rumor(author_pk, channel_id, epoch, &content, vec![], at_ms);
@@ -434,7 +434,7 @@ pub async fn send_typing<T: Transport + ?Sized>(
     community: &CommunityV2,
     channel_id: &ChannelId,
 ) -> Result<(), String> {
-    let (author_pk, group, epoch, __session) = chat_send_context(community, channel_id)?;
+    let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = now_ms();
     let rumor = chat::build_typing_rumor(author_pk, channel_id, epoch, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, true).await.map(|_| ())
@@ -445,8 +445,7 @@ pub async fn send_typing<T: Transport + ?Sized>(
 /// community (every honest member sealed it read-only) and a keyless Private
 /// channel — deriving from the root would post to the public plane; its key
 /// arrives over the rekey plane.
-fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(PublicKey, GroupKey, Epoch, SessionGuard), String> {
-    let session = SessionGuard::capture();
+fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<(PublicKey, GroupKey, Epoch), String> {
     let author_pk = me_pk()?;
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     if crate::db::community::get_community_dissolved(&cid_hex).unwrap_or(false) {
@@ -463,10 +462,10 @@ fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<
         return Err("this private channel has no key yet (awaiting rekey delivery)".to_string());
     }
     let (secret, epoch) = community.channel_secret(ch);
-    Ok((author_pk, channel_group_key(&secret, channel_id, epoch), epoch, session))
+    Ok((author_pk, channel_group_key(&secret, channel_id, epoch), epoch))
 }
 
-/// Seal one chat rumor, re-check the session, publish, and echo the send into the
+/// Seal one chat rumor, publish, and echo the send into the
 /// shared store. Returns the rumor id (hex).
 #[allow(clippy::too_many_arguments)]
 async fn publish_chat<T: Transport + ?Sized>(
@@ -936,7 +935,7 @@ fn live_signers_for(list: &invite::InviteList, community_id_hex: &str, now_ms: u
 /// Publish the creator's Registry (vsk-8) edition — their live link signers for this
 /// community — so members fold it into the Public/Private source of truth (a
 /// non-empty aggregate = Public).
-async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, session: &SessionGuard, live_signers: &[PublicKey]) -> Result<(), String> {
+async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, __session: &SessionGuard, live_signers: &[PublicKey]) -> Result<(), String> {
     let my_pk = me_pk()?;
     let eid = super::derive::invite_links_locator(community.id(), &my_pk.to_bytes());
     let content = invite::build_registry_content(live_signers);
@@ -944,14 +943,14 @@ async fn publish_invite_registry<T: Transport + ?Sized>(transport: &T, community
     // Refresh the cache from the PLANE, not from `live_signers`: the column aggregates
     // every creator, so writing only mine would clobber theirs, and a union could never
     // shrink — retiring the last link would leave the community reading Public forever.
-    refresh_invite_registry_cache(transport, community, session).await;
+    refresh_invite_registry_cache(transport, community).await;
     Ok(())
 }
 
 /// Re-fold the whole invite Registry and cache it, so Public/Private stays a sync
 /// LOCAL read. Silent no-op when the plane can't be read whole — a partial fold
 /// would under-state Public, leaving a live link open behind a ban.
-async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, session: &SessionGuard) {
+async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) {
     crate::db::scoped(async move {
         let Ok(owner) = community.owner() else { return };
         let Some(editions) = fetch_control_plane_whole(transport, community).await else { return };
@@ -964,10 +963,8 @@ async fn refresh_invite_registry_cache<T: Transport + ?Sized>(transport: &T, com
             .collect();
         let authority = fold_authority(community, &editions, &floors);
         let sets = live_invite_link_sets(community.id(), &owner.to_hex(), &editions, &authority, &floors);
-        if session.is_valid() {
-            let _ = crate::db::community::set_community_invite_registry(&cid_hex, &flatten_link_sets(&sets));
-            let _ = crate::db::community::replace_invite_link_sets(&cid_hex, &sets);
-        }
+        let _ = crate::db::community::set_community_invite_registry(&cid_hex, &flatten_link_sets(&sets));
+        let _ = crate::db::community::replace_invite_link_sets(&cid_hex, &sets);
     })
     .await
 }
@@ -1846,11 +1843,7 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
 pub async fn accept_public_link<T: Transport + ?Sized>(transport: &T, url: &str) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         // Capture BEFORE the network fetch so the join's is_valid() gate straddles it.
-        let session = SessionGuard::capture();
         let bundle = fetch_public_bundle(transport, url).await?;
-        if !session.is_valid() {
-            return Err("account changed during join".to_string());
-        }
         accept_bundle(transport, &bundle, None, true).await
     })
     .await
@@ -4353,7 +4346,6 @@ pub async fn grant_channel_access<T: Transport + ?Sized>(
     member: &PublicKey,
 ) -> Result<(), String> {
     crate::db::scoped(async move {
-        let session = SessionGuard::capture();
         let my_pk = me_pk()?;
         let ch = community.channel(channel_id).ok_or("unknown channel")?;
         if !ch.private {
@@ -4405,9 +4397,6 @@ pub async fn grant_channel_access<T: Transport + ?Sized>(
         // The access role is permission-less (never staff-making), but a KEPT role
         // can be — the fetched roster judges (CORD-04 §3).
         grant_roles_with_roster(transport, community, member, role_ids.clone(), &roster).await?;
-        if !session.is_valid() {
-            return Err("account changed during grant".to_string());
-        }
         merge_local_roster(&cid_hex, None, Some(&crate::community::roles::MemberGrant { member: member.to_hex(), role_ids }));
         // Settle the vend against the Grant we JUST published — the fold lags it.
         let bundle = bundle_of_with_overlay(
@@ -6952,11 +6941,27 @@ mod tests {
 
     /// A transport that simulates a session swap landing DURING a fetch await —
     /// so a join straddling the fetch sees an invalid session and aborts.
-    struct SwapMidFetch {
-        inner: MemoryRelay,
+    /// Switches to a real second account on the first fetch, then stays out of
+    /// the way. It BORROWS the relay that built the community — a fresh one
+    /// would fail verification for want of a control plane, which is not the
+    /// thing being tested.
+    struct SwapMidFetch<'a> {
+        inner: &'a MemoryRelay,
+        to: String,
+        armed: std::sync::atomic::AtomicBool,
     }
+
+    impl<'a> SwapMidFetch<'a> {
+        fn arm(inner: &'a MemoryRelay) -> Self {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(88_000);
+            let to = account_name(N.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+            std::fs::create_dir_all(crate::db::shared_test_data_dir().join(&to)).unwrap();
+            Self { inner, to, armed: std::sync::atomic::AtomicBool::new(true) }
+        }
+    }
+
     #[async_trait::async_trait]
-    impl Transport for SwapMidFetch {
+    impl Transport for SwapMidFetch<'_> {
         async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.inner.publish(e, r).await
@@ -6966,7 +6971,10 @@ mod tests {
         }
         async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> {
             let out = self.inner.fetch(q, r).await;
-            crate::state::bump_session_generation();
+            if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                crate::db::set_current_account(self.to.clone()).unwrap();
+                crate::db::init_database(&self.to).unwrap();
+            }
             out
         }
     }
@@ -8131,25 +8139,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_join_swap_between_fetch_and_save_aborts_and_leaves_the_other_account_clean() {
-        // The SessionGuard straddle: a public-link accept fetches then saves. If the
-        // account swaps in that window, the join must abort — never write A's
-        // community into B's DB. SwapMidFetch bumps the session generation during
-        // the fetch await, exactly as a real swap_session would.
+    async fn a_join_swap_between_fetch_and_save_lands_in_the_joining_account() {
+        // A public-link accept fetches, then saves. A swap in that window used to
+        // abort the join outright; the community is now written to the account
+        // that clicked the link, and the account swapped in gets nothing.
         let (bed, owner, member) = TestBed::new();
         bed.swap_to(&owner);
         let community = create_community(&bed.relay, "Straddle", bed.relays.clone(), None).await.unwrap();
         let link = mint_public_link(&bed.relay, &community, "https://vectorapp.io", None, None).await.unwrap();
-        // A fresh swap-injecting transport holding the same bundle event.
-        let swap_relay = SwapMidFetch { inner: MemoryRelay::new() };
-        swap_relay.inner.publish_durable(&link.bundle_event, &bed.relays).await.unwrap();
-
         bed.swap_to(&member);
-        let err = accept_public_link(&swap_relay, &link.url).await.unwrap_err();
-        assert!(err.contains("account changed"), "a swap mid-join must abort: {err}");
+        let joiner = crate::db::current_session();
+        let swap_relay = SwapMidFetch::arm(&bed.relay);
+        accept_public_link(&swap_relay, &link.url).await.unwrap();
+
         assert!(
-            crate::db::community::load_community_v2(community.id()).unwrap().is_none(),
-            "the aborted join wrote nothing to the (member) account DB"
+            crate::db::with_session(joiner, async {
+                crate::db::community::load_community_v2(community.id()).unwrap().is_some()
+            })
+            .await,
+            "the join completed for the account that accepted the link"
         );
     }
 

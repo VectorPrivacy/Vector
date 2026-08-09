@@ -312,7 +312,6 @@ fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
 pub async fn save_messages_batch(
     chat_id: &str,
     messages: &[&Message],
-    session: Option<&crate::state::SessionGuard>,
 ) -> Result<usize, String> {
     crate::db::scoped(async move {
         if messages.is_empty() {
@@ -322,9 +321,6 @@ pub async fn save_messages_batch(
             messages.iter().map(|m| (*m, None)).collect();
         let mut rows = Vec::with_capacity(messages.len());
         prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
-        if session.is_some_and(|s| !s.is_valid()) {
-            return Ok(0);
-        }
         write_batch_rows(&rows)
     })
     .await
@@ -336,7 +332,6 @@ pub async fn save_messages_batch(
 /// `BatchRow::wrapper`). Groups keep their slice order; everything lands in ONE transaction.
 pub async fn save_messages_batch_multi(
     groups: &[(String, Vec<(&Message, Option<([u8; 32], u64)>)>)],
-    session: Option<&crate::state::SessionGuard>,
 ) -> Result<usize, String> {
     crate::db::scoped(async move {
         let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
@@ -346,9 +341,6 @@ pub async fn save_messages_batch_multi(
         let mut rows = Vec::with_capacity(total);
         for (chat_id, messages) in groups {
             prepare_batch_rows(chat_id, messages, &mut rows).await?;
-        }
-        if session.is_some_and(|s| !s.is_valid()) {
-            return Ok(0);
         }
         write_batch_rows(&rows)
     })
@@ -1778,7 +1770,7 @@ pub async fn flush_message_batch(
             pending.clear();
             return;
         }
-        if let Err(e) = save_messages_batch(chat_id, pending, Some(session)).await {
+        if let Err(e) = save_messages_batch(chat_id, pending).await {
             crate::log_warn!("[DB] batch flush failed for {}: {}", chat_id, e);
         }
         pending.clear();
@@ -1792,7 +1784,7 @@ pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(
         return Ok(());
     }
     let refs: Vec<&Message> = messages.iter().collect();
-    save_messages_batch(chat_id, &refs, None).await.map(|_| ())
+    save_messages_batch(chat_id, &refs).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -2410,7 +2402,7 @@ mod tests {
         }).collect();
         let refs: Vec<&Message> = msgs.iter().collect();
 
-        let saved = save_messages_batch(chat, &refs, None).await.unwrap();
+        let saved = save_messages_batch(chat, &refs).await.unwrap();
         assert_eq!(saved, 5, "every message written");
 
         for i in 0..5u64 {
@@ -2452,7 +2444,7 @@ mod tests {
 
         // Re-delivery re-save without a wrapper id, reaction still attached.
         msg.wrapper_event_id = None;
-        let saved = save_messages_batch(chat, &[&msg], None).await.unwrap();
+        let saved = save_messages_batch(chat, &[&msg]).await.unwrap();
         assert_eq!(saved, 1);
 
         let conn = crate::db::get_db_connection_guard_static().unwrap();
@@ -2470,7 +2462,7 @@ mod tests {
     // chats with their gift-wrap ledger entries; a flush against a stale session drops the
     // buffer AND leaves the wrappers unledgered (that's what makes the drop recoverable).
     #[tokio::test]
-    async fn batching_persist_flushes_multi_chat_and_drops_on_stale_session() {
+    async fn batching_persist_flushes_multi_chat_and_drains_into_the_account_that_filled_it() {
         let (_tmp, _guard) = init_test_db();
         let handler = crate::event_handler::NoOpEventHandler;
         let batcher = crate::event_handler::BatchingPersist::new(&handler);
@@ -2510,8 +2502,7 @@ mod tests {
         };
         assert!(!ledgered(wrap_a1.0), "wrapper unledgered while its message sits buffered");
 
-        let session = crate::state::SessionGuard::capture();
-        assert_eq!(batcher.flush(&session).await, 3, "all buffered messages written");
+        assert_eq!(batcher.flush().await, 3, "all buffered messages written");
         assert_eq!(batcher.buffered(), 0);
         assert!(event_exists("bp_a1").unwrap() && event_exists("bp_b1").unwrap() && event_exists("bp_a2").unwrap());
         assert!(ledgered(wrap_a1.0) && ledgered(wrap_b1.0), "wrappers ledgered with the flush");
@@ -2519,17 +2510,30 @@ mod tests {
         let b = crate::db::id_cache::get_chat_id_by_identifier("npub1chatb").unwrap();
         assert_ne!(a, b, "rows grouped under their own chats");
 
-        // Stale session: buffered messages are dropped, never written — and the wrapper
-        // stays out of the negentropy fingerprint set, so the message re-delivers.
-        let stale = mk("bp_stale", "npub1chata");
-        seed("npub1chata", &stale).await;
-        let wrap_stale = ([0x5Eu8; 32], 333u64);
-        batcher.buffer_persist("npub1chata", &stale, Some(wrap_stale));
-        crate::state::bump_session_generation();
-        assert_eq!(batcher.flush(&session).await, 0, "stale flush writes nothing");
-        assert!(!event_exists("bp_stale").unwrap(), "stale message never reached the DB");
-        assert!(!ledgered(wrap_stale.0), "dropped message's wrapper NOT ledgered — negentropy will re-deliver it");
-        assert_eq!(batcher.buffered(), 0, "stale buffer drained, not retried into the next account");
+        // A swap between buffering and flushing. The batcher holds the account
+        // that filled it, so the drain lands there rather than in whoever is
+        // live by the time it runs — the buffer is one account's inbox.
+        let filled_under = crate::db::current_session();
+        let late = mk("bp_late", "npub1chata");
+        seed("npub1chata", &late).await;
+        let wrap_late = ([0x5Eu8; 32], 333u64);
+        batcher.buffer_persist("npub1chata", &late, Some(wrap_late));
+
+        let next = make_test_npub(TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        std::fs::create_dir_all(crate::db::shared_test_data_dir().join(&next)).unwrap();
+        crate::db::set_current_account(next.clone()).unwrap();
+        crate::db::init_database(&next).unwrap();
+
+        assert_eq!(batcher.flush().await, 1, "the buffer still drains");
+        assert!(
+            crate::db::with_session(filled_under, async {
+                event_exists("bp_late").unwrap() && ledgered(wrap_late.0)
+            })
+            .await,
+            "written to the account that received it, and its wrapper ledgered there"
+        );
+        assert!(!event_exists("bp_late").unwrap(), "the account swapped in never sees it");
+        assert_eq!(batcher.buffered(), 0, "and the buffer is empty either way");
     }
 
     // A deletion landing while its target sits buffered must not resurrect the message:
@@ -2612,8 +2616,7 @@ mod tests {
         }
         batcher.buffer_persist(chat, &m3, Some(wrap_evicted));
 
-        let session = crate::state::SessionGuard::capture();
-        assert_eq!(batcher.flush(&session).await, 1, "tombstoned target dropped, evicted message written");
+        assert_eq!(batcher.flush().await, 1, "tombstoned target dropped, evicted message written");
         assert!(!event_exists("del_sametask").unwrap(), "purged message never persisted");
         assert!(!event_exists("del_crosstask").unwrap(), "tombstoned message never persisted");
         assert!(event_exists("evicted_ok").unwrap(), "evicted-but-not-deleted message persisted");
