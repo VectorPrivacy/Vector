@@ -2384,6 +2384,7 @@ impl VectorCore {
         channel_id: &str,
         limit: usize,
         before_secs: Option<u64>,
+        since_secs: Option<u64>,
     ) -> Result<(BackfillCount, Vec<String>)> {
         if let Some(id) = self.v2_community_for_channel(channel_id)? {
             let warnings = if community::v2::realtime::follow_worker_running() {
@@ -2393,7 +2394,7 @@ impl VectorCore {
                 Self::v2_inline_follow(&id).await
             };
             let count = Self::v2_backfill_channel_counted(
-                &id, channel_id, limit, 8, None, before_secs,
+                &id, channel_id, limit, 8, since_secs, before_secs,
                 crate::community::transport::Evidence::Fast, 12,
             ).await;
             return Ok((count, warnings));

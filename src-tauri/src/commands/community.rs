@@ -1848,6 +1848,25 @@ async fn sync_community_channel_inner(
             .ok_or("Unknown Community channel")?;
         let id_bytes = hex_to_id32(&community_id)?;
 
+        // Latest-page `since`: skip re-pulling events we already hold by floor-ing the fetch at the
+        // newest wire time seen this session. ONLY the latest page (an older page must page strictly
+        // back with no lower bound). `None` before the first latest fetch this session → full newest
+        // page. Epoch spanning is untouched (it's in the pseudonym OR-set, not the cursor).
+        //
+        // The floor is pulled back by SINCE_LOOKBACK_SECS so an event whose OUTER time lands slightly
+        // BELOW the cursor — author clock-skew or late relay propagation — is still swept in (dedup
+        // drops the overlap). Reconnect-gap events aren't at risk: they're NEWER than the cursor, so
+        // they're above the floor regardless.
+        //
+        // Both protocols: a reconnect re-sweep that refetches each channel's whole newest page is
+        // how a relay blip turns into sustained load across every held channel.
+        const SINCE_LOOKBACK_SECS: u64 = 120;
+        let since_secs = if is_older {
+            None
+        } else {
+            vector_core::community::cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS))
+        };
+
         // Dual-stack: a v2 channel catches up through the facade (consensus refold +
         // chat backfill into the shared events tables). The frontend re-queries
         // get_messages from those tables, so the page renders identically to v1.
@@ -1861,7 +1880,7 @@ async fn sync_community_channel_inner(
             // each epoch is its own address — were never asked for at all.
             let before_secs = is_older.then(|| before_ms.map(|m| m / 1000)).flatten();
             let count = vector_core::VectorCore
-                .sync_community_channel_page(channel_id, limit, before_secs)
+                .sync_community_channel_page(channel_id, limit, before_secs, since_secs)
                 .await
                 .map(|(c, _warnings)| c)
                 .unwrap_or_default();
@@ -1979,22 +1998,6 @@ async fn sync_community_channel_inner(
             tracked.or_else(|| before_ms.map(|m| m / 1000))
         } else {
             None
-        };
-
-        // Latest-page `since`: skip re-pulling events we already hold by floor-ing the fetch at the
-        // newest wire time seen this session. ONLY the latest page (an older page must page strictly
-        // back with no lower bound). `None` before the first latest fetch this session → full newest
-        // page. Epoch spanning is untouched (it's in the pseudonym OR-set, not the cursor).
-        //
-        // The floor is pulled back by SINCE_LOOKBACK_SECS so an event whose OUTER time lands slightly
-        // BELOW the cursor — author clock-skew or late relay propagation — is still swept in (dedup
-        // drops the overlap). Reconnect-gap events aren't at risk: they're NEWER than the cursor, so
-        // they're above the floor regardless.
-        const SINCE_LOOKBACK_SECS: u64 = 120;
-        let since_secs = if is_older {
-            None
-        } else {
-            vector_core::community::cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS))
         };
 
         // Adopt an in-flight invite preload for the PRIMARY channel's latest page: rather than fire a
@@ -2891,6 +2894,37 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // active is redundant — the active run reads the same relays.
         static SWEEP_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         static RERUN_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        // Wall-clock floor between sweeps. The in-flight latch only collapses runs
+        // that OVERLAP; a relay flapping every few seconds lands each trigger after
+        // the last run finished, so every blip bought a fresh sweep of every held
+        // channel — the load that causes the next blip. A trigger inside the window
+        // is deferred to its end, not dropped: the relay that just came up may hold
+        // events the finished run never saw.
+        const SWEEP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(45);
+        static LAST_SWEEP_END: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        static DEFERRED_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let cooling = LAST_SWEEP_END
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .and_then(|end| SWEEP_COOLDOWN.checked_sub(end.elapsed()));
+        if let Some(wait) = cooling {
+            if !SWEEP_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst)
+                && !DEFERRED_ARMED.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                println!("[Boot] community sync within cooldown — deferring {:?}", wait);
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        tokio::time::sleep(wait).await;
+                        DEFERRED_ARMED.store(false, std::sync::atomic::Ordering::SeqCst);
+                        respawn_community_sync();
+                    });
+                } else {
+                    DEFERRED_ARMED.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            return Ok(());
+        }
         if SWEEP_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
             // Don't DROP the trigger: channels the active run fetched before this
             // caller's relay came up never saw its gap events — queue one rerun.
@@ -2902,6 +2936,11 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         impl Drop for SweepClaim {
             fn drop(&mut self) {
                 SWEEP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+                // The cooldown runs from the END of a sweep: a long run must not
+                // have its own duration counted against the next one's quiet window.
+                if let Ok(mut g) = LAST_SWEEP_END.lock() {
+                    *g = Some(std::time::Instant::now());
+                }
                 // Honor a queued rerun on EVERY exit path: an early return (account
                 // swap, propagated error) must not strand the trigger until the
                 // next reconnect. The respawned run captures its own fresh session.
