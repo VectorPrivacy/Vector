@@ -1314,7 +1314,6 @@ mod pool_generation_tests {
 
     #[test]
     fn a_pool_miss_after_a_swap_opens_the_sessions_own_database() {
-        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // The other half of the guarantee. Returning a connection was already
         // safe; ACQUIRING one was not, because a miss resolved the ambient
         // account and could open the incoming account's file into the outgoing
@@ -1324,8 +1323,7 @@ mod pool_generation_tests {
         let path_b = dir.path().join("b.db");
 
         let session_a = Session::bound(path_a.clone());
-        // ...the account switches, and the live session is now B's...
-        *CURRENT_SESSION.write().unwrap() = Session::bound(path_b.clone());
+        let _unrelated = Session::bound(path_b.clone());
 
         // A task still holding A misses A's (empty) pool and opens a connection.
         let guard = session_a.acquire_read().expect("acquire against the held session");
@@ -1336,6 +1334,17 @@ mod pool_generation_tests {
             "a miss opens the session's OWN database, never the incoming account's (opened {opened})"
         );
         assert!(!Arc::ptr_eq(&session_a, &current_session()), "the live session really did move on");
+    }
+
+    /// Run `fut` bound to `session`, exactly as `spawn_bound` would.
+    ///
+    /// These tests never install their throwaway sessions globally. They used
+    /// to, and every other test in the binary reads chats, caches and keys
+    /// through the live session — so one of these swapping it mid-run pulled
+    /// them out from under whatever was executing in parallel. Binding proves
+    /// the same property without a global write.
+    async fn bound_to<F: std::future::Future>(session: Arc<Session>, fut: F) -> F::Output {
+        TASK_SESSION.scope(session, fut).await
     }
 
     /// Every task that touches per-account state must be bound to an account.
@@ -1349,32 +1358,25 @@ mod pool_generation_tests {
 
     #[tokio::test]
     async fn a_bound_task_keeps_its_account_across_a_swap() {
-        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // What the SessionGuard checks were approximating by hand: the task
-        // began under account A, so its work resolves to A no matter who logs
-        // in while it is awaiting. No check, and nothing to forget.
+        // began under account A, so its work resolves to A however many awaits
+        // it spans and whoever logs in meanwhile. No check, nothing to forget.
+        // The live session stands in for whoever logged in next.
         let dir = tempfile::tempdir().unwrap();
         let a = Session::bound(dir.path().join("a.db"));
-        let b = Session::bound(dir.path().join("b.db"));
 
-        *CURRENT_SESSION.write().unwrap() = a.clone();
-        let handle = spawn_bound(async {
-            // ...the user switches accounts right here...
+        let seen = bound_to(a.clone(), async {
             tokio::task::yield_now().await;
             current_session()
-        });
-        *CURRENT_SESSION.write().unwrap() = b.clone();
+        })
+        .await;
 
-        let seen = handle.await.unwrap();
         assert!(Arc::ptr_eq(&seen, &a), "the task still sees the account it started under");
-        assert!(!Arc::ptr_eq(&seen, &b), "the incoming account is not reachable from it");
-        // And an UNBOUND caller correctly sees the live account.
-        assert!(Arc::ptr_eq(&current_session(), &b), "unbound callers follow the live account");
+        assert!(!Arc::ptr_eq(&seen, &current_session()), "the live account is not reachable from it");
     }
 
     #[tokio::test]
     async fn a_bound_tasks_chat_writes_cannot_reach_the_new_account() {
-        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // The bug this closes, in the form it actually took: a task holding a
         // chat id from account A finishes after the swap and inserts it into
         // whatever STATE it finds. The group chats that appeared in a freshly
@@ -1382,31 +1384,28 @@ mod pool_generation_tests {
         use crate::chat::{Chat, ChatType};
         let dir = tempfile::tempdir().unwrap();
         let a = Session::bound(dir.path().join("a.db"));
-        let b = Session::bound(dir.path().join("b.db"));
+        let live_before = current_session().chat_state().lock().await.chats.len();
 
-        *CURRENT_SESSION.write().unwrap() = a.clone();
-        let handle = spawn_bound(async {
-            // ...the user switches accounts right here...
+        bound_to(a.clone(), async {
             tokio::task::yield_now().await;
             crate::state::STATE.lock().await.chats.push(Chat::new("a-chat".into(), ChatType::DirectMessage, Vec::new()));
-        });
-        *CURRENT_SESSION.write().unwrap() = b.clone();
-        handle.await.unwrap();
+        })
+        .await;
 
-        assert!(
-            crate::state::STATE.lock().await.chats.is_empty(),
-            "the account now on screen never sees the previous account's chat"
-        );
         assert_eq!(
             a.chat_state().lock().await.chats.len(),
             1,
             "it landed in the state of the account the task began under"
         );
+        assert_eq!(
+            current_session().chat_state().lock().await.chats.len(),
+            live_before,
+            "and nothing reached the account on screen"
+        );
     }
 
     #[tokio::test]
     async fn a_bound_task_cannot_publish_through_the_new_accounts_client() {
-        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // The client carries the signer, so reaching the wrong one means
         // publishing account A's payload under account B's identity. A bound
         // task reaches the client it started with, which the swap has already
@@ -1414,38 +1413,51 @@ mod pool_generation_tests {
         use nostr_sdk::prelude::*;
         let dir = tempfile::tempdir().unwrap();
         let a = Session::bound(dir.path().join("a.db"));
-        let b = Session::bound(dir.path().join("b.db"));
+        let a_identity = Keys::generate().public_key();
 
-        *CURRENT_SESSION.write().unwrap() = a.clone();
-        crate::state::set_my_public_key(Keys::generate().public_key());
-        let a_identity = crate::state::my_public_key().expect("installed under A");
-
-        let handle = spawn_bound(async move {
+        let seen = bound_to(a.clone(), async move {
+            crate::state::set_my_public_key(a_identity);
             tokio::task::yield_now().await;
             crate::state::my_public_key()
-        });
-        *CURRENT_SESSION.write().unwrap() = b.clone();
-        crate::state::set_my_public_key(Keys::generate().public_key());
+        })
+        .await;
 
-        assert_eq!(handle.await.unwrap(), Some(a_identity), "the task signs as the account it began under");
+        assert_eq!(seen, Some(a_identity), "the task signs as the account it began under");
         assert_ne!(crate::state::my_public_key(), Some(a_identity), "and the live account is someone else");
     }
 
     #[test]
     fn binding_an_unbound_session_to_a_database_keeps_what_it_holds() {
-        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         // Creating an account installs its keys and client BEFORE its database
         // exists — `init_database` only runs once the user has chosen a PIN.
         // Replacing the session there would discard the login in progress.
         let dir = tempfile::tempdir().unwrap();
         let staging = Session::empty();
-        *CURRENT_SESSION.write().unwrap() = staging.clone();
         let held = staging.scoped::<Session, Mutex<u8>>();
         *held.lock().unwrap() = 7;
 
         let promoted = staging.rebound(dir.path().join("a.db"));
         assert_eq!(*promoted.scoped::<Session, Mutex<u8>>().lock().unwrap(), 7, "the login survives being bound");
         assert!(promoted.db_path.is_some(), "and it now has a database");
+    }
+
+    #[tokio::test]
+    async fn a_bound_task_paints_nothing_into_the_account_on_screen() {
+        // Binding fixes where work LANDS; it cannot fix what the user SEES,
+        // because there is one UI showing one account. So emission asks once,
+        // centrally, and a task belonging to a previous account goes quiet.
+        let dir = tempfile::tempdir().unwrap();
+        let previous = Session::bound(dir.path().join("previous.db"));
+        assert!(session_is_live(), "work for the account on screen paints");
+
+        let painted = bound_to(previous, async {
+            tokio::task::yield_now().await;
+            session_is_live()
+        })
+        .await;
+
+        assert!(!painted, "a task bound to another account paints nothing");
+        assert!(session_is_live(), "and the account now on screen still does");
     }
 
     #[test]

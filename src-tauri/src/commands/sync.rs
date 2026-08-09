@@ -495,9 +495,7 @@ pub async fn fetch_messages<R: Runtime>(
                     // relays' challenges are already remembered.
                     let warm_session = vector_core::state::SessionGuard::capture();
                     vector_core::db::spawn_bound(async move {
-                        if warm_session.is_valid() {
-                            vector_core::community::transport::prewarm_held_communities(warm_session).await;
-                        }
+                        vector_core::community::transport::prewarm_held_communities(warm_session).await;
                     });
                 }
             }
@@ -797,11 +795,8 @@ pub async fn fetch_messages<R: Runtime>(
     // the sweep windows itself (3 in flight) and emits message_new as pages land. init_finished was
     // already emitted above, so the frontend holds the Community chat rows before any page arrives.
     // SessionGuard captured before the spawn boundary (swap-safe); the sweep re-captures internally.
-    let community_session = vector_core::state::SessionGuard::capture();
     vector_core::db::spawn_bound(async move {
-        if community_session.is_valid() {
-            let _ = crate::commands::community::sync_communities_boot().await;
-        }
+        let _ = crate::commands::community::sync_communities_boot().await;
     });
 
     // ========================================================================
@@ -1222,15 +1217,13 @@ pub async fn fetch_messages<R: Runtime>(
                     Ok(Ok(recon)) => {
                         let count = recon.remote.len();
                         println!("[Sync] Archive: {} reconciled: {} missing", url, count);
-                        if archive_session.is_valid() {
-                            vector_core::negentropy::record_neg_support(url.as_str(), true);
-                            if count == 0 {
-                                // Full history verified against the ledger —
-                                // this relay's cursor is born here.
-                                vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor);
-                            } else {
-                                cursor_pending.push(url.to_string());
-                            }
+                        vector_core::negentropy::record_neg_support(url.as_str(), true);
+                        if count == 0 {
+                            // Full history verified against the ledger —
+                            // this relay's cursor is born here.
+                            vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor);
+                        } else {
+                            cursor_pending.push(url.to_string());
                         }
                         all_missing.extend(recon.remote);
                         first_success.get_or_insert_with(std::time::Instant::now);
@@ -1270,14 +1263,12 @@ pub async fn fetch_messages<R: Runtime>(
                         };
                         match result {
                             Ok(Ok(recon)) => {
-                                if det_session.is_valid() {
-                                    vector_core::negentropy::record_neg_support(url.as_str(), true);
-                                    // Cursor birth only on the zero-missing proof;
-                                    // a straggler that found events spans two fetch
-                                    // pipelines, so it re-bootstraps next boot.
-                                    if recon.remote.is_empty() {
-                                        vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor);
-                                    }
+                                vector_core::negentropy::record_neg_support(url.as_str(), true);
+                                // Cursor birth only on the zero-missing proof;
+                                // a straggler that found events spans two fetch
+                                // pipelines, so it re-bootstraps next boot.
+                                if recon.remote.is_empty() {
+                                    vector_core::negentropy::advance_reconcile_cursor(url.as_str(), archive_anchor);
                                 }
                                 let new: Vec<EventId> = recon.remote.into_iter()
                                     .filter(|id| !primary_set.contains(id))
@@ -1429,27 +1420,22 @@ pub async fn fetch_messages<R: Runtime>(
             // The claim's holding relay (often the user's own) is saturated through
             // the DM archive + concurrent community sweep, so a fetch
             // fired now routinely misses and trips the multi-hour re-check cooldown.
-            // A short settle delay lets the pool go quiet first, giving the 10s fetch
-            // a clean shot. Detached + session-gated across the sleep so a mid-wait
-            // account swap can't emit the wrong account's badge state. (On-demand
-            // profile checks are the other, self-persisting path — see badges.rs.)
-            {
-                let badge_handle = handle_bg.clone();
-                let badge_session = vector_core::state::SessionGuard::capture();
-                vector_core::db::spawn_bound(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    if !badge_session.is_valid() { return; }
-                    vector_core::badges::refresh_own_badges().await;
-                    if !badge_session.is_valid() { return; }
-                    vector_core::badges::refresh_own_bug_hunter().await;
-                    if !badge_session.is_valid() { return; }
-                    let _ = badge_handle.emit("badges_updated", serde_json::json!({
-                        "vector": vector_core::badges::has_vector_badge(),
-                        "tier": vector_core::badges::effective_tier(),
-                        "bug_hunter": vector_core::badges::bug_hunter_tier(),
-                    }));
-                });
-            }
+            // A short settle delay lets the pool go quiet first, giving the 10s
+            // fetch a clean shot. (On-demand profile checks are the other,
+            // self-persisting path — see badges.rs.)
+            vector_core::db::spawn_bound(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                vector_core::badges::refresh_own_badges().await;
+                vector_core::badges::refresh_own_bug_hunter().await;
+                // Through emit_event, not the handle: the badges belong to the
+                // account this task began under, and a swap during that half
+                // minute means they are not the badges now on screen.
+                vector_core::emit_event("badges_updated", &serde_json::json!({
+                    "vector": vector_core::badges::has_vector_badge(),
+                    "tier": vector_core::badges::effective_tier(),
+                    "bug_hunter": vector_core::badges::bug_hunter_tier(),
+                }));
+            });
 
             // Post-sync: weekly vacuum + daily planner-stats refresh.
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;

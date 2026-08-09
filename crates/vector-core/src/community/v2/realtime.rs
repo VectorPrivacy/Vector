@@ -369,11 +369,8 @@ fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
         return;
     }
     let client = client.clone();
-    let session = crate::state::SessionGuard::capture();
     crate::db::spawn_bound(async move {
-        if session.is_valid() {
-            super::streamauth::prime_auth(&client, &relays).await;
-        }
+        super::streamauth::prime_auth(&client, &relays).await;
         PRIME_IN_FLIGHT.store(false, Ordering::Release);
     });
 }

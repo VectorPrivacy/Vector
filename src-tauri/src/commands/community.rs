@@ -2462,20 +2462,17 @@ pub fn trigger_community_reconnect_resync() {
     // debounce, bail — the swapped-in account already gets a full boot sweep at selection, so a stale
     // reconnect trigger must not drive its sync. `sync_communities_boot` also re-guards each per-account
     // write, but capturing here keeps the whole detached task scoped to the account that reconnected.
-    let session = vector_core::state::SessionGuard::capture();
     vector_core::db::spawn_bound(async move {
         tokio::time::sleep(Duration::from_millis(1500)).await;
-        if session.is_valid() {
-            // RE-ARM the live Community subscription FIRST. On reconnect the pool re-applies the
-            // pool-wide DM subscription but NOT our targeted `subscribe_to` Community sub, so realtime
-            // community delivery silently dies after any reconnect (notably Android's bg-sync, which
-            // disconnects the shared pool on every foreground transition). The 1500ms debounce lets the
-            // reconnect burst settle so this re-subscribes against live connections, not mid-connect ones.
-            crate::services::subscription_handler::refresh_community_subscription().await;
-            // Then sweep the fetch to catch anything published during the disconnect gap (the live sub
-            // is limit(0) and only streams events published after it re-arms).
-            let _ = sync_communities_boot().await;
-        }
+        // RE-ARM the live Community subscription FIRST. On reconnect the pool re-applies the
+        // pool-wide DM subscription but NOT our targeted `subscribe_to` Community sub, so realtime
+        // community delivery silently dies after any reconnect (notably Android's bg-sync, which
+        // disconnects the shared pool on every foreground transition). The 1500ms debounce lets the
+        // reconnect burst settle so this re-subscribes against live connections, not mid-connect ones.
+        crate::services::subscription_handler::refresh_community_subscription().await;
+        // Then sweep the fetch to catch anything published during the disconnect gap (the live sub
+        // is limit(0) and only streams events published after it re-arms).
+        let _ = sync_communities_boot().await;
         IN_FLIGHT.store(false, Ordering::Release);
     });
 }
