@@ -316,6 +316,12 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         let mut ingested: HashSet<usize> = HashSet::new();
         let mut painted: Vec<(String, usize)> = Vec::new();
         while let Some((set, live, evs, covered)) = fetches.next().await {
+            // Each set is a page to open and persist. Once the user has moved
+            // on there is nobody to paint for, so stop rather than decrypt the
+            // rest of the boot for a screen that is gone.
+            if session.stopped() {
+                break;
+            }
             live_by_set.insert(set, live);
             if covered {
                 covered_sets.insert(set);
@@ -428,6 +434,9 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
             .await;
         let mut fb_pages: HashMap<usize, Vec<FetchedEvent>> = HashMap::new();
         for (job_idx, evs) in fallback_pages {
+            if session.stopped() {
+                break;
+            }
             let j = &jobs[job_idx];
             for wrap in evs {
                 if !seen_wraps.insert(wrap.id) {

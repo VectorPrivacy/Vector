@@ -422,6 +422,11 @@ pub async fn fetch_messages<R: Runtime>(
                 let recon_batcher = vector_core::event_handler::BatchingPersist::new(&recon_inner);
                 const BATCH_SIZE: usize = 500;
                 for batch in missing_ids.chunks(BATCH_SIZE) {
+                    // Boot sync is minutes of relay traffic and decryption.
+                    // A swap means nobody is waiting for it.
+                    if vector_core::db::session_stopped() {
+                        break;
+                    }
                     let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
                     match client.stream_events(nostr_sdk::prelude::ReqTarget::manual(vec![url.clone()].into_iter().map(|u| (u, vec![f.clone()]))))
                     .timeout(std::time::Duration::from_secs(30),
@@ -439,6 +444,9 @@ pub async fn fetch_messages<R: Runtime>(
                                 .buffer_unordered(8);
                             tokio::pin!(prepared_stream);
                             while let Some(result) = prepared_stream.next().await {
+                                if vector_core::db::session_stopped() {
+                                    break;
+                                }
                                 if let Ok(prepared) = result {
                                     // `is_new: true` — this is the mid-session reconnect catch-up
                                     // (gated on `!is_syncing`, never the initial sync), so these
@@ -1288,6 +1296,9 @@ pub async fn fetch_messages<R: Runtime>(
                         let det_inner = crate::services::event_handler::TauriEventHandler;
                         let det_batcher = vector_core::event_handler::BatchingPersist::new(&det_inner);
                         for batch in extra.chunks(500) {
+                            if vector_core::db::session_stopped() {
+                                break;
+                            }
                             let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
                             match det_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(
                                 relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()])),
@@ -1335,6 +1346,9 @@ pub async fn fetch_messages<R: Runtime>(
                     // forever — a failed flush must veto the birth below.
                     let mut flushes_ok = true;
                     for batch in ids.chunks(BATCH) {
+                        if vector_core::db::session_stopped() {
+                            break;
+                        }
                         let f = Filter::new().ids(batch.to_vec()).kind(Kind::GiftWrap).pubkey(my_public_key);
                         match bg_client.stream_events(nostr_sdk::prelude::ReqTarget::manual(relay_strs.clone().into_iter().map(|u| (u, vec![f.clone()]))))
                     .timeout(std::time::Duration::from_secs(30),

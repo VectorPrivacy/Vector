@@ -623,6 +623,16 @@ pub struct Session {
     chat_state: Arc<tokio::sync::Mutex<crate::state::ChatState>>,
     /// Everything else the account owns, keyed by type. See [`Session::scoped`].
     scoped: RwLock<std::collections::HashMap<std::any::TypeId, Arc<dyn std::any::Any + Send + Sync>>>,
+    /// Raised when this account stops being the one on screen.
+    stopped: SessionStop,
+}
+
+/// "This account is no longer current" — a flag long work polls, and a signal
+/// it can await.
+#[derive(Default)]
+struct SessionStop {
+    flag: std::sync::atomic::AtomicBool,
+    wake: tokio::sync::Notify,
 }
 
 impl Session {
@@ -634,6 +644,7 @@ impl Session {
             write_conn: Mutex::new(None),
             chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
             scoped: RwLock::new(std::collections::HashMap::new()),
+            stopped: SessionStop::default(),
         })
     }
 
@@ -647,6 +658,7 @@ impl Session {
             write_conn: Mutex::new(None),
             chat_state: Arc::new(tokio::sync::Mutex::new(crate::state::ChatState::new())),
             scoped: RwLock::new(std::collections::HashMap::new()),
+            stopped: SessionStop::default(),
         })
     }
 
@@ -668,6 +680,7 @@ impl Session {
             write_conn: Mutex::new(None),
             chat_state: self.chat_state.clone(),
             scoped: RwLock::new(self.scoped.read().unwrap_or_else(|e| e.into_inner()).clone()),
+            stopped: SessionStop::default(),
         })
     }
 
@@ -710,6 +723,39 @@ impl Session {
     /// account is this" use it in place of the old generation counter.
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Whether this account has been switched away from.
+    ///
+    /// Purely an efficiency signal. Work that continues past it is still
+    /// CORRECT — it writes to this account's own storage and paints nothing —
+    /// it is just no longer work anyone is waiting for. Long syncs poll this at
+    /// their loop heads so a swap stops the relay traffic and the decryption
+    /// rather than grinding on for a screen nobody is looking at.
+    ///
+    /// Never use it to decide whether a write is SAFE. That is structural now.
+    pub fn stopped(&self) -> bool {
+        self.stopped.flag.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Resolves once this account is switched away from — for `select!` against
+    /// a fetch, so an in-flight request is dropped instead of awaited out.
+    pub async fn on_stop(&self) {
+        loop {
+            let waiting = self.stopped.wake.notified();
+            if self.stopped() {
+                return;
+            }
+            waiting.await;
+            if self.stopped() {
+                return;
+            }
+        }
+    }
+
+    fn stop(&self) {
+        self.stopped.flag.store(true, std::sync::atomic::Ordering::Release);
+        self.stopped.wake.notify_waiters();
     }
 
     /// Whether this session is the account currently on screen.
@@ -860,6 +906,14 @@ impl std::fmt::Debug for Session {
     }
 }
 
+/// Has the account this work belongs to been switched away from?
+///
+/// Check it at the head of a long loop — a sync page, a relay in a fan-out, a
+/// channel in a sweep — and stop. Continuing is safe, just wasteful.
+pub fn session_stopped() -> bool {
+    current_session().stopped()
+}
+
 /// The live account's session id — for caches keyed by "which account is this".
 pub fn current_session_id() -> u64 {
     current_session().id
@@ -885,7 +939,16 @@ fn next_session_id() -> u64 {
 /// guard still outstanding against the old session returns its connection
 /// there, and that pool closes with it.
 fn replace_session() {
-    *CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner()) = Session::empty();
+    install(Session::empty());
+}
+
+/// Install `next` and tell the outgoing account's work to stop.
+fn install(next: Arc<Session>) {
+    let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
+    if current.id != next.id {
+        current.stop();
+    }
+    *current = next;
 }
 
 /// RAII guard for READ connections — auto-returns to its OWN session's pool.
@@ -1198,12 +1261,15 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     // all, is THIS account's — bind it and keep what it holds (see `rebound`).
     // Only a session belonging to a different account starts over.
     let session = {
-        let mut current = CURRENT_SESSION.write().unwrap_or_else(|e| e.into_inner());
-        *current = match current.db_path.as_deref() {
-            Some(p) if p != db_path => Session::bound(db_path.clone()),
-            _ => current.rebound(db_path.clone()),
+        let next = {
+            let current = CURRENT_SESSION.read().unwrap_or_else(|e| e.into_inner());
+            match current.db_path.as_deref() {
+                Some(p) if p != db_path => Session::bound(db_path.clone()),
+                _ => current.rebound(db_path.clone()),
+            }
         };
-        current.clone()
+        install(next.clone());
+        next
     };
 
     // Pre-warm read pool
@@ -1543,6 +1609,42 @@ mod pool_generation_tests {
 
         assert!(!painted, "a task bound to another account paints nothing");
         assert!(session_is_live(), "and the account now on screen still does");
+    }
+
+    #[tokio::test]
+    async fn switching_accounts_tells_the_previous_one_to_stop() {
+        // Purely an efficiency signal — the work would still be correct — but a
+        // boot sync is minutes of relay traffic and decryption, and after a swap
+        // nobody is waiting for any of it.
+        let _serialized = DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = current_session();
+        assert!(!previous.stopped(), "running work is not told to stop");
+
+        // `on_stop` must be pending until the switch, then resolve.
+        let waiter = { let p = previous.clone(); tokio::spawn(async move { p.on_stop().await }) };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "nothing to report while the account is current");
+
+        close_database();
+
+        assert!(previous.stopped(), "the outgoing account is told to stop");
+        assert!(!current_session().stopped(), "the incoming one is not");
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("on_stop resolves on the switch")
+            .expect("without panicking");
+    }
+
+    #[test]
+    fn re_initialising_the_same_account_does_not_tell_it_to_stop() {
+        // `init_database` runs more than once per account — the schema check at
+        // boot, Android's background sync. Reading that as a swap would abort a
+        // sync that is still perfectly wanted.
+        let dir = tempfile::tempdir().unwrap();
+        let staging = Session::empty();
+        let promoted = staging.rebound(dir.path().join("a.db"));
+        assert!(!staging.stopped(), "binding a session is not switching away from it");
+        assert_eq!(promoted.id, staging.id);
     }
 
     #[test]

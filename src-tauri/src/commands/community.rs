@@ -3107,6 +3107,12 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         let channel_count = channels.len();
         futures_util::stream::iter(channels)
             .map(|cid| async move {
+                // The sweep is 31 channels of relay round-trips on a real
+                // account. Each slot re-checks, so a swap drains the window
+                // instead of syncing the rest of a chat list nobody is on.
+                if vector_core::db::session_stopped() {
+                    return;
+                }
                 let t = std::time::Instant::now();
                 let new = sync_community_channel(cid.clone(), None, None)
                     .await
