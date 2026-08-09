@@ -333,8 +333,9 @@ pub async fn fetch_messages<R: Runtime>(
             }
 
             // Load negentropy items — 2-day window for fast reconnection sync,
-            // stretched back to the relay's cursor after a longer outage.
-            let all_items = db::load_negentropy_items().unwrap_or_default();
+            // stretched back to the relay's cursor after a longer outage. The
+            // window is resolved BEFORE the read so SQL applies it: on an
+            // established account this is tens of items, not the whole ledger.
             let recon_anchor = Timestamp::now().as_secs();
             let cursor = vector_core::negentropy::reconcile_cursor(&url);
             let quick_since = {
@@ -344,10 +345,7 @@ pub async fn fetch_messages<R: Runtime>(
                     .map(|c| c.saturating_sub(NIP59_BACKDATE_SLACK))
                     .unwrap_or(base)
             };
-            let items: Vec<(EventId, Timestamp)> = all_items.iter()
-                .filter(|(_, ts)| ts.as_secs() >= quick_since)
-                .cloned()
-                .collect();
+            let items = db::load_negentropy_items_since(quick_since).unwrap_or_default();
             let filter = Filter::new()
                 .pubkey(my_public_key)
                 .kind(Kind::GiftWrap)

@@ -3568,26 +3568,25 @@ impl VectorCore {
             let my_pk = state::my_public_key()
                 .ok_or(VectorError::Other("Not logged in".into()))?;
 
-            // Load known wrapper IDs + timestamps for negentropy fingerprinting
-            let all_items = db::wrappers::load_negentropy_items().unwrap_or_default();
-
-            // Filter items to time window (or use all for full sync)
+            // Load known wrapper IDs + timestamps for negentropy fingerprinting.
+            // A windowed sync bounds the read in SQL: materialising all of
+            // history to keep a few days of it is most of this function's cost
+            // on an established account.
             let (items, filter) = if let Some(days) = since_days {
                 let since_ts = Timestamp::now().as_secs().saturating_sub(days * 24 * 3600);
-                let items: Vec<(EventId, Timestamp)> = all_items.iter()
-                    .filter(|(_, ts)| ts.as_secs() >= since_ts)
-                    .cloned()
-                    .collect();
+                let items = db::wrappers::load_negentropy_items_since(since_ts)
+                    .unwrap_or_default();
                 let filter = Filter::new()
                     .pubkey(my_pk)
                     .kind(Kind::GiftWrap)
                     .since(Timestamp::from_secs(since_ts));
                 (items, filter)
             } else {
+                let items = db::wrappers::load_negentropy_items().unwrap_or_default();
                 let filter = Filter::new()
                     .pubkey(my_pk)
                     .kind(Kind::GiftWrap);
-                (all_items, filter)
+                (items, filter)
             };
 
             log_info!("[SyncDMs] {} negentropy items, since_days={:?}", items.len(), since_days);
