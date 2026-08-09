@@ -199,154 +199,150 @@ async fn clear_attachment_files<R: Runtime>(
     exts: Option<&std::collections::HashSet<String>>,
     session: &vector_core::state::SessionGuard,
 ) -> Result<usize, String> {
-    // Deletion is confined to the download dir: a stale or symlinked
-    // attachment path must not be able to reach files elsewhere on disk
-    let download_dir = vector_core::db::get_download_dir().canonicalize().ok();
+    vector_core::db::scoped(async move {
+        // Deletion is confined to the download dir: a stale or symlinked
+        // attachment path must not be able to reach files elsewhere on disk
+        let download_dir = vector_core::db::get_download_dir().canonicalize().ok();
 
-    // Lock the state to access all chats and messages
-    let mut state = STATE.lock().await;
-    if !session.is_valid() {
-        return Err("Session changed during storage clear".to_string());
-    }
+        // Lock the state to access all chats and messages
+        let mut state = STATE.lock().await;
 
-    // Track which chats have been updated to avoid duplicate saves
-    let mut updated_chats = std::collections::HashSet::new();
+        // Track which chats have been updated to avoid duplicate saves
+        let mut updated_chats = std::collections::HashSet::new();
 
-    // Process each chat to clear attachment metadata in messages
-    // Use index-based iteration to allow interner access for Message conversion
-    for chat_idx in 0..state.chats.len() {
-        let mut updated_msg_ids = Vec::new();
+        // Process each chat to clear attachment metadata in messages
+        // Use index-based iteration to allow interner access for Message conversion
+        for chat_idx in 0..state.chats.len() {
+            let mut updated_msg_ids = Vec::new();
 
-        // Iterate through all messages in this chat
-        for message in state.chats[chat_idx].messages.iter_mut() {
-            let mut attachment_updated = false;
+            // Iterate through all messages in this chat
+            for message in state.chats[chat_idx].messages.iter_mut() {
+                let mut attachment_updated = false;
 
-            // Iterate through matching attachments and reset their properties
-            for attachment in &mut message.attachments {
-                if !attachment.downloaded() && attachment.path.is_empty() {
-                    continue;
-                }
-
-                // Category clears match on the on-disk filename extension — the
-                // same derivation the storage chart buckets by
-                if let Some(set) = exts {
-                    let ext = std::path::Path::new(&*attachment.path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .and_then(|n| n.split('.').last())
-                        .map(|e| e.to_lowercase());
-                    if !ext.is_some_and(|e| set.contains(&e)) {
+                // Iterate through matching attachments and reset their properties
+                for attachment in &mut message.attachments {
+                    if !attachment.downloaded() && attachment.path.is_empty() {
                         continue;
                     }
-                }
 
-                // A path that resolves outside the download dir (user-picked
-                // send, symlink) is left fully intact: it isn't Vector's
-                // storage. A path that no longer resolves is a dangling ref:
-                // nothing to delete, but the metadata still needs the reset
-                match std::path::Path::new(&*attachment.path).canonicalize() {
-                    Ok(real) => {
-                        match &download_dir {
-                            Some(dir) if real.starts_with(dir) => {
-                                let _ = std::fs::remove_file(&real);
-                            }
-                            _ => continue,
+                    // Category clears match on the on-disk filename extension — the
+                    // same derivation the storage chart buckets by
+                    if let Some(set) = exts {
+                        let ext = std::path::Path::new(&*attachment.path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .and_then(|n| n.split('.').last())
+                            .map(|e| e.to_lowercase());
+                        if !ext.is_some_and(|e| set.contains(&e)) {
+                            continue;
                         }
                     }
-                    Err(_) => {}
+
+                    // A path that resolves outside the download dir (user-picked
+                    // send, symlink) is left fully intact: it isn't Vector's
+                    // storage. A path that no longer resolves is a dangling ref:
+                    // nothing to delete, but the metadata still needs the reset
+                    match std::path::Path::new(&*attachment.path).canonicalize() {
+                        Ok(real) => {
+                            match &download_dir {
+                                Some(dir) if real.starts_with(dir) => {
+                                    let _ = std::fs::remove_file(&real);
+                                }
+                                _ => continue,
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    // Reset attachment properties
+                    attachment.set_downloaded(false);
+                    attachment.set_downloading(false);
+                    attachment.path = String::new().into_boxed_str();
+                    attachment_updated = true;
                 }
-                // Reset attachment properties
-                attachment.set_downloaded(false);
-                attachment.set_downloading(false);
-                attachment.path = String::new().into_boxed_str();
-                attachment_updated = true;
+
+                // If any attachment was updated, track this message for save/emit
+                if attachment_updated {
+                    updated_msg_ids.push(message.id);
+                }
             }
 
-            // If any attachment was updated, track this message for save/emit
-            if attachment_updated {
-                updated_msg_ids.push(message.id);
+            // If we have messages to update, save them to the database
+            if updated_msg_ids.is_empty() {
+                continue;
             }
+            let chat_id = state.chats[chat_idx].id().to_string();
+
+            // Convert updated messages to Message format for save and emit
+            let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
+                .filter_map(|msg_id| {
+                    let hex_id = crate::util::bytes_to_hex_32(msg_id);
+                    state.chats[chat_idx].messages.find_by_hex_id(&hex_id)
+                        .map(|m| m.to_message(&state.interner))
+                })
+                .collect();
+
+            if !session.is_valid() {
+                return Err("Session changed during storage clear".to_string());
+            }
+
+            // Save updated messages to database
+            db::save_chat_messages(&chat_id, &messages_to_update).await
+                .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
+
+            // Emit message_update events for each updated message
+            for message in &messages_to_update {
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &message.id,
+                    "message": message,
+                    "chat_id": &chat_id
+                })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat_id, e))?;
+            }
+
+            updated_chats.insert(chat_id);
         }
 
-        // If we have messages to update, save them to the database
-        if updated_msg_ids.is_empty() {
-            continue;
-        }
-        let chat_id = state.chats[chat_idx].id().to_string();
-
-        // Convert updated messages to Message format for save and emit
-        let messages_to_update: Vec<crate::Message> = updated_msg_ids.iter()
-            .filter_map(|msg_id| {
-                let hex_id = crate::util::bytes_to_hex_32(msg_id);
-                state.chats[chat_idx].messages.find_by_hex_id(&hex_id)
-                    .map(|m| m.to_message(&state.interner))
-            })
-            .collect();
-
-        if !session.is_valid() {
-            return Err("Session changed during storage clear".to_string());
-        }
-
-        // Save updated messages to database
-        db::save_chat_messages(&chat_id, &messages_to_update).await
-            .map_err(|e| format!("Failed to save updated messages for chat {}: {}", chat_id, e))?;
-
-        // Emit message_update events for each updated message
-        for message in &messages_to_update {
-            handle.emit("message_update", serde_json::json!({
-                "old_id": &message.id,
-                "message": message,
-                "chat_id": &chat_id
-            })).map_err(|e| format!("Failed to emit message_update for chat {}: {}", chat_id, e))?;
-        }
-
-        updated_chats.insert(chat_id);
-    }
-
-    Ok(updated_chats.len())
+        Ok(updated_chats.len())
+    })
+    .await
 }
 
 /// Nuke the global image/sound caches and clear cached image paths from profiles
 async fn clear_media_caches<R: Runtime>(
     handle: &AppHandle<R>,
-    session: &vector_core::state::SessionGuard,
 ) -> Result<(), String> {
-    // Clear all disk caches (images, sounds, etc.) by nuking the cache directory
-    let cache_dir = handle.path().app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {}", e))?
-        .join("cache");
-    if cache_dir.exists() {
-        let _ = std::fs::remove_dir_all(&cache_dir);
-    }
+    vector_core::db::scoped(async move {
+        // Clear all disk caches (images, sounds, etc.) by nuking the cache directory
+        let cache_dir = handle.path().app_data_dir()
+            .map_err(|e| format!("Failed to get app data dir: {}", e))?
+            .join("cache");
+        if cache_dir.exists() {
+            let _ = std::fs::remove_dir_all(&cache_dir);
+        }
 
-    // Clear in-memory notification sound cache (desktop only)
-    #[cfg(desktop)]
-    audio::purge_sound_cache();
+        // Clear in-memory notification sound cache (desktop only)
+        #[cfg(desktop)]
+        audio::purge_sound_cache();
 
-    // Clear cached paths from all profiles in state and database
-    let mut state = STATE.lock().await;
-    if !session.is_valid() {
-        return Err("Session changed during storage clear".to_string());
-    }
-    let mut cleared_ids = Vec::new();
-    for profile in &mut state.profiles {
-        if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
-            profile.avatar_cached = Box::<str>::default();
-            profile.banner_cached = Box::<str>::default();
-            cleared_ids.push(profile.id);
+        // Clear cached paths from all profiles in state and database
+        let mut state = STATE.lock().await;
+        let mut cleared_ids = Vec::new();
+        for profile in &mut state.profiles {
+            if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
+                profile.avatar_cached = Box::<str>::default();
+                profile.banner_cached = Box::<str>::default();
+                cleared_ids.push(profile.id);
+            }
         }
-    }
-    for id in cleared_ids {
-        // Re-check each iteration: set_profile awaits, and a session swap
-        // mid-loop must not write the remaining profiles into the new account
-        if !session.is_valid() {
-            return Err("Session changed during storage clear".to_string());
+        for id in cleared_ids {
+            // Re-check each iteration: set_profile awaits, and a session swap
+            // mid-loop must not write the remaining profiles into the new account
+            if let Some(slim) = state.serialize_profile(id) {
+                db::set_profile(slim).await.ok();
+            }
         }
-        if let Some(slim) = state.serialize_profile(id) {
-            db::set_profile(slim).await.ok();
-        }
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Delete files with matching extensions from a directory (top level only,
@@ -388,7 +384,7 @@ pub async fn clear_storage<R: Runtime>(handle: AppHandle<R>) -> Result<serde_jso
     let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
 
     let updated_chats = clear_attachment_files(&handle, None, &session).await?;
-    clear_media_caches(&handle, &session).await?;
+    clear_media_caches(&handle).await?;
     // Attachment deletion can strand Mini App history rows pointing at nothing
     let _ = crate::db::prune_dangling_miniapp_history();
 
@@ -422,7 +418,7 @@ pub async fn clear_storage_category<R: Runtime>(
     let total_bytes_before = storage_info_before["total_bytes"].as_u64().unwrap_or(0);
 
     match category.as_str() {
-        "cache" => clear_media_caches(&handle, &session).await?,
+        "cache" => clear_media_caches(&handle).await?,
         "ai" => {
             #[cfg(feature = "whisper")]
             for model in whisper::MODELS {

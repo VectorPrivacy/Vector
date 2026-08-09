@@ -243,38 +243,37 @@ pub async fn unban_community_member(community_id: String, npub: String) -> Resul
 /// button on ownership + a type-to-confirm; this re-verifies authority cryptographically.
 #[tauri::command]
 pub async fn delete_community(community_id: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    // v2: dissolve at the community_id-derived plane (CORD-02 §9) via the facade,
-    // then the same local teardown so no sealed husk lingers.
-    if is_v2_community(&community_id) {
-        let channel_ids: Vec<String> = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
-            .ok()
-            .flatten()
-            .map(|c| c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)).collect())
-            .unwrap_or_default();
-        if !vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
-            vector_core::VectorCore.dissolve_community(&community_id).await.map_err(|e| e.to_string())?;
+    vector_core::db::scoped(async move {
+        let id_bytes = hex_to_id32(&community_id)?;
+        // v2: dissolve at the community_id-derived plane (CORD-02 §9) via the facade,
+        // then the same local teardown so no sealed husk lingers.
+        if is_v2_community(&community_id) {
+            let channel_ids: Vec<String> = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
+                .ok()
+                .flatten()
+                .map(|c| c.channels.iter().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)).collect())
+                .unwrap_or_default();
+            if !vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
+                vector_core::VectorCore.dissolve_community(&community_id).await.map_err(|e| e.to_string())?;
+            }
+            teardown_community_local(&community_id, &channel_ids, true).await;
+            return Ok(());
         }
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let channel_ids: Vec<String> = community.channels.iter().map(|ch| ch.id.to_hex()).collect();
+        // An already-sealed husk (dissolved before teardown existed) skips the publish — the
+        // tombstone is out there; this call is just the local cleanup.
+        if !vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            vector_core::community::service::dissolve_community(&transport, &community).await?;
+        }
+        // Full local teardown + cross-device list tombstone — a sealed husk lingering in the
+        // owner's own DB just re-registers its chat row at every boot ("dissolved group came back").
         teardown_community_local(&community_id, &channel_ids, true).await;
-        return Ok(());
-    }
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel_ids: Vec<String> = community.channels.iter().map(|ch| ch.id.to_hex()).collect();
-    if !session.is_valid() {
-        return Err("account changed during dissolution".to_string());
-    }
-    // An already-sealed husk (dissolved before teardown existed) skips the publish — the
-    // tombstone is out there; this call is just the local cleanup.
-    if !vector_core::db::community::get_community_dissolved(&community_id).unwrap_or(false) {
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        vector_core::community::service::dissolve_community(&transport, &community).await?;
-    }
-    // Full local teardown + cross-device list tombstone — a sealed husk lingering in the
-    // owner's own DB just re-registers its chat row at every boot ("dissolved group came back").
-    teardown_community_local(&community_id, &channel_ids, true).await;
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Owner "Upgrade to Concord v2" wizard entry (§migration). Builds the v2 twin (reusing v1
@@ -284,21 +283,20 @@ pub async fn delete_community(community_id: String) -> Result<(), String> {
 /// v2-only: a v2 community has no v1 to migrate from.
 #[tauri::command]
 pub async fn migrate_community(community_id: String) -> Result<String, String> {
-    let session = vector_core::state::SessionGuard::capture();
-    if is_v2_community(&community_id) {
-        return Err("this community is already on Concord v2".to_string());
-    }
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    if !session.is_valid() {
-        return Err("account changed before migration".to_string());
-    }
-    let now_secs = now_secs();
-    let transport = LiveTransport::with_timeout(Duration::from_secs(20));
-    // The wizard self-finalizes (re-stamps the owner's chats + emits `community_migrated`),
-    // so the UI updates without a reboot.
-    vector_core::community::migration::migrate_community_to_v2(&transport, &community, now_secs).await
+    vector_core::db::scoped(async move {
+        if is_v2_community(&community_id) {
+            return Err("this community is already on Concord v2".to_string());
+        }
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let now_secs = now_secs();
+        let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+        // The wizard self-finalizes (re-stamps the owner's chats + emits `community_migrated`),
+        // so the UI updates without a reboot.
+        vector_core::community::migration::migrate_community_to_v2(&transport, &community, now_secs).await
+    })
+    .await
 }
 
 /// Migration status for the Community-Details row: the timelock unlock time + whether it has
@@ -347,27 +345,26 @@ pub async fn migration_status(community_id: String) -> Result<serde_json::Value,
 /// in `publish_kick`, re-verified by peers).
 #[tauri::command]
 pub async fn kick_community_member(community_id: String, npub: String) -> Result<(), String> {
-    if is_v2_community(&community_id) {
-        return vector_core::VectorCore.kick_member(&community_id, &npub).await.map_err(|e| e.to_string());
-    }
-    let session = vector_core::state::SessionGuard::capture();
-    let hex = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?.to_hex();
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel = community.channels.first().ok_or("Community has no channel to kick in")?;
-    if !session.is_valid() {
-        return Err("account changed during kick".to_string());
-    }
-    let channel_id = channel.id.to_hex();
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let kick_id = vector_core::community::service::publish_kick(&transport, &community, channel, &hex).await?;
-    // The publish above is network-bound (12s timeout) — re-validate before the local write.
-    // We don't process our OWN kick, so record it locally as a "Member Left" — folds the target out of our
-    // member list durably (kick already stripped their grant, so the roster re-assert won't resurrect them)
-    // and renders "X left" in chat, matching what peers see on receipt. The inner id dedups with the echo.
-    apply_community_presence(&channel_id, &npub, false, &kick_id, now_secs(), None, None).await;
-    Ok(())
+    vector_core::db::scoped(async move {
+        if is_v2_community(&community_id) {
+            return vector_core::VectorCore.kick_member(&community_id, &npub).await.map_err(|e| e.to_string());
+        }
+        let hex = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?.to_hex();
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let channel = community.channels.first().ok_or("Community has no channel to kick in")?;
+        let channel_id = channel.id.to_hex();
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let kick_id = vector_core::community::service::publish_kick(&transport, &community, channel, &hex).await?;
+        // The publish above is network-bound (12s timeout) — re-validate before the local write.
+        // We don't process our OWN kick, so record it locally as a "Member Left" — folds the target out of our
+        // member list durably (kick already stripped their grant, so the roster re-assert won't resurrect them)
+        // and renders "X left" in chat, matching what peers see on receipt. The inner id dedups with the echo.
+        apply_community_presence(&channel_id, &npub, false, &kick_id, now_secs(), None, None).await;
+        Ok(())
+    })
+    .await
 }
 
 /// The Community's current banlist as npubs (bech32), for the owner's manage-bans UI.
@@ -384,43 +381,41 @@ pub async fn get_community_banlist(community_id: String) -> Result<Vec<String>, 
 /// to the roster at admin rank so they can sign management actions. Owner/admin-only.
 #[tauri::command]
 pub async fn grant_community_admin(community_id: String, npub: String) -> Result<(), String> {
-    if is_v2_community(&community_id) {
-        return vector_core::VectorCore.grant_admin(&community_id, &npub).await.map_err(|e| e.to_string());
-    }
-    let session = vector_core::state::SessionGuard::capture();
-    let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let admin_role_id = admin_role_id(&community_id)?;
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::service::grant_role(&transport, &community, member, &admin_role_id).await?;
-    if !session.is_valid() {
-        return Err("account changed during grant".to_string());
-    }
-    crate::services::subscription_handler::refresh_community_subscription().await;
-    Ok(())
+    vector_core::db::scoped(async move {
+        if is_v2_community(&community_id) {
+            return vector_core::VectorCore.grant_admin(&community_id, &npub).await.map_err(|e| e.to_string());
+        }
+        let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let admin_role_id = admin_role_id(&community_id)?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::service::grant_role(&transport, &community, member, &admin_role_id).await?;
+        crate::services::subscription_handler::refresh_community_subscription().await;
+        Ok(())
+    })
+    .await
 }
 
 /// Revoke a member's Admin role (instant-logical revocation). Owner/admin-only.
 #[tauri::command]
 pub async fn revoke_community_admin(community_id: String, npub: String) -> Result<(), String> {
-    if is_v2_community(&community_id) {
-        return vector_core::VectorCore.revoke_admin(&community_id, &npub).await.map_err(|e| e.to_string());
-    }
-    let session = vector_core::state::SessionGuard::capture();
-    let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let admin_role_id = admin_role_id(&community_id)?;
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::service::revoke_role(&transport, &community, member, &admin_role_id).await?;
-    if !session.is_valid() {
-        return Err("account changed during revoke".to_string());
-    }
-    crate::services::subscription_handler::refresh_community_subscription().await;
-    Ok(())
+    vector_core::db::scoped(async move {
+        if is_v2_community(&community_id) {
+            return vector_core::VectorCore.revoke_admin(&community_id, &npub).await.map_err(|e| e.to_string());
+        }
+        let member = nostr_sdk::prelude::PublicKey::parse(&npub).map_err(|_| "invalid npub".to_string())?;
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let admin_role_id = admin_role_id(&community_id)?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::service::revoke_role(&transport, &community, member, &admin_role_id).await?;
+        crate::services::subscription_handler::refresh_community_subscription().await;
+        Ok(())
+    })
+    .await
 }
 
 /// The npubs (bech32) of members holding a MANAGEMENT role — the admin set, for the member-list
@@ -615,31 +610,30 @@ pub(crate) async fn ingest_v2_community_list_update() {
 }
 
 async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Result<(), String> {
-    // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
-    if is_v2_community(community_id) {
-        return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
-    }
-    let session = vector_core::state::SessionGuard::capture();
-    let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
-    let id_bytes = hex_to_id32(community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    // Recompute the full list (latest-wins): drop any existing entry, then add if banning.
-    let mut list = vector_core::db::community::get_community_banlist(community_id)?;
-    list.retain(|h| h != &hex);
-    if banned {
-        list.push(hex);
-    }
-    if !session.is_valid() {
-        return Err("account changed during ban update".to_string());
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::service::publish_banlist(&transport, &community, &list).await?;
-    // Rebuild the live subscription so its cached channel routes carry the fresh `banned` set
-    // (COMMUNITY_ROUTES froze each Channel at the last refresh — without this, a banned author's
-    // LIVE messages keep flowing until reopen/restart).
-    crate::services::subscription_handler::refresh_community_subscription().await;
-    Ok(())
+    vector_core::db::scoped(async move {
+        // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
+        if is_v2_community(community_id) {
+            return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
+        }
+        let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
+        let id_bytes = hex_to_id32(community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        // Recompute the full list (latest-wins): drop any existing entry, then add if banning.
+        let mut list = vector_core::db::community::get_community_banlist(community_id)?;
+        list.retain(|h| h != &hex);
+        if banned {
+            list.push(hex);
+        }
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::service::publish_banlist(&transport, &community, &list).await?;
+        // Rebuild the live subscription so its cached channel routes carry the fresh `banned` set
+        // (COMMUNITY_ROUTES froze each Channel at the last refresh — without this, a banned author's
+        // LIVE messages keep flowing until reopen/restart).
+        crate::services::subscription_handler::refresh_community_subscription().await;
+        Ok(())
+    })
+    .await
 }
 
 /// Fetch one Community's summary (for the overview/settings panel).
@@ -654,35 +648,34 @@ pub async fn get_community(community_id: String) -> Result<CommunitySummary, Str
 /// purely local. Also clears the channels' chat rows from STATE.
 #[tauri::command]
 pub async fn leave_community(community_id: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    // v2: guestbook Leave announce (facade) + shared local teardown.
-    if is_v2_community(&community_id) {
-        let channel_ids = community_channel_ids(&community_id);
-        let _ = vector_core::VectorCore.leave_community(&community_id).await;
-        teardown_community_local(&community_id, &channel_ids, true).await;
-        return Ok(());
-    }
-    // Capture the full community first (channel ids for chat-row teardown + a leave announce).
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?;
-    let channel_ids: Vec<String> = community
-        .as_ref()
-        .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
-        .unwrap_or_default();
-    if !session.is_valid() {
-        return Err("account changed during leave".to_string());
-    }
-    // Best-effort "left" announcement (kind 3306) BEFORE dropping keys — afterward we can no
-    // longer sign/seal into the channel. Honest clients then show "X has left".
-    if let Some(ref c) = community {
-        if let Some(primary) = c.channels.first() {
-            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-            let _ = vector_core::community::service::publish_presence(&transport, c, primary, false, None).await;
+    vector_core::db::scoped(async move {
+        let id_bytes = hex_to_id32(&community_id)?;
+        // v2: guestbook Leave announce (facade) + shared local teardown.
+        if is_v2_community(&community_id) {
+            let channel_ids = community_channel_ids(&community_id);
+            let _ = vector_core::VectorCore.leave_community(&community_id).await;
+            teardown_community_local(&community_id, &channel_ids, true).await;
+            return Ok(());
         }
-    }
-    // Voluntary leave on THIS device — propagate the removal to our other devices.
-    teardown_community_local(&community_id, &channel_ids, true).await;
-    Ok(())
+        // Capture the full community first (channel ids for chat-row teardown + a leave announce).
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?;
+        let channel_ids: Vec<String> = community
+            .as_ref()
+            .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
+            .unwrap_or_default();
+        // Best-effort "left" announcement (kind 3306) BEFORE dropping keys — afterward we can no
+        // longer sign/seal into the channel. Honest clients then show "X has left".
+        if let Some(ref c) = community {
+            if let Some(primary) = c.channels.first() {
+                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                let _ = vector_core::community::service::publish_presence(&transport, c, primary, false, None).await;
+            }
+        }
+        // Voluntary leave on THIS device — propagate the removal to our other devices.
+        teardown_community_local(&community_id, &channel_ids, true).await;
+        Ok(())
+    })
+    .await
 }
 
 /// Tear down local state for a community: drop the DB rows + rebuild the subscription routes WITHOUT it,
@@ -934,86 +927,200 @@ pub async fn send_community_message(
     replied_to: Option<String>,
     bot: Option<String>,
 ) -> Result<(), String> {
-    use vector_core::sending::SendCallback;
-    use vector_core::Message;
-    let reply = replied_to.filter(|r| !r.is_empty());
-    // A `/` picker send names its chosen bot so only that bot executes when two
-    // bots share a command name (untagged = broadcast). The tag rides the
-    // inner on both stacks, and the sender's own optimistic row carries the
-    // npub too — the passive "ran /cmd with Bot" render can't wait for an echo.
-    let bot_pk = bot
-        .as_deref()
-        .filter(|b| !b.is_empty())
-        .and_then(|b| nostr_sdk::prelude::PublicKey::parse(b).ok());
-    let bot_tags: Vec<nostr_sdk::prelude::Tag> =
-        bot_pk.map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)]).unwrap_or_default();
-    let addressed_bots: Vec<String> = bot_pk
-        .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
-        .into_iter()
-        .collect();
+    vector_core::db::scoped(async move {
+        use vector_core::sending::SendCallback;
+        use vector_core::Message;
+        let reply = replied_to.filter(|r| !r.is_empty());
+        // A `/` picker send names its chosen bot so only that bot executes when two
+        // bots share a command name (untagged = broadcast). The tag rides the
+        // inner on both stacks, and the sender's own optimistic row carries the
+        // npub too — the passive "ran /cmd with Bot" render can't wait for an echo.
+        let bot_pk = bot
+            .as_deref()
+            .filter(|b| !b.is_empty())
+            .and_then(|b| nostr_sdk::prelude::PublicKey::parse(b).ok());
+        let bot_tags: Vec<nostr_sdk::prelude::Tag> =
+            bot_pk.map(|pk| vec![vector_core::bot_interface::bot_tag(&pk)]).unwrap_or_default();
+        let addressed_bots: Vec<String> = bot_pk
+            .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+            .into_iter()
+            .collect();
 
-    let session = vector_core::state::SessionGuard::capture();
-    let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
-    let my_npub = author_pk.to_bech32().ok();
+        let session = vector_core::state::SessionGuard::capture();
+        let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
+        let my_npub = author_pk.to_bech32().ok();
 
-    // Resolve channel → owning Community.
-    let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
-        .ok_or("Unknown Community channel")?;
-    let id_bytes = hex_to_id32(&community_id)?;
+        // Resolve channel → owning Community.
+        let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
+            .ok_or("Unknown Community channel")?;
+        let id_bytes = hex_to_id32(&community_id)?;
 
-    // Dual-stack: a v2 channel drives the SAME pending → sent/failed lifecycle
-    // as v1 and DMs. The rumor id is a pure function of its inputs (at_ms
-    // included), so the optimistic row is keyed by its REAL id up front and the
-    // in-process echo dedups onto it — the id never changes.
-    if matches!(
-        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
-        Some(vector_core::community::ConcordProtocol::V2)
-    ) {
-        let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
-            .ok_or("Community not found")?;
-        let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
-        let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
-        let (_, epoch) = community.channel_secret(channel);
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let callback = crate::message::sending::TauriSendCallback;
-        // NIP-30 pairs + the NIP-C7 reply author (best-effort from the held parent).
-        let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
-        let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-        let reply_owned = match reply.as_deref() {
-            Some(parent_id) => {
-                let author_hex = {
-                    let st = vector_core::state::STATE.lock().await;
-                    st.find_message(parent_id)
-                        .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
-                        .map(|pk| pk.to_hex())
-                        .unwrap_or_default()
-                };
-                Some((parent_id.to_string(), author_hex))
+        // Dual-stack: a v2 channel drives the SAME pending → sent/failed lifecycle
+        // as v1 and DMs. The rumor id is a pure function of its inputs (at_ms
+        // included), so the optimistic row is keyed by its REAL id up front and the
+        // in-process echo dedups onto it — the id never changes.
+        if matches!(
+            vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+            Some(vector_core::community::ConcordProtocol::V2)
+        ) {
+            let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+                .ok_or("Community not found")?;
+            let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
+            let channel = community.channel(&ch).ok_or("Channel not found in Community")?;
+            let (_, epoch) = community.channel_secret(channel);
+            let ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let callback = crate::message::sending::TauriSendCallback;
+            // NIP-30 pairs + the NIP-C7 reply author (best-effort from the held parent).
+            let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
+            let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+            let reply_owned = match reply.as_deref() {
+                Some(parent_id) => {
+                    let author_hex = {
+                        let st = vector_core::state::STATE.lock().await;
+                        st.find_message(parent_id)
+                            .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
+                            .map(|pk| pk.to_hex())
+                            .unwrap_or_default()
+                    };
+                    Some((parent_id.to_string(), author_hex))
+                }
+                None => None,
+            };
+            let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+            // Self-Destruct Timer: stamp the sender's per-channel NIP-40 expiry (if
+            // set) so relays drop the wrap and every member's client purges on
+            // schedule. Resolved ONCE and passed to both the precompute and the send
+            // so the pure-function rumor id can't fork.
+            let mut extra_tags = bot_tags;
+            // Resolve the Self-Destruct expiry ONCE: it stamps both the outgoing
+            // rumor (so recipients + relays honour NIP-40) AND the optimistic message
+            // below, so the sender's own echo self-destructs like everyone else's.
+            let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
+            if let Some(exp) = expiry {
+                extra_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
             }
-            None => None,
-        };
-        let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
-        // Self-Destruct Timer: stamp the sender's per-channel NIP-40 expiry (if
-        // set) so relays drop the wrap and every member's client purges on
-        // schedule. Resolved ONCE and passed to both the precompute and the send
-        // so the pure-function rumor id can't fork.
-        let mut extra_tags = bot_tags;
-        // Resolve the Self-Destruct expiry ONCE: it stamps both the outgoing
-        // rumor (so recipients + relays honour NIP-40) AND the optimistic message
-        // below, so the sender's own echo self-destructs like everyone else's.
-        let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
-        if let Some(exp) = expiry {
-            extra_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
-        }
-        let rumor = vector_core::community::v2::chat::build_message_rumor(
-            author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, extra_tags.clone(), ms,
-        );
-        let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
+            let rumor = vector_core::community::v2::chat::build_message_rumor(
+                author_pk, &ch, epoch, &content, reply_ref, &emoji_pairs, extra_tags.clone(), ms,
+            );
+            let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
-        // 1. Optimistic message — renders instantly, keyed by its real id.
+            // 1. Optimistic message — renders instantly, keyed by its real id.
+            let pending_msg = Message {
+                id: message_id.clone(),
+                content: content.clone(),
+                at: ms,
+                pending: true,
+                mine: true,
+                npub: my_npub.clone(),
+                replied_to: reply.clone().unwrap_or_default(),
+                emoji_tags: emoji_tags.clone(),
+                addressed_bots: addressed_bots.clone(),
+                expiration: expiry,
+                ..Default::default()
+            };
+            {
+                let mut state = vector_core::state::STATE.lock().await;
+                state.add_message_to_chat(&channel_id, &pending_msg);
+            }
+            callback.on_pending(&channel_id, &pending_msg);
+
+            // 2. Seal + publish — the service re-derives the identical rumor from `ms`.
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            // Same tags as the precomputed rumor above — the rumor id is a pure
+            // function of its inputs, so any divergence would fork the optimistic id.
+            let sent = vector_core::community::v2::service::send_chat_message_at(
+                &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
+            )
+            .await;
+            return match sent {
+                Ok(sent_id) if session.is_valid() => {
+                    if sent_id != message_id {
+                        // An epoch rolled between the precompute and the seal — the send
+                        // landed under a NEW id. Drop the orphaned pending row and adopt
+                        // the echo (persisted under sent_id).
+                        let adopted = {
+                            let mut state = vector_core::state::STATE.lock().await;
+                            state.remove_message(&message_id);
+                            state.find_message(&sent_id).map(|(_, m)| m.clone())
+                        };
+                        if let Some(ref msg) = adopted {
+                            callback.on_sent(&channel_id, &message_id, msg);
+                            callback.on_persist(&channel_id, msg);
+                        }
+                        return Ok(());
+                    }
+                    // 3a. Sent — clear the pending flag (the echo deduped onto this row).
+                    let sent_row = {
+                        let mut state = vector_core::state::STATE.lock().await;
+                        state.update_message(&message_id, |m| m.set_pending(false))
+                    };
+                    if let Some((_cid, ref msg)) = sent_row {
+                        callback.on_sent(&channel_id, &message_id, msg);
+                        callback.on_persist(&channel_id, msg);
+                    }
+                    Ok(())
+                }
+                Ok(_) => Err("account changed during send".to_string()),
+                Err(e) => {
+                    // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
+                    let failed = {
+                        let mut state = vector_core::state::STATE.lock().await;
+                        state.update_message(&message_id, |m| {
+                            m.set_failed(true);
+                            m.set_pending(false);
+                        })
+                    };
+                    if let Some((_cid, ref msg)) = failed {
+                        callback.on_failed(&channel_id, &message_id, msg);
+                    }
+                    Err(e)
+                }
+            };
+        }
+
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let channel = community
+            .channels
+            .iter()
+            .find(|c| c.id.to_hex() == channel_id)
+            .ok_or("Channel not found in Community")?
+            .clone();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let ms = now.as_millis() as u64;
+        let callback = crate::message::sending::TauriSendCallback;
+
+        // Build the inner event up front so its id (the message_id) is known BEFORE the
+        // optimistic insert. Using the final id from the start — not a swapped "pending-"
+        // id — means the message id never changes: the inbound STATE dedup recognizes the
+        // relay echo (same inner id) and drops it, so the sender can't see a duplicate even
+        // if the echo races the post-publish finalize. The id is derivable from the unsigned
+        // event (it doesn't depend on the signature).
+        // NIP-30: resolve `:shortcode:` in the content against subscribed packs so the inner
+        // event carries `["emoji", ...]` tags (custom emoji render for everyone + our echo).
+        let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
+        // The `bot` routing tag rides the inner verbatim (old readers ignore
+        // unknown inner tags), so a picked bot answers alone on v1 too.
+        let unsigned = vector_core::community::envelope::build_inner_full(
+            author_pk,
+            &channel.id,
+            channel.epoch,
+            vector_core::stored_event::event_kind::COMMUNITY_MESSAGE,
+            &content,
+            ms,
+            reply.as_deref(),
+            &emoji_tags,
+            &bot_tags,
+        );
+        let message_id = unsigned.id.ok_or("inner event has no id")?.to_hex();
+
+        // 1. Optimistic message — renders instantly (parity with DMs), keyed by its real id.
         let pending_msg = Message {
             id: message_id.clone(),
             content: content.clone(),
@@ -1024,7 +1131,6 @@ pub async fn send_community_message(
             replied_to: reply.clone().unwrap_or_default(),
             emoji_tags: emoji_tags.clone(),
             addressed_bots: addressed_bots.clone(),
-            expiration: expiry,
             ..Default::default()
         };
         {
@@ -1033,43 +1139,40 @@ pub async fn send_community_message(
         }
         callback.on_pending(&channel_id, &pending_msg);
 
-        // 2. Seal + publish — the service re-derives the identical rumor from `ms`.
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        // Same tags as the precomputed rumor above — the rumor id is a pure
-        // function of its inputs, so any divergence would fork the optimistic id.
-        let sent = vector_core::community::v2::service::send_chat_message_at(
-            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, extra_tags, ms,
-        )
+        // 2. Sign the inner event (local or bunker — may round-trip), then publish.
+        let signed = async {
+            let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+            let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+            unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign message: {e}"))
+        }
         .await;
-        return match sent {
-            Ok(sent_id) if session.is_valid() => {
-                if sent_id != message_id {
-                    // An epoch rolled between the precompute and the seal — the send
-                    // landed under a NEW id. Drop the orphaned pending row and adopt
-                    // the echo (persisted under sent_id).
-                    let adopted = {
-                        let mut state = vector_core::state::STATE.lock().await;
-                        state.remove_message(&message_id);
-                        state.find_message(&sent_id).map(|(_, m)| m.clone())
-                    };
-                    if let Some(ref msg) = adopted {
-                        callback.on_sent(&channel_id, &message_id, msg);
-                        callback.on_persist(&channel_id, msg);
-                    }
-                    return Ok(());
-                }
-                // 3a. Sent — clear the pending flag (the echo deduped onto this row).
-                let sent_row = {
+
+        let publish_result = match signed {
+            Ok(inner) if session.is_valid() => {
+                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                service::send_signed_message(&transport, &community, &channel, &inner).await
+            }
+            Ok(_) => Err("account changed during send".to_string()),
+            Err(e) => Err(e),
+        };
+
+        match publish_result {
+            Ok(_outer) => {
+                // 3a. Sent — clear the pending flag (id is unchanged) + persist.
+                let sent = {
                     let mut state = vector_core::state::STATE.lock().await;
                     state.update_message(&message_id, |m| m.set_pending(false))
                 };
-                if let Some((_cid, ref msg)) = sent_row {
+                if let Some((_cid, ref msg)) = sent {
                     callback.on_sent(&channel_id, &message_id, msg);
                     callback.on_persist(&channel_id, msg);
+                } else {
+                    // The optimistic message is gone (e.g. account swap cleared STATE). It
+                    // did publish; just don't strand a phantom pending bubble.
+                    vector_core::log_warn!("[community] sent message {} not in STATE to finalize", message_id);
                 }
                 Ok(())
             }
-            Ok(_) => Err("account changed during send".to_string()),
             Err(e) => {
                 // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
                 let failed = {
@@ -1084,116 +1187,9 @@ pub async fn send_community_message(
                 }
                 Err(e)
             }
-        };
-    }
-
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .ok_or("Channel not found in Community")?
-        .clone();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let ms = now.as_millis() as u64;
-    let callback = crate::message::sending::TauriSendCallback;
-
-    // Build the inner event up front so its id (the message_id) is known BEFORE the
-    // optimistic insert. Using the final id from the start — not a swapped "pending-"
-    // id — means the message id never changes: the inbound STATE dedup recognizes the
-    // relay echo (same inner id) and drops it, so the sender can't see a duplicate even
-    // if the echo races the post-publish finalize. The id is derivable from the unsigned
-    // event (it doesn't depend on the signature).
-    // NIP-30: resolve `:shortcode:` in the content against subscribed packs so the inner
-    // event carries `["emoji", ...]` tags (custom emoji render for everyone + our echo).
-    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
-    // The `bot` routing tag rides the inner verbatim (old readers ignore
-    // unknown inner tags), so a picked bot answers alone on v1 too.
-    let unsigned = vector_core::community::envelope::build_inner_full(
-        author_pk,
-        &channel.id,
-        channel.epoch,
-        vector_core::stored_event::event_kind::COMMUNITY_MESSAGE,
-        &content,
-        ms,
-        reply.as_deref(),
-        &emoji_tags,
-        &bot_tags,
-    );
-    let message_id = unsigned.id.ok_or("inner event has no id")?.to_hex();
-
-    // 1. Optimistic message — renders instantly (parity with DMs), keyed by its real id.
-    let pending_msg = Message {
-        id: message_id.clone(),
-        content: content.clone(),
-        at: ms,
-        pending: true,
-        mine: true,
-        npub: my_npub.clone(),
-        replied_to: reply.clone().unwrap_or_default(),
-        emoji_tags: emoji_tags.clone(),
-        addressed_bots: addressed_bots.clone(),
-        ..Default::default()
-    };
-    {
-        let mut state = vector_core::state::STATE.lock().await;
-        state.add_message_to_chat(&channel_id, &pending_msg);
-    }
-    callback.on_pending(&channel_id, &pending_msg);
-
-    // 2. Sign the inner event (local or bunker — may round-trip), then publish.
-    let signed = async {
-        let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-        let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
-        unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign message: {e}"))
-    }
-    .await;
-
-    let publish_result = match signed {
-        Ok(inner) if session.is_valid() => {
-            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-            service::send_signed_message(&transport, &community, &channel, &inner).await
         }
-        Ok(_) => Err("account changed during send".to_string()),
-        Err(e) => Err(e),
-    };
-
-    match publish_result {
-        Ok(_outer) => {
-            // 3a. Sent — clear the pending flag (id is unchanged) + persist.
-            let sent = {
-                let mut state = vector_core::state::STATE.lock().await;
-                state.update_message(&message_id, |m| m.set_pending(false))
-            };
-            if let Some((_cid, ref msg)) = sent {
-                callback.on_sent(&channel_id, &message_id, msg);
-                callback.on_persist(&channel_id, msg);
-            } else {
-                // The optimistic message is gone (e.g. account swap cleared STATE). It
-                // did publish; just don't strand a phantom pending bubble.
-                vector_core::log_warn!("[community] sent message {} not in STATE to finalize", message_id);
-            }
-            Ok(())
-        }
-        Err(e) => {
-            // 3b. Failed — mark the optimistic message failed (offers retry in the UI).
-            let failed = {
-                let mut state = vector_core::state::STATE.lock().await;
-                state.update_message(&message_id, |m| {
-                    m.set_failed(true);
-                    m.set_pending(false);
-                })
-            };
-            if let Some((_cid, ref msg)) = failed {
-                callback.on_failed(&channel_id, &message_id, msg);
-            }
-            Err(e)
-        }
-    }
+    })
+    .await
 }
 
 /// A Community attachment that's been encrypted and previewed locally but NOT yet uploaded.
@@ -1469,292 +1465,292 @@ async fn dispatch_community_attachment_message(
     session: vector_core::state::SessionGuard,
     prepared: Vec<PreparedCommunityAttachment>,
 ) -> Result<CommunityAttachmentSendResult, String> {
-    use vector_core::sending::SendCallback;
-    use vector_core::Message;
+    vector_core::db::scoped(async move {
+        use vector_core::sending::SendCallback;
+        use vector_core::Message;
 
-    if !session.is_valid() {
-        return Err("account changed during upload".to_string());
-    }
-    let reply = replied_to.filter(|r| !r.is_empty());
-    let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
-    let my_npub = author_pk.to_bech32().ok();
+        let reply = replied_to.filter(|r| !r.is_empty());
+        let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
+        let my_npub = author_pk.to_bech32().ok();
 
-    // Resolve channel → owning Community (same as send_community_message).
-    let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
-        .ok_or("Unknown Community channel")?;
-    let id_bytes = hex_to_id32(&community_id)?;
-    // Dual-stack: resolve under the community's OWN protocol before any upload
-    // work — a v2 row read through the v1 loader yields v1-shaped key garbage
-    // that would seal an event no member can decrypt.
-    let v2 = if is_v2_community(&community_id) {
-        let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
-            .ok_or("Community not found")?;
-        let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
-        if community.channel(&ch).is_none() {
-            return Err("Channel not found in Community".to_string());
+        // Resolve channel → owning Community (same as send_community_message).
+        let community_id = vector_core::db::community::community_id_for_channel(&channel_id)?
+            .ok_or("Unknown Community channel")?;
+        let id_bytes = hex_to_id32(&community_id)?;
+        // Dual-stack: resolve under the community's OWN protocol before any upload
+        // work — a v2 row read through the v1 loader yields v1-shaped key garbage
+        // that would seal an event no member can decrypt.
+        let v2 = if is_v2_community(&community_id) {
+            let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+                .ok_or("Community not found")?;
+            let ch = vector_core::community::ChannelId(hex_to_id32(&channel_id)?);
+            if community.channel(&ch).is_none() {
+                return Err("Channel not found in Community".to_string());
+            }
+            Some((community, ch))
+        } else {
+            None
+        };
+        let v1 = if v2.is_none() {
+            let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+                .ok_or("Community not found")?;
+            let channel = community
+                .channels
+                .iter()
+                .find(|c| c.id.to_hex() == channel_id)
+                .ok_or("Channel not found in Community")?
+                .clone();
+            Some((community, channel))
+        } else {
+            None
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let ms = now.as_millis() as u64;
+        // Temp id keyed during upload — the real inner id depends on the imeta (uploaded URLs),
+        // so it isn't known until every attachment lands. Finalized → real id on publish ack.
+        let pending_id = format!("pending-{}", now.as_nanos());
+        let callback = crate::message::sending::TauriSendCallback;
+        let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
+
+        // Resolve the Self-Destruct expiry ONCE, before the upload, so the optimistic
+        // bubble and the post-upload imeta stamp carry the identical NIP-40 expiry —
+        // the sender's own echo self-destructs, not just the recipients'.
+        let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
+        // Optimistic bubble — attachments carry empty URLs (plaintext is already on disk for the
+        // sender's preview); the upload fills them in.
+        let optimistic_attachments: Vec<_> = prepared.iter().map(|p| p.attachment.clone()).collect();
+        let pending_msg = Message {
+            id: pending_id.clone(),
+            content: content.clone(),
+            at: ms,
+            pending: true,
+            mine: true,
+            npub: my_npub.clone(),
+            replied_to: reply.clone().unwrap_or_default(),
+            emoji_tags: emoji_tags.clone(),
+            attachments: optimistic_attachments,
+            expiration: expiry,
+            ..Default::default()
+        };
+        {
+            let mut state = vector_core::state::STATE.lock().await;
+            state.add_message_to_chat(&channel_id, &pending_msg);
         }
-        Some((community, ch))
-    } else {
-        None
-    };
-    let v1 = if v2.is_none() {
-        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-            .ok_or("Community not found")?;
-        let channel = community
-            .channels
+        // Registers the cancel flag (keyed by pending_id) + emits the pending bubble.
+        callback.on_pending(&channel_id, &pending_msg);
+
+        // Cancel flag the cancel_upload command flips — bridge it into Blossom so a cancel
+        // between progress ticks still aborts the transfer.
+        let cancel_flag = crate::message::upload_cancel_flags().lock().unwrap().get(&pending_id).cloned();
+
+        let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+        let servers = vector_core::blossom_servers::compute_enabled_servers();
+        if servers.is_empty() {
+            let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+            return Err("No Blossom servers configured.".to_string());
+        }
+
+        // Upload each attachment, driving the progress ring (keyed by pending_id) + filling URLs.
+        let mut uploaded: Vec<vector_core::types::Attachment> = Vec::with_capacity(prepared.len());
+        for prep in prepared {
+            let PreparedCommunityAttachment { mut attachment, encrypted, mime } = prep;
+            let cb_for_progress = callback.clone();
+            let pid_for_progress = pending_id.clone();
+            let progress_cb: vector_core::blossom::ProgressCallback =
+                std::sync::Arc::new(move |percentage, bytes| {
+                    cb_for_progress.on_upload_progress(
+                        &pid_for_progress,
+                        percentage.unwrap_or(0),
+                        bytes.unwrap_or(0),
+                    )
+                });
+
+            let upload_url = match vector_core::blossom::upload_blob_with_progress_and_failover(
+                signer.clone(),
+                servers.clone(),
+                std::sync::Arc::new(encrypted),
+                Some(mime.as_str()),
+                /* is_encrypted */ true,
+                progress_cb,
+                Some(3),
+                Some(Duration::from_secs(2)),
+                cancel_flag.clone(),
+            )
+            .await
+            {
+                Ok(url) => url,
+                Err(e) => {
+                    vector_core::log_net_fail!("[Community Upload] attachment upload failed (channel {}…): {}", &channel_id[..8.min(channel_id.len())], e);
+                    let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+                    return Err(format!("Upload failed: {e}"));
+                }
+            };
+
+            attachment.url = upload_url.clone();
+            // Reflect the uploaded URL on the optimistic bubble's attachment.
+            {
+                let mut state = vector_core::state::STATE.lock().await;
+                state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
+                    a.url = upload_url.clone().into_boxed_str();
+                });
+            }
+            callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &upload_url);
+
+            // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride
+            // the imeta as `fallback` sources; zero mirrors never fails the send.
+            let mirror_urls = vector_core::blossom::mirror_blob_to_servers(
+                signer.clone(),
+                &upload_url,
+                servers.clone(),
+                2,
+                Duration::from_secs(5),
+            )
+            .await;
+            if !mirror_urls.is_empty() {
+                attachment.fallback_urls = mirror_urls.clone();
+                let mut state = vector_core::state::STATE.lock().await;
+                state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
+                    a.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+                });
+            }
+            uploaded.push(attachment);
+        }
+
+        // Build the real inner now that every imeta carries its uploaded URL.
+        let mut imeta_tags: Vec<_> = uploaded
             .iter()
-            .find(|c| c.id.to_hex() == channel_id)
-            .ok_or("Channel not found in Community")?
-            .clone();
-        Some((community, channel))
-    } else {
-        None
-    };
+            .map(vector_core::community::attachments::attachment_to_imeta)
+            .collect();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let ms = now.as_millis() as u64;
-    // Temp id keyed during upload — the real inner id depends on the imeta (uploaded URLs),
-    // so it isn't known until every attachment lands. Finalized → real id on publish ack.
-    let pending_id = format!("pending-{}", now.as_nanos());
-    let callback = crate::message::sending::TauriSendCallback;
-    let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
-
-    // Resolve the Self-Destruct expiry ONCE, before the upload, so the optimistic
-    // bubble and the post-upload imeta stamp carry the identical NIP-40 expiry —
-    // the sender's own echo self-destructs, not just the recipients'.
-    let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
-    // Optimistic bubble — attachments carry empty URLs (plaintext is already on disk for the
-    // sender's preview); the upload fills them in.
-    let optimistic_attachments: Vec<_> = prepared.iter().map(|p| p.attachment.clone()).collect();
-    let pending_msg = Message {
-        id: pending_id.clone(),
-        content: content.clone(),
-        at: ms,
-        pending: true,
-        mine: true,
-        npub: my_npub.clone(),
-        replied_to: reply.clone().unwrap_or_default(),
-        emoji_tags: emoji_tags.clone(),
-        attachments: optimistic_attachments,
-        expiration: expiry,
-        ..Default::default()
-    };
-    {
-        let mut state = vector_core::state::STATE.lock().await;
-        state.add_message_to_chat(&channel_id, &pending_msg);
-    }
-    // Registers the cancel flag (keyed by pending_id) + emits the pending bubble.
-    callback.on_pending(&channel_id, &pending_msg);
-
-    // Cancel flag the cancel_upload command flips — bridge it into Blossom so a cancel
-    // between progress ticks still aborts the transfer.
-    let cancel_flag = crate::message::upload_cancel_flags().lock().unwrap().get(&pending_id).cloned();
-
-    let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-    let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
-    let servers = vector_core::blossom_servers::compute_enabled_servers();
-    if servers.is_empty() {
-        let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
-        return Err("No Blossom servers configured.".to_string());
-    }
-
-    // Upload each attachment, driving the progress ring (keyed by pending_id) + filling URLs.
-    let mut uploaded: Vec<vector_core::types::Attachment> = Vec::with_capacity(prepared.len());
-    for prep in prepared {
-        let PreparedCommunityAttachment { mut attachment, encrypted, mime } = prep;
-        let cb_for_progress = callback.clone();
-        let pid_for_progress = pending_id.clone();
-        let progress_cb: vector_core::blossom::ProgressCallback =
-            std::sync::Arc::new(move |percentage, bytes| {
-                cb_for_progress.on_upload_progress(
-                    &pid_for_progress,
-                    percentage.unwrap_or(0),
-                    bytes.unwrap_or(0),
-                )
-            });
-
-        let upload_url = match vector_core::blossom::upload_blob_with_progress_and_failover(
-            signer.clone(),
-            servers.clone(),
-            std::sync::Arc::new(encrypted),
-            Some(mime.as_str()),
-            /* is_encrypted */ true,
-            progress_cb,
-            Some(3),
-            Some(Duration::from_secs(2)),
-            cancel_flag.clone(),
-        )
-        .await
-        {
-            Ok(url) => url,
-            Err(e) => {
-                vector_core::log_net_fail!("[Community Upload] attachment upload failed (channel {}…): {}", &channel_id[..8.min(channel_id.len())], e);
-                let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
-                return Err(format!("Upload failed: {e}"));
+        // v2: seal the caption + imeta rumor through the v2 service. The send echoes
+        // the persisted message into STATE/DB (bot-silent), so adopt the echo over
+        // the optimistic bubble — finalizing the temp id would duplicate the row.
+        if let Some((community, ch)) = v2 {
+            let reply_owned = match reply.as_deref() {
+                Some(parent_id) => {
+                    // The NIP-C7 q author slot is a SHOULD — best-effort from the held parent.
+                    let author_hex = {
+                        let st = vector_core::state::STATE.lock().await;
+                        st.find_message(parent_id)
+                            .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
+                            .map(|pk| pk.to_hex())
+                            .unwrap_or_default()
+                    };
+                    Some((parent_id.to_string(), author_hex))
+                }
+                None => None,
+            };
+            let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
+            let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+            // Self-Destruct Timer: reuse the expiry resolved before the upload so the
+            // imeta and the sender's optimistic bubble carry the identical NIP-40 stamp
+            // (v2-only; the v1 file path below leaves imeta untouched).
+            if let Some(exp) = expiry {
+                imeta_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
             }
-        };
-
-        attachment.url = upload_url.clone();
-        // Reflect the uploaded URL on the optimistic bubble's attachment.
-        {
-            let mut state = vector_core::state::STATE.lock().await;
-            state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
-                a.url = upload_url.clone().into_boxed_str();
-            });
-        }
-        callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &upload_url);
-
-        // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride
-        // the imeta as `fallback` sources; zero mirrors never fails the send.
-        let mirror_urls = vector_core::blossom::mirror_blob_to_servers(
-            signer.clone(),
-            &upload_url,
-            servers.clone(),
-            2,
-            Duration::from_secs(5),
-        )
-        .await;
-        if !mirror_urls.is_empty() {
-            attachment.fallback_urls = mirror_urls.clone();
-            let mut state = vector_core::state::STATE.lock().await;
-            state.update_attachment(&channel_id, &pending_id, &attachment.id, |a| {
-                a.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
-            });
-        }
-        uploaded.push(attachment);
-    }
-
-    // Build the real inner now that every imeta carries its uploaded URL.
-    let mut imeta_tags: Vec<_> = uploaded
-        .iter()
-        .map(vector_core::community::attachments::attachment_to_imeta)
-        .collect();
-
-    // v2: seal the caption + imeta rumor through the v2 service. The send echoes
-    // the persisted message into STATE/DB (bot-silent), so adopt the echo over
-    // the optimistic bubble — finalizing the temp id would duplicate the row.
-    if let Some((community, ch)) = v2 {
-        let reply_owned = match reply.as_deref() {
-            Some(parent_id) => {
-                // The NIP-C7 q author slot is a SHOULD — best-effort from the held parent.
-                let author_hex = {
-                    let st = vector_core::state::STATE.lock().await;
-                    st.find_message(parent_id)
-                        .and_then(|(_, m)| m.npub.as_deref().and_then(|n| nostr_sdk::prelude::PublicKey::parse(n).ok()))
-                        .map(|pk| pk.to_hex())
-                        .unwrap_or_default()
-                };
-                Some((parent_id.to_string(), author_hex))
-            }
-            None => None,
-        };
-        let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
-        let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-        // Self-Destruct Timer: reuse the expiry resolved before the upload so the
-        // imeta and the sender's optimistic bubble carry the identical NIP-40 stamp
-        // (v2-only; the v1 file path below leaves imeta untouched).
-        if let Some(exp) = expiry {
-            imeta_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
-        }
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        let sent = vector_core::community::v2::service::send_chat_message(
-            &transport, &community, &ch, &content, reply_ref, &emoji_pairs, imeta_tags,
-        )
-        .await;
-        return match sent {
-            Ok(real_id) if session.is_valid() => {
-                let echoed = {
-                    let mut state = vector_core::state::STATE.lock().await;
-                    state.remove_message(&pending_id);
-                    // Re-adopt our local download state onto the echo. The echo is parsed by
-                    // the inbound path, which never claims `downloaded` (an arriving imeta
-                    // proves nothing about what's on disk) — but we wrote these plaintexts
-                    // ourselves moments ago. Without this the sender downloads its own upload
-                    // back from Blossom, which on a slow transport shows as a file that sits
-                    // in a downloading state for minutes after sending. The DB upsert already
-                    // applies this rule via `downloaded=MAX(...)`; STATE needs it too.
-                    for local in uploaded.iter().filter(|u| u.downloaded) {
-                        let path = local.path.clone();
-                        state.update_attachment(&channel_id, &real_id, &local.id, |a| {
-                            a.set_downloaded(true);
-                            a.set_downloading(false);
-                            a.path = path.clone().into_boxed_str();
-                        });
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            let sent = vector_core::community::v2::service::send_chat_message(
+                &transport, &community, &ch, &content, reply_ref, &emoji_pairs, imeta_tags,
+            )
+            .await;
+            return match sent {
+                Ok(real_id) if session.is_valid() => {
+                    let echoed = {
+                        let mut state = vector_core::state::STATE.lock().await;
+                        state.remove_message(&pending_id);
+                        // Re-adopt our local download state onto the echo. The echo is parsed by
+                        // the inbound path, which never claims `downloaded` (an arriving imeta
+                        // proves nothing about what's on disk) — but we wrote these plaintexts
+                        // ourselves moments ago. Without this the sender downloads its own upload
+                        // back from Blossom, which on a slow transport shows as a file that sits
+                        // in a downloading state for minutes after sending. The DB upsert already
+                        // applies this rule via `downloaded=MAX(...)`; STATE needs it too.
+                        for local in uploaded.iter().filter(|u| u.downloaded) {
+                            let path = local.path.clone();
+                            state.update_attachment(&channel_id, &real_id, &local.id, |a| {
+                                a.set_downloaded(true);
+                                a.set_downloading(false);
+                                a.path = path.clone().into_boxed_str();
+                            });
+                        }
+                        state.find_message(&real_id).map(|(_, m)| m.clone())
+                    };
+                    if let Some(ref msg) = echoed {
+                        callback.on_sent(&channel_id, &pending_id, msg);
+                        callback.on_persist(&channel_id, msg);
+                    } else {
+                        vector_core::log_warn!("[community] v2 sent message {} not in STATE to finalize", real_id);
                     }
-                    state.find_message(&real_id).map(|(_, m)| m.clone())
+                    let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
+                    Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
+                }
+                Ok(_) => Err("account changed during send".to_string()),
+                Err(e) => {
+                    let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+                    Err(e)
+                }
+            };
+        }
+
+        let (community, channel) = v1.expect("resolved above when not v2");
+        let unsigned = vector_core::community::envelope::build_inner_full(
+            author_pk,
+            &channel.id,
+            channel.epoch,
+            vector_core::stored_event::event_kind::COMMUNITY_MESSAGE,
+            &content,
+            ms,
+            reply.as_deref(),
+            &emoji_tags,
+            &imeta_tags,
+        );
+        let real_id = match unsigned.id {
+            Some(id) => id.to_hex(),
+            None => {
+                let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
+                return Err("inner event has no id".to_string());
+            }
+        };
+
+        let signed = unsigned
+            .finalize_async(&signer)
+            .await
+            .map_err(|e| format!("Failed to sign message: {e}"));
+
+        let publish_result = match signed {
+            Ok(inner) if session.is_valid() => {
+                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                service::send_signed_message(&transport, &community, &channel, &inner).await
+            }
+            Ok(_) => Err("account changed during send".to_string()),
+            Err(e) => Err(e),
+        };
+
+        match publish_result {
+            Ok(_outer) => {
+                // Swap temp id → real id and clear pending.
+                let finalized = {
+                    let mut state = vector_core::state::STATE.lock().await;
+                    state.finalize_pending_message(&channel_id, &pending_id, &real_id)
                 };
-                if let Some(ref msg) = echoed {
+                if let Some((_old, ref msg)) = finalized {
                     callback.on_sent(&channel_id, &pending_id, msg);
                     callback.on_persist(&channel_id, msg);
-                } else {
-                    vector_core::log_warn!("[community] v2 sent message {} not in STATE to finalize", real_id);
                 }
                 let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
                 Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
             }
-            Ok(_) => Err("account changed during send".to_string()),
             Err(e) => {
                 let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
                 Err(e)
             }
-        };
-    }
-
-    let (community, channel) = v1.expect("resolved above when not v2");
-    let unsigned = vector_core::community::envelope::build_inner_full(
-        author_pk,
-        &channel.id,
-        channel.epoch,
-        vector_core::stored_event::event_kind::COMMUNITY_MESSAGE,
-        &content,
-        ms,
-        reply.as_deref(),
-        &emoji_tags,
-        &imeta_tags,
-    );
-    let real_id = match unsigned.id {
-        Some(id) => id.to_hex(),
-        None => {
-            let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
-            return Err("inner event has no id".to_string());
         }
-    };
-
-    let signed = unsigned
-        .finalize_async(&signer)
-        .await
-        .map_err(|e| format!("Failed to sign message: {e}"));
-
-    let publish_result = match signed {
-        Ok(inner) if session.is_valid() => {
-            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-            service::send_signed_message(&transport, &community, &channel, &inner).await
-        }
-        Ok(_) => Err("account changed during send".to_string()),
-        Err(e) => Err(e),
-    };
-
-    match publish_result {
-        Ok(_outer) => {
-            // Swap temp id → real id and clear pending.
-            let finalized = {
-                let mut state = vector_core::state::STATE.lock().await;
-                state.finalize_pending_message(&channel_id, &pending_id, &real_id)
-            };
-            if let Some((_old, ref msg)) = finalized {
-                callback.on_sent(&channel_id, &pending_id, msg);
-                callback.on_persist(&channel_id, msg);
-            }
-            let webxdc_topic = uploaded.iter().find_map(|a| a.webxdc_topic.clone());
-            Ok(CommunityAttachmentSendResult { message_id: real_id, webxdc_topic })
-        }
-        Err(e) => {
-            let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
-            Err(e)
-        }
-    }
+    })
+    .await
 }
 
 /// Mark an optimistic Community attachment message failed (keeps the temp id; offers retry).
@@ -1852,111 +1848,97 @@ async fn sync_community_channel_inner(
     before_ms: Option<u64>,
     is_older: bool,
 ) -> Result<CommunitySyncResult, String> {
-    use vector_core::community::inbound::IncomingEvent;
+    vector_core::db::scoped(async move {
+        use vector_core::community::inbound::IncomingEvent;
 
-    let session = vector_core::state::SessionGuard::capture();
-    let my_pk = vector_core::my_public_key().ok_or("Public key not set")?;
+        let session = vector_core::state::SessionGuard::capture();
+        let my_pk = vector_core::my_public_key().ok_or("Public key not set")?;
 
-    let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
-        .ok_or("Unknown Community channel")?;
-    let id_bytes = hex_to_id32(&community_id)?;
+        let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
+            .ok_or("Unknown Community channel")?;
+        let id_bytes = hex_to_id32(&community_id)?;
 
-    // Dual-stack: a v2 channel catches up through the facade (consensus refold +
-    // chat backfill into the shared events tables). The frontend re-queries
-    // get_messages from those tables, so the page renders identically to v1.
-    if matches!(
-        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
-        Some(vector_core::community::ConcordProtocol::V2)
-    ) {
-        let limit: usize = 50;
-        let new = vector_core::VectorCore
-            .sync_community_channel(channel_id, limit)
-            .await
-            .map(|(n, _warnings)| n)
-            .unwrap_or(0);
-        if !session.is_valid() {
-            return Ok(CommunitySyncResult::default());
+        // Dual-stack: a v2 channel catches up through the facade (consensus refold +
+        // chat backfill into the shared events tables). The frontend re-queries
+        // get_messages from those tables, so the page renders identically to v1.
+        if matches!(
+            vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+            Some(vector_core::community::ConcordProtocol::V2)
+        ) {
+            let limit: usize = 50;
+            let new = vector_core::VectorCore
+                .sync_community_channel(channel_id, limit)
+                .await
+                .map(|(n, _warnings)| n)
+                .unwrap_or(0);
+            // Each backfilled message already surfaced to the live UI via `message_new`
+            // (emitted per-outcome inside the facade backfill), so the chat list preview,
+            // unread badge, and sort order update without opening the channel. A short page
+            // means we reached the channel's start.
+            let reached_start = new < limit;
+            return Ok(CommunitySyncResult { new_messages: new as u32, reached_start, oldest_ms: None });
         }
-        // Each backfilled message already surfaced to the live UI via `message_new`
-        // (emitted per-outcome inside the facade backfill), so the chat list preview,
-        // unread badge, and sort order update without opening the channel. A short page
-        // means we reached the channel's start.
-        let reached_start = new < limit;
-        return Ok(CommunitySyncResult { new_messages: new as u32, reached_start, oldest_ms: None });
-    }
 
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    // Epochs the realtime subscription is currently pinned to (it was built from the DB's last-synced
-    // epochs). If the follow below advances either, the sub must be rebuilt or live delivery stays dead at
-    // the OLD epoch's pseudonyms until the next sync (the rekey realtime gap).
-    let pre_server_epoch = community.server_root_epoch.0;
-    let pre_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
-    // The control catch-up runs on every latest-page sync UNLESS the boot's coalesced
-    // probe covered this community and found NO control/rekey edition since the
-    // cursor — then its whole chain (server-root + control fold + channel rekeys) is
-    // redundant and skipped, dropping the sync to a single message-page fetch. The
-    // probe watches the exact coordinates a change would land on (control pseudonym,
-    // next-base-rekey, next-channel-rekey), so "clean" is authoritative; a stale or
-    // absent probe falls through to the full chain (the safe default). Older-page
-    // scroll-back never folds.
-    let skip_control = community_probe_clean(&community_id);
-    if skip_control {
-        vector_core::log_debug!("[Sync] control chain SKIPPED (probe-clean) for {}", &community_id[..8.min(community_id.len())]);
-    }
-    let community = if !is_older && !skip_control {
-        // Longer than the 12s op-norm: catch-up + the whole-control-plane fold ride this one transport, and
-        // boot is REQ-heavy (relays contended + ratelimited), so a short cap returns the plane partial →
-        // convergence/authority silently fail closed. (See refresh_community_control for the rationale.)
-        let bt = LiveTransport::with_timeout(Duration::from_secs(20));
-        // Follow a base (server-root) re-founding BEFORE reading control/messages (else we'd read
-        // stale-epoch pseudonyms and fall off). An AUTHORIZED base rotation that excluded us (private
-        // ban / read-cut) is a removal — tear down locally, the catch-all for a cut member who can no
-        // longer decrypt the new control plane to read the banlist the normal way.
-        if let Ok(c) = vector_core::community::service::catch_up_server_root(&bt, &community).await {
-            if c.removed {
-                // Destructive teardown after a multi-second fetch: re-validate the
-                // session or a mid-sync account swap tears down account B's membership.
-                if !session.is_valid() {
-                    return Err("account changed during sync".to_string());
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        // Epochs the realtime subscription is currently pinned to (it was built from the DB's last-synced
+        // epochs). If the follow below advances either, the sub must be rebuilt or live delivery stays dead at
+        // the OLD epoch's pseudonyms until the next sync (the rekey realtime gap).
+        let pre_server_epoch = community.server_root_epoch.0;
+        let pre_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
+        // The control catch-up runs on every latest-page sync UNLESS the boot's coalesced
+        // probe covered this community and found NO control/rekey edition since the
+        // cursor — then its whole chain (server-root + control fold + channel rekeys) is
+        // redundant and skipped, dropping the sync to a single message-page fetch. The
+        // probe watches the exact coordinates a change would land on (control pseudonym,
+        // next-base-rekey, next-channel-rekey), so "clean" is authoritative; a stale or
+        // absent probe falls through to the full chain (the safe default). Older-page
+        // scroll-back never folds.
+        let skip_control = community_probe_clean(&community_id);
+        if skip_control {
+            vector_core::log_debug!("[Sync] control chain SKIPPED (probe-clean) for {}", &community_id[..8.min(community_id.len())]);
+        }
+        let community = if !is_older && !skip_control {
+            // Longer than the 12s op-norm: catch-up + the whole-control-plane fold ride this one transport, and
+            // boot is REQ-heavy (relays contended + ratelimited), so a short cap returns the plane partial →
+            // convergence/authority silently fail closed. (See refresh_community_control for the rationale.)
+            let bt = LiveTransport::with_timeout(Duration::from_secs(20));
+            // Follow a base (server-root) re-founding BEFORE reading control/messages (else we'd read
+            // stale-epoch pseudonyms and fall off). An AUTHORIZED base rotation that excluded us (private
+            // ban / read-cut) is a removal — tear down locally, the catch-all for a cut member who can no
+            // longer decrypt the new control plane to read the banlist the normal way.
+            if let Ok(c) = vector_core::community::service::catch_up_server_root(&bt, &community).await {
+                if c.removed {
+                    // Destructive teardown after a multi-second fetch: re-validate the
+                    self_remove_from_community(&community_id, false).await;
+                    return Ok(CommunitySyncResult { new_messages: 0, reached_start: true, oldest_ms: None });
                 }
-                self_remove_from_community(&community_id, false).await;
+            }
+            let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community);
+            // ONE REQ for the entire control plane, applied banlist-first: roles (authority graph), invite links
+            // (Public/Private mode), and metadata (name/description/icon/channel) all fold from a single fetch.
+            let _ = vector_core::community::service::fetch_and_apply_control(&bt, &community).await;
+            // Did a ban land on us? A banned member self-removes (drop keys + wipe data, like a kick but no
+            // rejoin) — caught here on sync/boot, and in realtime via the control-plane subscription.
+            if check_self_banned(&community_id).await {
                 return Ok(CommunitySyncResult { new_messages: 0, reached_start: true, oldest_ms: None });
             }
-        }
-        if !session.is_valid() {
-            return Err("account changed during sync".to_string());
-        }
-        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community);
-        // ONE REQ for the entire control plane, applied banlist-first: roles (authority graph), invite links
-        // (Public/Private mode), and metadata (name/description/icon/channel) all fold from a single fetch.
-        let _ = vector_core::community::service::fetch_and_apply_control(&bt, &community).await;
-        // Did a ban land on us? A banned member self-removes (drop keys + wipe data, like a kick but no
-        // rejoin) — caught here on sync/boot, and in realtime via the control-plane subscription.
-        // Guarded: check_self_banned tears down on a hit, and the control fold above awaited.
-        if !session.is_valid() {
-            return Err("account changed during sync".to_string());
-        }
-        if check_self_banned(&community_id).await {
-            return Ok(CommunitySyncResult { new_messages: 0, reached_start: true, oldest_ms: None });
-        }
-        // Walk THIS channel's rekey chain (all held roots + gap-fill) so we hold the current channel
-        // key before paging — unconditional, the self-healing convergence for a lagging/prior-root
-        // channel rekey (mirrors the realtime path).
-        if let Some(ch) = community.channels.iter().find(|c| c.id.to_hex() == channel_id) {
-            let _ = vector_core::community::service::catch_up_channel_rekeys(&bt, &community, &ch.id).await;
-        }
-        // Retry an outstanding read-cut re-seal (a private ban whose rotation failed transiently) so it
-        // auto-recovers on sync instead of leaving a banned member with read access. No-op if none.
-        let _ = vector_core::community::service::retry_pending_read_cut(&bt, &community).await;
-        vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community)
-    } else {
-        community
-    };
-    // Re-persist the chat's display metadata (incl. the `dissolved` seal) after the control fold, so a
-    // community that just sealed via this sync reflects it in the persisted chat row — otherwise the stale
-    // pre-seal row loads at boot and the UI looks alive. Mirrors refresh_community_control's re-persist.
-    if session.is_valid() {
+            // Walk THIS channel's rekey chain (all held roots + gap-fill) so we hold the current channel
+            // key before paging — unconditional, the self-healing convergence for a lagging/prior-root
+            // channel rekey (mirrors the realtime path).
+            if let Some(ch) = community.channels.iter().find(|c| c.id.to_hex() == channel_id) {
+                let _ = vector_core::community::service::catch_up_channel_rekeys(&bt, &community, &ch.id).await;
+            }
+            // Retry an outstanding read-cut re-seal (a private ban whose rotation failed transiently) so it
+            // auto-recovers on sync instead of leaving a banned member with read access. No-op if none.
+            let _ = vector_core::community::service::retry_pending_read_cut(&bt, &community).await;
+            vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community)
+        } else {
+            community
+        };
+        // Re-persist the chat's display metadata (incl. the `dissolved` seal) after the control fold, so a
+        // community that just sealed via this sync reflects it in the persisted chat row — otherwise the stale
+        // pre-seal row loads at boot and the UI looks alive. Mirrors refresh_community_control's re-persist.
         sync_community_chats(&community).await;
         // Tell the live UI to re-read this community's metadata (name / description / members / mode /
         // dissolved) after the control fold, so a change folded during a SYNC — e.g. a rename picked up at
@@ -1966,252 +1948,247 @@ async fn sync_community_channel_inner(
         if !is_older {
             vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": community.id.to_hex() }));
         }
-    }
-    // Close the rekey realtime gap: if the follow advanced the server-root OR this channel's epoch, the
-    // live subscription is still pinned to the OLD pseudonyms — rebuild it so realtime delivery resumes at
-    // the NEW epoch immediately, instead of only on the next sync (the documented post-MVP closure).
-    if !is_older && session.is_valid() {
-        let post_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
-        if community.server_root_epoch.0 != pre_server_epoch || post_channel_epoch != pre_channel_epoch {
-            crate::services::subscription_handler::refresh_community_subscription().await;
+        // Close the rekey realtime gap: if the follow advanced the server-root OR this channel's epoch, the
+        // live subscription is still pinned to the OLD pseudonyms — rebuild it so realtime delivery resumes at
+        // the NEW epoch immediately, instead of only on the next sync (the documented post-MVP closure).
+        if !is_older && session.is_valid() {
+            let post_channel_epoch = community.channels.iter().find(|c| c.id.to_hex() == channel_id).map(|c| c.epoch.0);
+            if community.server_root_epoch.0 != pre_server_epoch || post_channel_epoch != pre_channel_epoch {
+                crate::services::subscription_handler::refresh_community_subscription().await;
+            }
+            // refresh the cross-device list's `current` snapshot (root + channel keys + name) so another
+            // device jumps straight to the latest epoch (debounced; no-op if unchanged — covers rekey + rename).
+            vector_core::community::list::refresh_membership_current(&community);
         }
-        // refresh the cross-device list's `current` snapshot (root + channel keys + name) so another
-        // device jumps straight to the latest epoch (debounced; no-op if unchanged — covers rekey + rename).
-        vector_core::community::list::refresh_membership_current(&community);
-    }
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .ok_or("Channel not found in Community")?
-        .clone();
+        let channel = community
+            .channels
+            .iter()
+            .find(|c| c.id.to_hex() == channel_id)
+            .ok_or("Channel not found in Community")?
+            .clone();
 
-    // Older-page cursor on the OUTER (send-time) clock — the clock the relay actually filters.
-    // Prefer the real oldest wire-time we've fetched for this channel (immune to inner-ms
-    // manipulation); fall back to the frontend's inner-`at` hint only before we've fetched any
-    // page this session. `until` is inclusive (re-admits the boundary; dedup drops it). Latest
-    // page (None) fetches the newest events.
-    let until_secs = if is_older {
-        let tracked = vector_core::community::cache::oldest_cursor(channel_id);
-        tracked.or_else(|| before_ms.map(|m| m / 1000))
-    } else {
-        None
-    };
+        // Older-page cursor on the OUTER (send-time) clock — the clock the relay actually filters.
+        // Prefer the real oldest wire-time we've fetched for this channel (immune to inner-ms
+        // manipulation); fall back to the frontend's inner-`at` hint only before we've fetched any
+        // page this session. `until` is inclusive (re-admits the boundary; dedup drops it). Latest
+        // page (None) fetches the newest events.
+        let until_secs = if is_older {
+            let tracked = vector_core::community::cache::oldest_cursor(channel_id);
+            tracked.or_else(|| before_ms.map(|m| m / 1000))
+        } else {
+            None
+        };
 
-    // Latest-page `since`: skip re-pulling events we already hold by floor-ing the fetch at the
-    // newest wire time seen this session. ONLY the latest page (an older page must page strictly
-    // back with no lower bound). `None` before the first latest fetch this session → full newest
-    // page. Epoch spanning is untouched (it's in the pseudonym OR-set, not the cursor).
-    //
-    // The floor is pulled back by SINCE_LOOKBACK_SECS so an event whose OUTER time lands slightly
-    // BELOW the cursor — author clock-skew or late relay propagation — is still swept in (dedup
-    // drops the overlap). Reconnect-gap events aren't at risk: they're NEWER than the cursor, so
-    // they're above the floor regardless.
-    const SINCE_LOOKBACK_SECS: u64 = 120;
-    let since_secs = if is_older {
-        None
-    } else {
-        vector_core::community::cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS))
-    };
+        // Latest-page `since`: skip re-pulling events we already hold by floor-ing the fetch at the
+        // newest wire time seen this session. ONLY the latest page (an older page must page strictly
+        // back with no lower bound). `None` before the first latest fetch this session → full newest
+        // page. Epoch spanning is untouched (it's in the pseudonym OR-set, not the cursor).
+        //
+        // The floor is pulled back by SINCE_LOOKBACK_SECS so an event whose OUTER time lands slightly
+        // BELOW the cursor — author clock-skew or late relay propagation — is still swept in (dedup
+        // drops the overlap). Reconnect-gap events aren't at risk: they're NEWER than the cursor, so
+        // they're above the floor regardless.
+        const SINCE_LOOKBACK_SECS: u64 = 120;
+        let since_secs = if is_older {
+            None
+        } else {
+            vector_core::community::cache::newest_cursor(channel_id).map(|s| s.saturating_sub(SINCE_LOOKBACK_SECS))
+        };
 
-    // Adopt an in-flight invite preload for the PRIMARY channel's latest page: rather than fire a
-    // second fetch, wait on the warm-up fetch already running (it IS the page) — so the join speedup
-    // holds even if the user tapped Join before the warm-up landed. Falls through to a normal fetch
-    // on miss / timeout / non-primary channel / older page (only the primary channel was warmed, and
-    // only the latest page is preload-shaped: newest, no `until`).
-    let is_primary = community.channels.first().map(|c| c.id) == Some(channel.id);
-    let adopted = if !is_older && is_primary {
-        vector_core::community::cache::take_or_await_preload(&community_id).await
-    } else {
-        None
-    };
-    // Fetch one page over the network — NO STATE lock held across the await.
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let events = match adopted {
-        Some(page) => page,
-        None => vector_core::community::send::fetch_channel_page(
-            &transport, &community, &channel, until_secs, since_secs, COMMUNITY_PAGE_FETCH_LIMIT,
-        )
-        .await?,
-    };
-    if !session.is_valid() {
-        return Err("account changed during sync".to_string());
-    }
+        // Adopt an in-flight invite preload for the PRIMARY channel's latest page: rather than fire a
+        // second fetch, wait on the warm-up fetch already running (it IS the page) — so the join speedup
+        // holds even if the user tapped Join before the warm-up landed. Falls through to a normal fetch
+        // on miss / timeout / non-primary channel / older page (only the primary channel was warmed, and
+        // only the latest page is preload-shaped: newest, no `until`).
+        let is_primary = community.channels.first().map(|c| c.id) == Some(channel.id);
+        let adopted = if !is_older && is_primary {
+            vector_core::community::cache::take_or_await_preload(&community_id).await
+        } else {
+            None
+        };
+        // Fetch one page over the network — NO STATE lock held across the await.
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let events = match adopted {
+            Some(page) => page,
+            None => vector_core::community::send::fetch_channel_page(
+                &transport, &community, &channel, until_secs, since_secs, COMMUNITY_PAGE_FETCH_LIMIT,
+            )
+            .await?,
+        };
 
-    // Process the batch into STATE (sync), collecting outcomes to persist (+ emit).
-    let mut outcomes = {
-        let mut state = vector_core::state::STATE.lock().await;
-        vector_core::community::inbound::process_channel_batch(&mut state, &events, &channel, &my_pk)
-    };
+        // Process the batch into STATE (sync), collecting outcomes to persist (+ emit).
+        let mut outcomes = {
+            let mut state = vector_core::state::STATE.lock().await;
+            vector_core::community::inbound::process_channel_batch(&mut state, &events, &channel, &my_pk)
+        };
 
-    // Resolve each reply's quote BEFORE emitting: the frontend renders the emitted payload,
-    // and a reply whose parent lies outside the rendered window has no other source for the
-    // quote (a parent inside the window is resolved from memory). One query for the page.
-    {
-        let quoted: Vec<&mut vector_core::types::Message> = outcomes
-            .iter_mut()
-            .filter_map(|o| match o {
-                IncomingEvent::NewMessage(m)
-                | IncomingEvent::Updated { message: m, .. }
-                | IncomingEvent::ReactionRemoved { message: m, .. } => Some(m),
-                _ => None,
-            })
-            .collect();
-        let _ = vector_core::db::events::populate_reply_contexts(quoted).await;
-    }
-
-    let mut new_messages = 0u32;
-    // Message saves COLLECT into batched transactions (one tx per page in the common case);
-    // deletes are flush barriers — a batched save committing after a delete it preceded on
-    // the wire would resurrect the deleted row.
-    let mut pending: Vec<&vector_core::types::Message> = Vec::new();
-    for outcome in &outcomes {
-        if !session.is_valid() {
-            pending.clear();
-            break;
+        // Resolve each reply's quote BEFORE emitting: the frontend renders the emitted payload,
+        // and a reply whose parent lies outside the rendered window has no other source for the
+        // quote (a parent inside the window is resolved from memory). One query for the page.
+        {
+            let quoted: Vec<&mut vector_core::types::Message> = outcomes
+                .iter_mut()
+                .filter_map(|o| match o {
+                    IncomingEvent::NewMessage(m)
+                    | IncomingEvent::Updated { message: m, .. }
+                    | IncomingEvent::ReactionRemoved { message: m, .. } => Some(m),
+                    _ => None,
+                })
+                .collect();
+            let _ = vector_core::db::events::populate_reply_contexts(quoted).await;
         }
-        match outcome {
-            IncomingEvent::NewMessage(msg) => {
-                pending.push(msg);
-                // Latest page → emit (append + preview). Older page → silent: the frontend
-                // prepends these from its DB re-query (emitting message_new would append them
-                // at the BOTTOM, which is wrong for back-paged history).
-                if !is_older {
+
+        let mut new_messages = 0u32;
+        // Message saves COLLECT into batched transactions (one tx per page in the common case);
+        // deletes are flush barriers — a batched save committing after a delete it preceded on
+        // the wire would resurrect the deleted row.
+        let mut pending: Vec<&vector_core::types::Message> = Vec::new();
+        for outcome in &outcomes {
+            if !session.is_valid() {
+                pending.clear();
+                break;
+            }
+            match outcome {
+                IncomingEvent::NewMessage(msg) => {
+                    pending.push(msg);
+                    // Latest page → emit (append + preview). Older page → silent: the frontend
+                    // prepends these from its DB re-query (emitting message_new would append them
+                    // at the BOTTOM, which is wrong for back-paged history).
+                    if !is_older {
+                        vector_core::emit_event(
+                            "message_new",
+                            &serde_json::json!({ "message": msg, "chat_id": channel_id }),
+                        );
+                    }
+                    new_messages += 1;
+                }
+                IncomingEvent::Updated { target_id, message, edit_event } => {
+                    match edit_event.as_deref() {
+                        Some(_) => persist_community_update(channel_id, message, edit_event.as_deref()).await,
+                        None => pending.push(message),
+                    }
+                    // Reactions/edits apply surgically by target id (position-independent), so
+                    // emit on BOTH latest and older pages — an older page can carry a reaction to
+                    // a still-visible message, which must update live.
                     vector_core::emit_event(
-                        "message_new",
-                        &serde_json::json!({ "message": msg, "chat_id": channel_id }),
+                        "message_update",
+                        &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": channel_id }),
                     );
                 }
-                new_messages += 1;
-            }
-            IncomingEvent::Updated { target_id, message, edit_event } => {
-                match edit_event.as_deref() {
-                    Some(_) => persist_community_update(channel_id, message, edit_event.as_deref()).await,
-                    None => pending.push(message),
+                IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
+                    // Reaction revoked by its author — drop the kind-7 row (save is additive) and
+                    // re-emit the parent so chips refresh live. Barrier: an unflushed batched save
+                    // carries this reaction inside its parent and would re-insert the row.
+                    vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                    let _ = crate::db::delete_event(reaction_id).await;
+                    vector_core::emit_event(
+                        "message_update",
+                        &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": channel_id }),
+                    );
                 }
-                // Reactions/edits apply surgically by target id (position-independent), so
-                // emit on BOTH latest and older pages — an older page can carry a reaction to
-                // a still-visible message, which must update live.
-                vector_core::emit_event(
-                    "message_update",
-                    &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": channel_id }),
-                );
-            }
-            IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
-                // Reaction revoked by its author — drop the kind-7 row (save is additive) and
-                // re-emit the parent so chips refresh live. Barrier: an unflushed batched save
-                // carries this reaction inside its parent and would re-insert the row.
-                vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-                let _ = crate::db::delete_event(reaction_id).await;
-                vector_core::emit_event(
-                    "message_update",
-                    &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": channel_id }),
-                );
-            }
-            IncomingEvent::Removed { target_id } => {
-                // Cooperative tombstone applies surgically by target id (position-independent),
-                // so honor it on both latest and older pages — drop locally + fade the row.
-                vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-                let _ = crate::db::delete_event(target_id).await;
-                vector_core::emit_event(
-                    "message_removed",
-                    &serde_json::json!({ "id": target_id, "chat_id": channel_id, "reason": "deleted" }),
-                );
-            }
-            IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
-                apply_community_presence(channel_id, npub, *joined, event_id, *created_at, invited_by.as_deref(), invited_label.as_deref()).await;
-            }
-            IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
-                // Full DM-parity handling: persist (rejoin discovery), feed the live gossip
-                // channel if this Mini App is open, else cache + surface the lobby status.
-                match node_addr {
-                    Some(addr) => {
-                        crate::services::event_handler::handle_webxdc_peer_advertisement(
-                            event_id, topic_id, addr, npub, *created_at, channel_id,
-                        ).await;
-                    }
-                    None => {
-                        crate::services::event_handler::handle_webxdc_peer_left(
-                            event_id, topic_id, npub, *created_at, channel_id,
-                        ).await;
+                IncomingEvent::Removed { target_id } => {
+                    // Cooperative tombstone applies surgically by target id (position-independent),
+                    // so honor it on both latest and older pages — drop locally + fade the row.
+                    vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                    let _ = crate::db::delete_event(target_id).await;
+                    vector_core::emit_event(
+                        "message_removed",
+                        &serde_json::json!({ "id": target_id, "chat_id": channel_id, "reason": "deleted" }),
+                    );
+                }
+                IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
+                    apply_community_presence(channel_id, npub, *joined, event_id, *created_at, invited_by.as_deref(), invited_label.as_deref()).await;
+                }
+                IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at } => {
+                    // Full DM-parity handling: persist (rejoin discovery), feed the live gossip
+                    // channel if this Mini App is open, else cache + surface the lobby status.
+                    match node_addr {
+                        Some(addr) => {
+                            crate::services::event_handler::handle_webxdc_peer_advertisement(
+                                event_id, topic_id, addr, npub, *created_at, channel_id,
+                            ).await;
+                        }
+                        None => {
+                            crate::services::event_handler::handle_webxdc_peer_left(
+                                event_id, topic_id, npub, *created_at, channel_id,
+                            ).await;
+                        }
                     }
                 }
-            }
-            IncomingEvent::Kicked { community_id } | IncomingEvent::SelfLeft { community_id } => {
-                // self-removal (kick of us, or a leave another device authored) — received, not
-                // locally originated, so tombstone local-only (boot's explicit publish propagates). Stop the
-                // batch — the community is being torn down, so later same-batch writes (message saves,
-                // presence) would orphan rows under a now-deleted chat. Teardown retains the held epoch keys.
-                vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
-                self_remove_from_community(community_id, false).await;
-                return Ok(CommunitySyncResult { new_messages, reached_start: false, oldest_ms: None });
-            }
-            IncomingEvent::Typing { .. } => {
-                // Realtime-only ephemeral signal; never fetched in a sync/straggler batch. No-op.
+                IncomingEvent::Kicked { community_id } | IncomingEvent::SelfLeft { community_id } => {
+                    // self-removal (kick of us, or a leave another device authored) — received, not
+                    // locally originated, so tombstone local-only (boot's explicit publish propagates). Stop the
+                    // batch — the community is being torn down, so later same-batch writes (message saves,
+                    // presence) would orphan rows under a now-deleted chat. Teardown retains the held epoch keys.
+                    vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                    self_remove_from_community(community_id, false).await;
+                    return Ok(CommunitySyncResult { new_messages, reached_start: false, oldest_ms: None });
+                }
+                IncomingEvent::Typing { .. } => {
+                    // Realtime-only ephemeral signal; never fetched in a sync/straggler batch. No-op.
+                }
             }
         }
-    }
-    vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+        vector_core::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
 
-    // Cursors and the history-start verdict consider ONLY events that authenticate against the
-    // channel's keys: the outer created_at is unauthenticated, and the cleartext pseudonym is in
-    // our own REQ — a relay (or any member) could otherwise stamp one junk event far-future/past
-    // and silently wedge this channel's fetch floor/ceiling for the whole session. Computed AFTER
-    // ingest so just-processed events are dedup-ledger hits (no second decryption).
-    if !session.is_valid() {
-        return Err("account changed during sync".to_string());
-    }
-    let verified_times: Vec<u64> = events
-        .iter()
-        .filter(|e| vector_core::community::inbound::event_authenticates(e, &channel))
-        .map(|e| e.created_at.as_secs())
-        .collect();
+        // Cursors and the history-start verdict consider ONLY events that authenticate against the
+        // channel's keys: the outer created_at is unauthenticated, and the cleartext pseudonym is in
+        // our own REQ — a relay (or any member) could otherwise stamp one junk event far-future/past
+        // and silently wedge this channel's fetch floor/ceiling for the whole session. Computed AFTER
+        // ingest so just-processed events are dedup-ledger hits (no second decryption).
+        let verified_times: Vec<u64> = events
+            .iter()
+            .filter(|e| vector_core::community::inbound::event_authenticates(e, &channel))
+            .map(|e| e.created_at.as_secs())
+            .collect();
 
-    // Advance the outer-time cursor to the oldest wire created_at this page returned (so the
-    // NEXT older page steps strictly further back, on the relay's own clock).
-    if let Some(oldest) = verified_times.iter().copied().min() {
-        vector_core::community::cache::advance_oldest_cursor(channel_id, oldest);
-    }
-    // Advance the latest-page `since` floor to the newest wire time this page returned, so the next
-    // latest sync only pulls what's genuinely new. Latest page only — an older page must not raise
-    // the floor (it returns OLD events, which would wrongly cap future top-fetches).
-    if !is_older {
-        if let Some(newest) = verified_times.iter().copied().max() {
-            vector_core::community::cache::advance_newest_cursor(channel_id, newest);
+        // Advance the outer-time cursor to the oldest wire created_at this page returned (so the
+        // NEXT older page steps strictly further back, on the relay's own clock).
+        if let Some(oldest) = verified_times.iter().copied().min() {
+            vector_core::community::cache::advance_oldest_cursor(channel_id, oldest);
         }
-    }
+        // Advance the latest-page `since` floor to the newest wire time this page returned, so the next
+        // latest sync only pulls what's genuinely new. Latest page only — an older page must not raise
+        // the floor (it returns OLD events, which would wrongly cap future top-fetches).
+        if !is_older {
+            if let Some(newest) = verified_times.iter().copied().max() {
+                vector_core::community::cache::advance_newest_cursor(channel_id, newest);
+            }
+        }
 
-    // History-start (older pages): the page came back NON-EMPTY but with nothing strictly
-    // older than the cursor → we've hit the channel's beginning; mark it so future older pages
-    // stay DB-only, and report it (the frontend trusts THIS, not a row-count delta). An EMPTY
-    // page is treated as a transient relay miss (rate-limit / unreachable), NOT history-start —
-    // so a flaky relay can't permanently wedge scroll-back. A FULL page is never history-start
-    // either: ≥limit events sharing the boundary second (a burst "wall") just means the next
-    // page must step past them, not that history ended.
-    let reached_start = if is_older && !verified_times.is_empty() && events.len() < COMMUNITY_PAGE_FETCH_LIMIT {
-        // A NULL cursor (e.g. right after a floor reset) cannot conclude history-start — only an
-        // explicit "nothing strictly older than the cursor" can. Default to a non-zero count so a
-        // missing cursor never fail-marks the start (which would wedge future scroll-back DB-only).
-        let older_than_cursor = until_secs.map_or(usize::MAX, |u| {
-            verified_times.iter().filter(|t| **t < u).count()
-        });
-        if older_than_cursor == 0 {
-            vector_core::community::cache::mark_history_start(channel_id);
-            true
+        // History-start (older pages): the page came back NON-EMPTY but with nothing strictly
+        // older than the cursor → we've hit the channel's beginning; mark it so future older pages
+        // stay DB-only, and report it (the frontend trusts THIS, not a row-count delta). An EMPTY
+        // page is treated as a transient relay miss (rate-limit / unreachable), NOT history-start —
+        // so a flaky relay can't permanently wedge scroll-back. A FULL page is never history-start
+        // either: ≥limit events sharing the boundary second (a burst "wall") just means the next
+        // page must step past them, not that history ended.
+        let reached_start = if is_older && !verified_times.is_empty() && events.len() < COMMUNITY_PAGE_FETCH_LIMIT {
+            // A NULL cursor (e.g. right after a floor reset) cannot conclude history-start — only an
+            // explicit "nothing strictly older than the cursor" can. Default to a non-zero count so a
+            // missing cursor never fail-marks the start (which would wedge future scroll-back DB-only).
+            let older_than_cursor = until_secs.map_or(usize::MAX, |u| {
+                verified_times.iter().filter(|t| **t < u).count()
+            });
+            if older_than_cursor == 0 {
+                vector_core::community::cache::mark_history_start(channel_id);
+                true
+            } else {
+                false
+            }
         } else {
             false
-        }
-    } else {
-        false
-    };
+        };
 
-    // Relay-walk cursor: oldest OUTER wire `created_at` this page returned (NIP-01 seconds, ×1000 only
-    // to fit the ms `before_ms` param). MUST stay on the OUTER clock, never the inner authored `at`:
-    // the relay filters `until` on outer, AND the inner `at` is hostile-controllable (a member could
-    // backdate to slip under the cursor and evade back-paging). The seconds resolution is the relay's,
-    // not a precision bug — the inner `at` (ms) is for local sort + the reachedBoundary termination.
-    let oldest_ms = verified_times.iter().copied().min().map(|s| s.saturating_mul(1000));
-    Ok(CommunitySyncResult { new_messages, reached_start, oldest_ms })
+        // Relay-walk cursor: oldest OUTER wire `created_at` this page returned (NIP-01 seconds, ×1000 only
+        // to fit the ms `before_ms` param). MUST stay on the OUTER clock, never the inner authored `at`:
+        // the relay filters `until` on outer, AND the inner `at` is hostile-controllable (a member could
+        // backdate to slip under the cursor and evade back-paging). The seconds resolution is the relay's,
+        // not a precision bug — the inner `at` (ms) is for local sort + the reachedBoundary termination.
+        let oldest_ms = verified_times.iter().copied().min().map(|s| s.saturating_mul(1000));
+        Ok(CommunitySyncResult { new_messages, reached_start, oldest_ms })
+    })
+    .await
 }
 
 /// Read-only v2 diagnostic snapshot: epochs, the channel-rekey addressing fan,
@@ -2484,64 +2461,65 @@ pub fn trigger_community_reconnect_resync() {
 /// communities page their latest in `rehydrate_listed_communities`; the boot sweep that runs after re-pages
 /// them too, but per-channel anti-stampede coalesces the overlap.
 pub(crate) async fn reconcile_community_list_boot() {
-    let session = vector_core::state::SessionGuard::capture();
-    let client = match vector_core::state::nostr_client() {
-        Some(c) => c,
-        None => return,
-    };
+    vector_core::db::scoped(async move {
+        let session = vector_core::state::SessionGuard::capture();
+        let client = match vector_core::state::nostr_client() {
+            Some(c) => c,
+            None => return,
+        };
 
-    // Boot is a READ/SYNC, not a write: fetch the relay copy and fold it into the local mirror so we learn
-    // other devices' joins. Publishing here every boot would be backwards — a fetch-then-publish race could
-    // clobber another device's just-published join by timestamp.
-    let my_pk = match vector_core::my_public_key() {
-        Some(pk) => pk,
-        None => return,
-    };
-    // One REQ for BOTH self-lists (Community + Invite) — same kind-30078, different `d`-tags.
-    let (relay, relay_invites) =
-        vector_core::community::invite_list::fetch_self_lists(&client, my_pk).await;
+        // Boot is a READ/SYNC, not a write: fetch the relay copy and fold it into the local mirror so we learn
+        // other devices' joins. Publishing here every boot would be backwards — a fetch-then-publish race could
+        // clobber another device's just-published join by timestamp.
+        let my_pk = match vector_core::my_public_key() {
+            Some(pk) => pk,
+            None => return,
+        };
+        // One REQ for BOTH self-lists (Community + Invite) — same kind-30078, different `d`-tags.
+        let (relay, relay_invites) =
+            vector_core::community::invite_list::fetch_self_lists(&client, my_pk).await;
 
-    // Invite List half: merge the relay copy, seed any pre-feature local tokens, hydrate the read model
-    // (so a link minted on another device shows up here), and publish only if genuinely ahead.
-    {
-        let merged_invites =
-            vector_core::community::invite_list::load_local_invite_list().merge(&relay_invites);
-        let _ = vector_core::community::invite_list::save_local_invite_list(&merged_invites);
-        vector_core::community::invite_list::backfill_from_db();
-        let invites = vector_core::community::invite_list::load_local_invite_list();
-        vector_core::community::invite_list::hydrate_read_model(&invites);
-        if invites.is_ahead_of(&relay_invites) {
-            vector_core::community::invite_list::republish_invite_list_debounced();
+        // Invite List half: merge the relay copy, seed any pre-feature local tokens, hydrate the read model
+        // (so a link minted on another device shows up here), and publish only if genuinely ahead.
+        {
+            let merged_invites =
+                vector_core::community::invite_list::load_local_invite_list().merge(&relay_invites);
+            let _ = vector_core::community::invite_list::save_local_invite_list(&merged_invites);
+            vector_core::community::invite_list::backfill_from_db();
+            let invites = vector_core::community::invite_list::load_local_invite_list();
+            vector_core::community::invite_list::hydrate_read_model(&invites);
+            if invites.is_ahead_of(&relay_invites) {
+                vector_core::community::invite_list::republish_invite_list_debounced();
+            }
         }
-    }
 
-    let merged = vector_core::community::list::load_local_list().merge(&relay);
-    let _ = vector_core::community::list::save_local_list(&merged);
-    // A tombstone we folded from another device (a leave/kick/ban there) may name a community whose DB row
-    // still lingers here — tear it down so the leave converges AND `backfill_from_db` below doesn't re-add it
-    // as a live row. Received removal → local-only tombstone (no republish; boot's own publish carries it).
-    for t in &merged.tombstones {
-        if tombstone_still_applies(&t.community_id, t.removed_at) {
-            self_remove_from_community_at(&t.community_id, false, Some(t.removed_at)).await;
+        let merged = vector_core::community::list::load_local_list().merge(&relay);
+        let _ = vector_core::community::list::save_local_list(&merged);
+        // A tombstone we folded from another device (a leave/kick/ban there) may name a community whose DB row
+        // still lingers here — tear it down so the leave converges AND `backfill_from_db` below doesn't re-add it
+        // as a live row. Received removal → local-only tombstone (no republish; boot's own publish carries it).
+        for t in &merged.tombstones {
+            if tombstone_still_applies(&t.community_id, t.removed_at) {
+                self_remove_from_community_at(&t.community_id, false, Some(t.removed_at)).await;
+            }
         }
-    }
-    // Seed any community we hold in the DB but that predates the list feature (or was joined on a device that
-    // did). Combined with the merge above, the local mirror now reflects everything we actually belong to.
-    vector_core::community::list::backfill_from_db();
-    let list = vector_core::community::list::load_local_list();
-    // Write ONLY if we're genuinely ahead of the relay (backfilled memberships, or an edit that never
-    // propagated) — otherwise boot stays read-only. The debounced republish is the single write path; the
-    // ADD/REMOVE/refresh hooks drive it on real edits.
-    if list.is_ahead_of(&relay) {
-        vector_core::community::list::republish_community_list_debounced();
-    }
-    // page_messages = true: the boot sweep runs CONCURRENTLY with this reconcile and flattens its channel
-    // list at its own start — a community rehydrated after that flatten would be paged by NEITHER path and
-    // render empty until the next sync. The per-channel anti-stampede coalesces any overlap with the sweep.
-    rehydrate_listed_communities(&list, &session, true).await;
-    if session.is_valid() {
+        // Seed any community we hold in the DB but that predates the list feature (or was joined on a device that
+        // did). Combined with the merge above, the local mirror now reflects everything we actually belong to.
+        vector_core::community::list::backfill_from_db();
+        let list = vector_core::community::list::load_local_list();
+        // Write ONLY if we're genuinely ahead of the relay (backfilled memberships, or an edit that never
+        // propagated) — otherwise boot stays read-only. The debounced republish is the single write path; the
+        // ADD/REMOVE/refresh hooks drive it on real edits.
+        if list.is_ahead_of(&relay) {
+            vector_core::community::list::republish_community_list_debounced();
+        }
+        // page_messages = true: the boot sweep runs CONCURRENTLY with this reconcile and flattens its channel
+        // list at its own start — a community rehydrated after that flatten would be paged by NEITHER path and
+        // render empty until the next sync. The per-channel anti-stampede coalesces any overlap with the sweep.
+        rehydrate_listed_communities(&list, &session, true).await;
         purge_stale_pending_invites(&list.tombstones);
-    }
+    })
+    .await
 }
 
 /// Drop parked invites the synced membership list proves STALE: any invite whose community we
@@ -2586,33 +2564,34 @@ fn purge_stale_pending_invites(tombstones: &[vector_core::community::list::Commu
 /// local mirror (NO republish — avoids an echo loop) and rehydrate any newly-present community, so a join
 /// on another device appears here WITHOUT a reboot. A removal arriving this way tears the community down.
 pub(crate) async fn ingest_community_list_update(event: nostr_sdk::prelude::Event) {
-    let session = vector_core::state::SessionGuard::capture();
-    let client = match vector_core::state::nostr_client() {
-        Some(c) => c,
-        None => return,
-    };
-    let Some(my_pk) = vector_core::my_public_key() else { return };
-    let merged = match vector_core::community::list::ingest_remote_list_event(&client, &my_pk, &event).await {
-        Ok(m) => m,
-        Err(e) => {
-            vector_core::log_warn!("[CommunityList] ingest remote update failed: {}", e);
-            return;
+    vector_core::db::scoped(async move {
+        let session = vector_core::state::SessionGuard::capture();
+        let client = match vector_core::state::nostr_client() {
+            Some(c) => c,
+            None => return,
+        };
+        let Some(my_pk) = vector_core::my_public_key() else { return };
+        let merged = match vector_core::community::list::ingest_remote_list_event(&client, &my_pk, &event).await {
+            Ok(m) => m,
+            Err(e) => {
+                vector_core::log_warn!("[CommunityList] ingest remote update failed: {}", e);
+                return;
+            }
+        };
+        // A removal that arrived in this update buries a community we still hold locally — tear it down so all
+        // devices converge (the merged list already dropped its entry; honor any fresh tombstone here).
+        for t in &merged.tombstones {
+            // Receive path — tombstone local-only (we got here BY receiving the removal).
+            if tombstone_still_applies(&t.community_id, t.removed_at) {
+                self_remove_from_community_at(&t.community_id, false, Some(t.removed_at)).await;
+            }
         }
-    };
-    // A removal that arrived in this update buries a community we still hold locally — tear it down so all
-    // devices converge (the merged list already dropped its entry; honor any fresh tombstone here).
-    for t in &merged.tombstones {
-        // Receive path — tombstone local-only (we got here BY receiving the removal).
-        if tombstone_still_applies(&t.community_id, t.removed_at) {
-            self_remove_from_community_at(&t.community_id, false, Some(t.removed_at)).await;
-        }
-    }
-    // page_messages = true: the live ingest path has NO boot sweep after it, so we must page the latest here
-    // for a community that just appeared, or it would render empty until the user opens it.
-    rehydrate_listed_communities(&merged, &session, true).await;
-    if session.is_valid() {
+        // page_messages = true: the live ingest path has NO boot sweep after it, so we must page the latest here
+        // for a community that just appeared, or it would render empty until the user opens it.
+        rehydrate_listed_communities(&merged, &session, true).await;
         purge_stale_pending_invites(&merged.tombstones);
-    }
+    })
+    .await
 }
 
 /// Route a live Invite List update from another device: decrypt, merge into the local mirror, and hydrate
@@ -2656,87 +2635,85 @@ async fn rehydrate_listed_communities(
     session: &vector_core::state::SessionGuard,
     page_messages: bool,
 ) -> bool {
-    let mut rehydrated_any = false;
-    let transport = LiveTransport::with_timeout(Duration::from_secs(20));
-    for entry in &list.entries {
-        if !session.is_valid() {
-            return rehydrated_any;
-        }
-        match vector_core::community::list::rehydrate_community_from_seed(&transport, entry, session.clone()).await {
-            Ok(vector_core::community::list::RehydrateOutcome::Rehydrated(community)) => {
-                // Surface its channel chat(s) so they load like any DM, then page the latest so it isn't empty.
-                sync_community_chats(&community).await;
-                // Push the full metadata to the live UI: a seamlessly-rehydrated community otherwise reaches
-                // the frontend only via `message_new` (a bare "Group <id>" chat with no name/owner/members).
-                // The frontend runs this summary through its join-path render so name/crown/members appear
-                // without a restart.
-                if session.is_valid() {
+    vector_core::db::scoped(async move {
+        let mut rehydrated_any = false;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+        for entry in &list.entries {
+            match vector_core::community::list::rehydrate_community_from_seed(&transport, entry, session.clone()).await {
+                Ok(vector_core::community::list::RehydrateOutcome::Rehydrated(community)) => {
+                    // Surface its channel chat(s) so they load like any DM, then page the latest so it isn't empty.
+                    sync_community_chats(&community).await;
+                    // Push the full metadata to the live UI: a seamlessly-rehydrated community otherwise reaches
+                    // the frontend only via `message_new` (a bare "Group <id>" chat with no name/owner/members).
+                    // The frontend runs this summary through its join-path render so name/crown/members appear
+                    // without a restart.
                     vector_core::emit_event(
                         "community_surfaced",
                         &serde_json::to_value(summarize(&community)).unwrap_or(serde_json::Value::Null),
                     );
-                }
-                if page_messages {
-                    for ch in &community.channels {
-                        let _ = sync_community_channel(ch.id.to_hex(), None, None).await;
-                    }
-                }
-                // Quietly archive PRIOR epochs' keys in the background so older history loads on scroll-back —
-                // the instant latest view above never waits for it. No-op for a never-re-founded community.
-                let entry_for_backfill = entry.clone();
-                let session_for_backfill = *session;
-                let backfill_channels: Vec<String> = community.channels.iter().map(|c| c.id.to_hex()).collect();
-                let backfill_cid = community.id.to_hex();
-                vector_core::db::spawn_bound(async move {
-                    let bt = LiveTransport::with_timeout(Duration::from_secs(20));
-                    match vector_core::community::list::backfill_history_from_seed(
-                        &bt, &entry_for_backfill,
-                    ).await {
-                        Ok(true) if session_for_backfill.is_valid() => {
-                            // Prior-epoch keys are now archived. Clear the per-channel scroll floors (a
-                            // scroll-back that raced the backfill may have falsely hit "history start"), then
-                            // re-page each channel's latest with the now-complete keyset: the multi-epoch fetch
-                            // spans all epochs, so a small community shows its whole history immediately and a
-                            // busy one still loads older on scroll. Nudge the UI last.
-                            for cid in &backfill_channels {
-                                vector_core::community::cache::clear_channel_floors(cid);
-                            }
-                            for cid in &backfill_channels {
-                                let _ = sync_community_channel(cid.clone(), None, None).await;
-                            }
-                            vector_core::emit_event(
-                                "community_refreshed",
-                                &serde_json::json!({ "community_id": backfill_cid }),
-                            );
+                    if page_messages {
+                        for ch in &community.channels {
+                            let _ = sync_community_channel(ch.id.to_hex(), None, None).await;
                         }
-                        Ok(_) => {}
-                        Err(e) => vector_core::log_warn!(
-                            "[CommunityList] history backfill {} failed: {}", backfill_cid, e,
-                        ),
                     }
-                });
-                rehydrated_any = true;
-            }
-            Ok(vector_core::community::list::RehydrateOutcome::AlreadyHeld(_)) => {}
-            Ok(vector_core::community::list::RehydrateOutcome::Removed) => {
-                // Banned since the entry was written. Full teardown (DB + STATE chats + routes) + tombstone
-                // local-only — boot's explicit publish propagates it; republishing here would re-echo.
-                let channel_ids: Vec<String> = hex_to_id32(&entry.community_id)
-                    .ok()
-                    .and_then(|b| vector_core::db::community::load_community(&CommunityId(b)).ok().flatten())
-                    .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
-                    .unwrap_or_default();
-                teardown_community_local(&entry.community_id, &channel_ids, false).await;
-            }
-            Err(e) => {
-                vector_core::log_warn!("[CommunityList] rehydrate {} failed: {}", entry.community_id, e);
+                    // Quietly archive PRIOR epochs' keys in the background so older history loads on scroll-back —
+                    // the instant latest view above never waits for it. No-op for a never-re-founded community.
+                    let entry_for_backfill = entry.clone();
+                    let session_for_backfill = *session;
+                    let backfill_channels: Vec<String> = community.channels.iter().map(|c| c.id.to_hex()).collect();
+                    let backfill_cid = community.id.to_hex();
+                    vector_core::db::spawn_bound(async move {
+                        let bt = LiveTransport::with_timeout(Duration::from_secs(20));
+                        match vector_core::community::list::backfill_history_from_seed(
+                            &bt, &entry_for_backfill,
+                        ).await {
+                            Ok(true) if session_for_backfill.is_valid() => {
+                                // Prior-epoch keys are now archived. Clear the per-channel scroll floors (a
+                                // scroll-back that raced the backfill may have falsely hit "history start"), then
+                                // re-page each channel's latest with the now-complete keyset: the multi-epoch fetch
+                                // spans all epochs, so a small community shows its whole history immediately and a
+                                // busy one still loads older on scroll. Nudge the UI last.
+                                for cid in &backfill_channels {
+                                    vector_core::community::cache::clear_channel_floors(cid);
+                                }
+                                for cid in &backfill_channels {
+                                    let _ = sync_community_channel(cid.clone(), None, None).await;
+                                }
+                                vector_core::emit_event(
+                                    "community_refreshed",
+                                    &serde_json::json!({ "community_id": backfill_cid }),
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => vector_core::log_warn!(
+                                "[CommunityList] history backfill {} failed: {}", backfill_cid, e,
+                            ),
+                        }
+                    });
+                    rehydrated_any = true;
+                }
+                Ok(vector_core::community::list::RehydrateOutcome::AlreadyHeld(_)) => {}
+                Ok(vector_core::community::list::RehydrateOutcome::Removed) => {
+                    // Banned since the entry was written. Full teardown (DB + STATE chats + routes) + tombstone
+                    // local-only — boot's explicit publish propagates it; republishing here would re-echo.
+                    let channel_ids: Vec<String> = hex_to_id32(&entry.community_id)
+                        .ok()
+                        .and_then(|b| vector_core::db::community::load_community(&CommunityId(b)).ok().flatten())
+                        .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
+                        .unwrap_or_default();
+                    teardown_community_local(&entry.community_id, &channel_ids, false).await;
+                }
+                Err(e) => {
+                    vector_core::log_warn!("[CommunityList] rehydrate {} failed: {}", entry.community_id, e);
+                }
             }
         }
-    }
-    if rehydrated_any && session.is_valid() {
-        crate::services::subscription_handler::refresh_community_subscription().await;
-    }
-    rehydrated_any
+        if rehydrated_any && session.is_valid() {
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        }
+        rehydrated_any
+    })
+    .await
 }
 
 /// Boot sweep: sync the LATEST page of every joined Community channel, most-recent-activity
@@ -2906,241 +2883,241 @@ async fn run_hot_v1_lane(
 
 #[tauri::command]
 pub async fn sync_communities_boot() -> Result<(), String> {
-    // One pipeline at a time: a relay reconnect mid-boot re-triggers this whole
-    // run, doubling the volley and probes (the sweep's page claims absorb the
-    // twins, but the repeated work is real). A run that arrives while one is
-    // active is redundant — the active run reads the same relays.
-    static SWEEP_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    static RERUN_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if SWEEP_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        // Don't DROP the trigger: channels the active run fetched before this
-        // caller's relay came up never saw its gap events — queue one rerun.
-        RERUN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
-        println!("[Boot] community sync already in flight — queuing a follow-up run");
-        return Ok(());
-    }
-    struct SweepClaim;
-    impl Drop for SweepClaim {
-        fn drop(&mut self) {
-            SWEEP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
-            // Honor a queued rerun on EVERY exit path: an early return (account
-            // swap, propagated error) must not strand the trigger until the
-            // next reconnect. The respawned run captures its own fresh session.
-            if RERUN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                respawn_community_sync();
+    vector_core::db::scoped(async move {
+        // One pipeline at a time: a relay reconnect mid-boot re-triggers this whole
+        // run, doubling the volley and probes (the sweep's page claims absorb the
+        // twins, but the repeated work is real). A run that arrives while one is
+        // active is redundant — the active run reads the same relays.
+        static SWEEP_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static RERUN_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if SWEEP_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            // Don't DROP the trigger: channels the active run fetched before this
+            // caller's relay came up never saw its gap events — queue one rerun.
+            RERUN_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            println!("[Boot] community sync already in flight — queuing a follow-up run");
+            return Ok(());
+        }
+        struct SweepClaim;
+        impl Drop for SweepClaim {
+            fn drop(&mut self) {
+                SWEEP_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
+                // Honor a queued rerun on EVERY exit path: an early return (account
+                // swap, propagated error) must not strand the trigger until the
+                // next reconnect. The respawned run captures its own fresh session.
+                if RERUN_REQUESTED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    respawn_community_sync();
+                }
             }
         }
-    }
-    let _claim = SweepClaim;
-    // A fresh full run satisfies any rerun queued before it started (and an
-    // early-return run must not leave a stale latch for the next account).
-    RERUN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _claim = SweepClaim;
+        // A fresh full run satisfies any rerun queued before it started (and an
+        // early-return run must not leave a stale latch for the next account).
+        RERUN_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
 
-    let session = vector_core::state::SessionGuard::capture();
-    let boot_start = std::time::Instant::now();
+        let session = vector_core::state::SessionGuard::capture();
+        let boot_start = std::time::Instant::now();
 
-    // Parked-invite hygiene FIRST, unconditionally: a dormant machine may boot
-    // with months of fossils that only the lifetime rule can cull (no declared
-    // expiry, never held, never tombstoned) — and the list-sync purges only
-    // run when a 13302 actually arrives.
-    if let Ok(n) = vector_core::db::community::purge_expired_pending_invites() {
-        if n > 0 {
-            println!("[Boot] purged {} stale pending invite(s)", n);
+        // Parked-invite hygiene FIRST, unconditionally: a dormant machine may boot
+        // with months of fossils that only the lifetime rule can cull (no declared
+        // expiry, never held, never tombstoned) — and the list-sync purges only
+        // run when a 13302 actually arrives.
+        if let Ok(n) = vector_core::db::community::purge_expired_pending_invites() {
+            if n > 0 {
+                println!("[Boot] purged {} stale pending invite(s)", n);
+            }
         }
-    }
-    if let Ok(n) = vector_core::db::community::purge_pending_invites_for_held_communities() {
-        if n > 0 {
-            println!("[Boot] purged {} pending invite(s) for held communities", n);
+        if let Ok(n) = vector_core::db::community::purge_pending_invites_for_held_communities() {
+            if n > 0 {
+                println!("[Boot] purged {} pending invite(s) for held communities", n);
+            }
         }
-    }
 
-    // Newest-message time per chat: the volley's since-bounds AND the sweep's
-    // activity ordering (one DB read shared by both).
-    let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
-    let activity = |cid: &str| -> u64 {
-        last_msgs.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0)
-    };
+        // Newest-message time per chat: the volley's since-bounds AND the sweep's
+        // activity ordering (one DB read shared by both).
+        let last_msgs = crate::db::get_all_chats_last_messages().await.unwrap_or_default();
+        let activity = |cid: &str| -> u64 {
+            last_msgs.get(cid).and_then(|v| v.first().map(|m| m.at)).unwrap_or(0)
+        };
 
-    // Held v2 communities: re-register chat rows (cheap, DB-only) BEFORE the
-    // volley so painted messages land on restored community chats. Follows
-    // queue AFTER the volley — the rapid pass gets the network to itself.
-    for c in vector_core::community::v2::realtime::load_held_v2() {
-        vector_core::VectorCore.register_v2_chats(&c, &session).await;
-    }
+        // Held v2 communities: re-register chat rows (cheap, DB-only) BEFORE the
+        // volley so painted messages land on restored community chats. Follows
+        // queue AFTER the volley — the rapid pass gets the network to itself.
+        for c in vector_core::community::v2::realtime::load_held_v2() {
+            vector_core::VectorCore.register_v2_chats(&c, &session).await;
+        }
 
-    // v1 hot-lane result (successes only), filled on the probe branch of the
-    // paint join below.
-    #[allow(unused_assignments)]
-    let mut hot_lane_result: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // v1 hot-lane result (successes only), filled on the probe branch of the
+        // paint join below.
+        #[allow(unused_assignments)]
+        let mut hot_lane_result: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // ── Volley Sync (chat-plane paint) ∥ control probe ───────────────────────────────
-    // The volley paints every v2 channel's latest page from stored epoch
-    // state (CONCORD_CHAT_PLANE_VOLLEY_DESIGN.md); the probe readies the v1
-    // fast path. Neither depends on the other — run them together so the v1
-    // hot lane below starts at probe-done, not probe-after-volley.
-    let mut hot_v1: Vec<(String, u64)> = Vec::new();
-    {
-        let volley_start = std::time::Instant::now();
-        const VOLLEY_SINCE_SLACK_SECS: u64 = 3600;
-        let mut with_activity: Vec<(vector_core::community::v2::volley::PaintTarget, u64)> = Vec::new();
+        // ── Volley Sync (chat-plane paint) ∥ control probe ───────────────────────────────
+        // The volley paints every v2 channel's latest page from stored epoch
+        // state (CONCORD_CHAT_PLANE_VOLLEY_DESIGN.md); the probe readies the v1
+        // fast path. Neither depends on the other — run them together so the v1
+        // hot lane below starts at probe-done, not probe-after-volley.
+        let mut hot_v1: Vec<(String, u64)> = Vec::new();
+        {
+            let volley_start = std::time::Instant::now();
+            const VOLLEY_SINCE_SLACK_SECS: u64 = 3600;
+            let mut with_activity: Vec<(vector_core::community::v2::volley::PaintTarget, u64)> = Vec::new();
+            for id in vector_core::db::community::list_community_ids()? {
+                match vector_core::db::community::community_protocol(&id).ok().flatten() {
+                    Some(vector_core::community::ConcordProtocol::V2) => {
+                        if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                            for ch in &c.channels {
+                                let cid = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
+                                let at = activity(&cid);
+                                let since = (at > 0)
+                                    .then(|| (at / 1000).saturating_sub(VOLLEY_SINCE_SLACK_SECS));
+                                with_activity.push((
+                                    vector_core::community::v2::volley::PaintTarget {
+                                        community_id: vector_core::community::CommunityId(id.0),
+                                        channel_hex: cid,
+                                        since,
+                                    },
+                                    at,
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
+                            for ch in &community.channels {
+                                let cid = ch.id.to_hex();
+                                let at = activity(&cid);
+                                hot_v1.push((cid, at));
+                            }
+                        }
+                    }
+                }
+            }
+            with_activity.sort_by(|a, b| b.1.cmp(&a.1));
+            let volley_count = with_activity.len();
+            let targets: Vec<_> = with_activity.into_iter().map(|(t, _)| t).collect();
+
+            const HOT_V1_MAX: usize = 12;
+            const HOT_V1_WINDOW_MS: u64 = 14 * 24 * 3600 * 1000;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            hot_v1.sort_by(|a, b| b.1.cmp(&a.1));
+            hot_v1.retain(|(_, at)| *at > 0 && now_ms.saturating_sub(*at) <= HOT_V1_WINDOW_MS);
+            hot_v1.truncate(HOT_V1_MAX);
+            let hot_v1_input: Vec<String> = hot_v1.iter().map(|(c, _)| c.clone()).collect();
+
+            let ((painted, stats), lane_set) = tokio::join!(
+                vector_core::community::v2::volley::paint_all(targets),
+                async {
+                    let probe_start = std::time::Instant::now();
+                    run_control_probe().await;
+                    println!("[Boot] community control probe in {:?}", probe_start.elapsed());
+                    // v1 hot lane starts the moment the probe lands — in PARALLEL
+                    // with the volley (both are paint work; waiting out the
+                    // volley cost v1's hottest channels ~3s for nothing).
+                    run_hot_v1_lane(hot_v1_input).await
+                }
+            );
+            hot_lane_result = lane_set;
+            let total: usize = painted.iter().map(|(_, n)| n).sum();
+            for (cid, n) in &painted {
+                println!("[Boot]   volley {}…: {} new", &cid[..8.min(cid.len())], n);
+            }
+            println!(
+                "[Boot] Volley Sync: {} channel(s), {} new in {:?} (batch {}ev/{}ms, fallback {}ev/{}ms)",
+                volley_count,
+                total,
+                volley_start.elapsed(),
+                stats.batch_events,
+                stats.batch_ms,
+                stats.fallback_events,
+                stats.fallback_ms
+            );
+        }
+        let hot_set = hot_lane_result;
+
+        // Verification follows queue AFTER the whole chat paint (volley + hot
+        // lane) BY OWNER RULING: boot exists to deliver message data; ban data
+        // rides seconds behind and retro-hide revokes anything it invalidates.
+        for c in vector_core::community::v2::realtime::load_held_v2() {
+            vector_core::community::v2::realtime::enqueue_follow(c.id());
+        }
+
+        // Cross-device discovery runs CONCURRENTLY with the channel sweep — the v1
+        // 30078 reconcile rides the raw pool-wide fetch (a 20s timeout a single
+        // dead relay can pin) and the v2 13302 fetch adds seconds more; neither may
+        // gate already-held communities' pages. A community either path rehydrates
+        // pages itself on arrival (page_messages=true below), and the per-channel
+        // anti-stampede coalesces any overlap with the sweep.
+        {
+            vector_core::db::spawn_bound(async move {
+                let t = std::time::Instant::now();
+                reconcile_community_list_boot().await;
+                // ONE implementation shared with the live kind-13302 self-sync: adopt, follow,
+                // resubscribe, and SURFACE to the UI. This reconcile is backgrounded and lands
+                // AFTER `init_finished`, so a community adopted here needs the same frontend
+                // notification a live update does — duplicating the loop is how they drifted.
+                ingest_v2_community_list_update().await;
+                vector_core::log_info!("[Boot] community list reconcile (background) in {:?}", t.elapsed());
+            });
+        }
+
+        // v1→v2 migration maintenance, backgrounded (network-bound: probes + possible joins).
+        // Re-drives any pointer-held-but-unflipped community (crash recovery / stale-root retry)
+        // and probes sealed pointer-less ones for a carrier this client missed (upgrade lag).
+        {
+            vector_core::db::spawn_bound(async move {
+                let transport = vector_core::community::transport::LiveTransport::with_timeout(Duration::from_secs(12));
+                let flipped = vector_core::community::migration::run_migration_maintenance(&transport).await;
+                if !flipped.is_empty() {
+                    vector_core::log_info!("[Boot] migration maintenance flipped {} community(ies)", flipped.len());
+                }
+            });
+        }
+
+        // Flatten every joined Community's channels (protocol-agnostic: a v2 community
+        // must load through its own reader, not the v1 one).
+        let mut channels: Vec<String> = Vec::new();
         for id in vector_core::db::community::list_community_ids()? {
             match vector_core::db::community::community_protocol(&id).ok().flatten() {
                 Some(vector_core::community::ConcordProtocol::V2) => {
                     if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
                         for ch in &c.channels {
-                            let cid = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
-                            let at = activity(&cid);
-                            let since = (at > 0)
-                                .then(|| (at / 1000).saturating_sub(VOLLEY_SINCE_SLACK_SECS));
-                            with_activity.push((
-                                vector_core::community::v2::volley::PaintTarget {
-                                    community_id: vector_core::community::CommunityId(id.0),
-                                    channel_hex: cid,
-                                    since,
-                                },
-                                at,
-                            ));
+                            channels.push(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0));
                         }
                     }
                 }
                 _ => {
                     if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
                         for ch in &community.channels {
-                            let cid = ch.id.to_hex();
-                            let at = activity(&cid);
-                            hot_v1.push((cid, at));
+                            channels.push(ch.id.to_hex());
                         }
                     }
                 }
             }
         }
-        with_activity.sort_by(|a, b| b.1.cmp(&a.1));
-        let volley_count = with_activity.len();
-        let targets: Vec<_> = with_activity.into_iter().map(|(t, _)| t).collect();
+        // Hot-lane channels already ran the full chain — don't re-queue them.
+        channels.retain(|c| !hot_set.contains(c));
+        // Most-recent-activity first.
+        channels.sort_by(|a, b| activity(b).cmp(&activity(a)));
 
-        const HOT_V1_MAX: usize = 12;
-        const HOT_V1_WINDOW_MS: u64 = 14 * 24 * 3600 * 1000;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        hot_v1.sort_by(|a, b| b.1.cmp(&a.1));
-        hot_v1.retain(|(_, at)| *at > 0 && now_ms.saturating_sub(*at) <= HOT_V1_WINDOW_MS);
-        hot_v1.truncate(HOT_V1_MAX);
-        let hot_v1_input: Vec<String> = hot_v1.iter().map(|(c, _)| c.clone()).collect();
-
-        let ((painted, stats), lane_set) = tokio::join!(
-            vector_core::community::v2::volley::paint_all(targets),
-            async {
-                let probe_start = std::time::Instant::now();
-                run_control_probe().await;
-                println!("[Boot] community control probe in {:?}", probe_start.elapsed());
-                // v1 hot lane starts the moment the probe lands — in PARALLEL
-                // with the volley (both are paint work; waiting out the
-                // volley cost v1's hottest channels ~3s for nothing).
-                run_hot_v1_lane(hot_v1_input).await
-            }
-        );
-        hot_lane_result = lane_set;
-        let total: usize = painted.iter().map(|(_, n)| n).sum();
-        for (cid, n) in &painted {
-            println!("[Boot]   volley {}…: {} new", &cid[..8.min(cid.len())], n);
-        }
-        println!(
-            "[Boot] Volley Sync: {} channel(s), {} new in {:?} (batch {}ev/{}ms, fallback {}ev/{}ms)",
-            volley_count,
-            total,
-            volley_start.elapsed(),
-            stats.batch_events,
-            stats.batch_ms,
-            stats.fallback_events,
-            stats.fallback_ms
-        );
-    }
-    let hot_set = hot_lane_result;
-
-    // Verification follows queue AFTER the whole chat paint (volley + hot
-    // lane) BY OWNER RULING: boot exists to deliver message data; ban data
-    // rides seconds behind and retro-hide revokes anything it invalidates.
-    for c in vector_core::community::v2::realtime::load_held_v2() {
-        vector_core::community::v2::realtime::enqueue_follow(c.id());
-    }
-
-    // Cross-device discovery runs CONCURRENTLY with the channel sweep — the v1
-    // 30078 reconcile rides the raw pool-wide fetch (a 20s timeout a single
-    // dead relay can pin) and the v2 13302 fetch adds seconds more; neither may
-    // gate already-held communities' pages. A community either path rehydrates
-    // pages itself on arrival (page_messages=true below), and the per-channel
-    // anti-stampede coalesces any overlap with the sweep.
-    {
-        vector_core::db::spawn_bound(async move {
-            let t = std::time::Instant::now();
-            reconcile_community_list_boot().await;
-            // ONE implementation shared with the live kind-13302 self-sync: adopt, follow,
-            // resubscribe, and SURFACE to the UI. This reconcile is backgrounded and lands
-            // AFTER `init_finished`, so a community adopted here needs the same frontend
-            // notification a live update does — duplicating the loop is how they drifted.
-            ingest_v2_community_list_update().await;
-            vector_core::log_info!("[Boot] community list reconcile (background) in {:?}", t.elapsed());
-        });
-    }
-
-    // v1→v2 migration maintenance, backgrounded (network-bound: probes + possible joins).
-    // Re-drives any pointer-held-but-unflipped community (crash recovery / stale-root retry)
-    // and probes sealed pointer-less ones for a carrier this client missed (upgrade lag).
-    {
-        vector_core::db::spawn_bound(async move {
-            let transport = vector_core::community::transport::LiveTransport::with_timeout(Duration::from_secs(12));
-            let flipped = vector_core::community::migration::run_migration_maintenance(&transport).await;
-            if !flipped.is_empty() {
-                vector_core::log_info!("[Boot] migration maintenance flipped {} community(ies)", flipped.len());
-            }
-        });
-    }
-
-    // Flatten every joined Community's channels (protocol-agnostic: a v2 community
-    // must load through its own reader, not the v1 one).
-    let mut channels: Vec<String> = Vec::new();
-    for id in vector_core::db::community::list_community_ids()? {
-        match vector_core::db::community::community_protocol(&id).ok().flatten() {
-            Some(vector_core::community::ConcordProtocol::V2) => {
-                if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
-                    for ch in &c.channels {
-                        channels.push(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0));
-                    }
-                }
-            }
-            _ => {
-                if let Ok(Some(community)) = vector_core::db::community::load_community(&id) {
-                    for ch in &community.channels {
-                        channels.push(ch.id.to_hex());
-                    }
-                }
-            }
-        }
-    }
-    // Hot-lane channels already ran the full chain — don't re-queue them.
-    channels.retain(|c| !hot_set.contains(c));
-    // Most-recent-activity first.
-    channels.sort_by(|a, b| activity(b).cmp(&activity(a)));
-
-    // No coverage cap — every joined Community syncs at boot (NIP-17 parity: bulk catch-up here,
-    // realtime after, re-sync on reconnect; nothing on-demand). A sliding window (not fixed
-    // batches) bounds peak relay load: a finished sync yields its slot to the next immediately
-    // instead of waiting on the slowest of a chunk. Each sync is ~4 REQs (server-root probe +
-    // control fold + rekey probe + page), so the window caps concurrent REQ pressure at window×4.
-    // MVP is single-channel Communities, so a channel here is 1:1 with a Community.
-    // An unchanged v1 sync is ~1 REQ (control chain skipped by the probe) and v2
-    // backfills reuse warm pooled connections, so the per-channel REQ pressure that
-    // once capped this at 3 is gone — more channels in flight hides slow-relay
-    // latency across fewer sequential slots. The plane pool (cap 24) and per-relay
-    // breaker bound the concurrent load.
-    const BOOT_SYNC_WINDOW: usize = 6;
-    use futures_util::stream::StreamExt;
-    let channel_count = channels.len();
-    futures_util::stream::iter(channels)
-        .map(|cid| async move {
-            if session.is_valid() {
+        // No coverage cap — every joined Community syncs at boot (NIP-17 parity: bulk catch-up here,
+        // realtime after, re-sync on reconnect; nothing on-demand). A sliding window (not fixed
+        // batches) bounds peak relay load: a finished sync yields its slot to the next immediately
+        // instead of waiting on the slowest of a chunk. Each sync is ~4 REQs (server-root probe +
+        // control fold + rekey probe + page), so the window caps concurrent REQ pressure at window×4.
+        // MVP is single-channel Communities, so a channel here is 1:1 with a Community.
+        // An unchanged v1 sync is ~1 REQ (control chain skipped by the probe) and v2
+        // backfills reuse warm pooled connections, so the per-channel REQ pressure that
+        // once capped this at 3 is gone — more channels in flight hides slow-relay
+        // latency across fewer sequential slots. The plane pool (cap 24) and per-relay
+        // breaker bound the concurrent load.
+        const BOOT_SYNC_WINDOW: usize = 6;
+        use futures_util::stream::StreamExt;
+        let channel_count = channels.len();
+        futures_util::stream::iter(channels)
+            .map(|cid| async move {
                 let t = std::time::Instant::now();
                 let new = sync_community_channel(cid.clone(), None, None)
                     .await
@@ -3153,18 +3130,19 @@ pub async fn sync_communities_boot() -> Result<(), String> {
                     new,
                     t.elapsed()
                 );
-            }
-        })
-        .buffer_unordered(BOOT_SYNC_WINDOW)
-        .collect::<Vec<()>>()
-        .await;
-    println!(
-        "[Boot] community channel sweep: {} channel(s) in {:?}",
-        channel_count,
-        boot_start.elapsed()
-    );
-    drop(_claim);
-    Ok(())
+            })
+            .buffer_unordered(BOOT_SYNC_WINDOW)
+            .collect::<Vec<()>>()
+            .await;
+        println!(
+            "[Boot] community channel sweep: {} channel(s) in {:?}",
+            channel_count,
+            boot_start.elapsed()
+        );
+        drop(_claim);
+        Ok(())
+    })
+    .await
 }
 
 /// One queued re-run of the boot sweep (a reconnect landed mid-run). Boxed to
@@ -3190,82 +3168,76 @@ fn respawn_community_sync() {
 /// already deleted) — only the original sender can delete their own message.
 #[tauri::command]
 pub async fn delete_community_message(message_id: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("account changed during delete".to_string());
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+    vector_core::db::scoped(async move {
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
 
-    // Snapshot the owning channel + attachment URLs BEFORE the cooperative echo removes the
-    // row (the publish below locally applies its own 3305, dropping the message from STATE).
-    let (channel_id, attachment_urls) = {
-        let state = vector_core::state::STATE.lock().await;
-        match state.find_message(&message_id) {
-            Some((chat, msg)) => (
-                chat.id.clone(),
-                msg.attachments
-                    .iter()
-                    .flat_map(|a| a.all_urls().map(str::to_string))
-                    .collect::<Vec<_>>(),
-            ),
-            None => return Err("message not found (already deleted?)".to_string()),
-        }
-    };
+        // Snapshot the owning channel + attachment URLs BEFORE the cooperative echo removes the
+        // row (the publish below locally applies its own 3305, dropping the message from STATE).
+        let (channel_id, attachment_urls) = {
+            let state = vector_core::state::STATE.lock().await;
+            match state.find_message(&message_id) {
+                Some((chat, msg)) => (
+                    chat.id.clone(),
+                    msg.attachments
+                        .iter()
+                        .flat_map(|a| a.all_urls().map(str::to_string))
+                        .collect::<Vec<_>>(),
+                ),
+                None => return Err("message not found (already deleted?)".to_string()),
+            }
+        };
 
-    // Layer 1 — relay nuke: a real NIP-09 against the retained per-message ephemeral key,
-    // erasing the wrapper from relays. Only possible when we hold that key (own send, this
-    // device, post-retention). Best-effort: a relay failure still falls through to the
-    // cooperative tombstone, and the key stays retained for a later retry.
-    let has_key = vector_core::db::community::get_message_key(&message_id)
-        .map(|k| k.is_some())
-        .unwrap_or(false);
-    if has_key {
-        if let Err(e) = vector_core::community::service::delete_message(&transport, &message_id).await {
-            log_error!("Community relay delete failed, using cooperative tombstone only: {e}");
-        }
-    }
-
-    // Layer 2 — cooperative tombstone (3305) so Vector peers hide it in-app even when we lack
-    // the original signing key (the "Limited Delete" path). Author-gated on the peer side.
-    publish_community_control(
-        &channel_id,
-        vector_core::stored_event::event_kind::COMMUNITY_DELETE,
-        "",
-        &message_id,
-        &[],
-    )
-    .await?;
-
-    // Layer 3 — best-effort Blossom blob delete for attachments (signed by the active
-    // identity so bunker accounts authorize correctly).
-    if !attachment_urls.is_empty() {
-        if let Some(_client) = vector_core::state::nostr_client() {
-            if let Ok(signer) = vector_core::signer::active_signer() {
-                vector_core::blossom::delete_blobs_best_effort(signer, attachment_urls);
+        // Layer 1 — relay nuke: a real NIP-09 against the retained per-message ephemeral key,
+        // erasing the wrapper from relays. Only possible when we hold that key (own send, this
+        // device, post-retention). Best-effort: a relay failure still falls through to the
+        // cooperative tombstone, and the key stays retained for a later retry.
+        let has_key = vector_core::db::community::get_message_key(&message_id)
+            .map(|k| k.is_some())
+            .unwrap_or(false);
+        if has_key {
+            if let Err(e) = vector_core::community::service::delete_message(&transport, &message_id).await {
+                log_error!("Community relay delete failed, using cooperative tombstone only: {e}");
             }
         }
-    }
 
-    // Drop locally + tell the UI to remove the row (idempotent — the cooperative echo may
-    // already have removed it). Re-check the session: the publishes above can take seconds,
-    // and an account swap mid-publish must not delete from the swapped-in account's STATE/DB.
-    if !session.is_valid() {
-        return Err("account changed during delete".to_string());
-    }
-    let removed_chat = {
-        let mut state = vector_core::state::STATE.lock().await;
-        state.remove_message(&message_id).map(|(cid, _)| cid)
-    };
-    let _ = crate::db::delete_event(&message_id).await;
-    vector_core::emit_event(
-        "message_removed",
-        &serde_json::json!({
-            "id": &message_id,
-            "chat_id": removed_chat.as_deref().unwrap_or(&channel_id),
-            "reason": "deleted"
-        }),
-    );
-    Ok(())
+        // Layer 2 — cooperative tombstone (3305) so Vector peers hide it in-app even when we lack
+        // the original signing key (the "Limited Delete" path). Author-gated on the peer side.
+        publish_community_control(
+            &channel_id,
+            vector_core::stored_event::event_kind::COMMUNITY_DELETE,
+            "",
+            &message_id,
+            &[],
+        )
+        .await?;
+
+        // Layer 3 — best-effort Blossom blob delete for attachments (signed by the active
+        // identity so bunker accounts authorize correctly).
+        if !attachment_urls.is_empty() {
+            if let Some(_client) = vector_core::state::nostr_client() {
+                if let Ok(signer) = vector_core::signer::active_signer() {
+                    vector_core::blossom::delete_blobs_best_effort(signer, attachment_urls);
+                }
+            }
+        }
+
+        // Drop locally + tell the UI to remove the row (idempotent — the cooperative echo may
+        let removed_chat = {
+            let mut state = vector_core::state::STATE.lock().await;
+            state.remove_message(&message_id).map(|(cid, _)| cid)
+        };
+        let _ = crate::db::delete_event(&message_id).await;
+        vector_core::emit_event(
+            "message_removed",
+            &serde_json::json!({
+                "id": &message_id,
+                "chat_id": removed_chat.as_deref().unwrap_or(&channel_id),
+                "reason": "deleted"
+            }),
+        );
+        Ok(())
+    })
+    .await
 }
 
 /// Revoke ONE of your own reactions (DM or Community). Author-gated: only the reactor can revoke,
@@ -3274,67 +3246,66 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
 /// hold no key (can't be relay-nuked), but the cooperative notice still reaches live peers.
 #[tauri::command]
 pub async fn revoke_reaction(reaction_id: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("account changed during revoke".to_string());
-    }
+    vector_core::db::scoped(async move {
 
-    // Locate the reaction, confirm it's ours, grab the parent message + chat type.
-    let (chat_id, message_id, author_npub, is_community) = {
-        let state = vector_core::state::STATE.lock().await;
-        state
-            .find_reaction(&reaction_id)
-            .ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?
-    };
-    let my_npub = vector_core::db::get_current_account()?;
-    if author_npub != my_npub {
-        return Err("Cannot revoke a reaction that isn't yours".to_string());
-    }
-
-    // Optimistic local removal + live chip refresh. Drop the kind-7 row (save is additive) and
-    // emit before the network round-trip — snappy, and it makes the cooperative self-echo a no-op.
-    let updated = {
-        let mut state = vector_core::state::STATE.lock().await;
-        state.remove_reaction_from_message(&message_id, &reaction_id)
-    };
-    let _ = crate::db::delete_event(&reaction_id).await;
-    if let Some((_cid, message)) = updated {
-        vector_core::emit_event(
-            "message_update",
-            &serde_json::json!({ "old_id": &message_id, "message": message, "chat_id": &chat_id }),
-        );
-    }
-
-    // Network propagation.
-    if is_community {
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        // Layer 1 — relay nuke via the retained per-reaction ephemeral key (own send, post-retention).
-        let has_key = vector_core::db::community::get_message_key(&reaction_id)
-            .map(|k| k.is_some())
-            .unwrap_or(false);
-        if has_key {
-            if let Err(e) = vector_core::community::service::delete_message(&transport, &reaction_id).await {
-                log_error!("Community reaction relay delete failed, tombstone only: {e}");
-            }
+        // Locate the reaction, confirm it's ours, grab the parent message + chat type.
+        let (chat_id, message_id, author_npub, is_community) = {
+            let state = vector_core::state::STATE.lock().await;
+            state
+                .find_reaction(&reaction_id)
+                .ok_or_else(|| format!("Reaction not found (id: {reaction_id})"))?
+        };
+        let my_npub = vector_core::db::get_current_account()?;
+        if author_npub != my_npub {
+            return Err("Cannot revoke a reaction that isn't yours".to_string());
         }
-        // Layer 2 — cooperative 3305 tombstone targeting the reaction id (author-gated peer-side).
-        publish_community_control(
-            &chat_id,
-            vector_core::stored_event::event_kind::COMMUNITY_DELETE,
-            "",
-            &reaction_id,
-            &[],
-        )
-        .await?;
-    } else {
-        use nostr_sdk::prelude::{EventId, PublicKey};
-        let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
-        let recipient = PublicKey::parse(&chat_id)
-            .map_err(|e| format!("Invalid DM counterpart: {e}"))?;
-        vector_core::deletion::delete_own_reaction(&rid, recipient).await?;
-    }
 
-    Ok(())
+        // Optimistic local removal + live chip refresh. Drop the kind-7 row (save is additive) and
+        // emit before the network round-trip — snappy, and it makes the cooperative self-echo a no-op.
+        let updated = {
+            let mut state = vector_core::state::STATE.lock().await;
+            state.remove_reaction_from_message(&message_id, &reaction_id)
+        };
+        let _ = crate::db::delete_event(&reaction_id).await;
+        if let Some((_cid, message)) = updated {
+            vector_core::emit_event(
+                "message_update",
+                &serde_json::json!({ "old_id": &message_id, "message": message, "chat_id": &chat_id }),
+            );
+        }
+
+        // Network propagation.
+        if is_community {
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            // Layer 1 — relay nuke via the retained per-reaction ephemeral key (own send, post-retention).
+            let has_key = vector_core::db::community::get_message_key(&reaction_id)
+                .map(|k| k.is_some())
+                .unwrap_or(false);
+            if has_key {
+                if let Err(e) = vector_core::community::service::delete_message(&transport, &reaction_id).await {
+                    log_error!("Community reaction relay delete failed, tombstone only: {e}");
+                }
+            }
+            // Layer 2 — cooperative 3305 tombstone targeting the reaction id (author-gated peer-side).
+            publish_community_control(
+                &chat_id,
+                vector_core::stored_event::event_kind::COMMUNITY_DELETE,
+                "",
+                &reaction_id,
+                &[],
+            )
+            .await?;
+        } else {
+            use nostr_sdk::prelude::{EventId, PublicKey};
+            let rid = EventId::from_hex(&reaction_id).map_err(|e| format!("Invalid reaction id: {e}"))?;
+            let recipient = PublicKey::parse(&chat_id)
+                .map_err(|e| format!("Invalid DM counterpart: {e}"))?;
+            vector_core::deletion::delete_own_reaction(&rid, recipient).await?;
+        }
+
+        Ok(())
+    })
+    .await
 }
 
 /// Moderation-hide: permanently remove ANY member's message you hold authority over
@@ -3361,58 +3332,61 @@ pub(crate) async fn apply_community_presence(
     invited_by: Option<&str>,
     invited_label: Option<&str>,
 ) {
-    let et = if joined {
-        vector_core::stored_event::SystemEventType::MemberJoined
-    } else {
-        vector_core::stored_event::SystemEventType::MemberLeft
-    };
-    // attribution: persist "invited_by[|label]" in the system event's note so "joined via X's link"
-    // survives a reload, and surface it on the live event for the member list.
-    let note = invited_by.map(|by| match invited_label {
-        Some(l) if !l.is_empty() => format!("{by}|{l}"),
-        _ => by.to_string(),
-    });
-    // A swap can land during the save await; without this re-check the queue push
-    // below would seed account A's npub into account B's freshly-cleared profile
-    // queue, and the emit would surface A's join in B's open chat.
-    let session = vector_core::state::SessionGuard::capture();
-    let inserted = vector_core::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at, invited_by, invited_label)
-        .await
-        .unwrap_or(false);
-    if inserted && session.is_valid() {
-        // A member we can't NAME renders as an npub stub everywhere (join/leave
-        // line, member list, @mention pool) — queue their profile so the name
-        // lands moments after the event. Gated on nameless-ness: a member we
-        // already show a name for refreshes on the profile system's own cadence.
-        let nameless = {
-            let state = vector_core::state::STATE.lock().await;
-            state.get_profile(npub).is_none_or(|p| {
-                p.nickname().is_empty() && p.display_name.is_empty() && p.name.is_empty()
-            })
+    vector_core::db::scoped(async move {
+        let et = if joined {
+            vector_core::stored_event::SystemEventType::MemberJoined
+        } else {
+            vector_core::stored_event::SystemEventType::MemberLeft
         };
-        if nameless {
-            vector_core::profile::sync::queue_profile_sync(
-                npub.to_string(),
-                vector_core::profile::sync::SyncPriority::High,
-                false,
+        // attribution: persist "invited_by[|label]" in the system event's note so "joined via X's link"
+        // survives a reload, and surface it on the live event for the member list.
+        let note = invited_by.map(|by| match invited_label {
+            Some(l) if !l.is_empty() => format!("{by}|{l}"),
+            _ => by.to_string(),
+        });
+        // A swap can land during the save await; without this re-check the queue push
+        // below would seed account A's npub into account B's freshly-cleared profile
+        // queue, and the emit would surface A's join in B's open chat.
+        let session = vector_core::state::SessionGuard::capture();
+        let inserted = vector_core::db::events::save_system_event_at(event_id, channel_id, et, npub, note.as_deref(), created_at, invited_by, invited_label)
+            .await
+            .unwrap_or(false);
+        if inserted && session.is_valid() {
+            // A member we can't NAME renders as an npub stub everywhere (join/leave
+            // line, member list, @mention pool) — queue their profile so the name
+            // lands moments after the event. Gated on nameless-ness: a member we
+            // already show a name for refreshes on the profile system's own cadence.
+            let nameless = {
+                let state = vector_core::state::STATE.lock().await;
+                state.get_profile(npub).is_none_or(|p| {
+                    p.nickname().is_empty() && p.display_name.is_empty() && p.name.is_empty()
+                })
+            };
+            if nameless {
+                vector_core::profile::sync::queue_profile_sync(
+                    npub.to_string(),
+                    vector_core::profile::sync::SyncPriority::High,
+                    false,
+                );
+            }
+            vector_core::emit_event(
+                "system_event",
+                &serde_json::json!({
+                    "conversation_id": channel_id,
+                    "event_id": event_id,
+                    "event_type": et.as_u8(),
+                    "member_pubkey": npub,
+                    "member_name": serde_json::Value::Null,
+                    "invited_by": invited_by,
+                    "invited_label": invited_label,
+                    // The event's REAL time (ms) so the UI sorts it chronologically. Without it the frontend
+                    // stamps `now`, and a join replayed during history paging/rehydration sinks to the bottom.
+                    "created_at_ms": created_at.saturating_mul(1000),
+                }),
             );
         }
-        vector_core::emit_event(
-            "system_event",
-            &serde_json::json!({
-                "conversation_id": channel_id,
-                "event_id": event_id,
-                "event_type": et.as_u8(),
-                "member_pubkey": npub,
-                "member_name": serde_json::Value::Null,
-                "invited_by": invited_by,
-                "invited_label": invited_label,
-                // The event's REAL time (ms) so the UI sorts it chronologically. Without it the frontend
-                // stamps `now`, and a join replayed during history paging/rehydration sinks to the bottom.
-                "created_at_ms": created_at.saturating_mul(1000),
-            }),
-        );
-    }
+    })
+    .await
 }
 
 /// Shared publish path for a control event that targets an existing message — a reaction
@@ -3448,44 +3422,41 @@ async fn publish_community_control(
     target: &str,
     emoji_tags: &[vector_core::types::EmojiTag],
 ) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
+    vector_core::db::scoped(async move {
+        let author_pk = vector_core::my_public_key().ok_or("Public key not set")?;
 
-    let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
-        .ok_or("Unknown Community channel")?;
-    let id_bytes = hex_to_id32(&community_id)?;
+        let community_id = vector_core::db::community::community_id_for_channel(channel_id)?
+            .ok_or("Unknown Community channel")?;
+        let id_bytes = hex_to_id32(&community_id)?;
 
-    // v2: route the target-op (reaction / edit / delete) to the facade, which
-    // seals + publishes + echoes into STATE/DB. The echo is emit-silent (bot
-    // parity), so surface the update to the frontend via the same events the
-    // live dispatch fires.
-    if matches!(
-        vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
-        Some(vector_core::community::ConcordProtocol::V2)
-    ) {
-        use vector_core::stored_event::event_kind;
-        let core = vector_core::VectorCore;
-        match kind {
-            k if k == event_kind::COMMUNITY_REACTION => {
-                let url = emoji_tags.first().map(|t| t.url.as_str());
-                core.send_community_reaction(channel_id, target, content, url).await.map_err(|e| e.to_string())?;
-            }
-            k if k == event_kind::COMMUNITY_EDIT => {
-                core.edit_community_message(channel_id, target, content).await.map_err(|e| e.to_string())?;
-            }
-            k if k == event_kind::COMMUNITY_DELETE => {
-                core.delete_community_message_in(channel_id, target).await.map_err(|e| e.to_string())?;
-                if session.is_valid() {
+        // v2: route the target-op (reaction / edit / delete) to the facade, which
+        // seals + publishes + echoes into STATE/DB. The echo is emit-silent (bot
+        // parity), so surface the update to the frontend via the same events the
+        // live dispatch fires.
+        if matches!(
+            vector_core::db::community::community_protocol(&CommunityId(id_bytes)).ok().flatten(),
+            Some(vector_core::community::ConcordProtocol::V2)
+        ) {
+            use vector_core::stored_event::event_kind;
+            let core = vector_core::VectorCore;
+            match kind {
+                k if k == event_kind::COMMUNITY_REACTION => {
+                    let url = emoji_tags.first().map(|t| t.url.as_str());
+                    core.send_community_reaction(channel_id, target, content, url).await.map_err(|e| e.to_string())?;
+                }
+                k if k == event_kind::COMMUNITY_EDIT => {
+                    core.edit_community_message(channel_id, target, content).await.map_err(|e| e.to_string())?;
+                }
+                k if k == event_kind::COMMUNITY_DELETE => {
+                    core.delete_community_message_in(channel_id, target).await.map_err(|e| e.to_string())?;
                     vector_core::emit_event("message_removed", &serde_json::json!({
                         "id": target, "chat_id": channel_id, "reason": "deleted",
                     }));
+                    return Ok(());
                 }
-                return Ok(());
+                _ => return Err("unsupported v2 control op".to_string()),
             }
-            _ => return Err("unsupported v2 control op".to_string()),
-        }
-        // React/edit updated the target in STATE — emit the fresh view.
-        if session.is_valid() {
+            // React/edit updated the target in STATE — emit the fresh view.
             let updated = {
                 let st = vector_core::state::STATE.lock().await;
                 st.find_message(target).map(|(_, m)| m.clone())
@@ -3495,53 +3466,47 @@ async fn publish_community_control(
                     "old_id": target, "message": msg, "chat_id": channel_id,
                 }));
             }
+            return Ok(());
         }
-        return Ok(());
-    }
 
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let channel = community
-        .channels
-        .iter()
-        .find(|c| c.id.to_hex() == channel_id)
-        .ok_or("Channel not found in Community")?
-        .clone();
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let channel = community
+            .channels
+            .iter()
+            .find(|c| c.id.to_hex() == channel_id)
+            .ok_or("Channel not found in Community")?
+            .clone();
 
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
-    let unsigned = vector_core::community::envelope::build_inner_typed(
-        author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
-    );
-    let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
-    let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
-    let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign: {e}"))?;
-    if !session.is_valid() {
-        return Err("account changed during send".to_string());
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let outer = service::send_signed_message(&transport, &community, &channel, &inner).await?;
-
-    // Local echo: apply our own event immediately (relay echo dedups). Re-check after the
-    // publish — an account swap during send must not echo into the swapped-in account.
-    if !session.is_valid() {
-        return Err("account changed during send".to_string());
-    }
-    let outcome = {
-        let mut state = vector_core::state::STATE.lock().await;
-        vector_core::community::inbound::process_incoming(&mut state, &outer, &channel, &author_pk)
-    };
-    if let Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message, edit_event }) = outcome {
-        persist_community_update(channel_id, &message, edit_event.as_deref()).await;
-        vector_core::emit_event(
-            "message_update",
-            &serde_json::json!({ "old_id": &target_id, "message": &message, "chat_id": channel_id }),
+        let unsigned = vector_core::community::envelope::build_inner_typed(
+            author_pk, &channel.id, channel.epoch, kind, content, ms, Some(target), emoji_tags,
         );
-    }
-    Ok(())
+        let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
+        let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
+        let inner = unsigned.finalize_async(&signer).await.map_err(|e| format!("Failed to sign: {e}"))?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let outer = service::send_signed_message(&transport, &community, &channel, &inner).await?;
+
+        // Local echo: apply our own event immediately (relay echo dedups). Re-check after the
+        let outcome = {
+            let mut state = vector_core::state::STATE.lock().await;
+            vector_core::community::inbound::process_incoming(&mut state, &outer, &channel, &author_pk)
+        };
+        if let Some(vector_core::community::inbound::IncomingEvent::Updated { target_id, message, edit_event }) = outcome {
+            persist_community_update(channel_id, &message, edit_event.as_deref()).await;
+            vector_core::emit_event(
+                "message_update",
+                &serde_json::json!({ "old_id": &target_id, "message": &message, "chat_id": channel_id }),
+            );
+        }
+        Ok(())
+    })
+    .await
 }
 
 /// React to a Community message with an emoji. `emoji_url` carries the NIP-30 image when
@@ -3599,47 +3564,46 @@ pub async fn edit_community_message(
 /// Community relays), since a fresh invitee has no Community pseudonym yet.
 #[tauri::command]
 pub async fn invite_to_community(community_id: String, invitee_npub: String) -> Result<(), String> {
-    if is_v2_community(&community_id) {
-        vector_core::VectorCore.invite_to_community(&community_id, &invitee_npub).await.map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    refuse_legacy_invite(&community_id)?;
-    let session = vector_core::state::SessionGuard::capture();
+    vector_core::db::scoped(async move {
+        if is_v2_community(&community_id) {
+            vector_core::VectorCore.invite_to_community(&community_id, &invitee_npub).await.map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        refuse_legacy_invite(&community_id)?;
 
-    let my_pk = vector_core::my_public_key().ok_or("Public key not set")?;
+        let my_pk = vector_core::my_public_key().ok_or("Public key not set")?;
 
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
 
-    // Role engine: anyone with CREATE_INVITE may invite (owner is just the top role).
-    if !vector_core::community::service::caller_has_permission(&community, vector_core::community::roles::Permissions::CREATE_INVITE) {
-        return Err("You need the create-invite permission to invite someone".to_string());
-    }
-    // A BANNED npub can't be re-invited: they self-removed and stay out — admins shouldn't be able to
-    // pull them back in. Match the banlist (stored as lowercase hex) against the invitee.
-    let invitee_hex = nostr_sdk::prelude::PublicKey::parse(&invitee_npub).map_err(|_| "invalid npub".to_string())?.to_hex();
-    if vector_core::db::community::get_community_banlist(&community_id)?.iter().any(|b| b == &invitee_hex) {
-        return Err("That member is banned from this community and can't be invited".to_string());
-    }
+        // Role engine: anyone with CREATE_INVITE may invite (owner is just the top role).
+        if !vector_core::community::service::caller_has_permission(&community, vector_core::community::roles::Permissions::CREATE_INVITE) {
+            return Err("You need the create-invite permission to invite someone".to_string());
+        }
+        // A BANNED npub can't be re-invited: they self-removed and stay out — admins shouldn't be able to
+        // pull them back in. Match the banlist (stored as lowercase hex) against the invitee.
+        let invitee_hex = nostr_sdk::prelude::PublicKey::parse(&invitee_npub).map_err(|_| "invalid npub".to_string())?.to_hex();
+        if vector_core::db::community::get_community_banlist(&community_id)?.iter().any(|b| b == &invitee_hex) {
+            return Err("That member is banned from this community and can't be invited".to_string());
+        }
 
-    // The bundle is built from purely local state; bail if the account swapped before
-    // we hand it to the gift-wrap path.
-    if !session.is_valid() {
-        return Err("account changed during invite".to_string());
-    }
+        // The bundle is built from purely local state; bail if the account swapped before
+        // we hand it to the gift-wrap path.
 
-    let rumor = build_invite_rumor(&community, my_pk, now_secs())?;
-    let pending_id = format!("community-invite-{}", community_id);
+        let rumor = build_invite_rumor(&community, my_pk, now_secs())?;
+        let pending_id = format!("community-invite-{}", community_id);
 
-    // self_send=false: the owner already holds the Community; echoing the bundle back
-    // would be a no-op the inbound guard drops anyway, so don't even emit it.
-    let config = SendConfig { self_send: false, ..SendConfig::gui() };
-    let callback: Arc<dyn SendCallback> = Arc::new(NoOpSendCallback);
+        // self_send=false: the owner already holds the Community; echoing the bundle back
+        // would be a no-op the inbound guard drops anyway, so don't even emit it.
+        let config = SendConfig { self_send: false, ..SendConfig::gui() };
+        let callback: Arc<dyn SendCallback> = Arc::new(NoOpSendCallback);
 
-    send_rumor_dm(&invitee_npub, &pending_id, rumor, &config, callback)
-        .await
-        .map(|_| ())
+        send_rumor_dm(&invitee_npub, &pending_id, rumor, &config, callback)
+            .await
+            .map(|_| ())
+    })
+    .await
 }
 
 /// List invites awaiting the user's accept/decline decision.
@@ -3656,80 +3620,83 @@ pub async fn list_community_invites() -> Result<Vec<vector_core::db::community::
 /// Returns `true` if it painted ≥1 message (so the caller can flag the summary `preloaded` and the
 /// frontend opens immediately instead of awaiting the first sync).
 async fn promote_preloaded_page(community: &vector_core::community::Community, page: Vec<nostr_sdk::prelude::Event>) -> bool {
-    use vector_core::community::inbound::IncomingEvent;
-    let Some(channel) = community.channels.first().cloned() else { return false };
-    let channel_id = channel.id.to_hex();
-    let Some(my_pk) = vector_core::my_public_key() else { return false };
-    let session = vector_core::state::SessionGuard::capture();
-    let mut outcomes = {
-        let mut state = vector_core::state::STATE.lock().await;
-        vector_core::community::inbound::process_channel_batch(&mut state, &page, &channel, &my_pk)
-    };
+    vector_core::db::scoped(async move {
+        use vector_core::community::inbound::IncomingEvent;
+        let Some(channel) = community.channels.first().cloned() else { return false };
+        let channel_id = channel.id.to_hex();
+        let Some(my_pk) = vector_core::my_public_key() else { return false };
+        let session = vector_core::state::SessionGuard::capture();
+        let mut outcomes = {
+            let mut state = vector_core::state::STATE.lock().await;
+            vector_core::community::inbound::process_channel_batch(&mut state, &page, &channel, &my_pk)
+        };
 
-    // Resolve each reply's quote BEFORE emitting: the frontend renders the emitted payload,
-    // and a reply whose parent lies outside the rendered window has no other source for the
-    // quote (a parent inside the window is resolved from memory). One query for the page.
-    {
-        let quoted: Vec<&mut vector_core::types::Message> = outcomes
-            .iter_mut()
-            .filter_map(|o| match o {
-                IncomingEvent::NewMessage(m)
-                | IncomingEvent::Updated { message: m, .. }
-                | IncomingEvent::ReactionRemoved { message: m, .. } => Some(m),
-                _ => None,
-            })
-            .collect();
-        let _ = vector_core::db::events::populate_reply_contexts(quoted).await;
-    }
-    let mut painted = 0u32;
-    // Message saves COLLECT into one batched transaction; deletes are flush barriers
-    // (see flush_message_batch).
-    let mut pending: Vec<&vector_core::types::Message> = Vec::new();
-    for outcome in &outcomes {
-        if !session.is_valid() {
-            pending.clear();
-            break;
+        // Resolve each reply's quote BEFORE emitting: the frontend renders the emitted payload,
+        // and a reply whose parent lies outside the rendered window has no other source for the
+        // quote (a parent inside the window is resolved from memory). One query for the page.
+        {
+            let quoted: Vec<&mut vector_core::types::Message> = outcomes
+                .iter_mut()
+                .filter_map(|o| match o {
+                    IncomingEvent::NewMessage(m)
+                    | IncomingEvent::Updated { message: m, .. }
+                    | IncomingEvent::ReactionRemoved { message: m, .. } => Some(m),
+                    _ => None,
+                })
+                .collect();
+            let _ = vector_core::db::events::populate_reply_contexts(quoted).await;
         }
-        match outcome {
-            IncomingEvent::NewMessage(msg) => {
-                pending.push(msg);
-                // Emit so the (optimistic, locked) chat row populates + unlocks NOW — the frontend
-                // learns messages via message_new, so without this the promote is invisible to the UI.
-                vector_core::emit_event(
-                    "message_new",
-                    &serde_json::json!({ "message": msg, "chat_id": &channel_id }),
-                );
-                painted += 1;
+        let mut painted = 0u32;
+        // Message saves COLLECT into one batched transaction; deletes are flush barriers
+        // (see flush_message_batch).
+        let mut pending: Vec<&vector_core::types::Message> = Vec::new();
+        for outcome in &outcomes {
+            if !session.is_valid() {
+                pending.clear();
+                break;
             }
-            IncomingEvent::Updated { target_id, message, edit_event } => {
-                match edit_event.as_deref() {
-                    Some(_) => persist_community_update(&channel_id, message, edit_event.as_deref()).await,
-                    None => pending.push(message),
+            match outcome {
+                IncomingEvent::NewMessage(msg) => {
+                    pending.push(msg);
+                    // Emit so the (optimistic, locked) chat row populates + unlocks NOW — the frontend
+                    // learns messages via message_new, so without this the promote is invisible to the UI.
+                    vector_core::emit_event(
+                        "message_new",
+                        &serde_json::json!({ "message": msg, "chat_id": &channel_id }),
+                    );
+                    painted += 1;
                 }
-                vector_core::emit_event(
-                    "message_update",
-                    &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": &channel_id }),
-                );
+                IncomingEvent::Updated { target_id, message, edit_event } => {
+                    match edit_event.as_deref() {
+                        Some(_) => persist_community_update(&channel_id, message, edit_event.as_deref()).await,
+                        None => pending.push(message),
+                    }
+                    vector_core::emit_event(
+                        "message_update",
+                        &serde_json::json!({ "old_id": target_id, "message": message, "chat_id": &channel_id }),
+                    );
+                }
+                IncomingEvent::Removed { target_id } => {
+                    vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
+                    let _ = crate::db::delete_event(target_id).await;
+                }
+                IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
+                    vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
+                    let _ = crate::db::delete_event(reaction_id).await;
+                    vector_core::emit_event(
+                        "message_update",
+                        &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": &channel_id }),
+                    );
+                }
+                // Presence / membership outcomes are left to the background true-up sync (it re-fetches
+                // the same page and applies them, deduped) — promotion only paints the message content.
+                _ => {}
             }
-            IncomingEvent::Removed { target_id } => {
-                vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
-                let _ = crate::db::delete_event(target_id).await;
-            }
-            IncomingEvent::ReactionRemoved { message_id, reaction_id, message } => {
-                vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
-                let _ = crate::db::delete_event(reaction_id).await;
-                vector_core::emit_event(
-                    "message_update",
-                    &serde_json::json!({ "old_id": message_id, "message": message, "chat_id": &channel_id }),
-                );
-            }
-            // Presence / membership outcomes are left to the background true-up sync (it re-fetches
-            // the same page and applies them, deduped) — promotion only paints the message content.
-            _ => {}
         }
-    }
-    vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
-    painted > 0
+        vector_core::db::events::flush_message_batch(&channel_id, &mut pending, &session).await;
+        painted > 0
+    })
+    .await
 }
 
 /// Accept a parked invite: join as a member, persist, and start receiving. Guards
@@ -3741,91 +3708,87 @@ async fn promote_preloaded_page(community: &vector_core::community::Community, p
 /// them in sync if you reorder here.
 #[tauri::command]
 pub async fn accept_community_invite(community_id: String) -> Result<CommunitySummary, String> {
-    let session = vector_core::state::SessionGuard::capture();
+    vector_core::db::scoped(async move {
 
-    // Peek WITHOUT deleting: accept is fallible (caps, owner/authority collision), and a
-    // rejected accept must leave the invite parked so the user can retry or decline.
-    let bundle_json = vector_core::db::community::get_pending_invite(&community_id)?
-        .ok_or("No pending invite for that Community")?;
+        // Peek WITHOUT deleting: accept is fallible (caps, owner/authority collision), and a
+        // rejected accept must leave the invite parked so the user can retry or decline.
+        let bundle_json = vector_core::db::community::get_pending_invite(&community_id)?
+            .ok_or("No pending invite for that Community")?;
 
-    // Dual-stack: a parked v2 Direct-Invite bundle self-describes (owner_salt +
-    // community_root), so a successful v2 parse routes to the facade accept
-    // (verify + join + subscribe). The v1 parser would misparse it.
-    if vector_core::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json).is_ok() {
-        let summary = vector_core::VectorCore.accept_pending_invite(&community_id).await.map_err(|e| e.to_string())?;
-        let cid = summary
-            .get("community_id")
-            .or_else(|| summary.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(&community_id);
-        let id_bytes = hex_to_id32(cid)?;
-        return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "accepted community not found".to_string());
-    }
-    let invite = CommunityInvite::from_json(&bundle_json)?;
+        // Dual-stack: a parked v2 Direct-Invite bundle self-describes (owner_salt +
+        // community_root), so a successful v2 parse routes to the facade accept
+        // (verify + join + subscribe). The v1 parser would misparse it.
+        if vector_core::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json).is_ok() {
+            let summary = vector_core::VectorCore.accept_pending_invite(&community_id).await.map_err(|e| e.to_string())?;
+            let cid = summary
+                .get("community_id")
+                .or_else(|| summary.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(&community_id);
+            let id_bytes = hex_to_id32(cid)?;
+            return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "accepted community not found".to_string());
+        }
+        let invite = CommunityInvite::from_json(&bundle_json)?;
 
-    // Post-timelock door: a FRESH v1 join must present a migration carrier (then it's
-    // the on-ramp into the v2 twin) or it is refused. Decode-only view — nothing
-    // persists unless the gate passes.
-    let probe_view = vector_core::community::invite::accept_invite(&invite)?;
-    let gate_transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::migration::gate_fresh_v1_join(&gate_transport, &probe_view, now_secs()).await?;
+        // Post-timelock door: a FRESH v1 join must present a migration carrier (then it's
+        // the on-ramp into the v2 twin) or it is refused. Decode-only view — nothing
+        // persists unless the gate passes.
+        let probe_view = vector_core::community::invite::accept_invite(&invite)?;
+        let gate_transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        vector_core::community::migration::gate_fresh_v1_join(&gate_transport, &probe_view, now_secs()).await?;
 
-    // Guarded save (caps + owner/authority-collision checks + its own SessionGuard). On
-    // error the pending row is untouched.
-    let community = vector_core::community::service::accept_invite(&invite)?;
+        // Guarded save (caps + owner/authority-collision checks + its own SessionGuard). On
+        // error the pending row is untouched.
+        let community = vector_core::community::service::accept_invite(&invite)?;
 
-    // Don't clear the parked row into a swapped-in account's DB.
-    if !session.is_valid() {
-        return Err("account changed during invite accept".to_string());
-    }
-    // Joined — clear the parked row + register the channel chat(s) locally. accept_invite already
-    // installed the bundle's keys, so the community is read/writeable now; everything below is relay-bound
-    // PROPAGATION the user shouldn't wait on (where the join latency lived — esp. the 12s presence timeout).
-    // Return the summary the instant local state is ready; fan the rest out in the background.
-    vector_core::db::community::delete_pending_invite(&community_id)?;
-    sync_community_chats(&community).await;
+        // Joined — clear the parked row + register the channel chat(s) locally. accept_invite already
+        // installed the bundle's keys, so the community is read/writeable now; everything below is relay-bound
+        // PROPAGATION the user shouldn't wait on (where the join latency lived — esp. the 12s presence timeout).
+        // Return the summary the instant local state is ready; fan the rest out in the background.
+        vector_core::db::community::delete_pending_invite(&community_id)?;
+        sync_community_chats(&community).await;
 
-    // Promote a warmed preload: if we fetched this community's first page ahead of Join (invite
-    // receive / public preview), ingest it NOW so the chat opens populated instead of waiting on the
-    // first sync. The background sync still runs and trues it up; dedup makes the re-fetch harmless.
-    let preloaded = match vector_core::community::cache::take_ready_preload(&community_id) {
-        Some(page) => promote_preloaded_page(&community, page).await,
-        None => false,
-    };
+        // Promote a warmed preload: if we fetched this community's first page ahead of Join (invite
+        // receive / public preview), ingest it NOW so the chat opens populated instead of waiting on the
+        // first sync. The background sync still runs and trues it up; dedup makes the re-fetch harmless.
+        let preloaded = match vector_core::community::cache::take_ready_preload(&community_id) {
+            Some(page) => promote_preloaded_page(&community, page).await,
+            None => false,
+        };
 
-    // Local-first self-join: build our join presence, record the "X joined" system event immediately
-    // (memory→DB + UI), then publish it in the background. The relay echo dedups by this inner's id, so
-    // our own join shows instantly without waiting on (or depending on) the echo — same as an outgoing
-    // message. Without this a fresh join opens to an empty timeline until the relay round-trips the echo.
-    if let Some(primary) = community.channels.first() {
-        if let Ok(inner) = vector_core::community::service::build_presence(primary, true, None).await {
-            if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
-                // Presence signing can be slow (bunker) — re-validate before the local write.
-                if session.is_valid() {
+        // Local-first self-join: build our join presence, record the "X joined" system event immediately
+        // (memory→DB + UI), then publish it in the background. The relay echo dedups by this inner's id, so
+        // our own join shows instantly without waiting on (or depending on) the echo — same as an outgoing
+        // message. Without this a fresh join opens to an empty timeline until the relay round-trips the echo.
+        if let Some(primary) = community.channels.first() {
+            if let Ok(inner) = vector_core::community::service::build_presence(primary, true, None).await {
+                if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+                    // Presence signing can be slow (bunker) — re-validate before the local write.
                     apply_community_presence(
                         &primary.id.to_hex(), &my_npub, true,
                         &inner.id.to_hex(), inner.created_at.as_secs(), None, None,
                     ).await;
                 }
+                let community_pub = community.clone();
+                let primary_pub = primary.clone();
+                vector_core::db::spawn_bound(async move {
+                    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                    let _ = vector_core::community::service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
+                });
             }
-            let community_pub = community.clone();
-            let primary_pub = primary.clone();
-            vector_core::db::spawn_bound(async move {
-                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-                let _ = vector_core::community::service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
-            });
         }
-    }
 
-    // Background: record the cross-device membership (so our other devices auto-join) + (re)subscribe for
-    // realtime. Bound, so a mid-flight swap leaves A's join recorded against A.
-    let community_bg = community.clone();
-    vector_core::db::spawn_bound(async move {
-        vector_core::community::list::add_membership(&community_bg);
-        crate::services::subscription_handler::refresh_community_subscription().await;
-    });
+        // Background: record the cross-device membership (so our other devices auto-join) + (re)subscribe for
+        // realtime. Bound, so a mid-flight swap leaves A's join recorded against A.
+        let community_bg = community.clone();
+        vector_core::db::spawn_bound(async move {
+            vector_core::community::list::add_membership(&community_bg);
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        });
 
-    Ok(CommunitySummary { preloaded, ..summarize(&community) })
+        Ok(CommunitySummary { preloaded, ..summarize(&community) })
+    })
+    .await
 }
 
 /// Decline a parked invite. Drops it locally, writes a decline tombstone to the synced Community List
@@ -3866,39 +3829,37 @@ pub async fn update_community_metadata(
     name: Option<String>,
     description: Option<String>,
 ) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    if is_v2_community(&community_id) {
-        vector_core::VectorCore
-            .edit_community_metadata(&community_id, name.as_deref(), description.as_deref())
-            .await
-            .map_err(|e| e.to_string())?;
-        if session.is_valid() {
+    vector_core::db::scoped(async move {
+        let session = vector_core::state::SessionGuard::capture();
+        let id_bytes = hex_to_id32(&community_id)?;
+        if is_v2_community(&community_id) {
+            vector_core::VectorCore
+                .edit_community_metadata(&community_id, name.as_deref(), description.as_deref())
+                .await
+                .map_err(|e| e.to_string())?;
             if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
                 vector_core::VectorCore.register_v2_chats(&c, &session).await;
             }
+            return Ok(());
         }
-        return Ok(());
-    }
-    let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    if let Some(n) = name {
-        community.name = n;
-    }
-    if let Some(d) = description {
-        // Empty string clears the description.
-        community.description = if d.is_empty() { None } else { Some(d) };
-    }
-    if !session.is_valid() {
-        return Err("account changed during metadata update".to_string());
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    service::republish_community_metadata(&transport, &community).await?;
-    sync_community_chats(&community).await;
-    // the name lives in the synced list's `current` snapshot — refresh it so other devices show the
-    // new name on rehydrate without waiting to fold the GroupRoot (no-op if unchanged).
-    vector_core::community::list::refresh_membership_current(&community);
-    Ok(())
+        let mut community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        if let Some(n) = name {
+            community.name = n;
+        }
+        if let Some(d) = description {
+            // Empty string clears the description.
+            community.description = if d.is_empty() { None } else { Some(d) };
+        }
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        service::republish_community_metadata(&transport, &community).await?;
+        sync_community_chats(&community).await;
+        // the name lives in the synced list's `current` snapshot — refresh it so other devices show the
+        // new name on rehydrate without waiting to fold the GroupRoot (no-op if unchanged).
+        vector_core::community::list::refresh_membership_current(&community);
+        Ok(())
+    })
+    .await
 }
 
 /// Rename a channel (requires manage-channels authority) and republish its ChannelMetadata so members
@@ -3909,41 +3870,39 @@ pub async fn rename_community_channel(
     channel_id: String,
     name: String,
 ) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    let ch_bytes = hex_to_id32(&channel_id)?;
-    let ch_id = vector_core::community::ChannelId(ch_bytes);
-    if is_v2_community(&community_id) {
-        let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
-            .map_err(|e| e)?
-            .ok_or("Community not found")?;
-        let held = community.channel(&ch_id).ok_or("Channel not found in Community")?;
-        // Rebuild from the held document — a rename must never strip vsk-2
-        // fields it didn't touch (CORD-02 §6).
-        let mut meta = held.metadata();
-        meta.name = name.clone();
-        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch_id, &meta).await?;
-        if session.is_valid() {
+    vector_core::db::scoped(async move {
+        let session = vector_core::state::SessionGuard::capture();
+        let id_bytes = hex_to_id32(&community_id)?;
+        let ch_bytes = hex_to_id32(&channel_id)?;
+        let ch_id = vector_core::community::ChannelId(ch_bytes);
+        if is_v2_community(&community_id) {
+            let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
+                .map_err(|e| e)?
+                .ok_or("Community not found")?;
+            let held = community.channel(&ch_id).ok_or("Channel not found in Community")?;
+            // Rebuild from the held document — a rename must never strip vsk-2
+            // fields it didn't touch (CORD-02 §6).
+            let mut meta = held.metadata();
+            meta.name = name.clone();
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            vector_core::community::v2::service::edit_channel_metadata(&transport, &community, &ch_id, &meta).await?;
             if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&CommunityId(id_bytes)) {
                 vector_core::VectorCore.register_v2_chats(&c, &session).await;
             }
+            return Ok(());
         }
-        return Ok(());
-    }
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    if !session.is_valid() {
-        return Err("account changed during channel rename".to_string());
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    service::republish_channel_metadata(&transport, &community, &ch_id, &name).await?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community);
-    sync_community_chats(&community).await;
-    // channel names ride the list's `current` snapshot too — refresh so a rehydrating device shows
-    // the renamed channel (no-op if unchanged).
-    vector_core::community::list::refresh_membership_current(&community);
-    Ok(())
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        service::republish_channel_metadata(&transport, &community, &ch_id, &name).await?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?.unwrap_or(community);
+        sync_community_chats(&community).await;
+        // channel names ride the list's `current` snapshot too — refresh so a rehydrating device shows
+        // the renamed channel (no-op if unchanged).
+        vector_core::community::list::refresh_membership_current(&community);
+        Ok(())
+    })
+    .await
 }
 
 /// Resolve a Community's logo (or banner) to a local cached file path: download the
@@ -4040,152 +3999,152 @@ pub async fn set_community_image(
     filepath: String,
     is_banner: bool,
 ) -> Result<(), String> {
-    use vector_core::community::CommunityImage;
+    vector_core::db::scoped(async move {
+        use vector_core::community::CommunityImage;
 
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    // Dual-stack: existence-check under the community's own protocol BEFORE the
-    // expensive read + encrypt + upload; the v1 loader misreads a v2 row.
-    let v2 = if is_v2_community(&community_id) {
-        Some(
-            vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
-                .ok_or("Community not found")?,
-        )
-    } else {
-        None
-    };
-    let v1 = if v2.is_none() {
-        Some(
-            vector_core::db::community::load_community(&CommunityId(id_bytes))?
-                .ok_or("Community not found")?,
-        )
-    } else {
-        None
-    };
-
-    // Read the picked file. On Android the file dialog returns a content:// URI that std::fs can't
-    // open, so route it through the JNI content-resolver (the same path upload_avatar uses); desktop
-    // reads the real path directly. Without this, picking an image on Android failed instantly at the
-    // read ("read image: ...") and surfaced as the generic "Failed to update the image" toast — for
-    // the owner too, not just admins.
-    let (raw_bytes, _raw_ext): (Vec<u8>, String) = {
-        #[cfg(not(target_os = "android"))]
-        {
-            let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
-            let ext = std::path::Path::new(&filepath)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("png")
-                .to_lowercase();
-            (bytes, ext)
-        }
-        #[cfg(target_os = "android")]
-        {
-            let af = crate::android::filesystem::read_android_uri(filepath.clone())?;
-            ((*af.bytes).clone(), af.extension)
-        }
-    };
-
-    // Strip metadata + resize + cap before encrypting (parity with profile images).
-    // Members, and anyone the community key reaches, must not receive the owner's
-    // camera EXIF; the re-encode also shrinks the blob every member downloads.
-    let prepared = crate::shared::image::prepare_upload_image(
-        &raw_bytes,
-        if is_banner {
-            crate::shared::image::UploadImageKind::Banner
+        let session = vector_core::state::SessionGuard::capture();
+        let id_bytes = hex_to_id32(&community_id)?;
+        // Dual-stack: existence-check under the community's own protocol BEFORE the
+        // expensive read + encrypt + upload; the v1 loader misreads a v2 row.
+        let v2 = if is_v2_community(&community_id) {
+            Some(
+                vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
+                    .ok_or("Community not found")?,
+            )
         } else {
-            crate::shared::image::UploadImageKind::Avatar
-        },
-    )?;
-    let bytes = prepared.bytes;
-    let ext = prepared.extension.to_string();
-
-    let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
-
-    // Encrypt with a fresh random key+nonce (same as file attachments); the key rides in
-    // the ServerRoot-sealed GroupRoot, so only members can decrypt the blob.
-    let params = vector_core::crypto::generate_encryption_params();
-    let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
-
-    let _client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
-    let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
-    let servers = vector_core::blossom_servers::compute_enabled_servers();
-    if servers.is_empty() {
-        return Err("No Blossom servers configured.".to_string());
-    }
-    // Emit upload progress so the avatar shows a ring (parity with profile avatars) instead of freezing
-    // until the new icon appears. `is_encrypted = true` routes the encrypted blob to servers that accept
-    // encrypted types (the same ranking file attachments use).
-    let cid_for_progress = community_id.clone();
-    let progress_cb: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, _bytes| {
-        vector_core::emit_event(
-            "community_image_upload_progress",
-            &serde_json::json!({ "community_id": cid_for_progress, "progress": pct.unwrap_or(0), "is_banner": is_banner }),
-        );
-        Ok(())
-    });
-    let url = vector_core::blossom::upload_blob_with_progress_and_failover(
-        signer,
-        servers,
-        std::sync::Arc::new(encrypted),
-        Some("application/octet-stream"),
-        true,
-        progress_cb,
-        None,
-        None,
-        None,
-    )
-    .await?;
-
-    if !session.is_valid() {
-        return Err("account changed during image upload".to_string());
-    }
-
-    // v2: the image is a field of the vsk-0 metadata document. Overlay onto the
-    // FULL held document (`metadata()`) so setting one image can't wipe the
-    // other fields, then persist locally for instant display — the control-fold
-    // echo re-applies the same head idempotently.
-    if let Some(v2) = v2 {
-        let mut extra = serde_json::Map::new();
-        extra.insert("ext".into(), serde_json::Value::String(ext.clone()));
-        let img_ref = vector_core::community::v2::control::ImageRef {
-            url: url.clone(),
-            key: params.key.clone(),
-            nonce: params.nonce.clone(),
-            hash: plaintext_hash.clone(),
-            extra,
+            None
         };
-        let mut meta = v2.metadata();
-        if is_banner {
-            meta.banner = Some(img_ref.clone());
+        let v1 = if v2.is_none() {
+            Some(
+                vector_core::db::community::load_community(&CommunityId(id_bytes))?
+                    .ok_or("Community not found")?,
+            )
         } else {
-            meta.icon = Some(img_ref.clone());
+            None
+        };
+
+        // Read the picked file. On Android the file dialog returns a content:// URI that std::fs can't
+        // open, so route it through the JNI content-resolver (the same path upload_avatar uses); desktop
+        // reads the real path directly. Without this, picking an image on Android failed instantly at the
+        // read ("read image: ...") and surfaced as the generic "Failed to update the image" toast — for
+        // the owner too, not just admins.
+        let (raw_bytes, _raw_ext): (Vec<u8>, String) = {
+            #[cfg(not(target_os = "android"))]
+            {
+                let bytes = std::fs::read(&filepath).map_err(|e| format!("read image: {e}"))?;
+                let ext = std::path::Path::new(&filepath)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("png")
+                    .to_lowercase();
+                (bytes, ext)
+            }
+            #[cfg(target_os = "android")]
+            {
+                let af = crate::android::filesystem::read_android_uri(filepath.clone())?;
+                ((*af.bytes).clone(), af.extension)
+            }
+        };
+
+        // Strip metadata + resize + cap before encrypting (parity with profile images).
+        // Members, and anyone the community key reaches, must not receive the owner's
+        // camera EXIF; the re-encode also shrinks the blob every member downloads.
+        let prepared = crate::shared::image::prepare_upload_image(
+            &raw_bytes,
+            if is_banner {
+                crate::shared::image::UploadImageKind::Banner
+            } else {
+                crate::shared::image::UploadImageKind::Avatar
+            },
+        )?;
+        let bytes = prepared.bytes;
+        let ext = prepared.extension.to_string();
+
+        let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
+
+        // Encrypt with a fresh random key+nonce (same as file attachments); the key rides in
+        // the ServerRoot-sealed GroupRoot, so only members can decrypt the blob.
+        let params = vector_core::crypto::generate_encryption_params();
+        let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
+
+        let _client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
+        let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
+        let servers = vector_core::blossom_servers::compute_enabled_servers();
+        if servers.is_empty() {
+            return Err("No Blossom servers configured.".to_string());
+        }
+        // Emit upload progress so the avatar shows a ring (parity with profile avatars) instead of freezing
+        // until the new icon appears. `is_encrypted = true` routes the encrypted blob to servers that accept
+        // encrypted types (the same ranking file attachments use).
+        let cid_for_progress = community_id.clone();
+        let progress_cb: vector_core::blossom::ProgressCallback = std::sync::Arc::new(move |pct, _bytes| {
+            vector_core::emit_event(
+                "community_image_upload_progress",
+                &serde_json::json!({ "community_id": cid_for_progress, "progress": pct.unwrap_or(0), "is_banner": is_banner }),
+            );
+            Ok(())
+        });
+        let url = vector_core::blossom::upload_blob_with_progress_and_failover(
+            signer,
+            servers,
+            std::sync::Arc::new(encrypted),
+            Some("application/octet-stream"),
+            true,
+            progress_cb,
+            None,
+            None,
+            None,
+        )
+        .await?;
+
+
+        // v2: the image is a field of the vsk-0 metadata document. Overlay onto the
+        // FULL held document (`metadata()`) so setting one image can't wipe the
+        // other fields, then persist locally for instant display — the control-fold
+        // echo re-applies the same head idempotently.
+        if let Some(v2) = v2 {
+            let mut extra = serde_json::Map::new();
+            extra.insert("ext".into(), serde_json::Value::String(ext.clone()));
+            let img_ref = vector_core::community::v2::control::ImageRef {
+                url: url.clone(),
+                key: params.key.clone(),
+                nonce: params.nonce.clone(),
+                hash: plaintext_hash.clone(),
+                extra,
+            };
+            let mut meta = v2.metadata();
+            if is_banner {
+                meta.banner = Some(img_ref.clone());
+            } else {
+                meta.icon = Some(img_ref.clone());
+            }
+            let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+            vector_core::community::v2::service::edit_community_metadata(&transport, &v2, &meta).await?;
+            if let Some(updated) = vector_core::community::v2::service::persist_community_image(
+                v2.id(),
+                img_ref,
+                is_banner,
+            )
+            .await
+            {
+                vector_core::VectorCore.register_v2_chats(&updated, &session).await;
+            }
+            return Ok(());
+        }
+
+        let mut community = v1.expect("resolved above when not v2");
+        let image = CommunityImage { url, key: params.key, nonce: params.nonce, hash: plaintext_hash, ext };
+        if is_banner {
+            community.banner = Some(image);
+        } else {
+            community.icon = Some(image);
         }
         let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-        vector_core::community::v2::service::edit_community_metadata(&transport, &v2, &meta).await?;
-        if let Some(updated) = vector_core::community::v2::service::persist_community_image(
-            v2.id(),
-            img_ref,
-            is_banner,
-        )
-        .await
-        {
-            vector_core::VectorCore.register_v2_chats(&updated, &session).await;
-        }
-        return Ok(());
-    }
-
-    let mut community = v1.expect("resolved above when not v2");
-    let image = CommunityImage { url, key: params.key, nonce: params.nonce, hash: plaintext_hash, ext };
-    if is_banner {
-        community.banner = Some(image);
-    } else {
-        community.icon = Some(image);
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    service::republish_community_metadata(&transport, &community).await?;
-    sync_community_chats(&community).await;
-    Ok(())
+        service::republish_community_metadata(&transport, &community).await?;
+        sync_community_chats(&community).await;
+        Ok(())
+    })
+    .await
 }
 
 // ============================================================================
@@ -4200,27 +4159,26 @@ pub async fn create_public_invite(
     expires_in_secs: Option<u64>,
     label: Option<String>,
 ) -> Result<String, String> {
-    // v2 mints a naddr#fragment link. The facade takes an ABSOLUTE ms deadline;
-    // `expires_in_secs` is a duration, so resolve it against now before converting.
-    if is_v2_community(&community_id) {
-        let expires_at_ms = expires_in_secs.map(|secs| now_secs().saturating_add(secs).saturating_mul(1000));
-        return vector_core::VectorCore
-            .create_public_invite(&community_id, expires_at_ms, label)
-            .await
-            .map_err(|e| e.to_string());
-    }
-    refuse_legacy_invite(&community_id)?;
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    if !session.is_valid() {
-        return Err("account changed during invite creation".to_string());
-    }
-    let expires_at = expires_in_secs.map(|secs| now_secs().saturating_add(secs));
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let (_token, url) = service::create_public_invite(&transport, &community, expires_at, label).await?;
-    Ok(url)
+    vector_core::db::scoped(async move {
+        // v2 mints a naddr#fragment link. The facade takes an ABSOLUTE ms deadline;
+        // `expires_in_secs` is a duration, so resolve it against now before converting.
+        if is_v2_community(&community_id) {
+            let expires_at_ms = expires_in_secs.map(|secs| now_secs().saturating_add(secs).saturating_mul(1000));
+            return vector_core::VectorCore
+                .create_public_invite(&community_id, expires_at_ms, label)
+                .await
+                .map_err(|e| e.to_string());
+        }
+        refuse_legacy_invite(&community_id)?;
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let expires_at = expires_in_secs.map(|secs| now_secs().saturating_add(secs));
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let (_token, url) = service::create_public_invite(&transport, &community, expires_at, label).await?;
+        Ok(url)
+    })
+    .await
 }
 
 /// Preview payload for the GUI: the bundle's public preview plus the community id, so a
@@ -4308,103 +4266,97 @@ pub async fn preview_public_invite(url: String) -> Result<PublicInvitePreviewInf
 /// guarded), and start receiving.
 #[tauri::command]
 pub async fn accept_public_invite(url: String) -> Result<CommunitySummary, String> {
-    let session = vector_core::state::SessionGuard::capture();
-    // Dual-stack: a v2 link (`…/invite/<naddr>#<fragment>`) routes through the
-    // facade join, which verifies the owner root, persists, registers chats,
-    // publishes the cross-device join, and starts the v2 planes.
-    if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
-        let summary = vector_core::VectorCore.join_community(&url).await.map_err(|e| e.to_string())?;
-        let cid = summary
-            .get("community_id")
-            .or_else(|| summary.get("id"))
-            .and_then(|v| v.as_str())
-            .ok_or("v2 join returned no community id")?;
-        let id_bytes = hex_to_id32(cid)?;
-        return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "joined community not found".to_string());
-    }
-    let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
-    // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp)
-    // or it is refused (see accept_community_invite).
-    let probe_view = vector_core::community::invite::accept_invite(&bundle.join)?;
-    vector_core::community::migration::gate_fresh_v1_join(&transport, &probe_view, now_secs()).await?;
-    if !session.is_valid() {
-        return Err("account changed during invite accept".to_string());
-    }
-    let community = service::accept_public_invite(&bundle, now_secs())?;
-    if !session.is_valid() {
-        return Err("account changed during invite accept".to_string());
-    }
-    // Open NOW, gate in the BACKGROUND (mirrors the private accept). Register the chat + promote the
-    // warmed page so the chat opens populated instantly; the control gate (rotation follow + banlist /
-    // read-cut) runs in the background first-sync (fired by the frontend) AND in the membership task
-    // below, tearing the chat down if this link's holder turns out to be banned/removed. The page
-    // shown is content the link's own keys already decrypt, so the brief pre-teardown window discloses
-    // nothing new — the rekey + teardown cut all future access.
-    sync_community_chats(&community).await;
-    let preloaded = match vector_core::community::cache::take_ready_preload(&community.id.to_hex()) {
-        Some(page) => promote_preloaded_page(&community, page).await,
-        None => false,
-    };
+    vector_core::db::scoped(async move {
+        // Dual-stack: a v2 link (`…/invite/<naddr>#<fragment>`) routes through the
+        // facade join, which verifies the owner root, persists, registers chats,
+        // publishes the cross-device join, and starts the v2 planes.
+        if vector_core::community::v2::invite::parse_invite_link(&url).is_ok() {
+            let summary = vector_core::VectorCore.join_community(&url).await.map_err(|e| e.to_string())?;
+            let cid = summary
+                .get("community_id")
+                .or_else(|| summary.get("id"))
+                .and_then(|v| v.as_str())
+                .ok_or("v2 join returned no community id")?;
+            let id_bytes = hex_to_id32(cid)?;
+            return summarize_any(&CommunityId(id_bytes)).ok_or_else(|| "joined community not found".to_string());
+        }
+        let (relays, token) = parse_invite_url(&url).map_err(|e| e.to_string())?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        let bundle = service::fetch_public_invite(&transport, &relays, &token).await?;
+        // Post-timelock door: a FRESH v1 join needs a migration carrier (the v2 on-ramp)
+        // or it is refused (see accept_community_invite).
+        let probe_view = vector_core::community::invite::accept_invite(&bundle.join)?;
+        vector_core::community::migration::gate_fresh_v1_join(&transport, &probe_view, now_secs()).await?;
+        let community = service::accept_public_invite(&bundle, now_secs())?;
+        // Open NOW, gate in the BACKGROUND (mirrors the private accept). Register the chat + promote the
+        // warmed page so the chat opens populated instantly; the control gate (rotation follow + banlist /
+        // read-cut) runs in the background first-sync (fired by the frontend) AND in the membership task
+        // below, tearing the chat down if this link's holder turns out to be banned/removed. The page
+        // shown is content the link's own keys already decrypt, so the brief pre-teardown window discloses
+        // nothing new — the rekey + teardown cut all future access.
+        sync_community_chats(&community).await;
+        let preloaded = match vector_core::community::cache::take_ready_preload(&community.id.to_hex()) {
+            Some(page) => promote_preloaded_page(&community, page).await,
+            None => false,
+        };
 
-    // Local-first join presence (carry the link's attribution), published in the background — so the
-    // "X joined" line shows instantly without waiting on the 12s presence publish.
-    let attribution = bundle.creator_npub.clone().map(|by| (by, bundle.label.clone()));
-    if let Some(primary) = community.channels.first() {
-        if let Ok(inner) = service::build_presence(primary, true, attribution.clone()).await {
-            if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
-                let (by, label) = match &attribution {
-                    Some((b, l)) => (Some(b.as_str()), l.as_deref()),
-                    None => (None, None),
-                };
-                // Presence signing can be slow (bunker) — re-validate before the local write.
-                if session.is_valid() {
+        // Local-first join presence (carry the link's attribution), published in the background — so the
+        // "X joined" line shows instantly without waiting on the 12s presence publish.
+        let attribution = bundle.creator_npub.clone().map(|by| (by, bundle.label.clone()));
+        if let Some(primary) = community.channels.first() {
+            if let Ok(inner) = service::build_presence(primary, true, attribution.clone()).await {
+                if let Some(my_npub) = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+                    let (by, label) = match &attribution {
+                        Some((b, l)) => (Some(b.as_str()), l.as_deref()),
+                        None => (None, None),
+                    };
+                    // Presence signing can be slow (bunker) — re-validate before the local write.
                     apply_community_presence(
                         &primary.id.to_hex(), &my_npub, true,
                         &inner.id.to_hex(), inner.created_at.as_secs(), by, label,
                     ).await;
                 }
+                let community_pub = community.clone();
+                let primary_pub = primary.clone();
+                vector_core::db::spawn_bound(async move {
+                    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+                    let _ = service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
+                });
             }
-            let community_pub = community.clone();
-            let primary_pub = primary.clone();
-            vector_core::db::spawn_bound(async move {
-                let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-                let _ = service::publish_presence_event(&transport, &community_pub, &primary_pub, &inner).await;
-            });
         }
-    }
 
-    // Background: follow any rotation the link predates (so membership records CURRENT keys; an
-    // excluding rotation = removal → teardown), then record cross-device membership + (re)subscribe.
-    let community_bg = community.clone();
-    vector_core::db::spawn_bound(async move {
-        let bt = LiveTransport::with_timeout(Duration::from_secs(20));
-        if let Ok(c) = service::catch_up_server_root(&bt, &community_bg).await {
-            if c.removed {
+        // Background: follow any rotation the link predates (so membership records CURRENT keys; an
+        // excluding rotation = removal → teardown), then record cross-device membership + (re)subscribe.
+        let community_bg = community.clone();
+        vector_core::db::spawn_bound(async move {
+            let bt = LiveTransport::with_timeout(Duration::from_secs(20));
+            if let Ok(c) = service::catch_up_server_root(&bt, &community_bg).await {
+                if c.removed {
+                    self_remove_from_community(&community_bg.id.to_hex(), false).await;
+                    return;
+                }
+            }
+            let community_bg = vector_core::db::community::load_community(&community_bg.id)
+                .ok()
+                .flatten()
+                .unwrap_or(community_bg);
+            // Public bans mint no rekey — fold control + check the banlist HERE too (not only the
+            // frontend-fired first sync), so a banned link-holder tears down even if that sync never runs.
+            let _ = service::fetch_and_apply_control(&bt, &community_bg).await;
+            let community_bg = vector_core::db::community::load_community(&community_bg.id)
+                .ok()
+                .flatten()
+                .unwrap_or(community_bg);
+            if service::am_i_banned(&community_bg) {
                 self_remove_from_community(&community_bg.id.to_hex(), false).await;
                 return;
             }
-        }
-        let community_bg = vector_core::db::community::load_community(&community_bg.id)
-            .ok()
-            .flatten()
-            .unwrap_or(community_bg);
-        // Public bans mint no rekey — fold control + check the banlist HERE too (not only the
-        // frontend-fired first sync), so a banned link-holder tears down even if that sync never runs.
-        let _ = service::fetch_and_apply_control(&bt, &community_bg).await;
-        let community_bg = vector_core::db::community::load_community(&community_bg.id)
-            .ok()
-            .flatten()
-            .unwrap_or(community_bg);
-        if service::am_i_banned(&community_bg) {
-            self_remove_from_community(&community_bg.id.to_hex(), false).await;
-            return;
-        }
-        vector_core::community::list::add_membership(&community_bg);
-        crate::services::subscription_handler::refresh_community_subscription().await;
-    });
-    Ok(CommunitySummary { preloaded, ..summarize(&community) })
+            vector_core::community::list::add_membership(&community_bg);
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        });
+        Ok(CommunitySummary { preloaded, ..summarize(&community) })
+    })
+    .await
 }
 
 /// List the active public-invite links the user has minted for a Community.
@@ -4419,26 +4371,23 @@ pub async fn list_public_invites(
 /// token locally. `token` is the 64-char hex token (from `list_public_invites`).
 #[tauri::command]
 pub async fn revoke_public_invite(community_id: String, token: String) -> Result<(), String> {
-    if is_v2_community(&community_id) {
-        return vector_core::VectorCore.revoke_public_invite(&community_id, &token).await.map_err(|e| e.to_string());
-    }
-    let session = vector_core::state::SessionGuard::capture();
-    let id_bytes = hex_to_id32(&community_id)?;
-    let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
-        .ok_or("Community not found")?;
-    let token_bytes = hex_to_id32(&token)?;
-    if !session.is_valid() {
-        return Err("account changed during invite revoke".to_string());
-    }
-    let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    service::revoke_public_invite(&transport, &community, &token_bytes).await?;
-    // Privatize re-founds (advances the server-root + every channel epoch), so OUR realtime sub is now
-    // pinned to the OLD pseudonyms — rebuild it (if still our account) so live delivery resumes at the new
-    // epoch immediately, instead of only on the next sync.
-    if session.is_valid() {
+    vector_core::db::scoped(async move {
+        if is_v2_community(&community_id) {
+            return vector_core::VectorCore.revoke_public_invite(&community_id, &token).await.map_err(|e| e.to_string());
+        }
+        let id_bytes = hex_to_id32(&community_id)?;
+        let community = vector_core::db::community::load_community(&CommunityId(id_bytes))?
+            .ok_or("Community not found")?;
+        let token_bytes = hex_to_id32(&token)?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(12));
+        service::revoke_public_invite(&transport, &community, &token_bytes).await?;
+        // Privatize re-founds (advances the server-root + every channel epoch), so OUR realtime sub is now
+        // pinned to the OLD pseudonyms — rebuild it (if still our account) so live delivery resumes at the new
+        // epoch immediately, instead of only on the next sync.
         crate::services::subscription_handler::refresh_community_subscription().await;
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Current Unix time in seconds.

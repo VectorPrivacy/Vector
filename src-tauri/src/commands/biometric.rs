@@ -160,46 +160,46 @@ pub async fn biometric_status<R: Runtime>(_handle: AppHandle<R>) -> Result<Biome
 async fn generate_and_wrap(
     npub: &str,
 ) -> Result<(zeroize::Zeroizing<String>, String, [u8; 32]), String> {
-    use rand::RngCore;
-    use zeroize::{Zeroize, Zeroizing};
+    vector_core::db::scoped(async move {
+        use rand::RngCore;
+        use zeroize::{Zeroize, Zeroizing};
 
-    if crate::commands::encryption::MIGRATION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire) {
-        return Err("An encryption migration is in progress, try again in a moment".to_string());
-    }
+        if crate::commands::encryption::MIGRATION_IN_PROGRESS.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("An encryption migration is in progress, try again in a moment".to_string());
+        }
 
-    let mut raw = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut raw);
-    let secret = Zeroizing::new(crate::util::bytes_to_hex_32(&raw));
-    raw.zeroize();
+        let mut raw = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut raw);
+        let secret = Zeroizing::new(crate::util::bytes_to_hex_32(&raw));
+        raw.zeroize();
 
-    // Derive the vault key NOW and wrap it FIRST, so the wrap exists before
-    // any store gets locked to this credential. The caller gets the key back
-    // rather than re-deriving it.
-    let key = crate::crypto::hash_pass((*secret).clone()).await;
+        // Derive the vault key NOW and wrap it FIRST, so the wrap exists before
+        // any store gets locked to this credential. The caller gets the key back
+        // rather than re-deriving it.
+        let key = crate::crypto::hash_pass((*secret).clone()).await;
 
-    let session = vector_core::state::SessionGuard::capture();
-    let alias = keystore_alias(npub);
+        let session = vector_core::state::SessionGuard::capture();
+        let alias = keystore_alias(npub);
 
-    let wrapped = tokio::task::spawn_blocking(move || {
-        let mut k = key;
-        let res = crate::android::biometric::enroll_wrap(&alias, &k);
-        k.zeroize();
-        res
+        let wrapped = tokio::task::spawn_blocking(move || {
+            let mut k = key;
+            let res = crate::android::biometric::enroll_wrap(&alias, &k);
+            k.zeroize();
+            res
+        })
+        .await
+        .map_err(|e| format!("join error: {:?}", e))?
+        .map_err(|e| match e {
+            crate::android::biometric::BiometricError::Cancelled => "BIOMETRIC_CANCELLED".to_string(),
+            crate::android::biometric::BiometricError::Invalidated => {
+                "Biometric hardware rejected the key, try again".to_string()
+            }
+            crate::android::biometric::BiometricError::Other(msg) => msg,
+        })?;
+
+        Ok((secret, wrapped, key))
     })
     .await
-    .map_err(|e| format!("join error: {:?}", e))?
-    .map_err(|e| match e {
-        crate::android::biometric::BiometricError::Cancelled => "BIOMETRIC_CANCELLED".to_string(),
-        crate::android::biometric::BiometricError::Invalidated => {
-            "Biometric hardware rejected the key, try again".to_string()
-        }
-        crate::android::biometric::BiometricError::Other(msg) => msg,
-    })?;
-
-    if !session.is_valid() {
-        return Err("Session changed during setup".to_string());
-    }
-    Ok((secret, wrapped, key))
 }
 
 /// New-account onboarding: encrypt with a generated credential unlocked

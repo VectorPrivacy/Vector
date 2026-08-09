@@ -175,57 +175,55 @@ fn generate_pack_identifier() -> String {
 pub async fn emoji_pack_create(
     input: EmojiPackCreateInput,
 ) -> Result<emoji_packs::EmojiPack, String> {
-    // Entry-level guard: catches a swap that landed between IPC dispatch
-    // and command execution. publish_pack re-checks before persisting.
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("Account swap in progress.".to_string());
-    }
+    vector_core::db::scoped(async move {
+        // Entry-level guard: catches a swap that landed between IPC dispatch
+        // and command execution. publish_pack re-checks before persisting.
 
-    let identifier = input.identifier
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(generate_pack_identifier);
+        let identifier = input.identifier
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(generate_pack_identifier);
 
-    let emojis: Vec<emoji_packs::PackEmoji> = input.emojis.into_iter()
-        .filter(|e| !e.shortcode.trim().is_empty() && !e.url.trim().is_empty())
-        .map(|e| emoji_packs::PackEmoji {
-            shortcode: e.shortcode.trim().to_string(),
-            url: e.url.trim().to_string(),
-            sha256: None,
-        })
-        .collect();
+        let emojis: Vec<emoji_packs::PackEmoji> = input.emojis.into_iter()
+            .filter(|e| !e.shortcode.trim().is_empty() && !e.url.trim().is_empty())
+            .map(|e| emoji_packs::PackEmoji {
+                shortcode: e.shortcode.trim().to_string(),
+                url: e.url.trim().to_string(),
+                sha256: None,
+            })
+            .collect();
 
-    if emojis.is_empty() {
-        return Err("A pack needs at least one emoji.".to_string());
-    }
+        if emojis.is_empty() {
+            return Err("A pack needs at least one emoji.".to_string());
+        }
 
-    // `pubkey` / `id` get overwritten by `publish_pack` based on the
-    // active session; we just need any valid shape here.
-    let pack = emoji_packs::EmojiPack {
-        id: String::new(),
-        pubkey: String::new(),
-        identifier,
-        title: input.title.trim().to_string(),
-        image_url: input.image_url.unwrap_or_default().trim().to_string(),
-        description: input.description.unwrap_or_default().trim().to_string(),
-        emojis,
-        is_own: true,
-        updated_at: 0,
-        status: emoji_packs::PACK_STATUS_ACTIVE,
-    };
+        // `pubkey` / `id` get overwritten by `publish_pack` based on the
+        // active session; we just need any valid shape here.
+        let pack = emoji_packs::EmojiPack {
+            id: String::new(),
+            pubkey: String::new(),
+            identifier,
+            title: input.title.trim().to_string(),
+            image_url: input.image_url.unwrap_or_default().trim().to_string(),
+            description: input.description.unwrap_or_default().trim().to_string(),
+            emojis,
+            is_own: true,
+            updated_at: 0,
+            status: emoji_packs::PACK_STATUS_ACTIVE,
+        };
 
-    emoji_packs::publish_pack(&pack).await
+        emoji_packs::publish_pack(&pack).await
+    })
+    .await
 }
 
 /// Tombstone one of the user's own packs (publishes an empty kind 30030
 /// + drops local state + republishes 10030). `id` is the naddr.
 #[tauri::command]
 pub async fn emoji_pack_delete(id: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("Account swap in progress.".to_string());
-    }
-    emoji_packs::delete_own_pack(&id).await
+    vector_core::db::scoped(async move {
+        emoji_packs::delete_own_pack(&id).await
+    })
+    .await
 }
 
 /// Delete a single Blossom blob by its URL. Frontend calls this once
@@ -233,15 +231,18 @@ pub async fn emoji_pack_delete(id: String) -> Result<(), String> {
 /// the Nostr-level `emoji_pack_delete` runs the tombstone publish.
 #[tauri::command]
 pub async fn emoji_pack_delete_blob(url: String) -> Result<(), String> {
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("Account swap in progress.".to_string());
-    }
-    let _client = vector_core::state::nostr_client()
-        .ok_or_else(|| "Nostr client not initialised".to_string())?;
-    let signer = vector_core::signer::active_signer()
-        .map_err(|e| format!("Failed to get signer: {}", e))?;
-    vector_core::blossom::delete_blob_by_url(signer, &url).await
+    vector_core::db::scoped(async move {
+        let session = vector_core::state::SessionGuard::capture();
+        if !session.is_valid() {
+            return Err("Account swap in progress.".to_string());
+        }
+        let _client = vector_core::state::nostr_client()
+            .ok_or_else(|| "Nostr client not initialised".to_string())?;
+        let signer = vector_core::signer::active_signer()
+            .map_err(|e| format!("Failed to get signer: {}", e))?;
+        vector_core::blossom::delete_blob_by_url(signer, &url).await
+    })
+    .await
 }
 
 /// Upload an emoji/pack image to one of the user's Blossom servers and
@@ -257,108 +258,104 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
     bytes_b64: String,
     kind: Option<String>,
 ) -> Result<String, String> {
-    // JSON base64 in: an async command doesn't reliably receive a raw ipc::Request
-    // body on Android's WebView (only sync commands do), so bytes ride a base64 arg.
-    let bytes = base64_simd::STANDARD
-        .decode_to_vec(&bytes_b64)
-        .map_err(|e| format!("bytes base64: {}", e))?;
+    vector_core::db::scoped(async move {
+        // JSON base64 in: an async command doesn't reliably receive a raw ipc::Request
+        // body on Android's WebView (only sync commands do), so bytes ride a base64 arg.
+        let bytes = base64_simd::STANDARD
+            .decode_to_vec(&bytes_b64)
+            .map_err(|e| format!("bytes base64: {}", e))?;
 
-    let session = vector_core::state::SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("Account swap in progress.".to_string());
-    }
-    if bytes.len() > MAX_EMOJI_BYTES {
-        return Err(format!(
-            "File is {} KB, max is {} KB.",
-            bytes.len() / 1024,
-            MAX_EMOJI_BYTES / 1024,
-        ));
-    }
-    if bytes.is_empty() {
-        return Err("File is empty.".to_string());
-    }
+        if bytes.len() > MAX_EMOJI_BYTES {
+            return Err(format!(
+                "File is {} KB, max is {} KB.",
+                bytes.len() / 1024,
+                MAX_EMOJI_BYTES / 1024,
+            ));
+        }
+        if bytes.is_empty() {
+            return Err("File is empty.".to_string());
+        }
 
-    let _client = vector_core::state::nostr_client()
-        .ok_or_else(|| "Nostr client not initialised".to_string())?;
-    let signer = vector_core::signer::active_signer()
-        .map_err(|e| format!("Failed to get signer: {}", e))?;
+        let _client = vector_core::state::nostr_client()
+            .ok_or_else(|| "Nostr client not initialised".to_string())?;
+        let signer = vector_core::signer::active_signer()
+            .map_err(|e| format!("Failed to get signer: {}", e))?;
 
-    let servers = vector_core::blossom_servers::compute_enabled_servers();
-    if servers.is_empty() {
-        return Err("No Blossom servers configured.".to_string());
-    }
+        let servers = vector_core::blossom_servers::compute_enabled_servers();
+        if servers.is_empty() {
+            return Err("No Blossom servers configured.".to_string());
+        }
 
-    // Strip metadata (+ resize/cap) before upload: static emojis are re-encoded
-    // (dropping any EXIF), animated emotes (GIF / animated WebP / APNG) pass
-    // through to keep their animation. The processed output drives the mime.
-    let prepared = crate::shared::image::prepare_upload_image(
-        &bytes,
-        crate::shared::image::UploadImageKind::Emoji,
-    )?;
-    let mime_ref = crate::shared::image::upload_mime_for(prepared.extension);
-    // Wrap once + clone the Arc — upload moves ownership of the inner
-    // Vec onto its task, we keep a reference for the post-upload
-    // pre-cache write.
-    let bytes_arc = std::sync::Arc::new(prepared.bytes);
-    let upload_bytes = bytes_arc.clone();
-    let url = vector_core::blossom::upload_blob_with_failover(
-        signer,
-        servers,
-        upload_bytes,
-        Some(mime_ref),
-        // Emojis are tiny (<=1MB) and should upload near-instantly: treat a server silent
-        // for 10s as dead and fail over, instead of waiting out the full request timeout on
-        // a broken Blossom host. Larger uploads (attachments, profiles) keep more leeway.
-        Some(std::time::Duration::from_secs(10)),
-    ).await?;
+        // Strip metadata (+ resize/cap) before upload: static emojis are re-encoded
+        // (dropping any EXIF), animated emotes (GIF / animated WebP / APNG) pass
+        // through to keep their animation. The processed output drives the mime.
+        let prepared = crate::shared::image::prepare_upload_image(
+            &bytes,
+            crate::shared::image::UploadImageKind::Emoji,
+        )?;
+        let mime_ref = crate::shared::image::upload_mime_for(prepared.extension);
+        // Wrap once + clone the Arc — upload moves ownership of the inner
+        // Vec onto its task, we keep a reference for the post-upload
+        // pre-cache write.
+        let bytes_arc = std::sync::Arc::new(prepared.bytes);
+        let upload_bytes = bytes_arc.clone();
+        let url = vector_core::blossom::upload_blob_with_failover(
+            signer,
+            servers,
+            upload_bytes,
+            Some(mime_ref),
+            // Emojis are tiny (<=1MB) and should upload near-instantly: treat a server silent
+            // for 10s as dead and fail over, instead of waiting out the full request timeout on
+            // a broken Blossom host. Larger uploads (attachments, profiles) keep more leeway.
+            Some(std::time::Duration::from_secs(10)),
+        ).await?;
 
-    // Re-check after the upload — caller will plumb this URL into a pack
-    // tied to the original session. Bail loudly if the account changed
-    // so the URL never gets stitched into the wrong pack.
-    if !session.is_valid() {
-        return Err("Account swapped during upload. Discard this URL.".to_string());
-    }
+        // Re-check after the upload — caller will plumb this URL into a pack
+        // tied to the original session. Bail loudly if the account changed
+        // so the URL never gets stitched into the wrong pack.
 
-    // Pre-cache the bytes locally under the URL we just got back from
-    // Blossom. Any subsequent render of this URL (in the picker, in a
-    // chat preview card, in a freshly-published pack landing in the
-    // user's own subscriptions, etc.) will hit the local cache and
-    // never need to re-download what we already had in hand.
-    let image_type = match kind.as_deref() {
-        Some("emoji_pack_icon") => crate::image_cache::ImageType::EmojiPackIcon,
-        _ => crate::image_cache::ImageType::Emoji,
-    };
-    let _ = crate::image_cache::precache_image_bytes(
-        &handle, &url, &bytes_arc, image_type,
-    );
+        // Pre-cache the bytes locally under the URL we just got back from
+        // Blossom. Any subsequent render of this URL (in the picker, in a
+        // chat preview card, in a freshly-published pack landing in the
+        // user's own subscriptions, etc.) will hit the local cache and
+        // never need to re-download what we already had in hand.
+        let image_type = match kind.as_deref() {
+            Some("emoji_pack_icon") => crate::image_cache::ImageType::EmojiPackIcon,
+            _ => crate::image_cache::ImageType::Emoji,
+        };
+        let _ = crate::image_cache::precache_image_bytes(
+            &handle, &url, &bytes_arc, image_type,
+        );
 
-    // Warm the presized-spritesheet cache the picker canvas reads for EVERY pack
-    // emoji (static + animated), so first view of a freshly-saved pack is a
-    // single file read: no fetch, no decode. Icons render as plain <img> and
-    // skip this. Detached + best-effort — the bytes are already in hand.
-    if !matches!(kind.as_deref(), Some("emoji_pack_icon")) {
-        if let Some(sheet_path) = emoji_spritesheet_path(&handle, &url) {
-            if !sheet_path.exists() {
-                let warm_bytes = bytes_arc.clone();
-                let warm_ct = mime_ref.to_string();
-                let warm_url = url.clone();
-                tokio::task::spawn_blocking(move || {
-                    if let Ok(decoded) = decode_to_spritesheet(&warm_bytes[..], &warm_ct, &warm_url) {
-                        let blob = serialize_spritesheet(
-                            decoded.frame_size, &decoded.durations, &decoded.png,
-                        );
-                        if std::fs::write(&sheet_path, &blob).is_ok() {
-                            if let Some(dir) = sheet_path.parent() {
-                                prune_spritesheet_cache(dir);
+        // Warm the presized-spritesheet cache the picker canvas reads for EVERY pack
+        // emoji (static + animated), so first view of a freshly-saved pack is a
+        // single file read: no fetch, no decode. Icons render as plain <img> and
+        // skip this. Detached + best-effort — the bytes are already in hand.
+        if !matches!(kind.as_deref(), Some("emoji_pack_icon")) {
+            if let Some(sheet_path) = emoji_spritesheet_path(&handle, &url) {
+                if !sheet_path.exists() {
+                    let warm_bytes = bytes_arc.clone();
+                    let warm_ct = mime_ref.to_string();
+                    let warm_url = url.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Ok(decoded) = decode_to_spritesheet(&warm_bytes[..], &warm_ct, &warm_url) {
+                            let blob = serialize_spritesheet(
+                                decoded.frame_size, &decoded.durations, &decoded.png,
+                            );
+                            if std::fs::write(&sheet_path, &blob).is_ok() {
+                                if let Some(dir) = sheet_path.parent() {
+                                    prune_spritesheet_cache(dir);
+                                }
                             }
                         }
-                    }
-                });
+                    });
+                }
             }
         }
-    }
 
-    Ok(url)
+        Ok(url)
+    })
+    .await
 }
 
 // ============================================================================

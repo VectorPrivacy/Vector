@@ -255,211 +255,208 @@ pub async fn login<R: Runtime>(
 /// (line 366) self-heals on the next launch.
 #[tauri::command]
 pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<String, String> {
-    // Snapshot the session generation. A concurrent `swap_session` / `logout`
-    // can fire between reading MY_SECRET_KEY (below) and installing the new
-    // bunker signer; without a guard the stale client keypair would land
-    // under a fresh, foreign account.
-    let session = vector_core::state::SessionGuard::capture();
+    vector_core::db::scoped(async move {
+        // Snapshot the session generation. A concurrent `swap_session` / `logout`
+        // can fire between reading MY_SECRET_KEY (below) and installing the new
+        // bunker signer; without a guard the stale client keypair would land
+        // under a fresh, foreign account.
+        let session = vector_core::state::SessionGuard::capture();
 
-    let client_keys = crate::MY_SECRET_KEY.to_keys()
-        .ok_or("No client keypair loaded — please return to the login screen and try again")?;
+        let client_keys = crate::MY_SECRET_KEY.to_keys()
+            .ok_or("No client keypair loaded — please return to the login screen and try again")?;
 
-    let signer_type = vector_core::db::get_signer_type().unwrap_or_else(|_| "local".to_string());
-    if signer_type != "bunker" {
-        return Err("This account is not a remote-signer account.".into());
-    }
+        let signer_type = vector_core::db::get_signer_type().unwrap_or_else(|_| "local".to_string());
+        if signer_type != "bunker" {
+            return Err("This account is not a remote-signer account.".into());
+        }
 
-    let expected_remote_pk_hex = vector_core::db::get_bunker_remote_pubkey()
-        .ok().flatten()
-        .ok_or("Bunker account missing cached remote pubkey")?
-        .to_ascii_lowercase();
+        let expected_remote_pk_hex = vector_core::db::get_bunker_remote_pubkey()
+            .ok().flatten()
+            .ok_or("Bunker account missing cached remote pubkey")?
+            .to_ascii_lowercase();
 
-    if !session.is_valid() {
-        return Err("Account changed during re-authorization. Please try again.".into());
-    }
 
-    let relays: Vec<RelayUrl> = vector_core::state::TRUSTED_RELAYS.iter()
-        .filter_map(|s| RelayUrl::parse(*s).ok())
-        .collect();
-    if relays.is_empty() {
-        return Err("No trusted relays configured".into());
-    }
+        let relays: Vec<RelayUrl> = vector_core::state::TRUSTED_RELAYS.iter()
+            .filter_map(|s| RelayUrl::parse(*s).ok())
+            .collect();
+        if relays.is_empty() {
+            return Err("No trusted relays configured".into());
+        }
 
-    let (nc, uri_string) = vector_core::build_nostrconnect_session(
-        client_keys,
-        relays,
-        std::time::Duration::from_secs(120),
-    )?;
+        let (nc, uri_string) = vector_core::build_nostrconnect_session(
+            client_keys,
+            relays,
+            std::time::Duration::from_secs(120),
+        )?;
 
-    if !session.is_valid() {
-        return Err("Account changed during re-authorization. Please try again.".into());
-    }
 
-    // The new NostrConnect is held LOCALLY in the spawn until the signer
-    // confirms identity. The live BUNKER_SIGNER / NOSTR_CLIENT remain
-    // installed and operational throughout — backing out of the form costs
-    // nothing, and a failed re-pair leaves the current session untouched.
-    // We swap in only after the identity check passes.
+        // The new NostrConnect is held LOCALLY in the spawn until the signer
+        // confirms identity. The live BUNKER_SIGNER / NOSTR_CLIENT remain
+        // installed and operational throughout — backing out of the form costs
+        // nothing, and a failed re-pair leaves the current session untouched.
+        // We swap in only after the identity check passes.
 
-    let handle_for_task = handle.clone();
-    // The bunker events below stay on the raw handle rather than `emit_event`:
-    // they narrate a login that is REPLACING the session, so gating them on the
-    // live session would silence the very transition they report.
-    //
-    // Reuse the entry-captured guard so the spawn shares the same generation
-    // snapshot — capturing fresh here would mask a swap occurring between the
-    // last entry-check and the spawn.
-    vector_core::db::spawn_bound(async move {
-        vector_core::log_debug!("[bunker-reauth] awaiting signer pair…");
+        let handle_for_task = handle.clone();
+        // The bunker events below stay on the raw handle rather than `emit_event`:
+        // they narrate a login that is REPLACING the session, so gating them on the
+        // live session would silence the very transition they report.
+        //
+        // Reuse the entry-captured guard so the spawn shares the same generation
+        // snapshot — capturing fresh here would mask a swap occurring between the
+        // last entry-check and the spawn.
+        vector_core::db::spawn_bound(async move {
+            vector_core::log_debug!("[bunker-reauth] awaiting signer pair…");
 
-        let bunker_uri = match nc.bunker_uri().await {
-            Ok(uri) => uri,
-            Err(e) => {
-                vector_core::log_warn!("[bunker-reauth] bunker_uri failed: {}", e);
+            let bunker_uri = match nc.bunker_uri().await {
+                Ok(uri) => uri,
+                Err(e) => {
+                    vector_core::log_warn!("[bunker-reauth] bunker_uri failed: {}", e);
+                    let _ = handle_for_task.emit("bunker_reauthorize_failed",
+                        serde_json::json!({ "error": e.to_string() }));
+                    let _ = nc.shutdown().await;
+                    return;
+                }
+            };
+            let storage_url = bunker_uri.to_string();
+
+            let _ = handle_for_task.emit("bunker_awaiting_approval", serde_json::json!({}));
+            let remote_pk = match nc.get_public_key_async().await {
+                Ok(pk) => pk,
+                Err(e) => {
+                    vector_core::log_warn!("[bunker-reauth] get_public_key failed: {}", e);
+                    let _ = handle_for_task.emit("bunker_reauthorize_failed",
+                        serde_json::json!({ "error": format!(
+                            "Signer didn't return your pubkey. Check the signer app for an approval prompt. ({})",
+                            e
+                        )}));
+                    let _ = nc.shutdown().await;
+                    return;
+                }
+            };
+            let remote_pk_hex = remote_pk.to_hex().to_ascii_lowercase();
+
+            // Identity-swap guard. If the signer returns a different identity
+            // than we have on file, the user is trying to re-authorize the
+            // wrong account — block and surface a clear error instead of
+            // silently corrupting the on-disk account.
+            if remote_pk_hex != expected_remote_pk_hex {
+                vector_core::log_warn!(
+                    "[bunker-reauth] identity mismatch: expected {} got {}",
+                    &expected_remote_pk_hex[..16.min(expected_remote_pk_hex.len())],
+                    &remote_pk_hex[..16.min(remote_pk_hex.len())]
+                );
                 let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                    serde_json::json!({ "error": e.to_string() }));
+                    serde_json::json!({ "error":
+                        "Signer returned a different identity. Re-authorize is only for the original account — logout to switch accounts."
+                    }));
                 let _ = nc.shutdown().await;
                 return;
             }
-        };
-        let storage_url = bunker_uri.to_string();
 
-        let _ = handle_for_task.emit("bunker_awaiting_approval", serde_json::json!({}));
-        let remote_pk = match nc.get_public_key_async().await {
-            Ok(pk) => pk,
-            Err(e) => {
-                vector_core::log_warn!("[bunker-reauth] get_public_key failed: {}", e);
-                let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                    serde_json::json!({ "error": format!(
-                        "Signer didn't return your pubkey. Check the signer app for an approval prompt. ({})",
-                        e
-                    )}));
+            // Account-swap defense: re-check before persisting the new URL so
+            // a swap during the long await window doesn't write into the wrong
+            // account's DB.
+            if !session.is_valid() {
+                vector_core::log_warn!("[bunker-reauth] session changed during pairing — aborting");
                 let _ = nc.shutdown().await;
                 return;
             }
-        };
-        let remote_pk_hex = remote_pk.to_hex().to_ascii_lowercase();
 
-        // Identity-swap guard. If the signer returns a different identity
-        // than we have on file, the user is trying to re-authorize the
-        // wrong account — block and surface a clear error instead of
-        // silently corrupting the on-disk account.
-        if remote_pk_hex != expected_remote_pk_hex {
-            vector_core::log_warn!(
-                "[bunker-reauth] identity mismatch: expected {} got {}",
-                &expected_remote_pk_hex[..16.min(expected_remote_pk_hex.len())],
-                &remote_pk_hex[..16.min(remote_pk_hex.len())]
-            );
-            let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                serde_json::json!({ "error":
-                    "Signer returned a different identity. Re-authorize is only for the original account — logout to switch accounts."
-                }));
-            let _ = nc.shutdown().await;
-            return;
-        }
-
-        // Account-swap defense: re-check before persisting the new URL so
-        // a swap during the long await window doesn't write into the wrong
-        // account's DB.
-        if !session.is_valid() {
-            vector_core::log_warn!("[bunker-reauth] session changed during pairing — aborting");
-            let _ = nc.shutdown().await;
-            return;
-        }
-
-        if let Err(e) = vector_core::db::set_bunker_url(&storage_url).await {
-            vector_core::log_warn!("[bunker-reauth] set_bunker_url failed: {}", e);
-            let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                serde_json::json!({ "error": format!("Failed to persist bunker URL: {}", e) }));
-            let _ = nc.shutdown().await;
-            return;
-        }
-
-        if !session.is_valid() {
-            let _ = nc.shutdown().await;
-            return;
-        }
-
-        let remote_npub = match remote_pk.to_bech32() {
-            Ok(n) => n,
-            Err(e) => {
+            if let Err(e) = vector_core::db::set_bunker_url(&storage_url).await {
+                vector_core::log_warn!("[bunker-reauth] set_bunker_url failed: {}", e);
                 let _ = handle_for_task.emit("bunker_reauthorize_failed",
-                    serde_json::json!({ "error": format!("npub encode: {}", e) }));
+                    serde_json::json!({ "error": format!("Failed to persist bunker URL: {}", e) }));
                 let _ = nc.shutdown().await;
                 return;
             }
-        };
 
-        // Confirmed: new pairing is healthy and matches the existing identity.
-        // Two install paths:
-        //   - In-app reauth (Settings, etc.): NOSTR_CLIENT is alive with
-        //     relays + subscriptions. `set_signer` hot-swaps the signer in
-        //     place — pool + subs stay intact, no reconnect storm.
-        //   - Boot-time reauth (login_from_stored_key returned Err before
-        //     installing the Client): the session bootstrap (relays, sync,
-        //     listeners, profile load) never ran. A fresh Client without
-        //     bootstrap leaves the UI blank, so we fire `session_reload`
-        //     and let the boot path replay cleanly with the signer now
-        //     online. The encryption key stays in-process across the
-        //     webview reload so the user re-enters their PIN only once.
-        let was_boot_reauth = vector_core::nostr_client().is_none();
-
-        let old_signer = vector_core::take_bunker_signer();
-        vector_core::set_bunker_signer(nc);
-
-        let new_inner = match vector_core::bunker_signer() {
-            Some(b) => b,
-            None => {
-                vector_core::log_warn!("[bunker-reauth] new signer slot drained mid-swap");
+            if !session.is_valid() {
+                let _ = nc.shutdown().await;
                 return;
             }
-        };
-        // Nothing to install: the client no longer owns a signer, and
-        // `active_signer()` rebuilds the watched wrapper from `BUNKER_SIGNER` on
-        // every call — so the handle refreshed just above is already live for the
-        // next signing op.
-        drop(new_inner);
 
-        // Drain the old NostrConnect in the background — its relay pool can
-        // take a moment to release sockets, and the success event shouldn't
-        // wait on that.
-        if let Some(old) = old_signer {
-            // spawn-detached: draining a replaced signer's sockets — no account storage.
-            tokio::spawn(async move { let _ = old.shutdown().await; });
-        }
+            let remote_npub = match remote_pk.to_bech32() {
+                Ok(n) => n,
+                Err(e) => {
+                    let _ = handle_for_task.emit("bunker_reauthorize_failed",
+                        serde_json::json!({ "error": format!("npub encode: {}", e) }));
+                    let _ = nc.shutdown().await;
+                    return;
+                }
+            };
 
-        if !was_boot_reauth {
-            set_my_public_key(remote_pk);
-            vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
-        }
+            // Confirmed: new pairing is healthy and matches the existing identity.
+            // Two install paths:
+            //   - In-app reauth (Settings, etc.): NOSTR_CLIENT is alive with
+            //     relays + subscriptions. `set_signer` hot-swaps the signer in
+            //     place — pool + subs stay intact, no reconnect storm.
+            //   - Boot-time reauth (login_from_stored_key returned Err before
+            //     installing the Client): the session bootstrap (relays, sync,
+            //     listeners, profile load) never ran. A fresh Client without
+            //     bootstrap leaves the UI blank, so we fire `session_reload`
+            //     and let the boot path replay cleanly with the signer now
+            //     online. The encryption key stays in-process across the
+            //     webview reload so the user re-enters their PIN only once.
+            let was_boot_reauth = vector_core::nostr_client().is_none();
 
+            let old_signer = vector_core::take_bunker_signer();
+            vector_core::set_bunker_signer(nc);
 
-        let _ = account_manager::set_current_account(remote_npub.clone());
+            let new_inner = match vector_core::bunker_signer() {
+                Some(b) => b,
+                None => {
+                    vector_core::log_warn!("[bunker-reauth] new signer slot drained mid-swap");
+                    return;
+                }
+            };
+            // Nothing to install: the client no longer owns a signer, and
+            // `active_signer()` rebuilds the watched wrapper from `BUNKER_SIGNER` on
+            // every call — so the handle refreshed just above is already live for the
+            // next signing op.
+            drop(new_inner);
 
-        vector_core::set_bunker_state(vector_core::BunkerConnectionState::Online);
-        // Stash the npub for `get_pending_reauth_result` so a frontend that
-        // reloaded between the success and its own listener registration
-        // can still recover on its next bunker form mount.
-        *PENDING_REAUTH_RESULT.lock().unwrap() = Some(remote_npub.clone());
-
-        if was_boot_reauth {
-            // Drain bunker state so the reloaded boot path starts clean —
-            // the NostrConnect we installed gets replaced by attempt_bunker_login
-            // during the next login_from_stored_key.
-            if let Some(b) = vector_core::take_bunker_signer() {
-                // spawn-detached: same, for the bunker signer being torn down.
-                tokio::spawn(async move { let _ = b.shutdown().await; });
+            // Drain the old NostrConnect in the background — its relay pool can
+            // take a moment to release sockets, and the success event shouldn't
+            // wait on that.
+            if let Some(old) = old_signer {
+                // spawn-detached: draining a replaced signer's sockets — no account storage.
+                tokio::spawn(async move { let _ = old.shutdown().await; });
             }
-            vector_core::set_bunker_state(vector_core::BunkerConnectionState::Idle);
-            let _ = handle_for_task.emit("session_reload", ());
-        } else {
-            let _ = handle_for_task.emit("bunker_reauthorize_succeeded",
-                serde_json::json!({ "npub": remote_npub }));
-        }
-        vector_core::log_debug!("[bunker-reauth] succeeded (boot={})", was_boot_reauth);
-    });
 
-    Ok(uri_string)
+            if !was_boot_reauth {
+                set_my_public_key(remote_pk);
+                vector_core::set_signer_kind(vector_core::SignerKind::Bunker);
+            }
+
+
+            let _ = account_manager::set_current_account(remote_npub.clone());
+
+            vector_core::set_bunker_state(vector_core::BunkerConnectionState::Online);
+            // Stash the npub for `get_pending_reauth_result` so a frontend that
+            // reloaded between the success and its own listener registration
+            // can still recover on its next bunker form mount.
+            *PENDING_REAUTH_RESULT.lock().unwrap() = Some(remote_npub.clone());
+
+            if was_boot_reauth {
+                // Drain bunker state so the reloaded boot path starts clean —
+                // the NostrConnect we installed gets replaced by attempt_bunker_login
+                // during the next login_from_stored_key.
+                if let Some(b) = vector_core::take_bunker_signer() {
+                    // spawn-detached: same, for the bunker signer being torn down.
+                    tokio::spawn(async move { let _ = b.shutdown().await; });
+                }
+                vector_core::set_bunker_state(vector_core::BunkerConnectionState::Idle);
+                let _ = handle_for_task.emit("session_reload", ());
+            } else {
+                let _ = handle_for_task.emit("bunker_reauthorize_succeeded",
+                    serde_json::json!({ "npub": remote_npub }));
+            }
+            vector_core::log_debug!("[bunker-reauth] succeeded (boot={})", was_boot_reauth);
+        });
+
+        Ok(uri_string)
+    })
+    .await
 }
 
 /// Records the npub of the most recent successful `bunker_reauthorize_succeeded`
@@ -710,37 +707,36 @@ pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginR
 /// signer side and reconnecting would silently mix two accounts' data.
 #[tauri::command]
 pub async fn reauthorize_nip55<R: Runtime>(_handle: AppHandle<R>) -> Result<String, String> {
-    if vector_core::signer_kind() != vector_core::SignerKind::Nip55 {
-        return Err("This is not an offline-signer account.".into());
-    }
-    if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
-        vector_core::set_nip55_state(vector_core::Nip55State::Missing);
-        return Err("No compatible signer app is installed. Install Amber and try again.".into());
-    }
-    let expected_hex = vector_core::db::get_nip55_user_pubkey()
-        .ok().flatten()
-        .ok_or("NIP-55 account missing cached identity pubkey")?
-        .to_ascii_lowercase();
+    vector_core::db::scoped(async move {
+        if vector_core::signer_kind() != vector_core::SignerKind::Nip55 {
+            return Err("This is not an offline-signer account.".into());
+        }
+        if !matches!(vector_core::nip55_is_installed(), Ok(true)) {
+            vector_core::set_nip55_state(vector_core::Nip55State::Missing);
+            return Err("No compatible signer app is installed. Install Amber and try again.".into());
+        }
+        let expected_hex = vector_core::db::get_nip55_user_pubkey()
+            .ok().flatten()
+            .ok_or("NIP-55 account missing cached identity pubkey")?
+            .to_ascii_lowercase();
 
-    let session = vector_core::state::SessionGuard::capture();
-    let (user_pk, package) = vector_core::nip55_pair().await?;
-    if !session.is_valid() {
-        return Err("Account changed during re-authorization. Please try again.".into());
-    }
-    // Identity-swap guard (mirrors the bunker reauth + boot checks).
-    if user_pk.to_hex().to_ascii_lowercase() != expected_hex {
-        return Err(
-            "The signer returned a different identity than this account. \
-             Logout and re-add the account to use a different identity."
-                .into(),
-        );
-    }
-    // Re-pin the (possibly-updated) package and clear the needs-auth state.
-    vector_core::db::set_nip55_signer_package(&package)?;
-    #[cfg(target_os = "android")]
-    crate::android::external_signer::set_signer_package(package);
-    vector_core::set_nip55_state(vector_core::Nip55State::Ready);
-    user_pk.to_bech32().map_err(|e| format!("Bech32 error: {}", e))
+        let (user_pk, package) = vector_core::nip55_pair().await?;
+        // Identity-swap guard (mirrors the bunker reauth + boot checks).
+        if user_pk.to_hex().to_ascii_lowercase() != expected_hex {
+            return Err(
+                "The signer returned a different identity than this account. \
+                 Logout and re-add the account to use a different identity."
+                    .into(),
+            );
+        }
+        // Re-pin the (possibly-updated) package and clear the needs-auth state.
+        vector_core::db::set_nip55_signer_package(&package)?;
+        #[cfg(target_os = "android")]
+        crate::android::external_signer::set_signer_package(package);
+        vector_core::set_nip55_state(vector_core::Nip55State::Ready);
+        user_pk.to_bech32().map_err(|e| format!("Bech32 error: {}", e))
+    })
+    .await
 }
 
 /// Frontend-callable: drain a half-staged NIP-55 session (Back button on the
