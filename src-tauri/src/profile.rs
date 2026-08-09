@@ -74,7 +74,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
 
         if updated {
             let slim = state.serialize_profile(id).unwrap();
-            handle.emit("profile_update", &slim).ok();
+            vector_core::emit_event("profile_update", &slim);
             drop(state);
             db::set_profile(slim).await.ok();
         }
@@ -138,7 +138,7 @@ pub async fn cache_all_profile_images() {
                         };
                         if needs_emit {
                             let slim = state.serialize_profile(id).unwrap();
-                            handle.emit("profile_update", &slim).ok();
+                            vector_core::emit_event("profile_update", &slim);
                             drop(state);
                             db::set_profile(slim).await.ok();
                         }
@@ -164,7 +164,7 @@ pub async fn cache_all_profile_images() {
                         };
                         if needs_emit {
                             let slim = state.serialize_profile(id).unwrap();
-                            handle.emit("profile_update", &slim).ok();
+                            vector_core::emit_event("profile_update", &slim);
                             drop(state);
                             db::set_profile(slim).await.ok();
                         }

@@ -1048,12 +1048,9 @@ pub async fn fetch_messages<R: Runtime>(
     // reconciles our full history with all relays using generous timeouts.
     {
         let bg_client = client.clone();
-        let handle_bg = handle.clone();
-        // Pin this archive task to the session that started it. After an
-        // account swap, downstream commits go through `commit_prepared_event`
-        // which is session-gated, but the negentropy + fetch loop above
-        // still burns relay bandwidth pointlessly and any post-sync
-        // community sweep would run against the new account. Bail early on swap.
+        // Bound to the account that started it. Its writes and its sync-progress
+        // events follow that account; the remaining guard below is about not
+        // burning relay bandwidth on a sync nobody is waiting for any more.
         let archive_session = vector_core::state::SessionGuard::capture();
         vector_core::db::spawn_bound(async move {
             let archive_start = std::time::Instant::now();
@@ -1089,7 +1086,7 @@ pub async fn fetch_messages<R: Runtime>(
                     let mut state = STATE.lock().await;
                     state.is_syncing = false;
                 }
-                let _ = handle_bg.emit("sync_finished", ());
+                vector_core::emit_event("sync_finished", &());
                 completed_early = true;
                 println!("[Sync] Sync complete — {} relay bootstrap(s) continue in background",
                     candidates.len());
@@ -1101,7 +1098,7 @@ pub async fn fetch_messages<R: Runtime>(
                 let mut state = STATE.lock().await;
                 state.is_syncing = false;
                 drop(state);
-                let _ = handle_bg.emit("sync_finished", ());
+                vector_core::emit_event("sync_finished", &());
                 return;
             }
 
@@ -1147,7 +1144,7 @@ pub async fn fetch_messages<R: Runtime>(
                     let mut state = STATE.lock().await;
                     state.is_syncing = false;
                     drop(state);
-                    let _ = handle_bg.emit("sync_finished", ());
+                    vector_core::emit_event("sync_finished", &());
                 }
                 return;
             }
@@ -1360,7 +1357,7 @@ pub async fn fetch_messages<R: Runtime>(
                                 ).await;
                                 processed += 1;
                                 if processed % 250 == 0 {
-                                    let _ = handle_bg.emit("sync_progress", serde_json::json!({
+                                    vector_core::emit_event("sync_progress", &serde_json::json!({
                                         "mode": "Syncing",
                                         "current": processed,
                                         "total": missing_total,
@@ -1413,7 +1410,7 @@ pub async fn fetch_messages<R: Runtime>(
                     let mut state = STATE.lock().await;
                     state.is_syncing = false;
                 }
-                let _ = handle_bg.emit("sync_finished", ());
+                vector_core::emit_event("sync_finished", &());
             }
 
             // Resolve + cache our own badges AFTER boot/init settles — not during.

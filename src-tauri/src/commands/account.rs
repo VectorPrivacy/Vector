@@ -294,6 +294,10 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
     // We swap in only after the identity check passes.
 
     let handle_for_task = handle.clone();
+    // The bunker events below stay on the raw handle rather than `emit_event`:
+    // they narrate a login that is REPLACING the session, so gating them on the
+    // live session would silence the very transition they report.
+    //
     // Reuse the entry-captured guard so the spawn shares the same generation
     // snapshot — capturing fresh here would mask a swap occurring between the
     // last entry-check and the spawn.
