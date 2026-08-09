@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn set_get_1000_iterations() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..1000u16 {
@@ -608,7 +608,7 @@ mod tests {
     // ================================================================
 
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn cross_key_set_then_set_500() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let key_a = test_key(0xAA);
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn cross_key_reverse_order_500() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let key_a = test_key(0xCC);
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn cross_key_clear_preserves_other_500() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let key_a = test_key(0x11);
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn cross_key_alternating_500() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..500u16 {
@@ -698,7 +698,7 @@ mod tests {
     /// Two keys occupy disjoint lanes, so a real write from one can never clobber the
     /// other's share slots regardless of decoy layout.
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn stress_both_keys_1000() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         for i in 0..1000u32 {
@@ -904,7 +904,7 @@ mod tests {
     /// Without exclusion, P(at least one hit) per position ~ 86%. With 6 positions:
     /// P(all survive unprotected) ~ 0.14^6 ~ 0.00075%, so a broken exclusion is caught with near-certainty.
     #[test]
-    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI via --include-ignored."]
+    #[ignore = "vault stress: hundreds of guarded set/get rounds, serialized on the vault statics (~41s of a 52s suite). Run in CI by NAME (`-- --ignored guarded_key`), never --include-ignored: that also sweeps in the live-relay tests."]
     fn write_decoys_respects_exclusions_500() {
         let _l = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         ensure_vaults();
