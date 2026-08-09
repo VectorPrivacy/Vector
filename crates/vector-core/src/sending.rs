@@ -207,11 +207,6 @@ fn remove_wrap_confirm(wrap_id: &EventId) {
     wrap_confirms().lock().unwrap().remove(wrap_id);
 }
 
-/// Clear on session swap — entries carry per-account chat/message ids.
-pub fn clear_wrap_confirms() {
-    wrap_confirms().lock().unwrap().clear();
-}
-
 /// Feed a relay `OK` for an outbound event back into the send pipeline.
 ///
 /// Hosts call this from their notification loop for every

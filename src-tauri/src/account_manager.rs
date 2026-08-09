@@ -658,22 +658,13 @@ pub async fn reset_session() {
     #[cfg(target_os = "android")]
     crate::android::biometric::on_session_reset();
 
-    // Chats, profiles and the unread cache need no clearing: they belong to the
-    // session `close_db_connection` released above, and went with it. That
-    // covers every field at once, which is the point — this block enumerated
-    // them, and a field added without a line here leaked into the next account.
-    { crate::WRAPPER_ID_CACHE.lock().await.clear(); }
-    { crate::state::PENDING_EVENTS.lock().await.clear(); }
-    // Active-chat marker is an npub; a shared contact across accounts would
-    // otherwise let account A's open chat auto-mark account B's messages.
-    vector_core::state::set_active_chat(None);
+    // Chats, profiles, unread counts, wrapper ids, parked events, row-id
+    // caches, the sync queue, the relay caches, the theme tags, the active
+    // chat, the pending invite and the identity all belonged to the session
+    // `close_db_connection` released above, and went with it. What follows is
+    // only teardown that DOES something a drop cannot: unsubscribing,
+    // disconnecting, zeroizing, and the shell's own caches.
 
-    // Profile sync queue (long-lived processor loop services this queue
-    // forever, so we drain it instead of cancelling the task).
-    vector_core::profile::sync::clear_profile_sync_queue();
-    // Theme-pack emoji tags are account-scoped; clear so account A's theme shortcodes don't tag
-    // account B's outbound messages. The frontend re-registers B's theme only if it has one.
-    vector_core::emoji_packs::set_theme_emoji_tags(Vec::new());
 
     // Community subscription pointer + routing tables hold channel SECRET keys + account-specific
     // pseudonyms, so they MUST be cleared on swap or account A's keys/routes leak into B's session.
@@ -696,9 +687,6 @@ pub async fn reset_session() {
             .clear_account_scoped().await;
     }
 
-    // Pending invite captured during account creation (must NOT auto-execute
-    // on the next account).
-    crate::state::clear_pending_invite();
 
     // Per-session caches that hold message/file content or relay diagnostics.
     if let Ok(mut m) = crate::commands::relays::RELAY_METRICS.write() { m.clear(); }
@@ -731,15 +719,6 @@ pub async fn reset_session() {
         rec.cancel();
     }
 
-    // Recipient relay-list cache — recipient-keyed, so technically
-    // account-agnostic, but holds privacy-adjacent metadata about every
-    // contact account A messaged. Drop on swap.
-    vector_core::inbox_relays::clear_inbox_relay_cache();
-    // In-flight wrap confirmations carry the prior account's chat and
-    // message ids — a late OK must not "rescue" into the new session.
-    vector_core::sending::clear_wrap_confirms();
-    // Pack-author NIP-65 cache — same privacy parity as the inbox cache.
-    vector_core::emoji_packs::clear_nip65_cache();
 
     // PIVX address→balance cache — addresses derive from user keys, so
     // a cached entry from account A is meaningless (and slightly
@@ -766,8 +745,6 @@ pub async fn reset_session() {
 
     // Identity caches.
     vector_core::db::clear_current_account_in_memory();
-    vector_core::clear_my_public_key();
-    crate::db::clear_id_caches();
     let _ = clear_pending_account();
 
     crate::commands::account::FULL_SESSION_INITIALIZED

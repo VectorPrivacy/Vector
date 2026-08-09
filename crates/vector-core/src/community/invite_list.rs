@@ -291,7 +291,7 @@ pub async fn publish_invite_list(
 ) -> Result<(), String> {
     let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
-    let relay = fetch_invite_list(client, my_pk, session.clone()).await;
+    let relay = fetch_invite_list(client, my_pk, session).await;
     if !session.is_valid() {
         return Ok(());
     }
@@ -350,7 +350,7 @@ pub fn republish_invite_list_debounced() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = publish_invite_list(&client, session.clone()).await {
+        if let Err(e) = publish_invite_list(&client, session).await {
             crate::log_warn!("[InviteList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }

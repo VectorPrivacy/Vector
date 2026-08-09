@@ -96,7 +96,7 @@ pub(crate) async fn subscribe_self_sync() {
 /// Route an arriving self-sync list event (our own replaceable settings): a Community List update folds +
 /// rehydrates (so a join on another device appears live); an emoji-list update refreshes the pack set.
 /// Spawned off the notification loop — both run several relay fetches and must not head-of-line-block it.
-async fn handle_self_sync_event(__session: &vector_core::state::SessionGuard, event: Event) {
+async fn handle_self_sync_event(event: Event) {
     // Per-list dedup key: the `d`-tag for kind-30078 lists (Community vs Invite share the kind), else the
     // kind. Coalesces multi-relay re-delivery of the SAME replaceable event so one update = one sweep.
     let dedup_key = if event.kind.as_u16() == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC {
@@ -410,7 +410,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // wrap id and drops NotOurs (e.g. a stray DM copy on another sub) for free.
                         handle_community_v2_event(&session, *event).await;
                     } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
-                        handle_self_sync_event(&session, *event).await;
+                        handle_self_sync_event(*event).await;
                     }
                 }
                 ClientNotification::Message { message, .. } => {

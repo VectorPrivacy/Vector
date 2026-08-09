@@ -223,17 +223,6 @@ fn inbox_relay_cache() -> Arc<Mutex<HashMap<PublicKey, CachedRelays>>> {
     crate::db::current_session().scoped::<InboxRelayCache, _>()
 }
 
-/// Drop every cached recipient relay list — called by `reset_session()`.
-/// The cache is recipient-keyed (so technically account-agnostic) but
-/// grows unboundedly across sessions; the 1-hour TTL only reclaims
-/// re-queried entries. Clear on swap to free memory and avoid
-/// stale-data revivals.
-pub fn clear_inbox_relay_cache() {
-    if let Ok(mut cache) = inbox_relay_cache().lock() {
-        cache.clear();
-    }
-}
-
 /// Per-key locks to prevent cache stampede (thundering herd).
 /// When multiple messages target the same recipient with a cold cache, only the
 /// first fetch runs — others wait on the per-key lock, then hit the cache.

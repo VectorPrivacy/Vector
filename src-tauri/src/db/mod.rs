@@ -35,7 +35,6 @@ pub use miniapps::{
 // ID cache — delegates to vector-core
 pub use vector_core::db::id_cache::{
     get_chat_id_by_identifier, get_or_create_chat_id,
-    clear_id_caches,
 };
 pub async fn preload_id_caches() -> Result<(), String> {
     vector_core::db::id_cache::preload_id_caches()

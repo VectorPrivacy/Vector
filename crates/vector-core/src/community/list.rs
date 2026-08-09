@@ -452,7 +452,7 @@ pub async fn publish_community_list(
     let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
     // Fold the relay's copy first so we don't drop a sibling device's change.
-    let relay = fetch_community_list(client, my_pk, session.clone()).await.unwrap_or_default();
+    let relay = fetch_community_list(client, my_pk, session).await.unwrap_or_default();
     if !session.is_valid() {
         return Ok(());
     }
@@ -515,7 +515,7 @@ pub fn republish_community_list_debounced() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = publish_community_list(&client, session.clone()).await {
+        if let Err(e) = publish_community_list(&client, session).await {
             crate::log_warn!("[CommunityList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }

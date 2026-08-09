@@ -206,15 +206,6 @@ fn profile_sync_queue() -> Arc<Mutex<ProfileSyncQueue>> {
     crate::db::current_session().scoped::<ProfileSyncQueueKey, _>()
 }
 
-/// Drop every queued profile-sync entry. Called by `reset_session()` so the
-/// long-lived `start_profile_sync_processor` loop doesn't service the prior
-/// account's contacts after an inline session swap.
-pub fn clear_profile_sync_queue() {
-    if let Ok(mut q) = profile_sync_queue().lock() {
-        q.clear();
-    }
-}
-
 // ============================================================================
 // ProfileSyncHandler — platform-specific callbacks
 // ============================================================================

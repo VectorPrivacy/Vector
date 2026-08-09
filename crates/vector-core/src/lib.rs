@@ -4094,31 +4094,18 @@ impl VectorCore {
             }
         }
 
-        // Chats and profiles need no clearing: they belong to the session
-        // `close_database` just released, and went with it.
-        state::WRAPPER_ID_CACHE.lock().await.clear();
-        state::PENDING_EVENTS.lock().await.clear();
-        state::set_active_chat(None);
-        crate::profile::sync::clear_profile_sync_queue();
-        crate::inbox_relays::clear_inbox_relay_cache();
-        // In-flight wrap confirmations carry the prior account's chat and
-        // message ids — a late OK must not "rescue" into the new session.
-        crate::sending::clear_wrap_confirms();
-        crate::emoji_packs::clear_nip65_cache();
-        // Chat/user row-id caches are PER-ACCOUNT (row ids belong to the prior account's DB). Not clearing
-        // them here let a swapped-in account resolve a channel/npub to the WRONG (prior-account) row id →
-        // saves FK-failed silently + reads hit the wrong row (e.g. a community member vanished post-swap).
-        crate::db::clear_id_caches();
-        // Community realtime route/subscription state is account-scoped (channel keys + banned sets);
-        // drop it so a swapped-in account can't listen on the prior account's pseudonyms.
+        // Everything else the account owned — chats, profiles, wrapper ids,
+        // parked events, row-id caches, the sync queue, the relay caches, the
+        // theme tags, the active chat — went with the session `close_database`
+        // released. Only teardown that DOES something beyond forgetting is left.
+
+        // Unsubscribing is an action: these hold live relay subscriptions keyed
+        // to the prior account's plane pseudonyms.
         crate::community::realtime::clear().await;
         crate::community::v2::realtime::clear().await;
-        // Pooled plane connections are authed as the prior account's plane secret keys.
+        // So is disconnecting: the pooled clients are AUTHENTICATED as the prior
+        // account's plane secret keys, and must not be left holding sockets.
         crate::community::transport::clear_plane_pool();
-        // Theme-pack emoji tags are account-scoped; leaving the prior account's set active would tag the
-        // next account's outbound messages with A's theme shortcodes (leaking A's pack Blossom URLs). The
-        // frontend re-registers the new account's theme, but only if it HAS one — clear to be safe.
-        crate::emoji_packs::set_theme_emoji_tags(Vec::new());
     }
 }
 

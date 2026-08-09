@@ -2788,7 +2788,7 @@ fn community_probe_clean(community_id: &str) -> bool {
 /// and advances the cursor on full coverage. A stale/absent cursor skips the
 /// probe (the sweep runs full chains) and reseeds the cursor — so the NEXT boot
 /// can probe. Idempotent, best-effort; any failure leaves the safe default.
-async fn run_control_probe(__session: &vector_core::state::SessionGuard) {
+async fn run_control_probe() {
     let now = probe_now_secs();
     let cursor = vector_core::db::settings::get_sql_setting("concord_control_probe_cursor".into())
         .ok()
@@ -3034,7 +3034,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             vector_core::community::v2::volley::paint_all(targets),
             async {
                 let probe_start = std::time::Instant::now();
-                run_control_probe(&session).await;
+                run_control_probe().await;
                 println!("[Boot] community control probe in {:?}", probe_start.elapsed());
                 // v1 hot lane starts the moment the probe lands — in PARALLEL
                 // with the volley (both are paint work; waiting out the
