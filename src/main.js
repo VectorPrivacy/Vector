@@ -4151,6 +4151,9 @@ async function setupRustListeners() {
 
         // If this user has the open chat, then update the chat too
         if (strOpenChat === chat.id) {
+            // Any row already rendered quoting THIS message can now draw its strip:
+            // it's in chat.messages as of the insert above.
+            backfillReplyContext(newMessage.id);
             // DOM windowing render gate. A jumpToUnread resolve freezes the window
             // entirely — its relay-walk/DB-pull echoes are data-only (already in
             // chat.messages above), so skip ALL rendering AND badge updates; the

@@ -186,6 +186,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // aligns with the name rather than floating up to the reply line.
             body.insertBefore(replyDiv, body.firstChild);
             row.classList.add('dmsg--has-reply');
+        } else {
+            // The parent hasn't arrived yet — a recency-first sync can deliver a reply
+            // before the message it quotes. Marked so its arrival can fill the strip in.
+            row.dataset.replyPending = msg.replied_to;
         }
     }
 
@@ -561,6 +565,36 @@ function _dmsgBuildReplyContext(msg, sender) {
     if (spanRef) divRef.appendChild(spanRef);
 
     return divRef;
+}
+
+/**
+ * Fill in the reply strips of rows that quote `parentId`, now that it has arrived.
+ * Rows render their quote once and never retry, so without this a reply delivered
+ * ahead of its parent stays context-less until the chat is reopened.
+ */
+function backfillReplyContext(parentId) {
+    if (!parentId) return;
+    const rows = document.querySelectorAll(`[data-reply-pending="${CSS.escape(parentId)}"]`);
+    if (!rows.length) return;
+    const chat = getChat(strOpenChat);
+    let inserted = false;
+    for (const row of rows) {
+        const msg = chat?.messages.find(m => m.id === row.id);
+        if (!msg) continue;
+        const replyDiv = _dmsgBuildReplyContext(msg, getProfile(msg.npub));
+        if (!replyDiv) continue;
+        const body = row.querySelector('.dmsg-body');
+        if (!body) continue;
+        body.insertBefore(replyDiv, body.firstChild);
+        row.classList.add('dmsg--has-reply');
+        delete row.dataset.replyPending;
+        inserted = true;
+    }
+    // A strip is a row that grew after layout — same class as a media load or the
+    // unread divider, so it goes through the same compensator or the view drifts
+    // off the bottom. Only when something actually landed: an unconditional call
+    // would soft-scroll on every arriving message.
+    if (inserted) compensateChatScrollForResize();
 }
 
 function _dmsgBuildBlockedPlaceholder(msg) {

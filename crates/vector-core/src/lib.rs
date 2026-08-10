@@ -3003,6 +3003,22 @@ impl VectorCore {
                 }
             }
             crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+            drop(pending);
+            // Resolve each reply's quote before the emit: the renderer has no other source
+            // for a parent outside its window and never retries. Placed AFTER the persists
+            // so a parent carried by this same page resolves too. One query per page.
+            {
+                let quoted: Vec<&mut crate::types::Message> = outcomes
+                    .iter_mut()
+                    .filter_map(|o| match o {
+                        ChatPersist::New(m)
+                        | ChatPersist::Updated { message: m, .. }
+                        | ChatPersist::ReactionRemoved { message: m, .. } => Some(m),
+                        ChatPersist::Removed(_) => None,
+                    })
+                    .collect();
+                let _ = crate::db::events::populate_reply_contexts(quoted).await;
+            }
             // Pass 3 — surface to the live UI, mirroring v1's sweep + the live dispatch handler:
             // a silent DB-only backfill left the chat-list preview, unread badge, and sort order
             // stale until the channel was opened. Raw emits (no notification ping) — a boot
