@@ -58,9 +58,9 @@ function cmpTokenize(src, opts) {
     // throws, tokenising must still finish: the caller renders from these tokens,
     // so an escaping error leaves the DOM frozen and swallows every keystroke.
     // Degrading a decoration to plain text is a cosmetic loss; losing input is not.
-    const safe = (fn, arg) => {
+    const safe = (fn, ...args) => {
         if (!fn) return null;
-        try { return fn(arg); } catch (_) { return null; }
+        try { return fn(...args); } catch (_) { return null; }
     };
     const out = [];
     // Order matters: code first (its content is literal), emoji before mention
@@ -72,11 +72,11 @@ function cmpTokenize(src, opts) {
         // The npub form comes before the name form: a pasted `@npub1…` is all
         // name-shaped characters, so the greedy name rule would swallow it and
         // leave 63 characters of key on screen.
-        // Display names contain spaces ("Walter White"), so that run is captured
-        // greedily and the resolver decides how much of it is actually a name.
         + '|(\\*[^*\\n]+\\*)|(:[a-zA-Z0-9_~-]+:)'
         + '|(@npub1[023456789acdefghjklmnpqrstuvwxyz]{58})'
-        + '|(@[\\p{L}\\p{N}_.\\- ]{1,64})'
+        // Just the marker. What follows is measured against the tracked names,
+        // not a character class — see the handler.
+        + '|(@(?=\\S))'
         // List marker, anchored to the line start (hence the `m` flag) and mirroring
         // marked's own rule: up to three spaces, then `-`, `*` or `1.`, then a space.
         // `+` is deliberately absent — the message renderer refuses it too.
@@ -106,12 +106,16 @@ function cmpTokenize(src, opts) {
             const label = safe(opts.resolveNpub, raw.slice(1));
             out.push(label ? { kind: 'npubmention', from, to, label } : { kind: 'text', from, to });
         } else if (m[8]) {
-            // The resolver returns the tracked name this run STARTS with, which is
-            // usually shorter than the greedy capture — the pill has to end at the
-            // name, not swallow the words after it.
-            const known = safe(opts.resolveMention, raw.slice(1));
-            if (known && known.length <= raw.length - 1) {
-                const end = from + 1 + known.length;
+            // Measured against the tracked names rather than a character class: a
+            // display name is arbitrary text, so any class is a guess that needs
+            // widening the first time someone picks a character it forgot.
+            const known = safe(opts.resolveMention, src, from + 1);
+            const end = known ? from + 1 + known.length : -1;
+            // Same boundaries the send-time conversion uses, so the preview can't
+            // promise a tag that won't fire.
+            const opens = from === 0 || /\s/.test(src[from - 1]);
+            const closes = known && (end >= src.length || /[\s.,!?;:]/.test(src[end]));
+            if (known && opens && closes) {
                 out.push({ kind: 'mention', from, to: end });
                 last = end;
                 re.lastIndex = end;

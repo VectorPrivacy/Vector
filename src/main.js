@@ -1143,15 +1143,16 @@ function buildRichComposer(host) {
     // resolver and already shortens an npub it doesn't know, so this never renders
     // a wall of bech32.
     resolveNpub: (npub) => getName(npub),
-    // `run` is everything name-shaped after the '@'; return the LONGEST tracked
-    // name it starts with, so "@Walter White and co" pills only the name.
-    resolveMention: (run) => {
-        const lower = run.toLowerCase();
+    // Which tracked name, if any, sits at `at` in `src`. The LONGEST wins, so
+    // "@Walter White and co" pills only the name. Names are arbitrary text, so
+    // each one measures itself rather than being matched against a shape.
+    resolveMention: (src, at) => {
         let best = null;
         for (const m of composerMentionLookup()) {
             if (!m.name) continue;
-            if (!lower.startsWith(m.name.toLowerCase())) continue;
-            if (!best || m.name.length > best.length) best = m.name;
+            if (best && m.name.length <= best.length) continue;
+            if (src.slice(at, at + m.name.length).toLowerCase() !== m.name.toLowerCase()) continue;
+            best = m.name;
         }
         return best;
         },
