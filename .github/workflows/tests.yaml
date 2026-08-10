@@ -73,6 +73,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `generate_context!` reads frontendDist at COMPILE time, so the crate
+      # won't build without dist/ — which is gitignored, and present on every
+      # dev machine. Copy mode: minification buys a test binary nothing.
+      - name: build frontend
+        run: |
+          npm ci
+          node scripts/build-frontend.mjs --copy
+
       - name: test
         working-directory: src-tauri
         run: cargo test --no-default-features --lib
