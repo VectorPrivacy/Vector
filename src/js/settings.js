@@ -2354,6 +2354,25 @@ async function initSettings() {
         });
     }
 
+    // Rich Composer toggle — the inline-formatting input, with the plain textarea
+    // as the escape hatch. Stored in localStorage rather than the settings DB for
+    // two reasons: the composer is constructed at main.js module scope, long before
+    // the async settings load, and it is a per-DEVICE compatibility choice — a
+    // WebView quirk on one machine shouldn't disable it on your others.
+    const richComposerToggle = document.getElementById('rich-composer-toggle');
+    if (richComposerToggle) {
+        richComposerToggle.checked = localStorage.getItem('rich_composer') !== 'false';
+        richComposerToggle.addEventListener('change', () => {
+            localStorage.setItem('rich_composer', richComposerToggle.checked ? 'true' : 'false');
+            // The input is built once at startup, so the swap needs a fresh load.
+            popupConfirm(
+                'Restart required',
+                'The composer changes on the next app start.',
+                true,
+            );
+        });
+    }
+
     // Emoticon Suggestions toggle (:) → 🙂, :D → 😄, …; off = leave emoticons as literal text)
     const emoticonToggle = document.getElementById('emoticon-suggestions-toggle');
     if (emoticonToggle) {

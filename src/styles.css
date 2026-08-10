@@ -3729,7 +3729,14 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: #FFFFFF;
 }
 
-#chat-input {
+/* Legacy fallback: the plain <textarea>, used when the rich composer is turned
+   off in Display settings or refuses to construct. Verbatim from 6eddd0b8. */
+textarea#chat-input {
+  /* It used to be a direct flex child of the row; it now sits inside
+     #chat-input-host. An inline-block on the baseline leaves the line box's
+     descender gap under it (7px), which pushed the row from 47 to 54 and made
+     the box look top-heavy. Block takes it out of inline layout. */
+  display: block;
   width: -webkit-fill-available;
   line-height: inherit;
   resize: none;
@@ -3744,9 +3751,128 @@ body.chat-bg-disabled .chat-messages::before {
   background: transparent !important;
 }
 
-#chat-input::placeholder {
+textarea#chat-input::placeholder {
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* A div has no intrinsic width to fill the row the way the textarea did, so it
+   has to claim the space as a flex item. Basis 0, NOT auto: an auto basis is the
+   CONTENT width, so the box would grow with every character typed and squeeze
+   the buttons beside it. Basis 0 makes it take the leftover space and wrap. */
+#chat-input-host {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The row's controls keep their size; only the composer flexes. 38px is what
+   they actually rendered at before: the declared 45px never applied, because the
+   old textarea claimed fill-available and flex shrank every button to pay for it.
+   Pinned rather than left to shrink so the row can't resize as you type. */
+.chat-input-container > button {
+  flex-shrink: 0;
+  width: 38px;
+}
+
+/* Pin the glyphs too, like the send button already does. The base `.icon` is 65%
+   of its button, so icon size tracked button WIDTH and rode that same shrink
+   down to 23px. Sizing it here decouples the two, so no later change to how the
+   row flexes can resize an icon again. */
+#chat-input-file .icon,
+#chat-input-emoji .icon,
+#chat-input-voice .icon {
+  width: 23px;
+  height: 23px;
+}
+
+#chat-input.rich-composer {
+  /* Typographic parity with a message row, measured from `.dmsg-text`:
+     Rubik 15px/400 on a 21px line. The composer used to be Inter 16px because a
+     textarea inherits the document font while `.dmsg` overrides to Rubik, so
+     what you typed never matched what you'd sent. Padding rises to 12px to keep
+     the collapsed row at 45px (21 + 24) now that the line is 3px shorter. */
+  font-family: Rubik, sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 21px;
+  min-height: 21px;
+  position: relative;
+  width: -webkit-fill-available;
+  outline: none;
+  /* The row centres its buttons; a textarea's UA style blocked that from
+     reaching the text, an editable div inherits it. */
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* A contenteditable sizes itself, so the collapsed box is a MIN of one full
+     24px line + balanced padding (45px total, matching the row's buttons) and
+     it grows to the cap on its own. */
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 12px 10px 12px 0;
+  background: transparent !important;
+  /* Scroll anchoring inside an editable fights the caret on WKWebView. */
+  overflow-anchor: none;
+}
+
+/* Absolute, not in-flow: an inline ::before is content the caret sits AFTER,
+   which parks the cursor mid-box on an empty composer. */
+#chat-input.rich-composer[data-empty="1"]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  left: 0;
+  top: 12px;
+  color: rgba(255, 255, 255, 0.38);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Decorated source: markers stay visible but recede, so what you type is what
+   gets sent and the caret has somewhere to go inside them. */
+#chat-input.rich-composer .cmp-mark { opacity: 0.4; }
+#chat-input.rich-composer .cmp-bold .cmp-body { font-weight: 700; }
+/* Matches `.chat em` so italics read the same weight of grey as in a message. */
+#chat-input.rich-composer .cmp-italic .cmp-body { font-style: italic; opacity: 0.7; }
+#chat-input.rich-composer .cmp-strike .cmp-body { text-decoration: line-through; }
+#chat-input.rich-composer .cmp-spoiler .cmp-body {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+}
+#chat-input.rich-composer .cmp-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+#chat-input.rich-composer .cmp-code .cmp-body {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 1px 2px;
+}
+/* Now that the composer is the same Rubik 15px as a message row, the in-chat
+   `.mention` weight of 500 matches exactly — no optical compensation needed. */
+#chat-input.rich-composer .cmp-mention {
+  color: var(--icon-color-primary, #59fcb3);
+  background: rgba(89, 252, 179, 0.13);
+  border-radius: 4px;
+  padding: 0 2px;
+  font-weight: 500;
+}
+/* Both emoji kinds share one geometry, derived rather than eyeballed. Measured
+   against the text baseline at 16px/24px: the text content box runs -16 to +6
+   (centre -5) and the line box -17 to +7. A 1.25em glyph dropped 0.3em below the
+   baseline spans -15.2 to +4.8 — centred on the text within 0.2px, and inside
+   the line box, so adding an emoji cannot grow the row. The old 1.35em custom
+   emoji reached -18.47 and pushed the line box to 24.48px, which is why the
+   composer jumped a pixel the first time you typed one. */
+#chat-input.rich-composer .cmp-twemoji,
+#chat-input.rich-composer .cmp-emoji {
+  display: inline-block;
+  vertical-align: -0.3em;
+}
+
+#chat-input.rich-composer .cmp-twemoji img,
+#chat-input.rich-composer .cmp-emoji img {
+  width: 1.25em;
+  height: 1.25em;
+  object-fit: contain;
+  display: block;
 }
 
 /* Vector Send Button - muted by default, stays visible when active */

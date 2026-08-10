@@ -15,6 +15,8 @@
     <script src="/js/qrcode-generator.js" defer></script>
     <!-- Svelte islands: IIFE exposing the VectorSvelte global (compiled from src/components/*.svelte). -->
     <script src="/components.bundle.js" defer></script>
+    <!-- Before main.js: it constructs the composer at module scope. -->
+    <script src="/js/composer.js" defer></script>
     <script src="/main.js" defer></script>
     <script src="/js/event-cache.js" defer></script>
     <script src="/js/back-stack.js" defer></script>
@@ -1047,7 +1049,7 @@
           <div class="row chat-input-container">
             <button id="chat-input-file"><span class="icon icon-plus"></span></button>
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
-            <textarea id="chat-input" placeholder="Enter message..."></textarea>
+            <div id="chat-input-host"></div>
             <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>
             <button id="chat-input-voice" style="margin-right: 3px;"><span class="icon icon-mic-on"></span></button>
             <button id="chat-input-send" style="display: none; margin-right: 3px;"><span class="icon icon-send"></span></button>
@@ -1352,6 +1354,14 @@
             <label class="toggle-container">
               <span><span id="chat-bg-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Background Wallpaper</span>
               <input type="checkbox" id="chat-bg-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle-container">
+              <span><span id="rich-composer-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Rich Composer</span>
+              <input type="checkbox" id="rich-composer-toggle" checked>
               <span class="neon-toggle"></span>
             </label>
           </div>

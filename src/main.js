@@ -1074,7 +1074,91 @@ const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-return');
-const domChatMessageInput = document.getElementById('chat-input');
+// Late-bound because the composer is constructed here, thousands of lines before
+// the mention selector that owns the tracked list. `var` so the binding exists no
+// matter which of the two runs first.
+var composerMentionLookup = () => [];
+
+/** The plain `<textarea>` the composer replaced. Kept as an escape hatch for a
+ *  WebView that can't drive a contenteditable, and as the automatic landing spot
+ *  if the composer fails to construct. Shares the same id, so every rule and call
+ *  site that isn't rich-composer-specific behaves as it always did. */
+function createLegacyComposer(host) {
+    const ta = document.createElement('textarea');
+    ta.id = 'chat-input';
+    ta.placeholder = 'Enter message...';
+    host.appendChild(ta);
+    return ta;
+}
+
+/** Off only when explicitly disabled, so a fresh install gets the rich one. */
+function richComposerEnabled() {
+    try { return localStorage.getItem('rich_composer') !== 'false'; } catch (_) { return true; }
+}
+
+// Rich composer: renders markdown, mention pills and custom emoji inline while
+// `value` stays the exact string that gets sent. It exposes the textarea's face
+// (value/selection/focus/listeners) and proxies anything else to its element, so
+// every existing call site here, in picker.js and in mentions.js is unchanged.
+//
+// Built inside a try/catch on purpose. This runs at module scope, so a throw here
+// would take the rest of main.js with it — no chat, no settings, no way to turn
+// the composer off. Falling back to the textarea keeps the app usable on a WebView
+// we haven't met yet.
+const domChatMessageInput = (() => {
+    const host = document.getElementById('chat-input-host');
+    if (!richComposerEnabled()) return createLegacyComposer(host);
+    try {
+        return buildRichComposer(host);
+    } catch (err) {
+        console.error('[composer] rich composer failed to construct, falling back', err);
+        host.textContent = '';
+        return createLegacyComposer(host);
+    }
+})();
+
+function buildRichComposer(host) {
+    const composer = createRichComposer(host, {
+    placeholder: 'Enter message...',
+    // Only a shortcode the user actually has renders as an image; anything else
+    // stays literal so it can still be typed and sent verbatim.
+    resolveEmoji: (code) => {
+        for (const pack of arrEmojiPacks) {
+            const hit = pack.emojis && pack.emojis.find(e => (e.dispCode || e.shortcode) === code);
+            if (hit) return hit.url;
+        }
+        return null;
+    },
+    // The draft carries `@display-name` and resolves to an npub at send, so a pill
+    // is styled editable text rather than an atomic widget.
+    // Pack art lives on a remote host the WebView refuses to load — Android fails
+    // it outright. Bind through the same disk cache the message renderer uses, so
+    // the composer and the sent message resolve identically, and degrade a missing
+    // one to its literal `:shortcode:` rather than a broken image.
+    bindEmojiImg: (img, url, onFail) => {
+        if (window.bindCachedEmojiImg) window.bindCachedEmojiImg(img, url, 'emoji', onFail);
+        else onFail();
+    },
+    // A pasted mention carries the raw key. `getName` is the app's one display-name
+    // resolver and already shortens an npub it doesn't know, so this never renders
+    // a wall of bech32.
+    resolveNpub: (npub) => getName(npub),
+    // `run` is everything name-shaped after the '@'; return the LONGEST tracked
+    // name it starts with, so "@Walter White and co" pills only the name.
+    resolveMention: (run) => {
+        const lower = run.toLowerCase();
+        let best = null;
+        for (const m of composerMentionLookup()) {
+            if (!m.name) continue;
+            if (!lower.startsWith(m.name.toLowerCase())) continue;
+            if (!best || m.name.length > best.length) best = m.name;
+        }
+        return best;
+        },
+    });
+    composer.el.id = 'chat-input';
+    return composer;
+}
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatReplyBarName = document.getElementById('chat-reply-bar-name');
@@ -11222,45 +11306,36 @@ const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholde
  * Expands up to max-height defined in CSS (150px), then scrolls.
  * Only expands when content actually needs more space (multi-line).
  */
+let _chatInputHeight = 0;
+
+/**
+ * The composer is a contenteditable, so it sizes itself between the min- and
+ * max-height in CSS — no measure-and-set pass, which on a contenteditable
+ * fights the growth it is trying to measure. This only reacts to a height
+ * change, keeping the chat pinned the way the old resize did.
+ */
 function autoResizeChatInput() {
-    // Get actual computed styles
-    const computed = window.getComputedStyle(domChatMessageInput);
-    const lineHeight = parseFloat(computed.lineHeight) || 24;
-    const paddingTop = parseFloat(computed.paddingTop) || 10;
-    const paddingBottom = parseFloat(computed.paddingBottom) || 10;
-    const padding = paddingTop + paddingBottom;
-    
-    // Single line scrollHeight = lineHeight + padding
-    const singleLineScrollHeight = lineHeight + padding;
-    
-    // Track previous state for scroll adjustment
-    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
-    
-    // Reset height and ensure overflow is hidden for accurate measurement
-    // Setting overflow:hidden before measuring prevents scrollbar space from affecting layout
-    domChatMessageInput.style.overflowY = 'hidden';
-    domChatMessageInput.style.height = '0';
-    
-    // Get scrollHeight - this tells us how much space content actually needs
-    const scrollHeight = domChatMessageInput.scrollHeight;
-    
-    // Only expand if content needs more than single line
-    if (scrollHeight > singleLineScrollHeight) {
-        // Set height to content needs minus padding (CSS height is content-box)
-        domChatMessageInput.style.height = (scrollHeight - padding) + 'px';
-        domChatMessageInput.style.overflowY = 'auto';
-        
-        // Soft scroll to keep chat at bottom when expanding
-        softChatScroll();
-    } else {
-        // Single line - use default CSS height, keep overflow hidden
-        domChatMessageInput.style.height = '';
-        
-        // If we just collapsed from multi-line, also soft scroll
-        if (wasExpanded) {
-            softChatScroll();
+    const node = domChatMessageInput.el || domChatMessageInput;
+    // A textarea has no intrinsic auto-grow, so the fallback still has to measure
+    // and set. The rich composer sizes itself between its min- and max-height.
+    if (!domChatMessageInput.el) {
+        const computed = window.getComputedStyle(node);
+        const padding = (parseFloat(computed.paddingTop) || 10.5) + (parseFloat(computed.paddingBottom) || 10.5);
+        const singleLine = (parseFloat(computed.lineHeight) || 24) + padding;
+        node.style.overflowY = 'hidden';
+        node.style.height = '0';
+        const needed = node.scrollHeight;
+        if (needed > singleLine) {
+            node.style.height = (needed - padding) + 'px';
+            node.style.overflowY = 'auto';
+        } else {
+            node.style.height = '';
         }
     }
+    const h = node.offsetHeight;
+    if (h === _chatInputHeight) return;
+    _chatInputHeight = h;
+    softChatScroll();
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -12712,6 +12787,10 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
     getMentionCandidates,
     document.getElementById('chat-box')
 ) : null;
+
+// Hand the composer its mention source now that one exists, so an inserted
+// `@Name` renders as a pill.
+composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
 
 // --- Emoji Shortcode Selector ---
 const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
