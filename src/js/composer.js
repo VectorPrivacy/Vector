@@ -368,12 +368,11 @@ function createRichComposer(host, opts = {}) {
     }
 
     /**
-     * Both ends of the selection as model offsets. `selectionStart` used to
-     * report the END too, so anything that replaces a selection — paste, the
-     * picker's insertAtCursor — inserted beside the highlighted text instead of
-     * over it.
+     * Both ends of the LIVE selection as model offsets, or null when the
+     * selection isn't inside us. `selectionStart` used to report the END too, so
+     * anything replacing a selection inserted beside the highlighted text.
      */
-    function selectionRange() {
+    function liveSelectionRange() {
         const sel = window.getSelection();
         if (!sel || !sel.rangeCount) return null;
         const r = sel.getRangeAt(0);
@@ -381,6 +380,22 @@ function createRichComposer(host, opts = {}) {
         const end = offsetOfPoint(r.endContainer, r.endOffset);
         if (start === null || end === null) return null;
         return start <= end ? { start, end } : { start: end, end: start };
+    }
+
+    /**
+     * Where the caret was the last time it was ours. Clicking the emoji picker
+     * moves focus out of the composer, so by the time it calls back there is no
+     * live selection to read and an insert would land at the end of the message
+     * instead of where you left off.
+     */
+    let lastSelection = null;
+    document.addEventListener('selectionchange', () => {
+        const r = liveSelectionRange();
+        if (r) lastSelection = r;
+    });
+
+    function selectionRange() {
+        return liveSelectionRange() || lastSelection;
     }
 
     /** Put the caret at model offset `target`. */
