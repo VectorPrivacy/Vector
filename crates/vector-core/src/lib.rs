@@ -739,6 +739,22 @@ impl VectorCore {
         ).await.map_err(|e| VectorError::Other(e))
     }
 
+    /// The id of our own reaction to `message_id` with `emoji`, if we already have
+    /// one. A reaction set is keyed by (author, emoji), so a repeat is something
+    /// every receiver collapses anyway: refusing it here spends no publish, no
+    /// gift-wrap and no relay round-trip on an event that changes nothing.
+    async fn own_reaction_id(message_id: &str, emoji: &str) -> Option<String> {
+        use nostr_sdk::prelude::ToBech32;
+        let me = state::my_public_key()?.to_bech32().ok()?;
+        let st = state::STATE.lock().await;
+        let (_, message) = st.find_message(message_id)?;
+        message
+            .reactions
+            .iter()
+            .find(|r| r.author_id == me && r.emoji == emoji)
+            .map(|r| r.id.clone())
+    }
+
     /// Send a NIP-25 reaction to a DM message. `emoji_url` carries the NIP-30
     /// image URL when reacting with a custom-pack emoji (content stays
     /// `:shortcode:`). Returns the reaction's rumor id. Local echo + persistence
@@ -754,6 +770,11 @@ impl VectorCore {
 
         let client = state::nostr_client().ok_or(VectorError::Other("Not connected".into()))?;
         let my_public_key = state::my_public_key().ok_or(VectorError::Other("Not logged in".into()))?;
+
+        // Already ours: hand back the reaction we hold rather than minting a second.
+        if let Some(existing) = Self::own_reaction_id(reference_id, emoji).await {
+            return Ok(existing);
+        }
 
         let reference_event = EventId::from_hex(reference_id)
             .map_err(|e| VectorError::Nostr(e.to_string()))?;
@@ -2109,6 +2130,10 @@ impl VectorCore {
         emoji_url: Option<&str>,
     ) -> Result<()> {
         crate::db::scoped(async move {
+            // Already ours — nothing to publish; the set can't hold it twice.
+            if Self::own_reaction_id(message_id, emoji).await.is_some() {
+                return Ok(());
+            }
             let emoji_tags: Vec<crate::types::EmojiTag> = match emoji_url {
                 Some(url) if emoji.starts_with(':') && emoji.ends_with(':') && emoji.len() >= 3 && !url.is_empty() => {
                     vec![crate::types::EmojiTag { shortcode: emoji[1..emoji.len() - 1].to_string(), url: url.to_string() }]

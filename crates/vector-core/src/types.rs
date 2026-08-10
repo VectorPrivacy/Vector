@@ -197,12 +197,11 @@ impl Message {
     /// Unlike the src-tauri version, this does NOT emit events — the caller
     /// is responsible for notifying the UI via `emit_event`.
     pub fn add_reaction(&mut self, reaction: Reaction) -> bool {
-        if !self.reactions.iter().any(|r| r.id == reaction.id) {
-            self.reactions.push(reaction);
-            true
-        } else {
-            false
+        if self.reactions.iter().any(|r| r.id == reaction.id || r.same_slot(&reaction)) {
+            return false;
         }
+        self.reactions.push(reaction);
+        true
     }
 
     // ========================================================================
@@ -385,6 +384,16 @@ pub struct Reaction {
     /// reaction chip survives reloads + missing pack subscriptions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji_url: Option<String>,
+}
+
+impl Reaction {
+    /// Do these occupy the same slot in a message's reaction set? That set is keyed
+    /// by (author, emoji): one person reacting with one emoji is ONE reaction however
+    /// many events carry it. Event ids differ per send, so id equality alone lets a
+    /// re-send from another device, a retry, or a foreign client double the count.
+    pub fn same_slot(&self, other: &Reaction) -> bool {
+        self.author_id == other.author_id && self.emoji == other.emoji
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -638,6 +647,29 @@ mod tests {
             assert!(msg.add_reaction(reaction), "reaction {} should be new", i);
         }
         assert_eq!(msg.reactions.len(), 5, "all 5 unique reactions should be added");
+    }
+
+    #[test]
+    fn add_reaction_rejects_a_resend_under_a_new_event_id() {
+        let mut msg = Message::default();
+        let slot = |id: &str, emoji: &str| Reaction {
+            id: id.to_string(),
+            reference_id: "msg1".to_string(),
+            author_id: "user1".to_string(),
+            emoji: emoji.to_string(),
+            emoji_url: None,
+        };
+        assert!(msg.add_reaction(slot("r1", "\u{1F44D}")));
+        assert!(
+            !msg.add_reaction(slot("r2", "\u{1F44D}")),
+            "a fresh event id is still the same (author, emoji) slot — this is the double-count"
+        );
+        assert_eq!(msg.reactions.len(), 1);
+        assert!(
+            msg.add_reaction(slot("r3", "\u{2764}\u{FE0F}")),
+            "a different emoji from the same author is its own reaction"
+        );
+        assert_eq!(msg.reactions.len(), 2);
     }
 
     // ========================================================================

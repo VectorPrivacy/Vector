@@ -1078,6 +1078,14 @@ impl CompactMessage {
             return false;
         }
 
+        // The interned form of `Reaction::same_slot`: the set is keyed by
+        // (author, emoji), so a second event from the same author carrying the
+        // same emoji is the reaction we already hold, not another one.
+        let author_idx = interner.intern(&reaction.author_id);
+        if self.reactions.iter().any(|r| r.author_idx == author_idx && *r.emoji == *reaction.emoji) {
+            return false;
+        }
+
         // Convert to compact and rebuild
         let compact = CompactReaction::from_reaction_owned(reaction, interner);
         let mut reactions = self.reactions.to_vec();
@@ -3144,6 +3152,31 @@ mod tests {
             emoji_tags: Vec::new(),
             addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
         }
+    }
+
+    #[test]
+    fn compact_add_reaction_rejects_a_resend_under_a_new_event_id() {
+        let mut interner = NpubInterner::new();
+        let mut compact = CompactMessage::from_message(&Message::default(), &mut interner);
+        // Real hex — the id check would mask the slot check if these collapsed.
+        let slot = |id: String, emoji: &str| Reaction {
+            id,
+            reference_id: "a".repeat(64),
+            author_id: "npub1author".to_string(),
+            emoji: emoji.to_string(),
+            emoji_url: None,
+        };
+        assert!(compact.add_reaction(slot("1".repeat(64), "\u{1F44D}"), &mut interner));
+        assert!(
+            !compact.add_reaction(slot("2".repeat(64), "\u{1F44D}"), &mut interner),
+            "distinct event ids but one (author, emoji) slot — this is the double-count"
+        );
+        assert_eq!(compact.reactions.len(), 1);
+        assert!(
+            compact.add_reaction(slot("3".repeat(64), "\u{2764}\u{FE0F}"), &mut interner),
+            "a different emoji from the same author is its own reaction"
+        );
+        assert_eq!(compact.reactions.len(), 2);
     }
 
     #[test]

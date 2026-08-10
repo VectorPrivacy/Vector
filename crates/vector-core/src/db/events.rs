@@ -1217,13 +1217,19 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             match event.kind {
                 k if k == event_kind::REACTION => {
                     let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
-                    reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
+                    let reaction = Reaction {
                         id: event.id.clone(),
                         reference_id: ref_id.clone(),
                         author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
                         emoji: event.content.clone(),
                         emoji_url,
-                    });
+                    };
+                    // Rows predating the (author, emoji) rule — or written by a client
+                    // that never had it — must not resurrect a double count on reload.
+                    let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
+                    if !slot.iter().any(|r| r.same_slot(&reaction)) {
+                        slot.push(reaction);
+                    }
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
                     let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
@@ -1494,12 +1500,18 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             match event.kind {
                 k if k == event_kind::REACTION => {
                     let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
-                    reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
+                    let reaction = Reaction {
                         id: event.id.clone(), reference_id: ref_id.clone(),
                         author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
                         emoji: event.content.clone(),
                         emoji_url,
-                    });
+                    };
+                    // Rows predating the (author, emoji) rule — or written by a client
+                    // that never had it — must not resurrect a double count on reload.
+                    let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
+                    if !slot.iter().any(|r| r.same_slot(&reaction)) {
+                        slot.push(reaction);
+                    }
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
                     let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await

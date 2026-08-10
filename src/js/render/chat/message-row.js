@@ -1705,10 +1705,15 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             ? reactionsRow.querySelector(`.reaction[data-emoji="${CSS.escape(emoji)}"]`)
             : null;
         if (existing) {
-            // Roll the count up (don't replace — replacing with the decoy's count
-            // of 1 would lose any prior count from other users' reactions).
-            _dmsgRollReactionCount(existing, _dmsgReactionCount(existing) + 1);
-            existing.setAttribute('data-reacted', 'true');
+            // Already ours: the set is keyed by (author, emoji), so picking the same
+            // emoji again adds nothing. Bumping would strand a wrong count — the send
+            // is refused as a duplicate, so no update comes back to correct it.
+            if (existing.getAttribute('data-reacted') !== 'true') {
+                // Roll the count up (don't replace — replacing with the decoy's count
+                // of 1 would lose any prior count from other users' reactions).
+                _dmsgRollReactionCount(existing, _dmsgReactionCount(existing) + 1);
+                existing.setAttribute('data-reacted', 'true');
+            }
         } else {
             // New emoji — insert BEFORE the trailing "+" add-reaction shortcut so the
             // chip lands in the same slot it'll occupy after the upcoming message_update
@@ -1718,13 +1723,17 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             else reactionsRow.appendChild(spanReaction);
             spanReaction.classList.add('reaction-enter');
             spanReaction.addEventListener('animationend', () => spanReaction.classList.remove('reaction-enter'), { once: true });
-            // If this insert pushed us to the unique-emoji ceiling, drop the "+"
-            // shortcut now so it doesn't linger until message_update re-renders.
-            if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= MAX_DISPLAYED_REACTIONS) {
-                addBtn.remove();
-            }
         }
     }
+    // The "+" tracks what's on screen, not what has been confirmed: a decoy chip
+    // is a visible reaction, so the shortcut belongs beside it right away rather
+    // than a publish round-trip later. Same helper the reconcile uses, so the
+    // appear/disappear rule can't drift between the two paths.
+    _dmsgSyncReactionsAddButton(
+        reactionsRow,
+        spanReaction.dataset.msgId || rowEl.id,
+        reactionsRow.querySelectorAll(':scope > .reaction').length,
+    );
     // Reaction chips can grow the row's height (first chip adds a whole
     // row, wrapped chips bump to a new line). Honour the user's
     // pinned-to-bottom state — softChatScroll no-ops if they've scrolled
