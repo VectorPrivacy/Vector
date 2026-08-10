@@ -321,12 +321,13 @@
   --status-good: #FCE459;
   --status-fair: #FCA559;
   --status-poor: var(--danger-color);
+  --text-color: #f6f6f6;
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
   font-weight: 400;
 
-  color: #f6f6f6;
+  color: var(--text-color);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -3853,6 +3854,9 @@ textarea#chat-input::placeholder {
   border-radius: 4px;
   padding: 0 2px;
   font-weight: 500;
+  /* A caret parked at the pill's edge would otherwise take the pill's colour
+     and read as "inside" a protected token. It's ordinary editable text. */
+  caret-color: var(--text-color);
 }
 /* Both emoji kinds share one geometry, derived rather than eyeballed. Measured
    against the text baseline at 16px/24px: the text content box runs -16 to +6
