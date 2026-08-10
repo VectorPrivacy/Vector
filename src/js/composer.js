@@ -528,6 +528,32 @@ function createRichComposer(host, opts = {}) {
         el.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
+    // The sentinels around a widget are real caret stops, so crossing one costs an
+    // extra tap. A ZWSP hop is exactly a move that leaves the MODEL offset where it
+    // was, which is the cheap test for "keep going".
+    el.addEventListener('keydown', (e) => {
+        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        if (e.shiftKey || e.metaKey || e.altKey || e.ctrlKey || composing) return;
+        const sel = window.getSelection();
+        if (!sel || !sel.isCollapsed || !sel.modify || !sel.rangeCount) return;
+        if (!el.contains(sel.getRangeAt(0).startContainer)) return;
+        const before = caretOffset();
+        if (before === null) return;
+        e.preventDefault();
+        const dir = e.key === 'ArrowRight' ? 'right' : 'left';
+        // Bounded: a widget contributes at most two sentinels, and standing still
+        // means the caret is against an edge.
+        for (let i = 0; i < 4; i++) {
+            const r = sel.getRangeAt(0);
+            const node = r.startContainer;
+            const off = r.startOffset;
+            sel.modify('move', dir, 'character');
+            const moved = sel.getRangeAt(0);
+            if (moved.startContainer === node && moved.startOffset === off) break;
+            if (caretOffset() !== before) break;
+        }
+    });
+
     el.addEventListener('compositionstart', () => { composing = true; });
     el.addEventListener('compositionend', () => {
         composing = false;
