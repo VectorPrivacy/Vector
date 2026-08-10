@@ -11690,7 +11690,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                 strPubkey = hotReloadState.npub;
                 arrProfiles = hotReloadState.profiles || [];
                 arrChats = hotReloadState.chats || [];
-                
+                // Seeded from the payload, so the first paint is already in pin order
+                // rather than correcting itself an IPC hop later.
+                arrPinnedChats = hotReloadState.pinned || [];
+                _pinnedLoaded = true;
+
                 // Setup Rust listeners
                 await setupRustListeners();
 

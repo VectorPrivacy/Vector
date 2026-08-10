@@ -113,6 +113,7 @@ pub async fn debug_hot_reload_sync() -> Result<serde_json::Value, String> {
         "npub": my_npub,
         "profiles": slim_profiles,
         "chats": serializable_chats,
+        "pinned": vector_core::pinned_chats::load_local().chats,
         "is_syncing": state.is_syncing
     }))
 }
