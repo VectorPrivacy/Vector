@@ -17,6 +17,36 @@
 const CMP_ZWSP = '​';
 
 /**
+ * Typographic variants of one character. macOS substitution rewrites these as
+ * you type — including inside a name the autofill just inserted — which turns a
+ * real mention into plain text both on screen and on send. Every mapping is
+ * 1:1, so folding never shifts an offset.
+ */
+const CMP_VARIANTS = [
+    ["'", '‘’'],
+    ['"', '“”'],
+    ['-', '–—'],
+];
+const CMP_FOLD_TO = new Map();
+for (const [canon, variants] of CMP_VARIANTS) for (const v of variants) CMP_FOLD_TO.set(v, canon);
+const CMP_FOLD_RE = new RegExp('[' + CMP_VARIANTS.map(([, v]) => v).join('') + ']', 'g');
+
+/** Canonical form, for comparing a display name against what was typed. */
+function cmpFold(s) {
+    return s.replace(CMP_FOLD_RE, (c) => CMP_FOLD_TO.get(c));
+}
+
+/** Regex source matching `name` under any variant of its characters. */
+function cmpNamePattern(name) {
+    return [...cmpFold(name)].map((ch) => {
+        const hit = CMP_VARIANTS.find(([canon]) => canon === ch);
+        // `-` leads its class, where it is literal.
+        if (hit) return '[' + ch + hit[1] + ']';
+        return ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }).join('');
+}
+
+/**
  * Emoji sequences: flags (two regional indicators), keycaps, and pictographs
  * with their optional tone/variation selector plus any ZWJ continuation. Matched
  * as ONE unit so a multi-codepoint emoji is a single atom rather than its parts.
@@ -577,4 +607,10 @@ function createRichComposer(host, opts = {}) {
     });
 }
 
-if (typeof window !== 'undefined') window.createRichComposer = createRichComposer;
+if (typeof window !== 'undefined') {
+    window.createRichComposer = createRichComposer;
+    // The send-time conversion has to fold names the same way the preview does,
+    // or one of them tags where the other doesn't.
+    window.cmpFold = cmpFold;
+    window.cmpNamePattern = cmpNamePattern;
+}

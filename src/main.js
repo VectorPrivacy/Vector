@@ -1151,7 +1151,7 @@ function buildRichComposer(host) {
         for (const m of composerMentionLookup()) {
             if (!m.name) continue;
             if (best && m.name.length <= best.length) continue;
-            if (src.slice(at, at + m.name.length).toLowerCase() !== m.name.toLowerCase()) continue;
+            if (cmpFold(src.slice(at, at + m.name.length)).toLowerCase() !== cmpFold(m.name).toLowerCase()) continue;
             best = m.name;
         }
         return best;
@@ -12568,10 +12568,10 @@ async function sendMessage(messageText) {
         // preventing partial matches (e.g. "Al" matching inside "Alice")
         const sorted = tracked.slice().sort((a, b) => b.name.length - a.name.length);
         for (const m of sorted) {
-            // Escape regex special chars in the display name
-            const escaped = m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // Match @Name only at word boundaries to avoid substring collisions
-            const re = new RegExp('(?<=^|\\s)@' + escaped + '(?=\\s|[.,!?;:]|$)', 'g');
+            // Match @Name only at word boundaries to avoid substring collisions,
+            // and under any typographic variant, so a name the OS re-punctuated
+            // still tags rather than sending as plain text.
+            const re = new RegExp('(?<=^|\\s)@' + cmpNamePattern(m.name) + '(?=\\s|[.,!?;:]|$)', 'g');
             cleanedText = cleanedText.replace(re, '@' + m.npub);
         }
     }
