@@ -14,10 +14,11 @@
     "dev:bare": "npm run tauri:dev:bare",
     "build:bare": "npm run tauri:build:bare",
     "android:dev": "./scripts/android-dev.sh",
-    "android:build": "tauri android build",
+    "android:build": "tauri android build --target aarch64 armv7",
     "svelte:build": "node scripts/build-svelte.mjs",
     "svelte:watch": "node scripts/build-svelte.mjs --watch",
-    "test:cache": "node --test \"tests/event-cache/*.test.mjs\""
+    "test:cache": "node --test \"tests/event-cache/*.test.mjs\"",
+    "android:emu": "./scripts/android-emu.sh"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.6",
