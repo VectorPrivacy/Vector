@@ -2045,7 +2045,7 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     since_secs: u64,
-) -> Result<(Vec<guestbook::GuestbookEvent>, u64), String> {
+) -> Result<(Vec<guestbook::GuestbookEvent>, u64, bool), String> {
     let gb_group = super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
     const GB_PAGE: usize = 500;
     const GB_MAX_PAGES: usize = 12;
@@ -2054,6 +2054,10 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
     let mut seen: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
     let mut until: Option<u64> = None;
     let mut oldest: Option<u64> = None;
+    // Did the walk run out of PLANE, or out of PAGES? Only the former means the
+    // caller holds everything down to `since_secs` — advancing a cursor on the
+    // latter skips whatever the walk never reached, permanently.
+    let mut reached_end = false;
     for _ in 0..GB_MAX_PAGES {
         // Full: this set becomes the refound's recipient list — a member's
         // Join visible only on a minority relay must not be severed.
@@ -2083,14 +2087,19 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
             }
         }
         if fresh == 0 || wraps.len() < GB_PAGE || oldest.is_some_and(|o| o < since_secs) {
+            reached_end = true;
             break;
         }
         match oldest {
             Some(o) if o > 0 => until = Some(o),
-            _ => break,
+            // Nothing older to ask for.
+            _ => {
+                reached_end = true;
+                break;
+            }
         }
     }
-    Ok((events, newest))
+    Ok((events, newest, reached_end))
 }
 
 /// The shared membership fold: coalesce Guestbook events under the community's
@@ -2187,10 +2196,18 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
     crate::db::scoped(async move {
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+        // First sync of the session walks the WHOLE plane; later ones ride the cursor.
+        // The cursor alone can only ever move forward, so any history a walk missed —
+        // a page cap, an open breaker, stream-auth not yet landed, one relay of several
+        // answering — is skipped for good, and two devices settle on different member
+        // counts that never converge. Re-walking each session heals that, and it also
+        // covers what no persisted flag can: a walk ends on a short page when the relays
+        // that ANSWERED had no more, which is not the same as the plane being exhausted.
+        let full = !guestbook_walked_this_session(&cid_hex);
         // Overlap one second so a same-second boundary event can't slip the cursor;
         // the rumor-id merge below dedups the re-fetched edge.
-        let since = cursor.saturating_sub(1);
-        let (fresh, newest) = fetch_guestbook_events(transport, community, since).await?;
+        let since = if full { 0 } else { cursor.saturating_sub(1) };
+        let (fresh, newest, reached_end) = fetch_guestbook_events(transport, community, since).await?;
         let known: std::collections::HashSet<[u8; 32]> = events.iter().map(|e| e.rumor_id).collect();
         let mut added = Vec::new();
         for ev in fresh {
@@ -2199,12 +2216,38 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
                 added.push(ev);
             }
         }
-        if !added.is_empty() || newest > cursor {
-            crate::db::community::set_guestbook(&cid_hex, &events, newest.max(cursor))?;
+        // Advance ONLY on a walk that ran out of plane. `newest` counts every wrap seen,
+        // including ones skipped or that failed to open, so moving it after a truncated
+        // walk is what buries the events that walk never reached.
+        let advanced = if reached_end { newest.max(cursor) } else { cursor };
+        if !added.is_empty() || advanced > cursor {
+            crate::db::community::set_guestbook(&cid_hex, &events, advanced)?;
+        }
+        if full && reached_end {
+            mark_guestbook_walked(&cid_hex);
         }
         Ok(added)
     })
     .await
+}
+
+/// Communities whose Guestbook plane has been walked end-to-end this session.
+/// Lives on the Session, so an account swap drops it and the next account walks
+/// its own rather than inheriting this one's coverage.
+struct GuestbookWalked;
+
+fn guestbook_walked_set() -> std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> {
+    crate::db::current_session().scoped::<GuestbookWalked, _>()
+}
+
+fn guestbook_walked_this_session(community_id: &str) -> bool {
+    guestbook_walked_set().lock().is_ok_and(|s| s.contains(community_id))
+}
+
+fn mark_guestbook_walked(community_id: &str) {
+    if let Ok(mut s) = guestbook_walked_set().lock() {
+        s.insert(community_id.to_string());
+    }
 }
 
 /// Fold ONE live guestbook event into the store (the realtime path — no fetch).
@@ -2257,7 +2300,7 @@ pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, Stri
 /// seen publishing on a channel — are folded in FORWARD-only per CORD-02 §5, so a
 /// member whose Join was lost still counts.
 pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
-    let (events, _newest) = fetch_guestbook_events(transport, community, 0).await?;
+    let (events, _newest, _reached_end) = fetch_guestbook_events(transport, community, 0).await?;
     // Observed authors: fold each held channel's recent authorship (real author +
     // newest ms), so a member who posted but whose Join was lost is still counted.
     let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
