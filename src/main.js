@@ -11338,6 +11338,16 @@ function autoResizeChatInput() {
     softChatScroll();
 }
 
+/** Undo what autoResizeChatInput set, after the input is cleared. */
+function resetChatInputSize() {
+    // Legacy only. The rich composer is sized by the stylesheet, and an inline
+    // overflow-y outranks it permanently — one send and a long draft could
+    // never scroll again.
+    if (domChatMessageInput.el) return;
+    domChatMessageInput.style.height = '';
+    domChatMessageInput.style.overflowY = 'hidden';
+}
+
 window.addEventListener("DOMContentLoaded", async () => {
     // Once login fade-in animation ends, remove it
     domLogin.addEventListener('animationend', () => domLogin.classList.remove('fadein-anim'), { once: true });
@@ -12576,8 +12586,7 @@ async function sendMessage(messageText) {
         // Clear input and show editing state
         domChatMessageInput.value = '';
         resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
-        domChatMessageInput.style.height = '';
-        domChatMessageInput.style.overflowY = 'hidden';
+        resetChatInputSize();
         domChatMessageInput.setAttribute('placeholder', 'Saving edit...');
 
         try {
@@ -12671,8 +12680,7 @@ async function sendMessage(messageText) {
     // Clear input and show sending state
     domChatMessageInput.value = '';
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
-    domChatMessageInput.style.height = ''; // Reset textarea height
-    domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
+    resetChatInputSize();
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
 
     try {
@@ -13050,8 +13058,7 @@ domChatMessageInput.oninput = async (e) => {
         } else if (newState === 'recording' || newState === 'locked') {
             // Clear input and show recording status
             domChatMessageInput.value = '';
-            domChatMessageInput.style.height = '';
-            domChatMessageInput.style.overflowY = 'hidden';
+            resetChatInputSize();
         }
     };
     
