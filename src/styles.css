@@ -1723,6 +1723,95 @@ html, body {
   opacity: 1 !important;
 }
 
+/* Banner QR button — the icon IS the profile QR, rendered small. Below Share
+   on the own profile; takes Share's top-right spot on other profiles.
+   Id selector: .profile-option would out-cascade a class rule's box sizing. */
+#profile-qr-btn {
+  top: 68px;
+  padding: 8px;
+  width: 54px;
+  height: 54px;
+}
+
+#profile:not(.is-own-profile) #profile-qr-btn {
+  top: 10px;
+}
+
+.profile-qr-icon {
+  width: 100%;
+  height: 100%;
+}
+
+.profile-qr-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.profile-qr-icon svg path { fill: #fff; }
+
+/* Fullscreen QR overlay (profile QR + bunker login QR) */
+.qr-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.88);
+  z-index: 10000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-overlay.active { display: flex; }
+
+.qr-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  background-color: #101010;
+  border: 1px solid #2c2e2f;
+  border-radius: 18px;
+  padding: 24px;
+  animation: qr-overlay-pop 0.16s ease-out;
+}
+
+@keyframes qr-overlay-pop {
+  from { transform: scale(0.92); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.qr-overlay-tile {
+  /* Solid white tile: the padding doubles as the QR quiet zone for scanners.
+     Height wraps the SVG (1:1 viewBox), so the tile stays square without an
+     aspect-ratio/percentage-height cycle. */
+  position: relative;
+  width: min(72vw, 320px);
+  padding: 16px;
+  border-radius: 10px;
+  background-color: #fff;
+  box-sizing: border-box;
+}
+
+#qr-overlay-full svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+
+.qr-overlay-close {
+  width: 100%;
+  padding: 12px 0;
+  border: none;
+  border-radius: 12px;
+  background-color: var(--accent-color, #59fcb3);
+  color: #000;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
 /* Style individual options within the danger zone */
 .danger-option {
   display: flex;
@@ -9619,6 +9708,7 @@ select:disabled:hover {
   align-items: center;
   justify-content: center;
 }
+.login-bunker-qr-wrap.ready { cursor: pointer; }
 .login-bunker-qr { width: 100%; height: 100%; }
 .login-bunker-qr svg { width: 100%; height: 100%; display: block; }
 .login-bunker-qr-loading {

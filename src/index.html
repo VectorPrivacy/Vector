@@ -44,6 +44,7 @@
     <script src="/js/render/chat/message-toolbar.js" defer></script>
     <script src="/js/render/chat/message-row.js" defer></script>
     <script src="/js/render/mini-profile.js" defer></script>
+    <script src="/js/render/qr.js" defer></script>
     <script src="/js/tor-glyph.js" defer></script>
     <script src="/js/picker.js" defer></script>
     <script src="/js/badge-card.js" defer></script>
@@ -799,6 +800,9 @@
     <div id="profile-share-btn" class="profile-share-btn profile-option btn">
       <span class="icon icon-share navbar-icon"></span>
       <p class="navbar-text">Share</p>
+    </div>
+    <div id="profile-qr-btn" class="profile-share-btn profile-qr-btn profile-option btn" role="button" aria-label="Show profile QR code">
+      <div id="profile-qr-icon" class="profile-qr-icon"></div>
     </div>
     <div class="profile-avatar-container">
       <img id="profile-avatar" class="profile-avatar">
@@ -1861,6 +1865,16 @@
   
   <!-- Global tooltip element -->
   <div id="global-tooltip" class="global-tooltip"></div>
+
+  <!-- Fullscreen QR overlay (profile banner QR button, bunker login QR) -->
+  <div id="qr-overlay" class="qr-overlay">
+    <div class="qr-overlay-card">
+      <div class="qr-overlay-tile">
+        <div id="qr-overlay-full" aria-label="QR code"></div>
+      </div>
+      <button id="qr-overlay-close" class="qr-overlay-close">Close</button>
+    </div>
+  </div>
 
   <!-- Multi-account: My Profile dropdown (in-app) -->
   <div id="profile-switcher-backdrop" class="profile-switcher-backdrop"></div>

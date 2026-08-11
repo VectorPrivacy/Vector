@@ -734,21 +734,6 @@ function armBunkerSessionTimer() {
 }
 
 /**
- * Render a QR code (SVG) into a container element using the vendored
- * qrcode-generator library. Reusable for future Profile QR / contact-share
- * / Lightning URI flows.
- */
-function renderQrInto(containerEl, text, opts = {}) {
-    if (!containerEl || !window.qrcode) return false;
-    const ecc = opts.ecc || 'M';
-    const qr = window.qrcode(0, ecc);
-    qr.addData(text);
-    qr.make();
-    containerEl.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
-    return true;
-}
-
-/**
  * Kick off a NIP-46 client-initiated session — either fresh
  * (`start_nostrconnect_session`) or re-pairing an existing committed account
  * (`reauthorize_bunker`). Backend returns a `nostrconnect://` URL that we
@@ -810,7 +795,7 @@ async function startBunkerSession() {
         }
         const url = await invoke(cmd);
         strBunkerNostrConnectUrl = url;
-        const rendered = renderQrInto(domLoginBunkerQr, url, { ecc: 'M' });
+        const rendered = renderQrInto(domLoginBunkerQr, url);
         if (rendered && domLoginBunkerQrWrap) {
             domLoginBunkerQrWrap.classList.add('ready');
         }
@@ -6065,6 +6050,16 @@ function renderProfileTab(cProfile) {
         }
     };
 
+    // Banner QR button (both profile kinds) — the icon is the profile QR
+    // itself, rendered small; tapping it opens the fullscreen version.
+    const qrBtn = document.getElementById('profile-qr-btn');
+    const fQrRendered = renderQrInto(document.getElementById('profile-qr-icon'), `https://vectorapp.io/profile/${cProfile.id}`);
+    qrBtn.style.display = fQrRendered ? 'block' : 'none';
+    qrBtn.onclick = () => {
+        const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
+        if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
+    };
+
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
         document.getElementById('profile').classList.add('is-own-profile');
@@ -10957,6 +10952,7 @@ function enterProfileEditMode() {
     };
     document.getElementById('profile-edit-btn').style.display = 'none';
     document.getElementById('profile-share-btn').style.display = 'none';
+    document.getElementById('profile-qr-btn').style.display = 'none';
     document.getElementById('profile-npub-label').style.display = 'none';
     document.getElementById('profile-npub-container').style.display = 'none';
     document.getElementById('profile-badges').style.display = 'none';
@@ -11055,6 +11051,7 @@ function exitProfileEditMode(fCancel = false) {
     document.getElementById('profile-edit-fields').style.display = 'none';
     document.getElementById('profile-edit-btn').style.display = '';
     document.getElementById('profile-share-btn').style.display = '';
+    document.getElementById('profile-qr-btn').style.display = 'block';
     document.getElementById('profile-secondary-name').style.display = '';
     document.getElementById('profile-secondary-status').style.display = '';
     document.getElementById('profile-description').style.display = '';
@@ -11965,7 +11962,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // phrase, the active-account-from-marker context no longer applies.
         loginPicker.hide();
     };
-    // Bunker form helpers (renderQrInto, startBunkerSession, showBunkerForm,
+    // Bunker form helpers (startBunkerSession, showBunkerForm,
     // hideBunkerForm) are now defined at module scope, near the DOM-ref
     // block — they need to be accessible to the boot-time login catch which
     // runs before this DOMContentLoaded handler reaches button wiring.
@@ -12030,6 +12027,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                 }
             }
         };
+    }
+    // Tap the bunker QR to blow it up fullscreen — easier for a phone camera.
+    // openQrOverlay no-ops while the connection link is still generating.
+    if (domLoginBunkerQrWrap) {
+        domLoginBunkerQrWrap.onclick = () => openQrOverlay(strBunkerNostrConnectUrl);
     }
     domLoginBackBtn.onclick = async () => {
         // Add Profile flow back has two cases — independent of which sub-
