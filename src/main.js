@@ -12248,20 +12248,17 @@ window.addEventListener("DOMContentLoaded", async () => {
         }, 100);
     });
     domChatNewStartBtn.onclick = () => {
-        let inputValue = domChatNewInput.value.trim();
-        // A pasted Community invite link → preview + join flow (not a DM).
-        if (isCommunityInviteUrl(inputValue)) {
-            domChatNewInput.value = ``;
-            previewAndJoinCommunityLink(inputValue);
+        const inputValue = domChatNewInput.value.trim();
+        domChatNewInput.value = ``;
+        // Same parser as the QR scanner: invites join, npubs DM, and any
+        // URL wrapper around either is ignored.
+        const parsed = parseContactInput(inputValue);
+        if (parsed?.kind === 'invite') {
+            previewAndJoinCommunityLink(parsed.url);
             return;
         }
-        // Parse npub from vectorapp.io profile URL if pasted
-        const profileUrlMatch = inputValue.match(/https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i);
-        if (profileUrlMatch) {
-            inputValue = profileUrlMatch[1];
-        }
-        openChat(inputValue);
-        domChatNewInput.value = ``;
+        // No extractable npub falls through raw — openChat owns rejection
+        openChat(parsed?.npub || inputValue);
     };
     domChatNewInput.onkeydown = async (evt) => {
         if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {

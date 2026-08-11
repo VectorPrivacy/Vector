@@ -1,3 +1,4 @@
+// Vendored from npm qrcode-generator@2.0.4 (MIT). Exposes the global `qrcode` factory.
 //---------------------------------------------------------------------
 //
 // QR Code Generator for JavaScript

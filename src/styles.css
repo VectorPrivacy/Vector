@@ -1799,6 +1799,81 @@ html, body {
 }
 
 
+/* New Chat scan button — camera scanner entry, mobile-only (body.mobile) */
+#chat-new-scan-btn {
+  display: none;
+  color: #b2b2b2;
+  margin-right: 3px;
+  cursor: pointer;
+  /* Snug: the container's default 10px padding leaves the glyph tiny */
+  padding: 6px;
+}
+
+body.mobile #chat-new-scan-btn { display: block; }
+#chat-new-scan-btn:hover { color: #fff; }
+
+#chat-new-scan-btn svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Fullscreen QR scanner */
+.qr-scanner {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: none;
+  background-color: #000;
+}
+
+.qr-scanner.active { display: block; }
+
+.qr-scanner-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Hidden until the first real frame — the WebView's placeholder art
+     (a giant play glyph) paints in the gap and must never be seen */
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.qr-scanner-video.live { opacity: 1; }
+
+.qr-scanner-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+}
+
+.qr-scanner-window {
+  width: min(70vw, 280px);
+  aspect-ratio: 1;
+  border: 2px solid var(--accent-color, #59fcb3);
+  border-radius: 18px;
+  /* Dims everything around the viewfinder in one paint */
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55);
+}
+
+.qr-scanner-hint {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+}
+
+/* Id selector: must outrank .qr-overlay-close's width:100% */
+#qr-scanner-cancel {
+  position: absolute;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(80vw, 360px);
+}
+
 .qr-overlay-close {
   width: 100%;
   padding: 12px 0;
