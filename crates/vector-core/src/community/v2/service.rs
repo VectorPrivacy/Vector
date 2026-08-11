@@ -1877,12 +1877,9 @@ pub async fn leave_community<T: Transport + ?Sized>(transport: &T, community: &C
         // Tombstone the membership across devices (CORD-02 §8) BEFORE the local delete.
         // Best-effort, but never silent: an unpublished tombstone is what lets a stale
         // copy of the list rejoin this community on a later boot.
-        if let Err(e) = tombstone_community_list(transport, community.id(), &community.relays).await {
-            crate::log_net_fail!(
-                "[CommunityList] leave tombstone NOT published ({}) — {} can come back on a later sync",
-                e,
-                &crate::simd::hex::bytes_to_hex_32(&community.id().0)[..8]
-            );
+        if let Err(e) = tombstone_community_list(transport, community.id(), &community.relays, at_ms).await {
+            crate::log_net_fail!("[CommunityList] leave tombstone failed ({}) — retrying in the background", e);
+            tombstone_community_list_durable(*community.id(), community.relays.clone(), at_ms);
         }
         crate::db::community::delete_community(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
         Ok(())
@@ -3375,7 +3372,12 @@ pub fn republish_community_list_durable(just_joined: Option<crate::community::Co
 /// our OWN relays: the departing community's are about to stop being read at all,
 /// so a tombstone left only there is one no later sync can ever fetch — the
 /// community then rejoins itself from a stale copy on the next boot.
-async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, community_id: &crate::community::CommunityId, relays: &[String]) -> Result<(), String> {
+async fn tombstone_community_list<T: Transport + ?Sized>(
+    transport: &T,
+    community_id: &crate::community::CommunityId,
+    relays: &[String],
+    removed_at: u64,
+) -> Result<(), String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
     let read_relays = list_read_relays(relays).await;
     let own = own_list_relays().await;
@@ -3391,13 +3393,47 @@ async fn tombstone_community_list<T: Transport + ?Sized>(transport: &T, communit
         Ok(None) => (super::list::CommunityList::default(), Default::default()),
         Err(e) => return Err(e),
     };
-    let now = now_ms();
     doc.tombstones.retain(|t| t.community_id != cid_hex);
-    doc.tombstones.push(super::list::Tombstone { community_id: cid_hex, removed_at: now, extra: Default::default() });
+    doc.tombstones.push(super::list::Tombstone { community_id: cid_hex, removed_at, extra: Default::default() });
     // No size gate on the way out: a tombstone strictly shrinks the live set, and
     // a guard that blocks the only operation able to restore compliance is a
     // deadlock, not a guard (CORD-02 §8).
     publish_fragments(transport, &doc, &prev_created, &write_relays).await.map(|_| ())
+}
+
+/// Retry a leave tombstone until it lands, on the same budget a join gets. A leave
+/// that fails to record is the worse of the two: the local hold is already gone, so
+/// this device shows the community left while every other one still holds it, and
+/// nothing re-records it until some unrelated edit happens to carry it.
+///
+/// `removed_at` is the caller's, not `now` — re-stamping it here would let a retry
+/// that fires after a genuine rejoin bury that rejoin.
+pub fn tombstone_community_list_durable(community_id: crate::community::CommunityId, relays: Vec<String>, removed_at: u64) {
+    if crate::state::nostr_client().is_none() {
+        return;
+    }
+    crate::db::spawn_bound(async move {
+        for (attempt, wait) in LIST_REPUBLISH_BACKOFF_SECS.iter().enumerate() {
+            tokio::time::sleep(std::time::Duration::from_secs(*wait)).await;
+            let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+            match tombstone_community_list(&transport, &community_id, &relays, removed_at).await {
+                Ok(()) => {
+                    crate::log_net_info!(
+                        "[CommunityList] leave tombstone for {} landed on retry #{}",
+                        &crate::simd::hex::bytes_to_hex_32(&community_id.0)[..8],
+                        attempt + 1
+                    );
+                    return;
+                }
+                Err(e) => crate::log_warn!("[CommunityList] leave tombstone retry #{} failed: {}", attempt + 1, e),
+            }
+        }
+        crate::log_net_fail!(
+            "[CommunityList] leave tombstone for {} NEVER landed after {} attempts — it will come back on another device",
+            &crate::simd::hex::bytes_to_hex_32(&community_id.0)[..8],
+            LIST_REPUBLISH_BACKOFF_SECS.len()
+        );
+    });
 }
 
 /// Sync memberships from the Community List across devices: fetch this account's list from
@@ -9463,6 +9499,27 @@ mod tests {
         assert_eq!(rehydrated.len(), 1, "the left-behind membership rehydrates");
         assert_eq!(rehydrated[0].id().0, community.id().0);
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_some(), "and is now held locally");
+    }
+
+    #[tokio::test]
+    async fn a_retried_leave_tombstone_cannot_bury_a_rejoin_made_meanwhile() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let community = create_community(&relay, "Left", relays.clone(), None).await.unwrap();
+        let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // The leave stamps its own removal time, and its publish fails.
+        let left_at = now_ms() - 1000;
+        tombstone_community_list(&relay, community.id(), &relays, left_at).await.unwrap();
+        // The user rejoins before the retry gets through.
+        republish_community_list(&relay, Some(community.id())).await.unwrap();
+        assert!(fetch_fragments(&relay, &relays).await.unwrap().unwrap().list.is_live(&cid));
+
+        // The retry lands late, carrying the ORIGINAL stamp — which the rejoin outranks.
+        tombstone_community_list(&relay, community.id(), &relays, left_at).await.unwrap();
+        let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
+        assert!(set.list.is_live(&cid), "a retry re-stamping `now` would have buried the rejoin");
     }
 
     #[tokio::test]
