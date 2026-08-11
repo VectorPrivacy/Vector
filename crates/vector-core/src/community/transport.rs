@@ -1442,7 +1442,7 @@ pub(crate) mod memory {
             // Replaceable kinds: parameterized (30000-39999, keyed by (kind, pubkey, d-tag)) AND
             // standard (10000-19999, plus 0/3, keyed by (kind, pubkey) — the d-tag is "") — a relay keeps
             // only the latest at that coordinate, so a new event REPLACES the old (NIP-01). This is what
-            // makes a revocation tombstone overwrite a bundle, and a fresh 13302 supersede the last one,
+            // makes a revocation tombstone overwrite a bundle, and a fresh Community List supersede the last one,
             // even on relays that ignore deletions — model it so tests match real relay behavior.
             let d_tag = |e: &Event| e.tags.iter().find_map(|t| {
                 let s = t.as_slice();

@@ -344,7 +344,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
 
     // held-v2 dedup: if this account ALREADY holds the v2 twin, do NOT network-join
     // it again — flip only. Covers the idempotent double-trigger, a multi-device peer that
-    // synced the twin via the 13302 list first, and the OWNER's own client (the wizard
+    // synced the twin via the Community List first, and the OWNER's own client (the wizard
     // created the twin, so the owner holds it — accept_bundle must never try to "join" it).
     let v2_id = CommunityId(crate::simd::hex::hex_to_bytes_32(&payload.signpost.v2_community_id));
     let v2_hex = payload.signpost.v2_community_id.clone();

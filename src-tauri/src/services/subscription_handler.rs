@@ -71,12 +71,13 @@ pub(crate) async fn subscribe_self_sync() {
         Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
     }
-    // v2 Community List (replaceable kind 13302, CORD-02 §8). Its own kind, so it needs its
-    // own filter — v1's list is a d-tagged 30078 above. Without this a v2 join/leave only
-    // reached the other devices on their next BOOT, while v1 had been instant since it shipped.
+    // v2 Community List (addressable kind 33302, CORD-02 §8 — one event per fragment).
+    // Its own kind, so it needs its own filter — v1's list is a d-tagged 30078 above.
+    // Without this a v2 join/leave only reached the other devices on their next BOOT,
+    // while v1 had been instant since it shipped.
     let v2_list_filter = Filter::new()
         .author(my_pk)
-        .kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST));
+        .kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
     match client.subscribe(v2_list_filter).await {
         Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] v2 community-list subscribe failed: {:?}", e),
@@ -101,12 +102,12 @@ pub(crate) async fn subscribe_self_sync() {
 /// rehydrates (so a join on another device appears live); an emoji-list update refreshes the pack set.
 /// Spawned off the notification loop — both run several relay fetches and must not head-of-line-block it.
 async fn handle_self_sync_event(event: Event) {
-    // Per-list dedup key: the `d`-tag for kind-30078 lists (Community vs Invite share the kind), else the
-    // kind. Coalesces multi-relay re-delivery of the SAME replaceable event so one update = one sweep.
-    let dedup_key = if event.kind.as_u16() == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC {
-        event.tags.identifier().unwrap_or_default().to_string()
-    } else {
-        event.kind.as_u16().to_string()
+    // Per-list dedup key: kind plus `d` where there is one, since several distinct lists ride a
+    // single kind (30078) and a fragmented list rides several `d`s of its own. Coalesces
+    // multi-relay re-delivery of the SAME event so one update = one sweep.
+    let dedup_key = match event.tags.identifier() {
+        Some(d) => format!("{}:{}", event.kind.as_u16(), d),
+        None => event.kind.as_u16().to_string(),
     };
     {
         let mut last = SELFSYNC_LAST_EVENT.lock().await;
@@ -133,7 +134,7 @@ async fn handle_self_sync_event(event: Event) {
                 }
             });
         }
-        k if k == vector_core::community::v2::kind::COMMUNITY_LIST => {
+        k if k == vector_core::community::v2::kind::COMMUNITY_LIST_FRAG => {
             // Re-run the same sync the boot path uses: it adopts newly-listed communities and
             // tears down ones a sibling device left. Spawned — it runs several relay fetches.
             vector_core::db::spawn_bound(async move {

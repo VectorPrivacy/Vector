@@ -3917,7 +3917,7 @@ impl VectorCore {
     /// start and on reconnect; safe to call manually — the v2 enqueue is a no-op if
     /// no `listen()` worker is running.
     pub async fn sync_communities(&self) -> Result<()> {
-        // Discover + rehydrate memberships from the 13302 across devices (CORD-02 §8),
+        // Discover + rehydrate memberships from the Community List across devices (CORD-02 §8),
         // bootstrapping from the client's connected relays so even a fresh device that
         // holds no community yet can find them. Best-effort.
         {

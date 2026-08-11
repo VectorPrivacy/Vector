@@ -566,7 +566,7 @@ fn tombstone_still_applies(community_id: &str, removed_at: u64) -> bool {
 }
 
 /// Re-run the v2 Community List sync: adopt anything newly listed, tear down anything a sibling
-/// device left. Shared by the boot reconcile and the LIVE kind-13302 self-sync subscription, so a
+/// device left. Shared by the boot reconcile and the LIVE kind-33302 self-sync subscription, so a
 /// join or leave on one device lands on the others without a reboot — the parity v1 has had since
 /// its list shipped (v1's is a d-tagged 30078 and was already in the self-sync filter set).
 pub(crate) async fn ingest_v2_community_list_update() {
@@ -653,7 +653,11 @@ pub async fn leave_community(community_id: String) -> Result<(), String> {
         // v2: guestbook Leave announce (facade) + shared local teardown.
         if is_v2_community(&community_id) {
             let channel_ids = community_channel_ids(&community_id);
-            let _ = vector_core::VectorCore.leave_community(&community_id).await;
+            // Never silent: no announce means no list tombstone, and the community
+            // comes back on the next boot.
+            if let Err(e) = vector_core::VectorCore.leave_community(&community_id).await {
+                vector_core::log_net_fail!("[Leave] {} announced nothing ({}) — it will come back", &community_id[..8], e);
+            }
             teardown_community_local(&community_id, &channel_ids, true).await;
             return Ok(());
         }
@@ -734,7 +738,7 @@ pub(crate) async fn teardown_community_local_at(
     if republish_list {
         vector_core::community::list::remove_membership(community_id);
     } else {
-        // v1 ONLY. A v2 community owns its membership in the kind-13302 list: the leave path
+        // v1 ONLY. A v2 community owns its membership in the kind-33302 list: the leave path
         // publishes its own tombstone there and `sync_community_list` tears it down on the
         // other devices. Writing here as well deposited v2 tombstones into the v1 (30078)
         // mirror, which can never gain a matching v2 entry — so that document read "removed"
@@ -2960,7 +2964,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // Parked-invite hygiene FIRST, unconditionally: a dormant machine may boot
         // with months of fossils that only the lifetime rule can cull (no declared
         // expiry, never held, never tombstoned) — and the list-sync purges only
-        // run when a 13302 actually arrives.
+        // run when a 33302 actually arrives.
         if let Ok(n) = vector_core::db::community::purge_expired_pending_invites() {
             if n > 0 {
                 println!("[Boot] purged {} stale pending invite(s)", n);
@@ -3086,7 +3090,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
 
         // Cross-device discovery runs CONCURRENTLY with the channel sweep — the v1
         // 30078 reconcile rides the raw pool-wide fetch (a 20s timeout a single
-        // dead relay can pin) and the v2 13302 fetch adds seconds more; neither may
+        // dead relay can pin) and the v2 List fetch adds seconds more; neither may
         // gate already-held communities' pages. A community either path rehydrates
         // pages itself on arrival (page_messages=true below), and the per-channel
         // anti-stampede coalesces any overlap with the sweep.
@@ -3094,7 +3098,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             vector_core::db::spawn_bound(async move {
                 let t = std::time::Instant::now();
                 reconcile_community_list_boot().await;
-                // ONE implementation shared with the live kind-13302 self-sync: adopt, follow,
+                // ONE implementation shared with the live kind-33302 self-sync: adopt, follow,
                 // resubscribe, and SURFACE to the UI. This reconcile is backgrounded and lands
                 // AFTER `init_finished`, so a community adopted here needs the same frontend
                 // notification a live update does — duplicating the loop is how they drifted.
