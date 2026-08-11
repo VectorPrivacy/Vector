@@ -441,6 +441,48 @@ async fn decrypt_list_event(_client: &Client, my_pk: &PublicKey, event: &nostr_s
     }
 }
 
+/// Drop entries whose community has migrated to v2: the membership continues as
+/// the twin in the v2 List, and the v1 bundle behind it can never be joined again.
+/// Applied on the way OUT only — the local mirror stays faithful to what a sibling
+/// device may still hold, and an absent entry is not a removal.
+fn drop_migrated(list: &mut CommunityList) {
+    list.entries.retain(|e| {
+        !matches!(crate::db::community::get_migrated_to(&e.community_id), Ok(Some(twin)) if !twin.is_empty())
+    });
+}
+
+/// Marks that this account has published a husk-free list at least once.
+const COMPACTED_KEY: &str = "community_list_compacted";
+
+/// One-shot republish for a list [`drop_migrated`] would shrink. Every other write
+/// path is an edit, and v1 accepts no new joins past the timelock — so an account
+/// that has finished migrating has no edit left to make, and a list that outgrew
+/// what a relay accepts would stay that way forever.
+pub async fn compact_community_list_once(client: &Client) {
+    if crate::db::settings::get_sql_setting(COMPACTED_KEY.to_string()).ok().flatten().is_some() {
+        return;
+    }
+    let mut pruned = load_local_list();
+    let before = pruned.entries.len();
+    drop_migrated(&mut pruned);
+    // Nothing to shed does NOT latch: `migrated_to` is local knowledge, so a device
+    // that has not yet folded the migrations is early, not done.
+    if pruned.entries.len() == before {
+        return;
+    }
+    crate::log_net_info!(
+        "[CommunityList] compacting: {} of {} entries are migrated husks",
+        before - pruned.entries.len(),
+        before
+    );
+    match publish_community_list(client).await {
+        Ok(()) => {
+            let _ = crate::db::settings::set_sql_setting(COMPACTED_KEY.to_string(), "1".to_string());
+        }
+        Err(e) => crate::log_net_fail!("[CommunityList] compaction failed: {e}"),
+    }
+}
+
 /// READ-MERGE-WRITE publish: fold the relay's copy into our local mirror (so a concurrent edit from
 /// another device survives), persist the merged result locally, then publish it self-encrypted. The merge
 /// is deterministic, so every device converges on identical bytes regardless of publish order.
@@ -452,8 +494,9 @@ pub async fn publish_community_list(
 
         // Fold the relay's copy first so we don't drop a sibling device's change.
         let relay = fetch_community_list(client, my_pk).await.unwrap_or_default();
-        let merged = load_local_list().merge(&relay);
+        let mut merged = load_local_list().merge(&relay);
         save_local_list(&merged)?;
+        drop_migrated(&mut merged);
 
         let signer = crate::signer::active_signer().map_err(|e| format!("Signer unavailable: {}", e))?;
         let content = signer
@@ -552,7 +595,7 @@ pub fn backfill_from_db() {
             continue; // already listed
         }
         // V1 ONLY. This seeds v1-shaped entries (`seed: CommunityInvite`) into the kind-30078
-        // list; a v2 membership is a `JoinMaterial` in the kind-13302 list and is republished by
+        // list; a v2 membership is a `JoinMaterial` in the v2 Community List and is republished by
         // `v2::service::republish_community_list`. Seeding a v2 community here would publish a
         // malformed entry that no reader can rehydrate. (Teardown writes its tombstone through
         // the v1 path for BOTH protocols, so v2 ids DO appear in this document's tombstones —
@@ -1023,5 +1066,54 @@ mod tests {
         // Never regress to an older epoch.
         assert!(!list.refresh_current("X", bundle("X", 0, "oldroot")));
         assert_eq!(list.entries[0].current_epoch(), 1, "a stale lower-epoch snapshot is rejected");
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        use nostr_sdk::prelude::ToBech32;
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn save_v1(byte: u8) -> String {
+        let c = crate::community::Community {
+            id: crate::community::CommunityId([byte; 32]),
+            server_root_key: crate::community::ServerRootKey([byte; 32]),
+            server_root_epoch: crate::community::Epoch(0),
+            name: "T".into(),
+            description: None,
+            icon: None,
+            banner: None,
+            relays: vec!["wss://r".into()],
+            channels: vec![],
+            owner_attestation: None,
+            dissolved: false,
+        };
+        crate::db::community::save_community(&c).unwrap();
+        c.id.to_hex()
+    }
+
+    #[test]
+    fn a_migrated_communitys_entry_never_reaches_the_wire() {
+        let (_tmp, _guard) = init_test_db();
+        let migrated = save_v1(1);
+        let plain = save_v1(2);
+        crate::db::community::set_migrated_to(&migrated, &"f".repeat(64)).unwrap();
+
+        let mut list = CommunityList {
+            entries: vec![entry(&migrated, 0, 0, 100), entry(&plain, 0, 0, 100)],
+            tombstones: vec![CommunityRemoval { community_id: "gone".into(), removed_at: 5 }],
+        };
+        drop_migrated(&mut list);
+        assert_eq!(list.entries.len(), 1, "the husk of a migrated community is dropped");
+        assert_eq!(list.entries[0].community_id, plain, "an unmigrated membership stays");
+        assert_eq!(list.tombstones.len(), 1, "tombstones are untouched");
     }
 }

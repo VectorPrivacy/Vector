@@ -2522,6 +2522,9 @@ pub(crate) async fn reconcile_community_list_boot() {
         if list.is_ahead_of(&relay) {
             vector_core::community::list::republish_community_list_debounced();
         }
+        // The one exception to boot-is-a-read: a list carrying migrated husks can be over
+        // the size a relay accepts, and no edit is left to shrink it. Once per account.
+        vector_core::community::list::compact_community_list_once(&client).await;
         // page_messages = true: the boot sweep runs CONCURRENTLY with this reconcile and flattens its channel
         // list at its own start — a community rehydrated after that flatten would be paged by NEITHER path and
         // render empty until the next sync. The per-channel anti-stampede coalesces any overlap with the sweep.
