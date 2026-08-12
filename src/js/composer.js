@@ -93,6 +93,29 @@ function cmpTokenize(src, opts) {
         try { return fn(...args); } catch (_) { return null; }
     };
     const out = [];
+    // Emoji-only face (`opts.emojiOnly`): the Status mini-composer wants inline
+    // emoji but no markdown, mentions or lists — same widgets, smaller grammar.
+    if (opts.emojiOnly) {
+        const re = new RegExp('(:[a-zA-Z0-9_~-]+:)|' + CMP_EMOJI, 'gmu');
+        let last = 0;
+        let m;
+        while ((m = re.exec(src)) !== null) {
+            if (m.index > last) out.push({ kind: 'text', from: last, to: m.index });
+            const raw = m[0];
+            const from = m.index;
+            const to = from + raw.length;
+            if (m[1]) {
+                const url = safe(opts.resolveEmoji, raw.slice(1, -1));
+                out.push(url ? { kind: 'emoji', from, to, url } : { kind: 'text', from, to });
+            } else {
+                const url = cmpTwemojiUrl(raw);
+                out.push(url ? { kind: 'twemoji', from, to, url } : { kind: 'text', from, to });
+            }
+            last = to;
+        }
+        if (last < src.length) out.push({ kind: 'text', from: last, to: src.length });
+        return out;
+    }
     // Order matters: code first (its content is literal), emoji before mention
     // so `:a:` inside a name can't be swallowed.
     // Emoji goes LAST: `*️⃣` and `*italic*` both start with `*`, and the engine only

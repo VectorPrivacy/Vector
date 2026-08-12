@@ -1102,28 +1102,33 @@ const domChatMessageInput = (() => {
     }
 })();
 
+// Only a shortcode the user actually has renders as an image; anything else
+// stays literal so it can still be typed and sent verbatim. Shared by every
+// composer instance (chat + the Status mini-composer).
+function cmpResolvePackEmoji(code) {
+    for (const pack of arrEmojiPacks) {
+        const hit = pack.emojis && pack.emojis.find(e => (e.dispCode || e.shortcode) === code);
+        if (hit) return hit.url;
+    }
+    return null;
+}
+
+// Pack art lives on a remote host the WebView refuses to load — Android fails
+// it outright. Bind through the same disk cache the message renderer uses, so
+// composers and sent messages resolve identically, and degrade a missing one
+// to its literal `:shortcode:` rather than a broken image.
+function cmpBindEmojiImg(img, url, onFail) {
+    if (window.bindCachedEmojiImg) window.bindCachedEmojiImg(img, url, 'emoji', onFail);
+    else onFail();
+}
+
 function buildRichComposer(host) {
     const composer = createRichComposer(host, {
     placeholder: 'Enter message...',
-    // Only a shortcode the user actually has renders as an image; anything else
-    // stays literal so it can still be typed and sent verbatim.
-    resolveEmoji: (code) => {
-        for (const pack of arrEmojiPacks) {
-            const hit = pack.emojis && pack.emojis.find(e => (e.dispCode || e.shortcode) === code);
-            if (hit) return hit.url;
-        }
-        return null;
-    },
+    resolveEmoji: cmpResolvePackEmoji,
     // The draft carries `@display-name` and resolves to an npub at send, so a pill
     // is styled editable text rather than an atomic widget.
-    // Pack art lives on a remote host the WebView refuses to load — Android fails
-    // it outright. Bind through the same disk cache the message renderer uses, so
-    // the composer and the sent message resolve identically, and degrade a missing
-    // one to its literal `:shortcode:` rather than a broken image.
-    bindEmojiImg: (img, url, onFail) => {
-        if (window.bindCachedEmojiImg) window.bindCachedEmojiImg(img, url, 'emoji', onFail);
-        else onFail();
-    },
+    bindEmojiImg: cmpBindEmojiImg,
     // A pasted mention carries the raw key. `getName` is the app's one display-name
     // resolver and already shortens an npub it doesn't know, so this never renders
     // a wall of bech32.

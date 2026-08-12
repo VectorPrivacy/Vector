@@ -1749,6 +1749,313 @@ html, body {
   display: block;
 }
 
+/* ============================================================
+   Status dialog — compact neutral card: avatar + live pill on
+   top, one input row, slim actions. Glides to the upper third
+   while the emoji panel owns the bottom.
+   ============================================================ */
+.status-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 9000; /* below the emoji picker's status mode, above the app */
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-dialog-overlay.active { display: flex; }
+
+/* Mirror of the open pop: the card recedes and the dim lifts together.
+   Shared by every popping modal (Status dialog, QR overlay). */
+@keyframes modal-card-pop-out {
+  from { transform: scale(1); opacity: 1; }
+  to { transform: scale(0.92); opacity: 0; }
+}
+
+@keyframes modal-overlay-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.status-dialog-overlay.closing {
+  animation: modal-overlay-fade-out 0.15s ease-out forwards;
+  pointer-events: none;
+}
+
+.status-dialog-overlay.closing .status-dialog-card {
+  animation: modal-card-pop-out 0.15s ease-out forwards;
+}
+
+/* Emoji panel open: yield the bottom — card glides to the upper third */
+.status-dialog-overlay.panel-open {
+  align-items: flex-start;
+  padding-top: max(24px, 7vh);
+}
+
+.status-dialog-card {
+  display: flex;
+  flex-direction: column;
+  width: min(92vw, 380px);
+  background-color: #101010;
+  border: 1px solid #2c2e2f;
+  border-radius: 18px;
+  padding: 14px 16px 12px;
+  box-sizing: border-box;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* Applied AFTER the overlay is displayed: WebKit never starts an animation
+   declared on a subtree that comes out of display:none, so the property has
+   to appear on an already-rendered element to play. */
+.status-dialog-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+
+.status-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.status-dialog-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.status-dialog-x,
+.status-dialog-x:hover,
+.status-dialog-x:focus,
+.status-dialog-x:active {
+  background: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.status-dialog-x {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.status-dialog-x:hover { color: #fff; }
+
+/* Live row: your avatar beside the pill exactly as others see it */
+.status-live-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.status-preview-avatar {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  background-color: #1a1a1a;
+}
+
+.status-preview-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.status-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 14px;
+  background-color: #1a1a1a;
+  border: 1px solid #262626;
+  border-radius: 999px;
+  box-sizing: border-box;
+}
+
+.status-preview-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #59fcb3;
+  box-shadow: 0 0 6px rgba(89, 252, 179, 0.6);
+}
+
+#status-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  color: #fff;
+}
+
+#status-preview-text .emoji {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+.status-preview.status-preview-empty { opacity: 0.45; }
+.status-preview.status-preview-empty .status-preview-dot { background-color: #555; box-shadow: none; }
+
+.status-input-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background-color: #1a1a1a;
+  border: 1px solid #262626;
+  border-radius: 12px;
+  padding: 2px 2px 2px 14px;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.status-input-row:focus-within { border-color: #3d4040; }
+
+/* The icon sits equidistant from the field's top, right and bottom edges:
+   a fixed 40px hit box centred in the 44px field leaves ~12px to the glyph
+   on every side. Explicit size, not padding — global button styling
+   collapses padding-driven boxes here. */
+#status-emoji-btn {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 2px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+/* A bare floating glyph: the global button styling paints a container box
+   (a backdrop blur reads as a subtle pale panel on the darker field), so
+   every state pins ALL the chrome off. */
+#status-emoji-btn,
+#status-emoji-btn:hover,
+#status-emoji-btn:focus,
+#status-emoji-btn:active {
+  background: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+#status-emoji-btn:hover { opacity: 1; transform: scale(1.08); }
+
+#status-emoji-btn .icon {
+  /* The global .icon styling floats glyphs absolutely; this one is an
+     ordinary flex child centred by the button. */
+  position: static;
+  margin: 0;
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.status-input-host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Mini composer: same machinery as the chat one, emoji-only grammar */
+.status-input-host .rich-composer {
+  position: relative;
+  font-family: Rubik, sans-serif;
+  font-size: 14.5px;
+  font-weight: 400;
+  line-height: 20px;
+  min-height: 20px;
+  max-height: 62px; /* ~3 lines, then scrolls — statuses stay short */
+  overflow-y: auto;
+  overflow-anchor: none;
+  outline: none;
+  color: #fff;
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 9px 4px 9px 0;
+  background: transparent;
+}
+
+.status-input-host .rich-composer[data-empty="1"]::before {
+  top: 9px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.status-char-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  min-width: 22px;
+  text-align: right;
+}
+
+.status-char-count.status-char-low { color: #ffb347; }
+
+.status-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.status-btn-clear {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 6px 2px;
+  transition: color 0.15s ease;
+}
+
+.status-btn-clear:hover { color: #fff; }
+.status-btn-clear.hidden { visibility: hidden; } /* keeps Save right-aligned */
+
+.status-btn-save {
+  background-color: #59fcb3;
+  color: #06130d;
+  border: none;
+  border-radius: 10px;
+  padding: 9px 26px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.status-btn-save:hover { filter: brightness(1.08); }
+.status-btn-save:active { transform: scale(0.97); }
+
+/* Emoji panel in status mode: above the dialog overlay, GIFs hidden, and
+   flush to the bottom — the composer clearance it normally keeps doesn't
+   exist here */
+.emoji-picker.emoji-picker-status-mode { z-index: 10005; bottom: 10px !important; }
+.emoji-picker.emoji-picker-no-gifs .picker-mode-btn[data-mode="gif"] { display: none; }
+
 /* Fullscreen QR overlay (profile QR + bunker login QR) */
 .qr-overlay {
   position: fixed;
@@ -3979,8 +4286,9 @@ textarea#chat-input::placeholder {
 }
 
 /* Absolute, not in-flow: an inline ::before is content the caret sits AFTER,
-   which parks the cursor mid-box on an empty composer. */
-#chat-input.rich-composer[data-empty="1"]::before {
+   which parks the cursor mid-box on an empty composer. Generic: every composer
+   instance (chat + Status mini) shares the placeholder mechanics. */
+.rich-composer[data-empty="1"]::before {
   content: attr(data-placeholder);
   position: absolute;
   left: 0;
@@ -4027,14 +4335,14 @@ textarea#chat-input::placeholder {
    the line box, so adding an emoji cannot grow the row. The old 1.35em custom
    emoji reached -18.47 and pushed the line box to 24.48px, which is why the
    composer jumped a pixel the first time you typed one. */
-#chat-input.rich-composer .cmp-twemoji,
-#chat-input.rich-composer .cmp-emoji {
+.rich-composer .cmp-twemoji,
+.rich-composer .cmp-emoji {
   display: inline-block;
   vertical-align: -0.3em;
 }
 
-#chat-input.rich-composer .cmp-twemoji img,
-#chat-input.rich-composer .cmp-emoji img {
+.rich-composer .cmp-twemoji img,
+.rich-composer .cmp-emoji img {
   width: 1.25em;
   height: 1.25em;
   object-fit: contain;

@@ -57,6 +57,42 @@ const emojiSearch = document.getElementById('emoji-search-input');
  */
 let strCurrentReactionReference = "";
 
+/** When set, non-reaction selections insert via this callback instead of the
+ *  chat input — the Status dialog points it at its own field. Owned by the
+ *  dialog's lifecycle: it clears the target when it closes. */
+let _emojiPanelTarget = null;
+
+/**
+ * Open the panel for a dialog-owned input: selections route to `onInsert`,
+ * GIFs are hidden (statuses carry text + emoji only), and the panel rises
+ * above the dialog overlay. Mirrors openEmojiPanel's deferred-render shape so
+ * the open transition starts this frame and content fills in after.
+ */
+function openEmojiPanelForStatus(onInsert) {
+    _emojiPanelTarget = { insert: onInsert };
+    document.querySelector('.picker-mode-btn[data-mode="emoji"]')?.click();
+    picker.classList.add('visible', 'emoji-picker-status-mode', 'emoji-picker-no-gifs');
+    picker.classList.remove('emoji-picker-message-type');
+    picker.style.bottom = '';
+    requestAnimationFrame(() => requestAnimationFrame(async () => {
+        if (!picker.classList.contains('visible')) return;
+        await loadEmojiUsage();
+        if (!picker.classList.contains('visible')) return;
+        resetEmojiPicker();
+        renderEmojiPanel();
+        initCollapsibleSections();
+        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            emojiSearch.focus();
+        }
+        if (!emojiPacksLoaded) {
+            loadEmojiPacks();
+        }
+        loadEmojiPacks({ refresh: true });
+        _attachEmojiPackReveal();
+        _rearmVisiblePackCanvases();
+    }));
+}
+
 /**
  * Opens the Emoji Input Panel
  *
@@ -163,7 +199,7 @@ function closeEmojiPanel() {
     emojiSearch.value = '';
     // Auto-save any in-progress pack edit before the panel disappears.
     if (_pc.open) closeEmojiPackCreator();
-    picker.classList.remove('visible');
+    picker.classList.remove('visible', 'emoji-picker-status-mode', 'emoji-picker-no-gifs');
     picker.style.bottom = ''; // Reset to CSS default
     strCurrentReactionReference = '';
     // Drop the canvas rAF so we don't tick under opacity:0.
@@ -4659,7 +4695,7 @@ function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
     if (!keepOpen) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-        domChatMessageInput.focus();
+        if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 }
 
@@ -5290,6 +5326,11 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
  * @param {boolean} autoSpace - If true, adds spaces around inserted text when adjacent to non-whitespace
  */
 function insertAtCursor(text, autoSpace = false) {
+    // Dialog-owned target (Status dialog) intercepts the insert wholesale.
+    if (_emojiPanelTarget) {
+        _emojiPanelTarget.insert(text);
+        return;
+    }
     const input = domChatMessageInput;
     const start = input.selectionStart;
     const end = input.selectionEnd;
@@ -5343,7 +5384,7 @@ picker.addEventListener('click', (e) => {
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
     if (!e.shiftKey) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-        domChatMessageInput.focus();
+        if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 }, true);
 
@@ -5386,7 +5427,7 @@ picker.addEventListener('click', (e) => {
             }
             // Focus chat input (desktop only - mobile keyboards are disruptive)
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-                domChatMessageInput.focus();
+                if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
         }
     }
@@ -5434,7 +5475,7 @@ emojiSearch.onkeydown = async (e) => {
             strCurrentReactionReference = '';
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-                domChatMessageInput.focus();
+                if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
             return;
         }
@@ -5482,7 +5523,7 @@ emojiSearch.onkeydown = async (e) => {
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-            domChatMessageInput.focus();
+            if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     } else if (e.code === 'Escape') {
         // Close the Mini App launch dialog if open
@@ -5506,7 +5547,7 @@ emojiSearch.onkeydown = async (e) => {
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-            domChatMessageInput.focus();
+            if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     }
 };
@@ -6178,7 +6219,7 @@ function selectGif(gifId) {
 
     // Focus the input (desktop only)
     if (!platformFeatures.is_mobile) {
-        domChatMessageInput.focus();
+        if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 
     // Auto-send only if input was empty (just the GIF)

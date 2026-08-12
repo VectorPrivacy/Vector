@@ -1888,6 +1888,32 @@
     </div>
   </div>
 
+  <!-- Status dialog: compact card, live avatar+pill preview, shared emoji panel -->
+  <div id="status-dialog" class="status-dialog-overlay">
+    <div class="status-dialog-card">
+      <div class="status-dialog-head">
+        <span class="status-dialog-label">Status</span>
+        <button id="status-dialog-close" class="status-dialog-x" aria-label="Close">&#x2715;</button>
+      </div>
+      <div class="status-live-row">
+        <div id="status-preview-avatar" class="status-preview-avatar"></div>
+        <div class="status-preview" id="status-preview">
+          <span class="status-preview-dot"></span>
+          <span id="status-preview-text"></span>
+        </div>
+      </div>
+      <div class="status-input-row">
+        <div id="status-input-host" class="status-input-host"></div>
+        <span id="status-char-count" class="status-char-count"></span>
+        <button id="status-emoji-btn" aria-label="Add emoji"><span class="icon icon-smile-face"></span></button>
+      </div>
+      <div class="status-dialog-actions">
+        <button id="status-clear" class="status-btn-clear">Clear Status</button>
+        <button id="status-save" class="status-btn-save">Save</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Fullscreen QR scanner (mobile; camera via getUserMedia, decode via vendored jsQR) -->
   <div id="qr-scanner" class="qr-scanner">
     <video id="qr-scanner-video" class="qr-scanner-video" autoplay playsinline muted></video>

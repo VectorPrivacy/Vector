@@ -292,7 +292,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
             if !res.is_empty() {
                 let status_event = res.first().unwrap();
                 (
-                    status_event.content.clone(),
+                    clamp_status(status_event.content.clone()),
                     status_event.tags.first()
                         .and_then(|t| t.content())
                         .unwrap_or_default()
@@ -573,9 +573,24 @@ async fn update_profile_inner(
 
 /// Update the current user's status (kind 30315) and broadcast to relays.
 ///
+/// Status length cap in Unicode scalar characters, enforced on BOTH sides:
+/// our own publishes and every stored inbound status. Characters, not bytes —
+/// a byte cap would chop emoji-heavy statuses to a third of what text gets.
+pub const STATUS_MAX_CHARS: usize = 120;
+
+/// Truncate a status to [`STATUS_MAX_CHARS`] on a character boundary.
+fn clamp_status(s: String) -> String {
+    if s.chars().count() <= STATUS_MAX_CHARS {
+        s
+    } else {
+        s.chars().take(STATUS_MAX_CHARS).collect()
+    }
+}
+
 /// Status is ephemeral — updated in STATE + frontend but not persisted to DB.
 /// (Re-fetched from relays on next `load_profile` call.)
 pub async fn update_status(status: String) -> bool {
+    let status = clamp_status(status);
     let client = match nostr_client() {
         Some(c) => c,
         None => return false,
@@ -915,6 +930,25 @@ pub async fn sync_all_profiles() {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod status_clamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_status_clamps_at_120_characters_not_bytes() {
+        assert_eq!(clamp_status("hi".to_string()), "hi");
+        let exact: String = "a".repeat(STATUS_MAX_CHARS);
+        assert_eq!(clamp_status(exact.clone()), exact, "at the cap is untouched");
+        let long = "b".repeat(10_000);
+        assert_eq!(clamp_status(long).chars().count(), STATUS_MAX_CHARS);
+        // Characters, not bytes: 120 four-byte emoji survive whole.
+        let emoji: String = "\u{1F980}".repeat(STATUS_MAX_CHARS);
+        let clamped = clamp_status(format!("{emoji}overflow"));
+        assert_eq!(clamped.chars().count(), STATUS_MAX_CHARS);
+        assert_eq!(clamped, emoji, "truncation lands on a character boundary");
+    }
+}
 
 #[cfg(test)]
 mod tests {

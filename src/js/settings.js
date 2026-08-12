@@ -1285,29 +1285,175 @@ async function askForBanner() {
  * in-app and on the Nostr network.
  */
 async function askForStatus() {
-    const strStatus = await popupConfirm('Status', 'Set a public status for everyone to see', false, 'Custom Status');
-    if (strStatus === false) return;
+    openStatusDialog(arrProfiles.find(a => a.mine));
+}
 
-    // Display the change immediately
+/** Open the Status dialog prefilled with the current status. Emoji come from
+ *  the shared Emoji Panel in status mode (GIFs hidden); the live row renders
+ *  your avatar + the exact pill other users will see. While the panel is
+ *  open the card glides to the upper third so both stay fully visible. */
+/** The Status field's mini composer: the chat composer module with the
+ *  emoji-only grammar (inline emoji, no markdown/mentions). Lazy singleton —
+ *  the dialog's DOM is permanent, so the instance is too. */
+let _statusComposer = null;
+function _ensureStatusComposer() {
+    if (_statusComposer) return _statusComposer;
+    _statusComposer = createRichComposer(document.getElementById('status-input-host'), {
+        placeholder: "What's happening?",
+        emojiOnly: true,
+        resolveEmoji: cmpResolvePackEmoji,
+        bindEmojiImg: cmpBindEmojiImg,
+    });
+    return _statusComposer;
+}
+
+function openStatusDialog(cProfile) {
+    const strCurrent = cProfile?.status?.title || '';
+    const overlay = document.getElementById('status-dialog');
+    const input = _ensureStatusComposer();
+    const btnEmoji = document.getElementById('status-emoji-btn');
+    const btnSave = document.getElementById('status-save');
+    const btnClose = document.getElementById('status-dialog-close');
+    const btnClear = document.getElementById('status-clear');
+    const charCount = document.getElementById('status-char-count');
+    const preview = document.getElementById('status-preview');
+    const previewText = document.getElementById('status-preview-text');
+    const avatarWrap = document.getElementById('status-preview-avatar');
+
+    avatarWrap.innerHTML = '';
+    avatarWrap.appendChild(createAvatarImg(getProfileAvatarSrc(cProfile), 34, false));
+
+    const updatePreview = () => {
+        // Statuses are one line, 120 chars — the composer itself has no
+        // maxlength, so sanitize the model on every edit.
+        const clean = input.value.replace(/\n/g, ' ').slice(0, 120);
+        if (clean !== input.value) input.value = clean;
+        const txt = clean.trim();
+        preview.classList.toggle('status-preview-empty', !txt);
+        previewText.textContent = txt || 'No status';
+        if (txt) {
+            twemojify(previewText);
+            renderCustomEmojiShortcodes(previewText, equippedEmojiTags());
+        }
+        const remaining = 120 - clean.length;
+        charCount.textContent = remaining <= 30 ? String(remaining) : '';
+        charCount.classList.toggle('status-char-low', remaining <= 10);
+    };
+
+    const insertIntoStatus = (text) => {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        const before = input.value.slice(0, start);
+        const after = input.value.slice(end);
+        const space = before && !/\s$/.test(before) ? ' ' : '';
+        input.value = (before + space + text + after).slice(0, 120);
+        const pos = Math.min((before + space + text).length, input.value.length);
+        input.setSelectionRange(pos, pos);
+        input.focus();
+        updatePreview();
+    };
+
+    // Card position tracks the panel: glide up while it's open, recentre when
+    // it closes — regardless of WHICH path closed it (✕, outside tap, select).
+    const panelWatcher = new MutationObserver(() => {
+        overlay.classList.toggle('panel-open', picker.classList.contains('visible'));
+    });
+    panelWatcher.observe(picker, { attributes: true, attributeFilter: ['class'] });
+
+    const close = () => {
+        if (overlay.classList.contains('closing')) return;
+        panelWatcher.disconnect();
+        _emojiPanelTarget = null;
+        closeEmojiPanel();
+        document.removeEventListener('keydown', onKey);
+        popBack('status-dialog');
+        // Mirror the open pop, then actually hide (matches the 0.15s animation)
+        overlay.classList.add('closing');
+        overlay._closeTimer = setTimeout(() => {
+            overlay.classList.remove('active', 'closing', 'panel-open');
+            overlay.querySelector('.status-dialog-card').classList.remove('pop-in');
+        }, 160);
+    };
+
+    const onKey = (e) => {
+        if (e.key === 'Escape') {
+            if (picker.classList.contains('visible')) closeEmojiPanel();
+            else close();
+        }
+    };
+
+    input.value = strCurrent;
+    btnClear.classList.toggle('hidden', !strCurrent);
+    updatePreview();
+
+    input.oninput = updatePreview;
+    // Enter saves — statuses have no second line to go to.
+    input.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            btnSave.click();
+        }
+    };
+    btnEmoji.onclick = (e) => {
+        // stopPropagation: the document-level click delegate would otherwise
+        // run the panel's open/close toggle against this same click.
+        e.stopPropagation();
+        if (picker.classList.contains('visible')) closeEmojiPanel();
+        else openEmojiPanelForStatus(insertIntoStatus);
+    };
+    btnSave.onclick = () => { const v = input.value.trim(); close(); saveStatus(v); };
+    btnClear.onclick = () => { close(); saveStatus(''); };
+    btnClose.onclick = close;
+    overlay.onclick = (e) => {
+        if (e.target !== overlay) return;
+        // First outside tap dismisses the emoji panel (the document delegate
+        // handles it); the next one dismisses the dialog.
+        if (picker.classList.contains('visible')) return;
+        close();
+    };
+
+    // Cancel any in-flight close, then pop in: the animation class lands
+    // AFTER the overlay renders, because WebKit won't start one declared on
+    // a subtree emerging from display:none.
+    clearTimeout(overlay._closeTimer);
+    overlay.classList.remove('closing');
+    const card = overlay.querySelector('.status-dialog-card');
+    card.classList.remove('pop-in');
+    overlay.classList.add('active');
+    void card.offsetWidth;
+    card.classList.add('pop-in');
+    document.addEventListener('keydown', onKey);
+    pushBack('status-dialog', close);
+    if (!platformFeatures.is_mobile) input.focus();
+}
+
+/** Publish a status (optimistic local echo, rollback + alert on failure). */
+async function saveStatus(strStatus) {
     const cProfile = arrProfiles.find(a => a.mine);
     const oldStatus = cProfile.status.title;
+    const oldTags = cProfile.status.emoji_tags;
     cProfile.status.title = strStatus;
+    // Optimistic tags: the equipped-pack superset renders any :shortcode:
+    // immediately; the backend's profile_update follows with the exact set.
+    cProfile.status.emoji_tags = strStatus ? equippedEmojiTags() : [];
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
-    // Send out the status update
+    const rollback = () => {
+        cProfile.status.title = oldStatus;
+        cProfile.status.emoji_tags = oldTags;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+    };
+
     try {
         const success = await invoke("update_status", { status: strStatus });
         if (!success) {
-            cProfile.status.title = oldStatus;
-            renderCurrentProfile(cProfile);
-            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            rollback();
             await popupConfirm('Status Update Failed!', 'Failed to broadcast status update to the network.', true, '', 'vector_warning.svg');
         }
     } catch (e) {
-        cProfile.status.title = oldStatus;
-        renderCurrentProfile(cProfile);
-        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        rollback();
         await popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
