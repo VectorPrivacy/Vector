@@ -2043,3 +2043,205 @@ pub async fn miniapp_get_granted_permissions_for_window(
         Err(Error::Anyhow(anyhow::anyhow!("Could not find Mini App instance")))
     }
 }
+
+/// A URL-shared Mini App resolved to a playable local package.
+#[derive(Serialize, Clone)]
+pub struct UrlXdcInfo {
+    pub path: String,
+    pub hash: String,
+    pub name: String,
+    pub topic: String,
+}
+
+struct UrlXdcProgressReporter<'a> {
+    url: &'a str,
+}
+
+impl crate::net::ProgressReporter for UrlXdcProgressReporter<'_> {
+    fn report_progress(&self, percentage: Option<u8>, _bytes: Option<u64>, _speed: Option<f64>) -> Result<(), &'static str> {
+        // Gated emitter: progress for an account no longer on screen paints nothing
+        vector_core::traits::emit_event("webxdc_url_progress", &serde_json::json!({
+            "url": self.url,
+            "progress": percentage.unwrap_or(0),
+        }));
+        Ok(())
+    }
+
+    fn report_complete(&self) -> Result<(), &'static str> {
+        vector_core::traits::emit_event("webxdc_url_progress", &serde_json::json!({
+            "url": self.url,
+            "progress": 100,
+        }));
+        Ok(())
+    }
+}
+
+/// Resolve a pasted `.xdc` URL into a playable local package.
+///
+/// `download: false` is the render-time cache probe and must never touch the
+/// network — merely receiving a message must not become a tracking beacon.
+/// The package cache is content-addressed and account-agnostic (public bytes,
+/// same trust shape as the marketplace); only the url→hash latch lives in
+/// per-account settings.
+///
+/// The realtime topic is derived, not minted: a URL has no file event to
+/// carry a topic tag, so every recipient computes the same
+/// `derive_url_topic_id(content_hash, msg_id)` — and a server that plays
+/// per-person games with the bytes splits those people onto disjoint topics.
+#[tauri::command]
+pub async fn miniapp_resolve_url_xdc(
+    app: AppHandle,
+    url: String,
+    msg_id: String,
+    download: bool,
+) -> Result<Option<UrlXdcInfo>, Error> {
+    // Commands are unbound: pin the whole operation to the account that asked,
+    // so the latch lands in ITS settings and a swap mid-download refuses the result
+    vector_core::db::scoped_result(resolve_url_xdc_inner(app, url, msg_id, download)).await
+}
+
+async fn resolve_url_xdc_inner(
+    app: AppHandle,
+    url: String,
+    msg_id: String,
+    download: bool,
+) -> Result<Option<UrlXdcInfo>, Error> {
+    use sha2::{Digest, Sha256};
+    let url_key = {
+        let mut h = Sha256::new();
+        h.update(url.as_bytes());
+        bytes_to_hex_string(&h.finalize())
+    };
+    let dir = app.path().app_data_dir().map_err(Error::Tauri)?.join("miniapps").join("url");
+    let kv_key = format!("xdcurl:{}", url_key);
+    // Per-message latch: a message resolved once stays pinned to that exact
+    // version — its card, bytes and realtime topic never drift. Freshness is
+    // decided per NEW message, at tap time, against the server.
+    let msg_key = {
+        let mut h = Sha256::new();
+        h.update(url.as_bytes());
+        h.update(b"|");
+        h.update(msg_id.as_bytes());
+        format!("xdcmsg:{}", bytes_to_hex_string(&h.finalize()))
+    };
+
+    let read_latch = |raw: &str| -> Option<(String, String)> {
+        let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let hash = v.get("hash")?.as_str()?.to_string();
+        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("Mini App").to_string();
+        // The stored hash becomes a path component — never trust it raw
+        (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some((hash, name))
+    };
+
+    if let Ok(Some(saved)) = crate::db::get_sql_setting(msg_key.clone()) {
+        if let Some((hash, name)) = read_latch(&saved) {
+            let path = dir.join(format!("{}.xdc", hash));
+            if path.exists() {
+                return Ok(Some(UrlXdcInfo {
+                    path: path.to_string_lossy().into_owned(),
+                    topic: vector_core::webxdc::derive_url_topic_id(&hash, &msg_id),
+                    hash,
+                    name,
+                }));
+            }
+        }
+    }
+    if !download {
+        return Ok(None);
+    }
+
+    // Only http(s), only .xdc paths — anything else never leaves the app
+    let lower = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) || !lower.ends_with(".xdc") {
+        return Err(Error::InvalidPackage("Not a Mini App URL".to_string()));
+    }
+
+    // Revalidate: a re-post of a known URL reuses the cache only when the
+    // server says the content is unchanged — the same URL legitimately changes
+    // between posts during rapid xdc development. No validator = re-download.
+    vector_core::net::validate_url_not_private(&url).map_err(|e| Error::InvalidPackage(e.to_string()))?;
+    let current_validator = fetch_url_validator(&url).await;
+    if let (Ok(Some(saved)), Some(cur)) = (crate::db::get_sql_setting(kv_key.clone()), current_validator.as_deref()) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&saved) {
+            let stored = v.get("etag").and_then(|e| e.as_str()).unwrap_or_default();
+            if !stored.is_empty() && stored == cur {
+                if let Some((hash, name)) = read_latch(&saved) {
+                    let path = dir.join(format!("{}.xdc", hash));
+                    if path.exists() {
+                        let _ = crate::db::set_sql_setting(
+                            msg_key.clone(),
+                            serde_json::json!({ "hash": hash, "name": name }).to_string(),
+                        );
+                        return Ok(Some(UrlXdcInfo {
+                            path: path.to_string_lossy().into_owned(),
+                            topic: vector_core::webxdc::derive_url_topic_id(&hash, &msg_id),
+                            hash,
+                            name,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    let reporter = UrlXdcProgressReporter { url: &url };
+    let bytes = crate::net::download_with_reporter(&url, &reporter, None)
+        .await
+        .map_err(|e| Error::InvalidPackage(e.to_string()))?;
+
+    // Validate BEFORE the cache write — garbage never lands on disk, and the
+    // gates match the opener's exactly, or the latch pins a package that can
+    // never open
+    let fallback = lower.rsplit('/').next().unwrap_or("app.xdc").to_string();
+    MiniAppPackage::validate_bytes_openable(&bytes)?;
+    let (manifest, _icon) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback)?;
+
+    let hash = {
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        bytes_to_hex_string(&h.finalize())
+    };
+    std::fs::create_dir_all(&dir).map_err(Error::Io)?;
+    let path = dir.join(format!("{}.xdc", hash));
+    // Temp + atomic rename: a crash mid-write must never leave a truncated
+    // file at the content-addressed path, and a re-download heals one
+    let tmp = dir.join(format!("{}.xdc.tmp-{}", hash, std::process::id()));
+    std::fs::write(&tmp, &bytes).map_err(Error::Io)?;
+    std::fs::rename(&tmp, &path).map_err(Error::Io)?;
+    let name = if manifest.name.is_empty() { fallback } else { manifest.name.clone() };
+    let _ = crate::db::set_sql_setting(
+        kv_key,
+        serde_json::json!({ "hash": hash, "name": name, "etag": current_validator.unwrap_or_default() }).to_string(),
+    );
+    let _ = crate::db::set_sql_setting(
+        msg_key,
+        serde_json::json!({ "hash": hash, "name": name }).to_string(),
+    );
+
+    Ok(Some(UrlXdcInfo {
+        path: path.to_string_lossy().into_owned(),
+        topic: vector_core::webxdc::derive_url_topic_id(&hash, &msg_id),
+        hash,
+        name,
+    }))
+}
+
+/// The URL's freshness validator: ETag preferred, Last-Modified fallback.
+/// None (no validator, or HEAD failed) means a re-post cannot prove the cache
+/// is current and must re-download.
+async fn fetch_url_validator(url: &str) -> Option<String> {
+    let client = vector_core::net::build_http_client_with_options(
+        std::time::Duration::from_secs(20),
+        Some(std::time::Duration::from_secs(10)),
+        true,
+    )
+    .ok()?;
+    let res = client.head(url).send().await.ok()?;
+    let headers = res.headers();
+    headers
+        .get("etag")
+        .or_else(|| headers.get("last-modified"))?
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
+}

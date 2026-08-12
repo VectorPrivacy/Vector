@@ -259,6 +259,7 @@
     "allow-delete-account",
     "allow-miniapp-load-info",
     "allow-miniapp-load-info-from-bytes",
+    "allow-miniapp-resolve-url-xdc",
     "allow-miniapp-open",
     "allow-miniapp-close",
     "allow-miniapp-get-updates",

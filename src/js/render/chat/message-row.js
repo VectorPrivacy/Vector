@@ -270,11 +270,21 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
 
 
+    // ---- URL-shared Mini App -------------------------------------------------
+    // An .xdc link renders as a playable game card (same file-box pipeline as
+    // an uploaded Mini App); it also supersedes the OpenGraph card below.
+    const xdcUrl = (!msg.pending && !msg.failed && !isRevealedBlockedMsg) ? findXdcUrl(msg.content) : null;
+    if (xdcUrl) {
+        const xdcTarget = document.createElement('div');
+        content.appendChild(xdcTarget);
+        renderXdcUrlCard(xdcTarget, msg, xdcUrl);
+    }
+
     // ---- Link preview (OpenGraph) ------------------------------------------
     // A vectorapp.io profile link renders as a mention pill; an OpenGraph
     // card for the same URL would be redundant.
     const skipWebPreview = /https?:\/\/vectorapp\.io\/profile\/npub1[a-z0-9]{58}/i.test(msg.content || '');
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !isRevealedBlockedMsg) {
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !xdcUrl && !isRevealedBlockedMsg) {
         const previewEl = _dmsgBuildLinkPreview(msg);
         if (previewEl) content.appendChild(previewEl);
     }
@@ -949,7 +959,9 @@ function _dmsgRenderFileAttachment(target, msg, cAttachment) {
 
         if (isMiniApp) {
             try {
-                const attachment = msg.attachments.find(a => a.path === path);
+                // URL-shared Mini Apps pass a synthetic attachment that is not
+                // in msg.attachments — fall back to the one we rendered from
+                const attachment = msg.attachments.find(a => a.path === path) || cAttachment;
                 const topicId = attachment?.webxdc_topic || null;
                 const shouldOpen = await checkChatMiniAppPermissions(path);
                 if (!shouldOpen) return;

@@ -674,6 +674,7 @@ pub fn run() {
             // Mini Apps commands
             miniapps::commands::miniapp_load_info,
             miniapps::commands::miniapp_load_info_from_bytes,
+            miniapps::commands::miniapp_resolve_url_xdc,
             miniapps::commands::miniapp_open,
             miniapps::commands::miniapp_close,
             miniapps::commands::miniapp_get_updates,

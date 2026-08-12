@@ -38,6 +38,23 @@ pub fn mint_topic_id(file_hash: &str, sender_hex: &str) -> String {
     base32_nopad_encode(&hasher.finalize())
 }
 
+/// Derive the realtime topic for a URL-shared Mini App.
+///
+/// A pasted `.xdc` URL has no file event to carry a minted topic, so every
+/// recipient derives the same one from what the message already gives them:
+/// the message id keeps re-shares distinct sessions (the role nanos+counter
+/// play in `mint_topic_id`), and the content hash quarantines a server that
+/// serves different bytes to different people into disjoint topics.
+pub fn derive_url_topic_id(file_hash: &str, msg_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"webxdc-url-realtime-v1:");
+    hasher.update(file_hash.as_bytes());
+    hasher.update(b":");
+    hasher.update(msg_id.as_bytes());
+    base32_nopad_encode(&hasher.finalize())
+}
+
 /// BASE32 no-pad encoding (RFC 4648). Mirrors the miniapp realtime layer's
 /// codec exactly — the two must agree for topic tags to decode.
 pub fn base32_nopad_encode(bytes: &[u8]) -> String {
@@ -119,6 +136,21 @@ pub fn parse_peer_signal(content: &str) -> Option<(String, Option<String>)> {
         _ => return None,
     };
     Some((topic_id, node_addr))
+}
+
+#[cfg(test)]
+mod url_topic_tests {
+    use super::*;
+
+    #[test]
+    fn a_url_topic_is_deterministic_per_message_and_splits_on_divergent_bytes() {
+        let a = derive_url_topic_id("hash1", "msg1");
+        assert_eq!(a, derive_url_topic_id("hash1", "msg1"));
+        assert_eq!(a.len(), 52, "must be a valid 52-char base32 TopicId");
+        assert!(parse_peer_signal(&peer_signal_content(&a, Some("iroh:x"))).is_some());
+        assert_ne!(a, derive_url_topic_id("hash2", "msg1"), "divergent bytes = disjoint topics");
+        assert_ne!(a, derive_url_topic_id("hash1", "msg2"), "re-share = fresh session");
+    }
 }
 
 #[cfg(test)]

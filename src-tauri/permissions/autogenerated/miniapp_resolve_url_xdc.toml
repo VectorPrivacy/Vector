@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-miniapp-resolve-url-xdc"
+description = "Enables the miniapp_resolve_url_xdc command without any pre-configured scope."
+commands.allow = ["miniapp_resolve_url_xdc"]
+
+[[permission]]
+identifier = "deny-miniapp-resolve-url-xdc"
+description = "Denies the miniapp_resolve_url_xdc command without any pre-configured scope."
+commands.deny = ["miniapp_resolve_url_xdc"]
