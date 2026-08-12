@@ -575,21 +575,68 @@ try {
 })();
 "#;
 
+/// Storage partition for a Mini App. Browser storage keys on ORIGIN, so the
+/// partition becomes the origin's host: reserved marketplace ids keep their
+/// storage across app updates, everything else keys on content — an unknown
+/// app's new version starts clean. Reserved ids are host-sanitized and
+/// suffixed with a digest so distinct ids stay distinct after sanitizing.
+/// Android serves this as an `http://` hostname label (63-char cap, no edge
+/// hyphens) — the digest carries uniqueness, the readable part is a courtesy.
+#[allow(dead_code)] // Unused on Windows only
+async fn miniapp_storage_partition(file_hash: &str) -> String {
+    let reserved = {
+        let state = MARKETPLACE_STATE.read().await;
+        state.get_app_by_hash(file_hash).map(|a| a.id.clone())
+    };
+    match reserved {
+        Some(id) if super::marketplace::is_safe_app_id(&id) => {
+            use sha2::{Digest, Sha256};
+            let mut sanitized: String = id
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            sanitized.truncate(24);
+            let sanitized = sanitized.trim_matches('-');
+            let mut h = Sha256::new();
+            h.update(id.as_bytes());
+            let tag = bytes_to_hex_string(&h.finalize());
+            if sanitized.is_empty() {
+                format!("app-{}", &tag[..8])
+            } else {
+                format!("{}-{}", sanitized, &tag[..8])
+            }
+        }
+        _ => file_hash[..32.min(file_hash.len())].to_ascii_lowercase(),
+    }
+}
+
 /// Get the base URL for Mini Apps based on platform
 #[allow(dead_code)] // Used on desktop only
-fn get_miniapp_base_url() -> Result<tauri::Url, Error> {
+fn get_miniapp_base_url(partition: &str) -> Result<tauri::Url, Error> {
     // URI format:
-    // mac/linux:         webxdc://dummy.host/<path>
-    // windows/android:   http://webxdc.localhost/<path>
-    #[cfg(any(target_os = "windows", target_os = "android"))]
+    // mac/linux:  webxdc://<partition>.host/<path>
+    // windows:    http://webxdc.<partition>.host/<path> — wry's WebView2
+    //             workaround intercepts by PREFIX (`http://webxdc.*`) and
+    //             strips it back to `webxdc://<partition>.host/`, so
+    //             per-partition hosts ride the existing filter untouched
+    // android:    unused (mini-apps run in the native overlay WebView)
+    #[cfg(target_os = "windows")]
     {
+        format!("http://webxdc.{}.host/", partition)
+            .parse()
+            .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = partition;
         "http://webxdc.localhost/"
             .parse()
             .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
     }
     #[cfg(not(any(target_os = "windows", target_os = "android")))]
     {
-        "webxdc://dummy.host/"
+        format!("webxdc://{}.host/", partition)
             .parse()
             .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
     }
@@ -774,7 +821,7 @@ pub async fn miniapp_open(
                 if let Some(window) = app.get_webview_window(&existing_label) {
                     // If href is provided, navigate to it
                     if let Some(ref href_value) = href {
-                        let mut nav_url = get_miniapp_base_url()?;
+                        let mut nav_url = window.url().map_err(Error::Tauri)?;
                         // Append href to the base URL (href should start with / or be a relative path)
                         let href_path = href_value.trim_start_matches('/');
                         nav_url.set_path(&format!("/{}", href_path));
@@ -995,6 +1042,7 @@ pub async fn miniapp_open(
                 &chat_id,
                 &message_id,
                 href.as_deref(),
+                &miniapp_storage_partition(&package.file_hash).await,
             ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
 
             // Record to Mini Apps history
@@ -1016,7 +1064,8 @@ pub async fn miniapp_open(
         #[cfg(not(target_os = "android"))]
         {
         // Build the initial URL - append href if provided
-        let mut initial_url = get_miniapp_base_url()?;
+        let mut initial_url =
+            get_miniapp_base_url(&miniapp_storage_partition(&package.file_hash).await)?;
         if let Some(ref href_value) = href {
             // Append href to the base URL (href should start with / or be a relative path)
             let href_path = href_value.trim_start_matches('/');
@@ -1047,14 +1096,21 @@ pub async fn miniapp_open(
         .initialization_script_for_all_frames(INIT_SCRIPT)
         // Enable devtools in debug mode only
         .devtools(cfg!(debug_assertions))
-        .on_navigation(move |url| {
-            // Only allow navigation within the webxdc:// scheme or webxdc.localhost
-            let scheme = url.scheme();
-            let allowed = scheme == "webxdc" || (scheme == "http" && url.host_str() == Some("webxdc.localhost"));
-            if !allowed {
-                log_warn!("Blocked navigation to: {}", url);
+        .on_navigation({
+            // Pin navigation to this window's own origin: serving routes by
+            // window label while storage keys on origin, so hopping to another
+            // partition's host would run this app's code against that app's
+            // storage.
+            let own_scheme = initial_url.scheme().to_string();
+            let own_host = initial_url.host_str().map(str::to_string);
+            move |url| {
+                let allowed =
+                    url.scheme() == own_scheme && url.host_str().map(str::to_string) == own_host;
+                if !allowed {
+                    log_warn!("Blocked navigation to: {}", url);
+                }
+                allowed
             }
-            allowed
         });
     
         // Platform-specific security settings

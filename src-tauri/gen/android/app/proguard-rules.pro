@@ -48,7 +48,7 @@
 # Keep MiniAppManager companion object static methods (called from Rust via JNI)
 -keep class io.vectorapp.miniapp.MiniAppManager {
     public static void initialize(android.app.Activity);
-    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
+    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
     public static void closeMiniApp();
     public static void sendToMiniApp(java.lang.String, java.lang.String);
     public static void sendRealtimeData(java.lang.String);

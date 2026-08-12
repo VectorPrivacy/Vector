@@ -25,7 +25,8 @@ import io.vectorapp.Logger
 class MiniAppWebView(
     context: Context,
     private val miniappId: String,
-    private val packagePath: String
+    private val packagePath: String,
+    private val host: String
 ) : WebView(context) {
 
     private lateinit var chromeClient: MiniAppChromeClient
@@ -247,7 +248,7 @@ class MiniAppWebView(
         )
 
         // Set custom WebViewClient for protocol handling
-        webViewClient = MiniAppWebViewClient(context, miniappId, packagePath)
+        webViewClient = MiniAppWebViewClient(context, miniappId, packagePath, host)
 
         // Set WebChromeClient for console logging and permission handling
         chromeClient = MiniAppChromeClient(context, miniappId, packagePath)

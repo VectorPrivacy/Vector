@@ -277,7 +277,7 @@ static FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// A marketplace `d`-tag id is attacker-controlled and becomes a filesystem path (`<id>.xdc`).
 /// Allow only a bounded, separator-free, traversal-free token so an id can never escape the
 /// miniapps dir. Permits reverse-DNS / slug / hash ids; bans `/`, `\`, `..`, absolute/UNC paths.
-fn is_safe_app_id(id: &str) -> bool {
+pub(super) fn is_safe_app_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && !id.contains("..")
