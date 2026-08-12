@@ -2078,7 +2078,19 @@ html, body {
   border: 1px solid #2c2e2f;
   border-radius: 18px;
   padding: 24px;
-  animation: qr-overlay-pop 0.16s ease-out;
+}
+
+/* Applied AFTER the overlay is displayed — WebKit never starts an animation
+   declared on a subtree emerging from display:none. */
+.qr-overlay-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+
+.qr-overlay.closing {
+  animation: modal-overlay-fade-out 0.15s ease-out forwards;
+  pointer-events: none;
+}
+
+.qr-overlay.closing .qr-overlay-card {
+  animation: modal-card-pop-out 0.15s ease-out forwards;
 }
 
 @keyframes qr-overlay-pop {
