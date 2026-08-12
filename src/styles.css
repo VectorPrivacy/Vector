@@ -2891,7 +2891,6 @@ body.mobile #chat-new-scan-btn { display: block; }
 
 .chat-contact-status {
   opacity: 0.8;
-  font-style: oblique;
   font-size: 14px;
   margin-bottom: 2px;
   display: block;
