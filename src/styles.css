@@ -1768,6 +1768,43 @@ html, body {
 
 .status-dialog-overlay.active { display: flex; }
 
+/* Selectability polish: chrome is tappable, never text-selectable — eager
+   clicks on the header, navbar, profile or modal furniture shouldn't paint
+   selections (including the whitespace text nodes between elements). */
+.account,
+.chat-bookmarks-btn,
+.new-chat-btn,
+.navbar,
+#profile,
+.status-dialog-card,
+.qr-overlay-card {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Real content opts back in: the bio, the npub itself (it has a copy button,
+   but manual selection stays honest), and every edit-mode field. */
+#profile input,
+#profile textarea,
+#profile-description,
+#profile-npub {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Images additionally refuse the ghost-drag that reads as a grab/selection */
+.profile-banner,
+.profile-avatar,
+#profile-badges img {
+  -webkit-user-drag: none;
+}
+
+/* The one exception: the status composer is editable text. */
+.status-input-host .rich-composer {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* Mirror of the open pop: the card recedes and the dim lifts together.
    Shared by every popping modal (Status dialog, QR overlay). */
 @keyframes modal-card-pop-out {
