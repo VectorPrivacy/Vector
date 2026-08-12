@@ -6066,11 +6066,10 @@ function renderProfileTab(cProfile) {
         }
     };
 
-    // Banner QR button (both profile kinds) — the icon is the profile QR
-    // itself, rendered small; tapping it opens the fullscreen version.
+    // Banner QR button (both profile kinds) — static icon; tapping it opens
+    // the fullscreen profile QR.
     const qrBtn = document.getElementById('profile-qr-btn');
-    const fQrRendered = renderQrInto(document.getElementById('profile-qr-icon'), `https://vectorapp.io/profile/${cProfile.id}`);
-    qrBtn.style.display = fQrRendered ? 'block' : 'none';
+    qrBtn.style.display = 'block';
     qrBtn.onclick = () => {
         const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
         if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);

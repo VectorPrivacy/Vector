@@ -1723,12 +1723,12 @@ html, body {
   opacity: 1 !important;
 }
 
-/* Banner QR button — the icon IS the profile QR, rendered small. Below Share
+/* Banner QR button — same scan glyph as the New Chat composer. Below Share
    on the own profile; takes Share's top-right spot on other profiles.
    Id selector: .profile-option would out-cascade a class rule's box sizing. */
 #profile-qr-btn {
   top: 68px;
-  padding: 8px;
+  padding: 10px;
   width: 54px;
   height: 54px;
 }
@@ -1740,6 +1740,7 @@ html, body {
 .profile-qr-icon {
   width: 100%;
   height: 100%;
+  color: #fff; /* stroke rides currentColor */
 }
 
 .profile-qr-icon svg {
@@ -1747,9 +1748,6 @@ html, body {
   height: 100%;
   display: block;
 }
-
-/* Direct children only: the .qr-logo group keeps its own sticker colors */
-.profile-qr-icon svg > path { fill: #fff; }
 
 /* Fullscreen QR overlay (profile QR + bunker login QR) */
 .qr-overlay {
