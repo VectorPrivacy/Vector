@@ -4384,18 +4384,15 @@ textarea#chat-input::placeholder {
    the line box, so adding an emoji cannot grow the row. The old 1.35em custom
    emoji reached -18.47 and pushed the line box to 24.48px, which is why the
    composer jumped a pixel the first time you typed one. */
-.rich-composer .cmp-twemoji,
-.rich-composer .cmp-emoji {
+/* The widget IS the <img> (no wrapper span — see composer.js on old-Android
+   IME resets), so geometry and sizing live on one element. */
+.rich-composer img.cmp-twemoji,
+.rich-composer img.cmp-emoji {
   display: inline-block;
   vertical-align: -0.3em;
-}
-
-.rich-composer .cmp-twemoji img,
-.rich-composer .cmp-emoji img {
   width: 1.25em;
   height: 1.25em;
   object-fit: contain;
-  display: block;
 }
 
 /* Vector Send Button - muted by default, stays visible when active */

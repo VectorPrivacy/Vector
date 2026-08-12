@@ -326,41 +326,38 @@ function createRichComposer(host, opts = {}) {
                     el.appendChild(document.createTextNode(CMP_ZWSP));
                     break;
                 }
+                // Emoji widgets are BARE <img> elements, deliberately: an image is
+                // inherently atomic (nothing to type inside) and reads to an IME as
+                // an ordinary object character. The previous shape — a
+                // contenteditable=false span between ZWSP sentinels — made old
+                // Android WebViews reset the input connection (keyboard close)
+                // whenever a native edit landed the caret against the island.
                 case 'twemoji': {
-                    const w = document.createElement('span');
-                    w.className = 'cmp-twemoji';
-                    w.contentEditable = 'false';
-                    w.dataset.src = raw;
                     const img = document.createElement('img');
+                    img.className = 'cmp-twemoji';
+                    img.dataset.src = raw;
                     // Always a BUNDLED asset path from `cmpTwemojiUrl` (/twemoji/svg/…),
                     // never a network URL — unlike pack art, which must go through the host.
                     img.src = t.url;
                     img.alt = raw;
+                    img.draggable = false;
                     // Second safety net: artwork the manifest claims but the build
                     // doesn't ship degrades to the character rather than a broken icon.
                     img.addEventListener('error', () => {
-                        w.replaceWith(document.createTextNode(raw));
+                        img.replaceWith(document.createTextNode(raw));
                     }, { once: true });
-                    w.appendChild(img);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
-                    el.appendChild(w);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                    el.appendChild(img);
                     break;
                 }
                 case 'emoji': {
-                    // The one real widget: an image's metrics can't match `:code:`.
-                    const w = document.createElement('span');
-                    w.className = 'cmp-emoji';
-                    w.contentEditable = 'false';
-                    w.dataset.src = raw;
                     const img = document.createElement('img');
+                    img.className = 'cmp-emoji';
+                    img.dataset.src = raw;
                     img.alt = raw;
-                    w.appendChild(img);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
-                    el.appendChild(w);
-                    el.appendChild(document.createTextNode(CMP_ZWSP));
+                    img.draggable = false;
+                    el.appendChild(img);
                     // Appended first: the fallback replaces the widget, which needs a parent.
-                    const fail = () => { if (w.parentNode) w.replaceWith(document.createTextNode(raw)); };
+                    const fail = () => { if (img.parentNode) img.replaceWith(document.createTextNode(raw)); };
                     // Pack art is REMOTE. This module never assigns such a src itself: the
                     // backend proxy is the only thing allowed to reach the network, and it
                     // is what carries Tor routing. A host without a binder gets the literal
@@ -549,6 +546,72 @@ function createRichComposer(host, opts = {}) {
         src = src.slice(0, at) + '\n' + src.slice(at);
         rerender(at + 1);
         el.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    // Deletions AT or NEXT TO an atomic widget are done in the MODEL, never
+    // by the browser: older Android WebViews (11-era) reset the IME's input
+    // connection — the keyboard just closes — both when a native delete
+    // consumes the non-editable island AND when one merely lands the caret
+    // against it (deleting the space after an emoji). Splice the source
+    // ourselves; every platform takes this path so behaviour can't diverge.
+    // Range deletions and deletes in plain text keep the native path.
+    // Returns true when handled (the caller cancels the event).
+    function deleteAdjacentWidget(backward) {
+        const sel = selectionRange();
+        if (!sel || sel.start !== sel.end) return false;
+        const caret = sel.start;
+        const atomic = (t) => t.kind === 'emoji' || t.kind === 'twemoji';
+        const tokens = cmpTokenize(src, opts);
+        const splice = (from, to) => {
+            src = src.slice(0, from) + src.slice(to);
+            rerender(from);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            return true;
+        };
+        if (backward) {
+            const hit = tokens.find(t => atomic(t) && t.to === caret);
+            if (hit) return splice(hit.from, hit.to);
+            // One character, whole code point: half a surrogate pair is worse
+            // than the bug being fixed.
+            let w = 1;
+            const lo = src.charCodeAt(caret - 1);
+            if (lo >= 0xDC00 && lo <= 0xDFFF && caret >= 2) {
+                const hi = src.charCodeAt(caret - 2);
+                if (hi >= 0xD800 && hi <= 0xDBFF) w = 2;
+            }
+            if (caret >= w && tokens.some(t => atomic(t) && t.to === caret - w)) {
+                return splice(caret - w, caret);
+            }
+            return false;
+        }
+        const hit = tokens.find(t => atomic(t) && t.from === caret);
+        if (hit) return splice(hit.from, hit.to);
+        let w = 1;
+        const hi = src.charCodeAt(caret);
+        if (hi >= 0xD800 && hi <= 0xDBFF && caret + 1 < src.length) {
+            const lo = src.charCodeAt(caret + 1);
+            if (lo >= 0xDC00 && lo <= 0xDFFF) w = 2;
+        }
+        if (tokens.some(t => atomic(t) && t.from === caret + w)) {
+            return splice(caret, caret + w);
+        }
+        return false;
+    }
+
+    // Two interception points, whichever fires first wins and cancels the
+    // rest. keydown catches the REAL key event (KEYCODE_DEL) that Android
+    // IMEs send AHEAD of their input-connection machinery — on old WebViews
+    // that machinery resets (keyboard closes) before any beforeinput can
+    // reach us, so beforeinput alone only worked on the second press.
+    el.addEventListener('keydown', (e) => {
+        if (composing) return;
+        if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+        if (deleteAdjacentWidget(e.key === 'Backspace')) e.preventDefault();
+    });
+    el.addEventListener('beforeinput', (e) => {
+        if (composing) return;
+        if (e.inputType !== 'deleteContentBackward' && e.inputType !== 'deleteContentForward') return;
+        if (deleteAdjacentWidget(e.inputType === 'deleteContentBackward')) e.preventDefault();
     });
 
     // The sentinels around a widget are real caret stops, so crossing one costs an
