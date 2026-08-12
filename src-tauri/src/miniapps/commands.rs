@@ -2142,8 +2142,9 @@ impl crate::net::ProgressReporter for UrlXdcProgressReporter<'_> {
 ///
 /// The realtime topic is derived, not minted: a URL has no file event to
 /// carry a topic tag, so every recipient computes the same
-/// `derive_url_topic_id(content_hash, msg_id)` — and a server that plays
-/// per-person games with the bytes splits those people onto disjoint topics.
+/// `derive_url_topic_id(url, msg_id)`. The bytes stay out of it — servers
+/// rebuild identical apps into new hashes, and two players who tapped the
+/// same card at different times must still land in the same session.
 #[tauri::command]
 pub async fn miniapp_resolve_url_xdc(
     app: AppHandle,
@@ -2195,7 +2196,7 @@ async fn resolve_url_xdc_inner(
             if path.exists() {
                 return Ok(Some(UrlXdcInfo {
                     path: path.to_string_lossy().into_owned(),
-                    topic: vector_core::webxdc::derive_url_topic_id(&hash, &msg_id),
+                    topic: vector_core::webxdc::derive_url_topic_id(&url, &msg_id),
                     hash,
                     name,
                 }));
@@ -2230,7 +2231,7 @@ async fn resolve_url_xdc_inner(
                         );
                         return Ok(Some(UrlXdcInfo {
                             path: path.to_string_lossy().into_owned(),
-                            topic: vector_core::webxdc::derive_url_topic_id(&hash, &msg_id),
+                            topic: vector_core::webxdc::derive_url_topic_id(&url, &msg_id),
                             hash,
                             name,
                         }));
@@ -2276,7 +2277,7 @@ async fn resolve_url_xdc_inner(
 
     Ok(Some(UrlXdcInfo {
         path: path.to_string_lossy().into_owned(),
-        topic: vector_core::webxdc::derive_url_topic_id(&hash, &msg_id),
+        topic: vector_core::webxdc::derive_url_topic_id(&url, &msg_id),
         hash,
         name,
     }))
