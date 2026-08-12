@@ -1748,7 +1748,8 @@ html, body {
   display: block;
 }
 
-.profile-qr-icon svg path { fill: #fff; }
+/* Direct children only: the .qr-logo group keeps its own sticker colors */
+.profile-qr-icon svg > path { fill: #fff; }
 
 /* Fullscreen QR overlay (profile QR + bunker login QR) */
 .qr-overlay {
