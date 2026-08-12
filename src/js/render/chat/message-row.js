@@ -16,8 +16,9 @@ const _dmsgPreviewFetchedIds = new Set();
 
 // Unique-emoji ceiling for a message's reaction row. At this count the "+"
 // add-reaction shortcut is dropped (no more can be shown), and the reaction
-// picker's shift multi-react auto-closes.
-const MAX_DISPLAYED_REACTIONS = 8;
+// picker's shift multi-react auto-closes. Mirrors vector-core's
+// MAX_REACTION_GROUPS — the backend refuses groups past it.
+const MAX_DISPLAYED_REACTIONS = 12;
 
 /**
  * Build a complete `.dmsg` row DOM element for a Message.
@@ -1503,9 +1504,10 @@ function _dmsgBuildReactions(msg) {
     for (const [emoji, g] of groups) {
         reactionsRow.appendChild(_dmsgBuildReactionChip(emoji, g, msg.id));
     }
-    // The "+" only shows while there's at least one reaction and we're below the
-    // unique-emoji ceiling — the floating toolbar's 😀 starts the first thread.
-    if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS) {
+    // The "+" only shows while there's at least one reaction and the user can
+    // still open a new group (unique-emoji ceiling AND their personal fresh
+    // allowance) — the floating toolbar's 😀 starts the first thread.
+    if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg)) {
         reactionsRow.appendChild(_dmsgBuildReactionsAddButton(msg.id));
     }
     return reactionsRow;
@@ -1556,11 +1558,13 @@ function _dmsgRollReactionCount(chip, toCount) {
         { duration, easing });
 }
 
-// Ensure the "+" shortcut exists (and sits last) below the unique-emoji ceiling,
-// and is gone at/above it.
+// Ensure the "+" shortcut exists (and sits last) below the unique-emoji ceiling
+// and the user's personal fresh allowance, and is gone at/above either.
 function _dmsgSyncReactionsAddButton(row, msgId, uniqueCount) {
     let addBtn = row.querySelector(':scope > .dmsg-reactions-add');
-    const wantBtn = uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS;
+    const cMsg = _dmsgLookupMessage(document.getElementById(msgId));
+    const wantBtn = uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS
+        && !newReactionGroupBlockReason(cMsg);
     if (wantBtn) {
         if (!addBtn) addBtn = _dmsgBuildReactionsAddButton(msgId);
         row.appendChild(addBtn);  // append = keep it last (moves it if it existed)
@@ -1757,15 +1761,16 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
     if (typeof softChatScroll === 'function') softChatScroll();
 }
 
-/** True once a message's reaction row holds the max unique emojis it can show
- *  (the "+" is gone). The reaction picker uses this to auto-close a shift
- *  multi-react when there's no more room to add. */
+/** True once no more reactions can be added to a message — the row holds the
+ *  max unique emojis it can show, or the user's personal fresh allowance is
+ *  spent (the "+" is gone either way). The reaction picker uses this to
+ *  auto-close a shift multi-react when there's no more room to add. */
 function _reactionRowAtCapacity(msgId) {
     if (!msgId) return false;
-    const chips = document.getElementById(msgId)
-        ?.querySelector('.dmsg-reactions')
-        ?.querySelectorAll('.reaction');
-    return !!chips && chips.length >= MAX_DISPLAYED_REACTIONS;
+    const rowEl = document.getElementById(msgId);
+    const chips = rowEl?.querySelector('.dmsg-reactions')?.querySelectorAll('.reaction');
+    if (chips && chips.length >= MAX_DISPLAYED_REACTIONS) return true;
+    return !!newReactionGroupBlockReason(_dmsgLookupMessage(rowEl));
 }
 
 // Delegated click handler — replaces per-row inline onclick closures for

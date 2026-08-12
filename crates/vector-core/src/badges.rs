@@ -108,6 +108,46 @@ pub fn effective_tier() -> u8 {
     bug_hunter_tier().max(if has_vector_badge() { 3 } else { 0 })
 }
 
+/// Per-effective-tier cap on NEW reaction groups one user may open on a single
+/// message. Joining an existing reaction (+1) is never gated — only introducing
+/// an emoji the message doesn't yet carry spends this allowance.
+pub const NEW_REACTIONS_PER_POST_BY_TIER: [usize; 4] = [6, 6, 9, 12];
+
+/// The current account's fresh-reaction allowance per message.
+pub fn effective_max_new_reactions_per_post() -> usize {
+    NEW_REACTIONS_PER_POST_BY_TIER[effective_tier() as usize]
+}
+
+/// Sender-side gate for reacting to `reference_id` with `emoji`: joining an
+/// existing group always passes; opening a new group checks the message-wide
+/// group ceiling, then the per-tier allowance. "Groups I opened" is judged by
+/// insertion order in our own view — the earliest held reaction per emoji.
+/// `Ok(())` when the send may proceed.
+pub async fn check_new_reaction_allowance(reference_id: &str, emoji: &str) -> Result<(), String> {
+    use nostr_sdk::prelude::ToBech32;
+    let me = match crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+        Some(npub) => npub,
+        None => return Err("Not logged in".to_string()),
+    };
+    let st = crate::state::STATE.lock().await;
+    let Some((_, message)) = st.find_message(reference_id) else { return Ok(()) };
+    if message.reactions.iter().any(|r| r.emoji == emoji) {
+        return Ok(());
+    }
+    let mut first_by_emoji: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for r in &message.reactions {
+        first_by_emoji.entry(r.emoji.as_str()).or_insert(r.author_id.as_str());
+    }
+    if first_by_emoji.len() >= crate::compact::MAX_REACTION_GROUPS {
+        return Err("This message has reached its reaction limit".to_string());
+    }
+    let spent = first_by_emoji.values().filter(|a| **a == me).count();
+    if spent >= effective_max_new_reactions_per_post() {
+        return Err("You've used all your new reactions on this message".to_string());
+    }
+    Ok(())
+}
+
 /// The highest effective tier across ALL accounts on this install. The
 /// multi-account cap is device-level (adding a profile spans accounts), so it
 /// must not drop when you switch to an un-badged account — unlike the per-account

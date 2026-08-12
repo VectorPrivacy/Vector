@@ -3193,6 +3193,16 @@ async function message(pubkey, content, replied_to, bot) {
  * the Community envelope yet, so a community reaction sends the emoji/shortcode content.
  */
 function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
+    const chat = arrChats.find(c => c.id === chatId);
+
+    // Group ceiling + per-tier fresh-reaction allowance (joins always pass) —
+    // gate BEFORE any optimistic bookkeeping so nothing strands on refusal.
+    const gateReason = reactionTierGate(chat?.messages.find(m => m.id === referenceId), emoji);
+    if (gateReason) {
+        showToast(gateReason);
+        return Promise.resolve(null);
+    }
+
     // Reactions are a real "use" of the emoji — record it (single chokepoint for
     // stock + custom reactions). Custom reactions arrive as `:shortcode:` + a url.
     if (emojiUrl) {
@@ -3200,7 +3210,6 @@ function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
     } else {
         bumpEmojiUsage('unicode', emoji);
     }
-    const chat = arrChats.find(c => c.id === chatId);
     if (chat && chat.chat_type === 'Community') {
         return invoke('react_to_community_message', { channelId: chatId, messageId: referenceId, emoji, emojiUrl: emojiUrl || null });
     }

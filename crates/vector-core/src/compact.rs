@@ -105,6 +105,12 @@ pub fn timestamp_from_compact(compact: u64) -> u64 {
     compact
 }
 
+/// Distinct-emoji ceiling on a single message's reaction set. Joining an
+/// existing group is never bounded by this; opening a group past it is
+/// refused at the STATE chokepoint (inbound and outbound alike). The UI's
+/// reaction row mirrors this number.
+pub const MAX_REACTION_GROUPS: usize = 12;
+
 /// Custom epoch in seconds: 2020-01-01 00:00:00 UTC
 const EPOCH_2020_SECS: u64 = 1577836800;
 
@@ -1069,6 +1075,7 @@ impl CompactMessage {
 
     /// Add a reaction to this message
     /// Note: Since TinyVec is immutable, this rebuilds the entire reactions list
+    /// (see [`MAX_REACTION_GROUPS`] for the distinct-emoji ceiling)
     pub fn add_reaction(&mut self, reaction: Reaction, interner: &mut NpubInterner) -> bool {
         // Convert to binary ID for comparison
         let reaction_id = hex_to_bytes_32(&reaction.id);
@@ -1084,6 +1091,17 @@ impl CompactMessage {
         let author_idx = interner.intern(&reaction.author_id);
         if self.reactions.iter().any(|r| r.author_idx == author_idx && *r.emoji == *reaction.emoji) {
             return false;
+        }
+
+        // Distinct-emoji ceiling: joining an existing group is always fine,
+        // but a reaction opening a group past the cap is refused — the same
+        // bound the UI draws, enforced against hostile inbound too.
+        if !self.reactions.iter().any(|r| *r.emoji == *reaction.emoji) {
+            let groups: std::collections::HashSet<&str> =
+                self.reactions.iter().map(|r| &*r.emoji).collect();
+            if groups.len() >= MAX_REACTION_GROUPS {
+                return false;
+            }
         }
 
         // Convert to compact and rebuild
@@ -3177,6 +3195,34 @@ mod tests {
             "a different emoji from the same author is its own reaction"
         );
         assert_eq!(compact.reactions.len(), 2);
+    }
+
+    #[test]
+    fn a_message_caps_at_twelve_reaction_groups_but_joins_stay_open() {
+        let mut interner = NpubInterner::new();
+        let mut compact = CompactMessage::from_message(&Message::default(), &mut interner);
+        let react = |i: usize, author: &str, emoji: &str| Reaction {
+            id: format!("{:064x}", i + 1),
+            reference_id: "a".repeat(64),
+            author_id: author.to_string(),
+            emoji: emoji.to_string(),
+            emoji_url: None,
+        };
+        for i in 0..MAX_REACTION_GROUPS {
+            assert!(
+                compact.add_reaction(react(i, "npub1opener", &format!("emoji{i}")), &mut interner),
+                "group {i} fits under the ceiling"
+            );
+        }
+        assert!(
+            !compact.add_reaction(react(100, "npub1opener", "emoji-thirteen"), &mut interner),
+            "a thirteenth distinct emoji is refused"
+        );
+        assert!(
+            compact.add_reaction(react(101, "npub1joiner", "emoji0"), &mut interner),
+            "joining an existing group is never bounded by the ceiling"
+        );
+        assert_eq!(compact.reactions.len(), MAX_REACTION_GROUPS + 1);
     }
 
     #[test]

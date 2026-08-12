@@ -45,7 +45,7 @@ const PINNED_PUBLISHED_AT_KEY: &str = "pinned_chats_published_at";
 /// account's list read on a free one, or another client's — is read and
 /// republished intact rather than truncated. Losing a premium user's pins
 /// because they opened a second account would be the worst possible reading.
-const PINNED_BY_TIER: [usize; 4] = [3, 3, 3, usize::MAX];
+const PINNED_BY_TIER: [usize; 4] = [3, 6, 9, usize::MAX];
 
 /// Base (free, tier-0) pin cap. Named const for the frontend mirror.
 pub const MAX_PINNED: usize = PINNED_BY_TIER[0];
@@ -302,13 +302,11 @@ mod tests {
     }
 
     #[test]
-    fn the_top_badge_tier_lifts_the_cap_and_the_others_do_not() {
-        // Bug Hunter's top grade IS full premium, so tier 3 pins without limit
-        // while every tier below it holds the default of 3.
-        assert_eq!(PINNED_BY_TIER[3], usize::MAX, "full premium pins are unlimited");
-        for tier in 0..3 {
-            assert_eq!(PINNED_BY_TIER[tier], MAX_PINNED, "tier {tier} keeps the default cap");
-        }
+    fn the_badge_tiers_step_the_cap_up_to_unlimited() {
+        // Free pins 3, Bug Hunter grades step 6 -> 9, and the top grade IS
+        // full premium: unlimited.
+        assert_eq!(PINNED_BY_TIER, [3, 6, 9, usize::MAX]);
+        assert_eq!(MAX_PINNED, 3, "the frontend mirror is the free-tier cap");
 
         // The cap is a parameter, so the premium path is exercised directly
         // rather than by faking a badge.

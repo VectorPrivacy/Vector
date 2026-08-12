@@ -3,6 +3,51 @@
  * Long-press on a reaction badge to see who reacted with that emoji.
  */
 
+/** Per-effective-tier (0-3) cap on NEW reaction groups one user can open on a
+ *  single message. Mirrors vector-core's NEW_REACTIONS_PER_POST_BY_TIER —
+ *  joining an existing reaction (+1) is never gated. */
+const NEW_REACTIONS_PER_POST_BY_TIER = [6, 6, 9, 12];
+
+/** Message-wide distinct-emoji ceiling. Mirrors vector-core's MAX_REACTION_GROUPS. */
+const MAX_REACTION_GROUPS = 12;
+
+/**
+ * Can the user OPEN a new reaction group on `cMsg` at all? Null when yes,
+ * else a user-facing reason (message-wide ceiling or their per-tier fresh
+ * allowance). "Groups I opened" is judged by insertion order — the earliest
+ * held reaction per emoji — matching the backend's view. The reaction row's
+ * "+" hides on this too, so a capped user isn't offered a dead picker.
+ */
+function newReactionGroupBlockReason(cMsg) {
+    if (!cMsg?.reactions?.length) return null;
+    const firstByEmoji = new Map();
+    for (const r of cMsg.reactions) {
+        if (!firstByEmoji.has(r.emoji)) firstByEmoji.set(r.emoji, r.author_id);
+    }
+    if (firstByEmoji.size >= MAX_REACTION_GROUPS) {
+        return 'This message has reached its reaction limit';
+    }
+    const tier = Math.min(Math.max(_myBadges?.tier | 0, 0), 3);
+    let spent = 0;
+    for (const author of firstByEmoji.values()) {
+        if (author === strPubkey) spent++;
+    }
+    if (spent >= NEW_REACTIONS_PER_POST_BY_TIER[tier]) {
+        return "You've used all your new reactions on this message";
+    }
+    return null;
+}
+
+/**
+ * Pre-gate for adding `emoji` to `cMsg`: null when the send may proceed, else
+ * a user-facing reason. Joining an existing group always passes.
+ */
+function reactionTierGate(cMsg, emoji) {
+    if (!cMsg?.reactions?.length) return null;
+    if (cMsg.reactions.some(r => r.emoji === emoji)) return null;
+    return newReactionGroupBlockReason(cMsg);
+}
+
 let reactionDetailsPopup = null;
 let reactionLongPressTimer = null;
 let reactionLongPressed = false;

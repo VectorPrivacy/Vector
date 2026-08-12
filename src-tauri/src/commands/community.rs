@@ -3570,6 +3570,9 @@ pub async fn react_to_community_message(
     emoji: String,
     emoji_url: Option<String>,
 ) -> Result<(), String> {
+    // Group ceiling + per-tier fresh-reaction allowance (joins always pass)
+    vector_core::badges::check_new_reaction_allowance(&message_id, &emoji).await?;
+
     // For a custom-emoji reaction (`:shortcode:` + url), attach the `["emoji", sc, url]`.
     let emoji_tags: Vec<vector_core::types::EmojiTag> = match emoji_url {
         Some(url) if emoji.starts_with(':') && emoji.ends_with(':') && emoji.len() >= 3 => {

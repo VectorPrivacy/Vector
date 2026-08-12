@@ -776,6 +776,11 @@ impl VectorCore {
             return Ok(existing);
         }
 
+        // Group ceiling + per-tier fresh-reaction allowance (joins always pass)
+        badges::check_new_reaction_allowance(reference_id, emoji)
+            .await
+            .map_err(VectorError::Other)?;
+
         let reference_event = EventId::from_hex(reference_id)
             .map_err(|e| VectorError::Nostr(e.to_string()))?;
         let receiver_pubkey = PublicKey::from_bech32(to_npub)
