@@ -29,6 +29,8 @@ pub fn get_all_profiles() -> Result<Vec<SlimProfile>, String> {
                 title: row.get(11)?,
                 purpose: String::new(),
                 url: row.get(12)?,
+                // Memory-only: repopulated by the next profile sync
+                emoji_tags: Vec::new(),
             },
             last_updated: 0,
             mine: false,

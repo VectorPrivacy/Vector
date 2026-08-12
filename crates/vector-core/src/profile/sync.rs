@@ -258,6 +258,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
 
     // Grab old status (or create profile if missing)
     let (old_status_title, old_status_purpose, old_status_url): (String, String, String);
+    let old_status_emoji_tags: Vec<crate::types::EmojiTag>;
     {
         let mut state = STATE.lock().await;
         match state.get_profile(&npub) {
@@ -265,12 +266,14 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 old_status_title = p.status_title().to_string();
                 old_status_purpose = p.status_purpose().to_string();
                 old_status_url = p.status_url().to_string();
+                old_status_emoji_tags = p.status_emoji_tags().to_vec();
             }
             None => {
                 state.insert_or_replace_profile(&npub, Profile::new());
                 old_status_title = String::new();
                 old_status_purpose = String::new();
                 old_status_url = String::new();
+                old_status_emoji_tags = Vec::new();
             }
         }
     }
@@ -281,7 +284,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         .kind(Kind::from_u16(30315))
         .limit(1);
 
-    let (status_title, status_purpose, status_url) = match client
+    let (status_title, status_purpose, status_url, status_emoji_tags) = match client
         .fetch_events(status_filter).timeout(Duration::from_secs(15))
         .await
     {
@@ -295,12 +298,13 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         .unwrap_or_default()
                         .to_string(),
                     String::new(),
+                    crate::types::EmojiTag::extract_from_tags(status_event.tags.iter()),
                 )
             } else {
-                (old_status_title, old_status_purpose, old_status_url)
+                (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags)
             }
         }
-        Err(_) => (old_status_title, old_status_purpose, old_status_url),
+        Err(_) => (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags),
     };
 
     // Fetch metadata from relays
@@ -341,7 +345,8 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         // Update status
                         let status_changed = profile.status_title() != status_title.as_str()
                             || profile.status_purpose() != status_purpose.as_str()
-                            || profile.status_url() != status_url.as_str();
+                            || profile.status_url() != status_url.as_str()
+                            || profile.status_emoji_tags() != status_emoji_tags.as_slice();
                         // Only touch the extras box when there's a real status to store or one
                         // already exists to clear — never materialize an empty box on the common
                         // status-less profile (that would make it larger than before the split).
@@ -352,6 +357,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                             ex.status_title = status_title.into_boxed_str();
                             ex.status_purpose = status_purpose.into_boxed_str();
                             ex.status_url = status_url.into_boxed_str();
+                            ex.status_emoji_tags = status_emoji_tags.into_boxed_slice();
                         }
 
                         // Update metadata
@@ -580,9 +586,14 @@ pub async fn update_status(status: String) -> bool {
         None => return false,
     };
 
-    // Build and sign kind 30315 status event
-    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
+    // Build and sign kind 30315 status event. `:shortcode:`s from the user's
+    // equipped packs ride along as NIP-30 tags so other clients render them.
+    let emoji_tags = crate::emoji_packs::resolve_outbound_emoji_tags(&status);
+    let mut status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
         .tag(Tag::custom("d", vec!["general"]));
+    for et in &emoji_tags {
+        status_builder = status_builder.tag(Tag::custom("emoji", [et.shortcode.clone(), et.url.clone()]));
+    }
 
     let Ok(event) = crate::sign_builder(status_builder).await else {
         return false;
@@ -607,6 +618,7 @@ pub async fn update_status(status: String) -> bool {
                 let ex = profile.extras_mut();
                 ex.status_purpose = "general".into();
                 ex.status_title = status.into_boxed_str();
+                ex.status_emoji_tags = emoji_tags.into_boxed_slice();
             }
 
             let slim = state.serialize_profile(id).unwrap();

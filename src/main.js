@@ -2899,6 +2899,7 @@ function updateChatHeaderSubtext(chat) {
     }
 
     let newStatusText = '';
+    let newStatusEmojiTags = [];
     let shouldAddGradient = false;
 
     const isCommunity = chat.chat_type === 'Community';
@@ -2926,6 +2927,7 @@ function updateChatHeaderSubtext(chat) {
         // DM - not typing, show profile status
         const profile = getProfile(chat.id);
         newStatusText = profile?.status?.title || '';
+        newStatusEmojiTags = profile?.status?.emoji_tags || [];
         shouldAddGradient = false;
     }
     
@@ -2940,6 +2942,7 @@ function updateChatHeaderSubtext(chat) {
         domChatContactStatus.classList.toggle('typing-indicator-text', shouldAddGradient);
         if (!shouldAddGradient) {
             twemojify(domChatContactStatus);
+            renderCustomEmojiShortcodes(domChatContactStatus, newStatusEmojiTags);
         }
         domChatContact.classList.remove('chat-contact');
         domChatContact.classList.add('chat-contact-with-status');
@@ -5860,6 +5863,7 @@ function renderCurrentProfile(cProfile) {
     domAccountStatus.textContent = cProfile?.status?.title || 'Set a Status';
     domAccountStatus.onclick = askForStatus;
     twemojify(domAccountStatus);
+    renderCustomEmojiShortcodes(domAccountStatus, cProfile?.status?.emoji_tags || []);
 
 }
 
@@ -5894,7 +5898,10 @@ function renderProfileTab(cProfile) {
     const strStatusPlaceholder = cProfile.mine ? 'Set a Status' : '';
     // textContent: status is attacker-controlled NIP-38 data, never HTML.
     domProfileStatus.textContent = cProfile?.status?.title || strStatusPlaceholder;
-    if (cProfile?.status?.title) twemojify(domProfileStatus);
+    if (cProfile?.status?.title) {
+        twemojify(domProfileStatus);
+        renderCustomEmojiShortcodes(domProfileStatus, cProfile.status.emoji_tags || []);
+    }
 
     // Adjust our Profile Name class to manage space according to Status visibility
     domProfileName.classList.toggle('chat-contact', !domProfileStatus.textContent);

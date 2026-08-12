@@ -73,6 +73,11 @@ pub struct ProfileExtras {
     pub status_title: Box<str>,
     pub status_purpose: Box<str>,
     pub status_url: Box<str>,
+    /// NIP-30 custom-emoji tags from the status event, so `:shortcode:` in the
+    /// status text can render as an image. Memory-only: refreshed on every
+    /// profile sync, not persisted (a pre-sync render shows the literal
+    /// shortcode, which is what an absent mapping shows anyway).
+    pub status_emoji_tags: Box<[crate::types::EmojiTag]>,
 }
 
 impl Default for Profile {
@@ -107,6 +112,7 @@ impl Profile {
     #[inline] pub fn status_title(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.status_title) }
     #[inline] pub fn status_purpose(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.status_purpose) }
     #[inline] pub fn status_url(&self) -> &str { self.extras.as_ref().map_or("", |e| &e.status_url) }
+    #[inline] pub fn status_emoji_tags(&self) -> &[crate::types::EmojiTag] { self.extras.as_ref().map_or(&[], |e| &e.status_emoji_tags) }
 
     /// Materialize the extras box for writing a cold field (allocates on first set).
     #[inline]
@@ -217,6 +223,7 @@ impl SlimProfile {
                 title: profile.status_title().to_string(),
                 purpose: profile.status_purpose().to_string(),
                 url: profile.status_url().to_string(),
+                emoji_tags: profile.status_emoji_tags().to_vec(),
             },
             last_updated: crate::compact::secs_from_compact(profile.last_updated),
             mine: profile.flags.is_mine(),
@@ -233,7 +240,8 @@ impl SlimProfile {
         // point of the split is that most profiles skip it.
         let extras = (!self.nickname.is_empty() || !self.lud06.is_empty() || !self.lud16.is_empty()
             || !self.nip05.is_empty() || !self.website.is_empty()
-            || !self.status.title.is_empty() || !self.status.purpose.is_empty() || !self.status.url.is_empty())
+            || !self.status.title.is_empty() || !self.status.purpose.is_empty() || !self.status.url.is_empty()
+            || !self.status.emoji_tags.is_empty())
         .then(|| Box::new(ProfileExtras {
             nickname: self.nickname.clone().into_boxed_str(),
             lud06: self.lud06.clone().into_boxed_str(),
@@ -243,6 +251,7 @@ impl SlimProfile {
             status_title: self.status.title.clone().into_boxed_str(),
             status_purpose: self.status.purpose.clone().into_boxed_str(),
             status_url: self.status.url.clone().into_boxed_str(),
+            status_emoji_tags: self.status.emoji_tags.clone().into_boxed_slice(),
         }));
         Profile {
             id: NO_NPUB,
@@ -271,11 +280,14 @@ pub struct Status {
     pub title: String,
     pub purpose: String,
     pub url: String,
+    /// NIP-30 tags from the status event; absent in DB rows (memory-only).
+    #[serde(default)]
+    pub emoji_tags: Vec<crate::types::EmojiTag>,
 }
 
 impl Status {
     pub fn new() -> Self {
-        Self { title: String::new(), purpose: String::new(), url: String::new() }
+        Self { title: String::new(), purpose: String::new(), url: String::new(), emoji_tags: Vec::new() }
     }
 }
 
