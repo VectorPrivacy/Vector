@@ -969,6 +969,10 @@ function _dmsgRenderFileAttachment(target, msg, cAttachment) {
                 // no-op — the open threw before any optimistic status, so the card stays "Click to Play".
                 showToast(String(err));
             }
+        } else if (platformFeatures.os === 'android') {
+            // No file manager to reveal into — open the file itself
+            // (an .apk routes through the system installer flow)
+            openAndroidAttachment(path);
         } else {
             revealItemInDir(path);
         }

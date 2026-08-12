@@ -13428,16 +13428,6 @@ document.addEventListener('click', (e) => {
         }
     }
 
-    // If we're clicking a File Reveal button, reveal/open the file. Android has
-    // no "reveal in folder", so open it with the user's chosen app instead.
-    if (e.target.getAttribute('filepath')) {
-        const filepath = e.target.getAttribute('filepath');
-        if (platformFeatures.os === 'android') {
-            return openAndroidAttachment(filepath);
-        }
-        return revealItemInDir(filepath);
-    }
-
     // If we're clicking a Reply context, center the referenced message in view
     {
         const replyEl = e.target.closest('.dmsg-reply');
