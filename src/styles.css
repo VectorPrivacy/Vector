@@ -2354,6 +2354,10 @@ body.mobile #chat-new-scan-btn { display: block; }
   transform: translateY(-4px);
   transition: opacity 0.12s ease, transform 0.12s ease;
   pointer-events: none;
+  /* Menu labels are commands, not content — highlighting them only makes
+     the long-press that OPENED the menu look like a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .context-menu.is-visible {
   opacity: 1;
