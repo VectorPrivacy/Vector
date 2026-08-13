@@ -558,13 +558,47 @@ function createRichComposer(host, opts = {}) {
      * common case and touches no DOM at all — which is what keeps this at 60fps
      * and, more importantly, keeps the IME's composition intact.
      */
+    /**
+     * True when a `.cmp-mark` span's text no longer equals its token's marker.
+     * Native typing at a mark boundary inserts INTO the marker span — a
+     * header's body starts empty, so the caret parks in the mark and the whole
+     * line would keep typing in marker grey without a repaint.
+     */
+    function marksDrifted(tokens) {
+        const expect = [];
+        for (const t of tokens) {
+            const raw = src.slice(t.from, t.to);
+            switch (t.kind) {
+                case 'bold': case 'bolditalic': case 'italic': case 'strike':
+                case 'spoiler': case 'code':
+                    expect.push(raw.slice(0, t.mark), raw.slice(raw.length - t.mark));
+                    break;
+                case 'header': case 'subtext':
+                    expect.push(raw.slice(0, t.mark));
+                    break;
+                case 'listmark':
+                    expect.push(raw);
+                    break;
+            }
+        }
+        const spans = el.querySelectorAll('.cmp-mark');
+        if (spans.length !== expect.length) return true;
+        for (let i = 0; i < spans.length; i++) {
+            if (spans[i].textContent !== expect[i]) return true;
+        }
+        return false;
+    }
+
     function syncFromDom() {
         const next = readDom();
         src = next;
         const tokens = cmpTokenize(src, opts);
         const sig = cmpSignature(tokens, src);
-        if (sig === signature) return;
-        signature = sig;
+        if (sig === signature) {
+            if (composing || !marksDrifted(tokens)) return;
+        } else {
+            signature = sig;
+        }
         const caret = caretOffset();
         render(tokens);
         if (caret !== null) setCaret(caret);
