@@ -104,3 +104,9 @@
 # ExternalSigner: statics invoked from Rust, nativeOnBiometricResult must keep
 # its exact name for the native symbol to bind.
 -keep class io.vectorapp.BiometricUnlock { *; }
+
+# Keep VectorUpdates (sideload self-updater). Its statics (installUpdate,
+# installedSignatureSha256, apkSignatureSha256) are invoked from Rust via JNI —
+# invisible to R8, so release builds died with NoSuchMethodError the moment an
+# update download completed.
+-keep class io.vectorapp.VectorUpdates { *; }
