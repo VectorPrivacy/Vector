@@ -1729,8 +1729,9 @@ html, body {
 #profile-qr-btn {
   top: 68px;
   padding: 10px;
-  width: 54px;
-  height: 54px;
+  /* 50 + padding + border = the same 74px box as the Edit/Share pills. */
+  width: 50px;
+  height: 50px;
 }
 
 #profile:not(.is-own-profile) #profile-qr-btn {
