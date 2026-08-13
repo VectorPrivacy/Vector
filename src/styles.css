@@ -17698,7 +17698,8 @@ textarea.command-part-input {
 }
 .dmsg-text p:first-child { margin-top: 0; }
 .dmsg-text p:last-child  { margin-bottom: 0; }
-.dmsg-text a             { color: var(--icon-color-primary, #59fcb3); }
+.dmsg-text a,
+.pins-drawer-row-text a  { color: var(--icon-color-primary, #59fcb3); }
 /* .dmsg-text is inline, so a divider-only message gives the <hr> a zero-width containing block
    and it disappears. Pin a visible block width (expands with surrounding text when present). */
 .dmsg-text hr            { display: block; width: 100%; min-width: 12rem; }

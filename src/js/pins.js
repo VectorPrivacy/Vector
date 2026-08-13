@@ -472,6 +472,9 @@ function pinsFirstDisplayLine(source) {
 function pinsRenderCollapsedContent(text, pin) {
     const source = pinsFirstDisplayLine(pin.edited?.content ?? pin.content);
     text.innerHTML = contentToPreviewHtml(resolveMentionText(source));
+    // Bare URLs stay clickable even collapsed — a link is often the entire
+    // point of a pin. Row clicks already defer to anchors.
+    linkifyUrls(text);
     twemojify(text);
     const emojiTags = pinsEmojiTags(pin);
     if (emojiTags.length) renderCustomEmojiShortcodes(text, emojiTags);
