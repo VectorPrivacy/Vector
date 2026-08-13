@@ -743,11 +743,23 @@ function createRichComposer(host, opts = {}) {
         rerender(sel.start + text.length);
         el.dispatchEvent(new Event('input', { bubbles: true }));
     });
+    // Copy/cut serialize through the MODEL, not Selection.toString() — that
+    // API skips <img> nodes entirely, so emoji widgets would leave the
+    // clipboard as bare whitespace. Model offsets already count them.
     el.addEventListener('copy', (e) => {
-        const sel = window.getSelection();
-        if (!sel || sel.isCollapsed) return;
+        const r = liveSelectionRange();
+        if (!r || r.start === r.end) return;
         e.preventDefault();
-        e.clipboardData.setData('text/plain', sel.toString().split(CMP_ZWSP).join(''));
+        e.clipboardData.setData('text/plain', src.slice(r.start, r.end));
+    });
+    el.addEventListener('cut', (e) => {
+        const r = liveSelectionRange();
+        if (!r || r.start === r.end) return;
+        e.preventDefault();
+        e.clipboardData.setData('text/plain', src.slice(r.start, r.end));
+        src = src.slice(0, r.start) + src.slice(r.end);
+        rerender(r.start);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
     // ---- the textarea-shaped face -------------------------------------------
