@@ -3198,7 +3198,9 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 
 .chat-header .profile-header-info {
-  max-width: 70%;
+  /* Centered, so BOTH sides must clear the wider rail: pins + menu occupy
+     the right 90px. 200 = 2 x (90 + 10px breathing room). */
+  max-width: min(70%, calc(100% - 200px));
   overflow: hidden;
 }
 
