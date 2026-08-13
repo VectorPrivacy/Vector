@@ -3244,6 +3244,13 @@ body.mobile #chat-new-scan-btn { display: block; }
   margin-right: unset;
 }
 
+/* `-# ` subtext: Discord's tiny text. Block so consecutive lines stack. */
+.chat small.md-subtext {
+  display: block;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
 .chat-contact-status {
   opacity: 0.8;
   font-size: 14px;
@@ -4354,6 +4361,17 @@ textarea#chat-input::placeholder {
 #chat-input.rich-composer .cmp-bold .cmp-body { font-weight: 700; }
 /* Matches `.chat em` so italics read the same weight of grey as in a message. */
 #chat-input.rich-composer .cmp-italic .cmp-body { font-style: italic; opacity: 0.7; }
+#chat-input.rich-composer .cmp-bolditalic .cmp-body { font-weight: 700; font-style: italic; }
+#chat-input.rich-composer .cmp-h1 .cmp-body,
+#chat-input.rich-composer .cmp-h2 .cmp-body,
+#chat-input.rich-composer .cmp-h3 .cmp-body,
+#chat-input.rich-composer .cmp-h4 .cmp-body,
+#chat-input.rich-composer .cmp-h5 .cmp-body,
+#chat-input.rich-composer .cmp-h6 .cmp-body { font-weight: 700; }
+#chat-input.rich-composer .cmp-h1 .cmp-body { font-size: 1.3em; }
+#chat-input.rich-composer .cmp-h2 .cmp-body { font-size: 1.2em; }
+#chat-input.rich-composer .cmp-h3 .cmp-body { font-size: 1.1em; }
+#chat-input.rich-composer .cmp-subtext .cmp-body { font-size: 0.8em; opacity: 0.75; }
 #chat-input.rich-composer .cmp-strike .cmp-body { text-decoration: line-through; }
 #chat-input.rich-composer .cmp-spoiler .cmp-body {
   background: rgba(255, 255, 255, 0.16);

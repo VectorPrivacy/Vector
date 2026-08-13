@@ -121,15 +121,22 @@ function cmpTokenize(src, opts) {
     // Emoji goes LAST: `*️⃣` and `*italic*` both start with `*`, and the engine only
     // falls through to a later alternative once the earlier one fails to match.
     const re = new RegExp(
-        '(`[^`\\n]+`)|(\\*\\*[^*\\n]+\\*\\*)|(~~[^~\\n]+~~)|(\\|\\|[^|\\n]+\\|\\|)'
+        '(`[^`\\n]+`)|(\\*\\*\\*[^*\\n]+\\*\\*\\*)|(\\*\\*[^*\\n]+\\*\\*)|(~~[^~\\n]+~~)|(\\|\\|[^|\\n]+\\|\\|)'
+        + '|(\\*[^*\\n]+\\*)'
+        // Underscore emphasis is boundary-gated in the handler, mirroring
+        // marked: `_this_` italicises, `snake_case_name` stays literal.
+        + '|(___[^_\\n]+___)|(__[^_\\n]+__)|(_[^_\\n]+_)'
         // The npub form comes before the name form: a pasted `@npub1…` is all
         // name-shaped characters, so the greedy name rule would swallow it and
         // leave 63 characters of key on screen.
-        + '|(\\*[^*\\n]+\\*)|(:[a-zA-Z0-9_~-]+:)'
+        + '|(:[a-zA-Z0-9_~-]+:)'
         + '|(@npub1[023456789acdefghjklmnpqrstuvwxyz]{58})'
         // Just the marker. What follows is measured against the tracked names,
         // not a character class — see the handler.
         + '|(@(?=\\S))'
+        // Line-level formats: ATX headers and `-# ` subtext take their whole
+        // line — the marker recedes, the body carries the weight.
+        + '|(^#{1,6} [^\\n]*)|(^-# [^\\n]*)'
         // List marker, anchored to the line start (hence the `m` flag) and mirroring
         // marked's own rule: up to three spaces, then `-`, `*` or `1.`, then a space.
         // `+` is deliberately absent — the message renderer refuses it too.
@@ -144,21 +151,40 @@ function cmpTokenize(src, opts) {
         const from = m.index;
         const to = from + raw.length;
         if (m[1]) out.push({ kind: 'code', from, to, mark: 1 });
-        else if (m[2]) out.push({ kind: 'bold', from, to, mark: 2 });
-        else if (m[3]) out.push({ kind: 'strike', from, to, mark: 2 });
-        else if (m[4]) out.push({ kind: 'spoiler', from, to, mark: 2 });
-        else if (m[5]) out.push({ kind: 'italic', from, to, mark: 1 });
-        else if (m[6]) {
+        else if (m[2]) out.push({ kind: 'bolditalic', from, to, mark: 3 });
+        else if (m[3]) out.push({ kind: 'bold', from, to, mark: 2 });
+        else if (m[4]) out.push({ kind: 'strike', from, to, mark: 2 });
+        else if (m[5]) out.push({ kind: 'spoiler', from, to, mark: 2 });
+        else if (m[6]) out.push({ kind: 'italic', from, to, mark: 1 });
+        else if (m[7] || m[8] || m[9]) {
+            // Underscores only delimit at word edges (marked's rule). A rejected
+            // match must not swallow tokens it covered — emit one literal `_`
+            // and rescan from the next character.
+            const word = /[\p{L}\p{N}_]/u;
+            const opens = from === 0 || !word.test(src[from - 1]);
+            const closes = to >= src.length || !word.test(src[to]);
+            if (opens && closes) {
+                out.push(m[7] ? { kind: 'bolditalic', from, to, mark: 3 }
+                    : m[8] ? { kind: 'bold', from, to, mark: 2 }
+                    : { kind: 'italic', from, to, mark: 1 });
+            } else {
+                out.push({ kind: 'text', from, to: from + 1 });
+                last = from + 1;
+                re.lastIndex = from + 1;
+                continue;
+            }
+        }
+        else if (m[10]) {
             // Only an emoji the app can actually resolve becomes a widget; an
             // unknown `:word:` stays literal text so it can still be typed through.
             const url = safe(opts.resolveEmoji, raw.slice(1, -1));
             out.push(url ? { kind: 'emoji', from, to, url } : { kind: 'text', from, to });
-        } else if (m[7]) {
+        } else if (m[11]) {
             // A mention pasted from a message carries the raw key, which is what
             // gets sent. Show the person's name over it; `data-src` keeps the npub.
             const label = safe(opts.resolveNpub, raw.slice(1));
             out.push(label ? { kind: 'npubmention', from, to, label } : { kind: 'text', from, to });
-        } else if (m[8]) {
+        } else if (m[12]) {
             // Measured against the tracked names rather than a character class: a
             // display name is arbitrary text, so any class is a guess that needs
             // widening the first time someone picks a character it forgot.
@@ -175,7 +201,13 @@ function cmpTokenize(src, opts) {
                 continue;
             }
             out.push({ kind: 'text', from, to });
-        } else if (m[9]) {
+        } else if (m[13]) {
+            // Whole-line format. `mark` = hashes + space, so it doubles as the
+            // level; inline tokens within the line stay literal in the preview.
+            out.push({ kind: 'header', from, to, mark: raw.indexOf(' ') + 1 });
+        } else if (m[14]) {
+            out.push({ kind: 'subtext', from, to, mark: 3 });
+        } else if (m[15]) {
             out.push({ kind: 'listmark', from, to });
         } else {
             // Unicode emoji. No Twemoji artwork (skin tones, very new emoji) falls
@@ -204,6 +236,8 @@ function cmpSignature(tokens, src) {
     for (const t of tokens) {
         s += t.kind;
         if (t.kind === 'emoji' || t.kind === 'twemoji') s += '(' + src.slice(t.from, t.to) + ')';
+        // Levels share a kind, but `#` -> `##` must still repaint the mark.
+        if (t.kind === 'header') s += t.mark;
         s += '|';
     }
     return s;
@@ -299,10 +333,21 @@ function createRichComposer(host, opts = {}) {
             const raw = src.slice(t.from, t.to);
             switch (t.kind) {
                 case 'bold': el.appendChild(decorated('cmp-bold', raw, 2)); break;
+                case 'bolditalic': el.appendChild(decorated('cmp-bolditalic', raw, 3)); break;
                 case 'italic': el.appendChild(decorated('cmp-italic', raw, 1)); break;
                 case 'strike': el.appendChild(decorated('cmp-strike', raw, 2)); break;
                 case 'spoiler': el.appendChild(decorated('cmp-spoiler', raw, 2)); break;
                 case 'code': el.appendChild(decorated('cmp-code', raw, 1)); break;
+                case 'header':
+                case 'subtext': {
+                    // Leading mark only — decorated() is symmetric.
+                    const wrap = document.createElement('span');
+                    wrap.className = t.kind === 'header' ? 'cmp-h' + (t.mark - 1) : 'cmp-subtext';
+                    wrap.appendChild(span('cmp-mark', raw.slice(0, t.mark)));
+                    wrap.appendChild(span('cmp-body', raw.slice(t.mark)));
+                    el.appendChild(wrap);
+                    break;
+                }
                 case 'listmark':
                     // Recede it like any other marker. The bullet itself is the
                     // renderer's job; here the point is that the line WILL format.
