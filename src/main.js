@@ -1484,6 +1484,36 @@ function truncateGraphemes(text, maxLength) {
 }
 
 /**
+ * Grapheme truncation that treats a whole `:shortcode:` as ONE atomic token
+ * priced like an emoji (2): cutting inside one reveals the raw code in the
+ * preview, and pricing it by its letters lets three emojis eat the budget.
+ */
+function truncateEmojiAware(text, maxLength) {
+    const parts = text.split(/(:[a-zA-Z0-9_~-]+:)/g);
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+    let out = '';
+    let used = 0;
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part) continue;
+        if (i % 2 === 1) {
+            if (used + 2 > maxLength) return out + '…';
+            out += part;
+            used += 2;
+        } else {
+            const segments = [...segmenter.segment(part)];
+            const remaining = maxLength - used;
+            if (segments.length > remaining) {
+                return out + segments.slice(0, remaining).map(s => s.segment).join('') + '…';
+            }
+            out += part;
+            used += segments.length;
+        }
+    }
+    return out;
+}
+
+/**
  * Close inline-markdown delimiters that lost their pair after truncation, so
  * the renderer applies the original styling to the truncated tail and a half-
  * spoiler stays blurred instead of leaking its content. The closing delimiter
@@ -1507,7 +1537,7 @@ function balanceInlineMarkdown(text) {
 function buildReplyPreviewHtml(content, maxLength = 50) {
     const resolved = resolveMentionText(content);
     const plain = contentToPreviewText(resolved);
-    const truncated = truncateGraphemes(plain, maxLength);
+    const truncated = truncateEmojiAware(plain, maxLength);
     const balanced = balanceInlineMarkdown(truncated);
     return contentToPreviewHtml(balanced);
 }
