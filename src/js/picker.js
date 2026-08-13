@@ -1405,6 +1405,10 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
                 if (p.classList && p.classList.contains('emoji-pack-emoji')) return NodeFilter.FILTER_REJECT;
                 p = p.parentElement;
             }
+            // A `g` regex's test() resumes from the PREVIOUS node's lastIndex —
+            // when twemoji has split the text into segments, that silently
+            // rejects every other node holding a shortcode.
+            pattern.lastIndex = 0;
             return pattern.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
         }
     });
