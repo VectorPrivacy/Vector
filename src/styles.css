@@ -18810,6 +18810,7 @@ body.profile-switcher-editing .profile-switcher-add {
   width: 62px;
   height: 62px;
   flex-shrink: 0;
+  cursor: pointer;
   -webkit-user-drag: none;
 }
 .chatlist-intro-text h4 {
