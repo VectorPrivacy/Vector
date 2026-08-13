@@ -564,16 +564,19 @@ fn symphonia_decode_mono(file_bytes: Vec<u8>, path: &Path) -> Result<(Vec<f32>, 
         .ok_or("No supported audio tracks found")?;
 
     let track_id = track.id;
-    let sample_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
-    let channels = track.codec_params.channels.ok_or("Unknown channel count")?.count();
+    let declared_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
 
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    let estimated_frames = track.codec_params.n_frames.unwrap_or(sample_rate as u64 * 120);
+    let estimated_frames = track.codec_params.n_frames.unwrap_or(declared_rate as u64 * 120);
     let mut mono_samples = Vec::with_capacity(estimated_frames as usize);
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
+    // Resolved from the first decoded buffer: HE-AAC headers declare the 2x
+    // SBR rate symphonia can't decode, and often omit the channel count.
+    let mut sample_rate = declared_rate;
+    let mut channels = 0usize;
 
     loop {
         let packet = match format.next_packet() {
@@ -588,8 +591,13 @@ fn symphonia_decode_mono(file_bytes: Vec<u8>, path: &Path) -> Result<(Vec<f32>, 
         match decoder.decode(&packet) {
             Ok(audio_buf) => {
                 if sample_buf.is_none() {
+                    let spec = *audio_buf.spec();
+                    if spec.rate > 0 {
+                        sample_rate = spec.rate;
+                    }
+                    channels = spec.channels.count().max(1);
                     sample_buf = Some(SampleBuffer::<f32>::new(
-                        audio_buf.capacity() as u64, *audio_buf.spec()));
+                        audio_buf.capacity() as u64, spec));
                 }
                 if let Some(ref mut buf) = sample_buf {
                     buf.copy_interleaved_ref(audio_buf);
@@ -651,8 +659,14 @@ fn decode_audio_internal(path: &Path, to_mono: bool) -> Result<(Vec<f32>, u32, u
         .make(codec_params, &decoder_opts)
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    let sample_rate = codec_params.sample_rate.ok_or("Unknown sample rate")?;
-    let channels = codec_params.channels.ok_or("Unknown channel count")?.count();
+    let declared_rate = codec_params.sample_rate;
+    let declared_channels = codec_params.channels.map(|c| c.count());
+
+    // Resolved from the first decoded buffer: the header can declare the
+    // HE-AAC SBR extension rate while symphonia decodes the LC core at half
+    // rate, and HE-AAC headers often omit the channel count entirely.
+    let mut sample_rate = 0u32;
+    let mut channels = 0usize;
 
     let mut all_samples = Vec::new();
     let mut sample_buf = None;
@@ -680,6 +694,8 @@ fn decode_audio_internal(path: &Path, to_mono: bool) -> Result<(Vec<f32>, u32, u
             Ok(audio_buf) => {
                 if sample_buf.is_none() {
                     let spec = *audio_buf.spec();
+                    sample_rate = spec.rate;
+                    channels = spec.channels.count();
                     let duration = audio_buf.capacity() as u64;
                     sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
                 }
@@ -692,6 +708,13 @@ fn decode_audio_internal(path: &Path, to_mono: bool) -> Result<(Vec<f32>, u32, u
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(_) => break,
         }
+    }
+
+    if sample_rate == 0 {
+        sample_rate = declared_rate.ok_or("Unknown sample rate")?;
+    }
+    if channels == 0 {
+        channels = declared_channels.ok_or("Unknown channel count")?;
     }
 
     // Convert to mono if requested

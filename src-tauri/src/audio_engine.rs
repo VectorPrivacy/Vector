@@ -736,7 +736,7 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
 
 /// Probe audio file metadata without decoding. Returns (sample_rate, channels, estimated_frames).
 fn probe_audio_metadata(path: &std::path::Path) -> Result<(u32, usize, u64), String> {
-    use symphonia::core::codecs::CODEC_TYPE_NULL;
+    use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
@@ -759,10 +759,47 @@ fn probe_audio_metadata(path: &std::path::Path) -> Result<(u32, usize, u64), Str
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or("No supported audio tracks found")?;
 
-    let sample_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
-    let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(2);
-    // Use n_frames if available, otherwise estimate ~5 minutes
-    let est_frames = track.codec_params.n_frames.unwrap_or(sample_rate as u64 * 300);
+    let declared_rate = track.codec_params.sample_rate.ok_or("Unknown sample rate")?;
+    let n_frames = track.codec_params.n_frames;
+    let params = track.codec_params.clone();
+    let track_id = track.id;
+
+    // The header can lie: HE-AAC declares the 2x SBR extension rate, but
+    // symphonia has no SBR support and decodes the AAC-LC core at half rate.
+    // The decoder's own output spec is the truth, so decode one packet and
+    // let it override the declared rate/channels.
+    let mut sample_rate = declared_rate;
+    let mut channels = params.channels.map(|c| c.count());
+    if let Ok(mut decoder) = symphonia::default::get_codecs().make(&params, &DecoderOptions::default()) {
+        let mut format = probed.format;
+        for _ in 0..16 {
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            if let Ok(buf) = decoder.decode(&packet) {
+                let spec = buf.spec();
+                if spec.rate > 0 {
+                    sample_rate = spec.rate;
+                }
+                if spec.channels.count() > 0 {
+                    channels = Some(spec.channels.count());
+                }
+                break;
+            }
+        }
+    }
+
+    let channels = channels.unwrap_or(2);
+    // n_frames counts in declared-rate units, so it rescales with the rate.
+    // Without it, estimate ~5 minutes.
+    let est_frames = match n_frames {
+        Some(n) => n.saturating_mul(sample_rate as u64) / declared_rate.max(1) as u64,
+        None => sample_rate as u64 * 300,
+    };
 
     Ok((sample_rate, channels, est_frames))
 }
