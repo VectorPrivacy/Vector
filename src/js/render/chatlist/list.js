@@ -162,9 +162,16 @@ function renderChatlist() {
     // message and groups the user has joined; if the fragment came out
     // empty AND there are no pending invites, surface a friendly nudge
     // so the user understands what to do next.
-    if (!fragment.firstElementChild && arrCommunityInvites.length === 0) {
+    const fEmptyList = !fragment.firstElementChild && arrCommunityInvites.length === 0;
+    if (fEmptyList) {
         fragment.appendChild(buildChatlistEmptyState());
+        fragment.appendChild(buildChatlistIntro());
     }
+
+    // The bottom fadeout exists to soften a scrolling list; over the empty
+    // state it just washes out the intro.
+    const fadeout = document.querySelector('#chats .fadeout-bottom');
+    if (fadeout) fadeout.style.display = fEmptyList ? 'none' : '';
 
     // Replace the existing list in one native call
     domChatList.replaceChildren(fragment);
@@ -183,28 +190,140 @@ function renderChatlist() {
  */
 function buildChatlistEmptyState() {
     const wrap = document.createElement('div');
-    wrap.className = 'chatlist-empty-state';
+    wrap.className = 'chatlist-get-started btn';
+    wrap.setAttribute('role', 'button');
     wrap.innerHTML = `
-        <div class="chatlist-empty-state-icon">
-            <span class="icon icon-chats"></span>
+        <div class="chatlist-get-started-badge">
+            <span class="icon icon-add-user"></span>
         </div>
-        <h3>No chats yet</h3>
-        <p>Start a <strong>New Chat</strong> or create a <strong>Group Chat</strong> from the buttons above. Messages you receive from other Vector users will appear here automatically.</p>
-        <button class="chatlist-empty-state-share cancel-btn" type="button">
-            Share My Contact
-        </button>
+        <div class="chatlist-get-started-text">
+            <h4>Get Started</h4>
+            <p>Create your first private chat.</p>
+        </div>
+        <div class="chatlist-get-started-watermark">
+            <span class="icon icon-add-user"></span>
+        </div>
     `;
-    const btn = wrap.querySelector('.chatlist-empty-state-share');
-    btn.addEventListener('click', () => {
-        if (!strPubkey) return;
-        const profileUrl = `https://vectorapp.io/profile/${strPubkey}`;
-        navigator.clipboard.writeText(profileUrl).then(() => {
-            showToast('Contact Link Copied');
-        }).catch(() => {
-            showToast('Failed to Copy Contact Link');
-        });
-    });
+    // Rides the New Chat button's own handler, so the two can never diverge.
+    wrap.addEventListener('click', () => document.getElementById('new-chat-btn')?.click());
     return wrap;
+}
+
+/**
+ * Bottom-of-list welcome: Viktor points fresh accounts at the Hub. Rides the
+ * list fragment, so the first real chat render sweeps it away with the rest.
+ */
+function buildChatlistIntro() {
+    const wrap = document.createElement('div');
+    wrap.className = 'chatlist-intro';
+    wrap.innerHTML = `
+        <img class="chatlist-intro-viktor" alt="Viktor">
+        <div class="chatlist-intro-text">
+            <h4>Welcome to Vector!</h4>
+            <p>Feel free to <span class="chatlist-intro-link">join the public community</span> to learn more about Vector, discuss privacy, and make some new friends.</p>
+        </div>
+    `;
+    wrap.querySelector('.chatlist-intro-link').addEventListener('click', () => {
+        openUrl('https://vectorapp.io/hub');
+    });
+
+    bindViktor(wrap.querySelector('.chatlist-intro-viktor'));
+    return wrap;
+}
+
+/** Viktor greets on the first paint after login; page-lifetime latch. */
+let fViktorGreeted = false;
+
+const VIKTOR_SMILE = '/icons/viktor-smile.gif';
+
+/**
+ * Idle pose, rasterised once from the smile clip's first frame — drawImage
+ * of an animated image always takes frame one, so no separate still ships
+ * and the idle can never drift from the clip it pauses.
+ */
+let viktorIdleSrc = null;
+const viktorIdleReady = (() => {
+    const probe = new Image();
+    probe.src = VIKTOR_SMILE;
+    return probe.decode().then(() => {
+        const c = document.createElement('canvas');
+        c.width = probe.naturalWidth;
+        c.height = probe.naturalHeight;
+        c.getContext('2d').drawImage(probe, 0, 0);
+        viktorIdleSrc = c.toDataURL('image/png');
+    }).catch(() => { viktorIdleSrc = VIKTOR_SMILE; });
+})();
+
+/**
+ * Viktor's little state machine. GIFs can't be paused, so every state is a
+ * file swap: idle = the smile's first frame, hover = the smile loop, click =
+ * one exclamation. Leaving mid-smile lets the loop in progress finish rather
+ * than cutting him off, and both clips share the idle frame at their seams.
+ */
+function bindViktor(img) {
+    const SMILE = VIKTOR_SMILE;
+    const EXCLAIM = '/icons/viktor-exclaim.gif';
+    const SMILE_MS = 1500;
+    const EXCLAIM_MS = 1600;
+    let mode = 'idle';
+    let hovering = false;
+    let smileStart = 0;
+    let timer = null;
+
+    // WebKit animates GIFs on a shared document-wide clock: re-assigning the
+    // same URL joins the cycle mid-flight instead of starting at frame one,
+    // which reads as a snap against the still. A unique query per play forces
+    // a genuine restart; the file is a local asset, so the refetch is free.
+    let playSeq = 0;
+    const fresh = (url) => `${url}?play=${++playSeq}`;
+
+    const toIdle = () => { mode = 'idle'; if (viktorIdleSrc) img.src = viktorIdleSrc; };
+    const smile = () => {
+        clearTimeout(timer);
+        mode = 'smile';
+        smileStart = Date.now();
+        img.src = fresh(SMILE);
+    };
+    const exclaim = () => {
+        clearTimeout(timer);
+        mode = 'exclaim';
+        img.src = fresh(EXCLAIM);
+        timer = setTimeout(() => (hovering ? smile() : toIdle()), EXCLAIM_MS);
+    };
+
+    // The still rasterises async on first use; paint it as soon as it lands.
+    if (viktorIdleSrc) toIdle();
+    else viktorIdleReady.then(() => { if (mode === 'idle') toIdle(); });
+
+    img.addEventListener('pointerenter', (e) => {
+        if (e.pointerType !== 'mouse') return;
+        hovering = true;
+        if (mode === 'idle') smile();
+        else if (mode === 'smile') clearTimeout(timer);
+    });
+    img.addEventListener('pointerleave', (e) => {
+        if (e.pointerType !== 'mouse') return;
+        hovering = false;
+        if (mode !== 'smile') return;
+        // Let the loop in progress run to its end before settling to idle.
+        const remainder = SMILE_MS - ((Date.now() - smileStart) % SMILE_MS);
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+            if (mode === 'smile' && !hovering) toIdle();
+        }, remainder);
+    });
+    img.addEventListener('click', exclaim);
+
+    // Boot greeting: one exclamation as the login fade-in lands.
+    if (!fViktorGreeted) {
+        fViktorGreeted = true;
+        const kick = () => setTimeout(exclaim, 150);
+        if (domChatList.classList.contains('intro-anim')) {
+            domChatList.addEventListener('animationend', kick, { once: true });
+        } else {
+            setTimeout(kick, 400);
+        }
+    }
 }
 
 /**

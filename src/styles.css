@@ -18725,55 +18725,112 @@ body.profile-switcher-editing .profile-switcher-add {
   display: none;
 }
 
-/* Empty-state placeholder shown when the chat list has no chats yet.
-   Centered vertically in the available space, soft accent glyph + helpful
-   copy that points at the New Chat / Group Chat buttons up top. */
-.chatlist-empty-state {
+/* "Get Started" pill shown where the first chat row will live: a chat-row
+   shaped nudge that opens the New Chat tab. Glow is a horizontal gradient
+   only; the oversized right glyph clips on the pill's rounded bounds. */
+.chatlist-get-started {
+  position: relative;
+  overflow: hidden;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 48px 32px;
-  margin: 24px auto 0;
-  max-width: 360px;
-  color: rgba(255, 255, 255, 0.55);
+  gap: 12px;
+  margin: 0 15px 15px;
+  /* 60 + the 1px borders = the same 62px box as a .chatlist-contact row. */
+  height: 60px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(89, 252, 179, 0.5);
+  background: linear-gradient(90deg, #000 0%, #000 35%, rgba(89, 252, 179, 0.3) 100%);
+  text-align: left;
+  cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
 }
-/* Sized container for the masked `.icon` glyph (which is position: absolute
-   internally and needs a relative parent with explicit dimensions). */
-.chatlist-empty-state-icon {
+/* Avatar-sized circle with the same soft inset a chat row's avatar gets. */
+.chatlist-get-started-badge {
   position: relative;
-  width: 56px;
-  height: 56px;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  margin-left: 6px;
+  border-radius: 50%;
+  border: 1px solid rgb(25, 25, 25);
 }
-.chatlist-empty-state-icon .icon {
+.chatlist-get-started-badge .icon {
   background-color: var(--accent-color, #59fcb3);
+  transform: scale(0.85);
 }
-.chatlist-empty-state h3 {
-  margin: 0 0 8px;
-  font-size: 18px;
-  font-weight: 500;
+.chatlist-get-started-text {
+  position: relative;
+  z-index: 1;
+}
+.chatlist-get-started-text h4 {
+  margin: 0;
+  font-size: 16.5px;
+  font-weight: 700;
   color: #f7f4f4;
 }
-.chatlist-empty-state p {
-  margin: 0 0 14px;
-  font-size: 14px;
-  line-height: 1.5;
+.chatlist-get-started-text p {
+  margin: 2px 0 0;
+  font-size: 13.5px;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.8);
 }
-.chatlist-empty-state strong {
+/* Decorative oversized glyph, sunk past the pill's top and right bounds. */
+.chatlist-get-started-watermark {
+  position: absolute;
+  top: -16px;
+  bottom: 0;
+  right: -15px;
+  width: 100px;
+  height: 100px;
+  pointer-events: none;
+}
+.chatlist-get-started-watermark .icon {
+  background-color: var(--accent-color, #59fcb3);
+}
+/* Bottom-of-list welcome: Viktor beside a short nudge toward the Hub.
+   Fixed above the navbar, same anchoring as the list's fadeout. */
+.chatlist-intro {
+  position: fixed;
+  bottom: 82px;
+  left: 18px;
+  right: 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* No `image-rendering: pixelated`: WebKit's animated-GIF path always scales
+   smooth, so the still must scale smooth too or the edges shift ~1px at
+   every idle/animation swap. */
+.chatlist-intro-viktor {
+  width: 62px;
+  height: 62px;
+  flex-shrink: 0;
+  -webkit-user-drag: none;
+}
+.chatlist-intro-text h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #f7f4f4;
+}
+.chatlist-intro-text p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.55);
+}
+.chatlist-intro-link {
   color: var(--accent-color, #59fcb3);
-  font-weight: 500;
+  cursor: pointer;
 }
-/* The share pill borrows `.cancel-btn` from the existing button system so
-   it matches the rest of the app's secondary-button look. The override
-   here just removes the leading margin that `.cancel-btn` carries from
-   its primary use case (paired with another button in popups). */
-.chatlist-empty-state-share.cancel-btn {
-  margin-left: 0;
+.chatlist-intro-link:hover {
+  text-decoration: underline;
 }
-
 /* Login screen — block all text selection and drag-grab gestures across
    every descendant. The login surface is interactive UI, not content;
    selection and drag would only get in the way (e.g. accidentally
