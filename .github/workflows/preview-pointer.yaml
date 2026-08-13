@@ -48,7 +48,20 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --prerelease \
               --title 'Preview channel' \
-              --notes 'Update manifest for Vector preview builds. Nothing to download here; the manifest points at the real release.'
+              --notes 'Update channel for Vector preview builds. The manifest points at the real release; the APKs ride along because sideloaded Android previews self-update from this fixed URL.'
           fi
 
           gh release upload preview latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+          # Sideloaded Android previews download their next APK from
+          # releases/download/preview/<abi>.apk — a fixed URL, same shape as the
+          # manifest's. The pointer must carry the APKs or every shipped preview
+          # 404s into the browser fallback. Stable publishes mirror here too,
+          # which is what carries preview phones onto the official build.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.apk' --dir apks --clobber || true
+          if ls apks/*.apk >/dev/null 2>&1; then
+            gh release upload preview apks/*.apk --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            echo "::warning::$TAG has no APK assets; pointer APKs left unchanged."
+          fi
