@@ -637,6 +637,10 @@ pub async fn update_status(status: String) -> bool {
             }
 
             let slim = state.serialize_profile(id).unwrap();
+            // Persist NOW: without this the new status (and its emoji tags)
+            // survives a reboot only if a self-profile sync happens to run
+            // before the app closes.
+            let _ = crate::db::profiles::set_profile(&slim);
             emit_event("profile_update", &slim);
             true
         }
