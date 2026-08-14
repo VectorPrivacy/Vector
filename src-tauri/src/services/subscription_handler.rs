@@ -199,7 +199,7 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
 }
 
 /// OS notification for a realtime Community message, mirroring the DM/group rules: a normal message
-/// notifies only when the channel isn't muted; a direct @mention, a reply to one of our own messages,
+/// notifies only when neither the channel nor the sender is muted; a direct @mention, a reply to one of our own messages,
 /// or an authorized @everyone (owner or admin) breaks through a muted channel — unless the SENDER's DM
 /// is muted, they're blocked, or @everyone pings are globally disabled. `chat_id` is the channel id.
 pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) {
@@ -238,7 +238,8 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
             // Pings bypass a muted CHANNEL, but never a muted/blocked sender.
             !sender_dm_muted
         } else {
-            state.get_chat(chat_id).map_or(false, |c| !c.muted)
+            // A muted SENDER is silent in every channel, muted or not.
+            state.get_chat(chat_id).map_or(false, |c| !c.muted) && !sender_dm_muted
         }
     };
     if !should_notify { return; }

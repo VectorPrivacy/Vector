@@ -1661,7 +1661,9 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// messages newer than the most recent "anchor" (our own message OR the `last_read` marker,
 /// whichever is latest). A never-read chat (empty `last_read`, no own message) counts all its
 /// non-mine messages. Returns `chat_identifier → count`; chats with 0 unread are omitted.
-/// Muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
+/// CHAT-level muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
+/// SENDER-level filtering happens here: a message whose author's DM is muted or whose profile
+/// is blocked never counts, in any chat — muting a person silences their community messages too.
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
     // Anchor computed once per chat in the CTE so the count scan doesn't re-derive it per row. The
@@ -1682,6 +1684,10 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
              SELECT a.chat_identifier, COUNT(*) AS unread \
              FROM events e JOIN anchors a ON a.chat_id = e.chat_id \
              WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 AND e.created_at > a.anchor_ts \
+               AND (e.npub IS NULL OR e.npub NOT IN ( \
+                     SELECT chat_identifier FROM chats WHERE muted = 1 \
+                     UNION \
+                     SELECT npub FROM profiles WHERE is_blocked = 1)) \
              GROUP BY a.chat_identifier",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
@@ -1710,6 +1716,10 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
         .query_row(
             "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
              WHERE c.chat_identifier = ?4 AND e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
+               AND (e.npub IS NULL OR e.npub NOT IN ( \
+                     SELECT chat_identifier FROM chats WHERE muted = 1 \
+                     UNION \
+                     SELECT npub FROM profiles WHERE is_blocked = 1)) \
                AND e.created_at > COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
@@ -2016,6 +2026,58 @@ mod tests {
         assert_eq!(unread().await, 0, "last_read=m8 clears all");
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
+    }
+
+    // Muting a person (their DM row) or blocking them silences their messages in EVERY chat's
+    // count — community messages from a muted sender must not badge.
+    #[tokio::test]
+    async fn unread_counts_exclude_muted_and_blocked_senders() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_mute_exclusion";
+        let mk = |id: &str, secs: u64, npub: &str| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine: false,
+            npub: Some(npub.to_string()),
+            ..Default::default()
+        };
+        save_message(chat, &mk("n1", 1000, "npub1noisy")).await.unwrap();
+        save_message(chat, &mk("q1", 1001, "npub1quiet")).await.unwrap();
+
+        let map = || async { unread_counts().await.unwrap().get(chat).copied().unwrap_or(0) };
+        let one = || async { unread_count_for_chat(chat).await.unwrap() };
+        assert_eq!(map().await, 2, "both senders count while neither is muted");
+        assert_eq!(one().await, 2);
+
+        // Mute npub1noisy: their (message-less) DM row exists purely to carry the flag.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "INSERT INTO chats (chat_identifier, chat_type, participants, created_at, muted) \
+                 VALUES ('npub1noisy', 0, '', 1000, 1)",
+                [],
+            ).unwrap();
+        }
+        assert_eq!(map().await, 1, "muted sender's message stops counting");
+        assert_eq!(one().await, 1);
+
+        // Block npub1quiet: same exclusion via the profiles flag.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "INSERT INTO profiles (npub, is_blocked) VALUES ('npub1quiet', 1) \
+                 ON CONFLICT(npub) DO UPDATE SET is_blocked = 1",
+                [],
+            ).unwrap();
+        }
+        assert_eq!(map().await, 0, "blocked sender's message stops counting too");
+        assert_eq!(one().await, 0);
+
+        // Unmute → the count comes straight back (nothing was consumed).
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET muted = 0 WHERE chat_identifier = 'npub1noisy'", []).unwrap();
+        }
+        assert_eq!(map().await, 1, "unmuting restores the sender's count");
+        assert_eq!(one().await, 1);
     }
 
     // The single-chat reconcile query must agree with the full map for every state the cache

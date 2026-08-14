@@ -706,11 +706,12 @@ pub struct ChatState {
     pub interner: NpubInterner,
     pub is_syncing: bool,
     pub db_loaded: bool,
-    /// Authoritative per-chat RAW unread counts (chat_identifier → count), so the badge recount is an
+    /// Authoritative per-chat unread counts (chat_identifier → count), so the badge recount is an
     /// in-RAM fold instead of a whole-DB scan. Seeded once per account from `db::unread_counts` (see
     /// `unread_seeded`), then kept current per-chat: cleared on read, reconciled from the DB
-    /// (`db::unread_count_for_chat`) on inbound / delete / mark-unread. RAW = pre muted/blocked
-    /// filter; the sum applies those, matching `sum_unread_from`. Cleared on account reset.
+    /// (`db::unread_count_for_chat`) on inbound / delete / mark-unread. SENDER-level muted/blocked
+    /// filtering is baked into the DB-sourced values (mute/block toggles reseed); CHAT-level
+    /// filtering happens at fold time, matching `sum_unread_from`. Cleared on account reset.
     pub unread_cache: std::collections::HashMap<String, u32>,
     /// False until `unread_cache` has been seeded from the DB for this account. Guards the one-time
     /// seed so the full-scan query runs once per login, never per message.
@@ -1174,6 +1175,13 @@ impl ChatState {
     }
 
     pub fn count_unread_messages(&self) -> u32 {
+        // Sender-level mutes: a muted DM silences that person's community messages too.
+        let muted_senders: std::collections::HashSet<u16> = self
+            .chats
+            .iter()
+            .filter(|c| c.muted && !c.is_community())
+            .filter_map(|c| self.interner.lookup(&c.id))
+            .collect();
         let mut total_unread = 0;
         for chat in &self.chats {
             if chat.muted { continue; }
@@ -1191,6 +1199,7 @@ impl ChatState {
                 if msg.flags.is_mine() { break; }
                 if chat.last_read != [0u8; 32] && msg.id == chat.last_read { break; }
                 if is_group && msg.npub_idx != NO_NPUB {
+                    if muted_senders.contains(&msg.npub_idx) { continue; }
                     if self.get_profile_by_id(msg.npub_idx).map_or(false, |p| p.flags.is_blocked()) { continue; }
                 }
                 unread_count += 1;
@@ -2112,6 +2121,32 @@ mod tests {
         assert_eq!(
             state.count_unread_messages(), 1,
             "only the non-blocked member's message should count"
+        );
+    }
+
+    #[test]
+    fn count_unread_muted_sender_group_messages_skipped() {
+        let mut state = ChatState::new();
+        state.insert_or_replace_profile("npub1mutedmember", Profile::new());
+        state.insert_or_replace_profile("npub1normal", Profile::new());
+
+        // Muting a person = muting their (possibly message-less) DM row.
+        state.create_dm_chat("npub1mutedmember");
+        state.get_chat_mut("npub1mutedmember").unwrap().muted = true;
+
+        state.ensure_community_chat("grp1");
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == "grp1") {
+            chat.metadata.custom_fields.insert("community_id".to_string(), "c".repeat(64));
+        }
+
+        let msg_muted = make_message_from(1, "muted says hi", 1700000001000, "npub1mutedmember");
+        state.add_message_to_chat("grp1", &msg_muted);
+        let msg_normal = make_message_from(2, "normal says hi", 1700000002000, "npub1normal");
+        state.add_message_to_chat("grp1", &msg_normal);
+
+        assert_eq!(
+            state.count_unread_messages(), 1,
+            "a muted sender's community messages should not count"
         );
     }
 

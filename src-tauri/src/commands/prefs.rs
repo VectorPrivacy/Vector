@@ -98,6 +98,9 @@ async fn apply_blocks(list: IdList) {
     for npub in currently.iter().filter(|n| !list.contains(n)) {
         vector_core::profile::sync::unblock_user(npub.clone(), handler).await;
     }
+    // Blocks change other chats' counts (SQL sender exclusion) — reseed, then re-badge.
+    let counts = crate::db::unread_counts().await.unwrap_or_default();
+    vector_core::state::STATE.lock().await.unread_seed(counts);
     if let Some(handle) = crate::TAURI_APP.get() {
         crate::commands::messaging::update_unread_counter(handle.clone()).await;
     }
@@ -106,8 +109,16 @@ async fn apply_blocks(list: IdList) {
 /// Mirror the mute list onto chat rows, persisting and surfacing only the ones
 /// that actually flipped.
 async fn apply_mutes(list: IdList) {
-    let changed: Vec<(String, bool)> = {
+    let (changed, slims) = {
         let mut state = vector_core::state::STATE.lock().await;
+        // A sibling device can mute someone this device has never DM'd: create
+        // the DM row so the mute has somewhere to live (and so this device's own
+        // projection republishes them instead of erasing the mute fleet-wide).
+        for id in list.ids.iter().filter(|id| id.starts_with("npub1")) {
+            if state.get_chat(id).is_none() {
+                state.create_dm_chat(id);
+            }
+        }
         let mut out = Vec::new();
         for chat in state.chats.iter_mut() {
             let want = list.contains(&chat.id);
@@ -116,13 +127,31 @@ async fn apply_mutes(list: IdList) {
                 out.push((chat.id.clone(), want));
             }
         }
-        out
+        let slims: Vec<_> = state
+            .chats
+            .iter()
+            .filter(|c| out.iter().any(|(id, _)| id == &c.id))
+            .map(|c| crate::db::chats::SlimChatDB::from_chat(c, &state.interner))
+            .collect();
+        (out, slims)
     };
+    let any_changed = !changed.is_empty();
+    for slim in slims {
+        let _ = crate::db::chats::save_slim_chat(slim).await;
+    }
     for (chat_id, muted) in changed {
         vector_core::traits::emit_event_json(
             "chat_muted",
             serde_json::json!({ "chat_id": chat_id, "value": muted }),
         );
+    }
+    // Sender-level mutes change other chats' counts — reseed, then re-badge.
+    if any_changed {
+        let counts = crate::db::unread_counts().await.unwrap_or_default();
+        vector_core::state::STATE.lock().await.unread_seed(counts);
+        if let Some(handle) = crate::TAURI_APP.get() {
+            crate::commands::messaging::update_unread_counter(handle.clone()).await;
+        }
     }
 }
 

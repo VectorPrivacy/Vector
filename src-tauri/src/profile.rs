@@ -315,10 +315,11 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 #[tauri::command]
 pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
     let ok = vector_core::profile::sync::block_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
-    // The unread sum already excludes blocked chats — but nothing recounts
-    // until the next message event, so the OS badge kept showing the blocked
-    // chat's unreads. Refresh immediately on the flip (both directions).
+    // A block changes OTHER chats' counts too (the sender's community messages
+    // stop counting in SQL), so reseed the cache before re-badging.
     if ok {
+        let counts = crate::db::unread_counts().await.unwrap_or_default();
+        crate::STATE.lock().await.unread_seed(counts);
         crate::commands::messaging::update_unread_counter(handle).await;
         crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
     }
@@ -330,6 +331,8 @@ pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: St
 pub async fn unblock_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
     let ok = vector_core::profile::sync::unblock_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
     if ok {
+        let counts = crate::db::unread_counts().await.unwrap_or_default();
+        crate::STATE.lock().await.unread_seed(counts);
         crate::commands::messaging::update_unread_counter(handle).await;
         crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
     }

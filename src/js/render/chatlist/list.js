@@ -371,6 +371,14 @@ function updateChatlistPreview(chatId) {
 }
 
 /**
+ * Whether a sender's DM chat is muted: a muted person is silent in every
+ * chat, so their community messages don't badge either. DM ids ARE npubs.
+ */
+function senderIsMuted(npub) {
+    return arrChats.some(c => c.muted && c.id === npub);
+}
+
+/**
  * Count the quantity of unread messages
  * @param {Chat} chat - The Chat we're checking
  * @returns {number} - The amount of unread messages, if any
@@ -404,10 +412,11 @@ function countUnreadMessages(chat) {
             break;
         }
 
-        // Skip messages from blocked users in group chats
+        // Skip messages from blocked or muted users in group chats
         if (chatIsGroup(chat) && msg.npub) {
             const authorProfile = getProfile(msg.npub);
             if (authorProfile?.is_blocked) continue;
+            if (senderIsMuted(msg.npub)) continue;
         }
 
         // Count this message as unread
@@ -453,6 +462,8 @@ function countPingMessages(chat) {
         if (isGroup && msg.npub) {
             const authorProfile = getProfile(msg.npub);
             if (authorProfile?.is_blocked) continue;
+            // A muted sender never pings, even through an unmuted channel.
+            if (senderIsMuted(msg.npub)) continue;
         }
         if (!msg.content) continue;
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);

@@ -4117,7 +4117,12 @@ async function setupRustListeners() {
     });
 
     _on('chat_muted', (evt) => {
-        const cChat = arrChats.find(c => c.id === evt.payload.chat_id);
+        // Muting someone we've never DM'd: the backend creates a hidden shell
+        // row, mirror it so profile UI and sender-mute checks see it.
+        let cChat = arrChats.find(c => c.id === evt.payload.chat_id);
+        if (!cChat && evt.payload.value && evt.payload.chat_id.startsWith('npub1')) {
+            cChat = getOrCreateChat(evt.payload.chat_id, 'DirectMessage');
+        }
         if (cChat) {
             cChat.muted = evt.payload.value;
         }
@@ -4136,8 +4141,10 @@ async function setupRustListeners() {
             domGrpMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
         }
 
-        // Re-render the chat list to immediately reflect glow/badge changes
+        // Re-render the chat list to immediately reflect glow/badge changes, then pull
+        // fresh DB counts: a sender mute changes OTHER chats' (community) badges too.
         renderChatlist();
+        scheduleUnreadRefresh();
     });
 
     _on('profile_nick_changed', (evt) => {
