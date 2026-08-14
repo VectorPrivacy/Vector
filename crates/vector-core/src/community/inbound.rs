@@ -329,9 +329,17 @@ fn apply_typing(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<Incomin
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // A typing signal is live for 30s from ITS OWN send time, never the wall
+    // clock — relay-to-relay sync replays stored months-old signals, and a
+    // `now + 30` here would paint a fresh bubble for every one of them.
+    // (v2 typing rides an ephemeral wrap kind; v1's 3311 is stored plane data.)
+    let until = opened.created_at.as_secs() + 30;
+    if until <= now || opened.created_at.as_secs() > now + 30 {
+        return None;
+    }
     Some(IncomingEvent::Typing {
         npub: opened.author.to_bech32().ok()?,
-        until: now + 30,
+        until,
     })
 }
 
@@ -1326,24 +1334,25 @@ mod tests {
         };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
-        // A "typing" signal from another member surfaces, attributed to the inner author, with a
-        // receiver-computed near-future `until` (not the sender's clock).
-        match process_incoming(&mut state, &mk("typing", 1), &c, &viewer.public_key()) {
+        // A FRESH "typing" signal from another member surfaces, attributed to the inner
+        // author, expiring ~30s after ITS OWN send time (never the receiver's clock —
+        // relay backfill replays stored old signals).
+        match process_incoming(&mut state, &mk("typing", now * 1000), &c, &viewer.public_key()) {
             Some(IncomingEvent::Typing { npub, until }) => {
                 assert_eq!(npub, alice.public_key().to_bech32().unwrap(), "typer is the inner author");
-                assert!(until >= now && until <= now + 31, "until is receiver-computed (~now + 30s)");
+                assert!(until >= now && until <= now + 31, "until = signal send time + 30s");
             }
             _ => panic!("expected a typing indicator"),
         }
 
         // Own echo is dropped — we never show ourselves typing.
         assert!(
-            process_incoming(&mut state, &mk("typing", 2), &c, &alice.public_key()).is_none(),
+            process_incoming(&mut state, &mk("typing", now * 1000), &c, &alice.public_key()).is_none(),
             "own typing signal must be ignored"
         );
 
         // Wrong content (a 3311 carrying anything but "typing") is rejected.
-        assert!(process_incoming(&mut state, &mk("nope", 3), &c, &viewer.public_key()).is_none());
+        assert!(process_incoming(&mut state, &mk("nope", now * 1000), &c, &viewer.public_key()).is_none());
     }
 
     #[test]
@@ -1649,5 +1658,31 @@ mod tests {
             tags: Tags::new(),
         };
         assert_eq!(build_message(&opened, &author.public_key()).at, 1_500_000);
+    }
+
+    // Relay-to-relay sync replays STORED old 3311s (a fresh relay backfilling from
+    // an established one floods months of them); a typing bubble must expire from
+    // the signal's own send time, never paint fresh off the wall clock.
+    #[test]
+    fn replayed_old_typing_signals_are_dropped() {
+        let author = Keys::generate();
+        let me = Keys::generate();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+        let fresh = opened_from(&author, "typing", now_ms);
+        match apply_typing(&fresh, &me.public_key()) {
+            Some(IncomingEvent::Typing { until, .. }) => {
+                assert!(until > now_ms / 1000, "a live signal stays visible");
+                assert!(until <= now_ms / 1000 + 31, "expiry derives from the signal, not the clock");
+            }
+            _ => panic!("fresh signal must show typing"),
+        }
+
+        let replayed = opened_from(&author, "typing", now_ms - 3_600_000);
+        assert!(apply_typing(&replayed, &me.public_key()).is_none(), "an hour-old replay never paints");
+
+        let future = opened_from(&author, "typing", now_ms + 600_000);
+        assert!(apply_typing(&future, &me.public_key()).is_none(), "future-dated junk never pins a bubble");
     }
 }
