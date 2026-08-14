@@ -203,11 +203,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // re-delivering already-saved history pushes OLD events through this handler; by inner
             // timestamp they're stale, so skip the notification. They still surface + count via the
             // message_new emit above — only the SFX/OS-ping is muted, so nothing goes sticky.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if msg.at.saturating_add(300_000) >= now_ms {
+            if vector_core::community::is_realtime_fresh(msg.at) {
                 crate::services::subscription_handler::show_community_notification(&chat_id, &msg).await;
             }
             if let Some(handle) = TAURI_APP.get() {

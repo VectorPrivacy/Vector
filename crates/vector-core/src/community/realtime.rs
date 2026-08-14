@@ -257,6 +257,12 @@ pub async fn refresh_subscription(client: &Client) {
             Kind::Custom(event_kind::COMMUNITY_REKEY),
         ])
         .custom_tags(SingleLetterTag::LOWERCASE_Z, pseudonyms)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .since(Timestamp::from_secs(
+            Timestamp::now().as_secs().saturating_sub(super::REALTIME_FRESH_WINDOW_MS / 1000),
+        ))
         .limit(0);
 
     // Pool-wide subscribe — the path that streams on Android (replaces any prior one).
@@ -332,8 +338,10 @@ pub async fn dispatch_event(
                 }
                 let _ = crate::db::events::save_message(&chat_id, &msg).await;
                 // This is the LIVE stream (limit-0 subscription) — back-paged history arrives via a
-                // separate one-shot batch, never here. So these are always genuinely new; surface them.
-                handler.on_community_message(&chat_id, &msg, true);
+                // separate one-shot batch, never here. But a relay backfilling from a peer pushes
+                // its newly-ACCEPTED old events to live subs too, so "arrived live" is not "fresh":
+                // is_new comes from the inner send time. Stale replays still persist + surface.
+                handler.on_community_message(&chat_id, &msg, super::is_realtime_fresh(msg.at));
             }
             Some(inbound::IncomingEvent::Updated { target_id, mut message, edit_event }) => {
                 // Edits are event-sourced (folded on reload); reactions re-save the message row.

@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
-use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId};
+use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId, Timestamp};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
@@ -323,6 +323,12 @@ pub async fn refresh_subscription(client: &Client) {
     let filter = Filter::new()
         .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
         .authors(authors)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .since(Timestamp::from_secs(
+            Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000),
+        ))
         .limit(0);
 
     {
@@ -395,6 +401,12 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
     let filter = Filter::new()
         .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
         .authors(authors)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .since(Timestamp::from_secs(
+            Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000),
+        ))
         .limit(0);
     for id in [targeted, poolwide].into_iter().flatten() {
         let _ = client
@@ -459,7 +471,13 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // nothing.
                 inbound::DispatchedV2::Chat { channel_id, event } => {
                     match inbound::persist_chat_event(&event, &channel_id, &my_pk).await {
-                        Some(inbound::ChatPersist::New(message)) => handler.on_community_message(&channel_id, &message, true),
+                        // "New" = first ingest, which a relay-backfill replay of a month-old
+                        // event also satisfies — is_new comes from the inner send time so
+                        // stale replays persist + surface without ringing anything.
+                        Some(inbound::ChatPersist::New(message)) => {
+                            let fresh = crate::community::is_realtime_fresh(message.at);
+                            handler.on_community_message(&channel_id, &message, fresh);
+                        }
                         // A reaction or an edit: the folded TARGET row (its id is the
                         // target's) — the same payload v1 hands this callback. Both come
                         // back out of STATE, whose compact form drops the quoted

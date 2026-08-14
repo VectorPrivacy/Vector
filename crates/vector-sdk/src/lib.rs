@@ -1513,7 +1513,13 @@ where
         self.dispatch(chat_id, msg, true, false);
     }
 
-    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+    fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        // The SDK's contract is realtime-only delivery (history flows through
+        // `Channel::history` + cursors) — a relay backfilling from a peer pushes
+        // stale events over the live sub, and those arrive with is_new=false.
+        if !is_new {
+            return;
+        }
         // Community has a single message hook, so derive is_file from the payload (DMs split it
         // across on_dm_received / on_file_received instead).
         self.dispatch(chat_id, msg, !msg.attachments.is_empty(), true);
@@ -1632,7 +1638,12 @@ where
     fn on_file_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
         self.message(chat_id, msg, false, true);
     }
-    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+    fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        // Realtime-only by contract (see `BotEvent::Ready`): a relay backfill
+        // replay arrives with is_new=false and never becomes a BotEvent.
+        if !is_new {
+            return;
+        }
         self.message(chat_id, msg, true, !msg.attachments.is_empty());
     }
     fn on_reaction_received(&self, chat_id: &str, msg: &Message) {
@@ -1653,10 +1664,17 @@ where
         npub: &str,
         joined: bool,
         _event_id: &str,
-        _created_at: u64,
+        created_at: u64,
         _invited_by: Option<&str>,
         _invited_label: Option<&str>,
     ) {
+        // Presence flows from live arrivals AND from guestbook/history folds — a
+        // sync or relay backfill replays joins that happened weeks ago. Member
+        // state still updates (core owns that); only FRESH transitions become
+        // BotEvents, or a welcome bot greets everyone who ever joined.
+        if !vector_core::community::is_realtime_fresh(created_at.saturating_mul(1000)) {
+            return;
+        }
         let (channel_id, npub) = (chat_id.to_string(), npub.to_string());
         self.emit(if joined {
             BotEvent::MemberJoin { channel_id, npub }
