@@ -726,7 +726,15 @@ function createRichComposer(host, opts = {}) {
         syncFromDom();
     });
     el.addEventListener('input', () => {
-        if (composing) return;   // NEVER touch the DOM mid-composition
+        if (composing) {
+            // READ-only sync while the IME composes: the model and the empty
+            // flag track every keystroke (the placeholder hides on the first
+            // char, `value` readers like live previews stay letter-accurate)
+            // — but NO render: a DOM write mid-composition resets the IME.
+            src = readDom();
+            el.dataset.empty = src === '' ? '1' : '0';
+            return;
+        }
         syncFromDom();
     });
     // Paste as plain text, applied to the MODEL. `execCommand('insertText')` drops
