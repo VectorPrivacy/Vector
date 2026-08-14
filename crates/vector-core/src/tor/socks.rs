@@ -34,10 +34,11 @@ const REP_ATYP_NOT_SUPPORTED: u8 = 0x08;
 
 pub(super) async fn run(
     listener: TcpListener,
-    tor: TorClient<PreferredRuntime>,
+    // `Arc` is arti's own client handle shape since 2.4.0 — per-stream clones
+    // below are refcount handles, exactly as the old implicit-Arc client was.
+    tor: Arc<TorClient<PreferredRuntime>>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
-    let tor = Arc::new(tor);
     // Track every per-stream task so stop can wait for them to drop their
     // TorClient Arcs before returning. Without this, the state-dir lock
     // (held inside the TorClient) outlives our `stop()` call and a

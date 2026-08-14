@@ -83,13 +83,13 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 
 # Tor (Arti) — stock crates.io. Now that Vector is on rusqlite 0.37+ we share
 # libsqlite3-sys with Arti's tor-dirmgr directly, so the rusqlite-0.32 fork is gone.
-arti-client = { version = "0.41", default-features = false, features = ["tokio", "rustls", "experimental-api", "bridge-client", "pt-client"], optional = true }
-tor-rtcompat = { version = "0.41", default-features = false, features = ["tokio", "rustls"], optional = true }
+arti-client = { version = "0.45", default-features = false, features = ["tokio", "rustls", "experimental-api", "bridge-client", "pt-client"], optional = true }
+tor-rtcompat = { version = "0.45", default-features = false, features = ["tokio", "rustls"], optional = true }
 # For circuit introspection (the "Advanced" panel showing live hops).
-tor-circmgr = { version = "0.41", default-features = false, optional = true }
-tor-dirmgr = { version = "0.41", default-features = false, optional = true }
-tor-linkspec = { version = "0.41", default-features = false, optional = true }
-tor-guardmgr = { version = "0.41", default-features = false, features = ["bridge-client", "pt-client"], optional = true }
+tor-circmgr = { version = "0.45", default-features = false, optional = true }
+tor-dirmgr = { version = "0.45", default-features = false, optional = true }
+tor-linkspec = { version = "0.45", default-features = false, optional = true }
+tor-guardmgr = { version = "0.45", default-features = false, features = ["bridge-client", "pt-client"], optional = true }
 # tokio_util::compat bridges arti's futures::io::AsyncRead to tokio::io::AsyncRead so
 # we can splice Arti's DataStream into a tokio TcpStream for the SOCKS5 bridge.
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
@@ -101,7 +101,7 @@ libc = "0.2"
 default = []
 # Enables embedded Tor (Arti) — bootstraps Arti, runs a localhost SOCKS5 listener
 # bridging into the Tor network. Consumers (HTTP / Nostr) opt into the proxy via
-# `tor::proxy_url()` returning `Some(socks5://127.0.0.1:<port>)` when active.
+# `tor::proxy_url()` returning `Some(socks5h://127.0.0.1:<port>)` when active.
 tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr", "dep:tor-dirmgr", "dep:tor-linkspec", "dep:tor-guardmgr"]
 
 [dev-dependencies]

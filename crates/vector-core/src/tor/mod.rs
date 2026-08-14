@@ -104,7 +104,9 @@ pub enum TorStatus {
 /// listener that bridges incoming connections into the Tor network.
 pub struct TorService {
     /// Arti's high-level client — owns circuits, the directory cache, etc.
-    client: TorClient<PreferredRuntime>,
+    /// Explicitly `Arc` since arti 2.4.0; clones are refcount handles exactly
+    /// as the old implicit-Arc semantics were, so teardown reasoning holds.
+    client: Arc<TorClient<PreferredRuntime>>,
     /// Where the SOCKS5 listener is bound. `127.0.0.1:<ephemeral>`.
     socks_addr: SocketAddr,
     /// Drop signal for the SOCKS accept loop. `take()`-d on stop.
@@ -741,6 +743,7 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
     let netdir = svc
         .client
         .dirmgr()
+        .map_err(|e| format!("dirmgr unavailable: {e}"))?
         .netdir(Timeliness::Timely)
         .map_err(|e| format!("netdir unavailable: {e}"))?;
 
@@ -761,6 +764,7 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
     let tunnel = svc
         .client
         .circmgr()
+        .map_err(|e| format!("circmgr unavailable: {e}"))?
         .get_or_launch_exit(netdir.as_ref().into(), &[], isolation)
         .await
         .map_err(|e| format!("launch exit: {e}"))?;
