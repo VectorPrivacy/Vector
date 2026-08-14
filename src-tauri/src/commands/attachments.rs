@@ -319,7 +319,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             // Find target chat index first (immutable scan)
             let target_idx = state.chats.iter().position(|chat| match &chat.chat_type {
                 ChatType::Community => chat.id == npub,
-                ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
+                // A DM's id IS the counterparty npub — match it first; the participant
+                // check alone strands chats whose roster was persisted empty.
+                ChatType::DirectMessage => chat.id == npub || chat.has_participant(&npub, &state.interner),
             });
             // Then mutably access only that chat
             if let Some(chat) = target_idx.map(|i| &mut state.chats[i]) {

@@ -87,9 +87,18 @@ pub fn get_or_create_chat_id(chat_identifier: &str) -> Result<i64, String> {
             .as_secs() as i64;
         let chat_type: i32 = if chat_identifier.starts_with("npub1") { 0 } else { 2 };
 
+        // A DM stub's id IS its counterparty: write the participant now, or the
+        // row boots with an empty roster and every participant-keyed lookup
+        // (attachment downloads) misses forever.
+        let participants = if chat_type == 0 {
+            format!("[\"{}\"]", chat_identifier)
+        } else {
+            "[]".to_string()
+        };
+
         conn.execute(
-            "INSERT INTO chats (chat_identifier, chat_type, participants, created_at) VALUES (?1, ?2, '[]', ?3)",
-            rusqlite::params![chat_identifier, chat_type, now],
+            "INSERT INTO chats (chat_identifier, chat_type, participants, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![chat_identifier, chat_type, participants, now],
         ).map_err(|e| format!("Failed to create chat stub: {}", e))?;
 
         conn.last_insert_rowid()
