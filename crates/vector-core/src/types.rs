@@ -25,6 +25,11 @@ pub struct Message {
     /// in-memory message can't supply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replied_to_attachment_extension: Option<String>,
+    /// The replied-to message's NIP-30 emoji tags, for off-screen targets:
+    /// without them the quote renders raw `:shortcodes:` and nothing later
+    /// corrects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replied_to_emoji_tags: Option<Vec<EmojiTag>>,
     pub preview_metadata: Option<SiteMetadata>,
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
@@ -73,6 +78,7 @@ impl Default for Message {
             replied_to_npub: None,
             replied_to_has_attachment: None,
             replied_to_attachment_extension: None,
+            replied_to_emoji_tags: None,
             preview_metadata: None,
             attachments: Vec::new(),
             reactions: Vec::new(),
@@ -684,6 +690,7 @@ mod tests {
             content: "Hello world".to_string(),
             replied_to: "def456".to_string(),
             replied_to_content: Some("previous msg".to_string()),
+            replied_to_emoji_tags: None,
             replied_to_npub: Some("npub1xyz".to_string()),
             replied_to_has_attachment: Some(true),
             replied_to_attachment_extension: Some("png".to_string()),
@@ -734,6 +741,7 @@ mod tests {
             replied_to_npub: None,
             replied_to_has_attachment: None,
             replied_to_attachment_extension: None,
+            replied_to_emoji_tags: None,
             npub: None,
             edit_history: None,
             ..Default::default()

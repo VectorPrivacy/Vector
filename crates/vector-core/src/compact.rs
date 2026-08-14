@@ -969,6 +969,8 @@ pub struct CompactMessage {
     pub content: Box<str>,
     /// Content of replied-to message
     pub replied_to_content: Option<Box<str>>,
+    /// The replied-to message's emoji tags (Boxed: rare, keeps the struct lean)
+    pub replied_to_emoji_tags: Option<Box<Vec<crate::types::EmojiTag>>>,
     /// File attachments (CompactAttachment = ~120 bytes vs Attachment's ~320 bytes)
     pub attachments: TinyVec<CompactAttachment>,
     /// Emoji reactions (CompactReaction = ~82 bytes vs Reaction's ~292 bytes)
@@ -1545,6 +1547,9 @@ impl CompactMessage {
             // Box<str> for content (saves 8 bytes per field)
             content: msg.content.clone().into_boxed_str(),
             replied_to_content: msg.replied_to_content.as_ref().map(|s| s.clone().into_boxed_str()),
+            replied_to_emoji_tags: msg.replied_to_emoji_tags.as_ref()
+                .filter(|t| !t.is_empty())
+                .map(|t| Box::new(t.clone())),
             // Convert attachments to compact format
             attachments: TinyVec::from_vec(
                 msg.attachments.iter()
@@ -1596,6 +1601,9 @@ impl CompactMessage {
             // Zero-copy: into_boxed_str() reuses the String's buffer!
             content: msg.content.into_boxed_str(),
             replied_to_content: msg.replied_to_content.map(|s| s.into_boxed_str()),
+            replied_to_emoji_tags: msg.replied_to_emoji_tags
+                .filter(|t| !t.is_empty())
+                .map(Box::new),
             // Convert attachments to compact format (zero-copy where possible)
             attachments: TinyVec::from_vec(
                 msg.attachments.into_iter()
@@ -1637,6 +1645,7 @@ impl CompactMessage {
             npub: interner.resolve(self.npub_idx).map(|s| s.to_string()),
             replied_to: self.replied_to_hex(),
             replied_to_content: self.replied_to_content.as_ref().map(|s| s.to_string()),
+            replied_to_emoji_tags: self.replied_to_emoji_tags.as_ref().map(|t| (**t).clone()),
             replied_to_npub: interner.resolve(self.replied_to_npub_idx).map(|s| s.to_string()),
             replied_to_has_attachment: self.flags.replied_to_has_attachment(),
             // Re-resolved per get_message_views / populate_reply_context; the compact
@@ -1748,6 +1757,7 @@ mod tests {
             wrapper_id: None,
             content: "First message".to_string().into_boxed_str(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -1767,6 +1777,7 @@ mod tests {
             wrapper_id: None,
             content: "Second message".to_string().into_boxed_str(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -1804,6 +1815,7 @@ mod tests {
             wrapper_id: None,
             content: "Test".to_string().into_boxed_str(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -1858,6 +1870,7 @@ mod tests {
                     } else {
                         None
                     },
+                    replied_to_emoji_tags: None,
                     replied_to_npub: if i > 0 && i % 5 == 0 {
                         Some(users[(i - 1) % NUM_UNIQUE_USERS].clone())
                     } else {
@@ -2765,6 +2778,7 @@ mod tests {
             wrapper_id: None,
             content: "test".into(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -3114,6 +3128,10 @@ mod tests {
             content: "Hello, world!".into(),
             replied_to: "1111111111111111111111111111111111111111111111111111111111111111".into(),
             replied_to_content: Some("Original message".into()),
+            replied_to_emoji_tags: Some(vec![crate::types::EmojiTag {
+                shortcode: "catJAM".into(),
+                url: "https://example.com/catjam.png".into(),
+            }]),
             replied_to_npub: Some("npub1replier".into()),
             replied_to_has_attachment: Some(true),
             replied_to_attachment_extension: None,

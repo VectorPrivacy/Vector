@@ -945,6 +945,9 @@ pub struct ReplyContext {
     /// Extension of the attachment, when the replied-to message is a file, so
     /// the reply quote can label the type even when the target is off-screen.
     pub extension: Option<String>,
+    /// The target's NIP-30 emoji tags — without them an off-screen quote
+    /// renders raw `:shortcodes:` and nothing ever corrects it.
+    pub emoji_tags: Vec<crate::types::EmojiTag>,
 }
 
 /// Fetch reply context for a list of message IDs.
@@ -957,7 +960,7 @@ pub async fn get_reply_contexts(
         return Ok(HashMap::new());
     }
 
-    let (events, edits): (Vec<(String, i32, String, Option<String>, Option<String>)>, Vec<(String, String)>) = {
+    let (events, edits): (Vec<(String, i32, String, Option<String>, Option<String>)>, Vec<(String, String, Option<String>)>) = {
         let conn = super::get_db_connection_guard_static()?;
 
         let placeholders: String = (0..message_ids.len())
@@ -986,7 +989,7 @@ pub async fn get_reply_contexts(
 
         // Query latest edits
         let edit_sql = format!(
-            "SELECT reference_id, content FROM events \
+            "SELECT reference_id, content, tags FROM events \
              WHERE kind = {} AND reference_id IN ({}) \
              ORDER BY created_at DESC, received_at DESC",
             event_kind::MESSAGE_EDIT, placeholders
@@ -994,7 +997,8 @@ pub async fn get_reply_contexts(
         let mut edit_stmt = conn.prepare(&edit_sql)
             .map_err(|e| format!("Failed to prepare edit query: {}", e))?;
         let edit_rows = edit_stmt.query_map(params_dyn.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?))
         }).map_err(|e| format!("Failed to query edits: {}", e))?;
         let edits_result: Vec<_> = edit_rows.filter_map(|r| r.ok()).collect();
 
@@ -1002,9 +1006,9 @@ pub async fn get_reply_contexts(
     };
 
     // Build latest edit map (first = most recent since ordered DESC)
-    let mut latest_edits: HashMap<String, String> = HashMap::new();
-    for (ref_id, content) in edits {
-        latest_edits.entry(ref_id).or_insert(content);
+    let mut latest_edits: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for (ref_id, content, tags) in edits {
+        latest_edits.entry(ref_id).or_insert((content, tags));
     }
 
     // Batch the file replies' attachments (one query, not one per reply) for the extension below.
@@ -1018,7 +1022,23 @@ pub async fn get_reply_contexts(
     let mut contexts = HashMap::new();
     for (id, kind, original_content, npub, tags) in events {
         let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
-        let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
+        let latest_edit = latest_edits.get(&id);
+        let content_to_decrypt = latest_edit
+            .map(|(c, _)| c.clone())
+            .unwrap_or(original_content);
+
+        // Same rule as the message loader: an edit's tags replace the
+        // original's, so the quote's emoji match the content it shows.
+        let parse_emoji = |json: &Option<String>| -> Vec<crate::types::EmojiTag> {
+            json.as_deref()
+                .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
+                .map(|parsed| crate::types::EmojiTag::extract_from_stored(&parsed))
+                .unwrap_or_default()
+        };
+        let emoji_tags = match latest_edit {
+            Some((_, edit_tags)) => parse_emoji(edit_tags),
+            None => parse_emoji(&tags),
+        };
 
         let decrypted_content = if kind == event_kind::CHAT_MESSAGE as i32
             || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
@@ -1049,7 +1069,7 @@ pub async fn get_reply_contexts(
             None
         };
 
-        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension });
+        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension, emoji_tags });
     }
 
     Ok(contexts)
@@ -1077,6 +1097,7 @@ pub async fn populate_reply_contexts(messages: Vec<&mut Message>) -> Result<(), 
             message.replied_to_npub = ctx.npub.clone();
             message.replied_to_has_attachment = Some(ctx.has_attachment);
             message.replied_to_attachment_extension = ctx.extension.clone();
+            message.replied_to_emoji_tags = if ctx.emoji_tags.is_empty() { None } else { Some(ctx.emoji_tags.clone()) };
         }
     }
     Ok(())
@@ -1096,6 +1117,7 @@ pub async fn populate_reply_context(message: &mut Message) -> Result<(), String>
         message.replied_to_npub = ctx.npub.clone();
         message.replied_to_has_attachment = Some(ctx.has_attachment);
         message.replied_to_attachment_extension = ctx.extension.clone();
+        message.replied_to_emoji_tags = if ctx.emoji_tags.is_empty() { None } else { Some(ctx.emoji_tags.clone()) };
     }
 
     Ok(())
@@ -1310,7 +1332,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             expiration,
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
-            replied_to_attachment_extension: None,
+            replied_to_attachment_extension: None, replied_to_emoji_tags: None,
             preview_metadata, attachments, reactions, at,
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
@@ -1593,7 +1615,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             expiration,
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
-            replied_to_attachment_extension: None,
+            replied_to_attachment_extension: None, replied_to_emoji_tags: None,
             preview_metadata, attachments, reactions, at: event.created_at * 1000,
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
