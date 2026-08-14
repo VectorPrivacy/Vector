@@ -8634,6 +8634,45 @@ function jumpToMessage(targetMsgId) {
 /**
  * Cancel any ongoing replies and reset the messaging interface
  */
+/**
+ * Set mic/send to exactly one visible button, derived from the input's text
+ * (no animation). Programmatic value changes fire no 'input' event, and a
+ * WebKit swap animation wedges if the composer hides mid-flight — so every
+ * chat open and reply/draft transition re-syncs through here.
+ */
+function syncSendMicToInput() {
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    domChatMessageInputSend.classList.remove('button-swap-in', 'button-swap-out');
+    domChatMessageInputVoice.classList.remove('button-swap-in', 'button-swap-out');
+    if (hasText) {
+        domChatMessageInputSend.classList.add('active');
+        domChatMessageInputSend.style.display = '';
+        domChatMessageInputVoice.style.display = 'none';
+    } else {
+        domChatMessageInputSend.classList.remove('active');
+        domChatMessageInputSend.style.display = 'none';
+        domChatMessageInputVoice.style.display = '';
+    }
+}
+
+/** Per-chat composer drafts, runtime-only (chat id → unsent text). */
+const chatDrafts = new Map();
+
+/**
+ * Stash the open chat's composer text as its draft and clear the input, so
+ * the next chat starts clean and restores its own draft. Edit text is not a
+ * draft — callers cancel an in-progress edit first.
+ */
+function stashComposerDraft() {
+    if (!strOpenChat) return;
+    const text = domChatMessageInput.value;
+    if (text) chatDrafts.set(strOpenChat, text);
+    else chatDrafts.delete(strOpenChat);
+    domChatMessageInput.value = '';
+    autoResizeChatInput();
+    syncSendMicToInput();
+}
+
 function cancelReply() {
     // Hide the reply bar. Its content is left in place so the collapse
     // animation doesn't slide out an empty shell; the next reply overwrites it
@@ -8654,16 +8693,7 @@ function cancelReply() {
     strCurrentReplyReference = '';
 
     // Reset send button state based on current input
-    const hasText = domChatMessageInput.value.trim().length > 0;
-    if (hasText) {
-        domChatMessageInputSend.classList.add('active');
-        domChatMessageInputSend.style.display = '';
-        domChatMessageInputVoice.style.display = 'none';
-    } else {
-        domChatMessageInputSend.classList.remove('active');
-        domChatMessageInputSend.style.display = 'none';
-        domChatMessageInputVoice.style.display = '';
-    }
+    syncSendMicToInput();
 }
 
 /**
@@ -8999,6 +9029,12 @@ async function openChat(contact) {
     _unreadJumpResolving = false;
     // A command composer belongs to the chat it was opened in.
     if (commandCtrl) commandCtrl.exitComposer();
+    // A direct chat-to-chat jump never passes through closeChat: stash the
+    // outgoing chat's draft here so it doesn't bleed into the new one.
+    if (strOpenChat && strOpenChat !== contact) {
+        if (strCurrentEditMessageId) cancelEdit();
+        stashComposerDraft();
+    }
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
     // overlay doesn't leak onto this header.
@@ -9287,6 +9323,14 @@ async function openChat(contact) {
         domChatMessageInputFile.style.display = '';
         domChatMessageInputVoice.style.display = '';
         domChatMessageInputEmoji.style.display = '';
+        // Restore this chat's draft (runtime-only). Skip when the input still
+        // holds live text — a same-chat re-open must not clobber typing.
+        if (domChatMessageInput.value === '') {
+            domChatMessageInput.value = chatDrafts.get(contact) || '';
+            autoResizeChatInput();
+        }
+        // Programmatic value sets fire no 'input' event; derive mic/send here.
+        syncSendMicToInput();
     }
 
     // last_read is not advanced on open — the divider needs the stale value
@@ -9457,6 +9501,10 @@ async function closeChat() {
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
+    // Stash the unsent text as this chat's draft and clear the composer, so
+    // the next open restores its own draft with a coherent mic/send state.
+    if (strCurrentEditMessageId) cancelEdit();
+    stashComposerDraft();
     strOpenChat = "";
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
