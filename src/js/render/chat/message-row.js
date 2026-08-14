@@ -527,8 +527,15 @@ function _dmsgBuildReplyContext(msg, sender) {
         spanRef.innerHTML = buildReplyPreviewHtml(replyContent);
         twemojify(spanRef);
         // Inline custom emojis in the quoted reply, matching in-chat rendering.
-        const replyEmojiTags = cMsg?.emoji_tags || msg.replied_to_emoji_tags;
-        if (replyEmojiTags && replyEmojiTags.length && typeof renderCustomEmojiShortcodes === 'function') {
+        // The message's tags can lose a hydration race on first paint and a
+        // painted row never self-corrects, so the user's own equipped packs
+        // backstop them. Message tags come LAST: the renderer's map keeps the
+        // last entry per shortcode, so the sender's mapping wins conflicts.
+        const msgTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null)
+            || msg.replied_to_emoji_tags || [];
+        const equipped = (typeof equippedEmojiTags === 'function') ? equippedEmojiTags() : [];
+        const replyEmojiTags = [...equipped, ...msgTags];
+        if (replyEmojiTags.length && typeof renderCustomEmojiShortcodes === 'function') {
             renderCustomEmojiShortcodes(spanRef, replyEmojiTags);
         }
     } else if (hasAttachment) {
