@@ -552,7 +552,9 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
         og_title: parsed.og_title.map(|c| c.into_owned()),
         og_description: parsed.og_description.map(|c| c.into_owned()),
         og_image: parsed.og_image.map(|u| normalize_url(&u, &domain)),
-        og_url: parsed.og_url.map(|c| c.into_owned()).or(Some(url.to_string())),
+        // Sites can (against the OG spec) serve a RELATIVE og:url — GitHub does —
+        // and the preview card opens this value, so it must come out absolute.
+        og_url: parsed.og_url.map(|u| normalize_url(&u, &domain)).or(Some(url.to_string())),
         og_type: parsed.og_type.map(|c| c.into_owned()),
         title: parsed.title.map(|c| c.into_owned()),
         description: parsed.description.map(|c| c.into_owned()),
@@ -620,6 +622,24 @@ fn normalize_url(url: &str, domain: &str) -> String {
             s.push_str(url);
             s
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_url;
+
+    // GitHub serves a spec-violating ROOT-RELATIVE og:url; stored raw, the preview
+    // opener turns its first path segment into a hostname.
+    #[test]
+    fn relative_og_url_resolves_against_the_page_domain() {
+        assert_eq!(
+            normalize_url("/VectorPrivacy/Vector/releases/tag/v0.4.2-4", "https://github.com/"),
+            "https://github.com/VectorPrivacy/Vector/releases/tag/v0.4.2-4"
+        );
+        assert_eq!(normalize_url("//cdn.example.com/x.png", "https://a.com/"), "https://cdn.example.com/x.png");
+        assert_eq!(normalize_url("http://a.com/x", "https://a.com/"), "https://a.com/x");
+        assert_eq!(normalize_url("https://b.com/x", "https://a.com/"), "https://b.com/x");
     }
 }
 
