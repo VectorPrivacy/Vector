@@ -2748,7 +2748,8 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
 ///
 /// - **Rekey recipients = {owner} ONLY.** Members do NOT get the epoch-1 root via birth blobs
 ///   — they get it from the migration carrier's `m` (sealed AFTER this returns). Keeping the
-///   set at {owner} also dodges the 120-blob rotation cap for large communities.
+///   set at {owner} also keeps the rotation to a single chunk (blobs shard at 80 per event,
+///   so a big memberlist would cost a stack of events delivering roots nobody uses).
 /// - **Snapshot members = the EXPLICIT full v1 list** (`snapshot_members`, display/roster only,
 ///   no keys). Chunked at SNAPSHOT_CHUNK (400)/rumor, no cap — a 10k-member community seeds fine.
 ///
@@ -4055,6 +4056,290 @@ pub async fn set_banlist<T: Transport + ?Sized>(transport: &T, community: &Commu
     .await
 }
 
+/// Per-community moderation-unit locks. Session-scoped: an account swap drops the
+/// map with its session, so no cross-account carry-over and nothing to clear.
+struct ModerationLocks;
+fn moderation_lock(cid: &crate::community::CommunityId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let map = crate::db::current_session()
+        .scoped::<ModerationLocks, std::sync::Mutex<std::collections::HashMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>>>();
+    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+    m.entry(cid.0).or_default().clone()
+}
+
+/// Fold control + guestbook so a moderation unit composes over the freshest view
+/// another moderator may have advanced. Best-effort: on a dead network the local
+/// cache (kept fresh by `set_banlist`'s own echo) is still the best basis.
+async fn converge_authority<T: Transport + ?Sized>(transport: &T, id: &crate::community::CommunityId) {
+    if let Ok(Some(fresh)) = crate::db::community::load_community_v2(id) {
+        let _ = follow_control(transport, &fresh).await;
+        // Membership is part of the converged view: a Join that legally raced a ban
+        // window may exist only on the relays, and our own just-published edition
+        // doesn't echo back to trigger a follow.
+        if let Ok(added) = sync_guestbook(transport, &fresh).await {
+            if !added.is_empty() {
+                crate::traits::emit_event_json(
+                    "community_refreshed",
+                    serde_json::json!({ "community_id": crate::simd::hex::bytes_to_hex_32(&id.0) }),
+                );
+            }
+        }
+    }
+}
+
+/// One queued ban/unban intent, answered on `done` when its batch completes.
+struct ModIntent {
+    id: u64,
+    targets: Vec<PublicKey>,
+    banned: bool,
+    done: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+/// Per-community pending moderation intents — the coalescing queue behind
+/// [`moderation_lock`]. Session-scoped for the same reason as the lock.
+struct PendingModeration;
+fn pending_moderation(cid: &crate::community::CommunityId) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<ModIntent>>>> {
+    let _ = cid;
+    crate::db::current_session()
+        .scoped::<PendingModeration, std::sync::Mutex<std::collections::HashMap<[u8; 32], Vec<ModIntent>>>>()
+}
+
+/// Ban or unban members as ONE moderation unit — the CORD-04 §6 three-removal
+/// composition, once for the whole wave: one Banlist edition (instant silence),
+/// one grant-strip pass (authority removal), and one read cut (a private
+/// community re-founds ONCE with every target removed; a public one rotates each
+/// reachable private channel ONCE excluding them all).
+///
+/// Serialized AND coalesced per community. Without the lock, concurrent bans
+/// (the SDK spawns a handler task per message, so a spam wave is exactly this)
+/// each build their edition from a pre-sibling banlist snapshot, and the fold
+/// takes the HEAD's content — so the last racing head silently un-bans the
+/// earlier target at every reader, and the refound then compacts that erasure
+/// into the new epoch permanently.
+///
+/// The coalescing half: a unit's read cut holds the lock for a whole multi-
+/// publish rotation, so serial single bans arriving meanwhile would each queue
+/// up a rotation of their own. Instead every caller deposits an intent; whoever
+/// next takes the lock drains ALL of them into one edition + one read cut,
+/// applied in arrival order (ban-then-unban of one npub nets to unban). Each
+/// intent is judged individually — a target the caller cannot outrank, or an
+/// add past the 500-entry ceiling, fails only its own caller, never the batch.
+pub async fn set_members_banned<T: Transport + ?Sized>(
+    transport: &T,
+    community_id: &crate::community::CommunityId,
+    members: &[PublicKey],
+    banned: bool,
+) -> Result<(), String> {
+    crate::db::scoped(async move {
+        // Dedup — a doubled target must not strip or rotate twice.
+        let mut targets: Vec<PublicKey> = Vec::with_capacity(members.len());
+        for m in members {
+            if !targets.contains(m) {
+                targets.push(*m);
+            }
+        }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        // Plain uniqueness source for intent ids — not per-account state.
+        static INTENT_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let my_id = INTENT_IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let map = pending_moderation(community_id);
+            let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+            m.entry(community_id.0).or_default().push(ModIntent { id: my_id, targets, banned, done: tx });
+        }
+        let unit = moderation_lock(community_id);
+        // `biased` so a verdict delivered by another leader wins over a lock we
+        // happen to also hold — a drained intent must never run twice.
+        tokio::select! {
+            biased;
+            res = rx => res.unwrap_or_else(|_| Err("moderation unit aborted before completing".to_string())),
+            _guard = unit.lock() => {
+                // Leader: drain EVERYTHING pending right now. Every ban/unban that
+                // stacked while the previous unit's rotation ran coalesces here.
+                let batch: Vec<ModIntent> = {
+                    let map = pending_moderation(community_id);
+                    let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+                    m.remove(&community_id.0).unwrap_or_default()
+                };
+                run_moderation_batch(transport, community_id, batch, my_id).await
+            }
+        }
+    })
+    .await
+}
+
+/// Execute one drained batch of moderation intents under the held lock: judge
+/// each intent in arrival order against the evolving list, publish the coalesced
+/// edition, strip + read-cut the net newly-banned set once, then answer every
+/// intent with its own verdict. Returns the LEADER's verdict.
+async fn run_moderation_batch<T: Transport + ?Sized>(
+    transport: &T,
+    community_id: &crate::community::CommunityId,
+    batch: Vec<ModIntent>,
+    leader_id: u64,
+) -> Result<(), String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community_id.0);
+
+    // SYNC BEFORE COMPOSING: a banlist edition replaces the whole list on the
+    // wire, so the mutation must start from the freshest view — another
+    // moderator's ban this device hasn't folded yet would otherwise be
+    // silently erased by ours.
+    converge_authority(transport, community_id).await;
+
+    let original = crate::db::community::get_community_banlist(&cid_hex)?;
+    let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let community0 = crate::db::community::load_community_v2(community_id)?
+        .ok_or_else(|| "v2 community not found".to_string())?;
+    let owner = community0.owner()?;
+    let my_pk = me_pk()?;
+    let my_hex = my_pk.to_hex();
+    let owner_hex = owner.to_hex();
+
+    // Judge intents in arrival order against the EVOLVING list, so the last
+    // intent naming an npub wins — exactly serial semantics, minus the churn.
+    let mut list = original.clone();
+    let mut pk_of: std::collections::HashMap<String, PublicKey> = std::collections::HashMap::new();
+    let mut verdicts: std::collections::HashMap<u64, Result<(), String>> = std::collections::HashMap::new();
+    for intent in &batch {
+        let hexes: Vec<String> = intent.targets.iter().map(|p| p.to_hex()).collect();
+        for (pk, hex) in intent.targets.iter().zip(&hexes) {
+            pk_of.insert(hex.clone(), *pk);
+        }
+        let verdict = (|| {
+            // Mirror of set_banlist's authority gate, per intent, so one refused
+            // intent cannot sink its batch-mates.
+            if my_pk != owner {
+                if original.contains(&my_hex) {
+                    return Err("you are banned from this community".to_string());
+                }
+                if !roster.is_authorized(&my_hex, Some(&owner_hex), crate::community::roles::Permissions::BAN) {
+                    return Err("editing the banlist needs the BAN permission".to_string());
+                }
+                if intent.banned {
+                    for t in hexes.iter().filter(|t| !list.contains(*t)) {
+                        if !roster.can_act_on_member(&my_hex, Some(&owner_hex), t, crate::community::roles::Permissions::BAN) {
+                            return Err("you do not outrank a member this ban targets".to_string());
+                        }
+                    }
+                }
+            }
+            let mut next = list.clone();
+            next.retain(|h| !hexes.contains(h));
+            if intent.banned {
+                next.extend(hexes.iter().cloned());
+            }
+            super::roles::validate_banlist(&next)?;
+            list = next;
+            Ok(())
+        })();
+        verdicts.insert(intent.id, verdict);
+    }
+
+    let changed = {
+        let mut a = original.clone();
+        let mut b = list.clone();
+        a.sort();
+        b.sort();
+        a != b
+    };
+    let newly_banned: Vec<PublicKey> = list
+        .iter()
+        .filter(|h| !original.contains(*h))
+        .filter_map(|h| pk_of.get(h).copied())
+        .collect();
+
+    // Publish the coalesced edition + strips, then the single read cut.
+    let unit_result: Result<(), String> = async {
+        if !changed {
+            return Ok(());
+        }
+        // Rotation barrier: a sibling refound holds this lock for its whole
+        // multi-publish rotation while the row still names the OLD root. Dropped
+        // before `refound_community`, which re-acquires it (non-reentrant).
+        let (community, stripped) = {
+            let lock = super::realtime::follow_lock(community_id);
+            let _rotation = lock.lock().await;
+            let community = crate::db::community::load_community_v2(community_id)?
+                .ok_or_else(|| "v2 community not found".to_string())?;
+            set_banlist(transport, &community, &list).await?;
+            let mut stripped: Vec<(PublicKey, Vec<String>)> = Vec::new();
+            // Pre-strip role capture: the read-severance below judges which
+            // private channels each member could reach, and after the strip
+            // the fold may no longer show it.
+            for pk in &newly_banned {
+                let hex = pk.to_hex();
+                let roles: Vec<String> = roster.roles_of(&hex).map(|r| r.role_id.clone()).collect();
+                // Nothing granted = nothing to strip: a bulk ban of roleless
+                // spammers must not publish one empty Grant edition apiece.
+                let has_grant = roster.grants.iter().any(|g| g.member == hex && !g.role_ids.is_empty());
+                if has_grant {
+                    // Strip on the kick doctrine (skip, not refuse): readers honor a
+                    // grant strip only from MANAGE_ROLES + outrank, and a BAN-only
+                    // moderator still bans — the banlist silences regardless, and
+                    // publishing a strip readers reject would only poison our own
+                    // floor for that grant entity.
+                    let can_strip = my_pk == owner
+                        || roster.can_act_on_member(&my_hex, Some(&owner_hex), &hex, crate::community::roles::Permissions::MANAGE_ROLES);
+                    if can_strip {
+                        grant_roles(transport, &community, pk, vec![]).await?;
+                    } else {
+                        crate::log_warn!("[Ban] grant strip skipped (no MANAGE_ROLES over the target); the banlist still silences");
+                    }
+                }
+                stripped.push((*pk, roles));
+            }
+            (community, stripped)
+        };
+        if !newly_banned.is_empty() {
+            // CORD-05 §5 gate: a PUBLIC community — any live invite link — must NOT
+            // refound on ban. The link refresh re-posts the bundle with the new root
+            // behind the same URL, so the banned member re-fetches and reads on: the
+            // rotation severs nothing and can strand foreign-link joiners on a buried
+            // epoch. The Banlist does all the real work in Public mode.
+            if community_is_public(transport, &community).await {
+                crate::log_info!("[Ban] public community — banlist + grant strip, no refound (CORD-05 §5)");
+                // CORD-06 §1 still applies per channel: only rotation severs the
+                // private-channel reads their held keys still allow.
+                match sever_banned_private_reads(transport, &community, &stripped).await {
+                    Ok(0) => {}
+                    Ok(n) => crate::log_info!("[Ban] rotated {n} private channel(s) the banned member(s) could read"),
+                    Err(e) => crate::log_warn!("[Ban] private-channel read severance incomplete: {e}"),
+                }
+            } else if let Err(e) = refound_community(transport, &community, &newly_banned).await {
+                // Best-effort escalation, NEVER the ban's verdict. The banlist
+                // edition (instant silence at every honest reader) and the grant
+                // strip ARE the ban; the refound's §3 coverage gate demands the
+                // relay serve back heads published milliseconds ago, so propagation
+                // lag makes it fail-closed — and propagating that error out of here
+                // once left every ban half-applied AND skipped the converge below,
+                // so each next ban rebuilt from a stale list and erased its
+                // predecessors.
+                crate::log_warn!("[Ban] refound deferred (banlist + grant strip landed): {e}");
+            }
+        }
+        Ok(())
+    }
+    .await;
+    converge_authority(transport, community_id).await;
+
+    // Answer every intent: its own judgment first, then the shared publish fate.
+    let mut my_verdict = Err("leader intent missing from its own batch".to_string());
+    for intent in batch {
+        let final_verdict = verdicts
+            .remove(&intent.id)
+            .unwrap_or_else(|| Err("intent was never judged".to_string()))
+            .and_then(|()| unit_result.clone());
+        if intent.id == leader_id {
+            my_verdict = final_verdict;
+        } else {
+            let _ = intent.done.send(final_verdict);
+        }
+    }
+    my_verdict
+}
+
 /// Edit the community metadata (vsk 0, CORD-02 §6). Gated on the reader side by
 /// `MANAGE_METADATA`.
 pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, meta: &control::CommunityMetadata) -> Result<(), String> {
@@ -4744,7 +5029,7 @@ pub async fn revoke_channel_access<T: Transport + ?Sized>(
         // Rotate so the removal actually severs them (CORD-06 §1). The revoked
         // member is excluded from the recipient set by the overlay, since the fold
         // has not yet caught the Grant we just published.
-        rekey_channel_excluding(transport, community, channel_id, &roster, &access_ids, member).await
+        rekey_channel_excluding(transport, community, channel_id, &roster, &access_ids, std::slice::from_ref(member)).await
     })
     .await
 }
@@ -4757,14 +5042,15 @@ pub async fn revoke_channel_access<T: Transport + ?Sized>(
 /// member granted since this client last folded — they keep a dead key with no
 /// heal path. `access_ids` is that roster's access-role set for this channel;
 /// `removed` is excluded explicitly, since the revoking Grant was published
-/// moments ago and no fold has caught it.
+/// moments ago and no fold has caught it. A batch ban excludes its whole wave
+/// in ONE rotation — that is why this takes a slice.
 async fn rekey_channel_excluding<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
     channel_id: &ChannelId,
     roster: &crate::community::roles::CommunityRoles,
     access_ids: &[String],
-    removed: &PublicKey,
+    removed: &[PublicKey],
 ) -> Result<(), String> {
     crate::db::scoped(async move {
         // Whole-row save below — serialize with the follow worker (see create_*_channel).
@@ -4782,14 +5068,14 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
 
         // Everyone still entitled: the owner (always), me (the rotator must be able
         // to read what it rekeys), and every member the roster shows holding an
-        // access role — minus the removal.
-        let removed_hex = removed.to_hex();
+        // access role — minus the removals.
+        let removed_hexes: std::collections::HashSet<String> = removed.iter().map(|p| p.to_hex()).collect();
         let mut recipients: Vec<PublicKey> = vec![my_pk];
         if owner != my_pk {
             recipients.push(owner);
         }
         for g in &roster.grants {
-            if g.member == removed_hex || g.member == owner_hex {
+            if removed_hexes.contains(&g.member) || g.member == owner_hex {
                 continue;
             }
             if !g.role_ids.iter().any(|id| access_ids.contains(id)) {
@@ -4868,9 +5154,13 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
 /// banlist and grant strip alone leave the member holding each private channel's
 /// CURRENT epoch key — rotation is the only read severance.
 ///
-/// `stripped_roles` is the member's role set as captured before the strip: the fold
-/// may or may not have caught the strip yet, and the `with` overlay makes the
-/// entitlement judgment independent of that timing.
+/// Takes the whole banned wave: a channel several targets could read rotates ONCE,
+/// excluding them all. Per-target rotation would mint N epochs for one ban wave and
+/// churn every legitimate reader N times.
+///
+/// Each target carries its role set as captured before the strip: the fold may or
+/// may not have caught the strip yet, and the `with` overlay makes the entitlement
+/// judgment independent of that timing.
 ///
 /// Offer-side mirror of the reader's `channel_rotator_ok`: a channel rotation is
 /// honored only from `MANAGE_CHANNELS` holders, so a BAN-only moderator must not
@@ -4881,8 +5171,7 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
 pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
-    member: &PublicKey,
-    stripped_roles: &[String],
+    targets: &[(PublicKey, Vec<String>)],
 ) -> Result<usize, String> {
     crate::db::scoped(async move {
         let my_pk = me_pk()?;
@@ -4904,7 +5193,6 @@ pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
             }
         }
         let owner_hex = community.owner().ok().map(|o| o.to_hex());
-        let member_hex = member.to_hex();
         let mut rotated = 0usize;
         let mut failures: Vec<String> = Vec::new();
         for ch in &community.channels {
@@ -4912,7 +5200,13 @@ pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
                 continue;
             }
             let chan_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
-            if !roster.is_entitled(owner_hex.as_deref(), &member_hex, &chan_hex, stripped_roles, &[]) {
+            // Everyone in the wave who could read this channel, cut in ONE rotation.
+            let excluded: Vec<PublicKey> = targets
+                .iter()
+                .filter(|(pk, stripped)| roster.is_entitled(owner_hex.as_deref(), &pk.to_hex(), &chan_hex, stripped, &[]))
+                .map(|(pk, _)| *pk)
+                .collect();
+            if excluded.is_empty() {
                 continue;
             }
             let access_ids = roster.channel_role_ids(&chan_hex);
@@ -4927,7 +5221,7 @@ pub async fn sever_banned_private_reads<T: Transport + ?Sized>(
                 Ok(Some(c)) => c,
                 _ => return Err("community gone during ban severance".to_string()),
             };
-            match rekey_channel_excluding(transport, &held, &ch.id, &roster, &access_ids, member).await {
+            match rekey_channel_excluding(transport, &held, &ch.id, &roster, &access_ids, &excluded).await {
                 Ok(()) => rotated += 1,
                 Err(e) => failures.push(format!("{}: {e}", &chan_hex[..12])),
             }
@@ -11874,7 +12168,7 @@ mod tests {
         grant_roles(&relay, &held, &spammer, vec![]).await.unwrap();
 
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
-        let rotated = sever_banned_private_reads(&relay, &held, &spammer, &stripped).await.unwrap();
+        let rotated = sever_banned_private_reads(&relay, &held, &[(spammer, stripped)]).await.unwrap();
         assert_eq!(rotated, 1, "exactly the one channel they could read rotated");
         let after = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert_eq!(after.channel(&mods).unwrap().epoch, Epoch(2), "the reachable channel advanced");
@@ -11882,7 +12176,7 @@ mod tests {
 
         // A member who never had reach rotates nothing.
         let stranger = Keys::generate().public_key();
-        let n = sever_banned_private_reads(&relay, &after, &stranger, &[]).await.unwrap();
+        let n = sever_banned_private_reads(&relay, &after, &[(stranger, Vec::new())]).await.unwrap();
         assert_eq!(n, 0, "no entitlement, no rotation");
     }
 
@@ -11907,7 +12201,7 @@ mod tests {
         let _ = follow_control(&bed.relay, &joined).await;
         let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
         let target = Keys::generate().public_key();
-        let err = sever_banned_private_reads(&bed.relay, &joined, &target, &[]).await.unwrap_err();
+        let err = sever_banned_private_reads(&bed.relay, &joined, &[(target, Vec::new())]).await.unwrap_err();
         assert!(err.contains("permission"), "refused at the gate, not mid-rotation: {err}");
     }
 
@@ -14100,6 +14394,338 @@ mod tests {
         assert!(view.banned.is_empty(), "the retried unban actually unbans");
     }
 
+    /// [`MemoryRelay`] with a cooperative yield before every call, so two units
+    /// driven by one `join!` genuinely interleave at each network boundary — on
+    /// the single-threaded test runtime the bare relay resolves without yielding,
+    /// the first unit runs to completion, and the race never happens.
+    struct YieldyRelay<'a>(&'a MemoryRelay);
+    #[async_trait::async_trait]
+    impl Transport for YieldyRelay<'_> {
+        async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            tokio::task::yield_now().await;
+            self.0.publish(event, relays).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            tokio::task::yield_now().await;
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            tokio::task::yield_now().await;
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            tokio::task::yield_now().await;
+            self.0.publish_durable(event, relays).await
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_bans_compose_instead_of_erasing_each_other() {
+        // The SDK spawns a handler task per message, so a spam wave runs N ban
+        // units concurrently. Unserialized, both read the pre-sibling banlist,
+        // the second head erases the first target at every reader, and the
+        // refound compacts that erasure into the new epoch permanently.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Wave", bed.relays.clone(), None).await.unwrap();
+        let a = Keys::generate().public_key();
+        let b = Keys::generate().public_key();
+
+        let yieldy = YieldyRelay(&bed.relay);
+        let (wave_a, wave_b) = ([a], [b]);
+        let (ra, rb) = tokio::join!(
+            set_members_banned(&yieldy, community.id(), &wave_a, true),
+            set_members_banned(&yieldy, community.id(), &wave_b, true),
+        );
+        ra.unwrap();
+        rb.unwrap();
+
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(2), "each single ban still performed its own read cut");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert!(
+            view.banned.contains(&a.to_hex()) && view.banned.contains(&b.to_hex()),
+            "both racing bans landed: {:?}",
+            view.banned
+        );
+    }
+
+    #[tokio::test]
+    async fn bans_stacked_behind_a_rotation_coalesce_into_one_read_cut() {
+        // Human-speed serial bans: the leader's read cut holds the lock for a
+        // whole rotation, so bans arriving meanwhile deposit intents. The next
+        // lock holder drains ALL of them — one edition, one rotation, however
+        // many stacked. Worst case for a burst of N is 2 rotations, never N.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Stack", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let banlist_hex = crate::simd::hex::bytes_to_hex_32(&super::super::derive::banlist_locator(community.id()));
+        let (a, b, c, d) = (
+            Keys::generate().public_key(),
+            Keys::generate().public_key(),
+            Keys::generate().public_key(),
+            Keys::generate().public_key(),
+        );
+
+        let yieldy = YieldyRelay(&bed.relay);
+        let (wa, wb, wc, wd) = ([a], [b], [c], [d]);
+        // The first future drains itself and rotates; the other three stack
+        // behind that rotation and coalesce under the next leader.
+        let (ra, rb, rc, rd) = tokio::join!(
+            set_members_banned(&yieldy, community.id(), &wa, true),
+            set_members_banned(&yieldy, community.id(), &wb, true),
+            set_members_banned(&yieldy, community.id(), &wc, true),
+            set_members_banned(&yieldy, community.id(), &wd, true),
+        );
+        ra.unwrap();
+        rb.unwrap();
+        rc.unwrap();
+        rd.unwrap();
+
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(2), "leader rotation + ONE coalesced rotation, never four");
+        let (version, _) = crate::db::community::get_edition_head(&cid_hex, &banlist_hex).unwrap().unwrap();
+        assert_eq!(version, 2, "two editions total: the leader's and the coalesced drain's");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        for pk in [a, b, c, d] {
+            assert!(view.banned.contains(&pk.to_hex()), "{} missing from the fold", pk.to_hex());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stacked_ban_and_unban_coalesce_in_arrival_order() {
+        // The drain applies intents in arrival order over the evolving list, so
+        // ban(X) … unban(X) stacked behind one rotation nets X out entirely and
+        // only the net newly-banned member costs a read cut.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Net", bed.relays.clone(), None).await.unwrap();
+        let x = Keys::generate().public_key();
+        let y = Keys::generate().public_key();
+
+        let yieldy = YieldyRelay(&bed.relay);
+        let (wx, wy) = ([x], [y]);
+        let (rx1, ry, rx2) = tokio::join!(
+            set_members_banned(&yieldy, community.id(), &wx, true),  // leader: rotates on X
+            set_members_banned(&yieldy, community.id(), &wy, true),  // stacked
+            set_members_banned(&yieldy, community.id(), &wx, false), // stacked: nets X back out
+        );
+        rx1.unwrap();
+        ry.unwrap();
+        rx2.unwrap();
+
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(2), "X's rotation + one coalesced rotation for Y");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert!(!view.banned.contains(&x.to_hex()), "the stacked unban netted X out");
+        assert!(view.banned.contains(&y.to_hex()), "Y's stacked ban landed");
+    }
+
+    #[tokio::test]
+    async fn a_second_member_folds_every_stacked_ban() {
+        // Derek's observer divergence, inverted: the whole point of composing the
+        // batch correctly is that an INDEPENDENT reader folding the same plane
+        // agrees. A fresh joiner (separate account DB, post-rotation bundle) must
+        // see every stacked ban — not just the leader's own echo.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Agree", bed.relays.clone(), None).await.unwrap();
+        let a = Keys::generate().public_key();
+        let b = Keys::generate().public_key();
+
+        let yieldy = YieldyRelay(&bed.relay);
+        let (wa, wb) = ([a], [b]);
+        let (ra, rb) = tokio::join!(
+            set_members_banned(&yieldy, community.id(), &wa, true),
+            set_members_banned(&yieldy, community.id(), &wb, true),
+        );
+        ra.unwrap();
+        rb.unwrap();
+
+        // Post-rotation bundle, exactly what a live link would serve now.
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let bundle = bundle_of(&held, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let view = fetch_authority(&bed.relay, &joined).await;
+        assert!(
+            view.banned.contains(&a.to_hex()) && view.banned.contains(&b.to_hex()),
+            "an independent reader folds BOTH stacked bans: {:?}",
+            view.banned
+        );
+    }
+
+    #[tokio::test]
+    async fn a_net_zero_batch_publishes_no_edition() {
+        // ban(X) + unban(X) stacked in one drain nets to the original list — the
+        // batch must not spend an edition (or a rotation) publishing a no-op.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Noop", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let banlist_hex = crate::simd::hex::bytes_to_hex_32(&super::super::derive::banlist_locator(community.id()));
+        let x = Keys::generate().public_key();
+
+        // The leader's slot is taken by a harmless real ban so X's ban+unban land
+        // in ONE coalesced drain together.
+        let decoy = Keys::generate().public_key();
+        let yieldy = YieldyRelay(&bed.relay);
+        let (wd, wx) = ([decoy], [x]);
+        let (rd, r1, r2) = tokio::join!(
+            set_members_banned(&yieldy, community.id(), &wd, true),
+            set_members_banned(&yieldy, community.id(), &wx, true),
+            set_members_banned(&yieldy, community.id(), &wx, false),
+        );
+        rd.unwrap();
+        r1.unwrap();
+        r2.unwrap();
+
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(1), "only the decoy's rotation — the net-zero drain rotated nothing");
+        let (version, _) = crate::db::community::get_edition_head(&cid_hex, &banlist_hex).unwrap().unwrap();
+        assert_eq!(version, 1, "only the decoy's edition — the net-zero drain published nothing");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert!(!view.banned.contains(&x.to_hex()));
+        assert!(view.banned.contains(&decoy.to_hex()));
+    }
+
+    /// Fetches fine, refuses every publish — the dead-network shape.
+    struct BrokenPublish<'a>(&'a MemoryRelay);
+    #[async_trait::async_trait]
+    impl Transport for BrokenPublish<'_> {
+        async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            tokio::task::yield_now().await;
+            Err("relay refused".to_string())
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            tokio::task::yield_now().await;
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            tokio::task::yield_now().await;
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
+            tokio::task::yield_now().await;
+            Err("relay refused".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_publish_answers_every_stacked_caller_and_never_hangs() {
+        // The batch's shared fate: when the edition can't land, every stacked
+        // intent must resolve with the error — a waiter left parked on a dead
+        // oneshot would hang a moderation bot forever.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Dead", bed.relays.clone(), None).await.unwrap();
+        let a = Keys::generate().public_key();
+        let b = Keys::generate().public_key();
+
+        let broken = BrokenPublish(&bed.relay);
+        let (wa, wb) = ([a], [b]);
+        let (ra, rb) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            async {
+                tokio::join!(
+                    set_members_banned(&broken, community.id(), &wa, true),
+                    set_members_banned(&broken, community.id(), &wb, true),
+                )
+            },
+        )
+        .await
+        .expect("stacked callers must resolve, never hang");
+        assert!(ra.is_err(), "the leader surfaced the publish failure");
+        assert!(rb.is_err(), "the stacked caller surfaced it too");
+
+        // Nothing landed: a later fold shows no bans.
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert!(view.banned.is_empty(), "no half-published state: {:?}", view.banned);
+        assert_eq!(fresh.root_epoch, Epoch(0), "no rotation on a failed edition");
+    }
+
+    #[tokio::test]
+    async fn a_poison_intent_fails_alone_not_its_batchmates() {
+        // Per-intent verdicts: an add that busts the 500 ceiling answers ITS
+        // caller with the refusal while its batch-mates publish normally.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Poison", bed.relays.clone(), None).await.unwrap();
+        // Pre-fill to 498 so the leader lands 499, the first stacked ban lands
+        // exactly 500, and the second stacked ban would be 501.
+        let filler: Vec<String> = (0..498).map(|i| format!("{i:064x}")).collect();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        set_banlist(&bed.relay, &held, &filler).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::set_community_banlist(&cid_hex, &filler, 1).unwrap();
+
+        let (a, x, y) = (Keys::generate().public_key(), Keys::generate().public_key(), Keys::generate().public_key());
+        let yieldy = YieldyRelay(&bed.relay);
+        let (wa, wx, wy) = ([a], [x], [y]);
+        let (ra, rx, ry) = tokio::join!(
+            set_members_banned(&yieldy, community.id(), &wa, true),
+            set_members_banned(&yieldy, community.id(), &wx, true),
+            set_members_banned(&yieldy, community.id(), &wy, true),
+        );
+        ra.unwrap();
+        rx.unwrap();
+        let err = ry.unwrap_err();
+        assert!(err.contains("ceiling"), "the over-cap intent failed alone: {err}");
+
+        let list = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert_eq!(list.len(), 500, "the batch published up to the ceiling");
+        assert!(list.contains(&x.to_hex()) && !list.contains(&y.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn ban_many_is_one_edition_one_refound_for_the_whole_wave() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Purge", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let banlist_hex = crate::simd::hex::bytes_to_hex_32(&super::super::derive::banlist_locator(community.id()));
+        let wave: Vec<PublicKey> = (0..3).map(|_| Keys::generate().public_key()).collect();
+
+        set_members_banned(&bed.relay, community.id(), &wave, true).await.unwrap();
+
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(1), "one refound for the whole wave, not one per target");
+        let (version, _) = crate::db::community::get_edition_head(&cid_hex, &banlist_hex).unwrap().unwrap();
+        assert_eq!(version, 1, "one banlist edition carried the whole wave");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        for pk in &wave {
+            assert!(view.banned.contains(&pk.to_hex()), "{} missing from the fold", pk.to_hex());
+        }
+
+        // The reductive mirror: unban two of three in one edition, no read cut.
+        set_members_banned(&bed.relay, community.id(), &wave[..2], false).await.unwrap();
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(1), "an unban rotates nothing");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert_eq!(view.banned.len(), 1, "reductive: exactly the un-unbanned target remains");
+        assert!(view.banned.contains(&wave[2].to_hex()));
+    }
+
+    #[tokio::test]
+    async fn a_batch_past_the_banlist_cap_refuses_before_publishing() {
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Cap", bed.relays.clone(), None).await.unwrap();
+        let wave: Vec<PublicKey> = (0..=crate::community::v2::roles::MAX_BANLIST).map(|_| Keys::generate().public_key()).collect();
+
+        let err = set_members_banned(&bed.relay, community.id(), &wave, true).await.unwrap_err();
+        assert!(err.contains("ceiling"), "refused at the cap: {err}");
+        let fresh = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(fresh.root_epoch, Epoch(0), "nothing rotated");
+        let view = fetch_authority(&bed.relay, &fresh).await;
+        assert!(view.banned.is_empty(), "nothing published");
+    }
+
     #[tokio::test]
     async fn an_uncited_kick_from_an_admin_is_not_honored() {
         // CORD-04 §5: a non-owner authority action must name the Grant it acts
@@ -14552,7 +15178,7 @@ mod tests {
 
         // Rotate the channel away from a (never-granted) member.
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
-        rekey_channel_excluding(&relay, &community, &chan, &roster, &[], &Keys::generate().public_key())
+        rekey_channel_excluding(&relay, &community, &chan, &roster, &[], &[Keys::generate().public_key()])
             .await
             .unwrap();
 

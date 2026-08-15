@@ -3408,114 +3408,52 @@ impl VectorCore {
     /// re-hand them the root). Requires BAN + outrank, checked against the folded roster
     /// BEFORE any publish.
     pub async fn set_member_banned(&self, community_id: &str, npub: &str, banned: bool) -> Result<()> {
+        self.set_members_banned(community_id, &[npub], banned).await
+    }
+
+    /// Ban (`true`) or unban (`false`) a whole batch as ONE moderation unit: one
+    /// Banlist edition, one grant-strip pass, one read cut — a private community
+    /// re-founds ONCE with every target removed, however many there are. Additive
+    /// on ban, reductive on unban, over the freshest folded list either way.
+    ///
+    /// Serialized per community (with every other ban/unban) so concurrent
+    /// moderation composes in arrival order instead of the last write erasing
+    /// its siblings. The wire caps a Banlist at 500 entries — a batch that would
+    /// exceed it fails before anything publishes.
+    pub async fn set_members_banned(&self, community_id: &str, npubs: &[&str], banned: bool) -> Result<()> {
         use crate::community::{service, transport::LiveTransport, CommunityId};
-        let pk = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
-        let hex = pk.to_hex();
+        if npubs.is_empty() {
+            return Ok(());
+        }
+        // Parse every target up front — one bad npub fails the batch before any publish.
+        let mut pks: Vec<nostr_sdk::prelude::PublicKey> = Vec::with_capacity(npubs.len());
+        for n in npubs {
+            let pk = nostr_sdk::prelude::PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !pks.contains(&pk) {
+                pks.push(pk);
+            }
+        }
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         // Dual-stack: a v2 Ban is the CORD-04 §6 three-removal composition, in order —
         // the Banlist edition first (instant silence), then the Grant strip (authority
         // removal), then the Refounding read-cut (cryptographic severance).
         if community_id.len() == 64 {
             let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
-            if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
-                // SYNC BEFORE COMPOSING: a banlist edition replaces the whole
-                // list on the wire, so the mutation must start from the freshest
-                // view — another moderator's ban this device hasn't folded yet
-                // would otherwise be silently erased by ours. Best-effort: on a
-                // dead network the cache (kept fresh by set_banlist's own echo)
-                // is still the best available basis.
-                Self::converge_v2_authority(&transport, community_id).await;
-                // Recompute the full list from the freshest view (latest-wins):
-                // drop any existing entry, then add if banning — the ROTATION-
-                // aware mutation that preserves every other standing ban.
-                let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
-                list.retain(|h| h != &hex);
-                if banned {
-                    list.push(hex.clone());
-                }
-                // Rotation barrier: a Ban's refound holds this lock for its whole
-                // multi-publish rotation while the row still names the OLD root. An
-                // unban/reban clicked in that window must WAIT and then load the
-                // post-commit root — unlocked, it publishes the edit to the epoch
-                // being buried, where no reader will ever fold it. Dropped before
-                // `refound_community`, which re-acquires it (non-reentrant).
-                let (community, stripped_roles) = {
-                    let lock = crate::community::v2::realtime::follow_lock(&cid);
-                    let _rotation = lock.lock().await;
-                    let community = crate::db::community::load_community_v2(&cid)
-                        .map_err(VectorError::Other)?
-                        .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
-                    crate::community::v2::service::set_banlist(&transport, &community, &list).await.map_err(VectorError::Other)?;
-                    let mut stripped_roles: Vec<String> = Vec::new();
-                    if banned {
-                        // Pre-strip role capture: the read-severance below judges which
-                        // private channels the member could reach, and after the strip
-                        // the fold may no longer show it.
-                        let roster = crate::db::community::get_community_roles(community_id).unwrap_or_default();
-                        stripped_roles = roster.roles_of(&hex).map(|r| r.role_id.clone()).collect();
-                        // Strip on the kick doctrine (skip, not refuse): readers honor a
-                        // grant strip only from MANAGE_ROLES + outrank, and a BAN-only
-                        // moderator still bans — the banlist silences regardless, and
-                        // publishing a strip readers reject would only poison our own
-                        // floor for that grant entity.
-                        let owner = community.owner().map_err(VectorError::Other)?;
-                        let my_pk = crate::state::my_public_key()
-                            .ok_or_else(|| VectorError::Other("Public key not set".into()))?;
-                        let can_strip = my_pk == owner
-                            || roster.can_act_on_member(
-                                &my_pk.to_hex(),
-                                Some(&owner.to_hex()),
-                                &hex,
-                                crate::community::roles::Permissions::MANAGE_ROLES,
-                            );
-                        if can_strip {
-                            crate::community::v2::service::grant_roles(&transport, &community, &pk, vec![]).await.map_err(VectorError::Other)?;
-                        } else {
-                            crate::log_warn!("[Ban] grant strip skipped (no MANAGE_ROLES over the target); the banlist still silences");
-                        }
-                    }
-                    (community, stripped_roles)
-                };
-                if banned {
-                    // CORD-05 §5 gate (v1 parity, regressed in the v2 port): a
-                    // PUBLIC community — any live invite link — must NOT refound
-                    // on ban. The link refresh re-posts the bundle with the new
-                    // root behind the same URL, so the banned member re-fetches
-                    // and reads on: the rotation severs nothing and can strand
-                    // foreign-link joiners on a buried epoch. The Banlist does
-                    // all the real work in Public mode.
-                    if crate::community::v2::service::community_is_public(&transport, &community).await {
-                        crate::log_info!("[Ban] public community — banlist + grant strip, no refound (CORD-05 §5)");
-                        // CORD-06 §1 still applies per channel: the banlist silences and
-                        // the strip de-authorizes, but only rotation severs the private-
-                        // channel reads their held keys still allow.
-                        match crate::community::v2::service::sever_banned_private_reads(&transport, &community, &pk, &stripped_roles).await {
-                            Ok(0) => {}
-                            Ok(n) => crate::log_info!("[Ban] rotated {n} private channel(s) the banned member could read"),
-                            Err(e) => crate::log_warn!("[Ban] private-channel read severance incomplete: {e}"),
-                        }
-                    } else if let Err(e) = crate::community::v2::service::refound_community(&transport, &community, &[pk]).await {
-                        // Best-effort escalation, NEVER the ban's verdict. The
-                        // banlist edition (instant silence at every honest
-                        // reader) and the grant strip ARE the ban; the refound's
-                        // §3 coverage gate demands the relay serve back heads
-                        // published milliseconds ago, so propagation lag makes
-                        // it fail-closed — and propagating that error out of
-                        // here once left every ban half-applied AND skipped the
-                        // converge below, so each next ban rebuilt from a stale
-                        // list and erased its predecessors.
-                        crate::log_warn!("[Ban] refound deferred (banlist + grant strip landed): {e}");
-                    }
-                }
-                Self::converge_v2_authority(&transport, community_id).await;
-                return Ok(());
+            // A transient protocol-read failure must fail the ban loudly: flattened
+            // to "not v2" it reroutes onto the v1 list no v2 reader folds — an Ok
+            // that banned no one.
+            if let Some(crate::community::ConcordProtocol::V2) = crate::db::community::community_protocol(&cid).map_err(VectorError::Other)? {
+                return crate::community::v2::service::set_members_banned(&transport, &cid, &pks, banned)
+                    .await
+                    .map_err(VectorError::Other);
             }
         }
         // v1: same latest-wins mutation over the held list.
+        let hexes: Vec<String> = pks.iter().map(|p| p.to_hex()).collect();
         let mut list = crate::db::community::get_community_banlist(community_id).map_err(VectorError::Other)?;
-        list.retain(|h| h != &hex);
+        list.retain(|h| !hexes.contains(h));
         if banned {
-            list.push(hex);
+            list.extend(hexes);
         }
         let community = Self::load_community_hex(community_id)?;
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)

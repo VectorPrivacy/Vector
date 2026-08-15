@@ -1156,6 +1156,34 @@ impl Community {
         Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
     }
 
+    /// Ban several members as ONE moderation unit: one banlist edition, one
+    /// grant-strip pass, and (in a private community) ONE key rotation — not one
+    /// per target. Prefer this over looping [`Member::ban`] when moderating in
+    /// bulk; N single bans cost N rotations and churn every reader N times.
+    ///
+    /// Additive: targets are appended to the existing folded banlist. The wire
+    /// caps a banlist at 500 entries, so a batch that would exceed it fails
+    /// before anything publishes.
+    ///
+    /// ```no_run
+    /// # async fn f(community: vector_sdk::Community) -> vector_sdk::Result<()> {
+    /// community.ban_many(&[
+    ///     "npub1spammer…",
+    ///     "npub1alsospam…",
+    /// ]).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn ban_many(&self, npubs: &[&str]) -> Result<()> {
+        self.core.set_members_banned(&self.id, npubs, true).await
+    }
+
+    /// Lift several bans as one unit — the reductive mirror of
+    /// [`ban_many`](Self::ban_many): one banlist edition removing every target,
+    /// no rotation.
+    pub async fn unban_many(&self, npubs: &[&str]) -> Result<()> {
+        self.core.set_members_banned(&self.id, npubs, false).await
+    }
+
     /// Every channel in this community, **including private ones this bot cannot
     /// read yet**.
     ///
@@ -1422,6 +1450,10 @@ impl Member {
     }
 
     /// Ban them (terminal; in a private community this triggers a read-cut rekey). Requires BAN.
+    ///
+    /// Bans serialize per community, so concurrent handlers calling this compose
+    /// correctly — but each single ban is its own rotation. Banning a wave? Use
+    /// [`Community::ban_many`]: one rotation for the whole batch.
     pub async fn ban(&self) -> Result<()> {
         self.core.set_member_banned(&self.community_id, &self.npub, true).await
     }
