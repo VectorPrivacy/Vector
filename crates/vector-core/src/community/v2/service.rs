@@ -3068,6 +3068,9 @@ pub struct FragSet {
     pub created_at: std::collections::BTreeMap<usize, u64>,
     /// `frags` as declared by the newest fragment seen.
     pub declared: usize,
+    /// The winning parsed fragment per index — what the relays currently hold,
+    /// so a rewrite can skip publishing byte-identical fragments.
+    pub read_frags: std::collections::BTreeMap<usize, super::list_frag::FragList>,
 }
 
 impl FragSet {
@@ -3093,14 +3096,21 @@ async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]
     if events.is_empty() {
         return Ok(None);
     }
-    let mut newest: std::collections::BTreeMap<usize, (u64, super::list_frag::FragList)> = Default::default();
+    let mut newest: std::collections::BTreeMap<usize, (u64, [u8; 32], super::list_frag::FragList)> = Default::default();
     let mut undecryptable = 0usize;
     for e in events {
         let at = e.created_at.as_secs();
+        let id = *e.id.as_bytes();
         match super::list_frag::parse_fragment_event(&signer, my_pk, &e).await {
             Ok((index, frag)) => {
-                if newest.get(&index).map(|(prev, _)| at > *prev).unwrap_or(true) {
-                    newest.insert(index, (at, frag));
+                // Mirror relay resolution (CORD-02 §8): newest created_at holds the
+                // coordinate, an age tie falls to the LOWEST event id.
+                let wins = match newest.get(&index) {
+                    None => true,
+                    Some((prev_at, prev_id, _)) => at > *prev_at || (at == *prev_at && id < *prev_id),
+                };
+                if wins {
+                    newest.insert(index, (at, id, frag));
                 }
             }
             Err(_) => undecryptable += 1,
@@ -3110,18 +3120,23 @@ async fn fetch_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]
         crate::log_warn!("[CommunityList] {} fragment(s) fetched, none readable — treating as no news", undecryptable);
         return Ok(None);
     }
-    // The newest fragment governs `frags`; a client can only consult what it holds.
+    // The newest fragment governs `frags`; an age tie resolves to the LARGER count
+    // (CORD-02 §8) — too large reads an index that turns out empty, too small sends
+    // live fragments out of range and dormant.
     let declared = newest
         .values()
-        .max_by_key(|(at, _)| *at)
-        .map(|(_, f)| f.frags)
+        .max_by_key(|(at, _, f)| (*at, f.frags))
+        .map(|(_, _, f)| f.frags)
         .unwrap_or(1)
         .max(1);
-    let frags: Vec<_> = newest.values().map(|(_, f)| f.clone()).collect();
+    let read_frags: std::collections::BTreeMap<usize, super::list_frag::FragList> =
+        newest.iter().map(|(i, (_, _, f))| (*i, f.clone())).collect();
+    let frags: Vec<_> = read_frags.values().cloned().collect();
     let set = FragSet {
         list: super::list_frag::defragment(&frags),
-        created_at: newest.iter().map(|(i, (at, _))| (*i, *at)).collect(),
+        created_at: newest.iter().map(|(i, (at, _, _))| (*i, *at)).collect(),
         declared,
+        read_frags,
     };
     if !set.is_complete() {
         crate::log_warn!(
@@ -3141,12 +3156,23 @@ async fn publish_fragments<T: Transport + ?Sized>(
     transport: &T,
     list: &super::list::CommunityList,
     prev: &std::collections::BTreeMap<usize, u64>,
+    read: &std::collections::BTreeMap<usize, super::list_frag::FragList>,
     own: &[String],
 ) -> Result<usize, String> {
     let signer = crate::signer::active_signer()?;
     let my_pk = me_pk()?;
     let frags = super::list_frag::fragment(list);
     let now = now_ms() / 1000;
+    // A fragment serializing to the bytes we just read is already on the relay:
+    // republishing it only churns created_at — and hands a same-second sibling
+    // write a lowest-id coin-flip it didn't need to enter.
+    let unchanged = |index: usize, frag: &super::list_frag::FragList| -> bool {
+        let Some(old) = read.get(&index) else { return false };
+        matches!(
+            (serde_json::to_string(old), serde_json::to_string(frag)),
+            (Ok(a), Ok(b)) if a == b
+        )
+    };
     // Persisted, not level-gated: a List write that silently never lands is the failure
     // mode this whole format exists to end, and it is only ever diagnosed after the fact.
     crate::log_net_info!(
@@ -3156,7 +3182,12 @@ async fn publish_fragments<T: Transport + ?Sized>(
         list.entries.len() - frags.iter().map(|f| f.entries.len()).sum::<usize>(),
         frags.iter().map(|f| f.tombstones.len()).sum::<usize>(),
     );
+    let mut skipped = 0usize;
     for (index, frag) in frags.iter().enumerate() {
+        if unchanged(index, frag) {
+            skipped += 1;
+            continue;
+        }
         let created_at = now.max(prev.get(&index).copied().unwrap_or(0) + 1);
         let event = super::list_frag::build_fragment_event(&signer, my_pk, frag, index, created_at).await?;
         publish_list_event(transport, &event, own).await?;
@@ -3170,9 +3201,16 @@ async fn publish_fragments<T: Transport + ?Sized>(
             tombstones: vec![],
             extra: Default::default(),
         };
+        if unchanged(index, &empty) {
+            skipped += 1;
+            continue;
+        }
         let created_at = now.max(prev.get(&index).copied().unwrap_or(0) + 1);
         let event = super::list_frag::build_fragment_event(&signer, my_pk, &empty, index, created_at).await?;
         publish_list_event(transport, &event, own).await?;
+    }
+    if skipped > 0 {
+        crate::log_net_info!("[CommunityList] {} fragment(s) skipped — byte-identical to the relay copy", skipped);
     }
     Ok(frags.len())
 }
@@ -3232,10 +3270,10 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
         // A FAILED remote fetch must not drive this replaceable-event write: publishing
         // a list built without the remote seeds would drop older-epoch backfill anchors
         // and re-stamp add-times (the W2 seed-regression + a resurrection window).
-        let (remote, prev_created) = match fetch_fragments(transport, &relays).await {
+        let (remote, prev_created, read_frags) = match fetch_fragments(transport, &relays).await {
             // No fragments yet: this is the first write under §8, and local state
             // is the source. Nothing to merge, nothing to lose.
-            Ok(None) => (super::list::CommunityList::default(), Default::default()),
+            Ok(None) => (super::list::CommunityList::default(), Default::default(), Default::default()),
             Ok(Some(set)) if !set.is_complete() => {
                 crate::log_net_fail!(
                     "[CommunityList] republish SKIPPED — hold {} of {} fragments; rewriting a set we haven't fully read would drop the memberships in the ones we're missing",
@@ -3244,7 +3282,7 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
                 );
                 return Ok(false);
             }
-            Ok(Some(set)) => (set.list, set.created_at),
+            Ok(Some(set)) => (set.list, set.created_at, set.read_frags),
             Err(e) => {
                 // SILENT-SKIP HAZARD: bailing is correct (publishing a list built without the
                 // remote seeds drops backfill anchors), but the membership this call was meant
@@ -3313,7 +3351,7 @@ pub async fn republish_community_list<T: Transport + ?Sized>(transport: &T, just
         let merged = remote.merge(&local);
         // No whole-list cap: fragmentation is what keeps each event publishable,
         // and the count limit is gone (CORD-02 §8).
-        match publish_fragments(transport, &merged, &prev_created, &write_relays).await {
+        match publish_fragments(transport, &merged, &prev_created, &read_frags, &write_relays).await {
             Ok(_) => {}
             Err(e) => {
                 crate::log_net_fail!("[CommunityList] publish FAILED ({}) — memberships stay local-only until the next edit", e);
@@ -3386,12 +3424,12 @@ async fn tombstone_community_list<T: Transport + ?Sized>(
     // A failed fetch here would drop other communities' entries (only the
     // tombstone would survive); preserve them by bailing — the leave re-records
     // on the next attempt, and the local teardown already happened.
-    let (mut doc, prev_created) = match fetch_fragments(transport, &read_relays).await {
+    let (mut doc, prev_created, read_frags) = match fetch_fragments(transport, &read_relays).await {
         Ok(Some(set)) if !set.is_complete() => {
             return Err(format!("hold {} of {} fragments — refusing to rewrite a set we haven't fully read", set.created_at.len(), set.declared));
         }
-        Ok(Some(set)) => (set.list, set.created_at),
-        Ok(None) => (super::list::CommunityList::default(), Default::default()),
+        Ok(Some(set)) => (set.list, set.created_at, set.read_frags),
+        Ok(None) => (super::list::CommunityList::default(), Default::default(), Default::default()),
         Err(e) => return Err(e),
     };
     doc.tombstones.retain(|t| t.community_id != cid_hex);
@@ -3399,7 +3437,7 @@ async fn tombstone_community_list<T: Transport + ?Sized>(
     // No size gate on the way out: a tombstone strictly shrinks the live set, and
     // a guard that blocks the only operation able to restore compliance is a
     // deadlock, not a guard (CORD-02 §8).
-    publish_fragments(transport, &doc, &prev_created, &write_relays).await.map(|_| ())
+    publish_fragments(transport, &doc, &prev_created, &read_frags, &write_relays).await.map(|_| ())
 }
 
 /// Retry a leave tombstone until it lands, on the same budget a join gets. A leave
@@ -3458,6 +3496,32 @@ pub struct ListSyncOutcome {
 /// Marks that this account has written the fragmented list at least once.
 const LIST_SEEDED_KEY: &str = "community_list_frag_seeded";
 
+/// Every relay answered EOSE with zero fragments — the only reading of "empty"
+/// strong enough to seed over. The aggregate fetch that precedes this cannot
+/// distinguish "no fragments" from "the relay holding them never answered";
+/// asked one at a time, an error is a FAILED read and a failed read never seeds.
+async fn confirmed_no_fragments<T: Transport + ?Sized>(transport: &T, relays: &[String]) -> bool {
+    let Ok(my_pk) = me_pk() else { return false };
+    if relays.is_empty() {
+        return false;
+    }
+    let query = Query {
+        kinds: vec![super::kind::COMMUNITY_LIST_FRAG],
+        authors: vec![my_pk.to_hex()],
+        limit: Some(1),
+        ..Default::default()
+    };
+    for relay in relays {
+        match transport.fetch(&query, std::slice::from_ref(relay)).await {
+            Ok(events) if events.is_empty() => {}
+            // Found one (the aggregate read raced a sibling's write) or the relay
+            // didn't answer — either way this account is not confirmed empty.
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// First write of the §8 List for an account that has none: an account upgrading
 /// from the retired single-event list arrives here with memberships that exist
 /// only in local state, and nothing else in the stack publishes without a
@@ -3470,7 +3534,15 @@ async fn seed_community_list<T: Transport + ?Sized>(transport: &T) {
     if held_v2_relays().is_empty() {
         return;
     }
-    crate::log_net_info!("[CommunityList] no fragments held anywhere — seeding from local state");
+    // Seeding over a read that merely FAILED publishes fragment 0 over a sibling
+    // device's tombstones at a fresh created_at — confirm the emptiness per relay.
+    let own = own_list_relays().await;
+    let confirm = if own.is_empty() { held_v2_relays() } else { own };
+    if !confirmed_no_fragments(transport, &confirm).await {
+        crate::log_warn!("[CommunityList] seed DEFERRED — the empty read is unconfirmed; retrying on a later boot");
+        return;
+    }
+    crate::log_net_info!("[CommunityList] no fragments held anywhere (confirmed per relay) — seeding from local state");
     match republish_community_list(transport, None).await {
         Ok(true) => {
             let _ = crate::db::settings::set_sql_setting(LIST_SEEDED_KEY.to_string(), "1".to_string());
@@ -9837,6 +9909,95 @@ mod tests {
         let empty = MemoryRelay::new();
         sync_community_list(&empty, &relays).await.unwrap();
         assert_eq!(empty.stored_count(), 0, "the seed runs once");
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_republish_rewrites_no_fragment() {
+        // Nothing changed since the last write: the rebuilt fragment serializes to
+        // the bytes already on the relay, so the write must not touch the wire —
+        // a bumped created_at on identical content is pure churn.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        create_community(&relay, "Stable", relays.clone(), None).await.unwrap();
+        let before = fetch_fragments(&relay, &relays).await.unwrap().unwrap().created_at;
+
+        republish_community_list(&relay, None).await.unwrap();
+        let after = fetch_fragments(&relay, &relays).await.unwrap().unwrap().created_at;
+        assert_eq!(before, after, "a byte-identical fragment must not republish");
+    }
+
+    #[tokio::test]
+    async fn a_frags_tie_at_equal_age_resolves_to_the_larger_count() {
+        // A torn repack's worst case: two fragments at the SAME created_at
+        // disagreeing on the total. The larger count must govern (CORD-02 §8) —
+        // the smaller would push index 2 out of range and its memberships dormant.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let at = now_ms() / 1000;
+        let two = super::super::list_frag::FragList { frags: 2, entries: vec![], tombstones: vec![], extra: Default::default() };
+        let three = super::super::list_frag::FragList { frags: 3, entries: vec![], tombstones: vec![], extra: Default::default() };
+        // The larger count sits at the LOWER index: an age-only rule that keeps
+        // the last fragment seen would pick 2 here, not 3.
+        for (frag, index) in [(&three, 0usize), (&two, 1usize)] {
+            let e = super::super::list_frag::build_fragment_event_keys(&owner, frag, index, at).unwrap();
+            relay.publish(&e, &relays).await.unwrap();
+        }
+        let set = fetch_fragments(&relay, &relays).await.unwrap().unwrap();
+        assert_eq!(set.declared, 3, "an age tie resolves to the larger frags");
+        assert!(!set.is_complete(), "index 2 is unread, so the set refuses to write");
+    }
+
+    /// Aggregate fetches answer from the healthy relay; asked alone, the dead
+    /// relay errors — the partial-failure shape a boot read can't see through.
+    struct HalfDeaf<'a>(&'a MemoryRelay, String);
+    #[async_trait::async_trait]
+    impl Transport for HalfDeaf<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            if relays.len() == 1 && relays[0] == self.1 {
+                return Err("relay did not answer the fetch".to_string());
+            }
+            self.0.fetch(query, relays).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_empty_read_never_seeds() {
+        // One of the account's relays never answers. The aggregate read comes back
+        // empty (the healthy relay has nothing), which is indistinguishable from a
+        // fresh account — but the dead relay may hold a sibling's tombstones, so
+        // seeding here would bury them. The seed must defer, unlatched, and land
+        // once every relay confirms empty.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string(), "wss://dead".to_string()];
+        let community = create_community(&relay, "Gated", relays.clone(), None).await.unwrap();
+        let cid = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let bare = MemoryRelay::new();
+        let half_deaf = HalfDeaf(&bare, "wss://dead".to_string());
+        sync_community_list(&half_deaf, &relays).await.unwrap();
+        assert_eq!(bare.stored_count(), 0, "a failed read must never seed");
+        assert!(
+            crate::db::settings::get_sql_setting(LIST_SEEDED_KEY.to_string()).unwrap().is_none(),
+            "a deferred seed must not latch"
+        );
+
+        // The relay comes back: every relay now confirms empty, and the seed lands.
+        sync_community_list(&bare, &relays).await.unwrap();
+        let set = fetch_fragments(&bare, &relays).await.unwrap().expect("the confirmed-empty boot seeds");
+        assert!(set.list.is_live(&cid));
+        assert!(crate::db::settings::get_sql_setting(LIST_SEEDED_KEY.to_string()).unwrap().is_some());
     }
 
     #[tokio::test]

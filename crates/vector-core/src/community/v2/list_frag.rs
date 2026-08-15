@@ -17,10 +17,15 @@ use serde::{Deserialize, Serialize};
 
 use super::list::{ChannelKeyRef, CommunityList, JoinMaterial};
 
-/// The relay ceiling the List actually has to fit. The binding limit is the
-/// encoded EVENT, never the NIP-44 plaintext: content is base64 ciphertext at
-/// ~4/3, so a plaintext-only check mints events every relay refuses.
+/// The relay ceiling the List actually has to fit — the refusal line. The binding
+/// limit is the encoded EVENT, never the NIP-44 plaintext: content is base64
+/// ciphertext at ~4/3, so a plaintext-only check mints events every relay refuses.
 pub const MAX_EVENT_BYTES: usize = 65_536;
+
+/// The pack target (CORD-02 §8 SHOULD): comfortably under the ceiling, because
+/// 65,536 is itself a common relay cap and an event AT it is a `>` vs `>=`
+/// lottery between relay implementations.
+pub const PACK_TARGET_BYTES: usize = 57_344;
 
 /// Everything in the signed event that isn't `content` — id, pubkey, sig, kind,
 /// created_at, the `d` tag, JSON scaffolding. Deliberately generous.
@@ -236,7 +241,7 @@ fn json_len<T: Serialize>(value: &T) -> usize {
 
 // ── fragmentation ────────────────────────────────────────────────────────────
 
-/// Pack the list into fragments, each projected to fit [`MAX_EVENT_BYTES`].
+/// Pack the list into fragments, each projected to fit [`PACK_TARGET_BYTES`].
 ///
 /// Greedy and order-preserving: an entry lands in the first fragment with room.
 /// Placement is arbitrary by design — a `community_id` in two fragments merges,
@@ -252,7 +257,16 @@ pub fn fragment(list: &CommunityList) -> Vec<FragList> {
         .filter(|e| list.is_live(&e.community_id))
         .map(|e| {
             let current = material(&e.current);
-            let seed = material(&e.seed);
+            let mut seed = material(&e.seed);
+            // seed's cosmetic fields are current's (CORD-02 §8): seed anchors keys,
+            // and comparing labels would let one rename fork the snapshots forever.
+            seed.name = current.name.clone();
+            seed.relays = current.relays.clone();
+            for ch in &mut seed.channels {
+                if let Some(cur) = current.channels.iter().find(|c| c.id == ch.id) {
+                    ch.name = cur.name.clone();
+                }
+            }
             FragEntry {
                 community_id: b64(&e.community_id),
                 // The omission that pays for itself: identical snapshots are the
@@ -281,7 +295,7 @@ pub fn fragment(list: &CommunityList) -> Vec<FragList> {
         extra: list.extra.clone(),
     }];
     // Room left in the current fragment, measured against the projected event.
-    let fits = |f: &FragList, add: usize| projected_event_bytes(json_len(f) + add) <= MAX_EVENT_BYTES;
+    let fits = |f: &FragList, add: usize| projected_event_bytes(json_len(f) + add) <= PACK_TARGET_BYTES;
 
     for e in entries {
         let cost = json_len(&e) + 1;
@@ -562,8 +576,30 @@ mod tests {
         let f = fragment(&list_of(entries));
         assert!(f.len() > 1, "400 memberships must not fit one event");
         for frag in &f {
-            assert!(projected_event_bytes(json_len(frag)) <= MAX_EVENT_BYTES);
+            // Packed to the TARGET, not the ceiling — an event at 65,536 exactly
+            // is a coin-flip between one relay's `>` and another's `>=`.
+            assert!(projected_event_bytes(json_len(frag)) <= PACK_TARGET_BYTES);
             assert_eq!(frag.frags, f.len(), "every fragment declares the total");
         }
+    }
+
+    #[test]
+    fn a_rename_never_forks_seed_from_current() {
+        // Same keys and epoch, renamed community + channel + moved relays: the
+        // stale labels must not re-materialize the duplicate snapshot.
+        let mut old = jm("Old Name");
+        old.relays = vec!["wss://old.example.com".into()];
+        old.channels.push(ChannelKeyRef { id: hex32(0x66), key: Some(hex32(0x77)), epoch: 2, name: "old-general".into(), extra: Default::default() });
+        let mut new = jm("New Name");
+        new.channels.push(ChannelKeyRef { id: hex32(0x66), key: Some(hex32(0x77)), epoch: 2, name: "general".into(), extra: Default::default() });
+        let f = fragment(&list_of(vec![entry(old, new)]));
+        assert!(f[0].entries[0].seed.is_none(), "cosmetic drift is not a difference");
+
+        // A real divergence (an older epoch) keeps seed — carrying current's cosmetics.
+        let mut refounded = jm("Old Name");
+        refounded.root_epoch = 1;
+        let g = fragment(&list_of(vec![entry(refounded, jm("New Name"))]));
+        let seed = g[0].entries[0].seed.as_ref().expect("an older epoch is a real difference");
+        assert_eq!(seed.name, "New Name", "seed's cosmetic fields are current's");
     }
 }
