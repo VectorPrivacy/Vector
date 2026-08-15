@@ -427,7 +427,11 @@ fn dispatch_chat_event(event: ChatEvent, channel_id: &str, my_pubkey: &PublicKey
         // own CORD-04 banned-author drop (the persisted kinds get theirs in
         // `apply_chat_to_state`).
         ChatEvent::Typing { opened } => {
-            if author_is_banned_here(channel_id, &opened.author) {
+            // Drop by AUTHOR, not by wrap id: another client signing with the same
+            // key is still us, and the send-side dedup only knows our own wraps.
+            // Drop by AUTHOR, not by wrap id: another client signing with the same
+            // key is still us, and the send-side dedup only knows our own wraps.
+            if opened.author == *my_pubkey || author_is_banned_here(channel_id, &opened.author) {
                 return DispatchedV2::Ignored;
             }
             let npub = opened.author.to_bech32().unwrap_or_default();
@@ -533,6 +537,7 @@ mod tests {
         updates: Mutex<Vec<(String, String)>>,
         removed: Mutex<Vec<(String, String)>>,
         presence: Mutex<Vec<(String, bool)>>,
+        typing: Mutex<Vec<(String, String)>>,
     }
     impl InboundEventHandler for Recorder {
         fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
@@ -546,6 +551,9 @@ mod tests {
         }
         fn on_community_presence(&self, _c: &str, npub: &str, joined: bool, _e: &str, _a: u64, _b: Option<&str>, _l: Option<&str>) {
             self.presence.lock().unwrap().push((npub.to_string(), joined));
+        }
+        fn on_community_typing(&self, chat_id: &str, npub: &str, _until: u64) {
+            self.typing.lock().unwrap().push((chat_id.to_string(), npub.to_string()));
         }
     }
 
@@ -1028,6 +1036,38 @@ mod tests {
         let (w3, _) = chat::seal_chat_rumor(&m3, &group, &innocent, Timestamp::from_secs(11), false).unwrap();
         let ev = chat::open_chat_event(&w3, &group, &general, community.root_epoch).unwrap();
         assert!(matches!(persist_chat_event(&ev, &cid, &me.public_key()).await, Some(ChatPersist::New(_))));
+    }
+
+    #[tokio::test]
+    async fn my_own_typing_from_another_client_never_paints_me_as_typing() {
+        use nostr_sdk::prelude::Timestamp;
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "Typing", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+        let rec = Recorder::default();
+
+        // A second client of OURS (same key, its own wrap id — so the send-side
+        // wrap dedup can't catch it) signals typing.
+        let mine = chat::build_typing_rumor(me.public_key(), &general, community.root_epoch, 5_000);
+        let (wm, _) = chat::seal_chat_rumor(&mine, &group, &me, Timestamp::from_secs(5), true).unwrap();
+        assert!(
+            matches!(dispatch_wrap(&wm, &community, &me.public_key(), &rec), DispatchedV2::Ignored),
+            "our own typing signal is not someone typing at us"
+        );
+        assert!(rec.typing.lock().unwrap().is_empty(), "no typing callback for our own signal");
+
+        // Someone else typing still lands.
+        let peer = Keys::generate();
+        let theirs = chat::build_typing_rumor(peer.public_key(), &general, community.root_epoch, 6_000);
+        let (wt, _) = chat::seal_chat_rumor(&theirs, &group, &peer, Timestamp::from_secs(6), true).unwrap();
+        assert!(matches!(dispatch_wrap(&wt, &community, &me.public_key(), &rec), DispatchedV2::Typing { .. }));
+        let got = rec.typing.lock().unwrap();
+        assert_eq!(got.len(), 1, "exactly the peer's signal fired");
+        assert_eq!(got[0].0, cid);
+        assert_eq!(got[0].1, peer.public_key().to_bech32().unwrap());
     }
 
     #[tokio::test]
