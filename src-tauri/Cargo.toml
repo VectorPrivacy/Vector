@@ -189,3 +189,10 @@ nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-
 noq = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
 noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
 noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
+# saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
+# (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
+# and its saturating ops evaluate those limits eagerly — so tor-netdoc's first
+# consensus time-range wrap spins a core forever and Tor freezes at 15%
+# bootstrap. Vendored with the probe and eagerness fixed; drop when an upstream
+# release ships the fix.
+saturating-time = { path = "../crates/vendor/saturating-time" }
