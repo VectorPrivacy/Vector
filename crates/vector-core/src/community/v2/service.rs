@@ -1386,7 +1386,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
 
         // A dissolved community is a grave (CORD-02 §9): refuse to join it.
         if is_dissolved(transport, &community).await {
-            return Err("this community has been dissolved".to_string());
+            return Err(ERR_DISSOLVED.to_string());
         }
 
         // Join-time ban gate (CORD-04 §4, Armada parity): an honest client refuses to join a
@@ -3496,6 +3496,29 @@ pub struct ListSyncOutcome {
 /// Marks that this account has written the fragmented list at least once.
 const LIST_SEEDED_KEY: &str = "community_list_frag_seeded";
 
+/// The join refusal for a VERIFIED dissolution — an owner-signed, identity-bound
+/// tombstone (§9: no un-dissolve). A sentinel because the accept boundary matches
+/// on it: this is the one join failure that is a verdict rather than a maybe, so
+/// the parked invite is retired instead of kept for a retry that can never succeed.
+pub const ERR_DISSOLVED: &str = "this community has been dissolved";
+
+/// Retire a parked invite whose community is provably dead: drop the local row and
+/// tombstone the §8 List so every sibling device purges its copy on the next sync.
+/// ONLY for the dissolved verdict — ambiguous could-not-verify failures stay parked.
+pub async fn retire_dead_invite<T: Transport + ?Sized>(transport: &T, community_id_hex: &str, relays: &[String]) {
+    let _ = crate::db::community::delete_pending_invite(community_id_hex);
+    if let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(community_id_hex) {
+        let id = crate::community::CommunityId(cid);
+        let at = now_ms();
+        if tombstone_community_list(transport, &id, &relays.to_vec(), at).await.is_err() {
+            // The row is already gone locally; make sure the suppression still
+            // reaches sibling devices once the relays cooperate.
+            tombstone_community_list_durable(id, relays.to_vec(), at);
+        }
+    }
+    crate::emit_event("community_invites_purged", &serde_json::json!({}));
+}
+
 /// Every relay answered EOSE with zero fragments — the only reading of "empty"
 /// strong enough to seed over. The aggregate fetch that precedes this cannot
 /// distinguish "no fragments" from "the relay holding them never answered";
@@ -3616,6 +3639,26 @@ pub async fn sync_community_list<T: Transport + ?Sized>(transport: &T, bootstrap
             let channel_ids: Vec<String> = held.channels.iter().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)).collect();
             let _ = crate::db::community::delete_community(&t.community_id);
             removed.push((t.community_id.clone(), channel_ids));
+        }
+        // A tombstone also retires any PARKED invite it post-dates — a decline or a
+        // dissolution-retire made on another device. Supersession, not a bare id
+        // match: only a removal NEWER than the invite's arrival is a verdict on it;
+        // an older tombstone is a past leave the re-invite already superseded
+        // (received_at is seconds, removed_at is ms).
+        let mut invites_purged = 0usize;
+        for t in &list.tombstones {
+            if list.is_live(&t.community_id) {
+                continue;
+            }
+            let Ok(Some(received_at)) = crate::db::community::pending_invite_received_at(&t.community_id) else { continue };
+            if (received_at.max(0) as u64).saturating_mul(1000) <= t.removed_at
+                && crate::db::community::delete_pending_invite(&t.community_id).is_ok()
+            {
+                invites_purged += 1;
+            }
+        }
+        if invites_purged > 0 {
+            crate::emit_event("community_invites_purged", &serde_json::json!({}));
         }
         let mut joined = Vec::new();
         for entry in list.live_entries() {
@@ -9909,6 +9952,53 @@ mod tests {
         let empty = MemoryRelay::new();
         sync_community_list(&empty, &relays).await.unwrap();
         assert_eq!(empty.stored_count(), 0, "the seed runs once");
+    }
+
+    #[tokio::test]
+    async fn a_dissolved_invite_retires_on_accept_and_tombstones_the_list() {
+        // The invite to a dissolved community is the one join failure with no
+        // retry: the refusal is an owner-signed grave. The boundary must retire
+        // the parked row AND write the §8 tombstone siblings purge on.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Grave", bed.relays.clone(), None).await.unwrap();
+        let bundle = serde_json::to_string(&bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None)).unwrap();
+        dissolve_community(&bed.relay, &community).await.unwrap();
+
+        bed.swap_to(&member);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::save_pending_invite(&cid_hex, &bundle, "inviter", i64::MAX).unwrap();
+        let err = accept_parked_invite(&bed.relay, &bundle, None).await.unwrap_err();
+        assert_eq!(err, ERR_DISSOLVED, "the grave refusal is the sentinel the boundary matches");
+
+        retire_dead_invite(&bed.relay, &cid_hex, &bed.relays).await;
+        assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_none(), "the dead invite leaves this device");
+        let set = fetch_fragments(&bed.relay, &bed.relays).await.unwrap().expect("the tombstone published");
+        assert!(set.list.tombstones.iter().any(|t| t.community_id == cid_hex), "and siblings get the §8 tombstone");
+        assert!(!set.list.is_live(&cid_hex));
+    }
+
+    #[tokio::test]
+    async fn a_sibling_devices_list_tombstone_purges_the_parked_invite() {
+        // Device A declined (or retired a dead invite): its §8 tombstone must
+        // clear device B's parked copy on the next list sync — and ONLY when the
+        // removal post-dates the invite, so a fresh re-invite survives an old leave.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let relays = vec!["wss://r".to_string()];
+        let cid = crate::community::CommunityId([0x5A; 32]);
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+
+        // An OLD tombstone (a past leave) must not kill an invite received after it.
+        tombstone_community_list(&relay, &cid, &relays, now_ms() - 600_000).await.unwrap();
+        crate::db::community::save_pending_invite(&cid_hex, "{}", "inviter", i64::MAX).unwrap();
+        sync_community_list(&relay, &relays).await.unwrap();
+        assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_some(), "a re-invite supersedes a past leave");
+
+        // A tombstone NEWER than the invite is a verdict on it: purged on sync.
+        tombstone_community_list(&relay, &cid, &relays, now_ms() + 10_000).await.unwrap();
+        sync_community_list(&relay, &relays).await.unwrap();
+        assert!(crate::db::community::get_pending_invite(&cid_hex).unwrap().is_none(), "the sibling's removal clears the parked copy");
     }
 
     #[tokio::test]

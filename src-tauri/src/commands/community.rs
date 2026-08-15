@@ -3856,14 +3856,29 @@ pub async fn decline_community_invite(community_id: String) -> Result<(), String
     let relays: Vec<String> = vector_core::db::community::get_pending_invite(&community_id)
         .ok()
         .flatten()
-        .and_then(|j| vector_core::community::invite::CommunityInvite::from_json(&j).ok())
-        .map(|inv| inv.relays)
+        .and_then(|j| {
+            vector_core::community::v2::invite::CommunityInvite::from_bundle_json(&j)
+                .map(|inv| inv.relays)
+                .or_else(|_| vector_core::community::invite::CommunityInvite::from_json(&j).map(|inv| inv.relays))
+                .ok()
+        })
         .unwrap_or_default();
 
     vector_core::db::community::delete_pending_invite(&community_id)?;
-    // Cross-device + durable suppression: tombstone (reuses the leave path's publish/converge) so the
-    // un-deletable 3304 can't re-nag and other devices drop their parked copy.
-    vector_core::community::list::remove_membership(&community_id);
+    // Cross-device + durable suppression: tombstone the kind-33302 List (the v1 mirror is
+    // READ-only) so the un-deletable invite wrap can't re-nag and other devices drop their
+    // parked copy on their next list sync.
+    if let Some(cid) = vector_core::simd::hex::hex_to_bytes_32_checked(&community_id) {
+        let removed_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        vector_core::community::v2::service::tombstone_community_list_durable(
+            vector_core::community::CommunityId(cid),
+            relays.clone(),
+            removed_at,
+        );
+    }
     // Drop any lingering warm entry, then prune the relays no joined community needs.
     vector_core::community::cache::abort_preload(&community_id);
     if !relays.is_empty() {

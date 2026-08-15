@@ -1426,9 +1426,21 @@ impl VectorCore {
                 // erase a GENUINE invite on a transient blip or an attacker's flood. A
                 // pre-planted forged-root bundle (deferred protocol residual) is instead
                 // cleared by the user declining it.
-                let community = crate::community::v2::service::accept_parked_invite(&transport, &bundle_json, inviter.as_deref())
-                    .await
-                    .map_err(VectorError::Other)?;
+                //
+                // ONE exception: a verified dissolution is a verdict, not a maybe — an
+                // owner-signed grave has no undo (§9), so that invite can never succeed
+                // and is retired everywhere instead of parking a permanent error loop.
+                let community = match crate::community::v2::service::accept_parked_invite(&transport, &bundle_json, inviter.as_deref()).await {
+                    Ok(c) => c,
+                    Err(e) if e == crate::community::v2::service::ERR_DISSOLVED => {
+                        let relays = crate::community::v2::invite::CommunityInvite::from_bundle_json(&bundle_json)
+                            .map(|i| i.relays)
+                            .unwrap_or_default();
+                        crate::community::v2::service::retire_dead_invite(&transport, community_id, &relays).await;
+                        return Err(VectorError::Other("this community has been dissolved — the invite was removed".into()));
+                    }
+                    Err(e) => return Err(VectorError::Other(e)),
+                };
                 self.register_v2_chats(&community, &session).await;
                 if let Some(client) = state::nostr_client() {
                     crate::community::v2::realtime::refresh_subscription(&client).await;
