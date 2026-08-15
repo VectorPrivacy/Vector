@@ -730,20 +730,33 @@ pub(crate) async fn teardown_community_local_at(
     // Capture this community's relays BEFORE deletion so we can drop any that no remaining community
     // needs — and that aren't the user's own relays — from the pool after the routes refresh.
     let left_relays: Vec<String> = community_relays_of(community_id);
+    // The protocol too: `is_v2_community` reads the `communities` row, and the delete below
+    // removes it — asked afterwards, every community answers "not v2" and the v1-only guards
+    // on the list writers stop guarding. (Callers whose service already deleted the row —
+    // the v2 leave — still read false here, which is the correct answer for a list the
+    // service has already tombstoned itself.)
+    let was_v2 = is_v2_community(community_id);
 
     let _ = vector_core::db::community::delete_community_retain_keys(community_id);
     // tombstone it out of the cross-device list. A LOCAL trigger (leave / observed-ban / kick)
     // republishes so our other devices tear it down too; the RECEIVE path (a sibling already published the
     // removal) tombstones locally only — republishing there would re-echo our own event over the live sub.
     if republish_list {
-        vector_core::community::list::remove_membership(community_id);
+        // v1 ONLY, same rule as the receive path below: a v2 community's removal is
+        // recorded in its kind-33302 List by the SERVICE that triggered this teardown
+        // (`leave_community` / `dissolve_community` both publish the §8 tombstone with
+        // a durable retry) — writing here as well deposits v2 tombstones into the v1
+        // (30078) mirror, which can never gain a matching v2 entry.
+        if !was_v2 {
+            vector_core::community::list::remove_membership(community_id);
+        }
     } else {
         // v1 ONLY. A v2 community owns its membership in the kind-33302 list: the leave path
         // publishes its own tombstone there and `sync_community_list` tears it down on the
         // other devices. Writing here as well deposited v2 tombstones into the v1 (30078)
         // mirror, which can never gain a matching v2 entry — so that document read "removed"
         // for every v2 community, permanently, and the boot sweep acted on it.
-        if !is_v2_community(community_id) {
+        if !was_v2 {
             match removed_at {
                 Some(at) => vector_core::community::list::tombstone_local_only_at(community_id, at),
                 None => vector_core::community::list::tombstone_local_only(community_id),

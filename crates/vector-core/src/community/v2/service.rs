@@ -2369,7 +2369,10 @@ pub async fn memberlist<T: Transport + ?Sized>(transport: &T, community: &Commun
 /// tombstone at the dissolved plane (`community_id`-derived, epoch-free, so every
 /// past or present member resolves the same grave and a Refounding can never strand
 /// it). The tombstone's presence IS the state; only the owner's seal counts.
-/// Irreversible — on success the local hold is sealed read-only.
+/// Irreversible — on success the local hold is sealed read-only AND the owner's
+/// own membership is tombstoned out of the §8 List: dissolving is also leaving,
+/// so the owner's other devices tear the community down on their next list sync
+/// instead of keeping a sealed husk they believe is still held.
 pub async fn dissolve_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) -> Result<(), String> {
     crate::db::scoped(async move {
         let signer = crate::signer::active_signer()?;
@@ -2377,12 +2380,25 @@ pub async fn dissolve_community<T: Transport + ?Sized>(transport: &T, community:
         if community.owner()? != my_pk {
             return Err("only the owner can dissolve a community".to_string());
         }
-        let at = now_ms() / 1000;
+        let at_ms = now_ms();
+        let at = at_ms / 1000;
         let rumor = super::dissolution::dissolved_tombstone_rumor(my_pk, community.id(), at);
         let wrap = super::dissolution::seal_dissolved_signed(&signer, my_pk, &rumor, community.id(), Timestamp::from_secs(at)).await.map_err(|e| e.to_string())?;
         // Durable broadcast: death must propagate (a rekey racing a dissolution loses).
         transport.publish_durable(&wrap, &community.relays).await?;
         crate::db::community::set_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0))?;
+        // Dissolving IS leaving (same discipline as `leave_community`): retire the
+        // membership from the cross-device List in the same breath as the grave.
+        // Without this the tombstone never reaches kind 33302 — the teardown above
+        // this call only ever spoke the retired v1 mirror — so every sibling device
+        // and every §8 client kept the entry LIVE, folded the grave, and showed a
+        // dissolved husk that had to be removed by hand. Best-effort with a durable
+        // retry, never failing the dissolve: the grave is already published, and an
+        // unrecorded leave only costs the husk lingering until the retry lands.
+        if let Err(e) = tombstone_community_list(transport, community.id(), &community.relays, at_ms).await {
+            crate::log_net_fail!("[CommunityList] dissolve tombstone failed ({}) — retrying in the background", e);
+            tombstone_community_list_durable(*community.id(), community.relays.clone(), at_ms);
+        }
         Ok(())
     })
     .await
@@ -9996,6 +10012,29 @@ mod tests {
         let set = fetch_fragments(&bed.relay, &bed.relays).await.unwrap().expect("the tombstone published");
         assert!(set.list.tombstones.iter().any(|t| t.community_id == cid_hex), "and siblings get the §8 tombstone");
         assert!(!set.list.is_live(&cid_hex));
+    }
+
+    #[tokio::test]
+    async fn an_owner_dissolve_tombstones_the_list_for_sibling_devices() {
+        // Dissolving IS leaving. The grave alone reaches every MEMBER, but only a §8
+        // tombstone reaches the owner's own sibling devices — without it they keep the
+        // membership LIVE in the List, fold the grave, and show a sealed husk the owner
+        // already deleted, on every device, until each is cleaned up by hand.
+        let (bed, owner, _member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Doomed", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let before = fetch_fragments(&bed.relay, &bed.relays).await.unwrap().expect("create published the List");
+        assert!(before.list.is_live(&cid_hex), "the membership is live before the dissolve");
+
+        dissolve_community(&bed.relay, &community).await.unwrap();
+
+        let set = fetch_fragments(&bed.relay, &bed.relays).await.unwrap().expect("the List outlives the dissolve");
+        assert!(
+            set.list.tombstones.iter().any(|t| t.community_id == cid_hex),
+            "the dissolve published the §8 tombstone alongside the grave"
+        );
+        assert!(!set.list.is_live(&cid_hex), "sibling devices tear the husk down on their next list sync");
     }
 
     #[tokio::test]
