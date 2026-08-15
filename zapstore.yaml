@@ -17,6 +17,9 @@ description: |
     - Custom emoji packs and chat wallpapers
     - Voice messaging
     - Private local AI for multilingual translations
+    - Profile QR cards with in-app camera scanning
+    - Pinned chats and pinned Community messages, synced across devices
+    - Biometric unlock with your phone's lock screen
     - Private notifications: hide sender and content from your notification shade
     - Photos strip EXIF and location metadata by default
     - Zero metadata leakage
