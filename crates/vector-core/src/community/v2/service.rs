@@ -467,6 +467,23 @@ fn chat_send_context(community: &CommunityV2, channel_id: &ChannelId) -> Result<
 /// Seal one chat rumor, publish, and echo the send into the
 /// shared store. Returns the rumor id (hex).
 #[allow(clippy::too_many_arguments)]
+/// §7: an OWN edit must refresh its pinned target's proof bundle from the SEND
+/// side — the relay echo of an own send deduplicates against the local echo, so
+/// the ingest hook never sees it (send_delete's omission duty, same reason).
+/// Without this the author's pin lags behind their message while everyone
+/// else's follows. Returns the duty's arguments when the echo applied an edit.
+fn own_echo_pin_duty(
+    outcome: &super::inbound::ChatPersist,
+    event: &ChatEvent,
+) -> Option<(String, super::stream::OpenedStream)> {
+    match (outcome, event) {
+        (super::inbound::ChatPersist::Updated { .. }, ChatEvent::Edit { opened, target, .. }) => {
+            Some((crate::simd::hex::bytes_to_hex_32(target), opened.clone()))
+        }
+        _ => None,
+    }
+}
+
 async fn publish_chat<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -505,6 +522,9 @@ async fn publish_chat<T: Transport + ?Sized>(
                 };
                 if let Some(outcome) = outcome {
                     super::inbound::persist_chat(&channel_hex, &outcome).await;
+                    if let Some((target_hex, opened)) = own_echo_pin_duty(&outcome, &event) {
+                        spawn_pin_duty(&channel_hex, &target_hex, Some(opened));
+                    }
                 }
             }
         }
@@ -15396,6 +15416,38 @@ mod tests {
         // Same revision again → monotonic guard, no new edition.
         run_pin_duty(&relay, &ch_hex, &rumor_id, Some(edit_opened)).await.unwrap();
         assert_eq!(read_channel_pins(&community, &general).unwrap().version, v, "idempotent");
+    }
+
+    /// §7 author-side trigger: an own edit's relay echo is a dedup'd duplicate
+    /// at ingest, so publish_chat's SEND echo must decide the duty itself —
+    /// otherwise the author's own pin lags behind their message while every
+    /// other client's follows ("the affected author acts at once").
+    #[tokio::test]
+    async fn an_own_edit_echo_carries_the_pin_duty_trigger() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "OwnEdit", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+
+        let rumor_id = send_message(&relay, &community, &general, "before").await.unwrap();
+        send_edit(&relay, &community, &general, &rumor_id, "after").await.unwrap();
+        let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
+        let edit_event = &page.iter().find(|f| matches!(&f.event, ChatEvent::Edit { .. })).expect("the edit reads back").event;
+        let msg_event = &page.iter().find(|f| matches!(&f.event, ChatEvent::Message { .. })).expect("the message reads back").event;
+
+        let updated = crate::community::v2::inbound::ChatPersist::Updated {
+            message: crate::types::Message::default(),
+            edit_event: None,
+        };
+        let (target_hex, opened) = own_echo_pin_duty(&updated, edit_event).expect("an applied own edit fires the duty");
+        assert_eq!(target_hex, rumor_id, "the duty targets the EDITED message, not the edit rumor");
+        assert_ne!(opened.rumor_id.to_hex(), rumor_id, "and carries the edit's own opened stream for the bundle");
+
+        // A fresh message echo is not a duty…
+        let new = crate::community::v2::inbound::ChatPersist::New(crate::types::Message::default());
+        assert!(own_echo_pin_duty(&new, msg_event).is_none());
+        // …and neither is a reaction-shaped Updated on a non-edit event.
+        assert!(own_echo_pin_duty(&updated, msg_event).is_none());
     }
 
     /// §7 Rotator duty: a private-channel rotation republishes the Pin List
