@@ -358,6 +358,10 @@ body.ws:not(.ws-rail-collapsed) #ws-rail-account #account {
   padding: 8px 10px;
   align-items: center;
   transition: background-color 0.12s ease;
+  /* The list row carries a 15px bottom margin to clear the chat beneath it; in
+     the rail footer there's nothing beneath, so it reads as the chip floating
+     off the bottom of the rail. */
+  margin-bottom: 0;
 }
 
 body.ws:not(.ws-rail-collapsed) #ws-rail-account #account:hover {
@@ -763,7 +767,9 @@ body.ws #ws-rail-account #account-status {
   width: 100%;
   box-sizing: border-box;
   margin: 0;
-  padding-left: 30px;
+  /* No indent: the status shares the name's grid column, which already clears
+     the avatar. The old 30px cleared a 22px avatar sitting on the line above. */
+  padding-left: 0;
   font-size: 12px;
   text-align: left;
 }
