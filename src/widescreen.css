@@ -137,6 +137,13 @@ body.ws #login-form {
   background-color: #030303;
 }
 
+/* Its Back bar is markup-classed `chat-new-header`, which takes the active-pane
+   inset below — correct for the New Chat pane, wrong here: this form spans every
+   column, so its header has to as well. */
+body.ws #login-back-bar {
+  left: 0;
+}
+
 /* ======================= 3. Visibility locks ============================= */
 
 /* These beat the inline `display: none` that openChat/closeChat/openProfile
