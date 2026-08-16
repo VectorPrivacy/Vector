@@ -3111,6 +3111,12 @@ function markAsRead(chat, message, explicit = false) {
         // Persist via backend using chat-based API
         invoke("mark_as_read", { chatId: chat.id, messageId: message.id });
 
+        // Widescreen keeps the list, its channels and the rail mounted beside the
+        // open chat, so the optimistic clear has to repaint NOW: the refresh below
+        // compares against the value we just set, finds no change, and repaints
+        // nothing. Hash-gated, so a burst of marks still costs one render.
+        if (wsActive()) renderChatlist();
+
         // The read advanced — re-derive this chat's unread from the DB (authoritative).
         scheduleUnreadRefresh();
     }
@@ -3209,7 +3215,9 @@ async function refreshUnreadCounts() {
         // A chat is open → the chatlist is hidden, so refresh the in-chat back-chevron unread dot
         // (it reads the chat.unread we just updated); otherwise refresh the visible rows.
         if (strOpenChat) updateChatBackNotification();
-        else renderChatlist();
+        // "Open" stops meaning "list hidden" in widescreen — the rows sit in the
+        // next column over, so they repaint either way.
+        if (!strOpenChat || wsActive()) renderChatlist();
     }
 }
 
