@@ -69,6 +69,7 @@ function renderRailShortcuts() {
     // New rows change what's below without moving the strip's own box, which is
     // the one case the ResizeObserver can't see.
     syncRailFade();
+    markRailShortcutActive();
 }
 
 function buildRailItem(chat, isCommunity) {
@@ -81,7 +82,8 @@ function buildRailItem(chat, isCommunity) {
     item.className = 'ws-rail-item btn' + (isCommunity ? ' is-community' : '');
     item.id = `ws-rail-item-${chat.id}`;
     item.title = name;
-    if (chat.id === strOpenChat) item.classList.add('active');
+    // Selection is stamped by markRailShortcutActive once the strip exists — one
+    // owner for the rule, rather than a second copy of it per row.
 
     const avatarSrc = isCommunity
         ? (chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null)
@@ -111,10 +113,25 @@ function buildRailItem(chat, isCommunity) {
     return item;
 }
 
+/**
+ * The rail row that REPRESENTS the open chat. A community has one shortcut, built
+ * from its primary channel, and it stands for the whole community — so any of its
+ * channels lights it. Matching the open chat's own id only ever hit `general`.
+ */
+function railItemIdForOpenChat() {
+    if (!strOpenChat) return null;
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    const communityId = communityIdOfChat(chat);
+    if (!communityId) return `ws-rail-item-${strOpenChat}`;
+    const primary = arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c));
+    return `ws-rail-item-${(primary || chat).id}`;
+}
+
 /** Re-stamp which shortcut is the open chat, without rebuilding the strip. */
 function markRailShortcutActive() {
     const rail = document.getElementById('ws-rail-shortcuts');
     if (!rail) return;
     for (const item of rail.querySelectorAll('.ws-rail-item.active')) item.classList.remove('active');
-    if (strOpenChat) document.getElementById(`ws-rail-item-${strOpenChat}`)?.classList.add('active');
+    const id = railItemIdForOpenChat();
+    if (id) document.getElementById(id)?.classList.add('active');
 }
