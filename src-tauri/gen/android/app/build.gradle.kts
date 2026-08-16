@@ -27,13 +27,32 @@ val cargoVersion = if (cargoTomlFile.exists()) {
     "0.0.1"
 }
 
-// Convert semantic version to version code (e.g., 0.2.2 -> 22, 1.0.0 -> 10000)
+// Convert semantic version to version code (e.g. 0.4.2-1 -> 40201, 0.4.2 -> 40299).
+//
+// The low two digits rank a version's previews below the release they lead to,
+// which is what lets Android accept preview -> official as an upgrade. Without
+// that slot a `0.4.2-1` APK scores below 0.4.1 and the install is refused as a
+// downgrade. Codes only ever grow, so the x100 widening is safe against every
+// build already in the wild.
 fun versionToCode(version: String): Int {
-    val parts = version.split(".").map { it.toIntOrNull() ?: 0 }
+    val core = version.substringBefore('-').substringBefore('+')
+    val parts = core.split(".").map { it.toIntOrNull() ?: 0 }
     val major = parts.getOrElse(0) { 0 }
     val minor = parts.getOrElse(1) { 0 }
     val patch = parts.getOrElse(2) { 0 }
-    return major * 10000 + minor * 100 + patch
+
+    // Stable sorts above every preview of the same version.
+    val preview = version.substringAfter('-', "").substringBefore('+')
+    val slot = if (preview.isEmpty()) 99 else preview.toIntOrNull()
+        ?.takeIf { it in 1..98 }
+        // The MSI bundler already requires a numeric pre-release identifier;
+        // failing here keeps Android from silently minting an unorderable code,
+        // which is unfixable once users have installed it.
+        ?: throw GradleException(
+            "Version '$version': preview identifier must be a number from 1 to 98 (e.g. 0.4.2-1)"
+        )
+
+    return (major * 10000 + minor * 100 + patch) * 100 + slot
 }
 
 android {

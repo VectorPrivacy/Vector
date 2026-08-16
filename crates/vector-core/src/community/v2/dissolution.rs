@@ -26,7 +26,7 @@
 //!     message, honored even post-seal (a self-scrub injects no content, so
 //!     read-only isn't violated). That lives on the message plane, not here.
 
-use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use super::super::CommunityId;
 use super::control::CommunityIdentity;
@@ -85,8 +85,8 @@ impl From<StreamError> for DissolveError {
 /// upstream — Armada carries the same replay hole).
 pub fn dissolved_tombstone_rumor(owner: PublicKey, community_id: &CommunityId, created_at_secs: u64) -> UnsignedEvent {
     let tags = vec![
-        Tag::custom(TagKind::Custom(TAG_VSK.into()), [vsk::DISSOLVED.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_EID.into()), [crate::simd::hex::bytes_to_hex_32(&community_id.0)]),
+        Tag::custom(TAG_VSK, [vsk::DISSOLVED.to_string()]),
+        Tag::custom(TAG_EID, [crate::simd::hex::bytes_to_hex_32(&community_id.0)]),
     ];
     stream::build_rumor_secs(kind::CONTROL, owner, "", tags, created_at_secs)
 }
@@ -107,9 +107,9 @@ pub fn seal_dissolved(
 }
 
 /// Signer-driven twin of [`seal_dissolved`] for bunker / NIP-55 accounts: the
-/// plaintext dissolution tombstone signs through a [`NostrSigner`]. `owner_pk`
+/// plaintext dissolution tombstone signs through a [`VectorSigner`]. `owner_pk`
 /// must equal `my_public_key()` (the owner identity the signer signs as).
-pub async fn seal_dissolved_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn seal_dissolved_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     owner_pk: PublicKey,
     rumor: &UnsignedEvent,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-verify-remote-media"
+description = "Enables the verify_remote_media command without any pre-configured scope."
+commands.allow = ["verify_remote_media"]
+
+[[permission]]
+identifier = "deny-verify-remote-media"
+description = "Denies the verify_remote_media command without any pre-configured scope."
+commands.deny = ["verify_remote_media"]

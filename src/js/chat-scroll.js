@@ -207,6 +207,7 @@ function _windowDropBottom(count) {
     }
     windowBottomId = msgs[newEnd - 1]?.id || windowBottomId;
     _dedupeAdjacentDaySeparators();
+    _mergeAdjacentSystemEvents();
     return removed;
 }
 
@@ -245,8 +246,10 @@ function _windowDropTop(count) {
         }
     }
     windowTopId = firstKeptId || windowTopId;
-    // Rebuild date dividers (a dropped row may have orphaned a leading divider).
+    // Rebuild date dividers (a dropped row may have orphaned a leading divider),
+    // then recompute system-event runs the drop may have split or joined.
     _dedupeAdjacentDaySeparators();
+    _mergeAdjacentSystemEvents();
 
     if (!firstKept) return droppedHeightSum;
     // Exact removed height from the kept row's offsetTop delta.
@@ -746,11 +749,83 @@ function compensateChatScrollForResize() {
     if (!domChatMessages) return;
     if (chatOpenTimestamp && Date.now() - chatOpenTimestamp < 100) {
         scrollToBottom(domChatMessages, false);
+        holdChatBottom();
     } else if (proceduralScrollState.isLoadingOlderMessages) {
         correctScrollForMediaLoad();
     } else {
         softChatScroll();
     }
+}
+
+/**
+ * Keep the view at the bottom while the layout settles.
+ *
+ * Media resolves over the frames AFTER a scroll-to-bottom — images, video
+ * posters, album art, link previews — and each one grows the content below the
+ * viewport. The one-shot scroll a load fires lands before its siblings' layout
+ * does, so with several resolving at once the view finishes short, and STAYS
+ * short: nothing looks again. This watches for growth over a bounded window and
+ * re-snaps. It's the only option here: WKWebView's scroll anchoring is unusable
+ * (`overflow-anchor: none` on the message list is deliberate).
+ *
+ * Deliberately a GROWTH compensator, not a clamp — scrollTop is touched only on
+ * the first tick and on frames where the content actually grew. A clamp would
+ * re-open `beginProgrammaticScroll`'s suppression window every frame, swallowing
+ * the user's own scroll-up and fighting them for the whole hold.
+ */
+const BOTTOM_HOLD_MS = 900;
+let _bottomHoldUntil = 0;
+let _bottomHoldRaf = null;
+
+/** Is the app currently asserting "we belong at the bottom"? The pin recompute
+ *  consults this so a settling layout can't be mistaken for the user leaving. */
+function chatBottomHoldPending() { return Date.now() < _bottomHoldUntil; }
+function holdChatBottom(ms = BOTTOM_HOLD_MS) {
+    if (!domChatMessages) return;
+    _bottomHoldUntil = Math.max(_bottomHoldUntil, Date.now() + ms);
+    if (_bottomHoldRaf !== null) return; // already holding; the deadline just moved
+    let lastHeight = domChatMessages.scrollHeight;
+    let lastSet = null;   // where WE last put the view, to tell our own scroll from theirs
+    let firstTick = true;
+    const tick = () => {
+        _bottomHoldRaf = null;
+        const el = domChatMessages;
+        if (!el || !strOpenChat) { _bottomHoldUntil = 0; return; }  // no chat: end the hold
+        if (!chatPinnedToBottom) { _bottomHoldUntil = 0; return; }  // user took over: end it,
+        // and drop the deadline so the pin recompute stops treating the view as held.
+        // A render or a seek owning the viewport is TRANSIENT — skip the frame and
+        // keep watching. Ending the hold here is what let the open-time render
+        // (which sets _windowSuppressAutoScroll across its await) kill the hold
+        // before a single pixel of media had resolved.
+        const viewportBusy = _windowSuppressAutoScroll || _unreadJumpResolving
+            || (CHAT_WINDOW_ENABLED && !isAtDataBottom());
+        if (!viewportBusy) {
+            const height = el.scrollHeight;
+            // Moved UP from where we last put it, and not by a shrink clamping us
+            // (that lands at the bottom, so it can't show real distance): the user
+            // is scrolling away mid-settle. Our own snaps re-open the programmatic
+            // window every growth frame, which would otherwise swallow their intent
+            // and leave the pin stuck on — stand down and latch it here instead.
+            if (lastSet !== null && el.scrollTop < lastSet - 4
+                && height - el.scrollTop - el.clientHeight > 8) {
+                _bottomHoldUntil = 0;
+                _userScrolledAway = true;
+                chatPinnedToBottom = false;
+                return;
+            }
+            if (firstTick || height !== lastHeight) {
+                lastHeight = height;
+                if (height - el.scrollTop - el.clientHeight > 1) {
+                    beginProgrammaticScroll();
+                    el.scrollTop = height;
+                    lastSet = el.scrollTop;
+                }
+            }
+            firstTick = false;
+        }
+        if (Date.now() < _bottomHoldUntil) _bottomHoldRaf = requestAnimationFrame(tick);
+    };
+    _bottomHoldRaf = requestAnimationFrame(tick);
 }
 
 /**

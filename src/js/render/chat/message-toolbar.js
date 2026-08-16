@@ -392,11 +392,19 @@ function _dmsgPositionToolbar(rowEl) {
     // domChatMessages, so it scrolls with the content automatically and no
     // per-frame reposition is needed during scroll.
     const tbW = _dmsgToolbarEl.offsetWidth || 140;
+    const tbH = _dmsgToolbarEl.offsetHeight || 34;
     const rowTop = rowEl.offsetTop;
     const rowRight = rowEl.offsetLeft + rowEl.offsetWidth;
 
     // Anchor: top-right of the row, raised so it overlaps the row above.
-    let top = rowTop - 16;
+    //
+    // A streak continuation has no header and only a 1px gap, so its first line of TEXT
+    // starts at the row's top edge — the standard lift drops the toolbar straight onto it.
+    // Lift those until only the last few pixels overlap the row: covering a little more of
+    // the row above (same author, same streak) beats covering the line you're hovering to
+    // act on. Derived from the measured height so a taller toolbar stays clear.
+    const lift = rowEl.dataset.streak === 'continuation' ? tbH - 4 : 16;
+    let top = rowTop - lift;
     let left = rowRight - tbW - 8;
 
     // Don't push above the very top of the scroll content.
@@ -901,6 +909,9 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
             items.push({ label: 'React', icon: 'smile-face', onClick: () => _dmsgOpenReactionPicker(targetId) });
         }
         items.push({ label: 'Reply', icon: 'reply', onClick: () => _dmsgSelectReply(targetId) });
+        // Pin/Unpin (Concord v2): empty unless this chat is a v2 community
+        // channel and the user holds PIN_MESSAGES.
+        items.push(...pinsMenuItems(targetId));
         if (mine && hasContent && !hasAttachments && !_dmsgCommandInfo(msg)) {
             items.push({ label: 'Edit', icon: 'edit', onClick: () => { if (msg) startEditMessage(targetId, msg.content); } });
         }
@@ -914,7 +925,7 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
             : null;
         if (downloadedPath) {
             if (platformFeatures?.os === 'android') {
-                items.push({ label: 'Open', icon: 'file-search', onClick: () => invoke('open_attachment', { path: downloadedPath }) });
+                items.push({ label: 'Open', icon: 'file-search', onClick: () => (platformFeatures.os === 'android' ? openAndroidAttachment(downloadedPath) : invoke('open_attachment', { path: downloadedPath })) });
                 items.push({ label: 'Share', icon: 'share', onClick: () => invoke('share_attachment', { path: downloadedPath }) });
                 items.push({ label: 'Copy', icon: 'copy', onClick: () => {
                     invoke('write_clipboard_files', { paths: [downloadedPath] })

@@ -105,6 +105,12 @@ pub fn timestamp_from_compact(compact: u64) -> u64 {
     compact
 }
 
+/// Distinct-emoji ceiling on a single message's reaction set. Joining an
+/// existing group is never bounded by this; opening a group past it is
+/// refused at the STATE chokepoint (inbound and outbound alike). The UI's
+/// reaction row mirrors this number.
+pub const MAX_REACTION_GROUPS: usize = 12;
+
 /// Custom epoch in seconds: 2020-01-01 00:00:00 UTC
 const EPOCH_2020_SECS: u64 = 1577836800;
 
@@ -673,6 +679,8 @@ pub struct CompactAttachment {
     pub original_hash: Option<Box<[u8; 32]>>,
     /// WebXDC topic (Mini Apps only - very rare)
     pub webxdc_topic: Option<Box<str>>,
+    /// Mirror URLs for the same ciphertext (None = no mirrors, the common case)
+    pub fallback_urls: Option<Box<[Box<str>]>>,
     /// Original filename (e.g. "memories.zip"). Empty = fallback to {hash}.{ext}
     pub name: Box<str>,
 }
@@ -742,6 +750,8 @@ impl CompactAttachment {
             group_id: att.group_id.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
             original_hash: att.original_hash.as_ref().map(|s| Box::new(hex_to_bytes_32(s))),
             webxdc_topic: att.webxdc_topic.clone().map(|s| s.into_boxed_str()),
+            fallback_urls: (!att.fallback_urls.is_empty())
+                .then(|| att.fallback_urls.iter().map(|s| s.as_str().into()).collect()),
             name: att.name.clone().into_boxed_str(),
         }
     }
@@ -766,6 +776,8 @@ impl CompactAttachment {
             group_id: att.group_id.map(|s| Box::new(hex_to_bytes_32(&s))),
             original_hash: att.original_hash.map(|s| Box::new(hex_to_bytes_32(&s))),
             webxdc_topic: att.webxdc_topic.map(|s| s.into_boxed_str()),
+            fallback_urls: (!att.fallback_urls.is_empty())
+                .then(|| att.fallback_urls.into_iter().map(|s| s.into_boxed_str()).collect()),
             name: att.name.into_boxed_str(),
         }
     }
@@ -787,6 +799,11 @@ impl CompactAttachment {
             webxdc_topic: self.webxdc_topic.as_ref().map(|s| s.to_string()),
             group_id: self.group_id.as_ref().map(|b| bytes_to_hex_32(b)),
             original_hash: self.original_hash.as_ref().map(|b| bytes_to_hex_32(b)),
+            fallback_urls: self
+                .fallback_urls
+                .as_deref()
+                .map(|urls| urls.iter().map(|u| u.to_string()).collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -952,6 +969,8 @@ pub struct CompactMessage {
     pub content: Box<str>,
     /// Content of replied-to message
     pub replied_to_content: Option<Box<str>>,
+    /// The replied-to message's emoji tags (Boxed: rare, keeps the struct lean)
+    pub replied_to_emoji_tags: Option<Box<Vec<crate::types::EmojiTag>>>,
     /// File attachments (CompactAttachment = ~120 bytes vs Attachment's ~320 bytes)
     pub attachments: TinyVec<CompactAttachment>,
     /// Emoji reactions (CompactReaction = ~82 bytes vs Reaction's ~292 bytes)
@@ -1058,6 +1077,7 @@ impl CompactMessage {
 
     /// Add a reaction to this message
     /// Note: Since TinyVec is immutable, this rebuilds the entire reactions list
+    /// (see [`MAX_REACTION_GROUPS`] for the distinct-emoji ceiling)
     pub fn add_reaction(&mut self, reaction: Reaction, interner: &mut NpubInterner) -> bool {
         // Convert to binary ID for comparison
         let reaction_id = hex_to_bytes_32(&reaction.id);
@@ -1065,6 +1085,25 @@ impl CompactMessage {
         // Check if already exists
         if self.reactions.iter().any(|r| r.id == reaction_id) {
             return false;
+        }
+
+        // The interned form of `Reaction::same_slot`: the set is keyed by
+        // (author, emoji), so a second event from the same author carrying the
+        // same emoji is the reaction we already hold, not another one.
+        let author_idx = interner.intern(&reaction.author_id);
+        if self.reactions.iter().any(|r| r.author_idx == author_idx && *r.emoji == *reaction.emoji) {
+            return false;
+        }
+
+        // Distinct-emoji ceiling: joining an existing group is always fine,
+        // but a reaction opening a group past the cap is refused — the same
+        // bound the UI draws, enforced against hostile inbound too.
+        if !self.reactions.iter().any(|r| *r.emoji == *reaction.emoji) {
+            let groups: std::collections::HashSet<&str> =
+                self.reactions.iter().map(|r| &*r.emoji).collect();
+            if groups.len() >= MAX_REACTION_GROUPS {
+                return false;
+            }
         }
 
         // Convert to compact and rebuild
@@ -1508,6 +1547,9 @@ impl CompactMessage {
             // Box<str> for content (saves 8 bytes per field)
             content: msg.content.clone().into_boxed_str(),
             replied_to_content: msg.replied_to_content.as_ref().map(|s| s.clone().into_boxed_str()),
+            replied_to_emoji_tags: msg.replied_to_emoji_tags.as_ref()
+                .filter(|t| !t.is_empty())
+                .map(|t| Box::new(t.clone())),
             // Convert attachments to compact format
             attachments: TinyVec::from_vec(
                 msg.attachments.iter()
@@ -1559,6 +1601,9 @@ impl CompactMessage {
             // Zero-copy: into_boxed_str() reuses the String's buffer!
             content: msg.content.into_boxed_str(),
             replied_to_content: msg.replied_to_content.map(|s| s.into_boxed_str()),
+            replied_to_emoji_tags: msg.replied_to_emoji_tags
+                .filter(|t| !t.is_empty())
+                .map(Box::new),
             // Convert attachments to compact format (zero-copy where possible)
             attachments: TinyVec::from_vec(
                 msg.attachments.into_iter()
@@ -1600,6 +1645,7 @@ impl CompactMessage {
             npub: interner.resolve(self.npub_idx).map(|s| s.to_string()),
             replied_to: self.replied_to_hex(),
             replied_to_content: self.replied_to_content.as_ref().map(|s| s.to_string()),
+            replied_to_emoji_tags: self.replied_to_emoji_tags.as_ref().map(|t| (**t).clone()),
             replied_to_npub: interner.resolve(self.replied_to_npub_idx).map(|s| s.to_string()),
             replied_to_has_attachment: self.flags.replied_to_has_attachment(),
             // Re-resolved per get_message_views / populate_reply_context; the compact
@@ -1711,6 +1757,7 @@ mod tests {
             wrapper_id: None,
             content: "First message".to_string().into_boxed_str(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -1730,6 +1777,7 @@ mod tests {
             wrapper_id: None,
             content: "Second message".to_string().into_boxed_str(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -1767,6 +1815,7 @@ mod tests {
             wrapper_id: None,
             content: "Test".to_string().into_boxed_str(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -1821,6 +1870,7 @@ mod tests {
                     } else {
                         None
                     },
+                    replied_to_emoji_tags: None,
                     replied_to_npub: if i > 0 && i % 5 == 0 {
                         Some(users[(i - 1) % NUM_UNIQUE_USERS].clone())
                     } else {
@@ -2728,6 +2778,7 @@ mod tests {
             wrapper_id: None,
             content: "test".into(),
             replied_to_content: None,
+            replied_to_emoji_tags: None,
             attachments: TinyVec::new(),
             reactions: TinyVec::new(),
             edit_history: None,
@@ -3077,6 +3128,10 @@ mod tests {
             content: "Hello, world!".into(),
             replied_to: "1111111111111111111111111111111111111111111111111111111111111111".into(),
             replied_to_content: Some("Original message".into()),
+            replied_to_emoji_tags: Some(vec![crate::types::EmojiTag {
+                shortcode: "catJAM".into(),
+                url: "https://example.com/catjam.png".into(),
+            }]),
             replied_to_npub: Some("npub1replier".into()),
             replied_to_has_attachment: Some(true),
             replied_to_attachment_extension: None,
@@ -3110,6 +3165,7 @@ mod tests {
                 webxdc_topic: None,
                 group_id: None,
                 original_hash: None,
+                fallback_urls: Vec::new(),
             }],
             reactions: vec![Reaction {
                 id: "dddd000000000000000000000000000000000000000000000000000000000000".into(),
@@ -3132,6 +3188,59 @@ mod tests {
             emoji_tags: Vec::new(),
             addressed_bots: vec!["npub1botrouting0000000000000000000000000000000000000000000000".into()],
         }
+    }
+
+    #[test]
+    fn compact_add_reaction_rejects_a_resend_under_a_new_event_id() {
+        let mut interner = NpubInterner::new();
+        let mut compact = CompactMessage::from_message(&Message::default(), &mut interner);
+        // Real hex — the id check would mask the slot check if these collapsed.
+        let slot = |id: String, emoji: &str| Reaction {
+            id,
+            reference_id: "a".repeat(64),
+            author_id: "npub1author".to_string(),
+            emoji: emoji.to_string(),
+            emoji_url: None,
+        };
+        assert!(compact.add_reaction(slot("1".repeat(64), "\u{1F44D}"), &mut interner));
+        assert!(
+            !compact.add_reaction(slot("2".repeat(64), "\u{1F44D}"), &mut interner),
+            "distinct event ids but one (author, emoji) slot — this is the double-count"
+        );
+        assert_eq!(compact.reactions.len(), 1);
+        assert!(
+            compact.add_reaction(slot("3".repeat(64), "\u{2764}\u{FE0F}"), &mut interner),
+            "a different emoji from the same author is its own reaction"
+        );
+        assert_eq!(compact.reactions.len(), 2);
+    }
+
+    #[test]
+    fn a_message_caps_at_twelve_reaction_groups_but_joins_stay_open() {
+        let mut interner = NpubInterner::new();
+        let mut compact = CompactMessage::from_message(&Message::default(), &mut interner);
+        let react = |i: usize, author: &str, emoji: &str| Reaction {
+            id: format!("{:064x}", i + 1),
+            reference_id: "a".repeat(64),
+            author_id: author.to_string(),
+            emoji: emoji.to_string(),
+            emoji_url: None,
+        };
+        for i in 0..MAX_REACTION_GROUPS {
+            assert!(
+                compact.add_reaction(react(i, "npub1opener", &format!("emoji{i}")), &mut interner),
+                "group {i} fits under the ceiling"
+            );
+        }
+        assert!(
+            !compact.add_reaction(react(100, "npub1opener", "emoji-thirteen"), &mut interner),
+            "a thirteenth distinct emoji is refused"
+        );
+        assert!(
+            compact.add_reaction(react(101, "npub1joiner", "emoji0"), &mut interner),
+            "joining an existing group is never bounded by the ceiling"
+        );
+        assert_eq!(compact.reactions.len(), MAX_REACTION_GROUPS + 1);
     }
 
     #[test]
@@ -3167,6 +3276,27 @@ mod tests {
         assert_eq!(restored.reactions[0].emoji, msg.reactions[0].emoji);
         // Bot routing targets round-trip through the interner.
         assert_eq!(restored.addressed_bots, msg.addressed_bots, "addressed_bots mismatch");
+    }
+
+    // The compact form deliberately keeps only the "replied-to has an attachment"
+    // bool, so the extension does NOT survive a trip through STATE. Every path
+    // that emits a message read back out of RAM has to re-run
+    // populate_reply_context, or a quoted "GIF Animation" renders as a generic
+    // "Attachment" the moment a reaction re-emits the row.
+    #[test]
+    fn compact_drops_replied_to_attachment_extension() {
+        let mut msg = make_full_message();
+        msg.replied_to_has_attachment = Some(true);
+        msg.replied_to_attachment_extension = Some("gif".to_string());
+
+        let mut interner = NpubInterner::new();
+        let restored = CompactMessage::from_message(&msg, &mut interner).to_message(&interner);
+
+        assert_eq!(restored.replied_to_has_attachment, Some(true), "the bool survives RAM");
+        assert_eq!(
+            restored.replied_to_attachment_extension, None,
+            "the extension does not survive RAM — emitters must re-resolve it"
+        );
     }
 
     #[test]
@@ -3410,6 +3540,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
+            fallback_urls: Vec::new(),
         };
 
         let compact = CompactAttachment::from_attachment(&att);
@@ -3444,6 +3575,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
+            fallback_urls: Vec::new(),
         };
         let att_clone = att.clone();
 
@@ -3554,6 +3686,7 @@ mod tests {
             webxdc_topic: Some("game-state".into()),
             group_id: Some("cccc000000000000000000000000000000000000000000000000000000000000".into()),
             original_hash: Some("dddd000000000000000000000000000000000000000000000000000000000000".into()),
+            fallback_urls: Vec::new(),
         };
 
         let compact = CompactAttachment::from_attachment(&att);

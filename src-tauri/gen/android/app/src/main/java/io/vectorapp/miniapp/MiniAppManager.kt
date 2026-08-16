@@ -71,7 +71,8 @@ object MiniAppManager {
         chatId: String,
         messageId: String,
         href: String?,
-        overlayHtml: String
+        overlayHtml: String,
+        partition: String
     ) {
         val act = activity ?: run {
             Logger.error(TAG, "Cannot open Mini App: Activity not initialized", null)
@@ -88,8 +89,12 @@ object MiniAppManager {
             // Enter immersive fullscreen mode
             enterImmersiveMode()
 
+            // Per-app origin host: browser storage keys on origin, so each app's
+            // partition becomes its host and storage can't bleed between apps
+            val host = "$partition.localhost"
+
             // Create the Mini App WebView
-            val webView = MiniAppWebView(act, miniappId, packagePath)
+            val webView = MiniAppWebView(act, miniappId, packagePath, host)
 
             // Add to root view with slide-in animation
             rootView?.let { root ->
@@ -114,9 +119,9 @@ object MiniAppManager {
             // Build the URL
             val url = if (href != null && href.isNotEmpty()) {
                 val cleanHref = if (href.startsWith("/")) href else "/$href"
-                "http://webxdc.localhost$cleanHref"
+                "http://$host$cleanHref"
             } else {
-                "http://webxdc.localhost/"
+                "http://$host/"
             }
 
             Logger.debug(TAG, "Loading Mini App URL: $url")

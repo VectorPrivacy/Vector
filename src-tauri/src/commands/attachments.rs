@@ -44,6 +44,7 @@ impl Drop for ActiveDownloadGuard {
             Ok(mut active) => { active.remove(&self.id); }
             Err(_) => {
                 let id = self.id.clone();
+                // spawn-detached: removes an id from the process-wide in-flight download set.
                 tokio::spawn(async move {
                     ACTIVE_DOWNLOADS.lock().await.remove(&id);
                 });
@@ -183,6 +184,22 @@ pub async fn open_attachment(path: String) -> Result<bool, String> {
     }
 }
 
+/// Whether Vector may hand an `.apk` to the system installer yet (Android only;
+/// always true on desktop, which has no such gate). Lets the UI explain the
+/// settings trip BEFORE the tap, rather than dumping the user into Settings
+/// unannounced — the platform offers no runtime prompt for this one.
+#[tauri::command]
+pub async fn can_install_apks() -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        Ok(crate::android::storage::can_install_apks())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        Ok(true)
+    }
+}
+
 /// Share a downloaded file via Android's share sheet (ACTION_SEND).
 /// No-op on non-Android (desktop shares are handled elsewhere). Returns true
 /// if the share sheet was launched.
@@ -252,349 +269,483 @@ fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
 /// Download and decrypt an attachment
 #[tauri::command]
 pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
-    // Check global download deduplication — prevent multiple threads for the same file.
-    // The RAII guard automatically removes the ID when this function returns (or panics).
-    let _download_guard = match ActiveDownloadGuard::try_new(attachment_id.clone()).await {
-        Some(guard) => guard,
-        None => return false, // Already downloading
-    };
-
-    let handle = TAURI_APP.get().unwrap();
-
-    // Grab the attachment's metadata from STATE — the single read surface. On a
-    // miss, refill STATE from the DB ONCE and retry: STATE is authoritative, the DB
-    // is consulted only to repopulate it. So a message that reached the UI without a
-    // STATE hydration still downloads instead of hanging on a spinner.
-    let attachment = {
-        let mut refilled = false;
-        loop {
-        let mut state = STATE.lock().await;
-
-        // Find the message and attachment in chats
-        let mut found_attachment = None;
-        // Find target chat index first (immutable scan)
-        let target_idx = state.chats.iter().position(|chat| match &chat.chat_type {
-            ChatType::Community => chat.id == npub,
-            ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
-        });
-        // Then mutably access only that chat
-        if let Some(chat) = target_idx.map(|i| &mut state.chats[i]) {
-                if let Some(message) = chat.messages.find_by_hex_id_mut(&msg_id) {
-                    if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id_eq(&attachment_id)) {
-                        // Check that we're not already downloading
-                        if attachment.downloading() {
-                            return false;
-                        }
-
-                        // Check if file already exists on disk (downloaded but flag was wrong).
-                        // Use the same canonical dir the write path uses
-                        // (vector-core download dir) so dedup looks where files
-                        // actually land — not a divergent Tauri-resolved path.
-                        {
-                            let vector_dir = vector_core::db::get_download_dir();
-                            // Check both hash-based and human-readable filenames
-                            let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(&attachment.id), &*attachment.extension));
-                            let name_path = if !attachment.name.is_empty() {
-                                Some(vector_dir.join(&*attachment.name))
-                            } else {
-                                None
-                            };
-                            let expected_hash = util::bytes_to_hex_32(&attachment.id);
-                            // Reuse requires a content-hash match, whatever the filename:
-                            // an ox-named file proves nothing by itself (ox is the
-                            // sender's CLAIM), and the honest pipeline never writes
-                            // digest-named files at all — so a digest id can never match
-                            // and correctly falls through to a real download. Size gates
-                            // the read so an obvious mismatch skips the full hash.
-                            let content_matches = |p: &std::path::PathBuf| {
-                                let size_ok = attachment.size == 0
-                                    || std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false);
-                                size_ok
-                                    && std::fs::read(p)
-                                        .map(|b| util::calculate_file_hash(&b) == expected_hash)
-                                        .unwrap_or(false)
-                            };
-                            let file_path = if hash_path.exists() && content_matches(&hash_path) {
-                                Some(hash_path)
-                            } else {
-                                name_path.filter(|p| p.exists() && content_matches(p))
-                            };
-                            if let Some(file_path) = file_path {
-                                // File already exists! Update the state and return success
-                                attachment.set_downloaded(true);
-                                attachment.path = file_path.to_string_lossy().to_string().into_boxed_str();
-
-                                // Emit success event
-                                handle.emit("attachment_download_result", serde_json::json!({
-                                    "profile_id": npub,
-                                    "msg_id": msg_id,
-                                    "id": attachment_id,
-                                    "success": true,
-                                    "result": file_path.to_string_lossy().to_string()
-                                })).unwrap();
-
-                                // Also update the database
-                                let chat_id_for_db = chat.id().to_string();
-                                let msg_id_clone = msg_id.clone();
-                                let attachment_id_clone = attachment_id.clone();
-                                let path_str = file_path.to_string_lossy().to_string();
-                                drop(state); // Release lock before DB call
-
-                                let _ = db::update_attachment_downloaded_status(
-                                    &chat_id_for_db,
-                                    &msg_id_clone,
-                                    &attachment_id_clone,
-                                    true,
-                                    &path_str
-                                );
-
-                                // Backfill other messages with the same attachment hash
-                                let _ = db::backfill_attachment_downloaded_status(
-                                    &attachment_id_clone,
-                                    true,
-                                    &path_str,
-                                    &msg_id_clone,
-                                );
-
-                                return true;
-                            }
-                        }
-
-                        // Enable the downloading flag to prevent re-calls
-                        attachment.set_downloading(true);
-                        found_attachment = Some(attachment.clone());
-                    }
-                }
-        }
-
-        if let Some(att) = found_attachment {
-            break att;
-        }
-        drop(state);
-
-        if !refilled {
-            refilled = true;
-            // STATE missed: refill this chat's window from the DB (STATE is authoritative,
-            // the message is durable there) and retry. Guard the DB-read → STATE-write
-            // against a mid-download account swap.
-            let session = vector_core::state::SessionGuard::capture();
-            if let Ok(msgs) = db::get_messages_around(&npub, &msg_id, 8, 8).await {
-                if !msgs.is_empty() && session.is_valid() {
-                    let mut state = STATE.lock().await;
-                    state.add_messages_to_chat_batch(&npub, msgs);
-                }
-            }
-            continue;
-        }
-
-        // Missed even after a DB refill: the message genuinely isn't in the DB, or
-        // its attachment id doesn't match — nothing to download either way.
-        return false;
-        }
-    };
-
-    // Begin our download progress events
-    let attachment_hex_id = util::bytes_to_hex_32(&attachment.id);
-    handle.emit("attachment_download_progress", serde_json::json!({
-        "id": &attachment_hex_id,
-        "progress": 0
-    })).unwrap();
-
-    // Download the file - no timeout, allow large downloads to complete
-    let encrypted_data = match net::download(&*attachment.url, handle, &attachment_hex_id, None).await {
-        Ok(data) => data,
-        Err(error) => {
-            vector_core::log_warn!(
-                "[AttachmentDownload] failed: {} (msg {}, attachment {}) url {}",
-                error, msg_id, attachment_id, &*attachment.url
+    vector_core::db::scoped(async move {
+        let handle = TAURI_APP.get().unwrap();
+        // The multi-source walk (mirrors + hash-swap) can run for minutes against
+        // dead hosts — an account swap mid-walk must never write this account's
+        // download into the swapped-in account's STATE/DB.
+        // The UI raises its spinner on invoke and only lowers it on this event, so an
+        // exit that emits nothing spins forever with no progress and no error — and
+        // every retry (or reload) takes the same silent path. Any refusal must speak,
+        // AND persist: Copy Logs is the after-the-fact reporting channel, and a
+        // refusal that only paints the UI leaves nothing to diagnose from.
+        let fail = |reason: &str| {
+            vector_core::log_net_fail!(
+                "[AttachmentDownload] refused: {} (msg {}, attachment {})",
+                reason, msg_id, attachment_id
             );
-            // Handle download error
-            let mut state = STATE.lock().await;
-            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                att.set_downloading(false);
-                att.set_downloaded(false);
-            });
-
-            // Emit the error
             handle.emit("attachment_download_result", serde_json::json!({
-                "profile_id": npub,
-                "msg_id": msg_id,
-                "id": attachment_id,
+                "profile_id": &npub,
+                "msg_id": &msg_id,
+                "id": &attachment_id,
                 "success": false,
-                "result": error
-            })).unwrap();
-            return false;
-        }
-    };
+                "result": reason
+            })).ok();
+            false
+        };
 
-    // Check if we got a reasonable amount of data
-    if encrypted_data.len() < 16 {
-        eprintln!("Downloaded file too small: {} bytes for attachment {}", encrypted_data.len(), attachment_id);
-        let mut state = STATE.lock().await;
-        state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-            att.set_downloading(false);
-            att.set_downloaded(false);
-        });
-        drop(state);
+        // Check global download deduplication — prevent multiple threads for the same file.
+        // The RAII guard automatically removes the ID when this function returns (or panics).
+        let _download_guard = match ActiveDownloadGuard::try_new(attachment_id.clone()).await {
+            Some(guard) => guard,
+            // The in-flight download owns the outcome event; staying silent here would
+            // strand THIS caller's spinner if it's a duplicate of a stale render.
+            None => return fail("This file is already downloading"),
+        };
 
-        // Emit a more helpful error
-        let error_msg = format!("Downloaded file too small ({} bytes). URL may be invalid or expired.", encrypted_data.len());
-        handle.emit("attachment_download_result", serde_json::json!({
-            "profile_id": npub,
-            "msg_id": msg_id,
-            "id": attachment_id,
-            "success": false,
-            "result": error_msg
-        })).unwrap();
-        return false;
-    }
+        // Grab the attachment's metadata from STATE — the single read surface. On a
+        // miss, refill STATE from the DB ONCE and retry: STATE is authoritative, the DB
+        // is consulted only to repopulate it. So a message that reached the UI without a
+        // STATE hydration still downloads instead of hanging on a spinner.
+        let (attachment, msg_is_mine, msg_author_npub) = {
+            let mut refilled = false;
+            loop {
+            let mut state = STATE.lock().await;
 
-    // Decrypt and save the file (convert CompactAttachment to Attachment for compatibility)
-    let attachment_for_decrypt = attachment.to_attachment();
-    let result = decrypt_and_save_attachment(handle, &encrypted_data, &attachment_for_decrypt).await;
+            // Find the message and attachment in chats. Alongside the attachment,
+            // capture whose blob this is (mine / author npub) — the BUD-03
+            // hash-swap needs to know whose server list can plausibly hold it.
+            let mut found_attachment = None;
+            // Find target chat index first (immutable scan)
+            let target_idx = state.chats.iter().position(|chat| match &chat.chat_type {
+                ChatType::Community => chat.id == npub,
+                // A DM's id IS the counterparty npub — match it first; the participant
+                // check alone strands chats whose roster was persisted empty.
+                ChatType::DirectMessage => chat.id == npub || chat.has_participant(&npub, &state.interner),
+            });
+            // Then mutably access only that chat
+            if let Some(chat) = target_idx.map(|i| &mut state.chats[i]) {
+                    if let Some(message) = chat.messages.find_by_hex_id_mut(&msg_id) {
+                        let msg_mine = message.is_mine();
+                        let msg_npub_idx = message.npub_idx;
+                        if let Some(attachment) = message.attachments.iter_mut().find(|a| a.id_eq(&attachment_id)) {
+                            // Check that we're not already downloading
+                            if attachment.downloading() {
+                                return fail("This file is already downloading");
+                            }
 
-    // Process the result
-    match result {
-        Err(error) => {
-            // Check if this is a corrupted attachment (decryption failure)
-            let is_decryption_error = error.contains("aead") || error.contains("decrypt");
+                            // Check if file already exists on disk (downloaded but flag was wrong).
+                            // Use the same canonical dir the write path uses
+                            // (vector-core download dir) so dedup looks where files
+                            // actually land — not a divergent Tauri-resolved path.
+                            {
+                                let vector_dir = vector_core::db::get_download_dir();
+                                // Check both hash-based and human-readable filenames
+                                let hash_path = vector_dir.join(format!("{}.{}", util::bytes_to_hex_32(&attachment.id), &*attachment.extension));
+                                let name_path = if !attachment.name.is_empty() {
+                                    Some(vector_dir.join(&*attachment.name))
+                                } else {
+                                    None
+                                };
+                                let expected_hash = util::bytes_to_hex_32(&attachment.id);
+                                // Reuse requires a content-hash match, whatever the filename:
+                                // an ox-named file proves nothing by itself (ox is the
+                                // sender's CLAIM), and the honest pipeline never writes
+                                // digest-named files at all — so a digest id can never match
+                                // and correctly falls through to a real download. Size gates
+                                // the read so an obvious mismatch skips the full hash.
+                                let content_matches = |p: &std::path::PathBuf| {
+                                    let size_ok = attachment.size == 0
+                                        || std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false);
+                                    size_ok
+                                        && std::fs::read(p)
+                                            .map(|b| util::calculate_file_hash(&b) == expected_hash)
+                                            .unwrap_or(false)
+                                };
+                                let file_path = if hash_path.exists() && content_matches(&hash_path) {
+                                    Some(hash_path)
+                                } else {
+                                    name_path.filter(|p| p.exists() && content_matches(p))
+                                };
+                                if let Some(file_path) = file_path {
+                                    // File already exists! Update the state and return success
+                                    attachment.set_downloaded(true);
+                                    attachment.path = file_path.to_string_lossy().to_string().into_boxed_str();
 
-            if is_decryption_error {
-                eprintln!("Decryption failed for attachment {}: corrupted keys/data mismatch", attachment_id);
+                                    // Emit success event
+                                    handle.emit("attachment_download_result", serde_json::json!({
+                                        "profile_id": npub,
+                                        "msg_id": msg_id,
+                                        "id": attachment_id,
+                                        "success": true,
+                                        "result": file_path.to_string_lossy().to_string()
+                                    })).unwrap();
+
+                                    // Also update the database
+                                    let chat_id_for_db = chat.id().to_string();
+                                    let msg_id_clone = msg_id.clone();
+                                    let attachment_id_clone = attachment_id.clone();
+                                    let path_str = file_path.to_string_lossy().to_string();
+                                    drop(state); // Release lock before DB call
+
+                                    let _ = db::update_attachment_downloaded_status(
+                                        &chat_id_for_db,
+                                        &msg_id_clone,
+                                        &attachment_id_clone,
+                                        true,
+                                        &path_str
+                                    );
+
+                                    // Backfill other messages with the same attachment hash
+                                    let _ = db::backfill_attachment_downloaded_status(
+                                        &attachment_id_clone,
+                                        true,
+                                        &path_str,
+                                        &msg_id_clone,
+                                    );
+
+                                    return true;
+                                }
+                            }
+
+                            // Enable the downloading flag to prevent re-calls
+                            attachment.set_downloading(true);
+                            found_attachment = Some((attachment.clone(), msg_mine, msg_npub_idx));
+                        }
+                    }
             }
 
-            // Handle decryption/saving error
-            let mut state = STATE.lock().await;
-            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                att.set_downloading(false);
-                att.set_downloaded(false);
-            });
-
-            // Log decryption errors but don't remove the attachment - allow retry
-            if is_decryption_error {
-                eprintln!("Decryption error for attachment {} - keeping for retry", attachment_id);
+            if let Some((att, mine, npub_idx)) = found_attachment {
+                let author = state.interner.resolve(npub_idx).map(|s| s.to_string());
+                break (att, mine, author);
             }
             drop(state);
 
-            // Emit the error
+            if !refilled {
+                refilled = true;
+                // Tripwire: rendered-implies-resident is the pipeline invariant (every
+                // window served to the frontend round-trips through STATE), so a miss
+                // here means some path violated it — worth a persisted line every time.
+                vector_core::log_net_fail!(
+                    "[AttachmentDownload] STATE miss for a rendered attachment (msg {}) — refilling from DB",
+                    &msg_id[..msg_id.len().min(8)]
+                );
+                // STATE missed: refill this chat's window from the DB (STATE is authoritative,
+                // the message is durable there) and retry. Guard the DB-read → STATE-write
+                // against a mid-download account swap.
+                if let Ok(msgs) = db::get_messages_around(&npub, &msg_id, 8, 8).await {
+                    if !msgs.is_empty() {
+                        let mut state = STATE.lock().await;
+                        state.add_messages_to_chat_batch(&npub, msgs);
+                    }
+                }
+                continue;
+            }
+
+            // Missed even after a DB refill: the message genuinely isn't in the DB, or
+            // its attachment id doesn't match — nothing to download either way. The UI
+            // is rendering it regardless, so say so instead of leaving a live spinner.
+            vector_core::log_warn!(
+                "[AttachmentDownload] not resolvable: chat {} msg {} attachment {} — rendered by the UI but absent from STATE and the DB",
+                &npub[..npub.len().min(12)], &msg_id[..msg_id.len().min(8)], &attachment_id[..attachment_id.len().min(8)]
+            );
+            return fail("Attachment not found, reopen the chat and retry");
+            }
+        };
+
+        // Begin our download progress events
+        let attachment_hex_id = util::bytes_to_hex_32(&attachment.id);
+        handle.emit("attachment_download_progress", serde_json::json!({
+            "id": &attachment_hex_id,
+            "progress": 0
+        })).unwrap();
+
+        // Walk the sources: primary URL first, then the BUD-04 `fallback` mirrors,
+        // then BUD-03 hash-swap candidates from the author's server list. Per
+        // source, transient network failures (dead connect, stalled or interrupted
+        // stream) retry with backoff — media servers flake; permanent refusals
+        // (blob gone, size cap) advance to the next source immediately. Bytes are
+        // verified against the URL's content address and decrypted PER SOURCE: a
+        // 2xx carrying the wrong bytes (lying middlebox, truncated body, corrupt
+        // blob) is a dead source, not a dead download — advancing through the
+        // mirrors on bad bytes is the redundancy they exist to provide.
+        let attachment_for_decrypt = attachment.to_attachment();
+        let mut candidates: Vec<String> = vec![attachment.url.to_string()];
+        if let Some(fbs) = attachment.fallback_urls.as_deref() {
+            candidates.extend(fbs.iter().map(|u| u.to_string()));
+        }
+        let mut saved: Option<(std::path::PathBuf, String)> = None;
+        let mut last_error: String = "Download failed".to_string();
+        let mut hash_swap_tried = false;
+        let mut i = 0;
+        while i < candidates.len() {
+            let url = candidates[i].clone();
+
+            // Fetch this source's bytes, retrying transient failures with backoff.
+            let mut attempt: u32 = 0;
+            let bytes: Option<Vec<u8>> = loop {
+                match net::download(&url, handle, &attachment_hex_id, None).await {
+                    Ok(d) => break Some(d),
+                    Err(error) => {
+                        attempt += 1;
+                        last_error = error.to_string();
+                        let permanent = matches!(
+                            error,
+                            "Media server returned an error status"
+                                | "File exceeds the maximum download size"
+                        );
+                        if !permanent && attempt < 3 {
+                            vector_core::log_warn!(
+                                "[AttachmentDownload] attempt {} failed for {} — retrying: {}",
+                                attempt, url, error
+                            );
+                            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
+                            continue;
+                        }
+                        break None;
+                    }
+                }
+            };
+
+            'source: {
+                let Some(data) = bytes else { break 'source };
+
+                // Content-address check: a Blossom URL names its own sha256, so a
+                // body that fails it is provably not the blob, whatever the status
+                // code said.
+                let verified = match vector_core::blossom::verify_blob_content(&url, &data) {
+                    Some(true) => true,
+                    Some(false) => {
+                        vector_core::log_net_fail!(
+                            "[AttachmentDownload] {} served bytes that fail their content address — bad source",
+                            url
+                        );
+                        last_error = "Source served corrupt bytes".to_string();
+                        break 'source;
+                    }
+                    None => false,
+                };
+
+                if data.len() < 16 {
+                    vector_core::log_net_fail!(
+                        "[AttachmentDownload] {} served {} bytes — too small, bad source",
+                        url, data.len()
+                    );
+                    last_error = format!("Downloaded file too small ({} bytes)", data.len());
+                    break 'source;
+                }
+
+                match decrypt_and_save_attachment(handle, &data, &attachment_for_decrypt).await {
+                    Ok(ok) => saved = Some(ok),
+                    Err(error) => {
+                        let is_decryption_error = error.contains("aead") || error.contains("decrypt");
+                        if is_decryption_error && !verified {
+                            // No content address to pre-check, so garbage bytes only
+                            // reveal themselves here — dead source, keep walking.
+                            vector_core::log_net_fail!(
+                                "[AttachmentDownload] bytes from {} fail decryption (unverifiable source) — trying next source",
+                                url
+                            );
+                            last_error = "Decryption failed - file may be corrupted".to_string();
+                            break 'source;
+                        }
+                        // Hash-verified ciphertext that won't decrypt is a key/nonce
+                        // problem no mirror can fix; filesystem errors likewise end
+                        // the walk.
+                        let reason = if is_decryption_error {
+                            "Decryption failed - file may be corrupted".to_string()
+                        } else {
+                            error
+                        };
+                        vector_core::log_net_fail!(
+                            "[AttachmentDownload] terminal failure: {} (msg {}, attachment {}, source {})",
+                            reason, msg_id, attachment_id, url
+                        );
+                        let mut state = STATE.lock().await;
+                        state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                            att.set_downloading(false);
+                            att.set_downloaded(false);
+                        });
+                        drop(state);
+                        handle.emit("attachment_download_result", serde_json::json!({
+                            "profile_id": npub,
+                            "msg_id": msg_id,
+                            "id": attachment_id,
+                            "success": false,
+                            "result": reason
+                        })).unwrap();
+                        return false;
+                    }
+                }
+            }
+
+            if saved.is_some() {
+                break;
+            }
+
+            i += 1;
+            if i == candidates.len() && !hash_swap_tried {
+                hash_swap_tried = true;
+                // BUD-03 hash-swap, the last resort: every embedded URL died,
+                // but the author's advertised servers may still hold the blob
+                // under the same content-address. DMs resolve the author to
+                // the chat partner (message npub is None in 1:1 chats).
+                let servers = vector_core::blossom_servers::author_swap_servers(
+                    Some(msg_author_npub.as_deref().unwrap_or(&npub)),
+                    msg_is_mine,
+                )
+                .await;
+                let extra = vector_core::blossom::hash_swap_candidates(&attachment.url, &servers);
+                let fresh: Vec<String> = extra
+                    .into_iter()
+                    .filter(|c| !candidates.iter().any(|e| e == c))
+                    .collect();
+                if !fresh.is_empty() {
+                    vector_core::log_net_fail!(
+                        "[AttachmentDownload] all {} embedded source(s) dead — hash-swapping onto {} author server(s)",
+                        candidates.len(), fresh.len()
+                    );
+                    candidates.extend(fresh);
+                }
+            } else if i < candidates.len() {
+                vector_core::log_net_fail!(
+                    "[AttachmentDownload] source {}/{} exhausted ({}) — trying mirror: {}",
+                    i, candidates.len(), last_error, candidates[i]
+                );
+            }
+        }
+
+        let Some((hash_file_path, file_hash)) = saved else {
+            // Every source is dead. Persist the outcome and surface the last reason.
+            vector_core::log_net_fail!(
+                "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
+                last_error, msg_id, attachment_id, candidates.len(), &*attachment.url
+            );
+            let mut state = STATE.lock().await;
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                att.set_downloading(false);
+                att.set_downloaded(false);
+            });
+            drop(state);
             handle.emit("attachment_download_result", serde_json::json!({
                 "profile_id": npub,
                 "msg_id": msg_id,
                 "id": attachment_id,
                 "success": false,
-                "result": if is_decryption_error {
-                    "Decryption failed - file may be corrupted".to_string()
-                } else {
-                    error
-                }
+                "result": last_error
             })).unwrap();
             return false;
-        }
-        Ok((hash_file_path, file_hash)) => {
+        };
 
-            // Update state with successful download
-            let path_str = hash_file_path.to_string_lossy().to_string();
 
-            // Index the file so it appears in the gallery / file managers now.
-            #[cfg(target_os = "android")]
-            crate::android::storage::scan_file(&path_str);
+        // Update state with successful download
+        let path_str = hash_file_path.to_string_lossy().to_string();
 
-            {
-                let mut state = STATE.lock().await;
-                state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
-                    // Update ID from nonce to hash
-                    let hash_bytes = hex_string_to_bytes(&file_hash);
-                    if hash_bytes.len() == 32 {
-                        att.id.copy_from_slice(&hash_bytes);
-                    }
-                    att.set_downloading(false);
-                    att.set_downloaded(true);
-                    att.path = path_str.clone().into_boxed_str();
+        // Index the file so it appears in the gallery / file managers now.
+        #[cfg(target_os = "android")]
+        crate::android::storage::scan_file(&path_str);
+
+        {
+            let mut state = STATE.lock().await;
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                // Update ID from nonce to hash
+                let hash_bytes = hex_string_to_bytes(&file_hash);
+                if hash_bytes.len() == 32 {
+                    att.id.copy_from_slice(&hash_bytes);
+                }
+                att.set_downloading(false);
+                att.set_downloaded(true);
+                att.path = path_str.clone().into_boxed_str();
+            });
+
+            // Emit the finished download with both old and new IDs
+            handle.emit("attachment_download_result", serde_json::json!({
+                "profile_id": npub,
+                "msg_id": msg_id,
+                "old_id": attachment_id,
+                "id": file_hash,
+                "success": true,
+                "result": &path_str,
+            })).unwrap();
+
+            // Persist updated message/attachment metadata to the database
+            if let Some(handle) = TAURI_APP.get() {
+                // Chat/message can vanish mid-download (deletion race, swap
+                // remnants) — skip persistence rather than panic.
+                let found = state.get_chat(&npub).and_then(|chat| {
+                    let chat_id = chat.id().clone();
+                    chat.messages.find_by_hex_id(&msg_id)
+                        .map(|m| (chat_id, m.to_message(&state.interner)))
                 });
+                let Some((chat_id, updated_message)) = found else {
+                    drop(state);
+                    return true;
+                };
 
-                // Emit the finished download with both old and new IDs
-                handle.emit("attachment_download_result", serde_json::json!({
-                    "profile_id": npub,
-                    "msg_id": msg_id,
-                    "old_id": attachment_id,
-                    "id": file_hash,
-                    "success": true,
-                    "result": &path_str,
+                // Update the frontend state
+                handle.emit("message_update", serde_json::json!({
+                    "old_id": &updated_message.id,
+                    "message": &updated_message,
+                    "chat_id": &chat_id
                 })).unwrap();
 
-                // Persist updated message/attachment metadata to the database
-                if let Some(handle) = TAURI_APP.get() {
-                    // Find and save only the updated message (convert to Message for serialization)
-                    let updated_chat = state.get_chat(&npub).unwrap();
-                    let chat_id = updated_chat.id().clone();
-                    let updated_message = updated_chat.messages.find_by_hex_id(&msg_id)
-                        .map(|m| m.to_message(&state.interner))
-                        .unwrap();
-
-                    // Update the frontend state
-                    handle.emit("message_update", serde_json::json!({
-                        "old_id": &updated_message.id,
-                        "message": &updated_message,
-                        "chat_id": &chat_id
-                    })).unwrap();
-
-                    // In-memory backfill: update all other messages in this chat that share
-                    // the same attachment hash, and push message_update events to the frontend.
-                    // Two passes to satisfy the borrow checker (mut for update, then immut for serialize).
-                    let hash_bytes = hex_string_to_bytes(&file_hash);
-                    let mut backfilled_msg_ids: Vec<String> = Vec::new();
-                    if let Some(chat_mut) = state.get_chat_mut(&npub) {
-                        for compact_msg in chat_mut.messages.iter_mut() {
-                            if compact_msg.id_hex() == msg_id { continue; }
-                            let mut changed = false;
-                            for att in compact_msg.attachments.iter_mut() {
-                                if att.id == hash_bytes.as_slice() && !att.downloaded() {
-                                    att.set_downloading(false);
-                                    att.set_downloaded(true);
-                                    att.path = path_str.clone().into_boxed_str();
-                                    changed = true;
-                                }
-                            }
-                            if changed {
-                                backfilled_msg_ids.push(compact_msg.id_hex());
+                // In-memory backfill: update all other messages in this chat that share
+                // the same attachment hash, and push message_update events to the frontend.
+                // Two passes to satisfy the borrow checker (mut for update, then immut for serialize).
+                let hash_bytes = hex_string_to_bytes(&file_hash);
+                let mut backfilled_msg_ids: Vec<String> = Vec::new();
+                if let Some(chat_mut) = state.get_chat_mut(&npub) {
+                    for compact_msg in chat_mut.messages.iter_mut() {
+                        if compact_msg.id_hex() == msg_id { continue; }
+                        let mut changed = false;
+                        for att in compact_msg.attachments.iter_mut() {
+                            if att.id == hash_bytes.as_slice() && !att.downloaded() {
+                                att.set_downloading(false);
+                                att.set_downloaded(true);
+                                att.path = path_str.clone().into_boxed_str();
+                                changed = true;
                             }
                         }
-                    }
-                    // Emit message_update for each backfilled message
-                    if let Some(chat_ref) = state.get_chat(&npub) {
-                        for backfill_id in &backfilled_msg_ids {
-                            if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
-                                let backfill_msg = compact_msg.to_message(&state.interner);
-                                handle.emit("message_update", serde_json::json!({
-                                    "old_id": &backfill_msg.id,
-                                    "message": &backfill_msg,
-                                    "chat_id": &chat_id
-                                })).unwrap();
-                            }
+                        if changed {
+                            backfilled_msg_ids.push(compact_msg.id_hex());
                         }
                     }
-
-                    // Drop the STATE lock before performing async I/O
-                    drop(state);
-
-                    let _ = db::save_message(&npub, &updated_message).await;
-
-                    // Backfill other messages with the same attachment hash
-                    let file_hash_clone = file_hash.clone();
-                    let path_str_clone = path_str.clone();
-                    let msg_id_clone = msg_id.clone();
-                    let _ = db::backfill_attachment_downloaded_status(
-                        &file_hash_clone,
-                        true,
-                        &path_str_clone,
-                        &msg_id_clone,
-                    );
                 }
-            }
+                // Emit message_update for each backfilled message
+                if let Some(chat_ref) = state.get_chat(&npub) {
+                    for backfill_id in &backfilled_msg_ids {
+                        if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
+                            let backfill_msg = compact_msg.to_message(&state.interner);
+                            handle.emit("message_update", serde_json::json!({
+                                "old_id": &backfill_msg.id,
+                                "message": &backfill_msg,
+                                "chat_id": &chat_id
+                            })).unwrap();
+                        }
+                    }
+                }
 
-            true
+                // Drop the STATE lock before performing async I/O
+                drop(state);
+
+                let _ = db::save_message(&npub, &updated_message).await;
+
+                // Backfill other messages with the same attachment hash
+                let file_hash_clone = file_hash.clone();
+                let path_str_clone = path_str.clone();
+                let msg_id_clone = msg_id.clone();
+                let _ = db::backfill_attachment_downloaded_status(
+                    &file_hash_clone,
+                    true,
+                    &path_str_clone,
+                    &msg_id_clone,
+                );
+            }
         }
-    }
+
+        true
+    })
+    .await
 }
 
 /// Reconcile in-memory STATE against the boot integrity check. Boot preloads messages into STATE (and

@@ -57,6 +57,20 @@ pub struct CommunityV2 {
     /// The base `@everyone` access key at `root_epoch` — holding it IS membership.
     pub community_root: [u8; 32],
     pub root_epoch: Epoch,
+    /// The CURRENT epoch's Control Plane signer pubkey (CORD-02 §2) — HELD,
+    /// never derived: it derives from a `control_root` only the owner and staff
+    /// hold, and arrives in invites, base rekey blobs, and the Community List.
+    /// Present = a split epoch (subscribe/verify by this address, decrypt under
+    /// the community_root-derived read key); absent = a LEGACY pre-split epoch,
+    /// whose Control Plane folds at the member-derivable `concord/control`
+    /// address (CORD-02 §5).
+    pub control_pk: Option<PublicKey>,
+    /// The CURRENT epoch's staff write secret (`control_root`, CORD-02 §2) —
+    /// held only by the owner and staff, delivered on promotion inside the
+    /// staff-making Grant (CORD-04 §3) or in a 136-byte base rekey blob
+    /// (CORD-06 §1). Absent for regular members and on legacy epochs.
+    /// Possession gates publishing to the Control Plane, never authority.
+    pub control_root: Option<[u8; 32]>,
     pub name: String,
     pub description: Option<String>,
     /// Folded vsk-0 icon/banner. Held so a local edit republishes the FULL
@@ -83,6 +97,8 @@ impl CommunityV2 {
             identity: g.identity.clone(),
             community_root: g.community_root,
             root_epoch: Epoch(0),
+            control_pk: Some(g.control_pk()),
+            control_root: Some(g.control_root),
             name: name.to_string(),
             description,
             icon: None,
@@ -140,10 +156,25 @@ impl CommunityV2 {
             });
         }
 
+        // The split epoch's Control address, taken on trust (CORD-05 §1: it
+        // derives from a secret the joiner never holds, so nothing in the
+        // bundle can prove it; a wrong one is eclipse-class self-harm by the
+        // inviter, healed by the next verified base rotation). A malformed
+        // value degrades to the legacy view rather than refusing the bundle.
+        let control_pk = bundle
+            .control_pk
+            .as_deref()
+            .and_then(|h| PublicKey::from_hex(h).ok());
+
         Ok(CommunityV2 {
             identity,
             community_root,
             root_epoch: Epoch(bundle.root_epoch),
+            control_pk,
+            // The bundle never carries the staff secret; a staffer's own
+            // devices receive it via the Community List, a Grant's
+            // control_wrap, or a 136-byte base blob.
+            control_root: None,
             name: bundle.name.clone(),
             description: None,
             // Mint-time snapshot so the community has an icon the moment it's
@@ -186,6 +217,47 @@ impl CommunityV2 {
 
     pub fn channel(&self, id: &ChannelId) -> Option<&ChannelV2> {
         self.channels.iter().find(|c| c.id.0 == id.0)
+    }
+
+    /// The channels an invite bundle may grant to `audience` (CORD-05 §1/§2).
+    ///
+    /// Public channels always ride (the joiner derives them from the
+    /// `community_root` anyway). A Private channel rides only for a MEMBER the
+    /// roster shows entitled, and only if we hold its key — a keyless one can't
+    /// be granted, and carrying the root placeholder would make the joiner
+    /// address a private channel at the public plane.
+    ///
+    /// A LINK has no recipient, so its audience holds no Role by construction
+    /// and is entitled to no Private channel at all.
+    pub fn vendable_channels<'a>(
+        &'a self,
+        roster: &crate::community::roles::CommunityRoles,
+        owner_hex: Option<&str>,
+        audience: Option<&str>,
+        with: &[String],
+        without: &[String],
+    ) -> Vec<&'a ChannelV2> {
+        self.channels
+            .iter()
+            .filter(|c| {
+                if !c.private {
+                    return true;
+                }
+                if c.key.is_none() {
+                    return false;
+                }
+                match audience {
+                    None => false,
+                    Some(m) => roster.is_entitled(
+                        owner_hex,
+                        m,
+                        &crate::simd::hex::bytes_to_hex_32(&c.id.0),
+                        with,
+                        without,
+                    ),
+                }
+            })
+            .collect()
     }
 
     /// The ONE channel the chat list surfaces for this community (multi-channel
@@ -364,6 +436,7 @@ mod tests {
             owner_salt: hex(&identity.owner_salt),
             community_root: hex(&root),
             root_epoch: 0,
+            control_pk: None,
             channels: vec![
                 // Public: key == root.
                 ChannelGrant { id: hex(&[0xa1; 32]), key: hex(&root), epoch: 0, name: "general".into() },
@@ -404,6 +477,7 @@ mod tests {
             owner_salt: hex(&identity.owner_salt),
             community_root: hex(&root),
             root_epoch: u64::MAX,
+            control_pk: None,
             channels: vec![ChannelGrant { id: hex(&[0xa1; 32]), key: hex(&root), epoch: 0, name: "general".into() }],
             relays: vec!["wss://r".into()],
             name: "Overflow".into(),
@@ -429,6 +503,7 @@ mod tests {
             owner_salt: hex(&identity.owner_salt),
             community_root: hex(&[0x11; 32]),
             root_epoch: 0,
+            control_pk: None,
             channels: vec![],
             relays: vec![],
             name: "X".into(),

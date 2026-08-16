@@ -175,6 +175,10 @@
   mask-image: url("./icons/chevron-down.svg");
 }
 
+.icon-pin {
+  mask-image: url("./icons/pin.svg");
+}
+
 .icon-chevron-double-left {
   mask-image: url("./icons/chevron-double-left.svg");
 }
@@ -317,12 +321,13 @@
   --status-good: #FCE459;
   --status-fair: #FCA559;
   --status-poor: var(--danger-color);
+  --text-color: #f6f6f6;
   font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 16px;
   line-height: 24px;
   font-weight: 400;
 
-  color: #f6f6f6;
+  color: var(--text-color);
 
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -732,6 +737,111 @@ html, body {
 
 .popup-buttons {
   margin-top: auto;
+}
+
+/* Downgrade block — a full takeover, not a popup: there is no "continue". */
+.downgrade-block {
+  position: fixed;
+  inset: 0;
+  z-index: 10010;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background-color: rgba(0, 0, 0, 0.92);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.downgrade-card {
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+  padding: 28px 24px;
+  border-radius: 12px;
+  background-color: #0d0d0d;
+  border: 1px solid color-mix(in srgb, var(--danger-color) 45%, transparent);
+}
+
+/* Vector's own dialog icon, matching how popupConfirm renders it large. The
+   themed `.warning-icon` asset is pixel art drawn for 16px and stair-steps
+   when enlarged. */
+.downgrade-icon {
+  width: 84px;
+  height: 84px;
+  margin-bottom: 12px;
+}
+
+.downgrade-card h2 {
+  font-size: 20px;
+  margin-bottom: 12px;
+  color: var(--danger-color);
+}
+
+.downgrade-card p {
+  font-size: 14px;
+  line-height: 1.5;
+  opacity: 0.8;
+  margin-bottom: 20px;
+}
+
+.downgrade-versions {
+  display: flex;
+  align-items: stretch;
+  margin-bottom: 20px;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+.downgrade-version {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 8px;
+  min-width: 0;
+}
+
+.downgrade-version span {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.45;
+}
+
+.downgrade-version strong {
+  font-size: 14px;
+  /* Long version strings wrap rather than widen the card. */
+  overflow-wrap: anywhere;
+}
+
+/* The required build is the one the user has to act on. */
+.downgrade-version:last-child strong {
+  color: var(--danger-color);
+}
+
+.downgrade-versions-sep {
+  width: 1px;
+  margin: 10px 0;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.downgrade-reassure {
+  font-size: 13px !important;
+  opacity: 0.55 !important;
+}
+
+/* Margins zeroed explicitly: `.cancel-btn` carries a global margin-left that
+   would otherwise offset it from the button above at identical width. */
+.downgrade-card .btn,
+.downgrade-card .cancel-btn {
+  display: block;
+  width: 100%;
+  margin: 0;
+}
+
+.downgrade-card .btn {
+  margin-bottom: 10px;
 }
 
 .typing-indicator-text {
@@ -1613,6 +1723,526 @@ html, body {
   opacity: 1 !important;
 }
 
+/* Banner QR button — same scan glyph as the New Chat composer. Below Share
+   on the own profile; takes Share's top-right spot on other profiles.
+   Id selector: .profile-option would out-cascade a class rule's box sizing. */
+#profile-qr-btn {
+  top: 68px;
+  padding: 10px;
+  /* 50 + padding + border = the same 74px box as the Edit/Share pills. */
+  width: 50px;
+  height: 50px;
+}
+
+#profile:not(.is-own-profile) #profile-qr-btn {
+  top: 10px;
+}
+
+.profile-qr-icon {
+  width: 100%;
+  height: 100%;
+  color: #fff; /* stroke rides currentColor */
+}
+
+.profile-qr-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* ============================================================
+   Status dialog — compact neutral card: avatar + live pill on
+   top, one input row, slim actions. Glides to the upper third
+   while the emoji panel owns the bottom.
+   ============================================================ */
+.status-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+  z-index: 9000; /* below the emoji picker's status mode, above the app */
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-dialog-overlay.active { display: flex; }
+
+/* Selectability polish: chrome is tappable, never text-selectable — eager
+   clicks on the header, navbar, profile or modal furniture shouldn't paint
+   selections (including the whitespace text nodes between elements). */
+.account,
+.chat-bookmarks-btn,
+.new-chat-btn,
+.navbar,
+#profile,
+.status-dialog-card,
+.qr-overlay-card {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Real content opts back in: the bio, the npub itself (it has a copy button,
+   but manual selection stays honest), and every edit-mode field. */
+#profile input,
+#profile textarea,
+#profile-description,
+#profile-npub {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Images additionally refuse the ghost-drag that reads as a grab/selection */
+.profile-banner,
+.profile-avatar,
+#profile-badges img {
+  -webkit-user-drag: none;
+}
+
+/* The one exception: the status composer is editable text. */
+.status-input-host .rich-composer {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Mirror of the open pop: the card recedes and the dim lifts together.
+   Shared by every popping modal (Status dialog, QR overlay). */
+@keyframes modal-card-pop-out {
+  from { transform: scale(1); opacity: 1; }
+  to { transform: scale(0.92); opacity: 0; }
+}
+
+@keyframes modal-overlay-fade-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.status-dialog-overlay.closing {
+  animation: modal-overlay-fade-out 0.15s ease-out forwards;
+  pointer-events: none;
+}
+
+.status-dialog-overlay.closing .status-dialog-card {
+  animation: modal-card-pop-out 0.15s ease-out forwards;
+}
+
+/* Emoji panel open: yield the bottom — card glides to the upper third */
+.status-dialog-overlay.panel-open {
+  align-items: flex-start;
+  padding-top: max(24px, 7vh);
+}
+
+.status-dialog-card {
+  display: flex;
+  flex-direction: column;
+  width: min(92vw, 380px);
+  background-color: #101010;
+  border: 1px solid #2c2e2f;
+  border-radius: 18px;
+  padding: 14px 16px 12px;
+  box-sizing: border-box;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
+}
+
+/* Applied AFTER the overlay is displayed: WebKit never starts an animation
+   declared on a subtree that comes out of display:none, so the property has
+   to appear on an already-rendered element to play. */
+.status-dialog-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+
+.status-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.status-dialog-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.status-dialog-x,
+.status-dialog-x:hover,
+.status-dialog-x:focus,
+.status-dialog-x:active {
+  background: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.status-dialog-x {
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 6px;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.status-dialog-x:hover { color: #fff; }
+
+/* Live row: your avatar beside the pill exactly as others see it */
+.status-live-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  min-width: 0;
+}
+
+.status-preview-avatar {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  background-color: #1a1a1a;
+}
+
+.status-preview-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.status-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 14px;
+  background-color: #1a1a1a;
+  border: 1px solid #262626;
+  border-radius: 999px;
+  box-sizing: border-box;
+}
+
+.status-preview-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: #59fcb3;
+  box-shadow: 0 0 6px rgba(89, 252, 179, 0.6);
+}
+
+#status-preview-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13.5px;
+  color: #fff;
+}
+
+#status-preview-text .emoji {
+  width: 16px;
+  height: 16px;
+  vertical-align: -3px;
+}
+
+.status-preview.status-preview-empty { opacity: 0.45; }
+.status-preview.status-preview-empty .status-preview-dot { background-color: #555; box-shadow: none; }
+
+.status-input-row {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  background-color: #1a1a1a;
+  border: 1px solid #262626;
+  border-radius: 12px;
+  padding: 2px 2px 2px 14px;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+}
+
+.status-input-row:focus-within { border-color: #3d4040; }
+
+/* The icon sits equidistant from the field's top, right and bottom edges:
+   a fixed 40px hit box centred in the 44px field leaves ~12px to the glyph
+   on every side. Explicit size, not padding — global button styling
+   collapses padding-driven boxes here. */
+#status-emoji-btn {
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 2px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+/* A bare floating glyph: the global button styling paints a container box
+   (a backdrop blur reads as a subtle pale panel on the darker field), so
+   every state pins ALL the chrome off. */
+#status-emoji-btn,
+#status-emoji-btn:hover,
+#status-emoji-btn:focus,
+#status-emoji-btn:active {
+  background: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+#status-emoji-btn:hover { opacity: 1; transform: scale(1.08); }
+
+#status-emoji-btn .icon {
+  /* The global .icon styling floats glyphs absolutely; this one is an
+     ordinary flex child centred by the button. */
+  position: static;
+  margin: 0;
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
+.status-input-host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Mini composer: same machinery as the chat one, emoji-only grammar */
+.status-input-host .rich-composer {
+  position: relative;
+  font-family: Rubik, sans-serif;
+  font-size: 14.5px;
+  font-weight: 400;
+  line-height: 20px;
+  min-height: 20px;
+  max-height: 62px; /* ~3 lines, then scrolls — statuses stay short */
+  overflow-y: auto;
+  overflow-anchor: none;
+  outline: none;
+  color: #fff;
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 9px 4px 9px 0;
+  background: transparent;
+}
+
+.status-input-host .rich-composer[data-empty="1"]::before {
+  top: 9px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.status-char-count {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.35);
+  min-width: 22px;
+  text-align: right;
+}
+
+.status-char-count.status-char-low { color: #ffb347; }
+
+.status-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+}
+
+.status-btn-clear {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 6px 2px;
+  transition: color 0.15s ease;
+}
+
+.status-btn-clear:hover { color: #fff; }
+.status-btn-clear.hidden { visibility: hidden; } /* keeps Save right-aligned */
+
+.status-btn-save {
+  background-color: #59fcb3;
+  color: #06130d;
+  border: none;
+  border-radius: 10px;
+  padding: 9px 26px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+
+.status-btn-save:hover { filter: brightness(1.08); }
+.status-btn-save:active { transform: scale(0.97); }
+
+/* Emoji panel in status mode: above the dialog overlay, GIFs hidden, and
+   flush to the bottom — the composer clearance it normally keeps doesn't
+   exist here */
+.emoji-picker.emoji-picker-status-mode { z-index: 10005; bottom: 10px !important; }
+.emoji-picker.emoji-picker-no-gifs .picker-mode-btn[data-mode="gif"] { display: none; }
+
+/* Fullscreen QR overlay (profile QR + bunker login QR) */
+.qr-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.88);
+  z-index: 10000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.qr-overlay.active { display: flex; }
+
+.qr-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+  background-color: #101010;
+  border: 1px solid #2c2e2f;
+  border-radius: 18px;
+  padding: 24px;
+}
+
+/* Applied AFTER the overlay is displayed — WebKit never starts an animation
+   declared on a subtree emerging from display:none. */
+.qr-overlay-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+
+.qr-overlay.closing {
+  animation: modal-overlay-fade-out 0.15s ease-out forwards;
+  pointer-events: none;
+}
+
+.qr-overlay.closing .qr-overlay-card {
+  animation: modal-card-pop-out 0.15s ease-out forwards;
+}
+
+@keyframes qr-overlay-pop {
+  from { transform: scale(0.92); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.qr-overlay-tile {
+  /* Solid white tile: the padding doubles as the QR quiet zone for scanners.
+     Height wraps the SVG (1:1 viewBox), so the tile stays square without an
+     aspect-ratio/percentage-height cycle. */
+  position: relative;
+  width: min(72vw, 320px);
+  padding: 16px;
+  border-radius: 10px;
+  background-color: #fff;
+  box-sizing: border-box;
+}
+
+#qr-overlay-full svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+
+/* New Chat scan button — camera scanner entry, mobile-only (body.mobile) */
+#chat-new-scan-btn {
+  display: none;
+  color: #b2b2b2;
+  margin-right: 3px;
+  cursor: pointer;
+  /* Snug: the container's default 10px padding leaves the glyph tiny */
+  padding: 6px;
+}
+
+body.mobile #chat-new-scan-btn { display: block; }
+#chat-new-scan-btn:hover { color: #fff; }
+
+#chat-new-scan-btn svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Fullscreen QR scanner */
+.qr-scanner {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: none;
+  background-color: #000;
+}
+
+.qr-scanner.active { display: block; }
+
+.qr-scanner-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Hidden until the first real frame — the WebView's placeholder art
+     (a giant play glyph) paints in the gap and must never be seen */
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.qr-scanner-video.live { opacity: 1; }
+
+.qr-scanner-veil {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+}
+
+.qr-scanner-window {
+  width: min(70vw, 280px);
+  aspect-ratio: 1;
+  border: 2px solid var(--accent-color, #59fcb3);
+  border-radius: 18px;
+  /* Dims everything around the viewfinder in one paint */
+  box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.55);
+}
+
+.qr-scanner-hint {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+}
+
+/* Id selector: must outrank .qr-overlay-close's width:100% */
+#qr-scanner-cancel {
+  position: absolute;
+  bottom: max(28px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(80vw, 360px);
+}
+
+.qr-overlay-close {
+  width: 100%;
+  padding: 12px 0;
+  border: none;
+  border-radius: 12px;
+  background-color: var(--accent-color, #59fcb3);
+  color: #000;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
 /* Style individual options within the danger zone */
 .danger-option {
   display: flex;
@@ -1724,6 +2354,10 @@ html, body {
   transform: translateY(-4px);
   transition: opacity 0.12s ease, transform 0.12s ease;
   pointer-events: none;
+  /* Menu labels are commands, not content — highlighting them only makes
+     the long-press that OPENED the menu look like a text selection. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 .context-menu.is-visible {
   opacity: 1;
@@ -2446,7 +3080,8 @@ html, body {
   display: inline-block;
   background-color: rgba(255, 255, 255, 0.55);
 }
-.chatlist-contact-header .chatlist-type-icon.icon-bot {
+.chatlist-contact-header .chatlist-type-icon.icon-bot,
+.chatlist-contact-header .chatlist-type-icon.icon-pin {
   background-color: var(--icon-color-primary, #59fcb3);
 }
 /* Inline time-ago (unread rows). Sits flush after the type icon, slightly
@@ -2745,7 +3380,9 @@ html, body {
 }
 
 .chat-header .profile-header-info {
-  max-width: 70%;
+  /* Centered, so BOTH sides must clear the wider rail: pins + menu occupy
+     the right 90px. 200 = 2 x (90 + 10px breathing room). */
+  max-width: min(70%, calc(100% - 200px));
   overflow: hidden;
 }
 
@@ -2792,9 +3429,15 @@ html, body {
   margin-right: unset;
 }
 
+/* `-# ` subtext: Discord's tiny text. Block so consecutive lines stack. */
+.chat small.md-subtext {
+  display: block;
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
 .chat-contact-status {
   opacity: 0.8;
-  font-style: oblique;
   font-size: 14px;
   margin-bottom: 2px;
   display: block;
@@ -2933,6 +3576,11 @@ body.chat-bg-disabled .chat-messages::before {
 .system-event-text:hover .system-event-name {
   text-decoration: underline;
   opacity: 1;
+}
+/* A repeat folded into the run's first line ("… 4 times"). The row stays in the
+   DOM so its id remains addressable; it just takes no space. */
+.msg-inline-timestamp.system-event-merged {
+  display: none;
 }
 
 /* "New" divider — same flexbox shape as inline timestamps but tinted with
@@ -3116,7 +3764,7 @@ body.chat-bg-disabled .chat-messages::before {
   top: 1px;
 }
 
-/* Reaction hover summary (desktop, ~250ms). Right-click expands into the full
+/* Reaction hover summary (desktop, ~500ms). Right-click expands into the full
    .reaction-details-popup below. */
 .reaction-hover-tip {
   position: fixed;
@@ -3792,21 +4440,162 @@ body.chat-bg-disabled .chat-messages::before {
   background-color: #FFFFFF;
 }
 
-#chat-input {
+/* Legacy fallback: the plain <textarea>, used when the rich composer is turned
+   off in Display settings or refuses to construct. Verbatim from 6eddd0b8. */
+textarea#chat-input {
+  /* It used to be a direct flex child of the row; it now sits inside
+     #chat-input-host. An inline-block on the baseline leaves the line box's
+     descender gap under it (7px), which pushed the row from 47 to 54 and made
+     the box look top-heavy. Block takes it out of inline layout. */
+  display: block;
   width: -webkit-fill-available;
   line-height: inherit;
   resize: none;
   overflow: hidden;
-  height: 20px;
+  /* Collapsed box = one full 24px line + balanced padding, 45px total to match
+     the row's buttons. The content box MUST fit the line: a shorter box leaves
+     hidden overflow, and a textarea scrolls its own overflow on caret moves and
+     drags even under overflow:hidden — the text rides 0-4px off center. */
+  height: 24px;
   max-height: 150px;
-  padding: 10px;
-  padding-left: 0;
+  padding: 10.5px 10px 10.5px 0;
   background: transparent !important;
 }
 
-#chat-input::placeholder {
+textarea#chat-input::placeholder {
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* A div has no intrinsic width to fill the row the way the textarea did, so it
+   has to claim the space as a flex item. Basis 0, NOT auto: an auto basis is the
+   CONTENT width, so the box would grow with every character typed and squeeze
+   the buttons beside it. Basis 0 makes it take the leftover space and wrap. */
+#chat-input-host {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The row's controls keep their size; only the composer flexes. 38px is what
+   they actually rendered at before: the declared 45px never applied, because the
+   old textarea claimed fill-available and flex shrank every button to pay for it.
+   Pinned rather than left to shrink so the row can't resize as you type. */
+.chat-input-container > button {
+  flex-shrink: 0;
+  width: 38px;
+}
+
+/* Pin the glyphs too, like the send button already does. The base `.icon` is 65%
+   of its button, so icon size tracked button WIDTH and rode that same shrink
+   down to 23px. Sizing it here decouples the two, so no later change to how the
+   row flexes can resize an icon again. */
+#chat-input-file .icon,
+#chat-input-emoji .icon,
+#chat-input-voice .icon {
+  width: 23px;
+  height: 23px;
+}
+
+#chat-input.rich-composer {
+  /* Typographic parity with a message row, measured from `.dmsg-text`:
+     Rubik 15px/400 on a 21px line. The composer used to be Inter 16px because a
+     textarea inherits the document font while `.dmsg` overrides to Rubik, so
+     what you typed never matched what you'd sent. Padding rises to 12px to keep
+     the collapsed row at 45px (21 + 24) now that the line is 3px shorter. */
+  font-family: Rubik, sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 21px;
+  min-height: 21px;
+  position: relative;
+  width: -webkit-fill-available;
+  outline: none;
+  /* The row centres its buttons; a textarea's UA style blocked that from
+     reaching the text, an editable div inherits it. */
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* A contenteditable sizes itself, so the collapsed box is a MIN of one full
+     24px line + balanced padding (45px total, matching the row's buttons) and
+     it grows to the cap on its own. */
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 12px 10px 12px 0;
+  background: transparent !important;
+  /* Scroll anchoring inside an editable fights the caret on WKWebView. */
+  overflow-anchor: none;
+}
+
+/* Absolute, not in-flow: an inline ::before is content the caret sits AFTER,
+   which parks the cursor mid-box on an empty composer. Generic: every composer
+   instance (chat + Status mini) shares the placeholder mechanics. */
+.rich-composer[data-empty="1"]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  left: 0;
+  top: 12px;
+  color: rgba(255, 255, 255, 0.38);
+  pointer-events: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Decorated source: markers stay visible but recede, so what you type is what
+   gets sent and the caret has somewhere to go inside them. */
+#chat-input.rich-composer .cmp-mark { opacity: 0.4; }
+#chat-input.rich-composer .cmp-bold .cmp-body { font-weight: 700; }
+/* Matches `.chat em` so italics read the same weight of grey as in a message. */
+#chat-input.rich-composer .cmp-italic .cmp-body { font-style: italic; opacity: 0.7; }
+#chat-input.rich-composer .cmp-bolditalic .cmp-body { font-weight: 700; font-style: italic; }
+#chat-input.rich-composer .cmp-h1 .cmp-body,
+#chat-input.rich-composer .cmp-h2 .cmp-body,
+#chat-input.rich-composer .cmp-h3 .cmp-body,
+#chat-input.rich-composer .cmp-h4 .cmp-body,
+#chat-input.rich-composer .cmp-h5 .cmp-body,
+#chat-input.rich-composer .cmp-h6 .cmp-body { font-weight: 700; }
+#chat-input.rich-composer .cmp-h1 .cmp-body { font-size: 1.3em; }
+#chat-input.rich-composer .cmp-h2 .cmp-body { font-size: 1.2em; }
+#chat-input.rich-composer .cmp-h3 .cmp-body { font-size: 1.1em; }
+#chat-input.rich-composer .cmp-subtext .cmp-body { font-size: 0.8em; opacity: 0.75; }
+#chat-input.rich-composer .cmp-strike .cmp-body { text-decoration: line-through; }
+#chat-input.rich-composer .cmp-spoiler .cmp-body {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+}
+#chat-input.rich-composer .cmp-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+#chat-input.rich-composer .cmp-code .cmp-body {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 1px 2px;
+}
+/* Now that the composer is the same Rubik 15px as a message row, the in-chat
+   `.mention` weight of 500 matches exactly — no optical compensation needed. */
+#chat-input.rich-composer .cmp-mention {
+  color: var(--icon-color-primary, #59fcb3);
+  background: rgba(89, 252, 179, 0.13);
+  border-radius: 4px;
+  padding: 0 2px;
+  font-weight: 500;
+  /* A caret parked at the pill's edge would otherwise take the pill's colour
+     and read as "inside" a protected token. It's ordinary editable text. */
+  caret-color: var(--text-color);
+}
+/* Both emoji kinds share one geometry, derived rather than eyeballed. Measured
+   against the text baseline at 16px/24px: the text content box runs -16 to +6
+   (centre -5) and the line box -17 to +7. A 1.25em glyph dropped 0.3em below the
+   baseline spans -15.2 to +4.8 — centred on the text within 0.2px, and inside
+   the line box, so adding an emoji cannot grow the row. The old 1.35em custom
+   emoji reached -18.47 and pushed the line box to 24.48px, which is why the
+   composer jumped a pixel the first time you typed one. */
+/* The widget IS the <img> (no wrapper span — see composer.js on old-Android
+   IME resets), so geometry and sizing live on one element. */
+.rich-composer img.cmp-twemoji,
+.rich-composer img.cmp-emoji {
+  display: inline-block;
+  vertical-align: -0.3em;
+  width: 1.25em;
+  height: 1.25em;
+  object-fit: contain;
 }
 
 /* Vector Send Button - muted by default, stays visible when active */
@@ -3953,10 +4742,12 @@ body.chat-bg-disabled .chat-messages::before {
 
 .emoji-sidebar::-webkit-scrollbar { display: none; }
 
-/* `display: flex` below outranks the UA's `[hidden]` rule on its own,
-   so `<button … hidden>` would still render. This explicit reinstates
-   the hide. */
-.emoji-category-btn[hidden] { display: none; }
+/* `[hidden]` is a UA-stylesheet rule, so ANY author `display` on a class defeats
+   it and `el.hidden = true` leaves the element rendering. That silently produced a
+   dead control twice (the category buttons, then the creator's delete button, which
+   showed in create mode and no-op'd on click), so restore the invariant across the
+   picker instead of chasing it per element. */
+.emoji-picker [hidden] { display: none !important; }
 
 .emoji-category-btn {
   position: relative;
@@ -3987,17 +4778,27 @@ body.chat-bg-disabled .chat-messages::before {
   opacity: 1;
 }
 
-/* Rectangular highlighter for active tab */
-.emoji-category-btn.active::before {
+/* Rectangular highlighter for active tab. Declared on the base class rather than
+   `.active` so it has something to animate from — a pseudo-element that only
+   exists while the class does is created and destroyed, never transitioned. */
+.emoji-category-btn::before {
   content: '';
   position: absolute;
   left: -12px;
   top: 50%;
-  transform: translateY(-50%);
+  transform: translateY(-50%) scaleY(0.35);
   width: 6px;
   height: 28px;
   background-color: var(--icon-color-primary);
   border-radius: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 130ms ease-out, transform 130ms ease-out;
+}
+
+.emoji-category-btn.active::before {
+  opacity: 1;
+  transform: translateY(-50%) scaleY(1);
 }
 
 .emoji-category-btn .icon {
@@ -4592,9 +5393,25 @@ img.emoji-img-loading {
   padding: 0;
   cursor: pointer;
   transition: border-color 0.15s ease, background-color 0.15s ease;
-  touch-action: none;
+  /* `none` here forbade the browser from panning at all, so the grid could not be
+     scrolled by touching a cell — which is most of the grid. `pan-y` keeps
+     vertical scrolling native; the gesture arbiter flips this to `none` inline the
+     moment a drag arms, which is legal because arming requires a still finger, so
+     no pan has begun yet. */
+  touch-action: pan-y;
 }
 .emoji-creator-cell.is-hovered { border-color: rgba(255, 255, 255, 0.18); }
+
+/* The hold landed and a drag is possible — shown before any movement so the
+   gesture is legible. Matches the pack rail's armed state. */
+.emoji-creator-cell.is-drag-armed {
+  transform: scale(1.12);
+  border-color: var(--icon-color-primary);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out,
+              border-color 120ms ease-out;
+  z-index: 3;
+}
 
 /* Per-cell busy overlay — covers the emoji image with a scrim + ring
    while it's queued / uploading / deleting. Renders above the image
@@ -4663,13 +5480,14 @@ img.emoji-img-loading {
 .emoji-creator-cell.drop-after::after  { right: -4px; }
 
 /* Equipped-pack sidebar drag-to-reorder (vertical list). */
-/* touch-action: none — the sidebar scrolls vertically, so without this the
-   browser claims a finger drag for scrolling before our reorder threshold
-   trips (no ghost, no drop marker, hold falls through to the context menu).
-   Suppress native image/text drag too, so a slow press starts our reorder
-   instead of grabbing the raw icon (WKWebView + desktop). */
+/* pan-y — `none` forbade the browser from panning at all, so the rail could not
+   be scrolled by a finger starting on a pack tab (which is most of the rail).
+   Vertical panning stays native; the gesture arbiter flips this to `none` inline
+   the moment a drag ARMS — legal because arming requires a still finger, so no
+   pan has begun yet (mirrors the creator grid's fix). Native image/text drag
+   stays suppressed so a slow press starts our reorder, not an icon grab. */
 .emoji-pack-tab {
-  touch-action: none;
+  touch-action: pan-y;
 }
 .emoji-pack-tab,
 .emoji-pack-tab img {
@@ -4677,6 +5495,15 @@ img.emoji-img-loading {
   user-select: none;
 }
 .emoji-pack-tab.is-dragging { opacity: 0.3; }
+
+/* The hold landed and a drag is now possible. Shown before any movement so the
+   gesture is legible: lift means "drag me", and letting go still just selects. */
+.emoji-pack-tab.is-drag-armed {
+  transform: scale(1.18);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+  z-index: 3;
+}
 .emoji-pack-tab-ghost {
   opacity: 0.9;
   transform: scale(0.85);
@@ -4687,7 +5514,12 @@ img.emoji-img-loading {
 }
 .emoji-pack-tab.drop-above,
 .emoji-pack-tab.drop-below { position: relative; }
-.emoji-pack-tab.drop-above::before,
+/* BOTH markers ride ::after — ::before belongs to the active-tab highlighter.
+   Sharing it made every un-marked tab flash the left active bar for 130ms as
+   the drop line moved off it (the hijacked opacity:1 faded out through the
+   highlighter's own transition). The two classes never coexist on one tab, so
+   one pseudo covers both edges. */
+.emoji-pack-tab.drop-above::after,
 .emoji-pack-tab.drop-below::after {
   content: '';
   position: absolute;
@@ -4699,8 +5531,8 @@ img.emoji-img-loading {
   box-shadow: 0 0 8px var(--icon-color-primary);
   pointer-events: none;
 }
-.emoji-pack-tab.drop-above::before { top: -4px; }
-.emoji-pack-tab.drop-below::after  { bottom: -4px; }
+.emoji-pack-tab.drop-above::after { top: -4px; }
+.emoji-pack-tab.drop-below::after { bottom: -4px; }
 .emoji-creator-cell img {
   width: 70%;
   height: 70%;
@@ -8648,6 +9480,344 @@ select:disabled:hover {
   background-color: #b2b2b2;
 }
 
+/* ── Pinned Messages (Concord v2) ─────────────────────────────────────────── */
+
+/* Header pin toggle — a twin of the ••• button (40px box at top:10), seated
+   immediately to its left. Resting color matches the hamburger's gray; the
+   accent green marks the drawer being OPEN, not the button existing. */
+.pins-header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 10px;
+  right: 50px;
+  width: 40px;
+  height: 40px;
+  color: #b2b2b2;
+  transition: color 0.15s ease;
+}
+
+.pins-header-btn.pins-open {
+  color: var(--accent-color);
+}
+
+.pins-header-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* The drawer slides open directly under the fixed 60px chat header, laying
+   over the messages like a sheet. */
+.pins-drawer {
+  position: fixed;
+  top: 60px;
+  left: 0;
+  right: 0;
+  /* Above the chat's own chrome (msg-top-fade sits at 100) but below every
+     real overlay (popups/menus live at 10000+). */
+  z-index: 101;
+  background-color: #0d0d0d;
+  /* Gray chrome (not accent) with rounded bottom corners, sheet-style. */
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+  transform-origin: top;
+  animation: pins-drawer-open 0.18s ease-out;
+}
+
+/* Android lays this sheet out at a fractional width (412.19 CSS px on a 412 px
+   viewport), and a right BORDER lands on the composited layer's clip boundary
+   and paints nothing at all — the left one is unaffected, so the sheet reads as
+   lopsided. An inset shadow paints inside the box, so it survives the clip;
+   1.5px because the same boundary eats the outer half of it. */
+.mobile .pins-drawer {
+  border-right: none;
+  box-shadow: inset -1.5px 0 0 rgba(255, 255, 255, 0.12);
+}
+
+@keyframes pins-drawer-open {
+  from {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Close plays the slide in reverse and holds the end state (`forwards`) so
+   there is no one-frame flash before JS lands display:none. */
+.pins-drawer.pins-drawer-closing {
+  animation: pins-drawer-shut 0.15s ease-in forwards;
+}
+
+@keyframes pins-drawer-shut {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-10px);
+    opacity: 0;
+  }
+}
+
+/* Up to 40% of the screen, but never squeezed useless on short windows.
+   Scrolls without a visible scrollbar — the drawer is a compact sheet and
+   the bar reads as clutter (wheel/touch/trackpad all still scroll). */
+.pins-drawer-list {
+  max-height: max(200px, 40vh);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.pins-drawer-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* Open drawer dims + blurs the conversation so the pins own the eye. A filter
+   on the messages container, NOT backdrop-filter on a scrim — WKWebKit's
+   backdrop-filter is unreliable (see the popup styles). The transition lives
+   on the base rule so both directions animate in step with the drawer slide. */
+#chat-messages {
+  transition: filter 0.22s ease;
+}
+
+#chat.pins-focus #chat-messages {
+  filter: blur(6px) brightness(0.45);
+  /* A blurred chat is a backdrop, not a surface: no accidental scrolls,
+     clicks, or hover toolbars while choosing a pin. */
+  pointer-events: none;
+}
+
+/* The top fade belongs to the CHAT: over the drawer's rows it reads as a
+   smudge, and over the blurred backdrop it means nothing. Ease it out with
+   the same timing as the focus dim. */
+#msg-top-fade {
+  transition: opacity 0.22s ease;
+}
+
+#chat.pins-focus #msg-top-fade {
+  opacity: 0;
+}
+
+.pins-drawer-row {
+  display: flex;
+  /* Top-aligned in BOTH states, with each control optically centered against
+     the first text line by a fixed margin — so expanding a row cannot move
+     the icon, date, chevron or ✕ by even a pixel. */
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.pins-drawer-row:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+/* No message on this device = nothing to jump to: an inert row, unless it's
+   truncated — then the whole row is the expand toggle and stays clickable. */
+.pins-drawer-row.pins-no-jump {
+  cursor: default;
+}
+
+.pins-drawer-row.pins-no-jump:hover {
+  background-color: transparent;
+}
+
+.pins-drawer-row.pins-no-jump.pins-expandable {
+  cursor: pointer;
+}
+
+.pins-drawer-row.pins-no-jump.pins-expandable:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+/* Twemoji in pinned previews — sized like inline text, not natural-size SVGs. */
+.pins-drawer-row-text img.emoji {
+  width: 18px;
+  height: 18px;
+  vertical-align: -4px;
+}
+
+.pins-drawer-row svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--accent-color);
+  /* Mirrored so the pin's point aims INTO the row it marks. */
+  transform: scaleX(-1);
+  /* Optically centered against the first text line (top-aligned row). */
+  margin-top: 1.5px;
+}
+
+.pins-drawer-row-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Explicit: an ancestor centers text, but rows read as a list —
+     [pin][text……spacer][date][✕] with the text hugging the icon. */
+  text-align: left;
+  /* ONE line metric for both states: the collapsed preview line and the
+     expanded render's first line must occupy identical pixels, or the
+     content swap at expand-start reads as a jump. */
+  line-height: 24px;
+  /* Driven inline by the expander; animates the grow/shrink. */
+  transition: max-height 0.25s ease;
+}
+
+/* Date/chevron/✕ float top-right INSIDE the text flow: collapsed rows look
+   identical to the flex layout, but an expanded pin's lines wrap around this
+   box and take the full drawer width below it — no dead right gutter. */
+.pins-drawer-row-controls {
+  float: right;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 10px;
+  height: 24px;
+}
+
+/* An expanded pin reads in full INSIDE the drawer — a member without the
+   original message in their DB has nowhere else to read it. */
+.pins-drawer-row.pins-expanded .pins-drawer-row-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Headers demote to bold body text inside the drawer: chat-scale h1-h3 read
+   as shouting in a compact sheet. Purely presentational — the renderer stays
+   byte-identical to in-chat, so semantics and copy behavior are untouched. */
+.pins-drawer-row-text h1,
+.pins-drawer-row-text h2,
+.pins-drawer-row-text h3,
+.pins-drawer-row-text h4,
+.pins-drawer-row-text h5,
+.pins-drawer-row-text h6 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0 0 6px 0;
+  /* Inherit the container's 24px line so a header-led first line sits on
+     exactly the collapsed line's pixels. */
+  line-height: inherit;
+}
+
+/* Show-more chevron: rendered only on rows whose text actually truncates. */
+/* Same hit target as the ✕ beside it. */
+.pins-drawer-row-expander {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: #b2b2b2;
+  transition: transform 0.25s ease;
+}
+
+/* Keyed to its OWN class, not .pins-expanded: the collapse branch holds
+   .pins-expanded until the height transition ends (the text must stay
+   wrapped while shrinking), and the chevron must not wait for that. */
+.pins-drawer-row-expander.pins-open {
+  transform: rotate(180deg);
+}
+
+.pins-drawer-row-date {
+  flex-shrink: 0;
+  opacity: 0.55;
+  font-size: 13px;
+}
+
+/* Reveal/Open for non-previewable file pins — fetches via the pin-only path,
+   then hands off to the OS (file manager on desktop, ACTION_VIEW on Android). */
+.pins-drawer-row-open {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: #b2b2b2;
+}
+
+.pins-drawer-row-open:hover {
+  background-color: var(--accent-color);
+}
+
+/* Unpin ✕ — rendered only for PIN_MESSAGES holders. */
+.pins-drawer-row-unpin {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  background-color: #b2b2b2;
+}
+
+.pins-drawer-row-unpin:hover {
+  background-color: var(--danger-color);
+}
+
+/* Attachment kind — the reply-context wording ("Picture", "File", …); the
+   row's leading type icon carries the visual. Medium weight: present, not
+   shouting next to genuinely bold message text. */
+.pins-drawer-row-kind {
+  font-weight: 500;
+}
+
+/* File pins lead with the chat's type icon (image/film/mic/file) in the pin
+   slot — same size, same accent, same seat as the pin icon it replaces. */
+.pins-drawer-row-type-icon {
+  position: relative;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  background-color: var(--accent-color);
+  margin-top: 1.5px;
+}
+
+/* Inline media preview for image/video pins whose decrypted local copy
+   exists. Block-level under the chip, bounded so one media pin can't own
+   the whole drawer. */
+.pins-drawer-row-media {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  margin-top: 8px;
+  border-radius: 8px;
+}
+
+/* Sealed/empty notices reuse the row layout without actions. */
+.pins-drawer-notice {
+  padding: 16px;
+  font-size: 13px;
+  opacity: 0.6;
+  text-align: center;
+}
+
+/* Inline centering on purpose — a plain text-align block is immune to the
+   app's global span/flex quirks that mis-seated the flex version. */
+.pins-drawer-close {
+  display: block;
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pins-drawer-close-icon {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  vertical-align: -5px;
+  color: var(--accent-color);
+}
+
 /* Text-accompanied "Back" Navigation button */
 .chat-new-back-text-btn {
   display: flex;
@@ -9168,6 +10338,7 @@ select:disabled:hover {
   align-items: center;
   justify-content: center;
 }
+.login-bunker-qr-wrap.ready { cursor: pointer; }
 .login-bunker-qr { width: 100%; height: 100%; }
 .login-bunker-qr svg { width: 100%; height: 100%; display: block; }
 .login-bunker-qr-loading {
@@ -9641,11 +10812,21 @@ select:disabled:hover {
   animation: pulse-sync 1.5s ease-in-out infinite 0.4s;
 }
 
+/* Determinate fill rides a MASK, not the transform — `scaleX` stays reserved for
+   the centre reveal/retract, so a determinate sync still opens from the middle
+   instead of growing out of the left edge. `mask-size` is animatable; a
+   gradient colour-stop driven by the variable is not. */
 .sync-line.progress {
-  transform-origin: left;
-  transform: scaleX(var(--sync-progress, 0));
   animation: none;
-  transition: transform 0.3s ease-out;
+  -webkit-mask-image: linear-gradient(#000, #000);
+  mask-image: linear-gradient(#000, #000);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: calc(var(--sync-progress, 0) * 100%) 100%;
+  mask-size: calc(var(--sync-progress, 0) * 100%) 100%;
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              -webkit-mask-size 0.3s ease-out,
+              mask-size 0.3s ease-out;
 }
 
 .sync-line.fade-out {
@@ -10802,6 +11983,41 @@ select:disabled:hover {
   font-size: 16px;
 }
 
+/* Shown only on preview builds; `display` is toggled to block from JS. */
+.update-preview-notice {
+  margin-bottom: 15px;
+  padding: 12px 14px;
+  text-align: left;
+  border-radius: 8px;
+  background-color: var(--danger-color-hover);
+  border: 1px solid color-mix(in srgb, var(--danger-color) 40%, transparent);
+}
+
+/* Rides the text baseline so it reads as the first word, not a gutter icon. */
+.update-preview-notice .warning-icon {
+  vertical-align: -3px;
+  margin-right: 6px;
+}
+
+/* margin-top too: there's no global `p` reset, so the UA's 1em block-start
+   would otherwise stack on top of the card's own padding. */
+.update-preview-notice p {
+  margin-top: 0;
+  margin-bottom: 8px;
+  font-size: 13px;
+  line-height: 1.45;
+  opacity: 0.85;
+}
+
+.update-preview-notice p:last-child {
+  margin-bottom: 0;
+}
+
+.update-preview-notice strong {
+  color: var(--danger-color);
+  opacity: 1;
+}
+
 #check-updates-btn {
   margin: 0 auto;
   padding: 8px 24px;
@@ -10878,6 +12094,7 @@ select:disabled:hover {
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
     transition: opacity 0.15s ease;
 }
 @media (hover: hover) {
@@ -10905,6 +12122,22 @@ select:disabled:hover {
 
 .member-pick-row .member-pick-avatar {
     margin-right: 10px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+}
+
+/* Name + inline markers (bot chip) for a member-style row. The cell owns the flex
+   growth and, crucially, `min-width: 0`: a flex item defaults to `min-width: auto`,
+   which refuses to shrink below its content and shoved the Kick/Ban buttons clean out
+   of the member list. The name truncates here so the row's trailing controls always
+   keep their space. */
+.member-pick-identity {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
     position: relative;
     z-index: 1;
 }
@@ -10912,10 +12145,27 @@ select:disabled:hover {
 .compact-member-name {
     color: #f7f4f4;
     font-size: 14px;
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     text-align: left;
     position: relative;
     z-index: 1;
+}
+
+/* Bot marker, same glyph + accent the chat list and profile use. Sized to the name's
+   cap height; `position: relative` and `margin: 0` undo the base `.icon` absolute
+   inset + auto margins (which would centre it and push its siblings apart). */
+.member-pick-bot {
+    position: relative;
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    flex-shrink: 0;
+    display: inline-block;
+    background-color: var(--icon-color-primary, #59fcb3);
 }
 
 /* Compact member list emoji styling */
@@ -10978,6 +12228,14 @@ select:disabled:hover {
 .member-pick-admin.promote { opacity: 0; }
 .member-pick-row:hover .member-pick-admin.promote { opacity: 0.35; }
 .member-pick-admin.promote:hover { opacity: 0.75; }
+
+/* An action in flight pins its own indicator visible: the spinner is the ONLY signal that a
+   kick/ban/role change is still running, and the hover-reveal above would otherwise hide it the
+   moment the pointer leaves the row — reading as though nothing had happened. Must stay after the
+   hover rules; both sides carry equal specificity, so source order decides. */
+.member-pick-row.is-acting .member-pick-actions,
+.member-pick-row.is-acting .member-pick-admin,
+.member-pick-row.is-acting .member-pick-admin.promote { opacity: 1; }
 
 /* Group Overview Edit Controls */
 .group-editable {
@@ -11239,7 +12497,7 @@ select:disabled:hover {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding-top: 60px;
+  padding-top: 18px; /* no Back header — Cancel is the way out */
   min-height: 0;
 }
 
@@ -11264,6 +12522,10 @@ select:disabled:hover {
 .create-group-content .chat-new-content:first-child {
   margin-top: 0; /* Remove default margin since padding-top handles it */
   flex-shrink: 0; /* Don't shrink the title/input section */
+  /* The shared 50px side margins strangle the name row on narrow windows —
+     the row's own 15px padding is the panel's gutter */
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .create-group-list {
@@ -11274,8 +12536,6 @@ select:disabled:hover {
   box-sizing: border-box;
   min-height: 0; /* Critical for flex children with overflow */
   padding: 6px;
-  border-radius: 8px;
-  border: 1px solid rgba(57, 57, 57, 0.5);
 }
 
 .create-group-footer {
@@ -11286,10 +12546,95 @@ select:disabled:hover {
   flex-wrap: wrap;
   flex-shrink: 0;
 }
+.create-group-footer .btn {
+  flex: 1;
+  max-width: 220px;
+}
+/* Solid fill like popupConfirm's Confirm — the one primary action on the panel */
+#create-group-create-btn {
+  background-color: #58fcb3;
+  color: #000;
+  font-weight: 600;
+}
+#create-group-create-btn[disabled] {
+  opacity: 0.45;
+}
 
+/* Dim placeholders — hints, not content */
+#create-group-name::placeholder,
+#create-group-filter::placeholder,
+#cmt-npub::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+/* Solid subtle hover — not the gradient sweep the other pickers use */
+#create-group-list .member-pick-hover,
+#cmt-contacts .member-pick-hover {
+  background: rgba(255, 255, 255, 0.085);
+}
+
+/* Quiet until chosen: unselected boxes are gray, only a selection earns the green */
+#create-group-list .member-pick-indicator,
+#cmt-contacts .member-pick-indicator {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+#create-group-list .member-pick-indicator.selected,
+#cmt-contacts .member-pick-indicator.selected {
+  border-color: var(--icon-color-primary);
+  background-color: var(--icon-color-primary);
+}
+
+/* Tighter header rhythm than the shared chat-new panels */
+.create-group-content .chat-new-title {
+  margin-top: 10px;
+}
+.create-group-content .chat-new-divider {
+  margin-bottom: 16px;
+  /* Re-inset: the section's 50px margins were zeroed for the name row.
+     width:auto — a 100% divider plus side margins bleeds off the panel edge. */
+  width: auto;
+  margin-left: 40px;
+  margin-right: 40px;
+}
+
+/* Status line rides ABOVE the buttons and reveals smoothly (mirrors .cmt-status):
+   content-driven — JS only sets textContent, empty collapses shut. */
 .create-group-footer .chat-contact-status {
   width: 100%;
   text-align: center;
+  font-size: 13px;
+  font-style: normal;
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease, margin 0.25s ease;
+}
+.create-group-footer .chat-contact-status:not(:empty) {
+  opacity: 0.85;
+  max-height: 60px;
+  margin: 0 0 8px;
+}
+/* Selection-counter pill: two-user glyph + count in a soft capsule */
+.create-group-selection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 14px 5px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.cg-pill-glyph {
+  position: relative; /* the absolute base .icon fills THIS box, not an ancestor */
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.cg-pill-glyph .icon {
+  width: 100%;
+  height: 100%;
+  background-color: var(--icon-color-primary);
 }
 
 /* Create Group Avatar Picker */
@@ -11314,10 +12659,15 @@ select:disabled:hover {
   opacity: 1;
 }
 .create-group-avatar-placeholder {
+  /* The SVG carries its own disc — sizing it down would draw a second ring.
+     Grayed until a real image is picked; the mint accent belongs to the (+). */
   width: 100%;
   height: 100%;
   object-fit: cover;
   border-radius: 50%;
+  /* contrast<1 pulls toward mid-gray: lifts the near-black disc into a visible
+     gray while dimming the mint glyph — two tones from one shared SVG */
+  filter: grayscale(1) contrast(0.7) brightness(0.5);
 }
 .create-group-avatar-preview {
   width: 100%;
@@ -11327,38 +12677,68 @@ select:disabled:hover {
 }
 .create-group-avatar-edit {
   position: absolute;
-  bottom: 2px;
-  right: 2px;
-  width: 22px;
-  height: 22px;
+  bottom: -1px;
+  right: -1px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  background-color: rgba(0, 0, 0, 0.7);
+  background-color: rgba(0, 0, 0, 0.85);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .create-group-avatar-edit .icon {
-  font-size: 13px;
-  color: #fff;
+  width: 19px;
+  height: 19px;
+  background-color: var(--icon-color-primary);
 }
-.create-group-description {
+
+/* The centered flex column shrink-wraps children — the name row must span it */
+.create-group-name-row {
   width: 100%;
   box-sizing: border-box;
-  padding: 10px 12px;
+}
+
+/* Name field wraps the input so the requirement hint can sit inside it */
+.create-group-name-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.create-group-name-wrap .chat-new-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: auto;
+  margin: 0; /* chat-input-container's 8px margins break alignment with the search box */
+  padding: 10px 86px 10px 12px; /* right inset: typed text never runs under the hint */
   background-color: transparent;
   border: 1px solid rgba(57, 57, 57, 0.5);
   border-radius: 8px;
   color: #fff;
-  font-size: 14px;
-  font-family: inherit;
-  resize: vertical;
-  min-height: 38px;
-  max-height: 100px;
+  font-size: 16px;
+}
+.create-group-name-required {
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  font-weight: 600;
+  color: #ff2e88;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
+/* The hint surfaces only once members are picked (JS toggles .needs-name) while
+   the name is still empty — and fades the moment a name exists */
+.create-group-name-wrap.needs-name input:placeholder-shown + .create-group-name-required {
+  opacity: 0.9;
 }
 
 /* Disable resize grip on touch devices (Android WebView renders it as a broken 1px dot) */
 @media (pointer: coarse) {
-  .create-group-description,
   .publish-app-field textarea {
     resize: none;
   }
@@ -11423,6 +12803,10 @@ select:disabled:hover {
   transition: none;
 }
 
+.image-viewer-image.no-anim {
+  transition: none !important;
+}
+
 .image-viewer-image.zoomed {
   cursor: grab;
 }
@@ -11446,6 +12830,38 @@ select:disabled:hover {
 
 .image-viewer-close:hover {
   background-color: #171717;
+}
+
+/* Viewer options — vertical column stacked below the close button */
+.image-viewer-controls {
+  position: absolute;
+  top: 70px; /* close btn: 20px top + 40px tall + 10px gap */
+  right: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 10001;
+}
+.image-viewer-ctrl-btn {
+  width: 40px;
+  height: 40px;
+  padding: 9px;
+  background-color: #17171770;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  transition: background-color 0.2s ease;
+}
+.image-viewer-ctrl-btn:hover {
+  background-color: #171717;
+}
+.image-viewer-ctrl-btn svg {
+  width: 100%;
+  height: 100%;
 }
 
 .image-viewer-close::before,
@@ -16466,7 +17882,8 @@ textarea.command-part-input {
 }
 .dmsg-text p:first-child { margin-top: 0; }
 .dmsg-text p:last-child  { margin-bottom: 0; }
-.dmsg-text a             { color: var(--icon-color-primary, #59fcb3); }
+.dmsg-text a,
+.pins-drawer-row-text a  { color: var(--icon-color-primary, #59fcb3); }
 /* .dmsg-text is inline, so a divider-only message gives the <hr> a zero-width containing block
    and it disappears. Pin a visible block width (expands with surrounding text when present). */
 .dmsg-text hr            { display: block; width: 100%; min-width: 12rem; }
@@ -16852,12 +18269,17 @@ textarea.command-part-input {
   vertical-align: middle;
 }
 /* Rolling reaction counter — the count lives in a clipped box so a change can
-   slide the old number out (up on +, down on −) while the new slides in. */
+   slide the old number out (up on +, down on −) while the new slides in.
+   Tabular digits + a one-digit floor: every single-digit count occupies the
+   exact same box, so 1→2 never resizes the chip or rewraps the row. */
 .dmsg-reactions .reaction-count {
   position: relative;
   display: inline-block;
   overflow: hidden;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
+  min-width: 1ch;
+  text-align: center;
 }
 .dmsg-reactions .rc-value {
   display: block;
@@ -17488,55 +18910,113 @@ body.profile-switcher-editing .profile-switcher-add {
   display: none;
 }
 
-/* Empty-state placeholder shown when the chat list has no chats yet.
-   Centered vertically in the available space, soft accent glyph + helpful
-   copy that points at the New Chat / Group Chat buttons up top. */
-.chatlist-empty-state {
+/* "Get Started" pill shown where the first chat row will live: a chat-row
+   shaped nudge that opens the New Chat tab. Glow is a horizontal gradient
+   only; the oversized right glyph clips on the pill's rounded bounds. */
+.chatlist-get-started {
+  position: relative;
+  overflow: hidden;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 48px 32px;
-  margin: 24px auto 0;
-  max-width: 360px;
-  color: rgba(255, 255, 255, 0.55);
+  gap: 12px;
+  margin: 0 15px 15px;
+  /* 60 + the 1px borders = the same 62px box as a .chatlist-contact row. */
+  height: 60px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid rgba(89, 252, 179, 0.5);
+  background: linear-gradient(90deg, #000 0%, #000 35%, rgba(89, 252, 179, 0.3) 100%);
+  text-align: left;
+  cursor: pointer;
   user-select: none;
   -webkit-user-select: none;
 }
-/* Sized container for the masked `.icon` glyph (which is position: absolute
-   internally and needs a relative parent with explicit dimensions). */
-.chatlist-empty-state-icon {
+/* Avatar-sized circle with the same soft inset a chat row's avatar gets. */
+.chatlist-get-started-badge {
   position: relative;
-  width: 56px;
-  height: 56px;
+  flex-shrink: 0;
+  width: 48px;
+  height: 48px;
+  margin-left: 6px;
+  border-radius: 50%;
+  border: 1px solid rgb(25, 25, 25);
 }
-.chatlist-empty-state-icon .icon {
+.chatlist-get-started-badge .icon {
   background-color: var(--accent-color, #59fcb3);
+  transform: scale(0.85);
 }
-.chatlist-empty-state h3 {
-  margin: 0 0 8px;
-  font-size: 18px;
-  font-weight: 500;
+.chatlist-get-started-text {
+  position: relative;
+  z-index: 1;
+}
+.chatlist-get-started-text h4 {
+  margin: 0;
+  font-size: 16.5px;
+  font-weight: 700;
   color: #f7f4f4;
 }
-.chatlist-empty-state p {
-  margin: 0 0 14px;
-  font-size: 14px;
-  line-height: 1.5;
+.chatlist-get-started-text p {
+  margin: 2px 0 0;
+  font-size: 13.5px;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.8);
 }
-.chatlist-empty-state strong {
+/* Decorative oversized glyph, sunk past the pill's top and right bounds. */
+.chatlist-get-started-watermark {
+  position: absolute;
+  top: -16px;
+  bottom: 0;
+  right: -15px;
+  width: 100px;
+  height: 100px;
+  pointer-events: none;
+}
+.chatlist-get-started-watermark .icon {
+  background-color: var(--accent-color, #59fcb3);
+}
+/* Bottom-of-list welcome: Viktor beside a short nudge toward the Hub.
+   Fixed above the navbar, same anchoring as the list's fadeout. */
+.chatlist-intro {
+  position: fixed;
+  bottom: 82px;
+  left: 18px;
+  right: 18px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* No `image-rendering: pixelated`: WebKit's animated-GIF path always scales
+   smooth, so the still must scale smooth too or the edges shift ~1px at
+   every idle/animation swap. */
+.chatlist-intro-viktor {
+  width: 62px;
+  height: 62px;
+  flex-shrink: 0;
+  cursor: pointer;
+  -webkit-user-drag: none;
+}
+.chatlist-intro-text h4 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #f7f4f4;
+}
+.chatlist-intro-text p {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.2;
+  color: rgba(255, 255, 255, 0.55);
+}
+.chatlist-intro-link {
   color: var(--accent-color, #59fcb3);
-  font-weight: 500;
+  cursor: pointer;
 }
-/* The share pill borrows `.cancel-btn` from the existing button system so
-   it matches the rest of the app's secondary-button look. The override
-   here just removes the leading margin that `.cancel-btn` carries from
-   its primary use case (paired with another button in popups). */
-.chatlist-empty-state-share.cancel-btn {
-  margin-left: 0;
+.chatlist-intro-link:hover {
+  text-decoration: underline;
 }
-
 /* Login screen — block all text selection and drag-grab gestures across
    every descendant. The login surface is interactive UI, not content;
    selection and drag would only get in the way (e.g. accidentally
@@ -17723,6 +19203,10 @@ body.profile-switcher-editing .profile-switcher-add {
 .modal-box .btn:disabled { opacity: 0.5; cursor: default; }
 /* ── Community invite modal ─────────────────────────────────────── */
 .cmt-modal { max-width: 480px; }
+/* Phones: slim the modal's own gutters too — with flat sections this is the only inset left */
+@media (max-width: 500px) {
+  .cmt-modal { padding: 18px 14px; }
+}
 
 .cmt-header { display: flex; align-items: center; gap: 13px; margin-bottom: 20px; }
 .cmt-header-icon {
@@ -17731,15 +19215,25 @@ body.profile-switcher-editing .profile-switcher-add {
   background: color-mix(in srgb, var(--accent-color, #59fcb3) 15%, transparent);
 }
 .cmt-header-icon .icon { background-color: var(--accent-color, #59fcb3); width: 23px; height: 23px; }
-.cmt-title { font-size: 18px; font-weight: 700; margin: 0; line-height: 1.2; }
-.cmt-subtitle { font-size: 13px; opacity: 0.5; margin: 3px 0 0; }
+/* min-width:0 lets the flex child shrink so the title can ellipsize instead of wrapping */
+.cmt-header-text { flex: 1; min-width: 0; }
+.cmt-title {
+  font-size: 18px; font-weight: 700; margin: 0; line-height: 1.1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cmt-subtitle { font-size: 13px; opacity: 0.5; margin: 0; line-height: 1.3; }
 
 .cmt-section {
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 13px;
-  padding: 15px 16px;
-  margin-bottom: 13px;
+  /* Flat, full-width sections: the old card chrome (bg + border + 16px side
+     padding) stacked a third gutter onto the overlay's and the modal's, squeezing
+     phone screens to ~240px of content. A hairline between sections keeps the
+     structure without the nesting. */
+  padding: 0;
+  margin-bottom: 18px;
+}
+.cmt-section + .cmt-section {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 16px;
 }
 .cmt-section-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 13px; }
 .cmt-section-head > .icon {
@@ -17838,6 +19332,17 @@ body.profile-switcher-editing .profile-switcher-add {
 /* Other creators' active-link counts (§10) — context for why the community is Public when you hold no links. */
 .cmt-others { margin: 0 0 10px; padding: 8px 10px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); }
 .cmt-other-line { font-size: 12.5px; opacity: 0.6; margin: 0; padding: 1px 0; }
+/* Collapsed multi-creator state: a bare accent line, box chrome only when expanded.
+   Left inset mirrors the section head's icon column (17px icon + 10px gap) so the
+   line sits in the same text column as the description above it. */
+.cmt-others.collapsed { background: transparent; padding: 0 0 0 27px; }
+.cmt-others-toggle {
+  color: var(--accent-color, #59fcb3);
+  opacity: 0.9;
+  cursor: pointer;
+  width: fit-content;
+}
+.cmt-others-toggle:hover { text-decoration: underline; }
 
 .cmt-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
@@ -17977,6 +19482,8 @@ body.profile-switcher-editing .profile-switcher-add {
   background: #0a0a0a;
   padding-top: 10px;
   margin-top: 2px;
+  /* Above scrolling content — the search icon's z-index otherwise paints over it */
+  z-index: 1;
 }
 /* Morphing CTA: gray "Done" (no selection) cross-fades to accent "Invite N" (selection > 0). The
    two faces are stacked; one slides+fades out while the other slides+fades in, background gray->accent. */

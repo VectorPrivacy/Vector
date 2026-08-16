@@ -14,7 +14,7 @@
 //!   registered (desktop, CLI, tests), every op returns a clean runtime error —
 //!   never a compile-time platform stub, so a stray shared-call-site reference
 //!   can't break the desktop build.
-//! - [`Nip55Signer`] implements `NostrSigner` on top of the hook, so every
+//! - [`Nip55Signer`] implements `VectorSigner` on top of the hook, so every
 //!   existing `client.signer()` call site (DM seals, Blossom auth, Concord v2
 //!   identity ops) uses it agnostically with no changes.
 //!
@@ -28,6 +28,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{LazyLock, OnceLock};
 
 use nostr_sdk::prelude::*;
+
+use crate::signer::{BoxedFuture, SignerError};
 
 // ============================================================================
 // Nip55Error — hook failure taxonomy
@@ -309,14 +311,14 @@ pub fn drain_nip55_state() {
 }
 
 // ============================================================================
-// Nip55Signer — NostrSigner over the platform hook
+// Nip55Signer — VectorSigner over the platform hook
 // ============================================================================
 
-/// A `NostrSigner` that routes every identity op to an external NIP-55 signer
+/// A `VectorSigner` that routes every identity op to an external NIP-55 signer
 /// over the platform hook. Cheap to clone (just a pubkey + a session
 /// generation snapshot).
 ///
-/// Captures a [`SessionGuard`](crate::state::SessionGuard) at construction:
+/// Captures a [`std::sync::Arc<crate::db::Session>`](std::sync::Arc<crate::db::Session>) at construction:
 /// state flips after an account swap are suppressed so an in-flight op
 /// resolving against the previous account can't leak `nip55_state` onto the new
 /// one. Wrong-key is impossible regardless — every op is bound to
@@ -325,7 +327,7 @@ pub fn drain_nip55_state() {
 #[derive(Debug, Clone)]
 pub struct Nip55Signer {
     user_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
 }
 
 impl Nip55Signer {
@@ -334,7 +336,7 @@ impl Nip55Signer {
     pub fn new(user_pubkey: PublicKey) -> Self {
         Self {
             user_pubkey,
-            session: crate::state::SessionGuard::capture(),
+            session: crate::db::current_session(),
         }
     }
 
@@ -347,7 +349,7 @@ impl Nip55Signer {
     /// Flip observable state only while the captured session is still active.
     #[inline]
     fn flip(&self, state: Nip55State) {
-        if self.session.is_valid() {
+        if self.session.is_live() {
             set_nip55_state(state);
         }
     }
@@ -444,24 +446,27 @@ impl Nip55Signer {
     /// Test-only view onto the captured guard so a test can assert the wrapper
     /// is bound to the session generation at construction.
     #[cfg(test)]
-    pub(crate) fn session_generation_for_test(&self) -> u64 {
-        self.session.generation()
+    pub(crate) fn session_id_for_test(&self) -> u64 {
+        self.session.id()
     }
 }
 
-impl NostrSigner for Nip55Signer {
-    fn backend(&self) -> SignerBackend<'_> {
-        SignerBackend::Custom(std::borrow::Cow::Borrowed("nip55"))
-    }
+impl AsyncGetPublicKey for Nip55Signer {
+    type Error = SignerError;
 
-    fn get_public_key<'a>(&'a self) -> BoxedFuture<'a, Result<PublicKey, SignerError>> {
+    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, Self::Error>> {
         // Cached (review W6): NIP-55 `get_public_key` is a pairing-time Intent,
         // never a per-call hop. `my_pk` is resolved constantly on the hot path;
         // an IPC round-trip here would be catastrophic.
         Box::pin(async move { Ok(self.user_pubkey) })
     }
 
-    fn sign_event<'a>(&'a self, unsigned: UnsignedEvent) -> BoxedFuture<'a, Result<Event, SignerError>> {
+}
+
+impl AsyncSignEvent for Nip55Signer {
+    type Error = SignerError;
+
+    fn sign_event_async(&self, unsigned: UnsignedEvent) -> BoxedFuture<'_, Result<Event, Self::Error>> {
         Box::pin(async move {
             let event_json = unsigned.as_json();
             let user_hex = self.user_pubkey.to_hex();
@@ -487,11 +492,16 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip04_encrypt<'a>(
+}
+
+impl AsyncNip04 for Nip55Signer {
+    type Error = SignerError;
+
+    fn nip04_encrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP04_ENCRYPT", "nip04_encrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -500,11 +510,11 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip04_decrypt<'a>(
+    fn nip04_decrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP04_DECRYPT", "nip04_decrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -513,11 +523,16 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip44_encrypt<'a>(
+}
+
+impl AsyncNip44 for Nip55Signer {
+    type Error = SignerError;
+
+    fn nip44_encrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP44_ENCRYPT", "nip44_encrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -526,11 +541,11 @@ impl NostrSigner for Nip55Signer {
         })
     }
 
-    fn nip44_decrypt<'a>(
+    fn nip44_decrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
         Box::pin(async move {
             let (result, _event) = self
                 .run("NIP44_DECRYPT", "nip44_decrypt", content.to_string(), public_key.to_hex(), self.user_pubkey.to_hex())
@@ -575,6 +590,7 @@ pub async fn nip55_pair() -> Result<(PublicKey, String), String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::event_ext::FinalizeUnsignedWithId;
     use super::*;
 
     #[test]
@@ -622,18 +638,17 @@ mod tests {
         // must still resolve — it returns the cached identity, never an IPC hop.
         let keys = Keys::generate();
         let signer = Nip55Signer::new(keys.public_key());
-        let pk = signer.get_public_key().await.expect("cached pubkey resolves");
+        let pk = signer.get_public_key_async().await.expect("cached pubkey resolves");
         assert_eq!(pk, keys.public_key());
     }
 
-    // NIP55_STATE and SESSION_GENERATION are process-wide. Cargo runs #[test]
+    // NIP55_STATE is process-wide. Cargo runs #[test]
     // functions in parallel, so every mutation of NIP55_STATE is bundled into
     // THIS single test to keep the sequence deterministic — mirrors
     // `atomic_state_round_trips_and_drains` / `watched_signer_session_gate...`
     // in signer.rs.
     #[tokio::test]
     async fn global_state_session_gate_and_missing_backend() {
-        use crate::state::{bump_session_generation, current_session_generation};
 
         // Defensive reset (a prior panic could have left state dirty).
         set_nip55_state(Nip55State::Idle);
@@ -651,22 +666,22 @@ mod tests {
         // Session gate: a signer flips state only while its captured generation
         // is live.
         let keys = Keys::generate();
-        let gen_before = current_session_generation();
+        let gen_before = crate::db::current_session_id();
         let signer = Nip55Signer::new(keys.public_key());
         assert_eq!(
-            signer.session_generation_for_test(),
+            signer.session_id_for_test(),
             gen_before,
             "signer must capture the live session generation at construction"
         );
         // Valid session flips (tolerate a concurrent bump from a sibling test).
-        if signer.session_generation_for_test() == current_session_generation() {
+        if signer.session_id_for_test() == crate::db::current_session_id() {
             signer.flip(Nip55State::Ready);
             assert_eq!(nip55_state(), Nip55State::Ready, "valid-session flip must apply");
         }
         // After a swap the guard is stale; flips are no-ops so a leftover op
         // can't leak state onto the new account.
         set_nip55_state(Nip55State::Ready);
-        bump_session_generation();
+        crate::db::close_database();
         signer.flip(Nip55State::Missing);
         assert_eq!(nip55_state(), Nip55State::Ready, "stale-session flip must be a no-op");
 
@@ -674,9 +689,9 @@ mod tests {
         // no registered backend fails `Missing` and flips the state.
         set_nip55_state(Nip55State::Idle);
         let fresh = Nip55Signer::new(keys.public_key());
-        let unsigned = EventBuilder::text_note("hi")
-            .build(keys.public_key());
-        let err = fresh.sign_event(unsigned).await;
+        let unsigned = EventBuilder::new(Kind::TextNote, "hi")
+            .finalize_unsigned_with_id(keys.public_key());
+        let err = fresh.sign_event_async(unsigned).await;
         assert!(err.is_err(), "no backend registered => sign must fail");
         assert_eq!(
             nip55_state(),

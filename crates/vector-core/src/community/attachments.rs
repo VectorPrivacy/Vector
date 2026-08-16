@@ -42,7 +42,11 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
     if let Some(topic) = att.webxdc_topic.as_deref().filter(|t| !t.is_empty()) {
         fields.push(format!("webxdc-topic {}", topic));
     }
-    Tag::custom(TagKind::Custom(IMETA.into()), fields)
+    // Mirrors of the same ciphertext (NIP-92 `fallback` convention).
+    for fb in &att.fallback_urls {
+        fields.push(format!("fallback {}", fb));
+    }
+    Tag::custom(IMETA, fields)
 }
 
 /// Read a single `key value` field from an `imeta` tag's entries (value is everything
@@ -50,6 +54,15 @@ pub fn attachment_to_imeta(att: &Attachment) -> Tag {
 fn field<'a>(entries: &'a [String], key: &str) -> Option<&'a str> {
     entries.iter().find_map(|e| {
         e.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix(' '))
+    })
+}
+
+/// Every value of a repeatable `key value` field, in tag order.
+fn fields_all<'a>(entries: &'a [String], key: &str) -> impl Iterator<Item = &'a str> + 'a {
+    let key = key.to_string();
+    entries.iter().filter_map(move |e| {
+        e.strip_prefix(key.as_str())
             .and_then(|rest| rest.strip_prefix(' '))
     })
 }
@@ -138,6 +151,23 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         .filter(|t| t.len() == 52 && t.bytes().all(|b| b.is_ascii_uppercase() || (b'2'..=b'7').contains(&b)))
         .map(|t| t.to_string());
 
+    // `fallback` mirrors: same ciphertext on other hosts. Author-controlled —
+    // https-only, deduped against the primary and each other, capped.
+    let mut fallback_urls: Vec<String> = Vec::new();
+    for fb in fields_all(body, "fallback") {
+        if !fb.starts_with("https://")
+            || fb.contains(char::is_whitespace)
+            || fb == url
+            || fallback_urls.iter().any(|f| f == fb)
+        {
+            continue;
+        }
+        fallback_urls.push(fb.to_string());
+        if fallback_urls.len() >= 4 {
+            break;
+        }
+    }
+
     Some(Attachment {
         id: basis,
         key,
@@ -153,6 +183,7 @@ pub fn attachment_from_imeta(tag: &Tag, download_dir: &Path) -> Option<Attachmen
         webxdc_topic,
         group_id: None, // Community attachments use explicit key/nonce (NIP-17 technique).
         original_hash,
+        fallback_urls,
     })
 }
 
@@ -219,7 +250,36 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("a".repeat(64)),
+            fallback_urls: Vec::new(),
         }
+    }
+
+    #[test]
+    fn imeta_fallback_mirrors_roundtrip() {
+        let dir = std::env::temp_dir();
+        let mut att = sample("pic.png", "png", false);
+        att.fallback_urls = vec![
+            "https://mirror-one.example/abc".to_string(),
+            "https://mirror-two.example/abc".to_string(),
+        ];
+        let parsed = attachment_from_imeta(&attachment_to_imeta(&att), &dir).unwrap();
+        assert_eq!(parsed.fallback_urls, att.fallback_urls);
+    }
+
+    #[test]
+    fn imeta_fallback_filters_junk() {
+        // Author-controlled entries: primary dups, non-https schemes and
+        // repeated mirrors are dropped, not propagated.
+        let dir = std::env::temp_dir();
+        let att = sample("pic.png", "png", false);
+        let mut entries: Vec<String> = attachment_to_imeta(&att).as_slice()[1..].to_vec();
+        entries.push(format!("fallback {}", att.url));
+        entries.push("fallback http://insecure.example/abc".to_string());
+        entries.push("fallback https://sneaky.example/a b".to_string());
+        entries.push("fallback https://mirror.example/abc".to_string());
+        entries.push("fallback https://mirror.example/abc".to_string());
+        let parsed = attachment_from_imeta(&Tag::custom(IMETA, entries), &dir).unwrap();
+        assert_eq!(parsed.fallback_urls, vec!["https://mirror.example/abc".to_string()]);
     }
 
     #[test]
@@ -340,9 +400,9 @@ mod tests {
     fn multiple_imeta_tags_parse_in_order() {
         let dir = std::env::temp_dir();
         let tags = vec![
-            Tag::custom(TagKind::Custom("z".into()), ["pseudonym"]),
+            Tag::custom("z", ["pseudonym"]),
             attachment_to_imeta(&sample("a.png", "png", false)),
-            Tag::custom(TagKind::Custom("ms".into()), ["12"]),
+            Tag::custom("ms", ["12"]),
             attachment_to_imeta(&sample("b.pdf", "pdf", false)),
         ];
         let atts = attachments_from_tags(tags.iter(), &dir);
@@ -355,13 +415,13 @@ mod tests {
     #[test]
     fn non_imeta_and_incomplete_tags_are_skipped() {
         let dir = std::env::temp_dir();
-        let not_imeta = Tag::custom(TagKind::Custom("e".into()), ["abc"]);
+        let not_imeta = Tag::custom("e", ["abc"]);
         assert!(attachment_from_imeta(&not_imeta, &dir).is_none());
         // No `url` at all → None (NIP-92 requires a url).
-        let no_url = Tag::custom(TagKind::Custom("imeta".into()), ["m image/png"]);
+        let no_url = Tag::custom("imeta", ["m image/png"]);
         assert!(attachment_from_imeta(&no_url, &dir).is_none());
         // A url-only imeta is valid now — an unencrypted (plaintext) attachment.
-        let plain = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y"]);
+        let plain = Tag::custom("imeta", ["url https://x/y"]);
         assert!(attachment_from_imeta(&plain, &dir).is_some(), "url-only imeta = plaintext attachment");
     }
 
@@ -390,6 +450,7 @@ mod tests {
             webxdc_topic: None,
             group_id: None,
             original_hash: Some("c".repeat(64)),
+            fallback_urls: Vec::new(),
         };
         let parsed = attachment_from_imeta(&attachment_to_imeta(&att), &dir).expect("parses");
         // The parsed key/nonce (straight off the imeta) must decrypt the ciphertext.
@@ -404,7 +465,7 @@ mod tests {
         // attacker-controlled. A non-hex / traversal basis must be refused, never joined
         // into a filesystem path.
         let dir = std::path::Path::new("/tmp/vector-test-dl");
-        let traversal = Tag::custom(TagKind::Custom("imeta".into()), [
+        let traversal = Tag::custom("imeta", [
             "url https://x/y",
             "decryption-key 00",
             "decryption-nonce 11",
@@ -413,7 +474,7 @@ mod tests {
         assert!(attachment_from_imeta(&traversal, dir).is_none(), "traversal ox rejected");
 
         // Falls back to nonce when ox absent — a non-hex nonce is likewise rejected.
-        let bad_nonce = Tag::custom(TagKind::Custom("imeta".into()), [
+        let bad_nonce = Tag::custom("imeta", [
             "url https://x/y",
             "decryption-key 00",
             "decryption-nonce ../evil",
@@ -421,7 +482,7 @@ mod tests {
         assert!(attachment_from_imeta(&bad_nonce, dir).is_none(), "traversal nonce rejected");
 
         // A legitimate hex basis still parses.
-        let good = Tag::custom(TagKind::Custom("imeta".into()), [
+        let good = Tag::custom("imeta", [
             "url https://x/y".to_string(),
             "decryption-key 00".to_string(),
             "decryption-nonce 11".to_string(),
@@ -437,7 +498,7 @@ mod tests {
         // NO decryption params. It must parse (empty key/nonce = plaintext) so we can
         // best-effort render it, identity keyed by the `x` content hash.
         let x = "b".repeat(64);
-        let tag = Tag::custom(TagKind::Custom("imeta".into()), [
+        let tag = Tag::custom("imeta", [
             "url https://blossom.ditto.pub/abc.png".to_string(),
             "m image/png".to_string(),
             "dim 640x480".to_string(),
@@ -450,7 +511,7 @@ mod tests {
         assert_eq!(att.extension, "png");
 
         // Half-specified encryption (key without a nonce) is still refused.
-        let half = Tag::custom(TagKind::Custom("imeta".into()), ["url https://x/y", "decryption-key 00"]);
+        let half = Tag::custom("imeta", ["url https://x/y", "decryption-key 00"]);
         assert!(attachment_from_imeta(&half, &dir).is_none(), "key without nonce dropped");
     }
 
@@ -476,7 +537,7 @@ mod tests {
     fn malformed_imeta_does_not_panic_and_drops_gracefully() {
         let dir = std::env::temp_dir();
         // Garbage entries, duplicate keys, value-less keys, weird spacing — must not panic.
-        let junk = Tag::custom(TagKind::Custom("imeta".into()), [
+        let junk = Tag::custom("imeta", [
             "url",                 // no value (skipped: `field` needs `key<space>`)
             "decryption-key",      // no value
             "random noise here",
@@ -489,11 +550,11 @@ mod tests {
         assert!(att.key.is_empty() && att.nonce.is_empty());
 
         // No url anywhere → None (not a panic).
-        let no_url = Tag::custom(TagKind::Custom("imeta".into()), ["m image/png", "random"]);
+        let no_url = Tag::custom("imeta", ["m image/png", "random"]);
         assert!(attachment_from_imeta(&no_url, &dir).is_none());
 
         // Empty imeta (just the tag name) → None.
-        let empty = Tag::custom(TagKind::Custom("imeta".into()), Vec::<String>::new());
+        let empty = Tag::custom("imeta", Vec::<String>::new());
         assert!(attachment_from_imeta(&empty, &dir).is_none());
     }
 }

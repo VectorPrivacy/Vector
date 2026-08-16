@@ -72,10 +72,6 @@ pub async fn sweep_expired() -> Option<u64> {
     }
     let _guard = SweepGuard;
 
-    // Snapshot the session so a mid-sweep account swap can't purge account A's
-    // rows against account B's DB (see SessionGuard contract).
-    let session = crate::state::SessionGuard::capture();
-
     let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(d) => d.as_secs(),
         Err(_) => return None,
@@ -103,59 +99,95 @@ pub async fn sweep_expired() -> Option<u64> {
         }
         ids
     };
-    if !session.is_valid() {
-        return None;
-    }
     if expired_ids.is_empty() {
         return soonest;
     }
 
-    let client = crate::state::nostr_client();
-
     // Pass 2 — purge each. Re-lock per id so the sweep never holds STATE across
     // an await (DB delete, blob delete).
     for id in expired_ids {
-        let removed = {
-            let mut state = crate::state::STATE.lock().await;
-            state.remove_message(&id)
-        };
-        let (chat_id, msg) = match removed {
-            Some(pair) => pair,
-            None => continue, // already gone (client-side derez or a prior sweep)
-        };
+        purge_one(&id, None).await;
+    }
 
-        if !msg.attachments.is_empty() {
-            let mine = msg.mine;
-            // Refcount filter: keep files/blobs a sibling message still points at.
-            let unique = crate::deletion::filter_unreferenced_attachments(&id, msg.attachments).await;
-            crate::deletion::delete_cached_attachment_files_pub(&unique);
+    soonest
+}
 
-            // Our own, now-unreferenced blob → wipe it network-side too.
-            if mine {
-                let urls: Vec<String> = unique
-                    .iter()
-                    .map(|a| a.url.to_string())
-                    .filter(|u| !u.is_empty())
-                    .collect();
-                if !urls.is_empty() {
-                    if let Some(ref client) = client {
-                        if let Ok(signer) = client.signer().await {
-                            crate::blossom::delete_blobs_best_effort(signer, urls);
-                        }
+/// Purge one expired message everywhere it lives: STATE (emitting the derez
+/// event when it was resident), cached attachment files, our own Blossom
+/// blobs, and the DB row. `db_fallback` supplies (attachments, mine) for rows
+/// that never hydrated into STATE (a DB load caught them first); `None` keeps
+/// the sweep's contract of skipping ids something else already removed.
+pub(crate) async fn purge_one(id: &str, db_fallback: Option<(Vec<crate::types::Attachment>, bool)>) {
+    let removed = {
+        let mut state = crate::state::STATE.lock().await;
+        state.remove_message(id)
+    };
+    let (attachments, mine, resident_chat) = match removed {
+        Some((chat_id, msg)) => (msg.attachments, msg.mine, Some(chat_id)),
+        None => match db_fallback {
+            Some((attachments, mine)) => (attachments, mine, None),
+            None => return, // already gone (client-side derez or a prior sweep)
+        },
+    };
+
+    if !attachments.is_empty() {
+        // Refcount filter: keep files/blobs a sibling message still points at.
+        let unique = crate::deletion::filter_unreferenced_attachments(id, attachments).await;
+        crate::deletion::delete_cached_attachment_files_pub(&unique);
+
+        // Our own, now-unreferenced blob → wipe it network-side too.
+        if mine {
+            let urls: Vec<String> = unique
+                .iter()
+                .flat_map(|a| a.all_urls().map(str::to_string))
+                .collect();
+            if !urls.is_empty() {
+                if crate::state::nostr_client().is_some() {
+                    if let Ok(signer) = crate::signer::active_signer() {
+                        crate::blossom::delete_blobs_best_effort(signer, urls);
                     }
                 }
             }
         }
+    }
 
-        let _ = crate::db::events::delete_event(&id).await;
+    let _ = crate::db::events::delete_event(id).await;
 
+    // Only a STATE-resident message can be on screen — DB-only rows were
+    // caught before rendering and vanish silently.
+    if let Some(chat_id) = resident_chat {
         crate::traits::emit_event(
             "message_removed",
             &serde_json::json!({ "id": id, "chat_id": chat_id, "reason": "self-destruct" }),
         );
     }
+}
 
-    soonest
+/// Drop already-expired messages from a freshly-loaded DB window, purging
+/// their remnants in the background. Rows that expired while the app was
+/// closed (or while their chat was out of STATE) must NEVER render — not
+/// even for the frame between hydration and the next sweep tick.
+pub fn strip_expired(messages: &mut Vec<crate::types::Message>) {
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(_) => return,
+    };
+    let mut expired: Vec<(String, Vec<crate::types::Attachment>, bool)> = Vec::new();
+    messages.retain(|m| match m.expiration {
+        Some(exp) if exp <= now => {
+            expired.push((m.id.clone(), m.attachments.clone(), m.mine));
+            false
+        }
+        _ => true,
+    });
+    if expired.is_empty() {
+        return;
+    }
+    crate::db::spawn_bound(async move {
+        for (id, attachments, mine) in expired {
+            purge_one(&id, Some((attachments, mine))).await;
+        }
+    });
 }
 
 /// Time until the next sweep: sleep exactly until the soonest pending expiry
@@ -191,5 +223,9 @@ pub fn start_sweeper() {
     if STARTED.swap(true, Ordering::AcqRel) {
         return;
     }
+    // NOT bound: this loop runs for the process lifetime and must sweep
+    // whichever account is live. Binding would pin it to whoever logged in
+    // first, and every later account would silently stop expiring messages.
+    // spawn-detached: the sweeper must expire messages for whichever account is live; see above.
     tokio::spawn(run_sweeper_loop());
 }

@@ -46,9 +46,10 @@ function cleanDist() {
 }
 
 if (isDev) {
-    // Symlink dist → src so Tauri watches src/ changes directly
+    // Symlink dist → src so Tauri watches src/ changes directly.
+    // Windows: 'junction' — real symlinks need Developer Mode or elevation; junctions don't.
     cleanDist();
-    symlinkSync(SRC, DIST, 'dir');
+    symlinkSync(SRC, DIST, process.platform === 'win32' ? 'junction' : 'dir');
     console.log('  Symlinked dist/ → src/ (hot-reload enabled)');
     process.exit(0);
 }

@@ -319,6 +319,20 @@ async fn main() -> vector_sdk::Result<()> {
             BotEvent::Typing { npub, .. } => println!("[TYPING] {}", short(&npub)),
             BotEvent::Invite { community_id } => println!("[INVITE] for community {}", short(&community_id)),
             BotEvent::Removed { community_id } => println!("[REMOVED] from community {} — I was kicked/banned", short(&community_id)),
+            BotEvent::Ready { communities } => {
+                println!("[READY] live — subscribed across {communities} communities");
+            }
+            BotEvent::ChannelKeyed { community_id, channel_id, backfilled } => {
+                println!("[KEYED] private channel {} in {} is readable now ({backfilled} back-filled)", short(&channel_id), short(&community_id));
+                // Back-filled history is NOT delivered as live events — read it.
+                if backfilled > 0 {
+                    for m in bot.community(&community_id).channel(&channel_id).history(backfilled).await {
+                        println!("[KEYED]   history: {}", m.content.chars().take(60).collect::<String>());
+                    }
+                }
+                print_channels(&bot, "channels visible (after key vend)").await;
+            }
+            _ => {} // BotEvent is non_exhaustive: future events land here
         }
     })
     .await?;
@@ -337,7 +351,7 @@ async fn reply(msg: &vector_sdk::IncomingMessage, text: &str) {
 /// fallback clients use to resolve an author they've never seen. Ditto-family
 /// community relays silently drop a stranger's kind-0 (accepted, never stored),
 /// so for a bot these indexers are the RELIABLE path to a rendered name+avatar.
-const PROFILE_INDEXERS: &[&str] = &["wss://purplepag.es", "wss://relay.nostr.band", "wss://relay.damus.io", "wss://nos.lol"];
+const PROFILE_INDEXERS: &[&str] = &["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"];
 
 /// Community relays are pool-isolated from profile ops by design (the GOSSIP
 /// flag keeps pool-wide DM/profile publishes off them), so the kind-0 above
@@ -349,7 +363,7 @@ async fn push_profile_to_communities() {
     let Some(client) = vector_core::state::nostr_client() else { return };
     let Some(me) = vector_core::state::my_public_key() else { return };
     let filter = Filter::new().kind(Kind::Metadata).author(me).limit(1);
-    let Ok(evs) = client.fetch_events(filter, std::time::Duration::from_secs(8)).await else {
+    let Ok(evs) = client.fetch_events(filter).timeout(std::time::Duration::from_secs(8)).await else {
         eprintln!("!! could not fetch own kind-0 back for the community push");
         return;
     };
@@ -364,24 +378,32 @@ async fn push_profile_to_communities() {
         let _ = client.add_relay(t).await;
     }
     client.connect().await;
-    match client.send_event_to(targets, &ev).await {
+    match client.send_event(&ev).to(targets).await {
         Ok(out) => println!("── profile pushed: stored on {} relay(s), refused by {}", out.success.len(), out.failed.len()),
         Err(e) => eprintln!("!! profile push failed: {e}"),
     }
 }
 
 /// Print every v2 community's channel names under `label`.
+/// Every channel with its key state. A private channel we've been told about but
+/// hold no key for prints as `#name (locked)` — the signal that an admin granted
+/// access whose key vend hasn't landed yet, rather than a channel that is simply
+/// quiet.
 async fn print_channels(bot: &VectorBot, label: &str) {
-    for c in bot.core().list_communities().await {
-        if c.get("version").and_then(|v| v.as_u64()) == Some(2) {
-            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-            let chans: Vec<String> = c
-                .get("channels")
-                .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|ch| ch.get("name").and_then(|n| n.as_str()).map(String::from)).collect())
-                .unwrap_or_default();
-            println!("── {label} in \"{name}\": {chans:?}");
+    for community in bot.communities().await {
+        let channels = community.channels().await;
+        if channels.is_empty() {
+            continue;
         }
+        let rendered: Vec<String> = channels
+            .iter()
+            .map(|ch| match (ch.is_private(), ch.is_readable()) {
+                (true, false) => format!("#{} (locked)", ch.name()),
+                (true, true) => format!("#{} (private)", ch.name()),
+                _ => format!("#{}", ch.name()),
+            })
+            .collect();
+        println!("── {label} in {}: {}", short(community.id()), rendered.join(", "));
     }
 }
 
@@ -426,7 +448,7 @@ async fn bounce_community_relays() -> usize {
         if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
             for r in &c.relays {
                 if let Ok(url) = nostr_sdk::prelude::RelayUrl::parse(r) {
-                    if let Ok(relay) = client.pool().relay(url).await {
+                    if let Ok(Some(relay)) = client.relay(url).await {
                         relay.disconnect();
                         bounced += 1;
                     }

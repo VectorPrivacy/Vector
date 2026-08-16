@@ -23,7 +23,7 @@
 //! coordinate: even though only the authorized rotator can mint blobs, the binding makes a
 //! cross-scope/epoch reuse fail closed on open, the same discipline as the message envelope.
 
-use nostr_sdk::nips::nip44::v2::ConversationKey;
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -215,12 +215,12 @@ fn build_rekey_inner(
     let blobs_json = serde_json::to_string(blobs).map_err(|e| format!("serialize blobs: {e}"))?;
     EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), blobs_json)
         .tags([
-            Tag::custom(TagKind::Custom(TAG_SCOPE.into()), [scope_to_hex(scope)]),
-            Tag::custom(TagKind::Custom(TAG_NEW_EPOCH.into()), [new_epoch.0.to_string()]),
-            Tag::custom(TagKind::Custom(TAG_PREV_EPOCH.into()), [prev_epoch.0.to_string()]),
-            Tag::custom(TagKind::Custom(TAG_PREV_COMMIT.into()), [crate::simd::hex::bytes_to_hex_32(prev_key_commitment)]),
+            Tag::custom(TAG_SCOPE, [scope_to_hex(scope)]),
+            Tag::custom(TAG_NEW_EPOCH, [new_epoch.0.to_string()]),
+            Tag::custom(TAG_PREV_EPOCH, [prev_epoch.0.to_string()]),
+            Tag::custom(TAG_PREV_COMMIT, [crate::simd::hex::bytes_to_hex_32(prev_key_commitment)]),
         ])
-        .sign_with_keys(rotator)
+        .finalize(rotator)
         .map_err(|e| format!("sign rekey inner: {e}"))
 }
 
@@ -231,10 +231,10 @@ fn seal_rekey_outer(ephemeral: &Keys, inner: &Event, envelope_key: &[u8; 32], ad
     let content = cipher::seal(envelope_key, inner.as_json().as_bytes()).map_err(|e| format!("seal rekey: {e}"))?;
     EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), content)
         .tags([
-            Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)), [address.to_hex()]),
-            Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+            Tag::custom("z", [address.to_hex()]),
+            Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
         ])
-        .sign_with_keys(ephemeral)
+        .finalize(ephemeral)
         .map_err(|e| format!("sign rekey outer: {e}"))
 }
 
@@ -376,7 +376,6 @@ mod tests {
     /// same wire builder (`build_rekey_inner`/`seal_rekey_outer`), so the server-root case bounds both.
     #[test]
     fn max_rekey_blobs_event_stays_under_relay_size_limit() {
-        use nostr_sdk::JsonUtil;
         let rotator = Keys::generate();
         let blobs: Vec<RekeyBlob> = (0..MAX_REKEY_BLOBS)
             .map(|_| {
@@ -786,20 +785,20 @@ mod tests {
         let old_key = SR;
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), "[]")
             .tags([
-                Tag::custom(TagKind::Custom(TAG_SCOPE.into()), [scope_to_hex(RekeyScope::ServerRoot)]),
-                Tag::custom(TagKind::Custom(TAG_NEW_EPOCH.into()), ["1".to_string()]),
-                Tag::custom(TagKind::Custom(TAG_PREV_EPOCH.into()), ["0".to_string()]),
-                Tag::custom(TagKind::Custom(TAG_PREV_COMMIT.into()), ["00".repeat(32)]),
+                Tag::custom(TAG_SCOPE, [scope_to_hex(RekeyScope::ServerRoot)]),
+                Tag::custom(TAG_NEW_EPOCH, ["1".to_string()]),
+                Tag::custom(TAG_PREV_EPOCH, ["0".to_string()]),
+                Tag::custom(TAG_PREV_COMMIT, ["00".repeat(32)]),
             ])
-            .sign_with_keys(&rotator)
+            .finalize(&rotator)
             .unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&inner.as_json()).unwrap();
         v["content"] = serde_json::Value::String("[{\"locator\":\"x\",\"wrapped\":\"y\"}]".into());
         let tampered = serde_json::to_string(&v).unwrap();
         let content = cipher::seal(&old_key, tampered.as_bytes()).unwrap();
         let outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), content)
-            .tags([Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()])])
-            .sign_with_keys(&Keys::generate())
+            .tags([Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()])])
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(open_rekey_event(&outer, &old_key).is_err());
     }
@@ -809,13 +808,13 @@ mod tests {
         let old_key = [0x55u8; 32];
         // Wrong outer kind.
         let not_rekey = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "x")
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(open_rekey_event(&not_rekey, &old_key).is_err());
         // Right kind, missing/garbage version (checked before decrypt).
         let bad_ver = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), "x")
-            .tags([Tag::custom(TagKind::Custom(TAG_VERSION.into()), ["999".to_string()])])
-            .sign_with_keys(&Keys::generate())
+            .tags([Tag::custom(TAG_VERSION, ["999".to_string()])])
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(open_rekey_event(&bad_ver, &old_key).is_err());
     }
@@ -828,12 +827,12 @@ mod tests {
         // still error there. Here the error must specifically be the version rejection.)
         let real_key = [0x55u8; 32];
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), "[]")
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         let content = cipher::seal(&real_key, inner.as_json().as_bytes()).unwrap();
         let outer = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_REKEY), content)
-            .tags([Tag::custom(TagKind::Custom(TAG_VERSION.into()), ["999".to_string()])])
-            .sign_with_keys(&Keys::generate())
+            .tags([Tag::custom(TAG_VERSION, ["999".to_string()])])
+            .finalize(&Keys::generate())
             .unwrap();
         // Open with a DIFFERENT key: if the version check were after decrypt, this would surface a
         // decrypt error instead of the version error.

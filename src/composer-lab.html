@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Composer Lab</title>
+<style>
+  :root { --accent-color: #59fcb3; --bg: #0d0d0d; --panel: #181818; --fg: #e8e8e8; --dim: rgba(255,255,255,.38); }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 16px; }
+  h1 { font-size: 15px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent-color); margin: 0 0 4px; }
+  p.hint { color: var(--dim); font-size: 13px; margin: 0 0 18px; }
+  .composer-shell { background: var(--panel); border: 1.5px solid rgba(255,255,255,.10);
+                    border-radius: 14px; padding: 10px 14px; }
+  .composer-shell:focus-within { border-color: var(--accent-color); }
+
+  .rich-composer { outline: none; min-height: 24px; max-height: 40vh; overflow-y: auto;
+                   white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+  .rich-composer:empty::before,
+  .rich-composer[data-empty="1"]::before { content: attr(data-placeholder); color: var(--dim); pointer-events: none; }
+
+  .cmp-mark   { color: var(--dim); }
+  .cmp-bold   .cmp-body { font-weight: 700; }
+  .cmp-italic .cmp-body { font-style: italic; }
+  .cmp-strike .cmp-body { text-decoration: line-through; }
+  .cmp-spoiler .cmp-body { background: rgba(255,255,255,.16); border-radius: 3px; }
+  .cmp-code   { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
+  .cmp-code   .cmp-body { background: rgba(255,255,255,.08); border-radius: 3px; padding: 1px 2px; }
+  .cmp-mention { color: var(--accent-color); background: rgba(89,252,179,.13);
+                 border-radius: 4px; padding: 0 2px; }
+  .cmp-emoji  { display: inline-block; vertical-align: -0.22em; }
+  .cmp-emoji img { width: 1.35em; height: 1.35em; object-fit: contain; display: block; }
+
+  .readout { margin-top: 18px; }
+  .readout h2 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--dim); margin: 0 0 6px; }
+  pre { background: var(--panel); border-radius: 10px; padding: 10px 12px; margin: 0 0 12px;
+        overflow-x: auto; font-size: 12.5px; color: var(--accent-color); white-space: pre-wrap; word-break: break-all; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  button { background: transparent; color: var(--fg); border: 1.5px solid rgba(255,255,255,.16);
+           border-radius: 9px; padding: 7px 12px; font-size: 13px; cursor: pointer; }
+  button:active { border-color: var(--accent-color); }
+</style>
+</head>
+<body>
+  <h1>Composer Lab</h1>
+  <p class="hint">
+    Type <code>**bold**</code>, <code>*italic*</code>, <code>~~strike~~</code>, <code>||spoiler||</code>,
+    <code>`code`</code>, <code>:cat:</code> / <code>:vector:</code>, or <code>@JSKitty</code>.
+    On Android: swipe-type, autocorrect and the prediction bar are the things to hammer.
+  </p>
+
+  <div class="composer-shell" id="shell"></div>
+
+  <div class="readout">
+    <div class="row">
+      <button id="btn-set">value = sample</button>
+      <button id="btn-clear">clear</button>
+      <button id="btn-insert">insertAtCursor(":cat:")</button>
+      <button id="btn-caret">read caret</button>
+    </div>
+    <h2>value (the string that would be sent)</h2>
+    <pre id="out-value">(empty)</pre>
+    <h2>round-trip check &amp; caret</h2>
+    <pre id="out-meta">–</pre>
+  </div>
+
+<script src="/js/composer.js"></script>
+<script>
+  // Stand-ins for the app's resolvers.
+  const EMOJI = {
+    cat: 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><text y="26" font-size="26">🐱</text></svg>'),
+    vector: 'data:image/svg+xml;utf8,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><polygon points="16,29 3,6 29,6" fill="#59fcb3"/></svg>'),
+  };
+  const MENTIONS = ['JSKitty', 'Danish', 'YuurinBee', 'Liquid369'];
+
+  const composer = createRichComposer(document.getElementById('shell'), {
+    placeholder: 'Enter message...',
+    resolveEmoji: (code) => EMOJI[code] || null,
+    // The module refuses to assign pack art itself; the host binds it. Here that's
+    // inert data: URIs, in the app it's the backend-proxied disk cache.
+    bindEmojiImg: (img, url, onFail) => { img.src = url; img.addEventListener('error', onFail, { once: true }); },
+    resolveMention: (name) => MENTIONS.find(m => m.toLowerCase() === name.toLowerCase()) || null,
+  });
+
+  const outValue = document.getElementById('out-value');
+  const outMeta = document.getElementById('out-meta');
+
+  function refresh() {
+    const v = composer.value;
+    outValue.textContent = v === '' ? '(empty)' : JSON.stringify(v);
+    composer.el.dataset.empty = v === '' ? '1' : '0';
+    // The round-trip check is the real assertion: the DOM must serialize back to
+    // exactly the source, or the model and the display have diverged.
+    outMeta.textContent =
+      'length ' + v.length +
+      '  ·  caret ' + composer.selectionStart +
+      '  ·  lines ' + (v.split('\n').length);
+  }
+
+  composer.addEventListener('input', refresh);
+  composer.addEventListener('keyup', refresh);
+  composer.addEventListener('click', refresh);
+
+  document.getElementById('btn-set').onclick = () => {
+    composer.value = 'hey **there** @JSKitty, try *this* :cat: and `code` ||secret||';
+    refresh(); composer.focus();
+  };
+  document.getElementById('btn-clear').onclick = () => { composer.value = ''; refresh(); composer.focus(); };
+  document.getElementById('btn-insert').onclick = () => {
+    // Exactly what picker.js's insertAtCursor does, through the same duck-typed API.
+    const s = composer.selectionStart, e = composer.selectionEnd, val = composer.value;
+    composer.value = val.slice(0, s) + ':cat:' + val.slice(e);
+    composer.setSelectionRange(s + 5, s + 5);
+    refresh(); composer.focus();
+  };
+  document.getElementById('btn-caret').onclick = refresh;
+
+  refresh();
+</script>
+</body>
+</html>

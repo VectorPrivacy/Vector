@@ -15,37 +15,38 @@ import io.vectorapp.Logger
 import java.io.ByteArrayInputStream
 
 /**
- * Custom WebViewClient that intercepts requests to webxdc.localhost
+ * Custom WebViewClient that intercepts requests to the app's partition host
  * and serves files from the Mini App package via JNI.
+ *
+ * Each Mini App gets its own origin (`http://<partition>.localhost`) so
+ * browser storage (localStorage/IndexedDB) can't bleed between apps.
  */
 class MiniAppWebViewClient(
     private val context: Context,
     private val miniappId: String,
-    private val packagePath: String
+    private val packagePath: String,
+    private val host: String
 ) : WebViewClient() {
+
+    /**
+     * Content Security Policy for Mini Apps.
+     *
+     * Security directives:
+     * - `default-src 'self'`: Only allow resources from the app's own origin
+     * - `webrtc 'block'`: Prevent IP leaks via WebRTC peer connections
+     * - `connect-src`: No external network (only self, ipc, data, blob)
+     *
+     * Permissive directives (required for Mini Apps to function):
+     * - `unsafe-inline`: Many apps use inline scripts/styles
+     * - `unsafe-eval`: Some apps use eval() or Function()
+     * - `blob:`: Apps may create blob URLs for generated content
+     *
+     * This matches the desktop implementation for consistency.
+     */
+    private val csp = """default-src 'self' http://$host; style-src 'self' http://$host 'unsafe-inline' blob:; font-src 'self' http://$host data: blob:; script-src 'self' http://$host 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self' http://$host ipc: data: blob: ws://127.0.0.1:*; img-src 'self' http://$host data: blob:; media-src 'self' http://$host data: blob:; webrtc 'block'"""
 
     companion object {
         private const val TAG = "MiniAppWebViewClient"
-
-        /** The custom protocol host for Mini Apps (Android requires http://) */
-        private const val WEBXDC_HOST = "webxdc.localhost"
-
-        /**
-         * Content Security Policy for Mini Apps.
-         *
-         * Security directives:
-         * - `default-src 'self'`: Only allow resources from webxdc.localhost
-         * - `webrtc 'block'`: Prevent IP leaks via WebRTC peer connections
-         * - `connect-src`: No external network (only self, ipc, data, blob)
-         *
-         * Permissive directives (required for Mini Apps to function):
-         * - `unsafe-inline`: Many apps use inline scripts/styles
-         * - `unsafe-eval`: Some apps use eval() or Function()
-         * - `blob:`: Apps may create blob URLs for generated content
-         *
-         * This matches the desktop implementation for consistency.
-         */
-        private const val CSP = """default-src 'self' http://webxdc.localhost; style-src 'self' http://webxdc.localhost 'unsafe-inline' blob:; font-src 'self' http://webxdc.localhost data: blob:; script-src 'self' http://webxdc.localhost 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; connect-src 'self' http://webxdc.localhost ipc: data: blob: ws://127.0.0.1:*; img-src 'self' http://webxdc.localhost data: blob:; media-src 'self' http://webxdc.localhost data: blob:; webrtc 'block'"""
 
         /**
          * Permissions Policy that denies all sensitive APIs by default.
@@ -63,11 +64,12 @@ class MiniAppWebViewClient(
         request: WebResourceRequest?
     ): WebResourceResponse? {
         val url = request?.url ?: return null
-        val host = url.host ?: return null
+        val requestHost = url.host ?: return null
 
-        // Only intercept webxdc.localhost requests
-        if (host != WEBXDC_HOST) {
-            Logger.warn(TAG, "[$miniappId] Blocked request to external host: $host")
+        // Only intercept this app's own origin — anything else (including
+        // another app's partition) is blocked
+        if (requestHost != host) {
+            Logger.warn(TAG, "[$miniappId] Blocked request to external host: $requestHost")
             return createBlockedResponse()
         }
 
@@ -81,7 +83,7 @@ class MiniAppWebViewClient(
 
         // Serve file from package via JNI
         return try {
-            val response = handleMiniAppRequest(miniappId, packagePath, path)
+            val response = handleMiniAppRequest(miniappId, packagePath, path, host)
             if (response != null) {
                 response
             } else {
@@ -100,9 +102,8 @@ class MiniAppWebViewClient(
     ): Boolean {
         val url = request?.url?.toString() ?: return true
 
-        // Only allow navigation within webxdc.localhost
-        val allowed = url.startsWith("http://webxdc.localhost/") ||
-                      url.startsWith("http://$WEBXDC_HOST/")
+        // Only allow navigation within this app's own origin
+        val allowed = url.startsWith("http://$host/")
 
         if (!allowed) {
             Logger.warn(TAG, "[$miniappId] Blocked navigation to: $url")
@@ -199,7 +200,7 @@ class MiniAppWebViewClient(
             200,
             "OK",
             mapOf(
-                "Content-Security-Policy" to CSP,
+                "Content-Security-Policy" to csp,
                 "Permissions-Policy" to PERMISSIONS_POLICY,
                 "X-Content-Type-Options" to "nosniff",
                 "Cache-Control" to "no-cache"
@@ -218,7 +219,7 @@ class MiniAppWebViewClient(
             403,
             "Forbidden",
             mapOf(
-                "Content-Security-Policy" to CSP,
+                "Content-Security-Policy" to csp,
                 "Permissions-Policy" to PERMISSIONS_POLICY,
                 "X-Content-Type-Options" to "nosniff"
             ),
@@ -236,7 +237,7 @@ class MiniAppWebViewClient(
             404,
             "Not Found",
             mapOf(
-                "Content-Security-Policy" to CSP,
+                "Content-Security-Policy" to csp,
                 "Permissions-Policy" to PERMISSIONS_POLICY,
                 "X-Content-Type-Options" to "nosniff"
             ),
@@ -254,7 +255,7 @@ class MiniAppWebViewClient(
             500,
             "Internal Server Error",
             mapOf(
-                "Content-Security-Policy" to CSP,
+                "Content-Security-Policy" to csp,
                 "Permissions-Policy" to PERMISSIONS_POLICY,
                 "X-Content-Type-Options" to "nosniff"
             ),
@@ -343,12 +344,14 @@ class MiniAppWebViewClient(
      * @param miniappId The Mini App identifier
      * @param packagePath Path to the .xdc file
      * @param path The requested file path
+     * @param host The app's partition host (for the per-origin CSP)
      * @return WebResourceResponse or null if file not found
      */
     private external fun handleMiniAppRequest(
         miniappId: String,
         packagePath: String,
-        path: String
+        path: String,
+        host: String
     ): WebResourceResponse?
 
     /**

@@ -12,6 +12,7 @@ const SystemEventType = {
     MemberRemoved: 2,
     WallpaperChanged: 3,
     WallpaperRemoved: 4,
+    PinsModified: 5,
 };
 
 /** The one true display-name resolver. Accepts a profile object or an npub/id string.
@@ -36,6 +37,7 @@ function systemEventSuffix(eventType) {
         case SystemEventType.MemberRemoved: return ' was removed';
         case SystemEventType.WallpaperChanged: return ' changed the wallpaper';
         case SystemEventType.WallpaperRemoved: return ' removed the wallpaper';
+        case SystemEventType.PinsModified: return ' modified the Pins';
         default: return '';
     }
 }
@@ -732,21 +734,6 @@ function armBunkerSessionTimer() {
 }
 
 /**
- * Render a QR code (SVG) into a container element using the vendored
- * qrcode-generator library. Reusable for future Profile QR / contact-share
- * / Lightning URI flows.
- */
-function renderQrInto(containerEl, text, opts = {}) {
-    if (!containerEl || !window.qrcode) return false;
-    const ecc = opts.ecc || 'M';
-    const qr = window.qrcode(0, ecc);
-    qr.addData(text);
-    qr.make();
-    containerEl.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 0, scalable: true });
-    return true;
-}
-
-/**
  * Kick off a NIP-46 client-initiated session — either fresh
  * (`start_nostrconnect_session`) or re-pairing an existing committed account
  * (`reauthorize_bunker`). Backend returns a `nostrconnect://` URL that we
@@ -808,7 +795,7 @@ async function startBunkerSession() {
         }
         const url = await invoke(cmd);
         strBunkerNostrConnectUrl = url;
-        const rendered = renderQrInto(domLoginBunkerQr, url, { ecc: 'M' });
+        const rendered = renderQrInto(domLoginBunkerQr, url);
         if (rendered && domLoginBunkerQrWrap) {
             domLoginBunkerQrWrap.classList.add('ready');
         }
@@ -1072,7 +1059,97 @@ const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
 const domChatMessageBox = document.getElementById('chat-box');
 const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-return');
-const domChatMessageInput = document.getElementById('chat-input');
+// Late-bound because the composer is constructed here, thousands of lines before
+// the mention selector that owns the tracked list. `var` so the binding exists no
+// matter which of the two runs first.
+var composerMentionLookup = () => [];
+
+/** The plain `<textarea>` the composer replaced. Kept as an escape hatch for a
+ *  WebView that can't drive a contenteditable, and as the automatic landing spot
+ *  if the composer fails to construct. Shares the same id, so every rule and call
+ *  site that isn't rich-composer-specific behaves as it always did. */
+function createLegacyComposer(host) {
+    const ta = document.createElement('textarea');
+    ta.id = 'chat-input';
+    ta.placeholder = 'Enter message...';
+    host.appendChild(ta);
+    return ta;
+}
+
+/** Off only when explicitly disabled, so a fresh install gets the rich one. */
+function richComposerEnabled() {
+    try { return localStorage.getItem('rich_composer') !== 'false'; } catch (_) { return true; }
+}
+
+// Rich composer: renders markdown, mention pills and custom emoji inline while
+// `value` stays the exact string that gets sent. It exposes the textarea's face
+// (value/selection/focus/listeners) and proxies anything else to its element, so
+// every existing call site here, in picker.js and in mentions.js is unchanged.
+//
+// Built inside a try/catch on purpose. This runs at module scope, so a throw here
+// would take the rest of main.js with it — no chat, no settings, no way to turn
+// the composer off. Falling back to the textarea keeps the app usable on a WebView
+// we haven't met yet.
+const domChatMessageInput = (() => {
+    const host = document.getElementById('chat-input-host');
+    if (!richComposerEnabled()) return createLegacyComposer(host);
+    try {
+        return buildRichComposer(host);
+    } catch (err) {
+        console.error('[composer] rich composer failed to construct, falling back', err);
+        host.textContent = '';
+        return createLegacyComposer(host);
+    }
+})();
+
+// Only a shortcode the user actually has renders as an image; anything else
+// stays literal so it can still be typed and sent verbatim. Shared by every
+// composer instance (chat + the Status mini-composer).
+function cmpResolvePackEmoji(code) {
+    for (const pack of arrEmojiPacks) {
+        const hit = pack.emojis && pack.emojis.find(e => (e.dispCode || e.shortcode) === code);
+        if (hit) return hit.url;
+    }
+    return null;
+}
+
+// Pack art lives on a remote host the WebView refuses to load — Android fails
+// it outright. Bind through the same disk cache the message renderer uses, so
+// composers and sent messages resolve identically, and degrade a missing one
+// to its literal `:shortcode:` rather than a broken image.
+function cmpBindEmojiImg(img, url, onFail) {
+    if (window.bindCachedEmojiImg) window.bindCachedEmojiImg(img, url, 'emoji', onFail);
+    else onFail();
+}
+
+function buildRichComposer(host) {
+    const composer = createRichComposer(host, {
+    placeholder: 'Enter message...',
+    resolveEmoji: cmpResolvePackEmoji,
+    // The draft carries `@display-name` and resolves to an npub at send, so a pill
+    // is styled editable text rather than an atomic widget.
+    bindEmojiImg: cmpBindEmojiImg,
+    // A pasted mention carries the raw key. `getName` is the app's one display-name
+    // resolver and already shortens an npub it doesn't know, so this never renders
+    // a wall of bech32.
+    resolveNpub: (npub) => getName(npub),
+    // Which tracked name, if any, sits at `at` in `src`. The LONGEST wins, so
+    // "@Walter White and co" pills only the name. Names are arbitrary text, so
+    // each one measures itself rather than being matched against a shape.
+    resolveMention: (src, at) => {
+        let best = null;
+        for (const m of composerMentionLookup()) {
+            if (!m.name) continue;
+            if (best && m.name.length <= best.length) continue;
+            if (cmpFold(src.slice(at, at + m.name.length)).toLowerCase() !== cmpFold(m.name).toLowerCase()) continue;
+            best = m.name;
+        }
+        return best;
+        },
+    });
+    composer.el.id = 'chat-input';
+    return composer;
+}
 const domChatMessageInputFile = document.getElementById('chat-input-file');
 const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
 const domChatReplyBarName = document.getElementById('chat-reply-bar-name');
@@ -1110,14 +1187,12 @@ const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 // Create Group UI refs
 const domCreateGroup = document.getElementById('create-group');
-const domCreateGroupBackBtn = document.getElementById('create-group-back-text-btn');
 const domCreateGroupName = document.getElementById('create-group-name');
 const domCreateGroupFilter = document.getElementById('create-group-filter');
 const domCreateGroupList = document.getElementById('create-group-list');
 const domCreateGroupCreateBtn = document.getElementById('create-group-create-btn');
 const domCreateGroupCancelBtn = document.getElementById('create-group-cancel-btn');
 const domCreateGroupStatus = document.getElementById('create-group-status');
-const domCreateGroupDescription = document.getElementById('create-group-description');
 const domCreateGroupAvatarPicker = document.getElementById('create-group-avatar-picker');
 const domCreateGroupAvatarPreview = document.getElementById('create-group-avatar-preview');
 const domCreateGroupAvatarPlaceholder = document.getElementById('create-group-avatar-placeholder');
@@ -1379,7 +1454,12 @@ function contentToPreviewText(content) {
  * @returns {string} Safe HTML string — assign to .innerHTML
  */
 function contentToPreviewHtml(content) {
-    let text = contentToPreviewText(content);
+    // Headers demote to BOLD in one-line previews (chat list + pins): the
+    // structure can't survive the flatten, but the emphasis can. Rewritten to
+    // markdown bold BEFORE the flatten so it rides the existing `**` pathway
+    // (and fenced code is stripped later, taking any rewritten lines with it).
+    const demoted = String(content ?? '').replace(/^#{1,6}\s+(.+)$/gm, '**$1**');
+    let text = contentToPreviewText(demoted);
     // HTML-escape to prevent injection — must happen before markdown conversion
     text = escapeHtml(text);
     // Convert inline markdown to HTML (order matters: bold before italic to avoid **x** matching **)
@@ -1401,6 +1481,36 @@ function truncateGraphemes(text, maxLength) {
     const segments = [...segmenter.segment(text)];
     if (segments.length <= maxLength) return text;
     return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
+}
+
+/**
+ * Grapheme truncation that treats a whole `:shortcode:` as ONE atomic token
+ * priced like an emoji (2): cutting inside one reveals the raw code in the
+ * preview, and pricing it by its letters lets three emojis eat the budget.
+ */
+function truncateEmojiAware(text, maxLength) {
+    const parts = text.split(/(:[a-zA-Z0-9_~-]+:)/g);
+    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+    let out = '';
+    let used = 0;
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part) continue;
+        if (i % 2 === 1) {
+            if (used + 2 > maxLength) return out + '…';
+            out += part;
+            used += 2;
+        } else {
+            const segments = [...segmenter.segment(part)];
+            const remaining = maxLength - used;
+            if (segments.length > remaining) {
+                return out + segments.slice(0, remaining).map(s => s.segment).join('') + '…';
+            }
+            out += part;
+            used += segments.length;
+        }
+    }
+    return out;
 }
 
 /**
@@ -1427,7 +1537,7 @@ function balanceInlineMarkdown(text) {
 function buildReplyPreviewHtml(content, maxLength = 50) {
     const resolved = resolveMentionText(content);
     const plain = contentToPreviewText(resolved);
-    const truncated = truncateGraphemes(plain, maxLength);
+    const truncated = truncateEmojiAware(plain, maxLength);
     const balanced = balanceInlineMarkdown(truncated);
     return contentToPreviewHtml(balanced);
 }
@@ -1763,6 +1873,135 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
 }
 
 /**
+ * Pinned chat ids, in pin order — the account's favourites, synced across its
+ * own devices. Ids are opaque: a DM's npub, or a Community's id.
+ * @type {string[]}
+ */
+let arrPinnedChats = [];
+
+/**
+ * The id a chat is pinned BY. A Community is pinned as the community, not as
+ * the channel row that represents it, so its `general` row is what gets hoisted.
+ * @param {Chat} chat
+ * @returns {string}
+ */
+function chatPinKey(chat) {
+    if (chat.chat_type === 'Community') {
+        return chat.metadata?.custom_fields?.community_id || chat.id;
+    }
+    return chat.id;
+}
+
+/**
+ * Pin rank, or -1 when unpinned. Looked up per render rather than stamped onto
+ * chats when they sync, so a chat that arrives AFTER its pin is pinned on its
+ * first paint with no restart and no retro-pass.
+ * @param {Chat} chat
+ * @returns {number}
+ */
+function chatPinRank(chat) {
+    return arrPinnedChats.indexOf(chatPinKey(chat));
+}
+
+/**
+ * True while a sync phase is running. The synced preference lists (pins,
+ * blocks, mutes, nicknames) are whole-list newest-wins, so a change made before
+ * this device has reconciled would publish its emptier view over another
+ * device's. The backend refuses such a publish outright; this stops the user
+ * making one and wondering why nothing happened.
+ */
+let fSyncing = false;
+
+/**
+ * Refuse a synced-preference action mid-sync, with a reason. Returns true when
+ * the caller should stop.
+ */
+/**
+ * Repaint every rendered surface showing `npub`'s name: chat list, open chat
+ * header, message authors, command invokers, bot names and system-event lines.
+ *
+ * A single helper on purpose. The chat is DOM-windowed, so re-rendering reuses
+ * existing rows and the name baked in at build time survives it — every surface
+ * has to be patched in place, and doing that per call site missed one four
+ * times running. Any new element rendering a person's name should tag itself
+ * `data-npub` and be added to the selector here, not handled somewhere else.
+ */
+function refreshRenderedName(npub) {
+    if (!npub) return;
+    renderChatlist();
+
+    const cProfile = getProfile(npub);
+    const strName = getName(cProfile || npub);
+    const sel = (cls) => `${cls}[data-npub="${npub}"]`;
+    for (const el of document.querySelectorAll(
+        [sel('.dmsg-author'), sel('.dmsg-command-author'), sel('.dmsg-command-bot')].join(', ')
+    )) {
+        el.textContent = strName;
+        twemojify(el);
+    }
+    // System-event lines phrase the name their own way ("X has joined"), so
+    // they take the same treatment through their own formatter.
+    for (const el of document.querySelectorAll(sel('.system-event-name'))) {
+        el.textContent = systemEventName(npub);
+        twemojify(el);
+    }
+
+    // The open chat's header names the DM's peer; a group's header is the
+    // group's own name and must not be relabelled.
+    if (strOpenChat) {
+        const cOpen = arrChats.find(c => c.id === strOpenChat);
+        if (cOpen && !chatIsGroup(cOpen) && cOpen.id === npub) {
+            setChatHeader(cOpen, cProfile, false, false);
+        }
+    }
+}
+
+function blockedBySync() {
+    if (!fSyncing) return false;
+    showToast('Syncing your account — try again in a moment');
+    return true;
+}
+
+/** Has the pinned list been pulled from the backend this session? */
+let _pinnedLoaded = false;
+
+/**
+ * Pull the pinned list once, from whichever path paints the chat list first.
+ *
+ * There are three boot paths — login (`init_finished`), `init()`, and dev
+ * hot-reload, which hydrates and renders without either — so hooking them
+ * individually leaves whichever one nobody remembered painting unpinned.
+ */
+async function ensurePinnedLoaded() {
+    if (_pinnedLoaded) return;
+    _pinnedLoaded = true;
+    try {
+        arrPinnedChats = await invoke('get_pinned_chats') || [];
+        sortChats();
+        renderChatlist();
+    } catch (e) {
+        _pinnedLoaded = false; // a failed load must be retryable, not latched
+        console.error('Failed to load pinned chats:', e);
+    }
+}
+
+/**
+ * The one chat-list ordering: pinned first in pin order, then newest activity.
+ */
+function sortChats() {
+    ensurePinnedLoaded();
+    arrChats.sort((a, b) => {
+        const ra = chatPinRank(a), rb = chatPinRank(b);
+        if (ra !== rb) {
+            if (ra === -1) return 1;
+            if (rb === -1) return -1;
+            return ra - rb;
+        }
+        return getChatSortTimestamp(b) - getChatSortTimestamp(a);
+    });
+}
+
+/**
  * One chat's own activity time: its newest conversation message, or its join/creation
  * time when it has none.
  * @param {Chat} chat
@@ -1950,6 +2189,41 @@ function createAvatarImg(src, size, isGroup = false) {
 }
 
 /**
+ * The name cell of a member-style row (`.member-pick-row`): the display name plus any
+ * inline markers. Shared by the community member list, the banlist and the invite
+ * picker so all three truncate identically and mark bots the same way the chat list
+ * and profile do.
+ *
+ * The cell — not the name — carries the row's flex growth, so the name can shrink and
+ * ellipsize instead of pushing the row's trailing controls out of the container.
+ *
+ * @param {string} display - The text to show (a real name, or a shortened npub).
+ * @param {Profile|null} profile - The member's profile, for the bot marker.
+ * @param {boolean} twemoji - Whether `display` is a real name that may carry emoji.
+ * @returns {{cell: HTMLDivElement, nameEl: HTMLDivElement}}
+ */
+function buildMemberNameCell(display, profile, twemoji) {
+    const cell = document.createElement('div');
+    cell.className = 'member-pick-identity';
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'compact-member-name';
+    nameEl.textContent = display;
+    if (twemoji) twemojify(nameEl);
+    cell.appendChild(nameEl);
+
+    if (profile?.bot) {
+        const botIcon = document.createElement('span');
+        botIcon.className = 'icon icon-bot member-pick-bot';
+        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
+        cell.appendChild(botIcon);
+    }
+
+    return { cell, nameEl };
+}
+
+/**
  * Tracks if we're in the initial chat open period for auto-scrolling
  */
 let chatOpenAutoScrollTimer = null;
@@ -2079,6 +2353,8 @@ async function surfaceCommunitySummary(summary) {
     if (!summary) return null;
     let firstChannel = null;
     let firstSync = null;
+    let fallbackChannel = null;
+    let fallbackSync = null;
     for (const ch of summary.channels || []) {
         const chat = getOrCreateChat(ch.channel_id, 'Community');
         chat.metadata = chat.metadata || {};
@@ -2107,7 +2383,12 @@ async function surfaceCommunitySummary(summary) {
         // The page-1 sync pulls existing history (e.g. the owner's welcome message) so the
         // channel isn't empty on open. Backend anti-stampede dedups a later open.
         const p = invoke('sync_community_channel', { channelId: ch.channel_id, beforeMs: null }).catch(() => {});
-        if (!firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
+        // Navigate to a channel we can actually READ. A private channel we hold no
+        // key for renders empty and refuses every send, so landing there reads as
+        // the community being broken. Falls back to the first channel when nothing
+        // is readable, so a community never becomes unopenable.
+        if (ch.readable !== false && !firstChannel) { firstChannel = ch.channel_id; firstSync = p; }
+        if (!fallbackChannel) { fallbackChannel = ch.channel_id; fallbackSync = p; }
     }
     loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
@@ -2115,9 +2396,11 @@ async function surfaceCommunitySummary(summary) {
     // If a warmed preload was promoted on Accept, the chat is ALREADY populated (its messages were
     // emitted by the backend), so open immediately — the first sync trues it up in the background.
     // Only await the sync when NOT preloaded (a cold join would otherwise open to an empty chat).
-    if (firstSync && !summary.preloaded) await firstSync;
+    const openChannel = firstChannel || fallbackChannel;
+    const openSync = firstChannel ? firstSync : fallbackSync;
+    if (openSync && !summary.preloaded) await openSync;
     renderChatlist();
-    return firstChannel;
+    return openChannel;
 }
 
 /**
@@ -2130,11 +2413,39 @@ async function loadCommunityRoles(communityId) {
     if (!communityId) return;
     let adminNpubs;
     try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) { return; }
+    applyCommunityAdmins(communityId, adminNpubs);
+}
+
+/**
+ * Cache a community's admin set onto its channel chats AND repaint the `admin` badges already
+ * rendered in the open channel. The badge is baked in at row-build time, so a promote/demote
+ * otherwise stayed visible until the chat was re-opened; a surgical pass keeps scroll position,
+ * which a full re-render would throw away mid-conversation.
+ */
+function applyCommunityAdmins(communityId, adminNpubs) {
     for (const c of arrChats) {
         if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
             c.metadata = c.metadata || {};
             c.metadata.admins = adminNpubs.slice();
         }
+    }
+    const open = arrChats.find(c => c.id === strOpenChat);
+    if (!open || open.metadata?.custom_fields?.community_id !== communityId) return;
+    const adminSet = new Set(adminNpubs);
+    for (const author of domChatMessages.querySelectorAll('.dmsg-author[data-npub]')) {
+        const header = author.parentElement;
+        if (!header) continue;
+        const existing = header.querySelector('.dmsg-author-badge.admin');
+        if (!adminSet.has(author.dataset.npub)) {
+            if (existing) existing.remove();
+            continue;
+        }
+        if (existing) continue;
+        const badge = document.createElement('span');
+        badge.classList.add('dmsg-author-badge', 'admin');
+        badge.textContent = 'admin';
+        // Same slot the renderer uses: after the name + bot marker, before the owner badge and time.
+        header.insertBefore(badge, header.querySelector('.dmsg-author-badge.owner, .dmsg-time'));
     }
 }
 
@@ -2161,7 +2472,7 @@ async function acceptCommunityInvite(communityId) {
         chat._joining = true; // renders locked
         // Re-sort so the fresh created_at floats the joining row to the TOP (renderChatlist itself
         // renders arrChats in order; the new chat was pushed to the end).
-        arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+        sortChats();
     }
     updateChatBackNotification();
     renderChatlist();
@@ -2645,6 +2956,7 @@ function updateChatHeaderSubtext(chat) {
     }
 
     let newStatusText = '';
+    let newStatusEmojiTags = [];
     let shouldAddGradient = false;
 
     const isCommunity = chat.chat_type === 'Community';
@@ -2672,6 +2984,7 @@ function updateChatHeaderSubtext(chat) {
         // DM - not typing, show profile status
         const profile = getProfile(chat.id);
         newStatusText = profile?.status?.title || '';
+        newStatusEmojiTags = profile?.status?.emoji_tags || [];
         shouldAddGradient = false;
     }
     
@@ -2686,6 +2999,7 @@ function updateChatHeaderSubtext(chat) {
         domChatContactStatus.classList.toggle('typing-indicator-text', shouldAddGradient);
         if (!shouldAddGradient) {
             twemojify(domChatContactStatus);
+            renderCustomEmojiShortcodes(domChatContactStatus, newStatusEmojiTags);
         }
         domChatContact.classList.remove('chat-contact');
         domChatContact.classList.add('chat-contact-with-status');
@@ -2738,13 +3052,10 @@ function updateChatBackNotification() {
     const hasOtherUnreads = arrChats.some(chat => {
         // Skip the currently open chat
         if (chat.id === strOpenChat) return false;
-        // Skip chats with no messages (same as chatlist rendering)
-        if (!chat.messages || chat.messages.length === 0) return false;
-        // Skip our own profile (bookmarks/notes)
-        if (chat.id === strPubkey) return false;
-        // Skip unsurfaced Community anchor rows (sibling channels the list hides) —
-        // their unreads can't be visited, so they must never light the dot.
-        if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) return false;
+        // Only chats the user can actually SEE and open count. `chatIsVisibleInList` is the
+        // list's own row test (bare anchors, sibling channels, empty DMs, blocked senders,
+        // own profile), so the dot can't light for something with no row to visit and clear.
+        if (!chatIsVisibleInList(chat)) return false;
         // Use the SAME badge count as the chatlist rows (computeRowBadgeCount: DB-authoritative
         // chat.unread, muted-aware) so the back dot can't light for a chat whose row shows nothing.
         // The raw countUnreadMessages walk can diverge from chat.unread on a windowed cache.
@@ -2779,7 +3090,17 @@ function findLatestContactMessage(messages, maxAt = Infinity) {
     return null;
 }
 
-function markAsRead(chat, message) {
+function markAsRead(chat, message, explicit = false) {
+    // A chat the user just marked unread stays unread until they open it or
+    // explicitly mark it read — otherwise the ambient sweeps (focus, repaint,
+    // scroll) undo the action instantly, which reads as a flicker.
+    if (chat && isChatUnreadLatched(chat.id)) {
+        if (explicit || chat.id === strOpenChat) {
+            clearChatUnreadLatch(chat.id);
+        } else {
+            return;
+        }
+    }
     // If we have a chat, and we haven't already marked as read, update its last_read and notify backend
     if (chat && message.id !== chat.last_read) {
         chat.last_read = message.id;
@@ -2799,9 +3120,9 @@ function markAsRead(chat, message) {
  *  window tail. The tail can be a system event (kind 30078), and pinning last_read there gives the
  *  unread query a row it can't anchor on, wedging the badge at a permanent 99+. No-op when the
  *  window holds no contact message (nothing non-mine can be unread). Used by the jump/reveal paths. */
-function markChatCaughtUp(chat) {
+function markChatCaughtUp(chat, explicit = false) {
     const caughtUp = findLatestContactMessage(chat?.messages);
-    if (caughtUp) markAsRead(chat, caughtUp);
+    if (caughtUp) markAsRead(chat, caughtUp, explicit);
 }
 
 /** True when the chat's newest conversational message is from the other side (not us, not a
@@ -2828,9 +3149,21 @@ async function markChatUnread(chat) {
     // Mark as Read isn't skipped by markAsRead's "already at last_read" guard.
     chat.last_read = lastRead;
     chat.unread = Math.max(1, chat.unread || 0);
+    // Latch the deliberate retreat: the closed chat still gets auto-marked by
+    // list repaints / window-focus sweeps, which would instantly undo it. The
+    // latch clears the moment the user actually opens the chat.
+    setChatUnreadLatch(chat.id);
     renderChatlist();
     refreshUnreadCounts();
 }
+
+/** Chats the user explicitly marked unread. While latched, the ambient
+ *  auto-mark-read paths (focus regain, scroll-to-bottom, list repaint) leave
+ *  the chat alone — only OPENING it counts as reading. */
+const setChatsMarkedUnread = new Set();
+function setChatUnreadLatch(chatId) { if (chatId) setChatsMarkedUnread.add(chatId); }
+function clearChatUnreadLatch(chatId) { if (chatId) setChatsMarkedUnread.delete(chatId); }
+function isChatUnreadLatched(chatId) { return setChatsMarkedUnread.has(chatId); }
 
 /** Leave a community you don't own, from the chat-list context menu. Confirms,
  *  calls leave_community, then drops its channels locally and repaints — mirrors
@@ -2917,6 +3250,16 @@ async function message(pubkey, content, replied_to, bot) {
  * the Community envelope yet, so a community reaction sends the emoji/shortcode content.
  */
 function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
+    const chat = arrChats.find(c => c.id === chatId);
+
+    // Group ceiling + per-tier fresh-reaction allowance (joins always pass) —
+    // gate BEFORE any optimistic bookkeeping so nothing strands on refusal.
+    const gateReason = reactionTierGate(chat?.messages.find(m => m.id === referenceId), emoji);
+    if (gateReason) {
+        showToast(gateReason);
+        return Promise.resolve(null);
+    }
+
     // Reactions are a real "use" of the emoji — record it (single chokepoint for
     // stock + custom reactions). Custom reactions arrive as `:shortcode:` + a url.
     if (emojiUrl) {
@@ -2924,7 +3267,6 @@ function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
     } else {
         bumpEmojiUsage('unicode', emoji);
     }
-    const chat = arrChats.find(c => c.id === chatId);
     if (chat && chat.chat_type === 'Community') {
         return invoke('react_to_community_message', { channelId: chatId, messageId: referenceId, emoji, emojiUrl: emojiUrl || null });
     }
@@ -3011,6 +3353,13 @@ function humanizeUploadError(raw) {
  */
 const pendingUploadProgress = new Map();
 
+// In-flight optimistic reaction adds (msg id -> [{id, author_id, emoji, at}]).
+// message_update re-applies these over an incoming payload so a spree's earlier
+// echo can't visually un-react a later click; entries drop once their own echo
+// confirms them (or after the TTL if the send died without an error).
+const pendingReactions = new Map();
+const PENDING_REACTION_TTL_MS = 10000;
+
 function applyPendingUploadProgress(spinner, pendingId) {
     const progress = pendingUploadProgress.get(pendingId);
     if (progress !== undefined) {
@@ -3055,6 +3404,15 @@ async function setupRustListeners() {
     // was deleted. Reload the local mirror so the picker greys out or revives
     // the section live, instead of waiting for the next panel open.
     _on('emoji_packs_updated', () => loadEmojiPacks());
+
+    // Another device pinned or unpinned a chat. Re-sort and repaint — the pin
+    // may name a chat this device has not synced yet, which is fine: the rank
+    // lookup simply finds it when it arrives.
+    _on('pinned_chats_updated', (evt) => {
+        arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];
+        sortChats();
+        renderChatlist();
+    });
 
     // The boot DM-relay-list sync adopted/retired relays; repaint the Network
     // panel so an already-open list reflects them without a reopen.
@@ -3103,7 +3461,8 @@ async function setupRustListeners() {
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
             const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
-            if (chat) renderCommunityOverview(chat);
+            // Live refresh, so an active member filter survives someone else's role/ban change.
+            if (chat) renderCommunityOverview(chat, true);
         }
         // Re-render the OPEN channel's header so a live metadata edit (name/description/icon) shows
         // immediately, not only after navigating away and back. The chatlist + overview refresh above.
@@ -3260,6 +3619,9 @@ async function setupRustListeners() {
                     // find + repaint this line in place when a stranger's name lands.
                     systemElement.id = event_id;
                     domChatMessages.appendChild(systemElement);
+                    // A repeat of the line above folds into its count instead of
+                    // stacking a new row.
+                    _mergeAdjacentSystemEvents();
                     softChatScroll();
                     if (CHAT_WINDOW_ENABLED) { _windowReseatAnchorsFromDom(); windowTrimTopIfOver(); }
                 }
@@ -3298,38 +3660,55 @@ async function setupRustListeners() {
     });
 
     _on('sync_finished', async (_) => {
+        fSyncing = false;
         // Mark sync as complete - this allows real-time messages to be cached
         fSyncComplete = true;
         
-        // Fade out the sync line
-        domSyncLine.classList.remove('active', 'progress');
-        domSyncLine.style.removeProperty('--sync-progress');
+        // Retract to the centre — the mirror of the reveal. `progress` is kept for
+        // the duration so the bar doesn't flash back to full width before shrinking
+        // (dropping the mask restores the whole line instantly); only `active` goes,
+        // to stop the pulse.
+        domSyncLine.classList.remove('active');
         domSyncLine.classList.add('fade-out');
 
-        // Wait for fade animation to complete, then reset
+        // Matches the 0.4s retract — clearing early left the class dangling mid-animation.
         setTimeout(() => {
-            domSyncLine.classList.remove('fade-out');
+            domSyncLine.classList.remove('fade-out', 'progress');
+            domSyncLine.style.removeProperty('--sync-progress');
             if (!strOpenChat) adjustSize();
-        }, 300);
+        }, 400);
     });
 
     // Listen for Synchronisation Progress updates
     _on('sync_progress', (evt) => {
-        if (fInit) return;
+        // The quick phase runs inside boot, so gating the whole handler on `fInit`
+        // meant it never showed a bar for the fastest, most common sync. Only the
+        // layout reflow below needs the gate.
         const { mode, current, total } = evt.payload || {};
+        fSyncing = true;
+        // `active` is the centre reveal and carries BOTH modes — a determinate sync
+        // (the common one, since the quick phase runs inside boot) used to jump
+        // straight to `progress` and grow out of the left edge instead.
+        domSyncLine.classList.remove('fade-out');
+        domSyncLine.classList.add('active');
         if (mode === 'Syncing' && current && total) {
-            // Determinate progress bar: fill left-to-right
-            domSyncLine.classList.remove('active', 'fade-out');
+            // Determinate: fill left-to-right within the revealed line (mask).
             domSyncLine.classList.add('progress');
             domSyncLine.style.setProperty('--sync-progress', Math.min(current / total, 1));
         } else {
-            // Indeterminate pulse (reconciliation phase — total unknown)
-            if (!domSyncLine.classList.contains('active')) {
-                domSyncLine.classList.remove('fade-out', 'progress');
-                domSyncLine.classList.add('active');
-            }
+            // Indeterminate pulse (reconciliation phase — total unknown).
+            domSyncLine.classList.remove('progress');
+            domSyncLine.style.removeProperty('--sync-progress');
         }
-        if (!strOpenChat) adjustSize();
+        if (!fInit && !strOpenChat) adjustSize();
+    });
+
+    // Every relay refused to reconcile AND the incremental read came back empty:
+    // the pool is unreachable, not the inbox empty. Without this the two are
+    // indistinguishable and a total sync failure looks like a quiet day.
+    _on('sync_unreachable', (evt) => {
+        const n = evt.payload?.relays ?? 0;
+        showToast(`Couldn't reach any of your ${n} relays, new messages may be missing`);
     });
 
     // Listen for Attachment Upload Progress events
@@ -3483,6 +3862,20 @@ async function setupRustListeners() {
 
     // Listen for Attachment Download Results
     _on('attachment_download_result', async (evt) => {
+        // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
+        const matchId = evt.payload?.old_id || evt.payload.id;
+
+        // Bookkeeping FIRST: if the message left the render window before this
+        // result arrived, the early returns below would otherwise strand these
+        // entries — and the auto-download dedup gate would then silently skip
+        // this attachment for the rest of the session.
+        downloadingAttachmentIds.delete(matchId);
+        downloadingAttachmentIds.delete(evt.payload.id);
+        for (const id of [matchId, evt.payload.id]) {
+            const lerp = downloadSpeedLerp.get(id);
+            if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
+        }
+
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);
         if (!cChat) return;
@@ -3490,19 +3883,11 @@ async function setupRustListeners() {
         let cMsg = cChat.messages.find(m => m.id === evt.payload.msg_id);
         if (!cMsg) return;
 
-        // When an attachment is being updated (i.e: post-hashing ID change), we reference the original nonce-based hash via old_id, otherwise, we use ID, as nothing changed
-        const matchId = evt.payload?.old_id || evt.payload.id;
         let cAttachment = cMsg.attachments.find(a => a.id === matchId);
         if (!cAttachment) return;
 
         cAttachment.downloading = false;
         cAttachment.download_failed = false;
-        downloadingAttachmentIds.delete(matchId);
-        downloadingAttachmentIds.delete(evt.payload.id);
-        for (const id of [matchId, evt.payload.id]) {
-            const lerp = downloadSpeedLerp.get(id);
-            if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
-        }
         if (evt.payload.success) {
             cAttachment.downloaded = true;
             // Update path from backend result (always has the correct file path)
@@ -3571,22 +3956,35 @@ async function setupRustListeners() {
                 softChatScroll();
             }
         } else {
-            // Download failed — mark as failed to prevent auto-download retry loop, then re-render
+            // Download failed — mark EVERY loaded copy failed first. The auto-download
+            // gate reads this flag, so it must flip even when the chat is closed or the
+            // row is outside the render window; gating the mark on the DOM would leave
+            // an unmarked copy free to re-trigger (or strand) the download later.
+            // The backend's reason string rides along: the UI renders it and the
+            // console keeps it, so a failure is never just a generic red box.
+            const failReason = typeof evt.payload.result === 'string' ? evt.payload.result : '';
+            console.error(`[AttachmentDownload] ${matchId} failed: ${failReason}`);
+            const failedMsgIds = [];
+            for (const msg of cChat.messages) {
+                let touched = false;
+                for (const att of msg.attachments) {
+                    if (att.id === matchId) {
+                        att.downloading = false;
+                        att.download_failed = true;
+                        att.download_error = failReason;
+                        touched = true;
+                    }
+                }
+                if (touched) failedMsgIds.push(msg.id);
+            }
+            // Then swap any painted rows over to the failed/retry rendering
             if (strOpenChat === evt.payload.profile_id) {
                 const profile = getProfile(evt.payload.profile_id);
-                for (const msg of cChat.messages) {
-                    const hasAtt = msg.attachments.some(a => a.id === matchId);
-                    if (hasAtt) {
-                        const domMsg = document.getElementById(msg.id);
-                        if (domMsg) {
-                            for (const att of msg.attachments) {
-                                if (att.id === matchId) {
-                                    att.downloading = false;
-                                    att.download_failed = true;
-                                }
-                            }
-                            domMsg.replaceWith(renderMessage(msg, profile, msg.id));
-                        }
+                for (const msgId of failedMsgIds) {
+                    const domMsg = document.getElementById(msgId);
+                    const memMsg = cChat.messages.find(m => m.id === msgId);
+                    if (domMsg && memMsg) {
+                        domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
                     }
                 }
             }
@@ -3743,7 +4141,12 @@ async function setupRustListeners() {
     });
 
     _on('chat_muted', (evt) => {
-        const cChat = arrChats.find(c => c.id === evt.payload.chat_id);
+        // Muting someone we've never DM'd: the backend creates a hidden shell
+        // row, mirror it so profile UI and sender-mute checks see it.
+        let cChat = arrChats.find(c => c.id === evt.payload.chat_id);
+        if (!cChat && evt.payload.value && evt.payload.chat_id.startsWith('npub1')) {
+            cChat = getOrCreateChat(evt.payload.chat_id, 'DirectMessage');
+        }
         if (cChat) {
             cChat.muted = evt.payload.value;
         }
@@ -3762,8 +4165,10 @@ async function setupRustListeners() {
             domGrpMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
         }
 
-        // Re-render the chat list to immediately reflect glow/badge changes
+        // Re-render the chat list to immediately reflect glow/badge changes, then pull
+        // fresh DB counts: a sender mute changes OTHER chats' (community) badges too.
         renderChatlist();
+        scheduleUnreadRefresh();
     });
 
     _on('profile_nick_changed', (evt) => {
@@ -3776,6 +4181,8 @@ async function setupRustListeners() {
             if (domProfileId.textContent === evt.payload.profile_id) {
                 renderProfileTab(cProfile);
             }
+            // One helper owns every surface that shows a name.
+            refreshRenderedName(evt.payload.profile_id);
         }
     });
 
@@ -3887,11 +4294,14 @@ async function setupRustListeners() {
         // Newest-first chat list sort (independent of how the message landed
         // in chat.messages).
         if (newMessage.at >= (chat.messages[chat.messages.length - 1]?.at ?? 0)) {
-            arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+            sortChats();
         }
 
         // If this user has the open chat, then update the chat too
         if (strOpenChat === chat.id) {
+            // Any row already rendered quoting THIS message can now draw its strip:
+            // it's in chat.messages as of the insert above.
+            backfillReplyContext(newMessage.id);
             // DOM windowing render gate. A jumpToUnread resolve freezes the window
             // entirely — its relay-walk/DB-pull echoes are data-only (already in
             // chat.messages above), so skip ALL rendering AND badge updates; the
@@ -3938,13 +4348,31 @@ async function setupRustListeners() {
                 proceduralScrollState.renderedMessageCount++;
                 proceduralScrollState.totalMessageCount++;
             } else {
-                // Not a tail-append (seeked away, or an OLDER history-echo insert). No DOM
-                // row. A genuine newest arrival below a seeked window bumps the scroll-down
-                // badge; an older insert is pure data.
+                // Not a tail-append. Two very different cases share this branch:
+                // an older HISTORY-ECHO beyond the window (pure data, no DOM), and a
+                // LIVE arrival that sorts mid-window — a peer whose clock lags stamps
+                // behind our own sends, and CORD orders by sender stamp. The latter
+                // MUST paint, or the message is invisible until the chat reopens.
+                const range = _currentWindowRange();
+                const midWindowLive = !newMessage.mine
+                    && atTail
+                    && chatPinnedToBottom
+                    && range && newIdx > range[0] && newIdx < range[1];
+                if (midWindowLive) {
+                    const repaintChat = chat.id;
+                    (async () => {
+                        await renderWindow(range[0], range[1]);
+                        if (strOpenChat !== repaintChat) return;
+                        windowAtTail = true;
+                        scrollToBottom(domChatMessages, false);
+                    })();
+                    rendered = true;
+                    proceduralScrollState.renderedMessageCount++;
+                }
                 proceduralScrollState.totalMessageCount++;
                 const winMsgs = _windowMessages();
                 const newestIdx = (winMsgs?.length || chat.messages.length) - 1;
-                if (!newMessage.mine && newIdx === newestIdx) incrementUnreadBelow();
+                if (!newMessage.mine && !midWindowLive && newIdx === newestIdx) incrementUnreadBelow();
             }
             // Open chat + pinned + window actually visible = user saw it
             // land. Tabbed-out arrivals stay unread until refocus, even when
@@ -3996,6 +4424,24 @@ async function setupRustListeners() {
 
         // Update it
         cChat.messages[nMsgIdx] = evt.payload.message;
+
+        // Re-apply in-flight optimistic reactions this echo predates: during a
+        // spree, click #1's echo must not visually un-react click #2. Entries the
+        // payload confirms (or that expired) drop; the rest ride the incoming
+        // message until their own echo arrives.
+        const inflight = pendingReactions.get(evt.payload.old_id);
+        if (inflight) {
+            const now = Date.now();
+            const still = inflight.filter(p =>
+                now - p.at < PENDING_REACTION_TTL_MS &&
+                !evt.payload.message.reactions.some(r => r.author_id === p.author_id && r.emoji === p.emoji)
+            );
+            for (const p of still) {
+                evt.payload.message.reactions.push({ id: p.id, reference_id: evt.payload.message.id, author_id: p.author_id, emoji: p.emoji });
+            }
+            if (still.length) pendingReactions.set(evt.payload.old_id, still);
+            else pendingReactions.delete(evt.payload.old_id);
+        }
         
         // Also update the event cache
         // This is important for pending->sent transitions where the ID changes
@@ -5234,6 +5680,12 @@ async function login(skipAnimations = false) {
             arrProfiles = evt.payload.profiles || [];
             arrChats = evt.payload.chats || [];
 
+            // Pinned favourites, from the LOCAL mirror so the first paint is
+            // already in pin order; the self-sync subscription streams any
+            // sibling-device edit in afterwards.
+            _pinnedLoaded = false; // a fresh account's pins are not the last one's
+            await ensurePinnedLoaded();
+
             // Seed unread badges from the DB — boot loads only the last message per chat into RAM,
             // so the in-memory walk can't see a backlog received in a prior session. Fire-and-render
             // (re-renders the chatlist when it lands; the first paint uses the RAM-walk fallback).
@@ -5304,6 +5756,9 @@ async function login(skipAnimations = false) {
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();
+                // Same window exists for deep links: drain any action stored while
+                // fInit gated the live listener.
+                invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
                 // Render the chatlist
                 console.time('[Boot] showMainUI:renderChatlist');
@@ -5485,6 +5940,7 @@ function renderCurrentProfile(cProfile) {
     domAccountStatus.textContent = cProfile?.status?.title || 'Set a Status';
     domAccountStatus.onclick = askForStatus;
     twemojify(domAccountStatus);
+    renderCustomEmojiShortcodes(domAccountStatus, cProfile?.status?.emoji_tags || []);
 
 }
 
@@ -5519,7 +5975,10 @@ function renderProfileTab(cProfile) {
     const strStatusPlaceholder = cProfile.mine ? 'Set a Status' : '';
     // textContent: status is attacker-controlled NIP-38 data, never HTML.
     domProfileStatus.textContent = cProfile?.status?.title || strStatusPlaceholder;
-    if (cProfile?.status?.title) twemojify(domProfileStatus);
+    if (cProfile?.status?.title) {
+        twemojify(domProfileStatus);
+        renderCustomEmojiShortcodes(domProfileStatus, cProfile.status.emoji_tags || []);
+    }
 
     // Adjust our Profile Name class to manage space according to Status visibility
     domProfileName.classList.toggle('chat-contact', !domProfileStatus.textContent);
@@ -5675,6 +6134,15 @@ function renderProfileTab(cProfile) {
         }
     };
 
+    // Banner QR button (both profile kinds) — static icon; tapping it opens
+    // the fullscreen profile QR.
+    const qrBtn = document.getElementById('profile-qr-btn');
+    qrBtn.style.display = 'block';
+    qrBtn.onclick = () => {
+        const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
+        if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
+    };
+
     // If this is OUR profile: make the elements clickable, hide the "Contact Options"
     if (cProfile.mine) {
         document.getElementById('profile').classList.add('is-own-profile');
@@ -5797,6 +6265,7 @@ function renderProfileTab(cProfile) {
             const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
             if (nick === false) return;
             if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
+            if (blockedBySync()) return;
             await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
         };
 
@@ -5957,12 +6426,135 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     let pinAbortController = null;
     let passwordAbortController = null;
 
+    // Android biometric fast-path. Auto-fires AT MOST once per unlock-screen
+    // mount; a cancel lands the user on the PIN/password pad and only the
+    // button re-triggers — never a render loop.
+    const domBiometricBtn = document.getElementById('login-biometric-btn');
+    let biometricBusy = false;
+    // True once the unlock button was offered this mount; processing states
+    // hide it and settled states bring it back (account switching included).
+    let biometricOffered = false;
+    // One login dispatch per screen, whoever gets there first. Deliberately a
+    // plain latch and nothing more: the credential path must NEVER be gated on
+    // biometric state, or a stuck flag leaves the user with a dead PIN pad.
+    let loginDispatched = false;
+    function setBiometricBtnVisible(visible) {
+        if (domBiometricBtn && biometricOffered) {
+            domBiometricBtn.style.display = visible ? '' : 'none';
+        }
+    }
+
     // If unlocking, go straight to the appropriate input
     if (fUnlock) {
         startCredentialEntry(chosenSecurityType);
     } else {
         // New account setup — show security type selection first
         showSecurityTypeSelector();
+    }
+
+    if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+    if (fUnlock && platformFeatures.os === 'android') {
+        offerBiometricUnlock();
+    }
+    async function offerBiometricUnlock() {
+        let status;
+        try {
+            status = await invoke('biometric_status');
+        } catch (e) {
+            return;
+        }
+        if (!status.enrolled) {
+            // A biometric-only account with no enrollment means the hardware
+            // key died (or the DB was restored to a new device): recovery.
+            if (chosenSecurityType === 'biometric') showBiometricRecovery();
+            return;
+        }
+        // The OS tells us its own words for what the sheet will ask for
+        // ("Use fingerprint", "Use screen lock", ...) — Android never exposes
+        // the credential type itself, but this is the honest next best.
+        if (status.label) {
+            const lbl = document.getElementById('login-biometric-label');
+            if (lbl) lbl.textContent = status.label;
+            if (chosenSecurityType === 'biometric') {
+                domLoginEncryptTitle.textContent = status.label + ' to unlock Vector';
+            }
+        }
+        if (domBiometricBtn) {
+            biometricOffered = true;
+            domBiometricBtn.style.display = '';
+            domBiometricBtn.onclick = () => attemptBiometricUnlock();
+        }
+        // Auto-fire on mount: an enrolled account is biometric-ONLY (the modes
+        // are mutually exclusive), so there is no credential pad for the prompt
+        // to race. Once per mount — a cancel leaves the button for a manual
+        // retry and never re-fires on its own.
+        if (chosenSecurityType === 'biometric') attemptBiometricUnlock();
+    }
+
+    async function showBiometricRecovery() {
+        domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+        domLoginEncryptTitle.textContent = 'Device security changed';
+        if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+        const yes = await popupConfirm(
+            'Device Security Changed',
+            'This device\'s encrypted data can no longer be unlocked: its hardware key was invalidated (screen lock removed, or the data was moved to a new device).<br><br><b>Reset this device and sign in with your keys to restore from the network.</b>',
+            false, '', 'vector_warning.svg'
+        );
+        if (yes) {
+            try { await invoke('logout'); } catch (e) { console.error('[Biometric] recovery logout failed:', e); }
+            window.location.reload();
+        }
+    }
+
+    async function attemptBiometricUnlock() {
+        if (biometricBusy || loginDispatched) return;
+        biometricBusy = true;
+        // The prompt sheet overlays the pad; once it passes, the backend emits
+        // biometric_unlocked and the title flips to the processing state while
+        // the real login (relays, sync) runs.
+        let unlisten = null;
+        try {
+            unlisten = await window.__TAURI__.event.once('biometric_unlocked', () => {
+                if (loginDispatched) return;
+                domLoginEncryptTitle.textContent = 'Decrypting your keys...';
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                setBiometricBtnVisible(false);
+                if (typeof loginPicker !== 'undefined') loginPicker.hide();
+            });
+            const npub = await runWithTorBootstrapStatus(() => invoke('biometric_login'));
+            // A typed credential already drove the login — don't start a second.
+            if (loginDispatched) return;
+            loginDispatched = true;
+            strPubkey = npub;
+            login();
+        } catch (e) {
+            const msg = String(e);
+            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+            if (msg.includes('BIOMETRIC_INVALIDATED')) {
+                biometricOffered = false;
+                if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+                if (chosenSecurityType === 'biometric') {
+                    showBiometricRecovery();
+                } else {
+                    domLoginEncryptTitle.textContent = 'Biometrics changed. Enter your '
+                        + (chosenSecurityType === 'password' ? 'password' : 'PIN') + '.';
+                }
+            } else if (msg.includes('BIOMETRIC_UNAVAILABLE')) {
+                if (chosenSecurityType === 'biometric') {
+                    domLoginEncryptTitle.textContent = 'Unlock unavailable right now. Restart Vector and try again.';
+                }
+            } else if (!msg.includes('BIOMETRIC_CANCELLED')
+                && !msg.includes('BIOMETRIC_NOT_ENROLLED')) {
+                console.error('[Biometric] unlock failed:', msg);
+            }
+            setBiometricBtnVisible(true);
+        } finally {
+            // Unconditional: delegate paths resolve without the event ever
+            // firing, which would otherwise leak the listener for the webview
+            // lifetime. Unlistening an already-fired once() is a no-op.
+            if (unlisten) { try { unlisten(); } catch (_) {} }
+            biometricBusy = false;
+        }
     }
 
     /** Show the security type selection phase */
@@ -5988,6 +6580,44 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             domLoginEncryptTypeSelect.style.display = 'none';
             startCredentialEntry('password');
         };
+
+        // Biometric-only mode (Android 11+ with capable hardware): a generated
+        // 256-bit credential nobody ever knows, unlocked solely by the OS.
+        const btnBiometric = document.getElementById('security-type-biometric');
+        if (btnBiometric && platformFeatures.os === 'android') {
+            invoke('biometric_status')
+                .then(s => {
+                    if (!s.supported) return;
+                    btnBiometric.style.display = '';
+                    // The OS's own wording for what the user will actually see
+                    // on the sheet ("Use fingerprint" / "Use screen lock").
+                    if (s.label) btnBiometric.textContent = s.label;
+                    // Two highlighted choices now — the label above them agrees.
+                    const rec = document.querySelector('.security-type-recommended');
+                    if (rec) rec.textContent = '*Recommended Options';
+                })
+                .catch(() => {});
+            btnBiometric.onclick = async () => {
+                if (!(await confirmBiometricOnlyWarning())) return;
+                domLoginEncryptTypeSelect.style.display = 'none';
+                document.querySelector('.login-encrypt-header').style.display = '';
+                document.querySelector('.login-lock-icon').style.display = 'none';
+                domLoginEncryptTitle.textContent = 'Setting up your account...';
+                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                try {
+                    await invoke('setup_encryption_biometric');
+                    login();
+                } catch (e) {
+                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    const msg = String(e);
+                    if (!msg.includes('BIOMETRIC_CANCELLED')) {
+                        await popupConfirm('Could not enable biometrics', escapeHtml(msg), true);
+                    }
+                    document.querySelector('.login-encrypt-header').style.display = 'none';
+                    domLoginEncryptTypeSelect.style.display = '';
+                }
+            };
+        }
 
         btnSkip.onclick = async () => {
             // Skip encryption — backend stores the key in plaintext (key never crosses IPC)
@@ -6015,7 +6645,13 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     function startCredentialEntry(type) {
         // Re-show lock icon header (hidden during type selector phase)
         document.querySelector('.login-encrypt-header').style.display = '';
-        if (type === 'password') {
+        if (type === 'biometric') {
+            // Biometric-only account: no credential to type. The auto-fire
+            // below owns the unlock; a dead enrollment routes to recovery.
+            domLoginEncryptPinRow.style.display = 'none';
+            domLoginEncryptPassword.style.display = 'none';
+            domLoginEncryptTitle.textContent = 'Unlock with Biometrics';
+        } else if (type === 'password') {
             startPasswordFlow();
         } else {
             startPinFlow();
@@ -6051,6 +6687,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             if (isProcessing) {
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 pinRow.style.display = 'none';
+                setBiometricBtnVisible(false);
                 // Past the point of no return — backend is decrypting or
                 // encrypting against THIS account. Mid-flight account swap
                 // would race the in-progress crypto and bind the wrong
@@ -6059,6 +6696,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             } else {
                 domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 pinRow.style.display = '';
+                setBiometricBtnVisible(true);
                 // Back to input state. On the unlock path, re-show the
                 // picker so a wrong-PIN retry can swap accounts. On the
                 // new-account setup path (fUnlock=false) the picker was
@@ -6112,6 +6750,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         const npub = await runWithTorBootstrapStatus(() =>
                             invoke("login_from_stored_key", { password: currentPinString })
                         );
+                        loginDispatched = true;
                         strPubkey = npub;
                         login();
                     } catch (e) {
@@ -6234,11 +6873,13 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             if (isProcessing) {
                 domLoginEncryptTitle.classList.add('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = 'none';
+                setBiometricBtnVisible(false);
                 // Past the point of no return — see PIN flow.
                 if (typeof loginPicker !== 'undefined') loginPicker.hide();
             } else {
                 domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
                 domLoginEncryptPassword.style.display = '';
+                setBiometricBtnVisible(true);
                 // See PIN flow for the rationale.
                 if (fUnlock && typeof loginPicker !== 'undefined'
                     && loginPicker.accounts && loginPicker.accounts.length >= 2) {
@@ -6286,6 +6927,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     const npub = await runWithTorBootstrapStatus(() =>
                         invoke("login_from_stored_key", { password })
                     );
+                    loginDispatched = true;
                     strPubkey = npub;
                     login();
                 } catch (e) {
@@ -6529,6 +7171,7 @@ function _derezRowDom(domMsg, followingRow) {
     // orphan left by this removal is dropped (and nothing left misplaced).
     domMsg.remove();
     _dedupeAdjacentDaySeparators();
+    _mergeAdjacentSystemEvents();
 }
 
 /** A message just vanished (deletion or self-destruct) — bail out of any UI
@@ -6918,8 +7561,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
         // Rebuild date separators from the final `.dmsg` order so any
         // orphans or misplaced separators from per-message inserts get
-        // healed in one pass.
+        // healed in one pass, then collapse repeated system events (runs
+        // are read off the final order, dividers included).
         _dedupeAdjacentDaySeparators();
+        _mergeAdjacentSystemEvents();
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open).
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
@@ -6933,6 +7578,11 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
                 adjustSize();
                 // Force an auto-scroll, given soft-scrolling won't accurately work when the entire list has just rendered
                 scrollToBottom(domChatMessages, false);
+                // A render is where media starts resolving — hold the bottom through
+                // it. Load-driven arming alone misses a cold render that lands after
+                // the open's own hold expired, and the pin then releases on distance
+                // with nothing left to recover it.
+                holdChatBottom();
             }
         }
     } else {
@@ -7045,6 +7695,58 @@ function _dedupeAdjacentDaySeparators() {
     }
 }
 
+/** System events that collapse when they repeat back-to-back. Membership is
+ *  deliberately absent: WHO joined or left is the content, so those never merge. */
+const MERGEABLE_SYSTEM_EVENTS = new Set([
+    SystemEventType.WallpaperChanged,
+    SystemEventType.WallpaperRemoved,
+    SystemEventType.PinsModified,
+]);
+
+/**
+ * Collapse a run of the same system event by the same person into one line
+ * ("JSKitty modified the Pins 4 times"). Every repeat keeps its row — ids stay
+ * addressable for the dedup guard, window bookkeeping and the profile
+ * retro-resolver — so the extras are hidden rather than removed. Anything else
+ * between two events (a message, a date divider, a different actor) breaks the
+ * run, which is also what keeps a merge inside one day.
+ *
+ * Recomputed from scratch each call, so a run that later splits restores its
+ * individual lines.
+ */
+function _mergeAdjacentSystemEvents(container = domChatMessages) {
+    if (!container) return;
+    let run = [];
+    const flush = () => {
+        if (!run.length) return;
+        const suffix = run[0].querySelector('.system-event-suffix');
+        if (suffix) {
+            const type = parseInt(run[0].dataset.systemEventType, 10);
+            suffix.textContent = systemEventSuffix(type) + (run.length > 1 ? ` ${run.length} times` : '');
+        }
+        for (let i = 1; i < run.length; i++) run[i].classList.add('system-event-merged');
+        run = [];
+    };
+    for (const child of container.children) {
+        const type = parseInt(child.dataset?.systemEventType, 10);
+        if (!Number.isFinite(type) || !MERGEABLE_SYSTEM_EVENTS.has(type)) {
+            flush();
+            continue;
+        }
+        child.classList.remove('system-event-merged'); // recompute from a clean slate
+        const head = run[0];
+        if (head
+            && head.dataset.systemEventType === child.dataset.systemEventType
+            && head.dataset.systemEventNpub === child.dataset.systemEventNpub) {
+            run.push(child);
+        } else {
+            flush();
+            run = [child];
+        }
+    }
+    flush();
+}
+
 function insertTimestamp(timestamp, parent = null) {
     const pTimestamp = document.createElement('p');
     // `.date-divider` distinguishes day-boundary timestamps from system
@@ -7101,7 +7803,12 @@ function insertSystemEvent(content, parent = null, npub = null, eventType = null
         nameSpan.textContent = systemEventName(npub);
         inner.appendChild(avatar);
         inner.appendChild(nameSpan);
-        inner.appendChild(document.createTextNode(systemEventSuffix(eventType)));
+        // The suffix owns its own element so the repeat-merge pass can rewrite it
+        // ("… 4 times") without disturbing the name affordance beside it.
+        const suffixSpan = document.createElement('span');
+        suffixSpan.className = 'system-event-suffix';
+        suffixSpan.textContent = systemEventSuffix(eventType);
+        inner.appendChild(suffixSpan);
         // Direct listener (system events are few — no delegation needed) so the affordance works
         // regardless of which container the line is appended to. Opens the same mini-profile as a
         // chat name/avatar tap. stopPropagation so it doesn't double-fire any ancestor delegate.
@@ -7110,6 +7817,9 @@ function insertSystemEvent(content, parent = null, npub = null, eventType = null
             showMiniProfile(npub, nameSpan);
         });
         pSystemEvent.appendChild(inner);
+        // Merge keys, read by `_mergeAdjacentSystemEvents`.
+        pSystemEvent.dataset.systemEventType = String(eventType);
+        pSystemEvent.dataset.systemEventNpub = npub;
     } else {
         pSystemEvent.textContent = content;
     }
@@ -7808,6 +8518,7 @@ function startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sen
     if (downloadingAttachmentIds.has(cAttachment.id)) return;
     downloadingAttachmentIds.add(cAttachment.id);
     cAttachment.download_failed = false;
+    cAttachment.download_error = '';
     const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
     invoke('download_attachment', { npub: downloadNpub, msgId: msg.id, attachmentId: cAttachment.id })
         .catch(() => downloadingAttachmentIds.delete(cAttachment.id));
@@ -7945,6 +8656,45 @@ function jumpToMessage(targetMsgId) {
 /**
  * Cancel any ongoing replies and reset the messaging interface
  */
+/**
+ * Set mic/send to exactly one visible button, derived from the input's text
+ * (no animation). Programmatic value changes fire no 'input' event, and a
+ * WebKit swap animation wedges if the composer hides mid-flight — so every
+ * chat open and reply/draft transition re-syncs through here.
+ */
+function syncSendMicToInput() {
+    const hasText = domChatMessageInput.value.trim().length > 0;
+    domChatMessageInputSend.classList.remove('button-swap-in', 'button-swap-out');
+    domChatMessageInputVoice.classList.remove('button-swap-in', 'button-swap-out');
+    if (hasText) {
+        domChatMessageInputSend.classList.add('active');
+        domChatMessageInputSend.style.display = '';
+        domChatMessageInputVoice.style.display = 'none';
+    } else {
+        domChatMessageInputSend.classList.remove('active');
+        domChatMessageInputSend.style.display = 'none';
+        domChatMessageInputVoice.style.display = '';
+    }
+}
+
+/** Per-chat composer drafts, runtime-only (chat id → unsent text). */
+const chatDrafts = new Map();
+
+/**
+ * Stash the open chat's composer text as its draft and clear the input, so
+ * the next chat starts clean and restores its own draft. Edit text is not a
+ * draft — callers cancel an in-progress edit first.
+ */
+function stashComposerDraft() {
+    if (!strOpenChat) return;
+    const text = domChatMessageInput.value;
+    if (text) chatDrafts.set(strOpenChat, text);
+    else chatDrafts.delete(strOpenChat);
+    domChatMessageInput.value = '';
+    autoResizeChatInput();
+    syncSendMicToInput();
+}
+
 function cancelReply() {
     // Hide the reply bar. Its content is left in place so the collapse
     // animation doesn't slide out an empty shell; the next reply overwrites it
@@ -7965,16 +8715,7 @@ function cancelReply() {
     strCurrentReplyReference = '';
 
     // Reset send button state based on current input
-    const hasText = domChatMessageInput.value.trim().length > 0;
-    if (hasText) {
-        domChatMessageInputSend.classList.add('active');
-        domChatMessageInputSend.style.display = '';
-        domChatMessageInputVoice.style.display = 'none';
-    } else {
-        domChatMessageInputSend.classList.remove('active');
-        domChatMessageInputSend.style.display = 'none';
-        domChatMessageInputVoice.style.display = '';
-    }
+    syncSendMicToInput();
 }
 
 /**
@@ -8310,6 +9051,12 @@ async function openChat(contact) {
     _unreadJumpResolving = false;
     // A command composer belongs to the chat it was opened in.
     if (commandCtrl) commandCtrl.exitComposer();
+    // A direct chat-to-chat jump never passes through closeChat: stash the
+    // outgoing chat's draft here so it doesn't bleed into the new one.
+    if (strOpenChat && strOpenChat !== contact) {
+        if (strCurrentEditMessageId) cancelEdit();
+        stashComposerDraft();
+    }
     pushBack('chat', closeChat);
     // Abandon a wallpaper preview staged in a different chat so its edit
     // overlay doesn't leak onto this header.
@@ -8347,6 +9094,10 @@ async function openChat(contact) {
     // Only reset revealed blocked messages when switching to a different chat
     if (strOpenChat !== contact) revealedBlockedMessages.clear();
 
+    // Pins: resolve this chat's pin context (v2 community channels only) —
+    // shows/hides the header pin button and closes a stale drawer.
+    pinsOnChatOpened(contact);
+
     // Warm up GIF server connection early (non-blocking)
     preconnectGifServer();
 
@@ -8372,6 +9123,8 @@ async function openChat(contact) {
     // chat.last_read so the OS badge clears immediately on entering the chat.
     const lastReadOnOpen = chat?.last_read || '';
     const unreadOnOpen = chat?.unread || 0;   // snapshot before the open-time markAsRead zeroes it
+    // Opening IS reading — release any explicit mark-unread latch.
+    clearChatUnreadLatch(chat?.id);
     if (chat?.messages?.length) {
         const latestNonMine = findLatestContactMessage(chat.messages);
         if (latestNonMine) markAsRead(chat, latestNonMine);
@@ -8518,6 +9271,10 @@ async function openChat(contact) {
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
     if (CHAT_WINDOW_ENABLED) windowAtTail = true;
+    // A chat open is where the most media resolves at once, and every one of
+    // those loads grows the content below the fold — hold the bottom until the
+    // layout settles instead of finishing short of the newest message.
+    holdChatBottom();
     refreshChatEmptyState(); // empty community → show the "start of channel" marker
 
     // Drop a "New" divider above the first non-mine message after
@@ -8589,6 +9346,14 @@ async function openChat(contact) {
         domChatMessageInputFile.style.display = '';
         domChatMessageInputVoice.style.display = '';
         domChatMessageInputEmoji.style.display = '';
+        // Restore this chat's draft (runtime-only). Skip when the input still
+        // holds live text — a same-chat re-open must not clobber typing.
+        if (domChatMessageInput.value === '') {
+            domChatMessageInput.value = chatDrafts.get(contact) || '';
+            autoResizeChatInput();
+        }
+        // Programmatic value sets fire no 'input' event; derive mic/send here.
+        syncSendMicToInput();
     }
 
     // last_read is not advanced on open — the divider needs the stale value
@@ -8681,6 +9446,7 @@ function openNewChat() {
 async function closeChat() {
     popBack('chat');
     popBack('new-chat');
+    pinsOnChatClosed();
     // Stop all audio engine playback (voice messages, music, etc.)
     invoke('audio_stop_all').catch(() => {});
 
@@ -8758,6 +9524,10 @@ async function closeChat() {
     domSettingsBtn.style.display = '';
     domChatNew.style.display = 'none';
     domChat.style.display = 'none';
+    // Stash the unsent text as this chat's draft and clear the composer, so
+    // the next open restores its own draft with a coherent mic/send state.
+    if (strCurrentEditMessageId) cancelEdit();
+    stashComposerDraft();
     strOpenChat = "";
     wsSyncOpenChat();
     previousChatBeforeProfile = ""; // Clear when closing chat
@@ -9198,28 +9968,18 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         const searchEl = domGroupMemberSearchInput;
         const myNpub = arrProfiles.find(p => p.mine)?.id;
         const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
-        // The panel is visible while this fetch runs (it can be network-bound), so
-        // swap any previous community's rows for a loading state up front.
-        membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
-        let memberList = [];
-        try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
-        // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
-        communityMembersCache.set(communityId, memberList);
-        communityMemberCounts.set(communityId, memberList.length);
-        _communityCountLastFetch.set(communityId, Date.now());
-        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
-        // Admins (members holding a management role) drive the gold crown. MVP: the OWNER elects /
-        // removes admins (no role hierarchy yet, so that's the only real promotion path). The
-        // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
-        // the UI just exposes the toggle to the owner for now.
-        let adminNpubs = [];
-        try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
-        // Cache admins onto this community's channel chats so message rendering can chip @everyone
-        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
-        for (const c of arrChats) {
-            if (c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
-                c.metadata.admins = adminNpubs.slice();
-            }
+        // Cache-first: the last known roster paints instantly (no "Loading members…" flash
+        // on reopen); the authoritative fetches run AFTER that first render and re-render
+        // only on a real change. The loading state survives only for a community this
+        // session has never fetched.
+        const hadCache = communityMembersCache.has(communityId);
+        let memberList = communityMembersCache.get(communityId) || [];
+        // Admins ride the community's channel-chat metadata (applyCommunityAdmins) — the
+        // same session cache the in-chat tags read.
+        let adminNpubs = (chat.metadata?.admins || []).slice();
+        let bannedList = [];
+        if (!hadCache) {
+            membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
         }
         const iAmOwner = !!(myNpub && ownerNpub && myNpub === ownerNpub);
         // Per-member outrank for moderation, expressed in role-engine POSITIONS (owner = pos 0 via
@@ -9231,9 +9991,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             if (iAmOwner) return true;                                   // pos 0 outranks all
             return !adminNpubs.includes(npub);                           // an admin outranks only non-admins
         };
-        // The banlist (for the unban list + to hide banned members), shown to anyone who can BAN.
-        let bannedList = [];
-        if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
 
         const renderMembers = (filterText = '') => {
             const f = (filterText || '').trim().toLowerCase();
@@ -9274,6 +10031,10 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 // green for admins (matches the in-chat tags); a promotable member shows a faint crown
                 // on row-hover; everyone else gets the empty spacer. Clicking toggles the Admin role.
                 const isAdminMember = adminNpubs.includes(m.npub);
+                // Pins this row's controls visible for the duration of an action (see the
+                // .is-acting rules): without it the hover-reveal swallows the only progress
+                // signal the moment the pointer moves away.
+                const markActing = (busy) => row.classList.toggle('is-acting', busy);
                 const crownSlot = document.createElement('div');
                 crownSlot.className = 'member-crown-slot';
                 const buildCrown = (active, promote) => {
@@ -9307,17 +10068,35 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                                 false, '', 'vector_warning.svg');
                             if (!confirmed) return;
                             // Spinner on the crown through the publish + broadcast wait.
+                            markActing(true);
                             crown.classList.add('active');
                             crown.style.pointerEvents = 'none';
                             crown.innerHTML = '<span class="icon icon-loading spin"></span>';
                             try {
                                 await invoke(makeAdmin ? 'grant_community_admin' : 'revoke_community_admin', { communityId, npub: m.npub });
-                                if (makeAdmin) { if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub); }
-                                else { adminNpubs = adminNpubs.filter(n => n !== m.npub); }
+                                // Re-read the roster the backend settled on rather than assuming the
+                                // flip: a published edition the fold hasn't adopted yet would otherwise
+                                // show as done and silently revert on the next open.
+                                const settled = await invoke('get_community_admins', { communityId }).catch(() => null);
+                                if (settled) {
+                                    adminNpubs = settled;
+                                    if (settled.includes(m.npub) !== makeAdmin) {
+                                        showToast('Published, but not confirmed yet. It should apply shortly.');
+                                    }
+                                } else if (makeAdmin) {
+                                    if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub);
+                                } else {
+                                    adminNpubs = adminNpubs.filter(n => n !== m.npub);
+                                }
+                                // Push the new set through the shared applier, not just this panel's
+                                // local copy: the in-chat tags read the cached roster, so a demote left
+                                // an "admin" badge sitting behind the overlay.
+                                applyCommunityAdmins(communityId, adminNpubs);
                                 renderMembers(searchEl?.value || '');
                                 // A rank change can flip moderation-hide verdicts — drop the toolbar cache.
                                 dmsgClearDeleteMetaCache();
                             } catch (err) {
+                                markActing(false);
                                 crown.style.pointerEvents = '';
                                 crown.innerHTML = '<span class="icon icon-crown"></span>';
                                 crown.classList.toggle('active', isAdminMember);
@@ -9334,11 +10113,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
                 avatar.className = 'member-pick-avatar';
                 row.appendChild(avatar);
-                const nameSpan = document.createElement('div');
-                nameSpan.className = 'compact-member-name';
-                nameSpan.textContent = display;
-                if (name) twemojify(nameSpan);
-                row.appendChild(nameSpan);
+                row.appendChild(buildMemberNameCell(display, profile, !!name).cell);
                 // Role-engine moderation: shown to anyone who holds KICK/BAN AND outranks this member
                 // (the owner outranks all; an admin outranks non-admins — never the owner, never self).
                 // Two tiers (§7 escalation ladder): KICK is cooperative + soft (they self-remove, can
@@ -9356,6 +10131,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                         e.stopPropagation();
                         const confirmed = await popupConfirm('Kick member', `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`, false, '', 'vector_warning.svg');
                         if (!confirmed) return;
+                        markActing(true);
                         kickBtn.disabled = true;
                         kickBtn.innerHTML = '<span class="icon icon-loading spin"></span>Kicking';
                         try {
@@ -9366,6 +10142,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             // Sync the "N members" subtext (the backend recorded the leave; this re-fetches).
                             refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
+                            markActing(false);
                             kickBtn.disabled = false;
                             kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
                             showToast(String(err));
@@ -9385,6 +10162,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                         if (!confirmed) return;
                         // Banning publishes to relays + rebuilds the subscription (a few seconds);
                         // show a spinner so the button isn't dead during the wait.
+                        markActing(true);
                         banBtn.disabled = true;
                         banBtn.innerHTML = '<span class="icon icon-loading spin"></span>Banning';
                         try {
@@ -9395,6 +10173,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                             // Sync the "N members" subtext (banned members are excluded by the fold).
                             refreshCommunityMemberCount(communityId, true);
                         } catch (err) {
+                            markActing(false);
                             banBtn.disabled = false;
                             banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
                             // A private-community ban can fail with the (long, important) bunker read-cut
@@ -9443,12 +10222,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     av.className = 'member-pick-avatar';
                     av.style.opacity = '0.5';
                     row.appendChild(av);
-                    const ns = document.createElement('div');
-                    ns.className = 'compact-member-name';
-                    ns.textContent = disp;
-                    ns.style.opacity = '0.6';
-                    if (nm) twemojify(ns);
-                    row.appendChild(ns);
+                    const banned = buildMemberNameCell(disp, p, !!nm);
+                    banned.cell.style.opacity = '0.6';
+                    row.appendChild(banned.cell);
                     const unbanBtn = document.createElement('button');
                     unbanBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-secondary';
                     unbanBtn.title = 'Unban';
@@ -9478,15 +10254,49 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 }
             }
         };
-        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start clean.
-        renderMembers(preserveSearch && searchEl ? (searchEl.value || '') : '');
+        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start
+        // clean. The reset happens HERE (not after the fetches below) so every render in this
+        // pass reads a trustworthy filter value.
+        if (searchEl && !preserveSearch) searchEl.value = '';
+        if (hadCache) renderMembers(searchEl?.value || '');
+
+        // Authoritative fetches — AFTER the cached paint, so the panel opens fully rendered.
+        // A re-render fires only when the roster/admins/banlist actually differ from the
+        // cached paint (re-rendering identical rows would just flicker them).
+        const rosterPrint = () => JSON.stringify([
+            memberList.map(m => m.npub).sort(),
+            [...adminNpubs].sort(),
+            [...bannedList].sort(),
+        ]);
+        const cachedPrint = rosterPrint();
+        try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
+        // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
+        communityMembersCache.set(communityId, memberList);
+        communityMemberCounts.set(communityId, memberList.length);
+        _communityCountLastFetch.set(communityId, Date.now());
+        // Admins (members holding a management role) drive the gold crown. MVP: the OWNER elects /
+        // removes admins (no role hierarchy yet, so that's the only real promotion path). The
+        // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
+        // the UI just exposes the toggle to the owner for now.
+        try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
+        // Cache admins onto this community's channel chats so message rendering can chip @everyone
+        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
+        applyCommunityAdmins(communityId, adminNpubs);
+        // The banlist (for the unban list), shown to anyone who can BAN.
+        if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
+        // The user may have switched to another community's overview mid-fetch — don't
+        // paint this one's roster (or subtext) over it. The panel carries the COMMUNITY
+        // id (re-tagged right after open for the realtime listener), never chat.id here.
+        if (domGroupOverview.getAttribute('data-group-id') !== communityId) return;
+        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+        if (!hadCache || rosterPrint() !== cachedPrint) renderMembers(searchEl?.value || '');
 
         // Resolve unknown member + banned-member profiles (name/avatar), then re-render once.
         const unknowns = [...memberList.map(m => m.npub), ...bannedList].filter(np => !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np));
         unknowns.forEach(np => strangerProfileRequested.add(np));
         if (unknowns.length) {
             Promise.allSettled(unknowns.map(np => invoke('load_profile', { npub: np }))).then(() => {
-                if (domGroupOverview.getAttribute('data-group-id') === chat.id) renderMembers(searchEl?.value || '');
+                if (domGroupOverview.getAttribute('data-group-id') === communityId) renderMembers(searchEl?.value || '');
             });
         }
 
@@ -9495,7 +10305,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             // hovers orphaned above an empty member list.
             const searchContainer = searchEl.parentElement;
             if (searchContainer) searchContainer.style.display = memberList.length ? '' : 'none';
-            if (!preserveSearch) searchEl.value = '';
             searchEl.oninput = () => renderMembers(searchEl.value || '');
         }
     }
@@ -9683,7 +10492,10 @@ async function openCommunityInvitePanel(chat) {
                         <p class="cmt-section-desc">Pick contacts to invite, or paste an npub to add someone new.</p>
                     </div>
                 </div>
-                <input id="cmt-npub" type="text" placeholder="Search contacts or paste an npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+                <div class="emoji-search-container" style="padding: 0; background: transparent; margin-bottom: 8px; isolation: isolate;">
+                    <span class="emoji-search-icon icon icon-search"></span>
+                    <input id="cmt-npub" type="text" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="flex: 1; box-sizing: border-box; margin: 0; padding: 10px 12px 10px 44px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;" />
+                </div>
                 <div id="cmt-contacts" class="cmt-contacts"></div>
             </section>
 
@@ -9701,8 +10513,10 @@ async function openCommunityInvitePanel(chat) {
         </div>
     `;
     overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    pushBack('community-invite', dismiss);
+    // NOT attached yet — the whole panel is built and filled on this detached tree
+    // (links, mode pill, contact rows are all local-DB reads), then attached ONCE at
+    // the bottom of this function so the modal opens in a single paint, not a
+    // cascade of reflows as each fetch lands.
 
     const status = box.querySelector('#cmt-status');
     const linksDiv = box.querySelector('#cmt-links');
@@ -9732,8 +10546,8 @@ async function openCommunityInvitePanel(chat) {
     // click crosses the Public⇄Private boundary. The mode is the folded registry, NOT just my own links —
     // another admin's live link keeps the community Public even when I hold none.
     let currentLinkCount = 0;     // MY own links — LOCAL DB, never lags a fresh create/revoke
-    let globalLinkCount = 0;      // every creator's links combined (drives empty-state copy)
     let otherCreatorLinkCount = 0; // OTHER creators' links per the folded registry (the remote part)
+    let communityIsPublic = false; // the folded mode itself — the ONLY thing the Public⇄Private confirm may gate on
     const renderLinks = async () => {
         linksDiv.innerHTML = '';
         let links = [];
@@ -9742,10 +10556,10 @@ async function openCommunityInvitePanel(chat) {
         // §10 computed mode + per-creator breakdown from the folded registry (the authoritative source).
         let summary = { is_public: links.length > 0, creators: [] };
         try { summary = await invoke('get_community_invite_summary', { communityId }); } catch (_) {}
-        globalLinkCount = (summary.creators || []).reduce((n, c) => n + (c.count || 0), 0);
         otherCreatorLinkCount = (summary.creators || [])
             .filter(c => c.npub !== strPubkey)
             .reduce((n, c) => n + (c.count || 0), 0);
+        communityIsPublic = !!summary.is_public;
         const modeEl = box.querySelector('#cmt-mode');
         if (modeEl) {
             const pub = !!summary.is_public;
@@ -9759,11 +10573,30 @@ async function openCommunityInvitePanel(chat) {
         if (others.length) {
             const note = document.createElement('div');
             note.className = 'cmt-others';
-            for (const c of others) {
-                const line = document.createElement('p');
-                line.className = 'cmt-other-line';
-                line.textContent = `${systemEventName(c.npub)} has ${c.count} active invite link${c.count === 1 ? '' : 's'}`;
-                note.appendChild(line);
+            const expandLines = () => {
+                for (const c of others) {
+                    const line = document.createElement('p');
+                    line.className = 'cmt-other-line';
+                    line.textContent = `${systemEventName(c.npub)} has ${c.count} active invite link${c.count === 1 ? '' : 's'}`;
+                    note.appendChild(line);
+                }
+            };
+            if (others.length > 1) {
+                // Space-frugal for large communities: 2+ other creators collapse to one
+                // accent line; the per-creator breakdown appears on tap.
+                const total = others.reduce((n, c) => n + (c.count || 0), 0);
+                note.classList.add('collapsed');
+                const toggle = document.createElement('p');
+                toggle.className = 'cmt-other-line cmt-others-toggle';
+                toggle.textContent = `View ${total} other invite${total === 1 ? '' : 's'}`;
+                toggle.onclick = () => {
+                    toggle.remove();
+                    note.classList.remove('collapsed');
+                    expandLines();
+                };
+                note.appendChild(toggle);
+            } else {
+                expandLines();
             }
             linksDiv.appendChild(note);
         }
@@ -9861,8 +10694,10 @@ async function openCommunityInvitePanel(chat) {
         const btn = e.currentTarget; // capture before await — currentTarget is null after it
         // The FIRST link ANYWHERE (across all creators) flips a private community to Public (anyone with the
         // link can join). Confirm that boundary crossing; if it's already Public (someone holds a link), a
-        // new link doesn't change the mode, so skip the warning.
-        if (globalLinkCount === 0) {
+        // new link doesn't change the mode, so skip the warning. Gate on the folded MODE, never on a derived
+        // count: the per-creator breakdown drops any creator whose npub won't parse, so it can read 0 while
+        // the community is genuinely Public — and then this warns on a boundary that isn't being crossed.
+        if (!communityIsPublic) {
             const ok = await popupConfirm('Make community public?',
                 'Creating an invite link makes this community <b>public</b>: anyone with the link can join. You can make it private again later by revoking every link.',
                 false, '', 'vector_warning.svg', '', 'Make public');
@@ -9910,9 +10745,11 @@ async function openCommunityInvitePanel(chat) {
         avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
         makePlaceholder: () => createPlaceholderAvatar(false, 25),
         twemojify: (el) => twemojify(el),
+        showTooltip: (text, el) => showGlobalTooltip(text, el),
+        hideTooltip: () => hideGlobalTooltip(),
         // Plain hex+alpha gradient (like Create Group's mouseenter handler) — a cheap cached
         // layer. color-mix() here re-rasterized every frame under the opacity fade -> avatar flicker.
-        hoverBg: `linear-gradient(to right, ${getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim()}40, transparent)`,
+        hoverBg: 'rgba(255, 255, 255, 0.085)',
     });
     // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's picked,
     // accent "Invite N" (send) once contacts are selected. The store drives its class + count.
@@ -9969,6 +10806,10 @@ async function openCommunityInvitePanel(chat) {
             setStatus(`Invited ${ok}, ${fail} failed.`, ok === 0);
         }
     };
+
+    // Fully rendered — attach in one paint (see the note at the top of this function).
+    document.body.appendChild(overlay);
+    pushBack('community-invite', dismiss);
 }
 
 
@@ -10242,6 +11083,7 @@ function enterProfileEditMode() {
     };
     document.getElementById('profile-edit-btn').style.display = 'none';
     document.getElementById('profile-share-btn').style.display = 'none';
+    document.getElementById('profile-qr-btn').style.display = 'none';
     document.getElementById('profile-npub-label').style.display = 'none';
     document.getElementById('profile-npub-container').style.display = 'none';
     document.getElementById('profile-badges').style.display = 'none';
@@ -10340,6 +11182,7 @@ function exitProfileEditMode(fCancel = false) {
     document.getElementById('profile-edit-fields').style.display = 'none';
     document.getElementById('profile-edit-btn').style.display = '';
     document.getElementById('profile-share-btn').style.display = '';
+    document.getElementById('profile-qr-btn').style.display = 'block';
     document.getElementById('profile-secondary-name').style.display = '';
     document.getElementById('profile-secondary-status').style.display = '';
     document.getElementById('profile-description').style.display = '';
@@ -10594,45 +11437,46 @@ const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholde
  * Expands up to max-height defined in CSS (150px), then scrolls.
  * Only expands when content actually needs more space (multi-line).
  */
+let _chatInputHeight = 0;
+
+/**
+ * The composer is a contenteditable, so it sizes itself between the min- and
+ * max-height in CSS — no measure-and-set pass, which on a contenteditable
+ * fights the growth it is trying to measure. This only reacts to a height
+ * change, keeping the chat pinned the way the old resize did.
+ */
 function autoResizeChatInput() {
-    // Get actual computed styles
-    const computed = window.getComputedStyle(domChatMessageInput);
-    const lineHeight = parseFloat(computed.lineHeight) || 24;
-    const paddingTop = parseFloat(computed.paddingTop) || 10;
-    const paddingBottom = parseFloat(computed.paddingBottom) || 10;
-    const padding = paddingTop + paddingBottom;
-    
-    // Single line scrollHeight = lineHeight + padding
-    const singleLineScrollHeight = lineHeight + padding;
-    
-    // Track previous state for scroll adjustment
-    const wasExpanded = domChatMessageInput.style.overflowY === 'auto';
-    
-    // Reset height and ensure overflow is hidden for accurate measurement
-    // Setting overflow:hidden before measuring prevents scrollbar space from affecting layout
-    domChatMessageInput.style.overflowY = 'hidden';
-    domChatMessageInput.style.height = '0';
-    
-    // Get scrollHeight - this tells us how much space content actually needs
-    const scrollHeight = domChatMessageInput.scrollHeight;
-    
-    // Only expand if content needs more than single line
-    if (scrollHeight > singleLineScrollHeight) {
-        // Set height to content needs minus padding (CSS height is content-box)
-        domChatMessageInput.style.height = (scrollHeight - padding) + 'px';
-        domChatMessageInput.style.overflowY = 'auto';
-        
-        // Soft scroll to keep chat at bottom when expanding
-        softChatScroll();
-    } else {
-        // Single line - use default CSS height, keep overflow hidden
-        domChatMessageInput.style.height = '';
-        
-        // If we just collapsed from multi-line, also soft scroll
-        if (wasExpanded) {
-            softChatScroll();
+    const node = domChatMessageInput.el || domChatMessageInput;
+    // A textarea has no intrinsic auto-grow, so the fallback still has to measure
+    // and set. The rich composer sizes itself between its min- and max-height.
+    if (!domChatMessageInput.el) {
+        const computed = window.getComputedStyle(node);
+        const padding = (parseFloat(computed.paddingTop) || 10.5) + (parseFloat(computed.paddingBottom) || 10.5);
+        const singleLine = (parseFloat(computed.lineHeight) || 24) + padding;
+        node.style.overflowY = 'hidden';
+        node.style.height = '0';
+        const needed = node.scrollHeight;
+        if (needed > singleLine) {
+            node.style.height = (needed - padding) + 'px';
+            node.style.overflowY = 'auto';
+        } else {
+            node.style.height = '';
         }
     }
+    const h = node.offsetHeight;
+    if (h === _chatInputHeight) return;
+    _chatInputHeight = h;
+    softChatScroll();
+}
+
+/** Undo what autoResizeChatInput set, after the input is cleared. */
+function resetChatInputSize() {
+    // Legacy only. The rich composer is sized by the stylesheet, and an inline
+    // overflow-y outranks it permanently — one send and a long draft could
+    // never scroll again.
+    if (domChatMessageInput.el) return;
+    domChatMessageInput.style.height = '';
+    domChatMessageInput.style.overflowY = 'hidden';
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -10641,6 +11485,20 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
+
+    // Downgrade gate, before any other boot step: this build must not touch a
+    // database a newer Vector wrote. Terminal by design — nothing below runs.
+    try {
+        const downgrade = await invoke('check_account_downgrade');
+        if (downgrade) {
+            await showDowngradeBlock(downgrade);
+            return;
+        }
+    } catch (e) {
+        // A failure here must not strand a healthy account on a blank screen;
+        // init_database still refuses the open if this really was a downgrade.
+        console.error('Downgrade check failed:', e);
+    }
 
     // Initialize relay dialog event listeners
     initRelayDialogs();
@@ -10660,9 +11518,13 @@ window.addEventListener("DOMContentLoaded", async () => {
             console.log('Deep link received before login, Rust backend has stored it');
             return;
         }
-        
-        // User is logged in, execute the action immediately
-        await executeDeepLinkAction(evt.payload);
+
+        // Consume through the pending slot (returns the stored action and CLEARS it):
+        // executing evt.payload directly would leave the pending copy behind to
+        // replay as a stale action on the next boot, and a double-delivered URL
+        // (event + cold-start catch) would run twice.
+        const action = await invoke('get_pending_deep_link').catch(() => null);
+        if (action) await executeDeepLinkAction(action);
     });
 
     // Inbound share from another app (Android share sheet). If not logged in yet,
@@ -10958,7 +11820,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                 strPubkey = hotReloadState.npub;
                 arrProfiles = hotReloadState.profiles || [];
                 arrChats = hotReloadState.chats || [];
-                
+                // Seeded from the payload, so the first paint is already in pin order
+                // rather than correcting itself an IPC hop later.
+                arrPinnedChats = hotReloadState.pinned || [];
+                _pinnedLoaded = true;
+
                 // Setup Rust listeners
                 await setupRustListeners();
 
@@ -10989,6 +11855,9 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Catch a share that landed between the cold-start poll and now (the live listener
                 // skips events while fInit was still true).
                 consumePendingShare();
+                // Same window exists for deep links: drain any action stored while
+                // fInit gated the live listener.
+                invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
                 // Render the chatlist
                 renderChatlist();
@@ -11092,6 +11961,19 @@ window.addEventListener("DOMContentLoaded", async () => {
                     // fall through to Create / Login as a last resort.
                     console.error('[Boot] Single-account auto-promote failed:', e);
                 }
+            }
+        }
+
+        // PIVX default flip: a FRESH install (no account has ever existed on this
+        // device) gets the wallet hidden until it's summoned via the Mini Apps
+        // search. A device that has run Vector before keeps its state — visible
+        // unless the user explicitly hid it. Stamped once, so deleting every
+        // account later never re-hides a wallet the user has been using.
+        if (!localStorage.getItem('pivx_default_applied')) {
+            localStorage.setItem('pivx_default_applied', 'true');
+            const everRan = account_exists || (loginPicker.accounts && loginPicker.accounts.length > 0);
+            if (!everRan && localStorage.getItem('pivx_hidden') === null) {
+                localStorage.setItem('pivx_hidden', 'true');
             }
         }
 
@@ -11214,7 +12096,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // phrase, the active-account-from-marker context no longer applies.
         loginPicker.hide();
     };
-    // Bunker form helpers (renderQrInto, startBunkerSession, showBunkerForm,
+    // Bunker form helpers (startBunkerSession, showBunkerForm,
     // hideBunkerForm) are now defined at module scope, near the DOM-ref
     // block — they need to be accessible to the boot-time login catch which
     // runs before this DOMContentLoaded handler reaches button wiring.
@@ -11279,6 +12161,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                 }
             }
         };
+    }
+    // Tap the bunker QR to blow it up fullscreen — easier for a phone camera.
+    // openQrOverlay no-ops while the connection link is still generating.
+    if (domLoginBunkerQrWrap) {
+        domLoginBunkerQrWrap.onclick = () => openQrOverlay(strBunkerNostrConnectUrl);
     }
     domLoginBackBtn.onclick = async () => {
         // Add Profile flow back has two cases — independent of which sub-
@@ -11495,20 +12382,17 @@ window.addEventListener("DOMContentLoaded", async () => {
         }, 100);
     });
     domChatNewStartBtn.onclick = () => {
-        let inputValue = domChatNewInput.value.trim();
-        // A pasted Community invite link → preview + join flow (not a DM).
-        if (isCommunityInviteUrl(inputValue)) {
-            domChatNewInput.value = ``;
-            previewAndJoinCommunityLink(inputValue);
+        const inputValue = domChatNewInput.value.trim();
+        domChatNewInput.value = ``;
+        // Same parser as the QR scanner: invites join, npubs DM, and any
+        // URL wrapper around either is ignored.
+        const parsed = parseContactInput(inputValue);
+        if (parsed?.kind === 'invite') {
+            previewAndJoinCommunityLink(parsed.url);
             return;
         }
-        // Parse npub from vectorapp.io profile URL if pasted
-        const profileUrlMatch = inputValue.match(/https?:\/\/vectorapp\.io\/profile\/(npub1[a-z0-9]{58})/i);
-        if (profileUrlMatch) {
-            inputValue = profileUrlMatch[1];
-        }
-        openChat(inputValue);
-        domChatNewInput.value = ``;
+        // No extractable npub falls through raw — openChat owns rejection
+        openChat(parsed?.npub || inputValue);
     };
     domChatNewInput.onkeydown = async (evt) => {
         if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
@@ -11694,12 +12578,16 @@ window.addEventListener("DOMContentLoaded", async () => {
     document.onpaste = async (evt) => {
         if (strOpenChat) {
             const dt = evt.clipboardData;
-            // clipboardData is only valid during synchronous dispatch — capture the
-            // image item + its blob NOW, since the await below would invalidate it.
+            // clipboardData is only valid during synchronous dispatch — capture any
+            // file item + its blob NOW, since the await below would invalidate it.
+            // ANY file kind, not just images: when the native path read fails (a
+            // clipboard held by another process, a manager that dropped CF_HDROP),
+            // the in-band blob is the universal fallback and carries a real name.
             const arrItems = Array.from(dt?.items || []);
-            const imageItem = arrItems.find(item => item.type.startsWith('image/'));
-            const imageBlob = imageItem ? imageItem.getAsFile() : null;
-            const imageType = imageItem ? imageItem.type : '';
+            const fileItem = arrItems.find(item => item.kind === 'file')
+                || arrItems.find(item => item.type.startsWith('image/'));
+            const fileBlob = fileItem ? fileItem.getAsFile() : null;
+            const fileMime = fileItem ? fileItem.type : '';
 
             // A file copy (Finder/Explorer) also carries a text representation of the
             // path, so the default paste inserts the filename into the input. We must
@@ -11709,7 +12597,7 @@ window.addEventListener("DOMContentLoaded", async () => {
             const hasFile = (dt?.files && dt.files.length > 0)
                 || arrItems.some(it => it.kind === 'file')
                 || dtTypes.includes('Files');
-            if (hasFile || imageBlob) evt.preventDefault();
+            if (hasFile || fileBlob) evt.preventDefault();
 
             // Snapshot the composer so we can scrub any filename text that still
             // slipped in (e.g. a folder copy whose sync signal we couldn't read).
@@ -11745,33 +12633,40 @@ window.addEventListener("DOMContentLoaded", async () => {
                 console.warn('[paste] native file read failed, falling back to image bytes:', e);
             }
 
-            // Fall back to raw image bytes (screenshot data with no file reference).
-            if (imageBlob) {
+            // Fall back to the in-band blob: screenshot bytes, or a copied file
+            // whose native path read failed (its content still rides the event).
+            if (fileBlob) {
                 restoreInput();
 
                 // Read the blob as bytes
-                const arrayBuffer = await imageBlob.arrayBuffer();
+                const arrayBuffer = await fileBlob.arrayBuffer();
                 const bytes = new Uint8Array(arrayBuffer);
 
-                // Determine file extension from MIME type
-                const mimeType = imageType;
+                // Prefer the blob's real filename; synthesize one from the MIME
+                // type only for anonymous data (screenshots).
                 let ext = 'png'; // Default
-                if (mimeType.includes('jpeg') || mimeType.includes('jpg')) {
+                if (fileMime.includes('jpeg') || fileMime.includes('jpg')) {
                     ext = 'jpg';
-                } else if (mimeType.includes('gif')) {
+                } else if (fileMime.includes('gif')) {
                     ext = 'gif';
-                } else if (mimeType.includes('webp')) {
+                } else if (fileMime.includes('webp')) {
                     ext = 'webp';
-                } else if (mimeType.includes('png')) {
+                } else if (fileMime.includes('png')) {
                     ext = 'png';
-                } else if (mimeType.includes('tiff')) {
+                } else if (fileMime.includes('tiff')) {
                     ext = 'tiff';
-                } else if (mimeType.includes('bmp')) {
+                } else if (fileMime.includes('bmp')) {
                     ext = 'bmp';
+                } else if (!fileMime.startsWith('image/')) {
+                    ext = 'bin';
                 }
-
-                // Generate a filename
-                const fileName = `pasted_image.${ext}`;
+                let fileName = `pasted_image.${ext}`;
+                if (fileBlob.name && fileBlob.name.includes('.')) {
+                    fileName = fileBlob.name;
+                    ext = fileBlob.name.split('.').pop().toLowerCase();
+                } else if (fileBlob.name) {
+                    fileName = fileBlob.name;
+                }
 
                 // Get reply reference before opening preview
                 const strReplyRef = strCurrentReplyReference;
@@ -11810,10 +12705,10 @@ async function sendMessage(messageText) {
         // preventing partial matches (e.g. "Al" matching inside "Alice")
         const sorted = tracked.slice().sort((a, b) => b.name.length - a.name.length);
         for (const m of sorted) {
-            // Escape regex special chars in the display name
-            const escaped = m.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            // Match @Name only at word boundaries to avoid substring collisions
-            const re = new RegExp('(?<=^|\\s)@' + escaped + '(?=\\s|[.,!?;:]|$)', 'g');
+            // Match @Name only at word boundaries to avoid substring collisions,
+            // and under any typographic variant, so a name the OS re-punctuated
+            // still tags rather than sending as plain text.
+            const re = new RegExp('(?<=^|\\s)@' + cmpNamePattern(m.name) + '(?=\\s|[.,!?;:]|$)', 'g');
             cleanedText = cleanedText.replace(re, '@' + m.npub);
         }
     }
@@ -11829,8 +12724,7 @@ async function sendMessage(messageText) {
         // Clear input and show editing state
         domChatMessageInput.value = '';
         resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
-        domChatMessageInput.style.height = '';
-        domChatMessageInput.style.overflowY = 'hidden';
+        resetChatInputSize();
         domChatMessageInput.setAttribute('placeholder', 'Saving edit...');
 
         try {
@@ -11924,8 +12818,7 @@ async function sendMessage(messageText) {
     // Clear input and show sending state
     domChatMessageInput.value = '';
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
-    domChatMessageInput.style.height = ''; // Reset textarea height
-    domChatMessageInput.style.overflowY = 'hidden'; // Reset overflow
+    resetChatInputSize();
     domChatMessageInput.setAttribute('placeholder', 'Sending...');
 
     try {
@@ -12040,6 +12933,10 @@ const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelec
     getMentionCandidates,
     document.getElementById('chat-box')
 ) : null;
+
+// Hand the composer its mention source now that one exists, so an inserted
+// `@Name` renders as a pill.
+composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
 
 // --- Emoji Shortcode Selector ---
 const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
@@ -12299,8 +13196,7 @@ domChatMessageInput.oninput = async (e) => {
         } else if (newState === 'recording' || newState === 'locked') {
             // Clear input and show recording status
             domChatMessageInput.value = '';
-            domChatMessageInput.style.height = '';
-            domChatMessageInput.style.overflowY = 'hidden';
+            resetChatInputSize();
         }
     };
     
@@ -12596,6 +13492,25 @@ document.addEventListener('mouseout', (e) => {
     if (e.target.closest?.('a[href]')) hideGlobalTooltip();
 });
 
+/**
+ * Open a downloaded file on Android.
+ *
+ * An `.apk` goes to the system package installer, but only once the user has
+ * trusted Vector as an install source. That is a "special app access", not a
+ * runtime permission: nothing can prompt for it, so the backend routes an
+ * untrusted tap to the settings screen that grants it. Say so first, otherwise
+ * asking to open a file appears to fling you into Settings for no reason.
+ */
+async function openAndroidAttachment(filepath) {
+    if (/\.apk$/i.test(filepath || '')) {
+        const allowed = await invoke('can_install_apks').catch(() => true);
+        if (!allowed) {
+            showToast('Android needs your permission first — switch on "Allow from this source", then tap the file again');
+        }
+    }
+    return invoke('open_attachment', { path: filepath });
+}
+
 // Listen for app-wide click interations
 document.addEventListener('click', (e) => {
     // If we're clicking the emoji search, don't close it!
@@ -12645,16 +13560,6 @@ document.addEventListener('click', (e) => {
         if (msgId) {
             showEditHistory(msgId, e.target);
         }
-    }
-
-    // If we're clicking a File Reveal button, reveal/open the file. Android has
-    // no "reveal in folder", so open it with the user's chosen app instead.
-    if (e.target.getAttribute('filepath')) {
-        const filepath = e.target.getAttribute('filepath');
-        if (platformFeatures.os === 'android') {
-            return invoke('open_attachment', { path: filepath });
-        }
-        return revealItemInDir(filepath);
     }
 
     // If we're clicking a Reply context, center the referenced message in view
@@ -12746,15 +13651,36 @@ document.addEventListener('click', (e) => {
                 if (!cMsg) continue;
                 const mine = cMsg.reactions.find(r => r.emoji === emoji && r.author_id === strPubkey);
                 if (mine) {
-                    // Already reacted → revoke. The backend optimistically removes the reaction
-                    // and emits message_update, so the chip refreshes without local bookkeeping.
-                    invoke('revoke_reaction', { reactionId: mine.id })
-                        .catch(err => console.error('revoke_reaction failed:', err));
+                    // A provisional entry means our add is still in flight — swallow the
+                    // click (debounce) rather than revoke an id the backend never issued.
+                    if (!String(mine.id).startsWith('pending-react-')) {
+                        // Already reacted → revoke. The backend optimistically removes the reaction
+                        // and emits message_update, so the chip refreshes without local bookkeeping.
+                        invoke('revoke_reaction', { reactionId: mine.id })
+                            .catch(err => console.error('revoke_reaction failed:', err));
+                    }
                 } else {
                     // Not yet reacted → add. Mark + optimistic count roll to debounce double-clicks.
                     clickedReaction.setAttribute('data-reacted', 'true');
                     _dmsgRollReactionCount(clickedReaction, _dmsgReactionCount(clickedReaction) + 1);
-                    reactToMessageRouted(msgId, cChat.id, emoji);
+                    // Mirror the bump into STATE as a provisional: during a rapid spree the
+                    // echo for an EARLIER click re-renders this row from a snapshot that
+                    // predates this click, and without the provisional that repaint visibly
+                    // un-reacts the chip until our own echo lands.
+                    const provisional = { id: `pending-react-${Date.now()}`, reference_id: msgId, author_id: strPubkey, emoji, at: Date.now() };
+                    cMsg.reactions.push({ id: provisional.id, reference_id: msgId, author_id: strPubkey, emoji });
+                    const inflight = pendingReactions.get(msgId) || [];
+                    inflight.push(provisional);
+                    pendingReactions.set(msgId, inflight);
+                    reactToMessageRouted(msgId, cChat.id, emoji).catch(() => {
+                        // The send failed: retract the provisional and the chip bump.
+                        const l = (pendingReactions.get(msgId) || []).filter(p => p.id !== provisional.id);
+                        if (l.length) pendingReactions.set(msgId, l); else pendingReactions.delete(msgId);
+                        const i = cMsg.reactions.findIndex(r => r.id === provisional.id);
+                        if (i !== -1) cMsg.reactions.splice(i, 1);
+                        clickedReaction.removeAttribute('data-reacted');
+                        _dmsgRollReactionCount(clickedReaction, Math.max(0, _dmsgReactionCount(clickedReaction) - 1));
+                    });
                 }
                 break;
             }
@@ -12871,6 +13797,9 @@ const PIN_THRESHOLD_PX = 80;
 const BOTTOM_EPSILON_PX = 6;        // "true bottom" tolerance for clearing the latch
 const PROGRAMMATIC_SCROLL_MS = 120; // suppress user-scroll-up detection just after an app scroll
 let lastScrollTop = 0;
+// Content height at the previous pin evaluation, so growth beneath the view can be
+// told apart from the user moving away from the bottom.
+let _lastPinEvalHeight = 0;
 let _userScrolledAway = false;
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
@@ -12946,13 +13875,27 @@ function clearUnreadBelow() { setUnreadBelow(0); }
 function handleChatScrollIntent() {
     if (!strOpenChat || !domChatMessages) return;
     const scrollTop = domChatMessages.scrollTop;
-    const pxFromBottom = domChatMessages.scrollHeight - scrollTop - domChatMessages.clientHeight;
+    const scrollHeight = domChatMessages.scrollHeight;
+    const pxFromBottom = scrollHeight - scrollTop - domChatMessages.clientHeight;
     const isProgrammatic = Date.now() < _programmaticScrollUntil;
+    // Content grew and the view did NOT move up: the world got taller beneath us,
+    // which is never the user leaving the bottom.
+    const prevHeight = _lastPinEvalHeight;
+    _lastPinEvalHeight = scrollHeight;
+    const grewUnderUs = scrollHeight > prevHeight && scrollTop >= lastScrollTop;
 
     // User scrolled UP (and it wasn't us) → release and latch until they're
     // back at the true bottom. Drop-top compensations move scrollTop up too,
     // but they're wrapped in beginProgrammaticScroll, so isProgrammatic gates them out.
-    if (!isProgrammatic && scrollTop < lastScrollTop - 1) {
+    //
+    // A SHRINK clamp is not a scroll-up: switching to a shorter chat (or hiding
+    // rows) makes the engine pull scrollTop down on its own, outside any
+    // programmatic window. That latched "the user left" on chat-open, and the
+    // latch outlives the open — every later scroll-to-bottom then refused to run.
+    // A clamp always lands at the bottom, which is what separates it from a real
+    // scroll-up (that leaves real distance below).
+    const clampedByShrink = scrollHeight < prevHeight && pxFromBottom < BOTTOM_EPSILON_PX;
+    if (!isProgrammatic && scrollTop < lastScrollTop - 1 && !clampedByShrink) {
         _userScrolledAway = true;
     }
     // Returned to the true bottom → allow re-pin (genuine "glue to the live tail").
@@ -12966,7 +13909,16 @@ function handleChatScrollIntent() {
     revealUnreadFrontierIfReached();
 
     const wasPinned = chatPinnedToBottom;
-    chatPinnedToBottom = pxFromBottom < PIN_THRESHOLD_PX && !_userScrolledAway;
+    // Only the USER leaves the bottom. Distance alone used to release the pin, so
+    // media resolving after a chat-open — which drops hundreds of px in below the
+    // fold in one frame — blew past PIN_THRESHOLD_PX and silently released it,
+    // after which every scroll-to-bottom path refused to run and the chat sat
+    // short forever. So the pin also survives while the app is actively holding
+    // the bottom, and whenever the content simply grew beneath a view that didn't
+    // move up. A seek moves the view up, so it still releases normally.
+    chatPinnedToBottom =
+        (pxFromBottom < PIN_THRESHOLD_PX || chatBottomHoldPending() || (wasPinned && grewUnderUs))
+        && !_userScrolledAway;
     // User scrolled themselves back into pin range — clear the badge and
     // advance last_read so the OS unread indicator reflects reality. The
     // divider stays put until the chat is closed.
@@ -12989,6 +13941,9 @@ function softChatScroll() {
     // infinite down-window cascade. Stay put; the ↓ button is the way back to "now".
     if (CHAT_WINDOW_ENABLED && !isAtDataBottom()) return;
     scrollToBottom(domChatMessages, false);
+    // Whatever prompted this (a media load, a new message) may keep growing the
+    // content below us for a few frames — ride it down.
+    holdChatBottom();
 }
 
 window.onresize = adjustSize;
@@ -13002,11 +13957,6 @@ let arrSelectedGroupMembers = [];
 let arrSelectedGroupAdmins = [];
 /** Path to the selected group avatar image file (null if none selected) */
 let strCreateGroupAvatarPath = null;
-/**
- * Tracks whether the user attempted to create the group.
- * Used to only show inline validation after an explicit attempt.
- */
-let fCreateGroupAttempt = false;
 
 
 /**
@@ -13086,21 +14036,13 @@ function renderCreateGroupList(filterText = '') {
         bgDiv.className = 'member-pick-hover';
         row.appendChild(bgDiv);
 
-        row.addEventListener('mouseenter', () => {
-            const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-            bgDiv.style.background = `linear-gradient(to right, ${primaryColor}40, transparent)`;
-        });
-
         const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
         const avatar = createAvatarImg(avatarSrc, 25, false);
         avatar.className = 'member-pick-avatar';
         row.appendChild(avatar);
 
-        const nameSpan = document.createElement('div');
-        nameSpan.className = 'compact-member-name';
-        nameSpan.textContent = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-        if (name) twemojify(nameSpan);
-        row.appendChild(nameSpan);
+        const display = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
+        row.appendChild(buildMemberNameCell(display, profile, !!name).cell);
 
         // No admin toggle at create: invitees haven't joined yet, so a role grant has no
         // member to bind to (you promote them from Group Info after they accept).
@@ -13118,7 +14060,8 @@ function renderCreateGroupList(filterText = '') {
             } else {
                 arrSelectedGroupMembers.push(npub);
             }
-            updateCreateGroupValidation(true);
+            updateCreateGroupValidation();
+            updateCreateGroupSelectionStatus();
             const currentFilter = domCreateGroupFilter?.value || '';
             renderCreateGroupList(currentFilter);
         });
@@ -13165,9 +14108,10 @@ function renderCreateGroupList(filterText = '') {
 }
 
 /**
- * Enable/disable Create button and show inline hint
+ * Enable/disable the Create button (the Required* tag on the name field is the
+ * only "name missing" signal — no inline hint).
  */
-function updateCreateGroupValidation(showInline = false) {
+function updateCreateGroupValidation() {
     if (!domCreateGroupCreateBtn) return;
     // A Community needs only a name — picking contacts to invite is optional, so there's
     // no member-selection requirement.
@@ -13179,19 +14123,20 @@ function updateCreateGroupValidation(showInline = false) {
     } else {
         domCreateGroupCreateBtn.setAttribute('disabled', '');
     }
+}
 
-    // Only show status after an explicit attempt, or when forced via parameter
-    const shouldShow = showInline || fCreateGroupAttempt;
-
-    if (domCreateGroupStatus) {
-        if (shouldShow && !nameOk) {
-            domCreateGroupStatus.style.display = '';
-            domCreateGroupStatus.textContent = 'A name is required';
-        } else {
-            domCreateGroupStatus.style.display = 'none';
-            domCreateGroupStatus.textContent = '';
-        }
-    }
+/**
+ * The footer status doubles as a selection counter — a "{N} User[s] Selected"
+ * pill — sliding open/shut with the selection. Create progress/errors overwrite it.
+ */
+function updateCreateGroupSelectionStatus() {
+    const n = arrSelectedGroupMembers.length;
+    // The Required* hint earns its urgency only once members are picked without a name.
+    document.querySelector('.create-group-name-wrap')?.classList.toggle('needs-name', n > 0);
+    if (!domCreateGroupStatus) return;
+    domCreateGroupStatus.innerHTML = n
+        ? `<span class="create-group-selection-pill"><span class="cg-pill-glyph"><span class="icon icon-users-multi"></span></span>${n} User${n === 1 ? '' : 's'} Selected</span>`
+        : '';
 }
 
 /**
@@ -13210,14 +14155,9 @@ function openCreateGroup() {
     arrSelectedGroupMembers = [];
     arrSelectedGroupAdmins = [];
     strCreateGroupAvatarPath = null;
-    fCreateGroupAttempt = false;
     if (domCreateGroupName) domCreateGroupName.value = '';
-    if (domCreateGroupDescription) domCreateGroupDescription.value = '';
     if (domCreateGroupFilter) domCreateGroupFilter.value = '';
-    if (domCreateGroupStatus) {
-        domCreateGroupStatus.style.display = 'none';
-        domCreateGroupStatus.textContent = '';
-    }
+    updateCreateGroupSelectionStatus(); // clears the pill + the needs-name hint state
     // Reset avatar picker
     if (domCreateGroupAvatarPreview) {
         domCreateGroupAvatarPreview.style.display = 'none';
@@ -13243,7 +14183,6 @@ function openCreateGroup() {
 async function closeCreateGroup() {
     popBack('create-group');
     domCreateGroup.style.display = 'none';
-    fCreateGroupAttempt = false;
 
     // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
     domNavbar.style.display = '';
@@ -13264,10 +14203,9 @@ async function closeCreateGroup() {
 (function wireCreateGroupUI() {
     if (!domCreateGroup) return;
 
-    domCreateGroupBackBtn.onclick = closeCreateGroup;
     domCreateGroupCancelBtn.onclick = closeCreateGroup;
 
-    domCreateGroupName.oninput = () => updateCreateGroupValidation(true);
+    domCreateGroupName.oninput = () => updateCreateGroupValidation();
     domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
 
     // Avatar picker: open file dialog on click
@@ -13299,14 +14237,9 @@ async function closeCreateGroup() {
 
     domCreateGroupCreateBtn.onclick = async () => {
         const name = (domCreateGroupName?.value || '').trim();
+        if (!name) return; // the button is disabled without a name; belt-and-braces
 
-        // Mark that the user attempted to create
-        fCreateGroupAttempt = true;
 
-        if (!name) {
-            updateCreateGroupValidation(true);
-            return;
-        }
 
         // Snapshot the picked direct-invite contacts now — openCreateGroup resets the array.
         const inviteeNpubs = [...arrSelectedGroupMembers];
@@ -13316,14 +14249,9 @@ async function closeCreateGroup() {
         domCreateGroupCreateBtn.textContent = 'Creating...';
         domCreateGroupCreateBtn.disabled = true;
 
-        if (domCreateGroupStatus) {
-            domCreateGroupStatus.style.display = '';
-            domCreateGroupStatus.textContent = 'Preparing devices...';
-        }
+        if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Preparing devices...';
 
         try {
-            const description = (domCreateGroupDescription?.value || '').trim() || null;
-
             if (domCreateGroupStatus) domCreateGroupStatus.textContent = 'Creating...';
             // Single-channel Community: defaults the channel to "general" + trusted relays.
             const created = await invoke('create_community', { name, channelName: null, relays: null });
@@ -13336,7 +14264,7 @@ async function closeCreateGroup() {
             chat.metadata = chat.metadata || {};
             chat.metadata.custom_fields = chat.metadata.custom_fields || {};
             chat.metadata.custom_fields.name = name;
-            chat.metadata.custom_fields.description = description || '';
+            chat.metadata.custom_fields.description = '';
             chat.metadata.custom_fields.community_id = communityId;
             chat.metadata.custom_fields.is_owner = 'true';
             // Stamp the proven owner npub so the crown/Owner tag shows now, not after reload.
@@ -13358,13 +14286,8 @@ async function closeCreateGroup() {
             openChat(channelId);
             domCreateGroup.style.display = 'none';
 
-            // Persist description, then upload the avatar — both republish metadata, so chain
-            // them (no concurrent GroupRoot republish). Detached: the group is already visible.
+            // Detached: the group is already visible; the avatar upload must not delay it.
             (async () => {
-                if (description) {
-                    try { await invoke('update_community_metadata', { communityId, name: null, description }); }
-                    catch (err) { console.error('Set community description failed:', err); showToast('Community created, but the description failed to save'); }
-                }
                 // Upload the avatar BEFORE sending invites: the private invite bundle snapshots
                 // community.icon, so the icon must already be in the metadata for invitees to see the
                 // logo on their parked invite (not only after they join).
@@ -13396,12 +14319,9 @@ async function closeCreateGroup() {
         } catch (e) {
             const friendly = typeof e === 'string' ? e : (e?.message || e || '').toString();
             popupConfirm('Community creation failed', friendly, true, '', 'vector_warning.svg');
-            if (domCreateGroupStatus) {
-                domCreateGroupStatus.style.display = '';
-                domCreateGroupStatus.textContent = friendly;
-            }
+            if (domCreateGroupStatus) domCreateGroupStatus.textContent = friendly;
         } finally {
-            domCreateGroupCreateBtn.textContent = prevTxt || 'Create';
+            domCreateGroupCreateBtn.textContent = prevTxt || 'Create Group';
             updateCreateGroupValidation();
         }
     };

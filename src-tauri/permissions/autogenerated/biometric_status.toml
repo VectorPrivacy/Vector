@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-biometric-status"
+description = "Enables the biometric_status command without any pre-configured scope."
+commands.allow = ["biometric_status"]
+
+[[permission]]
+identifier = "deny-biometric-status"
+description = "Denies the biometric_status command without any pre-configured scope."
+commands.deny = ["biometric_status"]

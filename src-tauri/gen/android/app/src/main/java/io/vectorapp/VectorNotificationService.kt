@@ -26,6 +26,8 @@ class VectorNotificationService : Service() {
 
         /** Incrementing counter for request codes + non-chat notification IDs. */
         private val notificationCounter = AtomicInteger(100)
+        // Single slot for locked-account generic notifications (see above).
+        private const val GENERIC_NOTIFICATION_ID = 0x56454331 // "VEC1"
 
         /** Message history per chat — MessagingStyle requires replaying all messages on each update. */
         private data class ChatMessage(val senderName: String, val senderAvatarPath: String, val body: String, val timestamp: Long)
@@ -70,10 +72,13 @@ class VectorNotificationService : Service() {
             // Deterministic per-chat notification ID so messages stack AND any later cancel (in-app
             // read or resume) can recompute it without depending on mutable map state that a racing
             // post/cancel could have already cleared.
+            // Generic (locked-account) notifications COLLAPSE into one fixed
+            // row: a fresh id per post let a relay replay pile up hundreds of
+            // "You have a new message" entries, each alerting.
             val notificationId = if (chatId.isNotEmpty()) {
                 chatId.hashCode()
             } else {
-                notificationCounter.getAndIncrement()
+                GENERIC_NOTIFICATION_ID
             }
 
             // Fresh requestCode per post — avoids PendingIntent caching issues with FLAG_IMMUTABLE
@@ -143,6 +148,8 @@ class VectorNotificationService : Service() {
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setContentIntent(pendingIntent)
                 .setDeleteIntent(deletePendingIntent)
+                // The collapsed generic row must not buzz on every replace.
+                .setOnlyAlertOnce(chatId.isEmpty())
 
             // Only add Mark Read / Reply actions when we have a valid chatId.
             // Encrypted account notifications pass empty chatId (can't decrypt),

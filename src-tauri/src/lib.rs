@@ -1,4 +1,3 @@
-use nostr_sdk::prelude::*;
 use tauri::Manager;
 
 #[macro_use]
@@ -96,7 +95,7 @@ mod state;
 // not these re-exports.
 pub(crate) use state::{
     TAURI_APP, TauriEventEmitter,
-    NOSTR_CLIENT, MY_SECRET_KEY, STATE,
+    MY_SECRET_KEY, STATE,
     nostr_client, my_public_key,
     set_my_public_key,
     active_trusted_relays, WRAPPER_ID_CACHE,
@@ -263,6 +262,28 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_deep_link::init())
+        // Mobile cold start: the LAUNCH intent never fires on_open_url — the plugin
+        // captures it at webview creation, so page-load is the first moment
+        // get_current() is reliably populated. The frontend consumes through the
+        // pending slot, so a URL that ALSO fired on_open_url executes only once.
+        .on_page_load(|_webview, _payload| {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            if matches!(_payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                // get_current() is a BLOCKING plugin round-trip on mobile; the
+                // page-load callback runs on the very thread that must answer it.
+                // Hop to the async runtime or the webview wedges black at boot.
+                let app = _webview.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri_plugin_deep_link::DeepLinkExt;
+                    if let Ok(Some(urls)) = app.deep_link().get_current() {
+                        if !urls.is_empty() {
+                            let urls: Vec<String> = urls.iter().map(|u| u.to_string()).collect();
+                            deep_link::handle_deep_link(&app, urls);
+                        }
+                    }
+                });
+            }
+        })
         // Register the webxdc:// custom protocol for Mini Apps (async to avoid deadlocks on Windows)
         .register_asynchronous_uri_scheme_protocol("webxdc", miniapps::scheme::miniapp_protocol)
         // Register Mini Apps state
@@ -306,7 +327,22 @@ pub fn run() {
     builder
         .setup(|app| {
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.handle().plugin(
+                tauri_plugin_updater::Builder::new()
+                    // A stable build must never accept a preview, even if one
+                    // reaches the stable endpoint. Channel separation otherwise
+                    // rests entirely on a release being flagged pre-release on
+                    // GitHub, and one unticked box would ship an unfinished
+                    // build to every user. Previews take anything newer, which
+                    // is what walks them onto the official release.
+                    .default_version_comparator(|current, release| {
+                        if current.pre.is_empty() && !release.version.pre.is_empty() {
+                            return false;
+                        }
+                        release.version > current
+                    })
+                    .build(),
+            )?;
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_process::init())?;
             
@@ -352,6 +388,10 @@ pub fn run() {
             if let Ok(data_dir) = handle.path().app_data_dir() {
                 account_manager::set_app_data_dir(data_dir);
             }
+
+            // Stamped into each account on open, so if the user later runs an
+            // older build the downgrade block can name what wrote the schema.
+            vector_core::db::set_app_version(handle.package_info().version.to_string());
 
             // Install the platform-correct download directory into
             // vector-core. Desktop & iOS use OS conventions (xdg-user-dirs
@@ -406,6 +446,10 @@ pub fn run() {
 
             // Bridge vector-core's EventEmitter to Tauri's emit system
             vector_core::set_event_emitter(Box::new(TauriEventEmitter));
+            // Route vector-core's failure-class logs (log_net_fail!/log_net_info!)
+            // into the user-copyable vector.log — Copy Logs must tell the whole
+            // blossom story, and most of it happens inside vector-core.
+            vector_core::logging::set_persist_sink(|line| append_vector_log(line));
 
             // Register the Android NIP-55 (Amber) signer backend so keyless
             // offline accounts can sign/encrypt/decrypt over local IPC.
@@ -555,6 +599,7 @@ pub fn run() {
             message::clear_compression_cache,
             message::send_cached_compressed_file,
             message::is_directory,
+            message::read_image_preview,
             message::zip_directory,
             message::cleanup_zip,
             message::react_to_message,
@@ -609,8 +654,10 @@ pub fn run() {
             commands::system::get_background_service_prompted,
             commands::system::set_background_service_prompted,
             commands::updates::check_app_update,
+            commands::updates::check_account_downgrade,
             commands::updates::get_install_source,
             commands::updates::open_update_source,
+            commands::updates::download_and_install_update,
             // Deep link commands
             deep_link::get_pending_deep_link,
             share::get_pending_share,
@@ -627,6 +674,7 @@ pub fn run() {
             // Mini Apps commands
             miniapps::commands::miniapp_load_info,
             miniapps::commands::miniapp_load_info_from_bytes,
+            miniapps::commands::miniapp_resolve_url_xdc,
             miniapps::commands::miniapp_open,
             miniapps::commands::miniapp_close,
             miniapps::commands::miniapp_get_updates,
@@ -670,6 +718,7 @@ pub fn run() {
             miniapps::commands::miniapp_revoke_all_permissions,
             // Image cache commands
             image_cache::get_or_cache_image,
+            image_cache::verify_remote_media,
             image_cache::clear_image_cache,
             image_cache::get_image_cache_stats,
             image_cache::cache_url_image,
@@ -682,7 +731,6 @@ pub fn run() {
             pivx::pivx_set_wallet_address,
             pivx::pivx_get_wallet_address,
             pivx::pivx_claim_from_message,
-            pivx::pivx_import_promo,
             pivx::pivx_refresh_balances,
             pivx::pivx_send_payment,
             pivx::pivx_send_existing_promo,
@@ -726,6 +774,12 @@ pub fn run() {
             // Account commands (commands/account.rs)
             commands::account::login,
             commands::account::login_from_stored_key,
+            commands::biometric::biometric_status,
+            commands::biometric::switch_to_biometric,
+            commands::encryption::switch_to_credential,
+            commands::biometric::biometric_login,
+            commands::biometric::setup_encryption_biometric,
+            commands::biometric::enable_encryption_biometric,
             commands::account::connect_bunker,
             commands::account::start_nostrconnect_session,
             commands::account::cancel_bunker_session,
@@ -741,6 +795,7 @@ pub fn run() {
             commands::account::skip_encryption,
             // Emoji pack commands (commands/emoji_packs.rs)
             commands::emoji_packs::list_emoji_packs,
+            commands::emoji_packs::get_pack_share_naddr,
             commands::emoji_packs::refresh_emoji_packs,
             commands::emoji_packs::fetch_emoji_pack_by_naddr,
             commands::emoji_packs::get_theme_emoji_pack,
@@ -790,12 +845,14 @@ pub fn run() {
             commands::relays::validate_relay_url_cmd,
             commands::relays::get_relay_metrics,
             commands::relays::get_relay_logs,
+            commands::relays::set_log_level,
             commands::relays::monitor_relay_connections,
             // Attachment commands (commands/attachments.rs)
             commands::attachments::generate_thumbhash_preview,
             commands::attachments::decode_thumbhash,
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,
+            commands::attachments::can_install_apks,
             commands::attachments::share_attachment,
             commands::attachments::get_gallery_hidden,
             commands::attachments::set_gallery_hidden,
@@ -819,6 +876,9 @@ pub fn run() {
             commands::community::send_community_file_bytes,
             commands::community::send_community_cached_file,
             commands::community::sync_community_channel,
+            commands::pinned::get_pinned_chats,
+            commands::pinned::pin_chat,
+            commands::pinned::unpin_chat,
             commands::community::sync_communities_boot,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_community_state,
@@ -853,6 +913,10 @@ pub fn run() {
             commands::community::get_community_admins,
             commands::community::can_manage_community_roles,
             commands::community::get_community_capabilities,
+            commands::community::pin_community_message,
+            commands::community::unpin_community_message,
+            commands::community::get_channel_pins,
+            commands::community::fetch_pinned_attachment,
             commands::community::get_community_invite_summary,
             // Sync commands (commands/sync.rs)
             commands::sync::queue_profile_sync,
@@ -878,4 +942,38 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Append one line to the user-copyable `vector.log` (Settings > Copy Logs),
+/// trimming to keep the file bounded. Shared by `log_error!` and the
+/// vector-core persist sink.
+pub fn append_vector_log(line: &str) {
+    if let Ok(data_dir) = account_manager::get_app_data_dir() {
+        let log_path = data_dir.join("vector.log");
+        if let Ok(existing) = std::fs::read_to_string(&log_path) {
+            let lines: Vec<&str> = existing.lines().collect();
+            if lines.len() > 1000 {
+                let trimmed = lines[lines.len() - 900..].join("\n");
+                let _ = std::fs::write(&log_path, trimmed);
+            }
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+}
+
+#[cfg(test)]
+mod spawn_binding_tests {
+    /// The shell spawns per-account work too, and the same mistake costs the
+    /// same: a task that outlives an account switch writing account A's data
+    /// into account B's storage. Same check, same marker, one implementation.
+    #[test]
+    fn per_account_tasks_are_spawned_bound_to_their_account() {
+        vector_core::spawn_audit::assert_all_spawns_bound(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            &[],
+        );
+    }
 }

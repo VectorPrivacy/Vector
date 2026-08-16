@@ -48,7 +48,7 @@
 # Keep MiniAppManager companion object static methods (called from Rust via JNI)
 -keep class io.vectorapp.miniapp.MiniAppManager {
     public static void initialize(android.app.Activity);
-    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
+    public static void openMiniApp(java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String, java.lang.String);
     public static void closeMiniApp();
     public static void sendToMiniApp(java.lang.String, java.lang.String);
     public static void sendRealtimeData(java.lang.String);
@@ -99,3 +99,14 @@
 # release builds hit NoSuchMethodError the moment the login screen probes for a
 # signer.
 -keep class io.vectorapp.ExternalSigner { *; }
+
+# Keep BiometricUnlock (Keystore-wrapped Local Encryption). Same JNI shape as
+# ExternalSigner: statics invoked from Rust, nativeOnBiometricResult must keep
+# its exact name for the native symbol to bind.
+-keep class io.vectorapp.BiometricUnlock { *; }
+
+# Keep VectorUpdates (sideload self-updater). Its statics (installUpdate,
+# installedSignatureSha256, apkSignatureSha256) are invoked from Rust via JNI —
+# invisible to R8, so release builds died with NoSuchMethodError the moment an
+# update download completed.
+-keep class io.vectorapp.VectorUpdates { *; }

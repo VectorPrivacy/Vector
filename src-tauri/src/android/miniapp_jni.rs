@@ -18,10 +18,16 @@ use crate::TAURI_APP;
 // ============================================================================
 
 /// Content Security Policy for Mini Apps.
-/// - `default-src 'self'`: Only allow resources from same origin (webxdc.localhost)
+/// - `default-src 'self'`: Only allow resources from same origin (the app's partition host)
 /// - `webrtc 'block'`: Prevent IP leaks via WebRTC
 /// - `unsafe-inline/eval`: Required for many Mini Apps to function
-const CSP_HEADER: &str = r#"default-src 'self' http://webxdc.localhost; style-src 'self' http://webxdc.localhost 'unsafe-inline' blob:; font-src 'self' http://webxdc.localhost data: blob:; script-src 'self' http://webxdc.localhost 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' http://webxdc.localhost ws://127.0.0.1:* ipc: data: blob:; img-src 'self' http://webxdc.localhost data: blob:; media-src 'self' http://webxdc.localhost data: blob:; webrtc 'block'"#;
+///
+/// The origin is per-app (`http://<partition>.localhost`) so storage can't
+/// cross-contaminate between apps; the CSP names it explicitly beside 'self'.
+fn csp_header(host: &str) -> String {
+    let o = format!("http://{}", host);
+    format!("default-src 'self' {o}; style-src 'self' {o} 'unsafe-inline' blob:; font-src 'self' {o} data: blob:; script-src 'self' {o} 'unsafe-inline' 'unsafe-eval' blob:; connect-src 'self' {o} ws://127.0.0.1:* ipc: data: blob:; img-src 'self' {o} data: blob:; media-src 'self' {o} data: blob:; webrtc 'block'")
+}
 
 /// Permissions Policy for Mini Apps (Android document responses).
 /// Autoplay is allowed (self) for video streaming in Mini Apps.
@@ -96,7 +102,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
         let app = app.clone();
         let miniapp_id_owned = miniapp_id.clone();
         // chat_id belongs to the account current NOW — bail in the task if it swaps.
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<crate::miniapps::state::MiniAppsState>();
 
@@ -138,8 +144,8 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppManager_onMiniAppClosed(
                 if let Some(ref instance) = closing_instance {
                     let chat_id = instance.chat_id.clone();
                     let topic_for_left = topic_encoded.clone();
-                    if session.is_valid() {
-                        tokio::spawn(async move {
+                    if session.is_live() {
+                        vector_core::db::spawn_bound(async move {
                             if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
                                 log_warn!("[WEBXDC] Failed to send peer-left signal");
                             }
@@ -521,7 +527,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
                     let chat_id_1 = chat_id.clone();
                     let topic_1 = topic_for_ad.clone();
                     let addr_1 = addr_for_ad.clone();
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         crate::commands::realtime::send_webxdc_peer_advertisement(
                             chat_id_1, topic_1, addr_1,
                         ).await;
@@ -531,7 +537,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppIpc_joinRealtimeChannelNative
                     let chat_id_2 = chat_id;
                     let topic_2 = topic_for_ad;
                     let addr_2 = addr_for_ad;
-                    tokio::spawn(async move {
+                    vector_core::db::spawn_bound(async move {
                         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                         crate::commands::realtime::send_webxdc_peer_advertisement(
                             chat_id_2, topic_2, addr_2,
@@ -758,6 +764,7 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
     miniapp_id: JString,
     package_path: JString,
     path: JString,
+    host: JString,
 ) -> jobject {
     let miniapp_id: String = match env.get_string(&miniapp_id) {
         Ok(s) => s.into(),
@@ -783,12 +790,20 @@ pub extern "C" fn Java_io_vectorapp_miniapp_MiniAppWebViewClient_handleMiniAppRe
         }
     };
 
+    let host: String = match env.get_string(&host) {
+        Ok(s) => s.into(),
+        Err(e) => {
+            log_error!("Failed to get host: {:?}", e);
+            return std::ptr::null_mut();
+        }
+    };
+
     log_debug!("[{}] handleMiniAppRequest: {}", miniapp_id, path);
 
     // Serve file from .xdc package. A miss is a plain 404 to the game's WebView —
     // browsers probe paths the package never shipped (/favicon.ico on every load),
     // and log_error would toast "Something went wrong" at the user for each one.
-    match serve_file_from_package(&mut env, &package_path, &path) {
+    match serve_file_from_package(&mut env, &package_path, &path, &host) {
         Ok(response) => response,
         Err(e) => {
             log_warn!("[{}] Failed to serve {}: {}", miniapp_id, path, e);
@@ -872,6 +887,7 @@ fn serve_file_from_package(
     env: &mut JNIEnv,
     package_path: &str,
     path: &str,
+    host: &str,
 ) -> Result<jobject, String> {
     let file = std::fs::File::open(package_path).map_err(|e| format!("Failed to open package: {}", e))?;
     let mut archive =
@@ -940,7 +956,7 @@ fn serve_file_from_package(
     }
 
     // Create WebResourceResponse with security headers
-    create_web_resource_response(env, &mime_type, &contents, CSP_HEADER)
+    create_web_resource_response(env, &mime_type, &contents, &csp_header(host))
 }
 
 /// Case-insensitive byte search for ASCII HTML tags.

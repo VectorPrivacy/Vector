@@ -61,8 +61,8 @@ impl From<rusqlite::Error> for VectorError {
     }
 }
 
-impl From<nostr_sdk::client::Error> for VectorError {
-    fn from(err: nostr_sdk::client::Error) -> Self {
+impl From<nostr_sdk::prelude::Error> for VectorError {
+    fn from(err: nostr_sdk::prelude::Error) -> Self {
         VectorError::Nostr(err.to_string())
     }
 }

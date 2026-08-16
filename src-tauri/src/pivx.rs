@@ -6,13 +6,13 @@
 //! Each promo code is a "single-UTXO wallet" - a human-readable code that
 //! derives a private key through iterated SHA256 hashing (12.5M iterations).
 
+use vector_core::event_ext::FinalizeUnsignedWithId;
 use serde::{Deserialize, Serialize};
 use sha2::{Sha256, Digest};
 use ripemd::Ripemd160;
 use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
 use secp256k1::{Secp256k1, SecretKey, PublicKey, Message};
 use tauri::{AppHandle, Runtime, Emitter};
-use std::sync::LazyLock;
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::Instant;
@@ -49,10 +49,15 @@ fn pivx_http_client() -> std::sync::Arc<reqwest::Client> {
     vector_core::net::shared_http_client()
 }
 
-/// Balance cache: address -> (balance_piv, last_fetch_time)
-static BALANCE_CACHE: LazyLock<RwLock<HashMap<String, (f64, Instant)>>> = LazyLock::new(|| {
-    RwLock::new(HashMap::new())
-});
+/// Balance cache: address -> (balance_piv, last_fetch_time).
+///
+/// Per-account: the addresses derive from the account's keys, so an entry from
+/// account A means nothing under account B.
+struct BalanceCache;
+
+fn balance_cache() -> std::sync::Arc<RwLock<HashMap<String, (f64, Instant)>>> {
+    vector_core::db::current_session().scoped::<BalanceCache, _>()
+}
 
 // ============================================================================
 // Types
@@ -224,7 +229,9 @@ fn decode_pivx_address(address: &str) -> Result<[u8; 20], String> {
 
 /// Check if cached balance is still valid
 fn get_cached_balance(address: &str) -> Option<f64> {
-    if let Ok(cache) = BALANCE_CACHE.read() {
+    let owner = balance_cache();
+    let locked = owner.read();
+    if let Ok(cache) = locked {
         if let Some((balance, timestamp)) = cache.get(address) {
             if timestamp.elapsed() < BALANCE_CACHE_TTL {
                 return Some(*balance);
@@ -236,14 +243,18 @@ fn get_cached_balance(address: &str) -> Option<f64> {
 
 /// Store balance in cache
 fn cache_balance(address: &str, balance: f64) {
-    if let Ok(mut cache) = BALANCE_CACHE.write() {
+    let owner = balance_cache();
+    let locked = owner.write();
+    if let Ok(mut cache) = locked {
         cache.insert(address.to_string(), (balance, Instant::now()));
     }
 }
 
 /// Clear the balance cache (useful after transactions)
 pub fn clear_balance_cache() {
-    if let Ok(mut cache) = BALANCE_CACHE.write() {
+    let owner = balance_cache();
+    let locked = owner.write();
+    if let Ok(mut cache) = locked {
         cache.clear();
     }
 }
@@ -998,41 +1009,6 @@ pub async fn pivx_claim_from_message<R: Runtime>(
     }
 }
 
-/// Import an external promo code (add to our wallet)
-#[tauri::command]
-pub async fn pivx_import_promo<R: Runtime>(
-    handle: AppHandle<R>,
-    gift_code: String,
-) -> Result<PivxPromo, String> {
-    // Check if already exists
-    if promo_code_exists(&handle, &gift_code)? {
-        return Err("This promo code is already in your wallet".to_string());
-    }
-
-    // Derive keys
-    let privkey = derive_privkey_from_code(&gift_code);
-    let address = privkey_to_address(&privkey)?;
-
-    // Check balance
-    let balance = fetch_balance(&address).await.unwrap_or(0.0);
-
-    // Store in database
-    save_promo(&handle, &gift_code, &address, &privkey).await?;
-
-    let created_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    Ok(PivxPromo {
-        gift_code,
-        address,
-        balance_piv: balance,
-        status: "active".to_string(),
-        created_at,
-    })
-}
-
 /// Refresh balances for all active promos
 /// Uses parallel batch fetching and caching for performance
 /// Pass force_refresh=true to bypass cache (e.g., after a transaction)
@@ -1116,7 +1092,7 @@ pub async fn pivx_send_payment<R: Runtime>(
     amount_piv: f64,
 ) -> Result<String, String> {
     use nostr_sdk::prelude::*;
-    use std::borrow::Cow;
+    
 
     // Validate amount
     if amount_piv <= 0.0 {
@@ -1245,12 +1221,12 @@ pub async fn pivx_send_payment<R: Runtime>(
         let receiver_pubkey = PublicKey::from_bech32(&receiver).map_err(|e| e.to_string())?;
 
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
-            .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&send_promo.0]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&send_promo.1]))
+            .tag(Tag::custom("d", vec!["pivx-payment"]))
+            .tag(Tag::custom("gift-code", vec![&send_promo.0]))
+            .tag(Tag::custom("amount", vec![&amount_sats.to_string()]))
+            .tag(Tag::custom("address", vec![&send_promo.1]))
             .tag(Tag::public_key(receiver_pubkey))
-            .build(my_public_key);
+            .finalize_unsigned_with_id(my_public_key);
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
@@ -1258,12 +1234,10 @@ pub async fn pivx_send_payment<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Self-copy for recovery (in-scope client clone + SessionGuard).
+        // Self-copy for recovery, bound to this account.
         let self_wrap_client = client.clone();
-        let self_wrap_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !self_wrap_session.is_valid() { return; }
-            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+        vector_core::db::spawn_bound(async move {
+            let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;
         });
 
         event_id
@@ -1323,7 +1297,7 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
     gift_code: String,
 ) -> Result<String, String> {
     use nostr_sdk::prelude::*;
-    use std::borrow::Cow;
+    
 
     // Verify the promo exists and get its balance
     let promo_data: (String, f64) = {
@@ -1361,12 +1335,12 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
         // Build the PIVX payment rumor with p tag for recipient (needed for DM routing)
         // Include address tag so recipients can check balance without deriving keys
         let rumor = EventBuilder::new(Kind::ApplicationSpecificData, &content)
-            .tag(Tag::custom(TagKind::d(), vec!["pivx-payment"]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("gift-code")), vec![&gift_code]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("amount")), vec![&amount_sats.to_string()]))
-            .tag(Tag::custom(TagKind::Custom(Cow::Borrowed("address")), vec![&address]))
+            .tag(Tag::custom("d", vec!["pivx-payment"]))
+            .tag(Tag::custom("gift-code", vec![&gift_code]))
+            .tag(Tag::custom("amount", vec![&amount_sats.to_string()]))
+            .tag(Tag::custom("address", vec![&address]))
             .tag(Tag::public_key(receiver_pubkey))
-            .build(my_public_key);
+            .finalize_unsigned_with_id(my_public_key);
 
         let event_id = rumor.id.ok_or("Failed to get event ID")?.to_hex();
 
@@ -1375,12 +1349,10 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
             .await
             .map_err(|e| format!("Failed to send payment: {}", e))?;
 
-        // Self-copy for recovery (in-scope client clone + SessionGuard).
+        // Self-copy for recovery (in-scope client clone + std::sync::Arc<crate::db::Session>).
         let self_wrap_client = client.clone();
-        let self_wrap_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !self_wrap_session.is_valid() { return; }
-            let _ = self_wrap_client.gift_wrap(&my_public_key, rumor, []).await;
+        vector_core::db::spawn_bound(async move {
+            let _ = vector_core::send_gift_wrap(&self_wrap_client, Vec::<nostr_sdk::prelude::RelayUrl>::new(), &my_public_key, rumor, []).await;
         });
 
         event_id
@@ -1492,7 +1464,9 @@ pub async fn pivx_check_address_balance(
 ) -> Result<f64, String> {
     // If force=true, clear cache entry for this address first
     if force.unwrap_or(false) {
-        if let Ok(mut cache) = BALANCE_CACHE.write() {
+        let owner = balance_cache();
+    let locked = owner.write();
+    if let Ok(mut cache) = locked {
             cache.remove(&address);
         }
     }

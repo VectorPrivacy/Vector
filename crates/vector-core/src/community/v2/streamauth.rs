@@ -20,11 +20,12 @@
 //! Signing is local (raw derived keys) — it never touches the account signer /
 //! bunker.
 
+use nostr_sdk::prelude::FinalizeEvent;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
-use nostr_sdk::prelude::{Client, ClientMessage, EventBuilder, Keys, RelayPoolNotification, RelayUrl};
+use nostr_sdk::prelude::{Client, ClientAuthentication, ClientMessage, ClientNotification, Keys, RelayUrl, StreamExt};
 
 use super::community::CommunityV2;
 
@@ -58,10 +59,19 @@ pub fn register(keys: impl IntoIterator<Item = Keys>) -> usize {
 /// first). Called at join and on every follow so a rotated address is covered.
 pub fn register_community(c: &CommunityV2) -> usize {
     let mut keys: Vec<Keys> = vec![
-        super::derive::control_group_key(&c.community_root, c.id(), c.root_epoch).keys().clone(),
         super::derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).keys().clone(),
         super::derive::dissolved_group_key(c.id()).keys().clone(),
     ];
+    // The Control Plane's signer: the whole legacy key on a pre-split epoch, the
+    // staff-held control_root's signer when this member holds it. A non-staff
+    // member on a split epoch holds NO secret for the plane address (CORD-02
+    // §2), so there is nothing to authenticate AS — a NIP-42 read-gating relay
+    // must not gate reads on a write-restricted stream's key, and registering
+    // nothing here is what keeps the auth dance from waiting on an
+    // unanswerable challenge.
+    if let Some(k) = super::control::ControlPlane::of(c).signer_keys() {
+        keys.push(k.clone());
+    }
     for ch in &c.channels {
         if ch.private && ch.key.is_none() {
             continue;
@@ -140,8 +150,8 @@ fn resub_cooldown_elapsed(relay: &RelayUrl) -> bool {
     }
 }
 
-/// Forget every registered stream key (on session swap). The responder task exits
-/// on its own when its `SessionGuard` invalidates.
+/// Forget every registered stream key (on session swap). The responder task
+/// exits on its own once the registry it serves is empty.
 pub fn clear() {
     REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clear();
     CHALLENGES.lock().unwrap_or_else(|e| e.into_inner()).clear();
@@ -156,10 +166,10 @@ pub fn is_empty() -> bool {
 
 /// Sign a NIP-42 AUTH (kind-22242) event for EVERY registered stream key against
 /// `challenge` + `relay`. Local raw-key signing; a malformed key is skipped.
-fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::Event> {
+fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::prelude::Event> {
     let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
     reg.values()
-        .filter_map(|keys| EventBuilder::auth(challenge, relay.clone()).sign_with_keys(keys).ok())
+        .filter_map(|keys| ClientAuthentication::new(challenge, relay.clone()).finalize(keys).ok())
         .collect()
 }
 
@@ -168,12 +178,12 @@ fn sign_all(challenge: &str, relay: &RelayUrl) -> Vec<nostr_sdk::Event> {
 /// bare kind-22242 event). Best-effort per key. Returns how many were sent.
 async fn authenticate_streams(client: &Client, relay: &RelayUrl, challenge: &str) -> usize {
     let events = sign_all(challenge, relay);
-    let Ok(r) = client.pool().relay(relay.clone()).await else {
+    let Ok(Some(r)) = client.relay(relay.clone()).await else {
         return 0;
     };
     let mut sent = 0;
     for ev in events {
-        if r.send_msg(ClientMessage::auth(ev)).is_ok() {
+        if r.send_msg(ClientMessage::auth(ev)).await.is_ok() {
             sent += 1;
         }
     }
@@ -194,16 +204,23 @@ pub fn ensure_responder(client: &Client) {
         return; // already running this session
     }
     let client = client.clone();
-    let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         let mut notifications = client.notifications();
-        while let Ok(n) = notifications.recv().await {
-            if !session.is_valid() {
-                break;
-            }
-            if let RelayPoolNotification::Message { relay_url, message } = n {
-                if let nostr_sdk::RelayMessage::Auth { challenge } = message {
+        while let Some(n) = notifications.next().await {
+            if let ClientNotification::Message { relay_url, message } = n {
+                if let nostr_sdk::prelude::RelayMessage::Auth { challenge } = *message {
                     let challenge = challenge.into_owned();
+                    // Durable capability fact: this relay gates reads behind
+                    // NIP-42 (the boot volley routes fallbacks by it). Write
+                    // once — a challenge-spamming relay must not drive DB
+                    // writes at frame rate on the notification loop.
+                    let gate_key = format!(
+                        "auth_gate:{}",
+                        crate::inbox_relays::normalize_relay_url(relay_url.as_str())
+                    );
+                    if crate::db::get_sql_setting(gate_key.clone()).ok().flatten().is_none() {
+                        let _ = crate::db::set_sql_setting(gate_key, "1".to_string());
+                    }
                     let fresh_connection = remember_challenge(&relay_url, &challenge);
                     if !is_empty() {
                         authenticate_streams(&client, &relay_url, &challenge).await;
@@ -259,19 +276,23 @@ pub async fn prime_auth(client: &Client, relays: &[String]) {
             authenticate_streams(client, url, &challenge).await;
         }
     }
-    let authors: Vec<nostr_sdk::PublicKey> = {
+    let authors: Vec<nostr_sdk::prelude::PublicKey> = {
         let reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
-        reg.keys().filter_map(|pk| nostr_sdk::PublicKey::from_slice(pk).ok()).collect()
+        reg.keys().filter_map(|pk| nostr_sdk::prelude::PublicKey::from_slice(pk).ok()).collect()
     };
     if authors.is_empty() {
         return;
     }
-    let filter = nostr_sdk::Filter::new()
-        .kind(nostr_sdk::Kind::Custom(super::stream::KIND_WRAP))
+    let filter = nostr_sdk::prelude::Filter::new()
+        .kind(nostr_sdk::prelude::Kind::Custom(super::stream::KIND_WRAP))
         .authors(authors)
         .limit(1);
     // Bounded so a dead relay can't stall the subscription refresh behind it.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), client.fetch_events_from(urls, filter, std::time::Duration::from_secs(6))).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(8), client
+        .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
+            urls.into_iter().map(|u| (u, vec![filter.clone()])),
+        ))
+        .timeout(std::time::Duration::from_secs(6))).await;
 }
 
 #[cfg(test)]
@@ -307,7 +328,10 @@ mod tests {
         assert!(added >= 6, "control+guestbook+dissolved+public chat+keyed chat+rekeys = at least 6 new keys, got {added}");
 
         use super::super::derive;
-        assert!(registered(&derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()));
+        // The control SIGNER registers (this community's owner holds the
+        // control_root); the legacy derivation is not the address and must not.
+        assert!(registered(&super::super::control::ControlPlane::of(&c).pk()));
+        assert!(!registered(&derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()));
         assert!(registered(&derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk()));
         assert!(registered(&derive::dissolved_group_key(c.id()).pk()));
         // Public channel: chat plane derives from the community root.
@@ -359,7 +383,7 @@ mod tests {
         register([key.clone()]);
         let events = sign_all("shape-challenge", &relay);
         let ev = events.iter().find(|e| e.pubkey == key.public_key()).expect("signed by the registered key");
-        assert_eq!(ev.kind, nostr_sdk::Kind::Authentication);
+        assert_eq!(ev.kind, nostr_sdk::prelude::Kind::Authentication);
         assert!(ev.verify().is_ok(), "signature + id must verify");
         let tag_values: Vec<String> = ev.tags.iter().filter_map(|t| t.content().map(String::from)).collect();
         assert!(tag_values.iter().any(|v| v == "shape-challenge"), "carries the challenge tag");

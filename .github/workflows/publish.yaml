@@ -92,6 +92,24 @@ jobs:
       - name: install frontend dependencies
         run: npm install
 
+      # A semver pre-release identifier (`0.4.2-1`) is what makes a build a
+      # preview. Both the GitHub pre-release flag and the updater endpoint are
+      # derived from it here so they can never disagree: flagging the release
+      # is what keeps `/releases/latest` (the stable channel) off previews.
+      - name: Resolve release channel
+        id: channel
+        shell: bash
+        run: |
+          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "Building $VERSION"
+          if [[ "$VERSION" == *-* ]]; then
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+            echo "config=--config src-tauri/tauri.preview.conf.json" >> $GITHUB_OUTPUT
+          else
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+            echo "config=" >> $GITHUB_OUTPUT
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,8 +120,8 @@ jobs:
           releaseName: 'Vector v__VERSION__'
           releaseBody: 'A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!'
           releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          prerelease: ${{ steps.channel.outputs.prerelease }}
+          args: ${{ matrix.args }} ${{ steps.channel.outputs.config }}
 
   # Android APK Build
   publish-android:
@@ -202,6 +220,15 @@ jobs:
         run: |
           VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          # Only used if this job wins the race to create the release; the flag
+          # must match the desktop jobs or a preview would land on the stable
+          # channel. Android itself picks its channel at runtime from the
+          # version's pre-release identifier, so it needs no build-time config.
+          if [[ "$VERSION" == *-* ]]; then
+            echo "PRERELEASE=--prerelease" >> $GITHUB_OUTPUT
+          else
+            echo "PRERELEASE=" >> $GITHUB_OUTPUT
+          fi
 
       - name: Collect split APKs
         run: |
@@ -212,14 +239,23 @@ jobs:
           mv "$OUT/app-universal-universal-release.apk"   "$OUT/Vector.apk"
           ls -lh "$OUT"/Vector*.apk
 
+      # Upload-only via the gh CLI: it must never PATCH release fields. The old
+      # softprops step carried `draft: true`, and once the release was published
+      # the (floating) @v2 action started trying to flip it BACK to draft — an
+      # operation the Actions token is refused ("Resource not accessible by
+      # integration"), failing the whole job. Uploading assets works on drafts
+      # and published releases alike; the create branch only covers the race
+      # where this job outruns every desktop job on a brand-new version.
       - name: Upload APKs to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.get_version.outputs.VERSION }}
-          files: |
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk
-            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk
-          draft: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.get_version.outputs.VERSION }}"
+          if ! gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq '.[].tagName' | grep -qx "$TAG"; then
+            gh release create "$TAG" --draft ${{ steps.get_version.outputs.PRERELEASE }} --title "Vector $TAG" --repo "$GITHUB_REPOSITORY"
+          fi
+          gh release upload "$TAG" \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector.apk \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk \
+            --clobber --repo "$GITHUB_REPOSITORY"

@@ -19,6 +19,12 @@ pub enum Error {
     DatabaseError(String),
 }
 
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error::DatabaseError(s)
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

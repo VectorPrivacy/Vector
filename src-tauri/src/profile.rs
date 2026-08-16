@@ -74,7 +74,7 @@ pub async fn cache_profile_images(npub: &str, avatar_url: &str, banner_url: &str
 
         if updated {
             let slim = state.serialize_profile(id).unwrap();
-            handle.emit("profile_update", &slim).ok();
+            vector_core::emit_event("profile_update", &slim);
             drop(state);
             db::set_profile(slim).await.ok();
         }
@@ -111,21 +111,16 @@ pub async fn cache_all_profile_images() {
 
     log_info!("[Profile] Caching images for {} profiles", profiles_to_cache.len());
 
-    // SessionGuard is Copy so each spawn can move-capture a snapshot.
-    // Without this, image fetches completing after a swap would land
-    // in account B's STATE/DB/cache under account A's npub.
-    let session = vector_core::state::SessionGuard::capture();
-    // Spawn caching tasks for each profile (concurrent with semaphore limiting)
+    // One bound task per profile (concurrent, semaphore-limited). Bound, so a
+    // fetch completing after a swap caches into the account that requested it.
     for (npub, avatar_url, banner_url) in profiles_to_cache {
         let handle = handle.clone();
-        let task_session = session;
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             // Cache avatar if needed
             if !avatar_url.is_empty() {
                 if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
                     image_cache::cache_avatar(&handle, &avatar_url).await
                 {
-                    if !task_session.is_valid() { return; }
                     let mut state = STATE.lock().await;
                     if let Some(id) = state.interner.lookup(&npub) {
                         let needs_emit = {
@@ -138,7 +133,7 @@ pub async fn cache_all_profile_images() {
                         };
                         if needs_emit {
                             let slim = state.serialize_profile(id).unwrap();
-                            handle.emit("profile_update", &slim).ok();
+                            vector_core::emit_event("profile_update", &slim);
                             drop(state);
                             db::set_profile(slim).await.ok();
                         }
@@ -151,7 +146,6 @@ pub async fn cache_all_profile_images() {
                 if let CacheResult::Cached(path) | CacheResult::AlreadyCached(path) =
                     image_cache::cache_banner(&handle, &banner_url).await
                 {
-                    if !task_session.is_valid() { return; }
                     let mut state = STATE.lock().await;
                     if let Some(id) = state.interner.lookup(&npub) {
                         let needs_emit = {
@@ -164,7 +158,7 @@ pub async fn cache_all_profile_images() {
                         };
                         if needs_emit {
                             let slim = state.serialize_profile(id).unwrap();
-                            handle.emit("profile_update", &slim).ok();
+                            vector_core::emit_event("profile_update", &slim);
                             drop(state);
                             db::set_profile(slim).await.ok();
                         }
@@ -256,8 +250,8 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     // and progress. Routes through the active client signer (local vault
     // for local accounts, NostrConnect for bunker accounts) so the auth
     // event is signed under the user's identity, not the bunker client key.
-    let client = nostr_client().ok_or("Not connected")?;
-    let signer = client.signer().await
+    let _client = nostr_client().ok_or("Not connected")?;
+    let signer = vector_core::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
     let servers = crate::get_blossom_servers();
 
@@ -319,14 +313,30 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
 
 /// Block a user by npub.
 #[tauri::command]
-pub async fn block_user(npub: String) -> bool {
-    vector_core::profile::sync::block_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await
+pub async fn block_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
+    let ok = vector_core::profile::sync::block_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
+    // A block changes OTHER chats' counts too (the sender's community messages
+    // stop counting in SQL), so reseed the cache before re-badging.
+    if ok {
+        let counts = crate::db::unread_counts().await.unwrap_or_default();
+        crate::STATE.lock().await.unread_seed(counts);
+        crate::commands::messaging::update_unread_counter(handle).await;
+        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
+    }
+    ok
 }
 
 /// Unblock a user by npub.
 #[tauri::command]
-pub async fn unblock_user(npub: String) -> bool {
-    vector_core::profile::sync::unblock_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await
+pub async fn unblock_user<R: tauri::Runtime>(handle: tauri::AppHandle<R>, npub: String) -> bool {
+    let ok = vector_core::profile::sync::unblock_user(npub, &crate::profile_sync::TauriProfileSyncHandler).await;
+    if ok {
+        let counts = crate::db::unread_counts().await.unwrap_or_default();
+        crate::STATE.lock().await.unread_seed(counts);
+        crate::commands::messaging::update_unread_counter(handle).await;
+        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Blocks);
+    }
+    ok
 }
 
 /// Returns all blocked profiles.
@@ -338,5 +348,9 @@ pub async fn get_blocked_users() -> Vec<crate::db::SlimProfile> {
 /// Set a nickname for a profile.
 #[tauri::command]
 pub async fn set_nickname(npub: String, nickname: String) -> bool {
-    vector_core::profile::sync::set_nickname(npub, nickname, &crate::profile_sync::TauriProfileSyncHandler).await
+    let ok = vector_core::profile::sync::set_nickname(npub, nickname, &crate::profile_sync::TauriProfileSyncHandler).await;
+    if ok {
+        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Nicknames);
+    }
+    ok
 }

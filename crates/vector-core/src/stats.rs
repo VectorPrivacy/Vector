@@ -156,6 +156,8 @@ impl DeepSize for Attachment {
             + self.webxdc_topic.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.group_id.as_ref().map(|s| s.capacity()).unwrap_or(0)
             + self.original_hash.as_ref().map(|s| s.capacity()).unwrap_or(0)
+            + self.fallback_urls.capacity() * std::mem::size_of::<String>()
+            + self.fallback_urls.iter().map(|s| s.capacity()).sum::<usize>()
     }
 }
 
@@ -243,6 +245,9 @@ impl DeepSize for CompactAttachment {
             + self.group_id.as_ref().map(|_| 32).unwrap_or(0)
             + self.original_hash.as_ref().map(|_| 32).unwrap_or(0)
             + self.webxdc_topic.as_ref().map(|s| s.len()).unwrap_or(0)
+            + self.fallback_urls.as_deref().map(|urls| {
+                std::mem::size_of_val(urls) + urls.iter().map(|u| u.len()).sum::<usize>()
+            }).unwrap_or(0)
     }
 }
 

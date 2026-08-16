@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pin-chat"
+description = "Enables the pin_chat command without any pre-configured scope."
+commands.allow = ["pin_chat"]
+
+[[permission]]
+identifier = "deny-pin-chat"
+description = "Denies the pin_chat command without any pre-configured scope."
+commands.deny = ["pin_chat"]

@@ -74,6 +74,15 @@ object VectorFiles {
             if (!file.exists()) return false
             val authority = context.packageName + ".fileprovider"
             val uri: Uri = FileProvider.getUriForFile(context, authority, file)
+
+            // An .apk goes to the package installer, which matches ONLY the exact
+            // package-archive type. Android's own MimeTypeMap has no entry for
+            // "apk", so the FileProvider answered application/octet-stream, no
+            // activity matched, and the tap looked like it did nothing at all.
+            if (file.extension.equals("apk", ignoreCase = true)) {
+                return installApk(context, uri)
+            }
+
             val mime = context.contentResolver.getType(uri) ?: "*/*"
             val view = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mime)
@@ -86,6 +95,50 @@ object VectorFiles {
             true
         } catch (_: Throwable) {
             false
+        }
+    }
+
+    /**
+     * Hand an .apk to the system package installer.
+     *
+     * No chooser: the installer is the only legitimate handler, and a chooser
+     * would invite a lookalike to sit beside it. The system owns the entire
+     * install UI from here — Vector only points at the file, the user decides.
+     *
+     * Since Android 8 the user must ALSO trust Vector as an install source.
+     * Until they do, the install intent silently does nothing, so send them to
+     * that toggle rather than leave another dead tap.
+     */
+    private fun installApk(context: Context, uri: Uri): Boolean {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            !context.packageManager.canRequestPackageInstalls()
+        ) {
+            val settings = Intent(
+                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:" + context.packageName)
+            ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
+            context.startActivity(settings)
+            return true
+        }
+        val install = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(install)
+        return true
+    }
+
+    /**
+     * Whether the user has trusted Vector as an install source. Always true below
+     * Android 8, where the setting is device-wide rather than per-app. Lets the UI
+     * say what will happen before the tap.
+     */
+    @JvmStatic
+    fun canInstallApks(context: Context): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            context.packageManager.canRequestPackageInstalls()
+        } else {
+            true
         }
     }
 

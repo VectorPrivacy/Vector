@@ -98,6 +98,7 @@ pub async fn start(allowed_dirs: Vec<PathBuf>) -> Result<(u16, String), String> 
 
     println!("[media_server] listening on 127.0.0.1:{port}");
 
+    // spawn-detached: the localhost media server runs for the process lifetime and serves whichever account is live.
     tokio::spawn(async move {
         loop {
             let (stream, _addr) = match listener.accept().await {
@@ -109,6 +110,7 @@ pub async fn start(allowed_dirs: Vec<PathBuf>) -> Result<(u16, String), String> 
                 }
             };
             let state = Arc::clone(&state);
+            // spawn-detached: one connection off that listener — same lifetime, same reason.
             tokio::spawn(async move {
                 // Acquire a connection permit (or drop the connection if at capacity)
                 let _permit = match state.semaphore.try_acquire() {

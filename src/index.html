@@ -18,6 +18,8 @@
     <script src="/js/qrcode-generator.js" defer></script>
     <!-- Svelte islands: IIFE exposing the VectorSvelte global (compiled from src/components/*.svelte). -->
     <script src="/components.bundle.js" defer></script>
+    <!-- Before main.js: it constructs the composer at module scope. -->
+    <script src="/js/composer.js" defer></script>
     <script src="/main.js" defer></script>
     <script src="/js/event-cache.js" defer></script>
     <script src="/js/back-stack.js" defer></script>
@@ -29,6 +31,7 @@
     <script src="/js/voice.js" defer></script>
     <script src="/js/context-menu.js" defer></script>
     <script src="/js/updater.js" defer></script>
+    <script src="/js/pins.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
     <script src="/js/miniapps.js" defer></script>
@@ -46,7 +49,11 @@
     <script src="/js/render/chat/message-states.js" defer></script>
     <script src="/js/render/chat/message-toolbar.js" defer></script>
     <script src="/js/render/chat/message-row.js" defer></script>
+    <script src="/js/render/chat/xdc-url.js" defer></script>
     <script src="/js/render/mini-profile.js" defer></script>
+    <script src="/js/render/qr.js" defer></script>
+    <script src="/js/jsqr.js" defer></script>
+    <script src="/js/scan.js" defer></script>
     <script src="/js/tor-glyph.js" defer></script>
     <script src="/js/picker.js" defer></script>
     <script src="/js/badge-card.js" defer></script>
@@ -83,6 +90,35 @@
           <button id="popupConfirm">Confirm</button><button id="popupCancel" class="cancel-btn">Cancel</button>
         </div>
       </center>
+    </div>
+
+    <!-- Downgrade block. Deliberately has no dismiss path: continuing would
+         write an older schema over a newer database. -->
+    <div id="downgrade-block" class="downgrade-block" style="display: none;">
+      <div class="downgrade-card">
+        <img class="downgrade-icon" src="./icons/vector_warning.svg" alt="">
+        <h2>Vector can't open this account</h2>
+        <p>
+          Your data was last used with a newer version of Vector. Opening it with this
+          older build would damage your message history.
+        </p>
+        <div class="downgrade-versions">
+          <div class="downgrade-version">
+            <span>This build</span>
+            <strong id="downgrade-current"></strong>
+          </div>
+          <div class="downgrade-versions-sep"></div>
+          <div class="downgrade-version">
+            <span>Your data needs</span>
+            <strong id="downgrade-required"></strong>
+          </div>
+        </div>
+        <p class="downgrade-reassure">
+          Nothing has been lost. Your messages are intact and will open again on the newer version.
+        </p>
+        <button id="downgrade-get-latest" class="btn accept-btn btn-bounce">Get the latest version</button>
+        <button id="downgrade-quit" class="cancel-btn">Quit Vector</button>
+      </div>
     </div>
 
     <!-- Edit History Popup -->
@@ -219,7 +255,7 @@
           <button type="button" class="emoji-creator-done" id="emoji-creator-done" aria-label="Save and exit" title="Save Pack">
             <span class="icon icon-edit"></span>
           </button>
-          <button type="button" class="emoji-creator-delete btn" id="emoji-creator-delete" aria-label="Delete pack" title="Remove Pack" hidden>
+          <button type="button" class="emoji-creator-delete btn" id="emoji-creator-delete" aria-label="Delete or discard pack" title="Remove Pack">
             <span class="icon icon-trash"></span>
           </button>
         </div>
@@ -774,6 +810,13 @@
       <span class="icon icon-share navbar-icon"></span>
       <p class="navbar-text">Share</p>
     </div>
+    <div id="profile-qr-btn" class="profile-share-btn profile-qr-btn profile-option btn" role="button" aria-label="Show profile QR code">
+      <div id="profile-qr-icon" class="profile-qr-icon">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M6.5 6.5H6.51M17.5 6.5H17.51M6.5 17.5H6.51M13 13H13.01M17.5 17.5H17.51M17 21H21V17M14 16.5V21M21 14H16.5M15.6 10H19.4C19.9601 10 20.2401 10 20.454 9.89101C20.6422 9.79513 20.7951 9.64215 20.891 9.45399C21 9.24008 21 8.96005 21 8.4V4.6C21 4.03995 21 3.75992 20.891 3.54601C20.7951 3.35785 20.6422 3.20487 20.454 3.10899C20.2401 3 19.9601 3 19.4 3H15.6C15.0399 3 14.7599 3 14.546 3.10899C14.3578 3.20487 14.2049 3.35785 14.109 3.54601C14 3.75992 14 4.03995 14 4.6V8.4C14 8.96005 14 9.24008 14.109 9.45399C14.2049 9.64215 14.3578 9.79513 14.546 9.89101C14.7599 10 15.0399 10 15.6 10ZM4.6 10H8.4C8.96005 10 9.24008 10 9.45399 9.89101C9.64215 9.79513 9.79513 9.64215 9.89101 9.45399C10 9.24008 10 8.96005 10 8.4V4.6C10 4.03995 10 3.75992 9.89101 3.54601C9.79513 3.35785 9.64215 3.20487 9.45399 3.10899C9.24008 3 8.96005 3 8.4 3H4.6C4.03995 3 3.75992 3 3.54601 3.10899C3.35785 3.20487 3.20487 3.35785 3.10899 3.54601C3 3.75992 3 4.03995 3 4.6V8.4C3 8.96005 3 9.24008 3.10899 9.45399C3.20487 9.64215 3.35785 9.79513 3.54601 9.89101C3.75992 10 4.03995 10 4.6 10ZM4.6 21H8.4C8.96005 21 9.24008 21 9.45399 20.891C9.64215 20.7951 9.79513 20.6422 9.89101 20.454C10 20.2401 10 19.9601 10 19.4V15.6C10 15.0399 10 14.7599 9.89101 14.546C9.79513 14.3578 9.64215 14.2049 9.45399 14.109C9.24008 14 8.96005 14 8.4 14H4.6C4.03995 14 3.75992 14 3.54601 14.109C3.35785 14.2049 3.20487 14.3578 3.10899 14.546C3 14.7599 3 15.0399 3 15.6V19.4C3 19.9601 3 20.2401 3.10899 20.454C3.20487 20.6422 3.35785 20.7951 3.54601 20.891C3.75992 21 4.03995 21 4.6 21Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+    </div>
     <div class="profile-avatar-container">
       <img id="profile-avatar" class="profile-avatar">
     </div>
@@ -949,6 +992,11 @@
             </div>
             <span class="cutoff chat-contact-status status-hidden btn" id="chat-contact-status"></span>
           </div>
+          <div id="chat-pins-btn" class="btn pins-header-btn" title="Pinned Messages" style="display: none;">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M8.3767 15.6163L2.71985 21.2732M11.6944 6.64181L10.1335 8.2027C10.0062 8.33003 9.94252 8.39369 9.86999 8.44427C9.80561 8.48917 9.73616 8.52634 9.66309 8.555C9.58077 8.58729 9.49249 8.60495 9.31592 8.64026L5.65145 9.37315C4.69915 9.56361 4.223 9.65884 4.00024 9.9099C3.80617 10.1286 3.71755 10.4213 3.75771 10.7109C3.8038 11.0434 4.14715 11.3867 4.83387 12.0735L11.9196 19.1592C12.6063 19.8459 12.9497 20.1893 13.2821 20.2354C13.5718 20.2755 13.8645 20.1869 14.0832 19.9928C14.3342 19.7701 14.4294 19.2939 14.6199 18.3416L15.3528 14.6771C15.3881 14.5006 15.4058 14.4123 15.4381 14.33C15.4667 14.2569 15.5039 14.1875 15.5488 14.1231C15.5994 14.0505 15.663 13.9869 15.7904 13.8596L17.3512 12.2987C17.4326 12.2173 17.4734 12.1766 17.5181 12.141C17.5578 12.1095 17.5999 12.081 17.644 12.0558C17.6936 12.0274 17.7465 12.0048 17.8523 11.9594L20.3467 10.8904C21.0744 10.5785 21.4383 10.4226 21.6035 10.1706C21.7481 9.95025 21.7998 9.68175 21.7474 9.42348C21.6875 9.12813 21.4076 8.84822 20.8478 8.28839L15.7047 3.14526C15.1448 2.58543 14.8649 2.30552 14.5696 2.24565C14.3113 2.19329 14.0428 2.245 13.8225 2.38953C13.5705 2.55481 13.4145 2.91866 13.1027 3.64636L12.0337 6.14071C11.9883 6.24653 11.9656 6.29944 11.9373 6.34905C11.9121 6.39313 11.8836 6.43522 11.852 6.47496C11.8165 6.51971 11.7758 6.56041 11.6944 6.64181Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
           <div id="chat-menu-btn" class="btn nav-menu-btn" title="Chat Options">
             <span class="icon icon-dots-horizontal nav-icon"></span>
           </div>
@@ -964,6 +1012,18 @@
               <span class="icon icon-save"></span>
               <span>Save</span>
             </div>
+          </div>
+        </div>
+        <!-- Pinned Messages drawer (Concord v2) — slides open under the chat
+             header. Rows render from verified pins only; a sealed list shows
+             the unavailable notice, never an empty drawer. -->
+        <div id="pins-drawer" class="pins-drawer" style="display: none;">
+          <div id="pins-drawer-list" class="pins-drawer-list"></div>
+          <div id="pins-drawer-close" class="pins-drawer-close btn">
+            <span>Click to Close</span>
+            <svg class="pins-drawer-close-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M18 15L12 9L6 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
           </div>
         </div>
         <div id="msg-top-fade" class="fadeout-top-msgs" style="top: 60px;"></div>
@@ -1006,7 +1066,7 @@
           <div class="row chat-input-container">
             <button id="chat-input-file"><span class="icon icon-plus"></span></button>
             <button id="chat-input-cancel" style="display: none;"><span class="icon icon-cancel"></span></button>
-            <textarea id="chat-input" placeholder="Enter message..."></textarea>
+            <div id="chat-input-host"></div>
             <button id="chat-input-emoji"><span class="icon icon-smile-face"></span></button>
             <button id="chat-input-voice" style="margin-right: 3px;"><span class="icon icon-mic-on"></span></button>
             <button id="chat-input-send" style="display: none; margin-right: 3px;"><span class="icon icon-send"></span></button>
@@ -1062,22 +1122,20 @@
           <div class="row chat-input-container">
             <input id="chat-new-input" type="text" placeholder="Paste nPub Key or Invite Link...">
             <button id="chat-new-btn" style="display: none; margin-right: 3px;"><span class="icon icon-add-user"></span></button>
+            <button id="chat-new-scan-btn" aria-label="Scan QR code">
+              <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M6.5 6.5H6.51M17.5 6.5H17.51M6.5 17.5H6.51M13 13H13.01M17.5 17.5H17.51M17 21H21V17M14 16.5V21M21 14H16.5M15.6 10H19.4C19.9601 10 20.2401 10 20.454 9.89101C20.6422 9.79513 20.7951 9.64215 20.891 9.45399C21 9.24008 21 8.96005 21 8.4V4.6C21 4.03995 21 3.75992 20.891 3.54601C20.7951 3.35785 20.6422 3.20487 20.454 3.10899C20.2401 3 19.9601 3 19.4 3H15.6C15.0399 3 14.7599 3 14.546 3.10899C14.3578 3.20487 14.2049 3.35785 14.109 3.54601C14 3.75992 14 4.03995 14 4.6V8.4C14 8.96005 14 9.24008 14.109 9.45399C14.2049 9.64215 14.3578 9.79513 14.546 9.89101C14.7599 10 15.0399 10 15.6 10ZM4.6 10H8.4C8.96005 10 9.24008 10 9.45399 9.89101C9.64215 9.79513 9.79513 9.64215 9.89101 9.45399C10 9.24008 10 8.96005 10 8.4V4.6C10 4.03995 10 3.75992 9.89101 3.54601C9.79513 3.35785 9.64215 3.20487 9.45399 3.10899C9.24008 3 8.96005 3 8.4 3H4.6C4.03995 3 3.75992 3 3.54601 3.10899C3.35785 3.20487 3.20487 3.35785 3.10899 3.54601C3 3.75992 3 4.03995 3 4.6V8.4C3 8.96005 3 9.24008 3.10899 9.45399C3.20487 9.64215 3.35785 9.79513 3.54601 9.89101C3.75992 10 4.03995 10 4.6 10ZM4.6 21H8.4C8.96005 21 9.24008 21 9.45399 20.891C9.64215 20.7951 9.79513 20.6422 9.89101 20.454C10 20.2401 10 19.9601 10 19.4V15.6C10 15.0399 10 14.7599 9.89101 14.546C9.79513 14.3578 9.64215 14.2049 9.45399 14.109C9.24008 14 8.96005 14 8.4 14H4.6C4.03995 14 3.75992 14 3.54601 14.109C3.35785 14.2049 3.20487 14.3578 3.10899 14.546C3 14.7599 3 15.0399 3 15.6V19.4C3 19.9601 3 20.2401 3.10899 20.454C3.20487 20.6422 3.35785 20.7951 3.54601 20.891C3.75992 21 4.03995 21 4.6 21Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
           </div>
         </div>
       </div>
       <div id="create-group" class="create-group-container" style="display: none;">
-        <div class="chat-new-header">
-          <div id="create-group-back-text-btn" class="btn chat-new-back-text-btn">
-            <span class="icon icon-chevron-double-left nav-icon"></span>
-            <p class="chat-new-back-text">Back</p>
-          </div>
-        </div>
-
         <div class="create-group-content">
           <center class="chat-new-content">
-            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create Group</h2>
+            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create New Group</h2>
             <hr class="divider chat-new-divider">
-            <div class="row" style="gap: 10px; align-items: center; padding: 0 15px;">
+            <div class="row create-group-name-row" style="gap: 12px; align-items: center; padding: 0 15px;">
               <div id="create-group-avatar-picker" class="create-group-avatar-picker" title="Choose group avatar">
                 <img id="create-group-avatar-preview" class="create-group-avatar-preview" style="display: none;" />
                 <img id="create-group-avatar-placeholder" class="create-group-avatar-placeholder" src="icons/group-placeholder.svg" />
@@ -1085,22 +1143,20 @@
                   <span id="create-group-avatar-edit-icon" class="icon icon-plus-circle"></span>
                 </div>
               </div>
-              <input id="create-group-name" placeholder="Group name..." maxlength="32" class="chat-input-container chat-new-input" />
-            </div>
-            <div style="padding: 0 15px; margin-top: 8px;">
-              <textarea id="create-group-description" placeholder="Group description (optional)" class="create-group-description" rows="2"></textarea>
+              <div class="create-group-name-wrap">
+                <input id="create-group-name" placeholder="Group Name..." maxlength="32" class="chat-input-container chat-new-input" />
+                <span class="create-group-name-required">Required*</span>
+              </div>
             </div>
           </center>
 
           <!-- Optional in-create direct invites: pick contacts (or paste an npub) to send a
                private invite to once the Community is created. Not the public-link system. -->
           <center id="create-group-members-section" class="chat-new-center-content" style="padding: 0 15px; box-sizing: border-box; width: 100%;">
-            <h2 class="chat-new-subtitle">Invite Members <span style="opacity: 0.55; font-weight: 400;">(optional)</span></h2>
-            <hr class="divider chat-new-subtitle-divider" style="width: 100%; max-width: 325px;">
-            <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0;">
-              <div class="emoji-search-container" style="padding: 0; background: transparent;">
+            <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0; margin-top: 12px;">
+              <div class="emoji-search-container" style="padding: 0; background: transparent; isolation: isolate;">
                 <span class="emoji-search-icon icon icon-search"></span>
-                <input id="create-group-filter" placeholder="Search or paste npub..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding: 10px 12px 10px 36px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
+                <input id="create-group-filter" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding: 10px 12px 10px 44px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
               </div>
               <div id="create-group-list" class="create-group-list"></div>
             </div>
@@ -1108,9 +1164,9 @@
         </div>
 
         <div class="create-group-footer">
-          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create</button>
+          <p id="create-group-status" class="chat-contact-status"></p>
+          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create Group</button>
           <button id="create-group-cancel-btn" class="btn cancel-btn">Cancel</button>
-          <p id="create-group-status" class="chat-contact-status" style="display: none; opacity: 0.8;"></p>
         </div>
       </div>
       <div id="settings" style="display: none;">
@@ -1334,6 +1390,14 @@
 
           <div class="form-group">
             <label class="toggle-container">
+              <span><span id="rich-composer-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Rich Composer</span>
+              <input type="checkbox" id="rich-composer-toggle" checked>
+              <span class="neon-toggle"></span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label class="toggle-container">
               <span><span id="emoticon-suggestions-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Emoticon Suggestions</span>
               <input type="checkbox" id="emoticon-suggestions-toggle" checked>
               <span class="neon-toggle"></span>
@@ -1493,6 +1557,16 @@
           <h2>Updates</h2>
           <div class="update-info">
             <p><span style="opacity: 0.7;">Current Version: </span><span id="current-version"></span></p>
+            <div id="update-preview-notice" class="update-preview-notice" style="display: none;">
+              <p>
+                <img class="warning-icon" alt=""><strong>This is a Preview build.</strong>
+                It ships ahead of the official release, so expect rough edges.
+              </p>
+              <p>
+                Updates come from the preview channel, and you'll be moved onto the official
+                build the moment it releases.
+              </p>
+            </div>
             <p id="new-version-display" style="display: none;">New Version: <span id="new-version"></span></p>
             
             <!-- Changelog -->
@@ -1545,6 +1619,14 @@
               <input type="checkbox" id="security-encryption-toggle">
               <span class="neon-toggle"></span>
             </label>
+          </div>
+
+          <div id="unlock-method-container" class="danger-option" style="display: none;">
+              <div class="left-group">
+                <span id="unlock-method-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>
+                <span id="unlock-method-label">Unlock Method</span>
+              </div>
+              <button id="unlock-method-switch" class="btn cancel-btn">Switch</button>
           </div>
 
           <div id="change-pin-container" class="danger-option" style="display: none;">
@@ -1819,6 +1901,7 @@
               <button id="security-type-password" class="security-type-option-btn">Create Password</button>
               <p class="security-type-recommended">*Recommended Option</p>
               <button id="security-type-pin" class="security-type-option-btn accent">Create PIN</button>
+              <button id="security-type-biometric" class="security-type-option-btn accent" style="display: none;">Use Biometrics</button>
             </div>
             <img src="./icons/by-formlesslabs.svg" class="login-credits">
           </div>
@@ -1842,6 +1925,12 @@
               </div>
             </div>
           </div>
+          <!-- Biometric unlock (Android, shown when enrolled) -->
+          <button id="login-biometric-btn" class="security-type-option-btn" style="display: none; margin-top: 18px; margin-bottom: calc(28px + env(safe-area-inset-bottom, 0px));">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: -4px; margin-right: 8px;">
+              <path d="M5.80688 18.5304C5.82459 18.5005 5.84273 18.4709 5.8613 18.4413C7.2158 16.2881 7.99991 13.7418 7.99991 11C7.99991 8.79086 9.79077 7 11.9999 7C14.209 7 15.9999 8.79086 15.9999 11C15.9999 12.017 15.9307 13.0186 15.7966 14M13.6792 20.8436C14.2909 19.6226 14.7924 18.3369 15.1707 17M19.0097 18.132C19.6547 15.8657 20 13.4732 20 11C20 6.58172 16.4183 3 12 3C10.5429 3 9.17669 3.38958 8 4.07026M3 15.3641C3.64066 14.0454 4 12.5646 4 11C4 9.54285 4.38958 8.17669 5.07026 7M11.9999 11C11.9999 14.5172 10.9911 17.7988 9.24707 20.5712" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg><span id="login-biometric-label">Unlock with Biometrics</span>
+          </button>
         </div>
       </div>
 
@@ -1849,6 +1938,52 @@
   
   <!-- Global tooltip element -->
   <div id="global-tooltip" class="global-tooltip"></div>
+
+  <!-- Fullscreen QR overlay (profile banner QR button, bunker login QR) -->
+  <div id="qr-overlay" class="qr-overlay">
+    <div class="qr-overlay-card">
+      <div class="qr-overlay-tile">
+        <div id="qr-overlay-full" aria-label="QR code"></div>
+      </div>
+      <button id="qr-overlay-close" class="qr-overlay-close">Close</button>
+    </div>
+  </div>
+
+  <!-- Status dialog: compact card, live avatar+pill preview, shared emoji panel -->
+  <div id="status-dialog" class="status-dialog-overlay">
+    <div class="status-dialog-card">
+      <div class="status-dialog-head">
+        <span class="status-dialog-label">Status</span>
+        <button id="status-dialog-close" class="status-dialog-x" aria-label="Close">&#x2715;</button>
+      </div>
+      <div class="status-live-row">
+        <div id="status-preview-avatar" class="status-preview-avatar"></div>
+        <div class="status-preview" id="status-preview">
+          <span class="status-preview-dot"></span>
+          <span id="status-preview-text"></span>
+        </div>
+      </div>
+      <div class="status-input-row">
+        <div id="status-input-host" class="status-input-host"></div>
+        <span id="status-char-count" class="status-char-count"></span>
+        <button id="status-emoji-btn" aria-label="Add emoji"><span class="icon icon-smile-face"></span></button>
+      </div>
+      <div class="status-dialog-actions">
+        <button id="status-clear" class="status-btn-clear">Clear Status</button>
+        <button id="status-save" class="status-btn-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Fullscreen QR scanner (mobile; camera via getUserMedia, decode via vendored jsQR) -->
+  <div id="qr-scanner" class="qr-scanner">
+    <video id="qr-scanner-video" class="qr-scanner-video" autoplay playsinline muted></video>
+    <div class="qr-scanner-veil">
+      <div class="qr-scanner-window"></div>
+      <span class="qr-scanner-hint">Point at a Vector QR code</span>
+    </div>
+    <button id="qr-scanner-cancel" class="qr-overlay-close qr-scanner-cancel">Cancel</button>
+  </div>
 
   <!-- Multi-account: My Profile dropdown (in-app) -->
   <div id="profile-switcher-backdrop" class="profile-switcher-backdrop"></div>

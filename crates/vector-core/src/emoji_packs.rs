@@ -18,6 +18,7 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::state::nostr_client;
+use crate::ClientRelayExt;
 
 /// NIP-51 kind for a user's "Emojis" list (replaceable, per-user).
 const KIND_EMOJI_LIST: u16 = 10030;
@@ -185,11 +186,12 @@ fn is_valid_shortcode(s: &str) -> bool {
 /// The theme pack is shown in the picker without being a real subscription, so
 /// its shortcodes never land in `emoji_pack_items`; this lets the send resolver
 /// still attach NIP-30 tags for them. Replaced wholesale on theme change.
-static THEME_EMOJI_TAGS: std::sync::OnceLock<std::sync::Mutex<Vec<(String, String)>>> =
-    std::sync::OnceLock::new();
+/// Per-account: leaving the prior account's set active would tag the next
+/// account's outbound messages with A's shortcodes, leaking A's pack URLs.
+struct ThemeEmojiTags;
 
-fn theme_emoji_tags() -> &'static std::sync::Mutex<Vec<(String, String)>> {
-    THEME_EMOJI_TAGS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+fn theme_emoji_tags() -> std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> {
+    crate::db::current_session().scoped::<ThemeEmojiTags, _>()
 }
 
 /// Register (or clear, with an empty vec) the active theme pack's emoji so the
@@ -445,21 +447,57 @@ impl PackAddress {
     }
 }
 
+/// Mint the SHAREABLE form of a pack naddr: the same coordinate plus up to 3
+/// relay hints naming the pack's own home. A pack lives on its AUTHOR's write
+/// relays (NIP-65), never the sharer's — a subscribed pack must not get the
+/// sharer's personal set stamped onto it. An author with no published kind
+/// 10002 falls back to this client's pool, which is where an own pack was
+/// published and where a subscribed one was actually seen.
+pub async fn share_naddr(naddr: &str) -> Result<String, String> {
+    let coordinate = match Nip19::from_bech32(naddr) {
+        Ok(Nip19::Coordinate(c)) => c.coordinate,
+        _ => return Err("not a pack naddr".to_string()),
+    };
+    if coordinate.kind != Kind::Custom(KIND_EMOJI_SET) {
+        return Err("not an emoji pack coordinate".to_string());
+    }
+    let client = nostr_client().ok_or_else(|| "Nostr client not initialized".to_string())?;
+    let mut relays = fetch_author_write_relays(&client, coordinate.public_key).await;
+    if relays.is_empty() {
+        // Write-capable pool relays only: GOSSIP-only community relays are
+        // foreign infrastructure a pack never publishes to.
+        relays = client
+            .relays()
+            .await
+            .into_iter()
+            .filter(|(_, r)| r.capabilities().load().can_write())
+            .map(|(url, _)| url)
+            .collect();
+    }
+    relays.truncate(3);
+    if relays.is_empty() {
+        return Ok(naddr.to_string());
+    }
+    Nip19::Coordinate(Nip19Coordinate { coordinate, relays })
+        .to_bech32()
+        .map_err(|e| format!("encode naddr: {}", e))
+}
+
 /// Encode a pack `addr` (`kind:pubkey:identifier`) into a NIP-19
 /// `naddr1...` bech32 string. Used by the share-pack flow to put a
 /// portable reference on the user's clipboard.
 pub fn naddr_from_addr(addr: &str) -> Result<String, String> {
     let parsed = parse_pack_address(addr)?;
-    let coord = nostr_sdk::nips::nip01::Coordinate {
+    let coord = nostr_sdk::prelude::nip01::Coordinate {
         kind: Kind::Custom(parsed.kind),
         public_key: parsed.pubkey,
         identifier: parsed.identifier,
     };
-    let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+    let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
         coordinate: coord,
         relays: Vec::new(),
     };
-    nostr_sdk::nips::nip19::Nip19::Coordinate(n19)
+    nostr_sdk::prelude::nip19::Nip19::Coordinate(n19)
         .to_bech32()
         .map_err(|e| format!("encode naddr: {}", e))
 }
@@ -469,10 +507,10 @@ pub fn naddr_from_addr(addr: &str) -> Result<String, String> {
 /// an unrelated replaceable event.
 pub fn parse_naddr(naddr: &str) -> Result<PackAddress, String> {
     let trimmed = naddr.trim().trim_start_matches("nostr:");
-    let parsed = nostr_sdk::nips::nip19::Nip19::from_bech32(trimmed)
+    let parsed = nostr_sdk::prelude::nip19::Nip19::from_bech32(trimmed)
         .map_err(|e| format!("invalid naddr: {}", e))?;
     let coord = match parsed {
-        nostr_sdk::nips::nip19::Nip19::Coordinate(c) => c,
+        nostr_sdk::prelude::nip19::Nip19::Coordinate(c) => c,
         _ => return Err("naddr expected (Nip19 was not a coordinate)".to_string()),
     };
     let kind = coord.kind.as_u16();
@@ -572,21 +610,21 @@ pub async fn decrypt_subscribed_addresses(
 /// NIP-44-self-decrypt a kind 10030 event's content. `None` = empty /
 /// undecryptable / no-signer (all treated as "no subscriptions").
 async fn decrypt_emoji_list_plaintext(
-    client: &Client,
+    _client: &Client,
     my_pk: &PublicKey,
     event: &Event,
 ) -> Option<String> {
     if event.content.is_empty() {
         return None;
     }
-    let signer = match client.signer().await {
+    let signer = match crate::signer::active_signer() {
         Ok(s) => s,
         Err(e) => {
             crate::log_warn!("[EmojiPacks] signer unavailable for emoji list decrypt: {}", e);
             return None;
         }
     };
-    match signer.nip44_decrypt(my_pk, &event.content).await {
+    match signer.nip44_decrypt_async(my_pk, &event.content).await {
         Ok(p) => Some(p),
         Err(e) => {
             crate::log_warn!("[EmojiPacks] emoji list decrypt failed: {}", e);
@@ -946,17 +984,19 @@ struct CachedRelayList {
     verified: bool,
 }
 
-static NIP65_CACHE: std::sync::OnceLock<std::sync::RwLock<HashMap<PublicKey, CachedRelayList>>> =
-    std::sync::OnceLock::new();
+/// Pack-author relay lists. Author-keyed, so technically account-agnostic, but
+/// the set of authors is contact-graph metadata belonging to one account.
+struct Nip65Cache;
 
-fn nip65_cache() -> &'static std::sync::RwLock<HashMap<PublicKey, CachedRelayList>> {
-    NIP65_CACHE.get_or_init(|| std::sync::RwLock::new(HashMap::new()))
+fn nip65_cache() -> std::sync::Arc<std::sync::RwLock<HashMap<PublicKey, CachedRelayList>>> {
+    crate::db::current_session().scoped::<Nip65Cache, _>()
 }
 
 /// Read fresh write relays for `pubkey` from the cache, or `None` if absent /
 /// expired. Honours the dual TTL (short for empty entries).
 fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
-    let cache = nip65_cache().read().ok()?;
+    let owner = nip65_cache();
+    let cache = owner.read().ok()?;
     let entry = cache.get(pubkey)?;
     let ttl = if entry.empty { NIP65_CACHE_TTL_ERROR_SECS } else { NIP65_CACHE_TTL_SECS };
     if entry.fetched_at.elapsed() < std::time::Duration::from_secs(ttl) {
@@ -970,7 +1010,8 @@ fn cached_write_relays(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
 /// kind-10002 fetch. Judging a pack's absence needs its canonical home to
 /// have really been resolved; an error placeholder must read as unknown.
 fn cached_write_relays_verified(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
-    let cache = nip65_cache().read().ok()?;
+    let owner = nip65_cache();
+    let cache = owner.read().ok()?;
     let entry = cache.get(pubkey)?;
     if !entry.verified {
         return None;
@@ -980,14 +1021,6 @@ fn cached_write_relays_verified(pubkey: &PublicKey) -> Option<Vec<RelayUrl>> {
         Some(entry.relays.clone())
     } else {
         None
-    }
-}
-
-/// Drop every cached relay list (account swap — entries hold contact-graph metadata
-/// from the prior session, mirroring the inbox-relay cache's swap hygiene).
-pub fn clear_nip65_cache() {
-    if let Ok(mut cache) = nip65_cache().write() {
-        cache.clear();
     }
 }
 
@@ -1009,14 +1042,14 @@ fn cache_write_relays(pubkey: PublicKey, relays: Vec<RelayUrl>, verified: bool) 
 /// only (useless for finding their packs), so we keep both/write and drop read.
 fn extract_write_relays(ev: &Event) -> Vec<RelayUrl> {
     let mut relays: Vec<RelayUrl> = Vec::new();
-    for (url, marker) in nostr_sdk::nips::nip65::extract_relay_list(ev) {
+    for (url, marker) in nostr_sdk::prelude::nip65::extract_relay_list(ev) {
         match marker {
-            None | Some(nostr_sdk::nips::nip65::RelayMetadata::Write) => {
-                if !relays.contains(url) {
+            None | Some(nostr_sdk::prelude::nip65::RelayMetadata::Write) => {
+                if !relays.contains(&url) {
                     relays.push(url.clone());
                 }
             }
-            Some(nostr_sdk::nips::nip65::RelayMetadata::Read) => {}
+            Some(nostr_sdk::prelude::nip65::RelayMetadata::Read) => {}
         }
     }
     relays
@@ -1036,7 +1069,7 @@ async fn fetch_author_write_relays(client: &Client, pubkey: PublicKey) -> Vec<Re
         .kind(Kind::RelayList)
         .limit(1);
     let events = match client
-        .fetch_events(filter, std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
         .await
     {
         Ok(evs) => evs,
@@ -1072,7 +1105,7 @@ async fn prefetch_author_write_relays(client: &Client, authors: &[PublicKey]) {
         .authors(uncached.iter().copied())
         .kind(Kind::RelayList);
     let events = match client
-        .fetch_events(filter, std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(NIP65_FETCH_TIMEOUT_SECS))
         .await
     {
         Ok(evs) => evs,
@@ -1114,7 +1147,7 @@ async fn fetch_pack_from_relays(client: &Client, addr: &PackAddress) -> Option<E
 
     // 1) Home relays first (the shared pool). Covers our own packs and any
     //    pack that's on Vector's default relays — the common, fast case.
-    match client.fetch_events(filter.clone(), timeout).await {
+    match client.fetch_events(filter.clone()).timeout(timeout).await {
         Ok(events) => {
             if let Some(ev) = events.into_iter().max_by_key(|e| e.created_at) {
                 if let Some(pack) = parse_pack_from_event(&ev, me.as_deref()) {
@@ -1146,16 +1179,14 @@ async fn fetch_pack_via_isolated_client(
     timeout: std::time::Duration,
     my_pubkey_hex: Option<&str>,
 ) -> Option<EmojiPack> {
-    let scratch = ClientBuilder::new()
-        .opts(crate::nostr_client_options())
+    let scratch = crate::nostr_client_builder()
         .build();
     for r in relays {
-        let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
-        let _ = scratch.pool().add_relay(r.as_str(), opts).await;
+        let _ = scratch.add_managed_relay(r.as_str()).await;
     }
     scratch.connect().await;
 
-    let result = scratch.fetch_events(filter, timeout).await;
+    let result = scratch.fetch_events(filter).timeout(timeout).await;
     // Tear the scratch client down regardless of outcome.
     scratch.shutdown().await;
 
@@ -1237,7 +1268,7 @@ fn deletion_filter(addrs: &[&PackAddress]) -> Filter {
         .authors(addrs.iter().map(|a| a.pubkey))
         .kind(Kind::EventDeletion)
         .custom_tags(
-            SingleLetterTag::lowercase(Alphabet::A),
+            SingleLetterTag::LOWERCASE_A,
             addrs.iter().map(|a| a.to_addr_string()),
         )
 }
@@ -1262,7 +1293,7 @@ async fn connected_read_relays(client: &Client, read_only: bool) -> std::collect
         .relays()
         .await
         .iter()
-        .filter(|(_, r)| r.status() == RelayStatus::Connected && (!read_only || r.flags().has_read()))
+        .filter(|(_, r)| r.status() == RelayStatus::Connected && (!read_only || r.capabilities().load().can_read()))
         .map(|(url, _)| url.to_string())
         .collect()
 }
@@ -1372,7 +1403,7 @@ async fn sweep_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Pack
     let mut newest: HashMap<String, Event> = HashMap::new();
     let mut deletions: Vec<Event> = Vec::new();
     let mut home_ok = false;
-    match client.fetch_events(home_filter, timeout).await {
+    match client.fetch_events(home_filter).timeout(timeout).await {
         Ok(events) => {
             home_ok = true;
             merge_newest(&mut newest, newest_events_by_coord(events, &wanted));
@@ -1382,7 +1413,7 @@ async fn sweep_packs_from_relays(client: &Client, addrs: &[PackAddress]) -> Pack
         }
     }
     if home_ok {
-        match client.fetch_events(deletion_filter(&all_refs), timeout).await {
+        match client.fetch_events(deletion_filter(&all_refs)).timeout(timeout).await {
             Ok(events) => deletions.extend(events),
             Err(e) => crate::log_warn!("[EmojiPacks] home deletion fetch failed: {}", e),
         }
@@ -1477,12 +1508,10 @@ async fn sweep_via_isolated_client(
     del_filter: Filter,
     timeout: std::time::Duration,
 ) -> Option<(Vec<Event>, Vec<Event>, std::collections::HashSet<String>)> {
-    let scratch = ClientBuilder::new()
-        .opts(crate::nostr_client_options())
+    let scratch = crate::nostr_client_builder()
         .build();
     for r in relays {
-        let opts = crate::tor_aware_relay_options(RelayOptions::new().reconnect(false));
-        let _ = scratch.pool().add_relay(r.as_str(), opts).await;
+        let _ = scratch.add_managed_relay(r.as_str()).await;
     }
     scratch.connect().await;
     // `connect()` is non-blocking and this client is brand new, so wait for at
@@ -1497,9 +1526,9 @@ async fn sweep_via_isolated_client(
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     };
-    let result = scratch.fetch_events(pack_filter, timeout).await;
+    let result = scratch.fetch_events(pack_filter).timeout(timeout).await;
     let dels = match &result {
-        Ok(_) => scratch.fetch_events(del_filter, timeout).await.ok(),
+        Ok(_) => scratch.fetch_events(del_filter).timeout(timeout).await.ok(),
         Err(_) => None,
     };
     let after = connected_read_relays(&scratch, false).await;
@@ -1529,173 +1558,168 @@ async fn sweep_via_isolated_client(
 pub async fn fetch_subscribed_packs(
     client: &Client,
     my_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
 ) -> Result<Vec<EmojiPack>, String> {
-    let list_filter = Filter::new()
-        .author(my_pubkey)
-        .kind(Kind::Custom(KIND_EMOJI_LIST))
-        .limit(1);
+    crate::db::scoped(async move {
+        let list_filter = Filter::new()
+            .author(my_pubkey)
+            .kind(Kind::Custom(KIND_EMOJI_LIST))
+            .limit(1);
 
-    let list_events = client
-        .fetch_events(list_filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .await
-        .map_err(|e| format!("fetch kind 10030: {}", e))?;
+        let list_events = client
+            .fetch_events(list_filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .await
+            .map_err(|e| format!("fetch kind 10030: {}", e))?;
 
-    if !session.is_valid() {
-        return Ok(Vec::new());
-    }
 
-    // Source-of-truth selection. If relays returned a kind 10030, trust
-    // its `a` tags as the canonical subscription set — UNLESS it predates
-    // our own last publish, which means our latest republish hasn't
-    // propagated yet and the relay is still serving a stale list. Trusting
-    // a stale list would clobber a just-added pack (last-write-wins by
-    // created_at). If relays returned *nothing*, that's a transient sync
-    // gap — fall back to the local mirror either way.
-    let local_addrs = || -> Vec<PackAddress> {
-        load_subscriptions()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|s| parse_pack_address(&s).ok())
-            .collect()
-    };
-    let our_last_publish: u64 = crate::db::settings::get_sql_setting(EMOJI_LIST_PUBLISHED_AT_KEY.to_string())
-        .ok()
-        .flatten()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        // Source-of-truth selection. If relays returned a kind 10030, trust
+        // its `a` tags as the canonical subscription set — UNLESS it predates
+        // our own last publish, which means our latest republish hasn't
+        // propagated yet and the relay is still serving a stale list. Trusting
+        // a stale list would clobber a just-added pack (last-write-wins by
+        // created_at). If relays returned *nothing*, that's a transient sync
+        // gap — fall back to the local mirror either way.
+        let local_addrs = || -> Vec<PackAddress> {
+            load_subscriptions()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|s| parse_pack_address(&s).ok())
+                .collect()
+        };
+        let our_last_publish: u64 = crate::db::settings::get_sql_setting(EMOJI_LIST_PUBLISHED_AT_KEY.to_string())
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
 
-    let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
-    // Anchor only rides in from a TRUSTED relay list — a stale/absent event
-    // falls back to local subs and leaves the local KV anchor untouched.
-    let mut fetched_anchor: Option<String> = None;
-    let addrs: Vec<PackAddress> = match list_event {
-        Some(ev) if ev.created_at.as_secs() < our_last_publish => {
-            crate::log_debug!(
-                "[EmojiPacks] fetched kind 10030 (created_at {}) predates our publish ({}) — keeping local subs",
-                ev.created_at.as_secs(), our_last_publish,
-            );
-            local_addrs()
-        }
-        Some(ev) => {
-            let (a, anchor) = decrypt_subscribed_addresses_with_anchor(client, &my_pubkey, &ev).await;
-            fetched_anchor = anchor;
-            a
-        }
-        None => {
-            crate::log_debug!(
-                "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
-            );
-            local_addrs()
-        }
-    };
-
-    let addr_strings: Vec<String> = addrs.iter().map(|a| a.to_addr_string()).collect();
-
-    // Batched resolve: one home request for every subscribed pack, plus one
-    // batched outbox pass for any not on our relays. Packs that still don't
-    // resolve keep their cached copy (we never shrink the subscription set on
-    // a transient miss); the health engine below decides whether an absence
-    // is judgeable at all. The per-pack `fetch_pack_from_relays` is reserved
-    // for the independent preview/theme flows.
-    let PackSweep { packs: fresh, outcomes } = sweep_packs_from_relays(client, &addrs).await;
-    let tombstoned = outcomes.values().filter(|o| matches!(o, PackFetchOutcome::Tombstoned)).count();
-    let unresolved = addrs.len().saturating_sub(fresh.len()).saturating_sub(tombstoned);
-    if unresolved > 0 {
-        crate::log_warn!(
-            "[EmojiPacks] {} subscribed pack(s) not on relays — keeping cached copies",
-            unresolved,
-        );
-    }
-    if tombstoned > 0 {
-        crate::log_info!("[EmojiPacks] {} subscribed pack(s) deleted by their creator", tombstoned);
-    }
-
-    if !session.is_valid() {
-        return Ok(fresh);
-    }
-
-    // Health verdicts BEFORE the save loop: save_pack's REPLACE resets the
-    // health columns, so `Found` must read the pre-save status or a revival
-    // (revoked back to active) would go unreported. Own packs are skipped:
-    // deleting an own pack removes its rows locally, so there's nothing to
-    // grieve, and a self-authored pack must never grey out over relay state.
-    let me_hex = my_pubkey.to_hex();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let mut health_changed = false;
-    for addr in &addrs {
-        if addr.pubkey.to_hex() == me_hex { continue; }
-        let raw = addr.to_addr_string();
-        let Some(outcome) = outcomes.get(&raw) else { continue; };
-        match apply_pack_health(&raw, outcome, now) {
-            Ok(true) => {
-                health_changed = true;
-                crate::log_info!(
-                    "[EmojiPacks] pack `{}` health changed ({:?})",
-                    addr.identifier, outcome,
+        let list_event = list_events.into_iter().max_by_key(|e| e.created_at);
+        // Anchor only rides in from a TRUSTED relay list — a stale/absent event
+        // falls back to local subs and leaves the local KV anchor untouched.
+        let mut fetched_anchor: Option<String> = None;
+        let addrs: Vec<PackAddress> = match list_event {
+            Some(ev) if ev.created_at.as_secs() < our_last_publish => {
+                crate::log_debug!(
+                    "[EmojiPacks] fetched kind 10030 (created_at {}) predates our publish ({}) — keeping local subs",
+                    ev.created_at.as_secs(), our_last_publish,
                 );
+                local_addrs()
             }
-            Ok(false) => {}
-            Err(e) => crate::log_warn!("[EmojiPacks] health update for `{}` failed: {}", addr.identifier, e),
-        }
-    }
-    for pack in &fresh {
-        if let Err(e) = save_pack(pack) {
-            crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
-        }
-    }
-    // Detect a real list change (reorder, sub add/remove, or theme-slot move)
-    // against the pre-save state, so a cross-device edit repaints an OPEN
-    // picker live — not only on its next open. Our own republish echoes back
-    // unchanged, so this stays quiet on self-echo.
-    let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
-        || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+            Some(ev) => {
+                let (a, anchor) = decrypt_subscribed_addresses_with_anchor(client, &my_pubkey, &ev).await;
+                fetched_anchor = anchor;
+                a
+            }
+            None => {
+                crate::log_debug!(
+                    "[EmojiPacks] kind 10030 not on relays — refreshing local subs only",
+                );
+                local_addrs()
+            }
+        };
 
-    // Persist the full subscription list (10030-driven, or local-mirror
-    // when 10030 was missing). Per-pack fetch failures don't shrink it —
-    // the user is still subscribed, they just have a cached copy for now.
-    if let Err(e) = save_subscriptions(&addr_strings) {
-        crate::log_warn!("[EmojiPacks] save subscriptions failed: {}", e);
-    }
-    // Sync the theme-slot position from the trusted list (old-format lists
-    // carry no marker → leave the local anchor as-is).
-    if let Some(anchor) = fetched_anchor {
-        if let Err(e) = save_theme_slot_anchor(&anchor) {
-            crate::log_warn!("[EmojiPacks] save theme slot anchor failed: {}", e);
-        }
-    }
-    if health_changed || list_changed {
-        crate::traits::emit_event("emoji_packs_updated", &());
-    }
+        let addr_strings: Vec<String> = addrs.iter().map(|a| a.to_addr_string()).collect();
 
-    crate::log_info!(
-        "[EmojiPacks] Resolved {} of {} subscribed pack(s){}",
-        fresh.len(),
-        addrs.len(),
+        // Batched resolve: one home request for every subscribed pack, plus one
+        // batched outbox pass for any not on our relays. Packs that still don't
+        // resolve keep their cached copy (we never shrink the subscription set on
+        // a transient miss); the health engine below decides whether an absence
+        // is judgeable at all. The per-pack `fetch_pack_from_relays` is reserved
+        // for the independent preview/theme flows.
+        let PackSweep { packs: fresh, outcomes } = sweep_packs_from_relays(client, &addrs).await;
+        let tombstoned = outcomes.values().filter(|o| matches!(o, PackFetchOutcome::Tombstoned)).count();
+        let unresolved = addrs.len().saturating_sub(fresh.len()).saturating_sub(tombstoned);
         if unresolved > 0 {
-            format!(" ({} via cache)", unresolved)
-        } else {
-            String::new()
-        },
-    );
+            crate::log_warn!(
+                "[EmojiPacks] {} subscribed pack(s) not on relays — keeping cached copies",
+                unresolved,
+            );
+        }
+        if tombstoned > 0 {
+            crate::log_info!("[EmojiPacks] {} subscribed pack(s) deleted by their creator", tombstoned);
+        }
 
-    // Return the unified view: freshly-fetched packs overlay the cached
-    // ones, and load_all_packs filters to subscribed-only for us.
-    load_all_packs()
+
+        // Health verdicts BEFORE the save loop: save_pack's REPLACE resets the
+        // health columns, so `Found` must read the pre-save status or a revival
+        // (revoked back to active) would go unreported. Own packs are skipped:
+        // deleting an own pack removes its rows locally, so there's nothing to
+        // grieve, and a self-authored pack must never grey out over relay state.
+        let me_hex = my_pubkey.to_hex();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut health_changed = false;
+        for addr in &addrs {
+            if addr.pubkey.to_hex() == me_hex { continue; }
+            let raw = addr.to_addr_string();
+            let Some(outcome) = outcomes.get(&raw) else { continue; };
+            match apply_pack_health(&raw, outcome, now) {
+                Ok(true) => {
+                    health_changed = true;
+                    crate::log_info!(
+                        "[EmojiPacks] pack `{}` health changed ({:?})",
+                        addr.identifier, outcome,
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => crate::log_warn!("[EmojiPacks] health update for `{}` failed: {}", addr.identifier, e),
+            }
+        }
+        for pack in &fresh {
+            if let Err(e) = save_pack(pack) {
+                crate::log_warn!("[EmojiPacks] save pack {} failed: {}", pack.identifier, e);
+            }
+        }
+        // Detect a real list change (reorder, sub add/remove, or theme-slot move)
+        // against the pre-save state, so a cross-device edit repaints an OPEN
+        // picker live — not only on its next open. Our own republish echoes back
+        // unchanged, so this stays quiet on self-echo.
+        let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
+            || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+
+        // Persist the full subscription list (10030-driven, or local-mirror
+        // when 10030 was missing). Per-pack fetch failures don't shrink it —
+        // the user is still subscribed, they just have a cached copy for now.
+        if let Err(e) = save_subscriptions(&addr_strings) {
+            crate::log_warn!("[EmojiPacks] save subscriptions failed: {}", e);
+        }
+        // Sync the theme-slot position from the trusted list (old-format lists
+        // carry no marker → leave the local anchor as-is).
+        if let Some(anchor) = fetched_anchor {
+            if let Err(e) = save_theme_slot_anchor(&anchor) {
+                crate::log_warn!("[EmojiPacks] save theme slot anchor failed: {}", e);
+            }
+        }
+        if health_changed || list_changed {
+            crate::traits::emit_event("emoji_packs_updated", &());
+        }
+
+        crate::log_info!(
+            "[EmojiPacks] Resolved {} of {} subscribed pack(s){}",
+            fresh.len(),
+            addrs.len(),
+            if unresolved > 0 {
+                format!(" ({} via cache)", unresolved)
+            } else {
+                String::new()
+            },
+        );
+
+        // Return the unified view: freshly-fetched packs overlay the cached
+        // ones, and load_all_packs filters to subscribed-only for us.
+        load_all_packs()
+    })
+    .await
 }
 
 /// Convenience entry point that grabs the client + my_pubkey internally
 /// and runs the full subscribed-packs refresh. Intended for the boot
-/// path; in-app commands pass an explicit `SessionGuard` via the lower
+/// path; in-app commands pass an explicit `std::sync::Arc<crate::db::Session>` via the lower
 /// helper to make the safety contract visible at every call site.
 pub async fn refresh_subscribed_packs() -> Result<Vec<EmojiPack>, String> {
     let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
     let me = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
-    let session = crate::state::SessionGuard::capture();
-    fetch_subscribed_packs(&client, me, session).await
+    fetch_subscribed_packs(&client, me).await
 }
 
 /// Preview-only fetch by naddr — resolves + parses but never touches
@@ -1721,49 +1745,47 @@ pub async fn fetch_pack_by_naddr(naddr: &str) -> Result<EmojiPack, String> {
 /// equip slot or land in the kind-10030 list. Returns `None` if uncached and
 /// the live fetch finds nothing.
 pub async fn get_or_fetch_theme_pack(naddr: &str) -> Result<Option<EmojiPack>, String> {
-    let addr = parse_naddr(naddr)?;
-    let coord = addr.to_addr_string();
+    crate::db::scoped(async move {
+        let addr = parse_naddr(naddr)?;
+        let coord = addr.to_addr_string();
 
-    // Cache hit: return immediately, refresh in the background so a later
-    // creator-side edit still propagates without blocking first paint.
-    if let Some(cached) = load_cached_pack(&coord)? {
-        let naddr_owned = naddr.to_string();
-        let session = crate::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
-            let Some(client) = nostr_client() else { return };
-            if let Ok(parsed) = parse_naddr(&naddr_owned) {
-                if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
-                    if session.is_valid() && fresh.updated_at > cached.updated_at {
-                        if let Err(e) = save_pack(&fresh) {
-                            crate::log_warn!("[EmojiPacks] theme pack refresh save failed: {}", e);
-                        } else {
-                            crate::traits::emit_event("emoji_packs_updated", &());
+        // Cache hit: return immediately, refresh in the background so a later
+        // creator-side edit still propagates without blocking first paint.
+        if let Some(cached) = load_cached_pack(&coord)? {
+            let naddr_owned = naddr.to_string();
+            crate::db::spawn_bound(async move {
+                let Some(client) = nostr_client() else { return };
+                if let Ok(parsed) = parse_naddr(&naddr_owned) {
+                    if let Some(fresh) = fetch_pack_from_relays(&client, &parsed).await {
+                        if fresh.updated_at > cached.updated_at {
+                            if let Err(e) = save_pack(&fresh) {
+                                crate::log_warn!("[EmojiPacks] theme pack refresh save failed: {}", e);
+                            } else {
+                                crate::traits::emit_event("emoji_packs_updated", &());
+                            }
                         }
                     }
                 }
-            }
-        });
-        return Ok(Some(cached));
-    }
+            });
+            return Ok(Some(cached));
+        }
 
-    // Cache miss: fetch live, persist for next session, return.
-    let session = crate::state::SessionGuard::capture();
-    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
-    match fetch_pack_from_relays(&client, &addr).await {
-        Some(pack) => {
-            // Still show the pack this session, but only persist if the account
-            // didn't swap during the fetch — otherwise we'd write into the wrong
-            // account's DB.
-            if session.is_valid() {
+        // Cache miss: fetch live, persist for next session, return.
+        let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+        match fetch_pack_from_relays(&client, &addr).await {
+            Some(pack) => {
+                // Still show the pack this session, but only persist if the account
+                // didn't swap during the fetch — otherwise we'd write into the wrong
+                // account's DB.
                 if let Err(e) = save_pack(&pack) {
                     crate::log_warn!("[EmojiPacks] theme pack cache save failed: {}", e);
                 }
+                Ok(Some(pack))
             }
-            Ok(Some(pack))
+            None => Ok(None),
         }
-        None => Ok(None),
-    }
+    })
+    .await
 }
 
 /// KV setting holding the raw addr (`30030:pk:d`) of the pack the theme slot
@@ -1832,13 +1854,13 @@ pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
     let plaintext = serde_json::to_string(&inner_tags)
         .map_err(|e| format!("Serialise emoji list: {}", e))?;
 
-    let signer = client.signer().await
+    let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
-    let content = signer.nip44_encrypt(&my_pk, &plaintext).await
+    let content = signer.nip44_encrypt_async(&my_pk, &plaintext).await
         .map_err(|e| format!("nip44 encrypt emoji list: {}", e))?;
 
     let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content);
-    client.send_event_builder(builder).await
+    crate::sign_and_send(&client, builder).await
         .map_err(|e| format!("Failed to publish emoji list (kind 10030): {}", e))?;
 
     crate::log_info!("[EmojiPacks] Published encrypted kind 10030 with {} pack subscription(s)", addrs.len());
@@ -1853,7 +1875,7 @@ const EMOJI_LIST_PUBLISHED_AT_KEY: &str = "emoji_list_published_at";
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Coalesce rapid subscribe/unsubscribe taps into one network publish.
-/// Captures `SessionGuard` BEFORE the spawn boundary so a mid-debounce
+/// Captures `std::sync::Arc<crate::db::Session>` BEFORE the spawn boundary so a mid-debounce
 /// account swap can't sign account A's pack list with account B's key.
 pub fn republish_emoji_list_debounced() {
     use std::sync::atomic::Ordering;
@@ -1867,11 +1889,9 @@ pub fn republish_emoji_list_debounced() {
         Timestamp::now().as_secs().to_string(),
     );
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-        if !session.is_valid() { return; }
         let client = match nostr_client() {
             Some(c) => c,
             None => return,
@@ -1880,7 +1900,6 @@ pub fn republish_emoji_list_debounced() {
             crate::log_warn!("[EmojiPacks] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if !session.is_valid() { return; }
             if let Err(e2) = publish_emoji_list(&client).await {
                 crate::log_warn!("[EmojiPacks] Republish retry failed: {}", e2);
             }
@@ -1892,42 +1911,38 @@ pub fn republish_emoji_list_debounced() {
 /// subscription, then schedule a debounced republish of kind 10030.
 /// Returns the hydrated pack on success.
 pub async fn subscribe_pack(naddr: &str) -> Result<EmojiPack, String> {
-    let session = crate::state::SessionGuard::capture();
-    let pack = fetch_pack_by_naddr(naddr).await?;
-    if !session.is_valid() {
-        return Err("Account swapped during fetch — aborted".to_string());
-    }
+    crate::db::scoped(async move {
+        let pack = fetch_pack_by_naddr(naddr).await?;
 
-    // Equipped-pack cap. Idempotent re-subscribe to a pack we already
-    // have stays free; only adding a brand-new addr counts toward the limit.
-    let pack_addr = pack.addr();
-    {
-        let existing_subs = load_subscriptions()?;
-        let is_new = !existing_subs.iter().any(|a| a == &pack_addr);
-        let cap = effective_max_equipped_packs();
-        if is_new && existing_subs.len() >= cap {
-            return Err(format!(
-                "You can equip at most {} packs. Remove one to add another.",
-                cap,
-            ));
+        // Equipped-pack cap. Idempotent re-subscribe to a pack we already
+        // have stays free; only adding a brand-new addr counts toward the limit.
+        let pack_addr = pack.addr();
+        {
+            let existing_subs = load_subscriptions()?;
+            let is_new = !existing_subs.iter().any(|a| a == &pack_addr);
+            let cap = effective_max_equipped_packs();
+            if is_new && existing_subs.len() >= cap {
+                return Err(format!(
+                    "You can equip at most {} packs. Remove one to add another.",
+                    cap,
+                ));
+            }
         }
-    }
 
-    save_pack(&pack)?;
+        save_pack(&pack)?;
 
-    let mut subs = load_subscriptions()?;
-    if !subs.iter().any(|a| a == &pack_addr) {
-        subs.push(pack_addr.clone());
-    }
-    if !session.is_valid() {
-        return Err("Account swapped before subscription save — aborted".to_string());
-    }
-    save_subscriptions(&subs)?;
+        let mut subs = load_subscriptions()?;
+        if !subs.iter().any(|a| a == &pack_addr) {
+            subs.push(pack_addr.clone());
+        }
+        save_subscriptions(&subs)?;
 
-    republish_emoji_list_debounced();
-    crate::traits::emit_event("emoji_packs_updated", &());
+        republish_emoji_list_debounced();
+        crate::traits::emit_event("emoji_packs_updated", &());
 
-    Ok(pack)
+        Ok(pack)
+    })
+    .await
 }
 
 // ============================================================================
@@ -1943,32 +1958,32 @@ fn build_pack_event(pack: &EmojiPack) -> Result<EventBuilder, String> {
         return Err("pack identifier required".to_string());
     }
     let mut builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-        .tag(Tag::custom(TagKind::custom("d"), [pack.identifier.clone()]))
+        .tag(Tag::custom("d", [pack.identifier.clone()]))
         // Stamp Vector as the authoring client (same ["client","vector"] tag our kind-0
         // profile publishes carry) so packs made or edited here are attributable.
-        .tag(Tag::custom(TagKind::custom("client"), ["vector"]));
+        .tag(Tag::custom("client", ["vector"]));
 
     // Spec-compliant metadata (NIP-51).
     if !pack.title.is_empty() {
         builder = builder
-            .tag(Tag::custom(TagKind::custom("title"), [pack.title.clone()]))
-            .tag(Tag::custom(TagKind::custom("name"), [pack.title.clone()]));
+            .tag(Tag::custom("title", [pack.title.clone()]))
+            .tag(Tag::custom("name", [pack.title.clone()]));
     }
     if !pack.image_url.is_empty() {
         builder = builder
-            .tag(Tag::custom(TagKind::custom("image"), [pack.image_url.clone()]))
-            .tag(Tag::custom(TagKind::custom("picture"), [pack.image_url.clone()]));
+            .tag(Tag::custom("image", [pack.image_url.clone()]))
+            .tag(Tag::custom("picture", [pack.image_url.clone()]));
     }
     if !pack.description.is_empty() {
         builder = builder
-            .tag(Tag::custom(TagKind::custom("description"), [pack.description.clone()]))
-            .tag(Tag::custom(TagKind::custom("about"), [pack.description.clone()]));
+            .tag(Tag::custom("description", [pack.description.clone()]))
+            .tag(Tag::custom("about", [pack.description.clone()]));
     }
 
     for e in &pack.emojis {
         if e.shortcode.is_empty() || e.url.is_empty() { continue; }
         builder = builder.tag(Tag::custom(
-            TagKind::custom("emoji"),
+            "emoji",
             [e.shortcode.clone(), e.url.clone()],
         ));
     }
@@ -1977,140 +1992,134 @@ fn build_pack_event(pack: &EmojiPack) -> Result<EventBuilder, String> {
 
 /// Publish (or replace) one of the user's own packs as a kind 30030
 /// event, persist it locally, and add it to the subscription list so
-/// the picker surfaces it immediately. SessionGuard-gated so a mid-
+/// the picker surfaces it immediately. std::sync::Arc<crate::db::Session>-gated so a mid-
 /// network account swap can't push account A's pack signed by B's key.
 pub async fn publish_pack(pack: &EmojiPack) -> Result<EmojiPack, String> {
-    let session = crate::state::SessionGuard::capture();
-    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
-    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+    crate::db::scoped(async move {
+        let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+        let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
-    // Per-pack emoji cap. Applies to own packs only — shared packs the
-    // user receives can exceed this, the display layer truncates.
-    let emoji_cap = effective_max_emojis_per_pack();
-    if pack.emojis.len() > emoji_cap {
-        return Err(format!(
-            "A pack can hold at most {} emojis.",
-            emoji_cap,
-        ));
-    }
-
-    // Force `pubkey` + `is_own` regardless of caller — protects against
-    // a malformed payload claiming ownership of someone else's pack.
-    let mut to_save = pack.clone();
-    to_save.pubkey = my_pk.to_hex();
-    to_save.is_own = true;
-    let raw_addr = build_pack_addr(&to_save.pubkey, &to_save.identifier);
-    to_save.id = naddr_from_addr(&raw_addr)?;
-    to_save.updated_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-
-    // Equipped-pack cap. Replacing an existing own pack is fine — only
-    // a *new* identifier would push us over the limit.
-    {
-        let existing_subs = load_subscriptions()?;
-        let is_new = !existing_subs.iter().any(|a| a == &raw_addr);
-        let cap = effective_max_equipped_packs();
-        if is_new && existing_subs.len() >= cap {
+        // Per-pack emoji cap. Applies to own packs only — shared packs the
+        // user receives can exceed this, the display layer truncates.
+        let emoji_cap = effective_max_emojis_per_pack();
+        if pack.emojis.len() > emoji_cap {
             return Err(format!(
-                "You can equip at most {} packs. Remove one to add another.",
-                cap,
+                "A pack can hold at most {} emojis.",
+                emoji_cap,
             ));
         }
-    }
 
-    let builder = build_pack_event(&to_save)?;
-    client.send_event_builder(builder).await
-        .map_err(|e| format!("publish kind 30030: {}", e))?;
+        // Force `pubkey` + `is_own` regardless of caller — protects against
+        // a malformed payload claiming ownership of someone else's pack.
+        let mut to_save = pack.clone();
+        to_save.pubkey = my_pk.to_hex();
+        to_save.is_own = true;
+        let raw_addr = build_pack_addr(&to_save.pubkey, &to_save.identifier);
+        to_save.id = naddr_from_addr(&raw_addr)?;
+        to_save.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
-    if !session.is_valid() {
-        return Err("Account swapped during publish — local state untouched".to_string());
-    }
-
-    save_pack(&to_save)?;
-
-    // Add to local subscriptions so the picker shows it without waiting
-    // for the next 10030 republish to land.
-    let mut subs = load_subscriptions()?;
-    if !subs.iter().any(|a| a == &raw_addr) {
-        subs.push(raw_addr.clone());
-        if !session.is_valid() {
-            return Err("Account swapped before subscription save — aborted".to_string());
+        // Equipped-pack cap. Replacing an existing own pack is fine — only
+        // a *new* identifier would push us over the limit.
+        {
+            let existing_subs = load_subscriptions()?;
+            let is_new = !existing_subs.iter().any(|a| a == &raw_addr);
+            let cap = effective_max_equipped_packs();
+            if is_new && existing_subs.len() >= cap {
+                return Err(format!(
+                    "You can equip at most {} packs. Remove one to add another.",
+                    cap,
+                ));
+            }
         }
-        save_subscriptions(&subs)?;
-        republish_emoji_list_debounced();
-    }
 
-    crate::traits::emit_event("emoji_packs_updated", &());
-    crate::log_info!("[EmojiPacks] Published own pack `{}` with {} emoji(s)",
-        to_save.identifier, to_save.emojis.len());
+        let builder = build_pack_event(&to_save)?;
+        crate::sign_and_send(&client, builder).await
+            .map_err(|e| format!("publish kind 30030: {}", e))?;
 
-    Ok(to_save)
+
+        save_pack(&to_save)?;
+
+        // Add to local subscriptions so the picker shows it without waiting
+        // for the next 10030 republish to land.
+        let mut subs = load_subscriptions()?;
+        if !subs.iter().any(|a| a == &raw_addr) {
+            subs.push(raw_addr.clone());
+            save_subscriptions(&subs)?;
+            republish_emoji_list_debounced();
+        }
+
+        crate::traits::emit_event("emoji_packs_updated", &());
+        crate::log_info!("[EmojiPacks] Published own pack `{}` with {} emoji(s)",
+            to_save.identifier, to_save.emojis.len());
+
+        Ok(to_save)
+    })
+    .await
 }
 
 /// Tombstone one of the user's own packs by publishing an empty kind
 /// 30030 with just the `d` tag (relays replace the prior payload), drop
 /// the local subscription, and republish kind 10030.
 pub async fn delete_own_pack(id: &str) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
-    let parsed = parse_naddr(id)?;
-    let raw_addr = parsed.to_addr_string();
-    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
-    if parsed.pubkey != my_pk {
-        return Err("Cannot delete a pack you don't own".to_string());
-    }
-    let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
+    crate::db::scoped(async move {
+        let parsed = parse_naddr(id)?;
+        let raw_addr = parsed.to_addr_string();
+        let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+        if parsed.pubkey != my_pk {
+            return Err("Cannot delete a pack you don't own".to_string());
+        }
+        let client = nostr_client().ok_or_else(|| "Nostr client not initialised".to_string())?;
 
-    let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-        .tag(Tag::custom(TagKind::custom("d"), [parsed.identifier.clone()]));
-    client.send_event_builder(builder).await
-        .map_err(|e| format!("publish empty kind 30030: {}", e))?;
+        let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
+            .tag(Tag::custom("d", [parsed.identifier.clone()]));
+        crate::sign_and_send(&client, builder).await
+            .map_err(|e| format!("publish empty kind 30030: {}", e))?;
 
-    if !session.is_valid() {
-        return Err("Account swapped during delete — local state untouched".to_string());
-    }
 
-    // Drop subscription + pack rows (CASCADE wipes pack items).
-    // Wrapped in a transaction so a crash between the two deletes can't
-    // leave an orphan subscription pointing at a pack row that's already gone.
-    {
-        let mut conn = crate::db::get_write_connection_guard_static()?;
-        let tx = conn.transaction()
-            .map_err(|e| format!("begin delete tx: {}", e))?;
-        tx.execute("DELETE FROM emoji_pack_subscriptions WHERE addr = ?1",
-            rusqlite::params![raw_addr])
-            .map_err(|e| format!("drop subscription: {}", e))?;
-        tx.execute("DELETE FROM emoji_packs WHERE addr = ?1",
-            rusqlite::params![raw_addr])
-            .map_err(|e| format!("drop pack row: {}", e))?;
-        tx.commit()
-            .map_err(|e| format!("commit delete tx: {}", e))?;
-    }
+        // Drop subscription + pack rows (CASCADE wipes pack items).
+        // Wrapped in a transaction so a crash between the two deletes can't
+        // leave an orphan subscription pointing at a pack row that's already gone.
+        {
+            let mut conn = crate::db::get_write_connection_guard_static()?;
+            let tx = conn.transaction()
+                .map_err(|e| format!("begin delete tx: {}", e))?;
+            tx.execute("DELETE FROM emoji_pack_subscriptions WHERE addr = ?1",
+                rusqlite::params![raw_addr])
+                .map_err(|e| format!("drop subscription: {}", e))?;
+            tx.execute("DELETE FROM emoji_packs WHERE addr = ?1",
+                rusqlite::params![raw_addr])
+                .map_err(|e| format!("drop pack row: {}", e))?;
+            tx.commit()
+                .map_err(|e| format!("commit delete tx: {}", e))?;
+        }
 
-    republish_emoji_list_debounced();
-    crate::traits::emit_event("emoji_packs_updated", &());
-    crate::log_info!("[EmojiPacks] Deleted own pack `{}`", parsed.identifier);
-    Ok(())
+        republish_emoji_list_debounced();
+        crate::traits::emit_event("emoji_packs_updated", &());
+        crate::log_info!("[EmojiPacks] Deleted own pack `{}`", parsed.identifier);
+        Ok(())
+    })
+    .await
 }
 
 /// Unsubscribe locally and republish kind 10030 without the pack.
 /// The pack row itself stays in `emoji_packs` (caller may still want
 /// to render old reactions); only the subscription link is dropped.
 pub async fn unsubscribe_pack(id: &str) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
-    let raw_addr = parse_naddr(id)?.to_addr_string();
-    let mut subs = load_subscriptions()?;
-    let before = subs.len();
-    subs.retain(|a| a != &raw_addr);
-    if subs.len() == before {
-        return Ok(()); // not subscribed, noop
-    }
-    if !session.is_valid() {
-        return Err("Account swapped before unsubscribe save — aborted".to_string());
-    }
-    save_subscriptions(&subs)?;
-    republish_emoji_list_debounced();
-    crate::traits::emit_event("emoji_packs_updated", &());
-    Ok(())
+    crate::db::scoped(async move {
+        let raw_addr = parse_naddr(id)?.to_addr_string();
+        let mut subs = load_subscriptions()?;
+        let before = subs.len();
+        subs.retain(|a| a != &raw_addr);
+        if subs.len() == before {
+            return Ok(()); // not subscribed, noop
+        }
+        save_subscriptions(&subs)?;
+        republish_emoji_list_debounced();
+        crate::traits::emit_event("emoji_packs_updated", &());
+        Ok(())
+    })
+    .await
 }
 
 /// Persist a user-defined display order for the equipped packs (including the
@@ -2122,7 +2131,7 @@ pub async fn unsubscribe_pack(id: &str) -> Result<(), String> {
 /// given order; the anchor is set to the raw addr of the pack immediately
 /// before the marker (`""` = top / marker absent).
 pub fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
+    let session = crate::db::current_session();
 
     let mut real_addrs: Vec<String> = Vec::with_capacity(ordered_ids.len());
     let mut anchor = String::new();
@@ -2136,7 +2145,7 @@ pub fn reorder_emoji_packs(ordered_ids: Vec<String>) -> Result<(), String> {
         }
     }
 
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("Account swapped during reorder — aborted".to_string());
     }
     save_subscriptions(&real_addrs)?;
@@ -2183,22 +2192,22 @@ mod tests {
         emojis: &[(&str, &str)],
     ) -> Event {
         let mut tags: Vec<Tag> = Vec::new();
-        tags.push(Tag::custom(TagKind::custom("d"), [d]));
+        tags.push(Tag::custom("d", [d]));
         if let Some((key, val)) = title_tag {
-            tags.push(Tag::custom(TagKind::custom(key), [val]));
+            tags.push(Tag::custom(key, [val]));
         }
         if let Some((key, val)) = image_tag {
-            tags.push(Tag::custom(TagKind::custom(key), [val]));
+            tags.push(Tag::custom(key, [val]));
         }
         if let Some((key, val)) = desc_tag {
-            tags.push(Tag::custom(TagKind::custom(key), [val]));
+            tags.push(Tag::custom(key, [val]));
         }
         for (code, url) in emojis {
-            tags.push(Tag::custom(TagKind::custom("emoji"), [*code, *url]));
+            tags.push(Tag::custom("emoji", [*code, *url]));
         }
         EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
             .tags(tags)
-            .sign_with_keys(k)
+            .finalize(k)
             .unwrap()
     }
 
@@ -2211,7 +2220,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let account = keys().public_key().to_bech32().unwrap();
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
@@ -2244,8 +2253,8 @@ mod tests {
 
     fn build_deletion_event(k: &Keys, addr: &str) -> Event {
         EventBuilder::new(Kind::EventDeletion, "")
-            .tag(Tag::custom(TagKind::custom("a"), [addr]))
-            .sign_with_keys(k)
+            .tag(Tag::custom("a", [addr]))
+            .finalize(k)
             .unwrap()
     }
 
@@ -2275,17 +2284,17 @@ mod tests {
         let ts = Timestamp::from_secs(1_700_000_000);
         let live_pinned = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
             .tags(vec![
-                Tag::custom(TagKind::custom("d"), ["p"]),
-                Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+                Tag::custom("d", ["p"]),
+                Tag::custom("emoji", ["a", "https://e.x/a.png"]),
             ])
             .custom_created_at(ts)
-            .sign_with_keys(&k)
+            .finalize(&k)
             .unwrap();
         let del_at = |secs: u64| {
             EventBuilder::new(Kind::EventDeletion, "")
-                .tag(Tag::custom(TagKind::custom("a"), [addr.as_str()]))
+                .tag(Tag::custom("a", [addr.as_str()]))
                 .custom_created_at(Timestamp::from_secs(secs))
-                .sign_with_keys(&k)
+                .finalize(&k)
                 .unwrap()
         };
 
@@ -2462,7 +2471,7 @@ mod tests {
         let k = keys();
         let ev = build_pack_event(&k, "myPack", Some(("title", "Mine")), None, None, &[("smile", "https://e.x/s.png")]);
         let pack = parse_pack_from_event(&ev, None).unwrap();
-        let built = super::build_pack_event(&pack).unwrap().sign_with_keys(&k).unwrap();
+        let built = super::build_pack_event(&pack).unwrap().finalize(&k).unwrap();
         let has_client = built.tags.iter().any(|t| {
             let s = t.as_slice();
             s.first().map(String::as_str) == Some("client") && s.get(1).map(String::as_str) == Some("vector")
@@ -2490,16 +2499,16 @@ mod tests {
     fn parse_pack_prefers_spec_tags_over_ditto() {
         let k = keys();
         let mut tags: Vec<Tag> = vec![
-            Tag::custom(TagKind::custom("d"), ["both"]),
-            Tag::custom(TagKind::custom("title"), ["SpecTitle"]),
-            Tag::custom(TagKind::custom("name"), ["DittoName"]),
-            Tag::custom(TagKind::custom("image"), ["spec.png"]),
-            Tag::custom(TagKind::custom("picture"), ["ditto.png"]),
-            Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+            Tag::custom("d", ["both"]),
+            Tag::custom("title", ["SpecTitle"]),
+            Tag::custom("name", ["DittoName"]),
+            Tag::custom("image", ["spec.png"]),
+            Tag::custom("picture", ["ditto.png"]),
+            Tag::custom("emoji", ["a", "https://e.x/a.png"]),
         ];
         tags.extend(std::iter::empty());
         let ev = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
-            .tags(tags).sign_with_keys(&k).unwrap();
+            .tags(tags).finalize(&k).unwrap();
         let pack = parse_pack_from_event(&ev, None).unwrap();
         assert_eq!(pack.title, "SpecTitle");
         assert_eq!(pack.image_url, "spec.png");
@@ -2510,10 +2519,10 @@ mod tests {
         let k = keys();
         let ev = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET), "")
             .tags(vec![
-                Tag::custom(TagKind::custom("title"), ["No D"]),
-                Tag::custom(TagKind::custom("emoji"), ["a", "https://e.x/a.png"]),
+                Tag::custom("title", ["No D"]),
+                Tag::custom("emoji", ["a", "https://e.x/a.png"]),
             ])
-            .sign_with_keys(&k).unwrap();
+            .finalize(&k).unwrap();
         assert!(parse_pack_from_event(&ev, None).is_none());
     }
 
@@ -2586,16 +2595,16 @@ mod tests {
         // Construct a synthetic naddr via nostr-sdk and verify our decoder
         // round-trips kind / pubkey / identifier.
         let k = keys();
-        let coord = nostr_sdk::nips::nip01::Coordinate {
+        let coord = nostr_sdk::prelude::nip01::Coordinate {
             kind: Kind::Custom(30030),
             public_key: k.public_key(),
             identifier: "trip".to_string(),
         };
-        let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+        let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
             coordinate: coord,
             relays: Vec::new(),
         };
-        let naddr = nostr_sdk::nips::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
+        let naddr = nostr_sdk::prelude::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
         let parsed = parse_naddr(&naddr).unwrap();
         assert_eq!(parsed.kind, 30030);
         assert_eq!(parsed.pubkey, k.public_key());
@@ -2605,16 +2614,16 @@ mod tests {
     #[test]
     fn parse_naddr_rejects_non_30030_kinds() {
         let k = keys();
-        let coord = nostr_sdk::nips::nip01::Coordinate {
+        let coord = nostr_sdk::prelude::nip01::Coordinate {
             kind: Kind::Custom(30023), // long-form article
             public_key: k.public_key(),
             identifier: "essay".to_string(),
         };
-        let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+        let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
             coordinate: coord,
             relays: Vec::new(),
         };
-        let naddr = nostr_sdk::nips::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
+        let naddr = nostr_sdk::prelude::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
         let err = parse_naddr(&naddr).unwrap_err();
         assert!(err.contains("expected kind 30030"),
             "expected kind-rejection error, got: {}", err);
@@ -2623,16 +2632,16 @@ mod tests {
     #[test]
     fn parse_naddr_strips_nostr_uri_prefix() {
         let k = keys();
-        let coord = nostr_sdk::nips::nip01::Coordinate {
+        let coord = nostr_sdk::prelude::nip01::Coordinate {
             kind: Kind::Custom(30030),
             public_key: k.public_key(),
             identifier: "prefixed".to_string(),
         };
-        let n19 = nostr_sdk::nips::nip19::Nip19Coordinate {
+        let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate {
             coordinate: coord,
             relays: Vec::new(),
         };
-        let naddr = nostr_sdk::nips::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
+        let naddr = nostr_sdk::prelude::nip19::Nip19::Coordinate(n19).to_bech32().unwrap();
         let with_prefix = format!("nostr:{}", naddr);
         let parsed = parse_naddr(&with_prefix).unwrap();
         assert_eq!(parsed.identifier, "prefixed");

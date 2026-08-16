@@ -32,11 +32,9 @@ async fn auto_mark_if_active(chat_id: &str, msg_id: &str) -> bool {
     if active.as_deref() != Some(chat_id) { return false; }
     // A swap can land while awaiting the STATE lock; re-check inside so we never write account A's
     // last_read into account B's freshly-swapped chat list/DB.
-    let session = vector_core::state::SessionGuard::capture();
 
     let slim = {
         let mut state = STATE.lock().await;
-        if !session.is_valid() { return false; }
         if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
             chat.last_read = vector_core::compact::encode_message_id(msg_id);
             state.get_chat(chat_id).map(|c| {
@@ -86,9 +84,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // pending OS notification is revoked, even when backgrounded. This hook runs in both the
             // foreground handler and the background-sync commit path.
             let chat_id = chat_id.to_string();
-            let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !session.is_valid() { return; }
+            vector_core::db::spawn_bound(async move {
                 crate::chat::mark_as_read_headless(&chat_id).await;
                 if let Some(handle) = TAURI_APP.get() {
                     let _ = commands::messaging::update_unread_counter(handle.clone()).await;
@@ -99,9 +95,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let chat_id = chat_id.to_string();
         let content = msg.content.clone();
         let msg_id = msg.id.clone();
-        let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        vector_core::db::spawn_bound(async move {
             // If the user is actively watching this chat, advance last_read
             // before the badge recount so the message never counts as unread.
             // The FE's own markAsRead still runs on the message_new event for
@@ -135,9 +129,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         if msg.mine {
             // Answered from another device: mark read + revoke any notification (see on_dm_received).
             let chat_id = chat_id.to_string();
-            let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !session.is_valid() { return; }
+            vector_core::db::spawn_bound(async move {
                 crate::chat::mark_as_read_headless(&chat_id).await;
                 if let Some(handle) = TAURI_APP.get() {
                     let _ = commands::messaging::update_unread_counter(handle.clone()).await;
@@ -150,9 +142,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             .map(|att| att.extension.clone())
             .unwrap_or_else(|| String::from("file"));
         let msg_id = msg.id.clone();
-        let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        vector_core::db::spawn_bound(async move {
             let marked = auto_mark_if_active(&chat_id, &msg_id).await;
             refresh_chat_unread(&chat_id, marked).await;
             // Check muted
@@ -201,9 +191,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let msg = msg.clone();
         // Snapshot the session BEFORE the spawn (multi-account rule 1): a swap can land before the
         // body runs, and auto_mark below writes last_read — guard it from landing in account B's DB.
-        let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        vector_core::db::spawn_bound(async move {
             // Advance last_read first if this is the chat the user is actively watching, so a message
             // in the open community never counts as unread on the badge recount below (mirrors the DM
             // path; without it the badge bumps to 1 and races the FE's markAsRead, leaving it stuck).
@@ -215,11 +203,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // re-delivering already-saved history pushes OLD events through this handler; by inner
             // timestamp they're stale, so skip the notification. They still surface + count via the
             // message_new emit above — only the SFX/OS-ping is muted, so nothing goes sticky.
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if msg.at.saturating_add(300_000) >= now_ms {
+            if vector_core::community::is_realtime_fresh(msg.at) {
                 crate::services::subscription_handler::show_community_notification(&chat_id, &msg).await;
             }
             if let Some(handle) = TAURI_APP.get() {
@@ -250,12 +234,10 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         invited_by: Option<&str>,
         invited_label: Option<&str>,
     ) {
-        let session = vector_core::state::SessionGuard::capture();
         let (chat_id, npub, event_id) = (chat_id.to_string(), npub.to_string(), event_id.to_string());
         let invited_by = invited_by.map(str::to_string);
         let invited_label = invited_label.map(str::to_string);
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        vector_core::db::spawn_bound(async move {
             crate::commands::community::apply_community_presence(
                 &chat_id, &npub, joined, &event_id, created_at,
                 invited_by.as_deref(), invited_label.as_deref(),
@@ -265,7 +247,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
 
     fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
         let (chat_id, npub) = (chat_id.to_string(), npub.to_string());
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let typers = {
                 let mut state = crate::STATE.lock().await;
                 state.update_typing_and_get_active(&chat_id, &npub, until)
@@ -288,7 +270,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         let (chat_id, npub, topic_id, event_id) =
             (chat_id.to_string(), npub.to_string(), topic_id.to_string(), event_id.to_string());
         let node_addr = node_addr.map(str::to_string);
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             match node_addr {
                 Some(addr) => handle_webxdc_peer_advertisement(&event_id, &topic_id, &addr, &npub, created_at, &chat_id).await,
                 None => handle_webxdc_peer_left(&event_id, &topic_id, &npub, created_at, &chat_id).await,
@@ -297,19 +279,16 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
     }
 
     fn on_community_self_removed(&self, community_id: &str) {
-        let session = vector_core::state::SessionGuard::capture();
         let community_id = community_id.to_string();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        vector_core::db::spawn_bound(async move {
             crate::commands::community::self_remove_from_community(&community_id, false).await;
         });
     }
 
     fn on_community_refreshed(&self, community_id: &str) {
-        let session = vector_core::state::SessionGuard::capture();
+        let session = vector_core::db::current_session();
         let community_id = community_id.to_string();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        vector_core::db::spawn_bound(async move {
             let id = vector_core::community::CommunityId(vector_core::simd::hex::hex_to_bytes_32(&community_id));
             match vector_core::db::community::community_protocol(&id).ok().flatten() {
                 Some(vector_core::community::ConcordProtocol::V2) => {

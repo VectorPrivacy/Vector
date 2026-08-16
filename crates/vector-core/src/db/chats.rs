@@ -59,7 +59,15 @@ impl SlimChatDB {
 
     /// Convert back to full Chat (messages loaded separately).
     pub fn to_chat(&self, interner: &mut NpubInterner) -> Chat {
-        let handles: Vec<u16> = self.participants.iter().map(|p| interner.intern(p)).collect();
+        let mut handles: Vec<u16> = self.participants.iter().map(|p| interner.intern(p)).collect();
+        // Self-heal DM rows persisted as bare stubs (participants '[]'): the id IS
+        // the counterparty, and participant-keyed lookups need it present.
+        if handles.is_empty()
+            && matches!(self.chat_type, ChatType::DirectMessage)
+            && self.id.starts_with("npub1")
+        {
+            handles.push(interner.intern(&self.id));
+        }
         let mut chat = Chat::new(self.id.clone(), self.chat_type.clone(), handles);
         chat.last_read = if self.last_read.is_empty() {
             [0u8; 32]
@@ -123,6 +131,21 @@ pub fn get_all_chats() -> Result<Vec<SlimChatDB>, String> {
 }
 
 /// Upsert a chat to the database.
+/// Clear a chat's read marker to never-read. The [`save_slim_chat`] upsert
+/// deliberately refuses to regress `last_read` to empty (a partially-hydrated
+/// STATE chat would otherwise wipe the stored position), so a DELIBERATE
+/// clear — Mark as Unread on a chat whose only message is the target — must
+/// come through here or it silently no-ops.
+pub fn clear_chat_last_read(chat_identifier: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE chats SET last_read = '' WHERE chat_identifier = ?1",
+        rusqlite::params![chat_identifier],
+    )
+    .map_err(|e| format!("clear_chat_last_read: {e}"))?;
+    Ok(())
+}
+
 pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
 
@@ -211,7 +234,7 @@ mod tests {
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
@@ -271,5 +294,51 @@ mod tests {
         let found = chats.iter().find(|c| c.id == channel_id)
             .expect("stub-created non-npub chat must survive get_all_chats");
         assert_eq!(found.chat_type, crate::ChatType::Community);
+    }
+
+    // Regression: a DM row stub-created by a message save (no prior chat row) must carry
+    // its counterparty — a bare '[]' roster boots into STATE participant-less, and every
+    // participant-keyed lookup (attachment downloads) misses forever after.
+    #[test]
+    fn stub_created_dm_chat_carries_its_counterparty() {
+        let (_tmp, _guard) = init_test_db();
+        let npub = "npub1stubcounterparty";
+        let _ = crate::db::id_cache::get_or_create_chat_id(npub).unwrap();
+
+        let chats = super::get_all_chats().unwrap();
+        let found = chats.iter().find(|c| c.id == npub).expect("stub DM row exists");
+        assert_eq!(found.chat_type, crate::ChatType::DirectMessage);
+        assert_eq!(found.participants, vec![npub.to_string()], "the DM's id IS its participant");
+    }
+
+    // Rows already persisted with an empty roster (pre-fix stubs) heal at load: the id
+    // is the counterparty, so to_chat re-derives it.
+    #[test]
+    fn to_chat_heals_bare_dm_participants() {
+        let slim = super::SlimChatDB {
+            id: "npub1baredmrow".to_string(),
+            chat_type: crate::ChatType::DirectMessage,
+            participants: vec![],
+            last_read: String::new(),
+            created_at: 1000,
+            metadata: crate::chat::ChatMetadata::default(),
+            muted: false,
+            wallpaper_path: String::new(),
+            wallpaper_ts: 0,
+            wallpaper_blur: 0,
+            wallpaper_dim: 50,
+            wallpaper_url: String::new(),
+            wallpaper_uploader: String::new(),
+        };
+        let mut interner = crate::compact::NpubInterner::new();
+        let chat = slim.to_chat(&mut interner);
+        assert!(chat.has_participant("npub1baredmrow", &interner), "bare DM roster heals from the id");
+
+        // A community row with no participants stays empty — only DMs derive from the id.
+        let mut community = slim.clone();
+        community.id = "aabbccddeeff00".to_string();
+        community.chat_type = crate::ChatType::Community;
+        let chat = community.to_chat(&mut interner);
+        assert!(chat.participants().is_empty(), "non-DM rosters are not invented");
     }
 }

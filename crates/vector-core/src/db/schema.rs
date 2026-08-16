@@ -131,6 +131,32 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 "#;
 
+/// Highest migration id this build knows how to apply.
+///
+/// **Bump this whenever you add a migration below.** A DB carrying anything
+/// above it was written by a newer Vector, so its schema holds changes this
+/// build cannot see and opening it corrupts data.
+///
+/// Leaving it behind is the one way the guard misfires: the new migration
+/// applies on first run, then this build reads its own database as newer and
+/// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
+/// `highest_migration_id_matches_the_runner` both catch that before release.
+pub const HIGHEST_MIGRATION_ID: u32 = 88;
+
+/// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
+///
+/// Nothing else reads the high-water mark: `schema_migrations` is a *set* of
+/// applied ids and every migration probes its own id, which is exactly why an
+/// older build slides past newer schema without noticing it exists.
+pub fn applied_migration_high_water(conn: &rusqlite::Connection) -> u32 {
+    conn.query_row("SELECT MAX(id) FROM schema_migrations", [], |row| {
+        row.get::<_, Option<u32>>(0)
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(0)
+}
+
 /// Check if a specific migration has already been applied
 pub fn migration_applied(conn: &rusqlite::Connection, migration_id: u32) -> bool {
     conn.query_row(
@@ -172,6 +198,16 @@ fn run_atomic_migration<F>(
 where
     F: FnOnce(&rusqlite::Transaction) -> Result<(), String>,
 {
+    // A migration above the constant would apply fine on first run, then be
+    // read as a downgrade on the next one and lock the user out of their own
+    // account. Fires on any debug run, so it lands long before a release even
+    // if nobody ran the test suite.
+    debug_assert!(
+        id <= HIGHEST_MIGRATION_ID,
+        "migration {id} exceeds HIGHEST_MIGRATION_ID ({HIGHEST_MIGRATION_ID}); bump the constant \
+         or this build will refuse the database it just wrote"
+    );
+
     // Check if this specific migration was already applied.
     if migration_applied(conn, id) {
         return Ok(());
@@ -1055,5 +1091,249 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         Ok(())
     })?;
 
+    // =========================================================================
+    // Migration 79: Per-npub ban history for phantom-member suppression
+    // =========================================================================
+    // CORD-02 §5 counts observation FORWARD of a member's latest Leave, Kick OR
+    // BAN. The banlist alone is a timeless set, so lifting it let a pre-ban Join
+    // (or old message) resurrect the npub as a member of a community they hold no
+    // key to. Armada folds this from live control history; Vector caches the
+    // banlist, so the per-npub mark has to persist alongside it.
+    run_atomic_migration(conn, 79, "Per-npub ban marks (phantom-member suppression)", |tx| {
+        // Presence-checked, not blind: a build that briefly carried this column in the
+        // CREATE TABLE too would leave a DB holding the column with the migration rolled
+        // back, and a bare ALTER then fails on every boot forever with no way out.
+        let present: i32 = tx
+            .query_row("SELECT COUNT(*) FROM pragma_table_info('communities') WHERE name='banlist_marks'", [], |r| r.get(0))
+            .map_err(|e| format!("migration 79: {}", e))?;
+        if present == 0 {
+            tx.execute(
+                "ALTER TABLE communities ADD COLUMN banlist_marks TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )
+            .map_err(|e| format!("migration 79: {}", e))?;
+        }
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 80: Attachment mirror URLs (BUD-04 fallbacks)
+    // =========================================================================
+    // NIP-17 / imeta `fallback` sources: the same ciphertext mirrored on other
+    // Blossom servers, tried in order when the primary URL dies. Space-joined
+    // (URLs cannot contain spaces); empty = no mirrors.
+    run_atomic_migration(conn, 80, "Attachment fallback URLs (Blossom mirrors)", |tx| {
+        tx.execute(
+            "ALTER TABLE attachments ADD COLUMN fallback_urls TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("migration 80: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 81: window index for the dedup-cache preload
+    // =========================================================================
+    // The preload reads processed_wrappers bounded by the reconcile cursors;
+    // without this index the bounded query still scans the full ledger.
+    run_atomic_migration(conn, 81, "processed_wrappers window index", |tx| {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_wrappers_window \
+             ON processed_wrappers(transport, wrapper_created_at)",
+            [],
+        )
+        .map_err(|e| format!("migration 81: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 82: parked Private-Channel key vends (CORD-03/05 §6)
+    // =========================================================================
+    // A grant's key vend can arrive before the control fold that proves the
+    // grant, so it parks here and is re-judged after every control follow.
+    // Durable rather than in-RAM by necessity: the vend rides a 24h NIP-40 wrap
+    // that relays delete, so a restart before the fold catches up would lose the
+    // only copy. One row per (community, channel) — the newest epoch wins, and a
+    // vend at or below the held epoch is superseded.
+    run_atomic_migration(conn, 82, "Parked private-channel key vends", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS pending_channel_keys (
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
+                channel_key  BLOB NOT NULL,
+                sender       TEXT NOT NULL,
+                received_at  INTEGER NOT NULL,
+                PRIMARY KEY (community_id, channel_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 82: {}", e))?;
+        Ok(())
+    })?;
+
+    // =========================================================================
+    // Migration 83: parked vends become CANDIDATES, not a single slot
+    // =========================================================================
+    // 82 keyed the table on (community, channel) and only replaced on a higher
+    // epoch. Parking is reachable by any npub that can gift-wrap us (the bundle
+    // self-certifies, and its inputs are public for a public community), so a
+    // stranger could pre-park a high-epoch row and make the genuine vend a silent
+    // no-op — the member simply stays keyless with no retry.
+    //
+    // Now every vend is its own row and the judge tries them all, so an
+    // unprovable row can never displace a provable one. Caps bound what an
+    // arbitrary sender can make us store (and decrypt on every follow pass).
+    run_atomic_migration(conn, 83, "Parked channel-key vends as candidates", |tx| {
+        tx.execute("DROP TABLE IF EXISTS pending_channel_keys", [])
+            .map_err(|e| format!("migration 83: {}", e))?;
+        tx.execute(
+            "CREATE TABLE pending_channel_keys (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                epoch        INTEGER NOT NULL,
+                channel_key  BLOB NOT NULL,
+                sender       TEXT NOT NULL,
+                received_at  INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 83: {}", e))?;
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pending_channel_keys_scope \
+             ON pending_channel_keys(community_id, channel_id)",
+            [],
+        )
+        .map_err(|e| format!("migration 83: {}", e))?;
+        Ok(())
+    })?;
+
+    // CORD-04 §7: one Pin List per channel — the folded head's RAW content
+    // (both self-describing forms), never a re-serialization, so republishing
+    // carries the exact bytes and the byte cap judges what the wire carried.
+    run_atomic_migration(conn, 84, "Per-channel pin lists", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_pins (
+                community_id TEXT NOT NULL,
+                channel_id   TEXT NOT NULL,
+                content      TEXT NOT NULL,
+                version      INTEGER NOT NULL,
+                PRIMARY KEY (community_id, channel_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 84: {}", e))?;
+        Ok(())
+    })?;
+
+    // Durable delete tombstones: a deleted message's row is GONE, so the ingest
+    // dedup can't refuse a wrap a relay re-serves after ignoring our NIP-09 —
+    // across a restart the in-session tombstone set is empty and the message
+    // resurrects. One row per deleted message id, forever.
+    run_atomic_migration(conn, 85, "Deleted-message tombstones", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS deleted_messages (
+                event_id   TEXT PRIMARY KEY,
+                deleted_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| format!("migration 85: {}", e))?;
+        Ok(())
+    })?;
+
+    // CORD-02 §2 control_root split: the Control Plane's held address
+    // (control_pk, encrypted hex) and the staff write secret (control_root,
+    // encrypted blob) per v2 community. Nullable — a legacy epoch has neither,
+    // a non-staff member holds only the address, and the v1 writer never
+    // names these columns.
+    run_atomic_migration(conn, 86, "Concord v2 control_root split columns", |tx| {
+        for (col, ddl) in [("control_pk", "TEXT"), ("control_root", "BLOB")] {
+            // ADD COLUMN is not idempotent; tolerate a re-run (duplicate column).
+            let sql = format!("ALTER TABLE communities ADD COLUMN {col} {ddl}");
+            if let Err(e) = tx.execute(&sql, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(format!("add communities.{col}: {msg}"));
+                }
+            }
+        }
+        Ok(())
+    })?;
+
+    // The NIP-77 fingerprint read selects `wrapper_id` for a whole transport,
+    // which `idx_processed_wrappers_window` can locate but not supply — so every
+    // row costs a table lookup, and asking for sorted rows costs a temp B-tree
+    // on top. Carrying `wrapper_id` in the index makes the read a covering scan
+    // that arrives in negentropy's own sort order, which is most of the cost of
+    // sealing a storage on a device that isn't a desktop.
+    run_atomic_migration(conn, 87, "Covering index for negentropy fingerprints", |tx| {
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_processed_wrappers_neg \
+             ON processed_wrappers(transport, wrapper_created_at, wrapper_id)",
+            [],
+        )
+        .map_err(|e| format!("migration 87: {}", e))?;
+
+        // `idx_processed_wrappers_window` is a strict prefix of the index above,
+        // and every reader of this table also wants `wrapper_id` — the one
+        // column it lacks. Keeping it would cost a second b-tree write per
+        // ingested wrapper to serve queries the wider index already covers.
+        tx.execute("DROP INDEX IF EXISTS idx_processed_wrappers_window", [])
+            .map_err(|e| format!("migration 87 (drop superseded index): {}", e))?;
+        Ok(())
+    })?;
+
+    run_atomic_migration(conn, 88, "Persist status custom-emoji tags", |tx| {
+        // Without this column the shortcode->URL pairs live only in memory,
+        // so every boot renders raw :shortcodes: until a relay answers the
+        // next status fetch — even when the emoji is cached on disk.
+        tx.execute(
+            "ALTER TABLE profiles ADD COLUMN status_emoji_tags TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| format!("migration 88: {}", e))?;
+        Ok(())
+    })?;
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HIGHEST_MIGRATION_ID;
+
+    /// Parses this very file so the constant cannot drift from `run_migrations`.
+    /// Without it, adding a migration and forgetting the bump would silently
+    /// re-open the downgrade hole the constant exists to close.
+    #[test]
+    fn highest_migration_id_matches_the_runner() {
+        let src = include_str!("schema.rs");
+        let mut highest = 0u32;
+        let mut seen = 0usize;
+
+        for (at, _) in src.match_indices("run_atomic_migration(") {
+            let tail = src[at + "run_atomic_migration(".len()..].trim_start();
+            // Skips this test's own mention of the name, which is not a call.
+            let Some(args) = tail.strip_prefix("conn,") else {
+                continue;
+            };
+            let id: String = args
+                .trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if let Ok(id) = id.parse::<u32>() {
+                seen += 1;
+                highest = highest.max(id);
+            }
+        }
+
+        assert!(seen > 0, "parsed no migrations; the call shape must have changed");
+        assert_eq!(
+            HIGHEST_MIGRATION_ID, highest,
+            "bump HIGHEST_MIGRATION_ID to {highest} when adding a migration"
+        );
+    }
 }

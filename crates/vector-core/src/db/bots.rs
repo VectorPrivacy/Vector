@@ -75,7 +75,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)

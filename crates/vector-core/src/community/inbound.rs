@@ -4,7 +4,7 @@
 //! conversion is unit-testable without any global state.
 
 use nostr_sdk::prelude::{Event, PublicKey};
-use nostr_sdk::ToBech32;
+use nostr_sdk::prelude::ToBech32;
 
 use super::envelope::{open_message_multi, OpenedMessage};
 use super::Channel;
@@ -25,7 +25,7 @@ use crate::types::Message;
 /// happened at the transport layer; this is purely the bridge to the shared content parser.
 fn concord_rumor(
     opened: &OpenedMessage,
-    kind: nostr_sdk::Kind,
+    kind: nostr_sdk::prelude::Kind,
     my_pubkey: &PublicKey,
 ) -> (crate::rumor::RumorEvent, crate::rumor::RumorContext) {
     use crate::rumor::{ConversationType, RumorContext, RumorEvent};
@@ -49,7 +49,7 @@ fn concord_rumor(
 
 pub fn build_message(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Message {
     use crate::rumor::{process_rumor, RumorProcessingResult};
-    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::Kind::PrivateDirectMessage, my_pubkey);
+    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::prelude::Kind::PrivateDirectMessage, my_pubkey);
     let mut msg = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
         Ok(RumorProcessingResult::TextMessage(m)) => m,
         // A 3300 is always a caption/text message, so this never fires — but never drop a message on
@@ -329,9 +329,17 @@ fn apply_typing(opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<Incomin
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    // A typing signal is live for 30s from ITS OWN send time, never the wall
+    // clock — relay-to-relay sync replays stored months-old signals, and a
+    // `now + 30` here would paint a fresh bubble for every one of them.
+    // (v2 typing rides an ephemeral wrap kind; v1's 3311 is stored plane data.)
+    let until = opened.created_at.as_secs() + 30;
+    if until <= now || opened.created_at.as_secs() > now + 30 {
+        return None;
+    }
     Some(IncomingEvent::Typing {
         npub: opened.author.to_bech32().ok()?,
-        until: now + 30,
+        until,
     })
 }
 
@@ -445,7 +453,7 @@ pub fn process_channel_batch(
 /// reaction's inner id, so local + relay echoes collapse) is Concord-side.
 fn apply_reaction(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
     use crate::rumor::{process_rumor, RumorProcessingResult};
-    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::Kind::Reaction, my_pubkey);
+    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::prelude::Kind::Reaction, my_pubkey);
     let reaction = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
         Ok(RumorProcessingResult::Reaction(r)) => r,
         _ => return None,
@@ -472,7 +480,7 @@ fn apply_reaction(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &Pub
 /// (only the original author may edit their own message) + the canonical edit applier are Concord-side.
 fn apply_edit(state: &mut ChatState, opened: &OpenedMessage, my_pubkey: &PublicKey) -> Option<IncomingEvent> {
     use crate::rumor::{process_rumor, RumorProcessingResult};
-    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::Kind::from(event_kind::MESSAGE_EDIT), my_pubkey);
+    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::prelude::Kind::from(event_kind::MESSAGE_EDIT), my_pubkey);
     let (target_id, new_content, edited_at, emoji_tags, edit_event) = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
         Ok(RumorProcessingResult::Edit { message_id, new_content, edited_at, emoji_tags, event }) => (message_id, new_content, edited_at, emoji_tags, event),
         _ => return None,
@@ -540,7 +548,7 @@ fn apply_delete(state: &mut ChatState, opened: &OpenedMessage, channel: &Channel
     // Target PARSED by the shared deletion parser (3305→kind 5; rejects an ambiguous multi-`e` target).
     // The author-delete vs moderation-hide AUTHORITY decision below stays Concord-side — it reads the
     // synced roster, which the parser knows nothing about, and never mutates consensus.
-    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::Kind::EventDeletion, my_pubkey);
+    let (rumor, ctx) = concord_rumor(opened, nostr_sdk::prelude::Kind::EventDeletion, my_pubkey);
     let target_id = match process_rumor(rumor, ctx, &crate::db::get_download_dir()) {
         Ok(RumorProcessingResult::DeletionRequest { target_event_id }) => target_event_id,
         _ => return None,
@@ -646,6 +654,7 @@ pub fn route_incoming(
 
 #[cfg(test)]
 mod tests {
+    use nostr_sdk::prelude::FinalizeEvent;
     use super::*;
     use crate::community::derive::channel_pseudonym;
     use std::collections::HashMap;
@@ -665,13 +674,13 @@ mod tests {
         admin: &PublicKey,
     ) -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>, Channel, AuthorityCitation) {
         use crate::community::roles::{CommunityRoles, MemberGrant, Role};
-        use nostr_sdk::{JsonUtil, ToBech32};
+        use nostr_sdk::prelude::ToBech32;
         let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         crate::db::close_database();
         let tmp = tempfile::tempdir().unwrap();
         let account = owner.public_key().to_bech32().unwrap();
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         crate::state::MY_SECRET_KEY.store_from_keys(owner, &[]);
@@ -681,7 +690,7 @@ mod tests {
         let cid = community.id.to_hex();
         community.owner_attestation = Some(
             crate::community::owner::build_owner_attestation_unsigned(owner.public_key(), &cid)
-                .sign_with_keys(owner)
+                .finalize(owner)
                 .unwrap()
                 .as_json(),
         );
@@ -711,7 +720,7 @@ mod tests {
         let inner = build_inner_full(
             author.public_key(), &channel.id, channel.epoch, event_kind::COMMUNITY_DELETE, "", ms, Some(target), &[], &extra,
         )
-        .sign_with_keys(author)
+        .finalize(author)
         .unwrap();
         seal_with_signed_inner(&Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch).unwrap()
     }
@@ -740,7 +749,7 @@ mod tests {
     fn seal_typed(author: &Keys, kind: u16, content: &str, ms: u64, target: &str) -> Event {
         let c = test_channel();
         let inner = build_inner_typed(author.public_key(), &c.id, c.epoch, kind, content, ms, Some(target), &[])
-            .sign_with_keys(author)
+            .finalize(author)
             .unwrap();
         seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
     }
@@ -795,7 +804,7 @@ mod tests {
             &[],
             &[crate::bot_interface::bot_tag(&bot.public_key())],
         )
-        .sign_with_keys(&alice)
+        .finalize(&alice)
         .unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap();
 
@@ -833,7 +842,7 @@ mod tests {
         // Bob seals a reaction under channel B that points at A's message.
         let inner = build_inner_typed(
             bob.public_key(), &chan_b.id, chan_b.epoch, event_kind::COMMUNITY_REACTION, "🔥", 2, Some(&target), &[],
-        ).sign_with_keys(&bob).unwrap();
+        ).finalize(&bob).unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &chan_b.key, &chan_b.id, chan_b.epoch).unwrap();
         // Opened under channel B, but the target is in A → rejected, nothing applied.
         assert!(
@@ -860,12 +869,13 @@ mod tests {
             extension: ext.into(), name: n.into(), url: format!("https://b/{n}"),
             path: String::new(), size: 9, img_meta: None, downloading: false, downloaded: false,
             webxdc_topic: None, group_id: None, original_hash: Some("a".repeat(64)),
+            fallback_urls: Vec::new(),
         };
         let imetas = vec![attachment_to_imeta(&mk("a.png", "png")), attachment_to_imeta(&mk("b.txt", "txt"))];
         let inner = build_inner_full(
             alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_MESSAGE,
             "caption", 5, None, &[], &imetas,
-        ).sign_with_keys(&alice).unwrap();
+        ).finalize(&alice).unwrap();
         let outer = seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap();
 
         match process_incoming(&mut state, &outer, &c, &bob.public_key()) {
@@ -1093,7 +1103,7 @@ mod tests {
         // A paged-out target (in the DB, not resident in memory) is authorized against its REAL author:
         // an admin can hide a regular member's paged-out message, but NOT the owner's (owner-protection
         // holds even when the message is out of the in-memory window).
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let owner = Keys::generate();
         let admin = Keys::generate(); // granted MANAGE_MESSAGES
         let member = Keys::generate();
@@ -1152,7 +1162,7 @@ mod tests {
         let inner = build_inner_full(
             author.public_key(), &channel.id, channel.epoch, event_kind::COMMUNITY_KICK, target_hex, ms, None, &[], &extra,
         )
-        .sign_with_keys(author)
+        .finalize(author)
         .unwrap();
         seal_with_signed_inner(&Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch).unwrap()
     }
@@ -1182,7 +1192,7 @@ mod tests {
 
     #[test]
     fn cited_admin_kick_of_other_member_is_a_leave() {
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let owner = Keys::generate();
         let admin = Keys::generate();
         let member = Keys::generate();
@@ -1261,14 +1271,14 @@ mod tests {
     #[test]
     fn webxdc_signals_parse_ad_and_left_and_reject_garbage() {
         use crate::stored_event::event_kind;
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let mut state = ChatState::new();
         let alice = Keys::generate();
         let c = test_channel();
         let viewer = Keys::generate();
         let mk = |content: &str, ms: u64| {
             let inner = build_inner_typed(alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_WEBXDC, content, ms, None, &[])
-                .sign_with_keys(&alice).unwrap();
+                .finalize(&alice).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
         };
         let topic = crate::webxdc::mint_topic_id("game-hash", "sender");
@@ -1312,36 +1322,37 @@ mod tests {
     #[test]
     fn typing_indicator_parses_drops_own_echo_and_rejects_garbage() {
         use crate::stored_event::event_kind;
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         let mut state = ChatState::new();
         let alice = Keys::generate();
         let c = test_channel();
         let viewer = Keys::generate();
         let mk = |content: &str, ms: u64| {
             let inner = build_inner_typed(alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_TYPING, content, ms, None, &[])
-                .sign_with_keys(&alice).unwrap();
+                .finalize(&alice).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
         };
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
 
-        // A "typing" signal from another member surfaces, attributed to the inner author, with a
-        // receiver-computed near-future `until` (not the sender's clock).
-        match process_incoming(&mut state, &mk("typing", 1), &c, &viewer.public_key()) {
+        // A FRESH "typing" signal from another member surfaces, attributed to the inner
+        // author, expiring ~30s after ITS OWN send time (never the receiver's clock —
+        // relay backfill replays stored old signals).
+        match process_incoming(&mut state, &mk("typing", now * 1000), &c, &viewer.public_key()) {
             Some(IncomingEvent::Typing { npub, until }) => {
                 assert_eq!(npub, alice.public_key().to_bech32().unwrap(), "typer is the inner author");
-                assert!(until >= now && until <= now + 31, "until is receiver-computed (~now + 30s)");
+                assert!(until >= now && until <= now + 31, "until = signal send time + 30s");
             }
             _ => panic!("expected a typing indicator"),
         }
 
         // Own echo is dropped — we never show ourselves typing.
         assert!(
-            process_incoming(&mut state, &mk("typing", 2), &c, &alice.public_key()).is_none(),
+            process_incoming(&mut state, &mk("typing", now * 1000), &c, &alice.public_key()).is_none(),
             "own typing signal must be ignored"
         );
 
         // Wrong content (a 3311 carrying anything but "typing") is rejected.
-        assert!(process_incoming(&mut state, &mk("nope", 3), &c, &viewer.public_key()).is_none());
+        assert!(process_incoming(&mut state, &mk("nope", now * 1000), &c, &viewer.public_key()).is_none());
     }
 
     #[test]
@@ -1353,7 +1364,7 @@ mod tests {
         let viewer = Keys::generate();
         let mk = |content: &str, ms: u64| {
             let inner = build_inner_typed(alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_PRESENCE, content, ms, None, &[])
-                .sign_with_keys(&alice).unwrap();
+                .finalize(&alice).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &c.key, &c.id, c.epoch).unwrap()
         };
         match process_incoming(&mut state, &mk("join", 1), &c, &viewer.public_key()) {
@@ -1406,7 +1417,7 @@ mod tests {
         let leave_ms = crate::db::community::community_created_at_ms(&cid_bytes).unwrap_or(0) + 10_000;
         let leave = {
             let inner = build_inner_typed(owner.public_key(), &channel.id, channel.epoch, event_kind::COMMUNITY_PRESENCE, "leave", leave_ms, None, &[])
-                .sign_with_keys(&owner).unwrap();
+                .finalize(&owner).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch).unwrap()
         };
         match process_incoming(&mut state, &leave, &channel, &owner.public_key()) {
@@ -1419,7 +1430,7 @@ mod tests {
     #[test]
     fn leave_presence_authored_by_another_npub_stays_a_plain_leave() {
         use crate::stored_event::event_kind;
-        use nostr_sdk::ToBech32;
+        use nostr_sdk::prelude::ToBech32;
         // A leave by SOMEONE ELSE is just a member-list departure, NOT a self-removal.
         let owner = Keys::generate();
         let admin = Keys::generate();
@@ -1428,7 +1439,7 @@ mod tests {
         let mut state = ChatState::new();
         let leave = {
             let inner = build_inner_typed(other.public_key(), &channel.id, channel.epoch, event_kind::COMMUNITY_PRESENCE, "leave", 2, None, &[])
-                .sign_with_keys(&other).unwrap();
+                .finalize(&other).unwrap();
             seal_with_signed_inner(&Keys::generate(), &inner, &channel.key, &channel.id, channel.epoch).unwrap()
         };
         // LOCAL viewer is the owner; the leave is `other`'s → plain Presence{joined:false}.
@@ -1489,7 +1500,7 @@ mod tests {
 
         // A banned author's PRESENCE is dropped too (the anti-memberlist must hide them entirely).
         let pres_inner = build_inner_typed(alice.public_key(), &c.id, c.epoch, event_kind::COMMUNITY_PRESENCE, "join", 2, None, &[])
-            .sign_with_keys(&alice).unwrap();
+            .finalize(&alice).unwrap();
         let pres = seal_with_signed_inner(&Keys::generate(), &pres_inner, &c.key, &c.id, c.epoch).unwrap();
         assert!(process_incoming(&mut state, &pres, &c, &bob.public_key()).is_none(), "banned presence dropped");
 
@@ -1633,7 +1644,7 @@ mod tests {
         use nostr_sdk::prelude::{EventId, Timestamp, Tags};
         let author = Keys::generate();
         let opened = OpenedMessage {
-            message_id: EventId::all_zeros(),
+            message_id: EventId::from_byte_array([0u8; 32]),
             author: author.public_key(),
             content: "no ms".into(),
             channel_id: ChannelId([1u8; 32]),
@@ -1643,9 +1654,35 @@ mod tests {
             kind: 3300,
             attachments: vec![],
             citation: None,
-            wrapper_id: EventId::all_zeros(),
+            wrapper_id: EventId::from_byte_array([0u8; 32]),
             tags: Tags::new(),
         };
         assert_eq!(build_message(&opened, &author.public_key()).at, 1_500_000);
+    }
+
+    // Relay-to-relay sync replays STORED old 3311s (a fresh relay backfilling from
+    // an established one floods months of them); a typing bubble must expire from
+    // the signal's own send time, never paint fresh off the wall clock.
+    #[test]
+    fn replayed_old_typing_signals_are_dropped() {
+        let author = Keys::generate();
+        let me = Keys::generate();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+
+        let fresh = opened_from(&author, "typing", now_ms);
+        match apply_typing(&fresh, &me.public_key()) {
+            Some(IncomingEvent::Typing { until, .. }) => {
+                assert!(until > now_ms / 1000, "a live signal stays visible");
+                assert!(until <= now_ms / 1000 + 31, "expiry derives from the signal, not the clock");
+            }
+            _ => panic!("fresh signal must show typing"),
+        }
+
+        let replayed = opened_from(&author, "typing", now_ms - 3_600_000);
+        assert!(apply_typing(&replayed, &me.public_key()).is_none(), "an hour-old replay never paints");
+
+        let future = opened_from(&author, "typing", now_ms + 600_000);
+        assert!(apply_typing(&future, &me.public_key()).is_none(), "future-dated junk never pins a bubble");
     }
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-biometric-login"
+description = "Enables the biometric_login command without any pre-configured scope."
+commands.allow = ["biometric_login"]
+
+[[permission]]
+identifier = "deny-biometric-login"
+description = "Denies the biometric_login command without any pre-configured scope."
+commands.deny = ["biometric_login"]

@@ -681,6 +681,16 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
                     <img src="${imgSrc}" class="file-preview-image" alt="Preview">
                 </div>
             `;
+            // The asset protocol serves only its scoped dirs — a file pasted from a
+            // clipboard manager or dragged from an arbitrary folder is refused and
+            // the img errors. Fall back to an inline (image-only, size-capped)
+            // backend read so the thumbnail still renders.
+            const previewImg = contentArea.querySelector('.file-preview-image');
+            previewImg.onerror = async () => {
+                previewImg.onerror = null;
+                try { previewImg.src = await invoke('read_image_preview', { path: filepath }); }
+                catch (_) { /* leave the browser's broken-image state; Send still works */ }
+            };
         }
         // Add spoiler toggle to whichever image container was created
         const imgCont = contentArea.querySelector('.file-preview-image-container');

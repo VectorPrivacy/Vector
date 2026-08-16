@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-enable-encryption-biometric"
+description = "Enables the enable_encryption_biometric command without any pre-configured scope."
+commands.allow = ["enable_encryption_biometric"]
+
+[[permission]]
+identifier = "deny-enable-encryption-biometric"
+description = "Denies the enable_encryption_biometric command without any pre-configured scope."
+commands.deny = ["enable_encryption_biometric"]

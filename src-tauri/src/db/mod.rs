@@ -35,7 +35,6 @@ pub use miniapps::{
 // ID cache — delegates to vector-core
 pub use vector_core::db::id_cache::{
     get_chat_id_by_identifier, get_or_create_chat_id,
-    clear_id_caches,
 };
 pub async fn preload_id_caches() -> Result<(), String> {
     vector_core::db::id_cache::preload_id_caches()
@@ -56,7 +55,8 @@ pub async fn get_messages_around(chat_id: &str, anchor_id: &str, before: usize, 
 }
 // Wrapper tracking — sync functions re-exported directly
 pub use vector_core::db::wrappers::{
-    save_processed_wrapper, load_processed_wrappers, load_negentropy_items,
+    save_processed_wrapper, load_processed_wrappers, load_processed_wrappers_since, load_negentropy_items,
+    load_negentropy_items_since,
 };
 pub async fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
     vector_core::db::wrappers::load_recent_wrapper_ids(days)

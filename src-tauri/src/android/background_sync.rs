@@ -16,10 +16,11 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::{NOSTR_CLIENT, MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
+use crate::{MY_SECRET_KEY, ENCRYPTION_KEY, set_my_public_key};
 use vector_core::state::set_nostr_client;
 use crate::commands::relays::DEFAULT_RELAYS;
 use crate::services::event_handler::handle_event_with_context;
+use vector_core::ClientRelayExt;
 
 /// Log to Android logcat via NDK. println!/eprintln! go to /dev/null on Android.
 fn logcat(msg: &str) {
@@ -402,7 +403,7 @@ fn run_standalone_sync_loop(data_dir: &str) {
             // standalone one, so nativeOnResume can restore it (and keep the notification loop and all
             // future subscriptions on a single live client).
             if ACTIVITY_EVER_CREATED.load(Ordering::Acquire) {
-                if let Some(fg) = NOSTR_CLIENT.read().unwrap().as_ref().cloned() {
+                if let Some(fg) = vector_core::state::nostr_client() {
                     *PRESWAP_FOREGROUND_CLIENT.lock().unwrap() = Some(fg);
                 }
             }
@@ -414,17 +415,25 @@ fn run_standalone_sync_loop(data_dir: &str) {
             }
         }
 
-        // Subscribe to GiftWraps addressed to us (DMs, files)
-        // limit(0) = only new events going forward (real-time streaming)
+        // Subscribe to GiftWraps addressed to us (DMs, files).
+        // limit(0) = only new events going forward — but a relay that
+        // mishandles it (or a reconnect re-REQ) can replay stored history,
+        // and the locked-account arm below has no ledger to dedup against
+        // across service restarts. The `since` bound caps any replay at the
+        // NIP-59 backdating window instead of the whole mailbox.
+        let sub_since = nostr_sdk::prelude::Timestamp::now()
+            .as_secs()
+            .saturating_sub(2 * 24 * 3600);
         let giftwrap_filter = Filter::new()
             .pubkey(my_public_key)
             .kind(Kind::GiftWrap)
+            .since(nostr_sdk::prelude::Timestamp::from_secs(sub_since))
             .limit(0);
 
-        let gift_sub_id = match client.subscribe(giftwrap_filter, None).await {
+        let gift_sub_id = match client.subscribe(giftwrap_filter).await {
             Ok(output) => {
                 logcat("Live GiftWrap subscription active");
-                output.val
+                output.value
             }
             Err(e) => {
                 logcat(&format!("Failed to subscribe: {:?}", e));
@@ -441,10 +450,61 @@ fn run_standalone_sync_loop(data_dir: &str) {
         // Spawn a stop-checker task that disconnects the client when stop is signaled.
         // Uses Notify for instant zero-cost wakeup instead of polling.
         let client_for_stop = client.clone();
+        // spawn-detached: Android background client lifecycle — stops whichever client is live.
         tokio::spawn(async move {
             STOP_NOTIFY.notified().await;
             logcat("Stop signal received, disconnecting client...");
             client_for_stop.disconnect().await;
+        });
+
+        // Reconnect driver. Pool auto-reconnect is off everywhere by design
+        // (`add_managed_relay`), and this process has no reconcile loop — so without
+        // this, one dropped socket leaves bg-sync deaf until the service restarts,
+        // and mobile drops sockets constantly (doze, cell handoff, Tor circuit death).
+        //
+        // Polls the stop flag rather than awaiting STOP_NOTIFY: `notify_one` wakes a
+        // single waiter, so awaiting it here could steal the signal from the
+        // stop-checker above and leave the client connected forever.
+        // Covers BOTH clients. In full-app mode this standalone client replaced the
+        // foreground one as the global, but the foreground client is what still holds
+        // the Concord subscriptions: those match by author on the community planes,
+        // while this client only subscribes to gift wraps p-tagged to us, so community
+        // traffic can never arrive here. The stashed client is invisible to the
+        // reconcile loop (which resolves the *global* client), so if nobody reconnects
+        // it, a soft-backgrounded app silently stops receiving community messages.
+        let client_for_reconnect = client.clone();
+        // spawn-detached: resolves the live global client by design; see the comment above.
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
+                    return;
+                }
+                // Clone out of the std mutex — never hold it across an await.
+                let stashed = PRESWAP_FOREGROUND_CLIENT.lock().ok().and_then(|g| g.clone());
+                let mut pools = vec![client_for_reconnect.clone()];
+                pools.extend(stashed);
+
+                for pool in pools {
+                    for (url, relay) in pool.relays().all().await {
+                        if !matches!(relay.status(), RelayStatus::Terminated | RelayStatus::Sleeping) {
+                            continue;
+                        }
+                        // Re-check immediately before acting so we can't resurrect a socket
+                        // the stop-checker just closed.
+                        if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        logcat(&format!("Background: reconnecting dropped relay {}", url));
+                        let _ = relay
+                            .try_connect()
+                            .timeout(vector_core::relay_connect_timeout(
+                                std::time::Duration::from_secs(10),
+                            ))
+                            .await;
+                    }
+                }
+            }
         });
 
         // Track seen event IDs to deduplicate across relays
@@ -454,37 +514,39 @@ fn run_standalone_sync_loop(data_dir: &str) {
 
         // Live event handler — runs until stop signal or disconnect.
         // Routes GiftWrap events through the DM/file handler for full state consistency.
+        // 0.45 removed `handle_notifications`; drive the stream directly.
         let client_for_handler = client.clone();
-        let result = client.handle_notifications(move |notification| {
+        let mut notifications = client.notifications();
+        while let Some(notification) = notifications.next().await {
             let client = client_for_handler.clone();
             let seen = seen_events.clone();
             let gift_id = gift_sub_id.clone();
 
-            async move {
+            {
                 if STOP_STANDALONE_SYNC.load(Ordering::SeqCst) {
-                    return Ok(true); // Stop
+                    break; // Stop
                 }
 
                 // Relay OKs feed the send pipeline: an OK that outlives the
                 // per-attempt wait still confirms delivery, and can rescue a
                 // message already marked Failed.
-                if let RelayPoolNotification::Message {
-                    message: nostr_sdk::RelayMessage::Ok { event_id, status, .. }, ..
-                } = &notification {
-                    vector_core::sending::note_relay_ok(event_id, *status);
+                if let ClientNotification::Message { message, .. } = &notification {
+                    if let nostr_sdk::prelude::RelayMessage::Ok { event_id, status, .. } = &**message {
+                        vector_core::sending::note_relay_ok(event_id, *status);
+                    }
                 }
 
-                if let RelayPoolNotification::Event { event, subscription_id, .. } = notification {
+                if let ClientNotification::Event { event, subscription_id, .. } = notification {
                     // Route by subscription
                     let is_gift = subscription_id == gift_id;
 
                     if !is_gift {
-                        return Ok(false);
+                        continue;
                     }
 
                     // Deduplicate across relays
                     if !seen.lock().unwrap().insert(event.id) {
-                        return Ok(false);
+                        continue;
                     }
 
                     if can_decrypt {
@@ -493,8 +555,23 @@ fn run_standalone_sync_loop(data_dir: &str) {
                             (*event).clone(), true, &client, my_public_key
                         ).await;
                     } else {
-                        // Encrypted account — can't decrypt, but we know something arrived
-                        post_notification_jni("Vector", "You have a new message", None, None, None, None, None);
+                        // Encrypted account — can't decrypt, but we know something
+                        // arrived. THROTTLED: without a ledger this arm can't tell
+                        // new mail from a relay's replay, and the Kotlin side
+                        // collapses these into one row — re-posting faster than
+                        // once per window is pure churn.
+                        const LOCKED_NOTIFY_GAP_SECS: u64 = 30;
+                        static LAST_LOCKED_NOTIFY: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+                        let last = LAST_LOCKED_NOTIFY.load(Ordering::Relaxed);
+                        if now.saturating_sub(last) >= LOCKED_NOTIFY_GAP_SECS
+                            && LAST_LOCKED_NOTIFY
+                                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                                .is_ok()
+                        {
+                            post_notification_jni("Vector", "You have new messages", None, None, None, None, None);
+                        }
                     }
 
                     // Cap the seen set to prevent unbounded memory growth
@@ -504,14 +581,9 @@ fn run_standalone_sync_loop(data_dir: &str) {
                     }
                 }
 
-                Ok(false) // Continue listening
             }
-        }).await;
-
-        match &result {
-            Ok(_) => logcat("handle_notifications returned Ok"),
-            Err(e) => logcat(&format!("handle_notifications returned Err: {:?}", e)),
         }
+        logcat("notification stream ended");
 
         // Clean up: stop the nostr client first, then the Tor service.
         // The TorService was spawned on this transient runtime; if we let
@@ -613,13 +685,9 @@ async fn bg_connect_single_relay(client: &Client, data_dir: &str) -> Result<(), 
     }
 
     // Try each relay until one connects successfully.
-    // Use pool().add_relay with tor_aware_relay_options — `client.add_relay()`
-    // does NOT inherit `ClientOptions::connection`, so without this the bg
-    // sync connects direct over clearnet on Tor-enabled accounts.
     for url in &candidates {
         logcat(&format!("Background: trying relay {}", url));
-        let opts = vector_core::tor_aware_relay_options(RelayOptions::new());
-        if let Err(e) = client.pool().add_relay(url.as_str(), opts).await {
+        if let Err(e) = client.add_managed_relay(url.as_str()).await {
             logcat(&format!("Failed to add relay {}: {:?}", url, e));
             continue;
         }
@@ -750,8 +818,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         logcat(&format!("Encrypted account — read-only mode for {}...",
             &npub_name[..20.min(npub_name.len())]));
 
-        let client = Client::builder()
-            .opts(vector_core::nostr_client_options())
+        let client = vector_core::nostr_client_builder()
             .build();
         bg_connect_single_relay(&client, data_dir).await?;
 
@@ -797,9 +864,7 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
             logcat(&format!("Bootstrapped NIP-55 offline client for {}...",
                 &npub_name[..20.min(npub_name.len())]));
 
-            let client = Client::builder()
-                .signer(vector_core::Nip55Signer::new(my_public_key))
-                .opts(vector_core::nostr_client_options())
+            let client = vector_core::nostr_client_builder()
                 .build();
             bg_connect_single_relay(&client, data_dir).await?;
 
@@ -825,12 +890,9 @@ async fn bootstrap_client(data_dir: &str) -> Result<(Client, PublicKey, bool, Op
         logcat(&format!("Bootstrapped client for {}...",
             &my_public_key.to_bech32().unwrap_or_default()[..20.min(my_public_key.to_bech32().unwrap_or_default().len())]));
 
-        let public_key_for_signer = keys.public_key();
         MY_SECRET_KEY.store_from_keys(&keys, &[&ENCRYPTION_KEY]);
 
-        let client = Client::builder()
-            .signer(vector_core::GuardedSigner::new(public_key_for_signer))
-            .opts(vector_core::nostr_client_options())
+        let client = vector_core::nostr_client_builder()
             .build();
 
         bg_connect_single_relay(&client, data_dir).await?;

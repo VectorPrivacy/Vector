@@ -137,6 +137,22 @@ impl MiniAppPackage {
 
     /// Load Mini App info from bytes (in-memory, no file needed)
     /// Returns (manifest, icon_bytes)
+    /// The opener's gates applied to raw bytes BEFORE a download is cached:
+    /// the zip must carry an index.html and fit the same ceiling `load`
+    /// enforces — otherwise the cache latches a package that can never open.
+    pub fn validate_bytes_openable(bytes: &[u8]) -> Result<(), Error> {
+        if bytes.len() > 500 * 1024 * 1024 {
+            return Err(Error::InvalidPackage(format!(
+                "File too large ({} MB)", bytes.len() / (1024 * 1024)
+            )));
+        }
+        let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+        if resolve_entry_ci(&archive, "index.html").is_none() {
+            return Err(Error::InvalidPackage("Missing index.html".to_string()));
+        }
+        Ok(())
+    }
+
     pub fn load_info_from_bytes(bytes: &[u8], fallback_name: &str) -> Result<(MiniAppManifest, Option<Vec<u8>>), Error> {
         use std::io::Cursor;
         
@@ -332,7 +348,7 @@ impl MiniAppsState {
     /// Drop the account-scoped realtime lobby state (session npubs + cached peer addrs).
     /// Called from the session-swap teardown — the maps are keyed by game topic and hold
     /// the OLD account's players/addresses. Instances/channels are left to their own
-    /// window lifecycle; the SessionGuard checks on their send paths bail post-swap.
+    /// window lifecycle; their send paths resolve the account they were opened under.
     pub async fn clear_account_scoped(&self) {
         self.session_peers.write().await.clear();
         self.peer_addrs.write().await.clear();

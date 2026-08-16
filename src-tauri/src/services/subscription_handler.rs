@@ -62,15 +62,30 @@ pub(crate) async fn subscribe_self_sync() {
         .identifiers([
             vector_core::community::list::COMMUNITY_LIST_D_TAG.to_string(),
             vector_core::community::invite_list::INVITE_LIST_D_TAG.to_string(),
+            vector_core::pinned_chats::PINNED_D_TAG.to_string(),
+            vector_core::synced_prefs::BLOCKS_D_TAG.to_string(),
+            vector_core::synced_prefs::MUTES_D_TAG.to_string(),
+            vector_core::synced_prefs::NICKNAMES_D_TAG.to_string(),
         ]);
-    match client.subscribe(self_lists_filter, None).await {
-        Ok(out) => new_ids.push(out.val),
+    match client.subscribe(self_lists_filter).await {
+        Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] self-lists subscribe failed: {:?}", e),
+    }
+    // v2 Community List (addressable kind 33302, CORD-02 §8 — one event per fragment).
+    // Its own kind, so it needs its own filter — v1's list is a d-tagged 30078 above.
+    // Without this a v2 join/leave only reached the other devices on their next BOOT,
+    // while v1 had been instant since it shipped.
+    let v2_list_filter = Filter::new()
+        .author(my_pk)
+        .kind(Kind::Custom(vector_core::community::v2::kind::COMMUNITY_LIST_FRAG));
+    match client.subscribe(v2_list_filter).await {
+        Ok(out) => new_ids.push(out.value),
+        Err(e) => eprintln!("[self-sync] v2 community-list subscribe failed: {:?}", e),
     }
     // Emoji-pack List (replaceable kind 10030).
     let emoji_filter = Filter::new().author(my_pk).kind(Kind::Custom(10030));
-    match client.subscribe(emoji_filter, None).await {
-        Ok(out) => new_ids.push(out.val),
+    match client.subscribe(emoji_filter).await {
+        Ok(out) => new_ids.push(out.value),
         Err(e) => eprintln!("[self-sync] emoji-list subscribe failed: {:?}", e),
     }
 
@@ -79,23 +94,20 @@ pub(crate) async fn subscribe_self_sync() {
         std::mem::replace(&mut *ids, new_ids)
     };
     for id in displaced {
-        client.unsubscribe(&id).await;
+        let _ = client.unsubscribe(&id).await;
     }
 }
 
 /// Route an arriving self-sync list event (our own replaceable settings): a Community List update folds +
 /// rehydrates (so a join on another device appears live); an emoji-list update refreshes the pack set.
 /// Spawned off the notification loop — both run several relay fetches and must not head-of-line-block it.
-async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, event: Event) {
-    if !session.is_valid() {
-        return;
-    }
-    // Per-list dedup key: the `d`-tag for kind-30078 lists (Community vs Invite share the kind), else the
-    // kind. Coalesces multi-relay re-delivery of the SAME replaceable event so one update = one sweep.
-    let dedup_key = if event.kind.as_u16() == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC {
-        event.tags.identifier().unwrap_or_default().to_string()
-    } else {
-        event.kind.as_u16().to_string()
+async fn handle_self_sync_event(event: Event) {
+    // Per-list dedup key: kind plus `d` where there is one, since several distinct lists ride a
+    // single kind (30078) and a fragmented list rides several `d`s of its own. Coalesces
+    // multi-relay re-delivery of the SAME event so one update = one sweep.
+    let dedup_key = match event.tags.identifier() {
+        Some(d) => format!("{}:{}", event.kind.as_u16(), d),
+        None => event.kind.as_u16().to_string(),
     };
     {
         let mut last = SELFSYNC_LAST_EVENT.lock().await;
@@ -106,19 +118,31 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
     }
     match event.kind.as_u16() {
         k if k == vector_core::stored_event::event_kind::APPLICATION_SPECIFIC => {
-            // Both lists are kind 30078 — route by `d`-tag.
-            let is_invite = event.tags.identifier()
-                == Some(vector_core::community::invite_list::INVITE_LIST_D_TAG);
-            tokio::spawn(async move {
-                if is_invite {
+            // Several lists share kind 30078 — route by `d`-tag, and match each
+            // explicitly: an unrecognised tag must fall through, not land on
+            // whichever ingest happens to be the else-branch.
+            let d = event.tags.identifier().unwrap_or_default().to_string();
+            vector_core::db::spawn_bound(async move {
+                if d == vector_core::community::invite_list::INVITE_LIST_D_TAG {
                     crate::commands::community::ingest_invite_list_update(event).await;
-                } else {
+                } else if d == vector_core::pinned_chats::PINNED_D_TAG {
+                    crate::commands::pinned::ingest_pinned_chats_update(event).await;
+                } else if vector_core::synced_prefs::Pref::from_d_tag(&d).is_some() {
+                    crate::commands::prefs::ingest_prefs_update(event).await;
+                } else if d == vector_core::community::list::COMMUNITY_LIST_D_TAG {
                     crate::commands::community::ingest_community_list_update(event).await;
                 }
             });
         }
+        k if k == vector_core::community::v2::kind::COMMUNITY_LIST_FRAG => {
+            // Re-run the same sync the boot path uses: it adopts newly-listed communities and
+            // tears down ones a sibling device left. Spawned — it runs several relay fetches.
+            vector_core::db::spawn_bound(async move {
+                crate::commands::community::ingest_v2_community_list_update().await;
+            });
+        }
         10030 => {
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 let _ = vector_core::emoji_packs::refresh_subscribed_packs().await;
             });
         }
@@ -129,18 +153,17 @@ async fn handle_self_sync_event(session: &vector_core::state::SessionGuard, even
 /// Route an arriving Community (kind-3300) event: find the channel its `z` pseudonym
 /// maps to, open + verify + ingest it into STATE, then persist + emit if it is new.
 /// Events that fail to open (wrong key, splice, forged sig) are dropped inside
-/// `process_incoming`. (The notification loop's `session.is_valid()` gate above guards
+/// `process_incoming`. (The notification loop's `session.is_live()` gate above guards
 /// against account-swap before dispatch.)
 /// Route an arriving Community event through `vector_core::community::realtime`, which opens +
 /// verifies + ingests + persists it and dispatches the typed outcome to the Tauri handler (UI +
 /// notifications + presence/teardown). Thin wrapper — the realtime pipeline now lives in core.
 async fn handle_community_event(
-    session: &vector_core::state::SessionGuard,
     event: Event,
 ) {
     let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
         std::sync::Arc::new(super::event_handler::TauriEventHandler);
-    vector_core::community::realtime::dispatch_event(session, event, handler).await;
+    vector_core::community::realtime::dispatch_event(event, handler).await;
 }
 
 /// v2 twin of [`handle_community_event`]: the same Tauri handler surface fed by
@@ -148,12 +171,11 @@ async fn handle_community_event(
 /// persist-gated callbacks), so a v2 message emits to the frontend identically
 /// to a v1 one.
 async fn handle_community_v2_event(
-    session: &vector_core::state::SessionGuard,
     event: Event,
 ) {
     let handler: std::sync::Arc<dyn vector_core::InboundEventHandler> =
         std::sync::Arc::new(super::event_handler::TauriEventHandler);
-    vector_core::community::v2::realtime::dispatch_event(session, event, handler).await;
+    vector_core::community::v2::realtime::dispatch_event(event, handler).await;
 }
 
 /// Routes "straggler" community events — ones a slower relay returned after a racing
@@ -166,22 +188,18 @@ pub struct CommunityStragglerSink;
 impl vector_core::community::transport::CommunityIngestSink for CommunityStragglerSink {
     fn ingest_stragglers(&self, events: Vec<Event>) {
         // Called from inside the transport's background drain task (always within the tokio runtime).
-        // SessionGuard captured BEFORE the spawn boundary (a capture inside the task would validate
+        // std::sync::Arc<crate::db::Session> captured BEFORE the spawn boundary (a capture inside the task would validate
         // against whatever generation is current by then) — re-checked per event across the fold loop.
-        let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             for event in events {
-                if !session.is_valid() {
-                    return;
-                }
-                handle_community_event(&session, event).await;
+                handle_community_event(event).await;
             }
         });
     }
 }
 
 /// OS notification for a realtime Community message, mirroring the DM/group rules: a normal message
-/// notifies only when the channel isn't muted; a direct @mention, a reply to one of our own messages,
+/// notifies only when neither the channel nor the sender is muted; a direct @mention, a reply to one of our own messages,
 /// or an authorized @everyone (owner or admin) breaks through a muted channel — unless the SENDER's DM
 /// is muted, they're blocked, or @everyone pings are globally disabled. `chat_id` is the channel id.
 pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) {
@@ -205,11 +223,12 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 
     let should_notify = {
         let state = crate::STATE.lock().await;
-        // Only a community's surfaced (primary) row notifies — sibling-channel rows
-        // are bare persistence anchors carrying no community metadata.
+        // Only a community's surfaced (primary) row notifies. Every channel is registered
+        // and synced, but there is no row to open for a sibling channel, so ringing for
+        // one would be a notification the user can't act on or clear.
         let registered = state
             .get_chat(chat_id)
-            .is_some_and(|c| c.metadata.custom_fields.contains_key("community_id"));
+            .is_some_and(|c| c.is_surfaced_community_channel());
         let mentions_me = msg.mentions_me();
         let sender_blocked = state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked());
         let sender_dm_muted = state.get_chat(sender_npub).map_or(false, |c| c.muted);
@@ -219,7 +238,8 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
             // Pings bypass a muted CHANNEL, but never a muted/blocked sender.
             !sender_dm_muted
         } else {
-            state.get_chat(chat_id).map_or(false, |c| !c.muted)
+            // A muted SENDER is silent in every channel, muted or not.
+            state.get_chat(chat_id).map_or(false, |c| !c.muted) && !sender_dm_muted
         }
     };
     if !should_notify { return; }
@@ -271,7 +291,7 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
 /// Whether `sender_npub` (bech32) is the owner or an admin of the community owning `channel_id`.
 /// Used only for @everyone authority; a lookup failure denies the bypass (fail-closed).
 fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
-    let Ok(sender_hex) = nostr_sdk::PublicKey::from_bech32(sender_npub).map(|pk| pk.to_hex()) else {
+    let Ok(sender_hex) = nostr_sdk::prelude::PublicKey::from_bech32(sender_npub).map(|pk| pk.to_hex()) else {
         return false;
     };
     let Ok(Some(community_id)) = vector_core::db::community::community_id_for_channel(channel_id) else {
@@ -307,7 +327,6 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Session captured at subscription start; every notification short-
     // circuits on swap so account A's inbound events don't persist into
     // account B's DB.
-    let session = vector_core::state::SessionGuard::capture();
 
     // Backstop: reap retained resend bodies for messages left red and untouched
     // past a week, so a pile of never-retried failures can't grow unbounded (the
@@ -346,19 +365,21 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // boot, reconnect, AND instant cross-device in one open subscription.
     subscribe_self_sync().await;
 
+    // Reconcile blocks/mutes/nicknames BEFORE the user can change them. The
+    // subscription above delivers them too, but it races the user: acting in
+    // that window would publish this device's emptier view over another
+    // device's prefs. Until this lands, those lists are unpublishable.
+    crate::commands::prefs::hydrate_prefs().await;
+
     // v2 reconnect catch-up: a `limit(0)` sub never replays what a relay missed
     // while down, so each Connected transition enqueues a refold + re-tracks the
     // subs at the current epochs (debounced across a reconnect burst). v1 leans
     // on open-sub replay; v2's consensus planes need the explicit fold.
     if let Some(monitor) = client.monitor() {
         let mut rx = monitor.subscribe();
-        let monitor_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let mut last: Option<std::time::Instant> = None;
             while let Ok(n) = rx.recv().await {
-                if !monitor_session.is_valid() {
-                    return;
-                }
                 let MonitorNotification::StatusChanged { status, .. } = n;
                 if status == RelayStatus::Connected {
                     if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(3)) {
@@ -378,13 +399,13 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
     // Notification loop: dispatch GiftWraps through Tauri's event handler,
     // Community messages through the Community handler.
-    match client
-        .handle_notifications(|notification| async {
-            // If the session has been swapped out from under us, exit the
-            // notification loop. Returning Ok(true) tells nostr-sdk to break.
-            if !session.is_valid() { return Ok(true); }
+    // 0.45 removed `handle_notifications`; drive the stream directly. It ends when
+    // the client shuts down, and the session check still breaks out on a swap.
+    let mut notifications = client.notifications();
+    while let Some(notification) = notifications.next().await {
+        {
             match notification {
-                RelayPoolNotification::Event { event, subscription_id, .. } => {
+                ClientNotification::Event { event, subscription_id, .. } => {
                     let k = event.kind.as_u16();
                     if subscription_id == gift_sub_id {
                         // DMs/files/reactions/edits (via tauri_commit_prepared_event)
@@ -395,31 +416,27 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // id would drop the rest. dispatch_event resolves the channel by the event's
                         // z-pseudonym, and process_incoming dedups by outer-event id, so handling every
                         // community event the pool surfaces is correct and idempotent.
-                        handle_community_event(&session, *event).await;
+                        handle_community_event(*event).await;
                     } else if k == 1059 || k == 21059 {
                         // v2 wraps (plane-key authors). DM gift wraps matched the gift sub above;
                         // any other wrap-kind event tries the v2 route — the dispatcher dedups by
                         // wrap id and drops NotOurs (e.g. a stray DM copy on another sub) for free.
-                        handle_community_v2_event(&session, *event).await;
+                        handle_community_v2_event(*event).await;
                     } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
-                        handle_self_sync_event(&session, *event).await;
+                        handle_self_sync_event(*event).await;
                     }
                 }
-                RelayPoolNotification::Message { message, .. } => {
+                ClientNotification::Message { message, .. } => {
                     // Relay OKs feed the send pipeline: an OK that outlives
                     // the per-attempt wait still confirms delivery, and can
                     // rescue a message already marked Failed.
-                    if let nostr_sdk::RelayMessage::Ok { event_id, status, .. } = message {
+                    if let nostr_sdk::prelude::RelayMessage::Ok { event_id, status, .. } = *message {
                         vector_core::sending::note_relay_ok(&event_id, status);
                     }
                 }
                 _ => {}
             }
-            Ok(false)
-        })
-        .await
-    {
-        Ok(_) => Ok(true),
-        Err(e) => Err(e.to_string()),
+        }
     }
+    Ok(true)
 }

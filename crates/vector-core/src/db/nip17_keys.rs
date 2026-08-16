@@ -315,6 +315,7 @@ pub fn prune_stale_resend_payloads(max_age_secs: i64) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::event_ext::FinalizeUnsignedWithId;
     use super::*;
 
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(81000);
@@ -340,7 +341,7 @@ mod tests {
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
@@ -351,9 +352,10 @@ mod tests {
         let sender = Keys::generate();
         let recipient = Keys::generate();
         // Stand-in wrap: any valid signed event — the id is what must survive.
-        let wrap = EventBuilder::text_note("wrap").sign_with_keys(&ephemeral).unwrap();
-        let rumor = EventBuilder::private_msg_rumor(recipient.public_key(), "hello")
-            .build(sender.public_key());
+        let wrap = EventBuilder::new(Kind::TextNote, "wrap").finalize(&ephemeral).unwrap();
+        let rumor = EventBuilder::new(Kind::PrivateDirectMessage, "hello")
+            .tag(Tag::public_key(recipient.public_key()))
+            .finalize_unsigned_with_id(sender.public_key());
         (wrap, rumor, ephemeral, recipient.public_key())
     }
 

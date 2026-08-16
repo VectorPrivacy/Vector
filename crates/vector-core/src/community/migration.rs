@@ -17,7 +17,6 @@ use super::cipher;
 use super::roster::DissolvedEdition;
 use super::transport::Transport;
 use super::{Community, CommunityId};
-use crate::state::SessionGuard;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex as StdMutex};
@@ -39,19 +38,19 @@ pub fn clear_drive_inflight() {
 /// (drive vs drive, wizard vs drive, wizard vs wizard). Drop is generation-aware: after an
 /// account swap clears the set, a stale claim's unwind must not release the claim the NEW
 /// account just inserted for the same cid.
-struct DriveClaim(String, SessionGuard);
+struct DriveClaim(String, std::sync::Arc<crate::db::Session>);
 impl DriveClaim {
     fn take(cid: &str) -> Option<Self> {
         let mut inflight = DRIVE_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
         if !inflight.insert(cid.to_string()) {
             return None;
         }
-        Some(DriveClaim(cid.to_string(), SessionGuard::capture()))
+        Some(DriveClaim(cid.to_string(), crate::db::current_session()))
     }
 }
 impl Drop for DriveClaim {
     fn drop(&mut self) {
-        if self.1.is_valid() {
+        if self.1.is_live() {
             DRIVE_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
         }
     }
@@ -68,11 +67,11 @@ pub fn test_release_drive_claim(cid: &str) {
     DRIVE_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(cid);
 }
 
-/// When the owner-side migration wizard unlocks: 2026-07-30 00:00:00 UTC. Gates ONLY the
+/// When the owner-side migration wizard unlocks: 2026-08-04 00:00:00 UTC. Gates ONLY the
 /// wizard (UI row + command entry); the member-side machinery is live from release day, so
 /// a migration performed by a lock-bypassing build still carries every member along. A
 /// coordination gate, not a security gate.
-pub const MIGRATION_UNLOCK_AT: u64 = 1_785_369_600;
+pub const MIGRATION_UNLOCK_AT: u64 = 1_785_801_600;
 
 /// Bound on the whole tombstone content string before any parse. The outer NIP-44 seal
 /// caps its plaintext at 65535 bytes, so anything larger is garbage by construction.
@@ -96,6 +95,8 @@ pub struct MigrationSignpost {
     /// The v2 owner salt (public input to the self-cert id).
     pub owner_salt: String,
     /// The v2 relay set (capped like every other attacker-influencable relay list).
+    /// Absent is empty, not a parse failure — a rejected signpost strands the migration.
+    #[serde(default)]
     pub relays: Vec<String>,
     /// Display name at migration time (informational only).
     pub name: String,
@@ -222,8 +223,7 @@ pub fn select_pointer(editions: &[DissolvedEdition], owner_hex: &str) -> Option<
 
 /// Wire-size gate for the final sealed OUTER event — computed on the actual bytes, never
 /// estimated. Run by the wizard before publishing; failing is a clean abort.
-pub fn check_outer_size(outer: &nostr_sdk::Event) -> Result<(), String> {
-    use nostr_sdk::JsonUtil;
+pub fn check_outer_size(outer: &nostr_sdk::prelude::Event) -> Result<(), String> {
     let len = outer.as_json().len();
     if len > MAX_WIRE_EVENT {
         return Err(format!(
@@ -271,7 +271,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
 ) -> Result<Option<String>, String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let cid = community.id.to_hex();
 
     // Claim the in-flight slot or bail — a concurrent drive (boot maintenance vs the live
@@ -325,7 +325,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
     let mut plain = open_m(&held_roots(&cid), m_b64);
     if plain.is_none() && community.server_root_epoch.0 < payload.signpost.root_epoch {
         let _ = super::service::catch_up_server_root(transport, community).await;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during migration catch-up".to_string());
         }
         plain = open_m(&held_roots(&cid), m_b64);
@@ -344,7 +344,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
 
     // held-v2 dedup: if this account ALREADY holds the v2 twin, do NOT network-join
     // it again — flip only. Covers the idempotent double-trigger, a multi-device peer that
-    // synced the twin via the 13302 list first, and the OWNER's own client (the wizard
+    // synced the twin via the Community List first, and the OWNER's own client (the wizard
     // created the twin, so the owner holds it — accept_bundle must never try to "join" it).
     let v2_id = CommunityId(crate::simd::hex::hex_to_bytes_32(&payload.signpost.v2_community_id));
     let v2_hex = payload.signpost.v2_community_id.clone();
@@ -355,7 +355,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
         if crate::simd::hex::bytes_to_hex_32(&v2.identity.community_id.0) != v2_hex {
             return Err("joined community id disagrees with the migration pointer".to_string());
         }
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during migration join".to_string());
         }
     }
@@ -371,7 +371,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
     // path above skips the join branch (and its check), so this is the one that counts.
     let flock = super::v2::realtime::follow_lock(&v2_id);
     let _fguard = flock.lock().await;
-    if !session.is_valid() {
+    if !session.is_live() {
         return Err("account changed during migration flip".to_string());
     }
     crate::db::community::reparent_channels_and_fence(&cid, &v2_hex)?;
@@ -409,11 +409,11 @@ pub const PHASE_FLIPPED: i64 = 5;
 /// ARE seeded. That is v1-faithful (v1 shows them as a member), a deliberate divergence from
 /// the design's "− left" line for the admin case; a NON-admin who left is dropped by the leave
 /// filter. `owner_hex` is unused now (the DB seeds the owner) but kept for call-site clarity.
-fn v1_snapshot_members(v1_cid: &str, _owner_hex: &str) -> Vec<nostr_sdk::PublicKey> {
+fn v1_snapshot_members(v1_cid: &str, _owner_hex: &str) -> Vec<nostr_sdk::prelude::PublicKey> {
     crate::db::community::community_member_activity_capped(v1_cid, false)
         .unwrap_or_default()
         .iter()
-        .filter_map(|(npub, _)| nostr_sdk::PublicKey::parse(npub).ok())
+        .filter_map(|(npub, _)| nostr_sdk::prelude::PublicKey::parse(npub).ok())
         .collect()
 }
 
@@ -421,6 +421,34 @@ fn v1_snapshot_members(v1_cid: &str, _owner_hex: &str) -> Vec<nostr_sdk::PublicK
 /// the command entry, not just in the UI). `now_secs` is passed in (the core has no clock).
 pub fn wizard_unlocked(now_secs: u64) -> bool {
     now_secs >= MIGRATION_UNLOCK_AT
+}
+
+/// The post-timelock door for FRESH v1 joins, probe-first. Pre-unlock, or a community we
+/// already hold (re-accept / cross-device rehydrate), passes locally. Post-unlock a fresh
+/// join passes ONLY when the rotation-stable dissolved coordinate carries the proven
+/// owner's migration pointer — that join is the permanent on-ramp (save → carrier fold
+/// seals → drive lands the joiner in the v2 twin). A live v1 community, an unprovable
+/// owner, or a relay miss all refuse: fail-closed, a retry beats onboarding a fresh user
+/// onto the legacy protocol. Every v1 join door (Tauri direct + public accepts, facade
+/// direct + public accepts) must call this before persisting anything.
+pub async fn gate_fresh_v1_join<T: Transport + ?Sized>(
+    transport: &T,
+    community: &Community,
+    now_secs: u64,
+) -> Result<(), String> {
+    if now_secs < MIGRATION_UNLOCK_AT {
+        return Ok(());
+    }
+    if matches!(crate::db::community::load_community(&community.id), Ok(Some(_))) {
+        return Ok(());
+    }
+    if let Some(owner) = super::service::proven_owner_hex(community) {
+        let records = super::service::dissolved_tombstone_records(transport, community).await;
+        if select_pointer(&records, &owner).is_some() {
+            return Ok(());
+        }
+    }
+    Err("This community still uses the legacy protocol and can no longer be joined. Ask the owner to upgrade it to Concord v2 and share a fresh invite.".to_string())
 }
 
 /// The UI state ladder for a v1 community's migration row, in priority order. Pure so the
@@ -458,7 +486,7 @@ pub fn migration_eligible(migrated: bool, ledger_phase: i64, dissolved: bool, is
 /// Owner-side migration wizard: build the v2 twin (reusing v1 channel ids + cloning the
 /// banlist), seal the twin's JoinMaterial into `m`, publish the carrier dissolution on v1,
 /// then flip the owner's own client to v2. Resumable via the migration-77 ledger — a re-run
-/// after a crash picks up at the recorded phase. Every phase re-checks the `SessionGuard`.
+/// after a crash picks up at the recorded phase. Every phase re-checks the `std::sync::Arc<crate::db::Session>`.
 /// `now_secs` gates the timelock. Returns the v2 community id on completion.
 /// Emit a wizard progress step to the UI (no-op on headless clients via the unregistered
 /// emitter). `pct` is OVERALL progress 0-100 across the whole wizard; `label` is layman-facing.
@@ -472,7 +500,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
     v1: &Community,
     now_secs: u64,
 ) -> Result<String, String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let v1_cid = v1.id.to_hex();
     // One wizard/drive at a time per cid: a double-fired command would race the twin mint
     // pre-ledger (the double-mint orphan window) and its flip against a concurrent drive's.
@@ -541,7 +569,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
         // Ledger the minted identity IMMEDIATELY — before the sibling/banlist tail — so no
         // crash in that tail can re-mint a second twin (the double-mint orphan window).
         let v2_hex = crate::simd::hex::bytes_to_hex_32(&twin.identity.community_id.0);
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during twin mint".to_string());
         }
         crate::db::community::set_migration_ledger(&v1_cid, &v2_hex, PHASE_TWIN_MINTED, "")?;
@@ -562,7 +590,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
         // Clone the v1 banlist so the v2 join-time ban gate catches v1-banned members.
         let banlist = crate::db::community::get_community_banlist(&v1_cid).unwrap_or_default();
         super::v2::service::clone_banlist_to_twin(transport, &twin, &banlist).await?;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during banlist clone".to_string());
         }
         // Clone governance: every v1 full admin is re-granted @admin on the twin (owner is
@@ -573,7 +601,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
         // The twin persists via save_community_v2 (community row + control plane); its public
         // channel rows stay v1-owned until the flip re-parents them (the hijack guard).
         // The ledger needs only the v2 id — a resume reloads the rest from DB + control plane.
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during twin build".to_string());
         }
         crate::db::community::set_migration_ledger(&v1_cid, &v2_hex, PHASE_TWIN_BUILT, "")?;
@@ -591,7 +619,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
         emit_migration_progress("Securing member access...", 55);
         let members = v1_snapshot_members(&v1_cid, &owner_hex);
         super::v2::service::refound_at_birth(transport, &twin, &members).await?;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during birth refound".to_string());
         }
         crate::db::community::set_migration_ledger(&v1_cid, &v2_hex, PHASE_TWIN_REFOUNDED, "")?;
@@ -622,7 +650,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
         };
         let content = build_migration_content(&signpost, Some(m))?;
         super::service::publish_migration_carrier(transport, v1, &content).await?;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during carrier publish".to_string());
         }
         crate::db::community::set_migration_ledger(&v1_cid, &v2_hex, PHASE_CARRIER_PUBLISHED, "")?;
@@ -642,7 +670,7 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
         // network I/O (the list republish below awaits).
         let flock = super::v2::realtime::follow_lock(&twin.identity.community_id);
         let _fguard = flock.lock().await;
-        if !session.is_valid() {
+        if !session.is_live() {
             return Err("account changed during migration".to_string());
         }
         crate::db::community::reparent_channels_and_fence(&v1_cid, &v2_hex)?;
@@ -654,7 +682,12 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
     // the carrier themselves, but one that no longer holds the v1 community has no carrier to
     // fold and the list is its only route. Runs AFTER the flip so the list never advertises a
     // half-built twin (pre-refound it is epoch 0 with no snapshot). Best-effort.
-    let _ = super::v2::service::republish_community_list(transport, Some(&twin.identity.community_id)).await;
+    // Durable like every other membership record: a twin whose list entry never lands is
+    // the same stranded-behind-a-tombstone hazard as a failed join.
+    match super::v2::service::republish_community_list(transport, Some(&twin.identity.community_id)).await {
+        Ok(true) => {}
+        _ => super::v2::service::republish_community_list_durable(Some(twin.identity.community_id)),
+    }
     // Stamp the owner's OWN chats as v2 + notify the UI — the wizard doesn't fold its own
     // carrier, so without this the owner's client would show the stale v1 row until a
     // later fold/boot. Same finalize the member path uses (idempotent if a self-fold beat us).
@@ -664,17 +697,17 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
 
 /// Post-flip finalize: stamp the stitched chats as the v2 community (name/metadata,
 /// `proto_version` → 2 monotonic, dissolved=false — the ROOM is alive on v2 even though the
-/// v1 row is sealed) and tell the UI. Spawned (SessionGuard captured BEFORE the spawn, per
+/// v1 row is sealed) and tell the UI. Spawned (std::sync::Arc<crate::db::Session> captured BEFORE the spawn, per
 /// the multi-account contract) so no caller's lock context can deadlock the STATE lock.
 pub fn spawn_finalize_migration(v1_cid: String, v2_hex: String) {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     tokio::spawn(async move {
         let v2_id = CommunityId(crate::simd::hex::hex_to_bytes_32(&v2_hex));
         let Ok(Some(twin)) = crate::db::community::load_community_v2(&v2_id) else { return };
-        if !session.is_valid() {
+        if !session.is_live() {
             return;
         }
-        crate::register_v2_chats_inner(&twin, &session).await;
+        crate::register_v2_chats_inner(&twin).await;
         // Subscribe to the v2 twin's realtime planes — the flip re-pointed the DB but a
         // migrating MEMBER was never live-listening on the new community, so the owner's
         // subsequent messages wouldn't arrive (they can still SEND — that path is stateless).
@@ -697,11 +730,11 @@ pub fn spawn_finalize_migration(v1_cid: String, v2_hex: String) {
 /// flip on re-run); (2) probe every sealed pointer-less community for a payload the client
 /// missed (the upgrade-lag sweep). Call at boot and after an account swap.
 pub async fn run_migration_maintenance<T: Transport + ?Sized>(transport: &T) -> Vec<String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let mut flipped = Vec::new();
     for cid in crate::db::community::migration_flip_candidates().unwrap_or_default() {
         // The candidate list was pre-fetched: after a swap it describes the WRONG account.
-        if !session.is_valid() {
+        if !session.is_live() {
             return flipped;
         }
         let Ok(Some(community)) = crate::db::community::load_community(&CommunityId(
@@ -722,20 +755,27 @@ pub async fn run_migration_maintenance<T: Transport + ?Sized>(transport: &T) -> 
     flipped
 }
 
-/// Boot / account-swap sweep: for every SEALED, pointer-less-checked v1 community, re-probe
-/// the rotation-stable dissolved coordinate (relays retain the event; the client kept only
-/// the `dissolved` flag). Extract + persist any migration payload and drive the flip; a
-/// plain `{}` dissolution is marked checked so it is never re-probed. This is the recovery
-/// path for a member who folded the tombstone on a build that predated migration support.
+/// Boot / account-swap sweep: for every pointer-less, unchecked v1 community — **sealed or
+/// not** — re-probe the rotation-stable dissolved coordinate. Extract + persist any migration
+/// payload and drive the flip; a plain `{}` dissolution is marked checked so it is never
+/// re-probed.
+///
+/// Unsealed candidates matter most. Sealing happens inside the control fold, which the boot
+/// control probe can veto indefinitely: that probe is `since`-windowed over the CONTROL plane
+/// while the authoritative tombstone lives at the DISSOLVED coordinate, so once the cursor
+/// passes it a migrated-away community reads as quiet forever and never seals. Probing only
+/// sealed rows made that state unreachable by every recovery path at once — the community sat
+/// on v1 permanently while its v2 twin, adopted from the Community List, stayed empty (the
+/// stitched channel id is already owned by the unsealed v1 row).
 pub async fn sweep_dissolved_for_migration<T: Transport + ?Sized>(transport: &T) -> Vec<String> {
-    let session = SessionGuard::capture();
+    let session = crate::db::current_session();
     let mut flipped = Vec::new();
     let candidates = crate::db::community::migration_sweep_candidates().unwrap_or_default();
     for cid in candidates {
         // Pre-fetched candidates + a network probe per iteration: re-check the session both
         // before each community and again between the probe and any write, so a mid-sweep
         // swap can't persist pointers/checked markers into the new account's rows.
-        if !session.is_valid() {
+        if !session.is_live() {
             return flipped;
         }
         let Ok(Some(community)) = crate::db::community::load_community(&CommunityId(
@@ -748,7 +788,7 @@ pub async fn sweep_dissolved_for_migration<T: Transport + ?Sized>(transport: &T)
             continue;
         };
         let records = super::service::dissolved_tombstone_records(transport, &community).await;
-        if !session.is_valid() {
+        if !session.is_live() {
             return flipped;
         }
         match select_pointer(&records, &owner) {
@@ -795,7 +835,7 @@ mod tests {
         let acct = Keys::generate().public_key().to_bech32().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(acct.clone()).unwrap();
         crate::db::init_database(&acct).unwrap();
 
@@ -806,9 +846,8 @@ mod tests {
         let mut c = crate::community::Community::create("HQ", "general", vec![]);
         let cid = c.id.to_hex();
         {
-            use nostr_sdk::JsonUtil;
             c.owner_attestation = Some(crate::community::owner::build_owner_attestation_unsigned(owner.public_key(), &cid)
-                .sign_with_keys(&owner).unwrap().as_json());
+                .finalize(&owner).unwrap().as_json());
         }
         crate::db::community::save_community(&c).unwrap();
         crate::db::community::set_community_banlist(&cid, &[banned.public_key().to_hex()], 1).unwrap();
@@ -863,14 +902,14 @@ mod tests {
     #[test]
     fn drive_claim_drop_is_generation_aware() {
         // Bumps the global session generation — hold the suite guard so no concurrent test
-        // sees its own SessionGuard spuriously invalidated.
+        // sees its own std::sync::Arc<crate::db::Session> spuriously invalidated.
         let _g = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         clear_drive_inflight();
         let cid = "ef".repeat(32);
 
         let stale = DriveClaim::take(&cid).expect("old account's drive claims");
         // The swap: generation advances and the set is cleared (production `swap_session`).
-        crate::state::bump_session_generation();
+        crate::db::close_database();
         clear_drive_inflight();
         let fresh = DriveClaim::take(&cid).expect("the new account's drive claims the same cid");
 

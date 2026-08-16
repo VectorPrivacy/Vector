@@ -21,10 +21,12 @@
 //!
 //! The kind number is provisional pending upstream registry coordination.
 
+use nostr_sdk::prelude::FinalizeEvent;
 use std::collections::HashMap;
 
 use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, Tag};
 use serde::{Deserialize, Serialize};
+use crate::ClientRelayExt;
 
 /// Replaceable bot-interface manifest (outside any wrap): one authoritative
 /// command catalog per bot pubkey, the same shape as a profile or relay list.
@@ -47,7 +49,7 @@ pub const MAX_BOT_TAGS: usize = 8;
 
 /// Build the recipient tag a picker attaches: `["bot", <hex>]`.
 pub fn bot_tag(bot: &nostr_sdk::prelude::PublicKey) -> Tag {
-    Tag::custom(nostr_sdk::prelude::TagKind::Custom(TAG_BOT.into()), [bot.to_hex()])
+    Tag::custom(TAG_BOT, [bot.to_hex()])
 }
 
 /// Extract the addressed bots from a rumor's tags as npubs (deduped, capped,
@@ -236,7 +238,7 @@ impl BotManifest {
         self.validate()?;
         let content = serde_json::to_string(self).map_err(|e| e.to_string())?;
         EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), content)
-            .sign_with_keys(keys)
+            .finalize(keys)
             .map_err(|e| e.to_string())
     }
 }
@@ -473,7 +475,7 @@ pub struct ChatBotCommands {
 /// unreachable or drops stranger events (Ditto does). Write side: the SDK
 /// publishes every bot's manifest here for the same reason.
 pub const DISCOVERY_RELAYS: &[&str] =
-    &["wss://purplepag.es", "wss://relay.nostr.band", "wss://relay.damus.io", "wss://nos.lol"];
+    &["wss://purplepag.es", "wss://relay.nostr.band", "wss://nos.lol"];
 
 /// What the composer's `/` picker renders, instantly answerable from local
 /// state. `fresh: false` means a background refetch was spawned — a
@@ -566,7 +568,7 @@ static REFRESH_INFLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::
 /// `true` while the last completed refresh for this chat is within TTL AND
 /// covered exactly `bot_hexes`.
 pub fn commands_fresh(chat_id: &str, bot_hexes: &[String]) -> bool {
-    let generation = crate::state::SessionGuard::capture().generation();
+    let generation = crate::db::current_session_id();
     let map = match COMMANDS_FRESH.lock() {
         Ok(m) => m,
         Err(_) => return false,
@@ -597,17 +599,14 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
             return; // already fetching for this chat
         }
     }
-    let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    let session = crate::db::current_session();
+    crate::db::spawn_bound(async move {
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(5));
         let fetched = fetch_manifests(&transport, &bots, &relays).await;
         if let Ok(mut inflight) = REFRESH_INFLIGHT.lock() {
             inflight.remove(&chat_id);
         }
         let Ok(found) = fetched else { return }; // transient failure: stay stale, next `/` retries
-        if !session.is_valid() {
-            return;
-        }
         for (pk, manifest, created_at) in &found {
             if let Ok(json) = serde_json::to_string(manifest) {
                 let _ = crate::db::bots::upsert_bot_manifest(&pk.to_hex(), &json, *created_at);
@@ -615,10 +614,7 @@ pub fn spawn_commands_refresh(chat_id: String, bots: Vec<nostr_sdk::prelude::Pub
         }
         let bot_hexes: Vec<String> = bots.iter().map(|p| p.to_hex()).collect();
         let commands = assemble_from_store(&bot_hexes);
-        if !session.is_valid() {
-            return;
-        }
-        mark_commands_fresh(&chat_id, session.generation(), &bot_hexes);
+        mark_commands_fresh(&chat_id, session.id(), &bot_hexes);
         crate::traits::emit_event(
             "chat_commands_updated",
             &serde_json::json!({ "chat_id": chat_id, "bots": bots.len(), "commands": commands }),
@@ -635,11 +631,12 @@ pub async fn publish_manifest(manifest: &BotManifest, keys: &Keys, relays: &[Str
     let event = manifest.to_event(keys)?;
     let client = crate::state::nostr_client().ok_or("no client connected")?;
     for r in relays {
-        let _ = client.add_relay(r.as_str()).await;
+        let _ = client.add_managed_relay(r.as_str()).await;
     }
     client.connect().await;
     let out = client
-        .send_event_to(relays.to_vec(), &event)
+        .send_event(&event)
+        .to(relays.to_vec())
         .await
         .map_err(|e| e.to_string())?;
     Ok(out.success.len())
@@ -654,10 +651,13 @@ pub async fn fetch_manifest(bot: &nostr_sdk::prelude::PublicKey, relays: &[Strin
         .author(*bot)
         .limit(1);
     let events = if relays.is_empty() {
-        client.fetch_events(filter, std::time::Duration::from_secs(8)).await.ok()?
+        client.fetch_events(filter).timeout(std::time::Duration::from_secs(8)).await.ok()?
     } else {
         client
-            .fetch_events_from(relays.to_vec(), filter, std::time::Duration::from_secs(8))
+            .fetch_events(nostr_sdk::prelude::ReqTarget::manual(
+                relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
+            ))
+            .timeout(std::time::Duration::from_secs(8))
             .await
             .ok()?
     };
@@ -902,8 +902,8 @@ mod tests {
             bot_tag(&a),
             bot_tag(&a), // dup
             bot_tag(&b),
-            Tag::custom(nostr_sdk::prelude::TagKind::Custom(TAG_BOT.into()), ["nothex"]),
-            Tag::custom(nostr_sdk::prelude::TagKind::Custom("p".into()), [a.to_hex()]), // not ours
+            Tag::custom(TAG_BOT, ["nothex"]),
+            Tag::custom("p", [a.to_hex()]), // not ours
         ];
         let out = addressed_bots(tags.iter());
         assert_eq!(out, vec![a.to_bech32().unwrap(), b.to_bech32().unwrap()]);
@@ -955,7 +955,7 @@ mod tests {
         let manifest_event = |m: &BotManifest, keys: &Keys, at: u64| {
             EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), serde_json::to_string(m).unwrap())
                 .custom_created_at(Timestamp::from_secs(at))
-                .sign_with_keys(keys)
+                .finalize(keys)
                 .unwrap()
         };
         // A: an old manifest, then a newer edition with a different command set.
@@ -968,7 +968,7 @@ mod tests {
         // B: newest is garbage — B has no usable interface (no fallback to older).
         let b_garbage = EventBuilder::new(Kind::Custom(KIND_BOT_MANIFEST), "not json")
             .custom_created_at(Timestamp::from_secs(300))
-            .sign_with_keys(&bot_b)
+            .finalize(&bot_b)
             .unwrap();
         // Stranger: a VALID manifest outside the asked author set.
         let s_ev = price_manifest().to_event(&stranger).unwrap();
@@ -993,7 +993,7 @@ mod tests {
     fn command_freshness_is_generation_ttl_and_botset_scoped() {
         // Serialize with bed tests — they bump the session generation mid-test.
         let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|p| p.into_inner());
-        let generation = crate::state::SessionGuard::capture().generation();
+        let generation = crate::db::current_session_id();
         let bots = vec!["aa".to_string(), "bb".to_string()];
 
         assert!(!commands_fresh("cmd-fresh-a", &bots), "unseen chat is stale");

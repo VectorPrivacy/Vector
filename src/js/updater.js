@@ -12,6 +12,20 @@ let updateState = 'idle'; // idle, checking, available, downloading, ready
 // button's label and action. Defaults to sideload (website) until resolved.
 let androidInstallSource = { has_store: false, label: '' };
 
+// The running build's identity, resolved once before the first check.
+let versionInfo = { raw: '', preview: null, display: '' };
+
+// Where preview builds are downloaded from: previews are never published to a
+// store, so there is nothing for a store to hand off to.
+const PREVIEW_RELEASES_URL = 'https://github.com/VectorPrivacy/Vector/releases';
+
+// Land on the exact release the check found, falling back to the release list
+// when the target isn't known (a manual tap before any check has resolved).
+function previewReleaseUrl() {
+    const target = currentUpdate && currentUpdate.version;
+    return target ? `${PREVIEW_RELEASES_URL}/tag/v${target}` : PREVIEW_RELEASES_URL;
+}
+
 // Get current version
 async function getCurrentVersion() {
     try {
@@ -22,19 +36,37 @@ async function getCurrentVersion() {
     }
 }
 
+// `0.4.2-1` -> preview 1 of the upcoming 0.4.2; `0.4.2` -> the release itself.
+// The identifier is numeric because the Windows MSI bundler rejects anything
+// else, so it gets spelled out for display: a bare "v0.4.2-1" reads as though
+// it came *after* 0.4.2, which is backwards.
+function parseVersion(raw) {
+    const match = /^(\d+\.\d+\.\d+)(?:-(\d+))?/.exec(raw);
+    if (!match) return { raw, preview: null, display: raw };
+    const [, core, pre] = match;
+    const preview = pre ? parseInt(pre, 10) : null;
+    return {
+        raw,
+        preview,
+        display: preview === null ? `v${core}` : `v${core} Preview ${preview}`,
+    };
+}
+
 // Initialize updater UI elements
 function initializeUpdaterUI() {
     const updateSection = document.getElementById('settings-updates');
     if (!updateSection) return;
     
     // Update current version display
-    getCurrentVersion().then(version => {
-        const versionElement = document.getElementById('current-version');
-        if (versionElement) {
-            versionElement.textContent = `v${version}`;
-        }
-    });
-    
+    const versionElement = document.getElementById('current-version');
+    if (versionElement) {
+        versionElement.textContent = versionInfo.display;
+    }
+    const previewNotice = document.getElementById('update-preview-notice');
+    if (previewNotice) {
+        previewNotice.style.display = versionInfo.preview === null ? 'none' : 'block';
+    }
+
     // Add click handler for check updates button
     const checkButton = document.getElementById('check-updates-btn');
     if (checkButton) {
@@ -61,25 +93,60 @@ function handleButtonClick() {
     }
 }
 
-// Android can't self-update: hand off to whatever store shipped this APK.
+// Where an Android build updates from depends on where it CAME from. A store
+// installed it, signed with that store's key, so only that store can update it.
+// A sideload was signed by the release key we publish, so Vector can install the
+// next release itself. Previews skip stores entirely — a store that never
+// carried this build can't offer the next preview.
 function androidUpdateButtonLabel() {
-    return androidInstallSource.has_store
-        ? `Update via ${androidInstallSource.label}`
-        : 'Download at vectorapp.io';
+    // A store can only update what it installed. Previews are never store
+    // builds, so they always take the sideload route.
+    if (androidInstallSource.has_store && versionInfo.preview === null) {
+        return `Update via ${androidInstallSource.label}`;
+    }
+    return 'Download & install';
 }
 
 async function openAndroidUpdateSource() {
-    if (androidInstallSource.has_store) {
+    // A store build hands back to its store — it holds the signing key, so it is
+    // the only thing that CAN update this copy. Previews are never store builds,
+    // so they skip straight past (a store would 404 or offer the older stable).
+    if (androidInstallSource.has_store && versionInfo.preview === null) {
         try {
             const opened = await window.__TAURI__.core.invoke('open_update_source');
             if (opened) return;
         } catch (e) {
             console.warn('Updater: store hand-off failed:', e);
         }
+        // The store couldn't take the deep link: the website carries every build
+        // and links out to each store.
+        return openUrl('https://vectorapp.io');
     }
-    // Sideload, or the store couldn't take the deep link: the website carries
-    // every build and links out to each store.
-    return openUrl('https://vectorapp.io');
+    // Sideload: this copy carries the release signing key, so Vector can fetch
+    // and install the next one itself. The system installer still asks.
+    try {
+        updateUI('downloading', '', 0);
+        const stopProgress = await window.__TAURI__.event.listen('update_download_progress', (evt) => {
+            const { received = 0, total = 0 } = evt.payload || {};
+            updateUI('downloading', '', total > 0 ? Math.round((received / total) * 100) : 0);
+        });
+        try {
+            const result = await window.__TAURI__.core.invoke('download_and_install_update');
+            if (result === 'needs-permission') {
+                updateUI('available', 'Allow installs from Vector, then tap again');
+            } else {
+                updateUI('available', 'Confirm the install to finish');
+            }
+        } finally {
+            stopProgress();
+        }
+    } catch (e) {
+        console.warn('Updater: in-app install failed:', e);
+        // Anything that stops the in-app route (a signing-key change, no space,
+        // a dead network) still has the manual path behind it.
+        updateUI('available', String(e?.message || e || 'Update failed'));
+        return openUrl('https://vectorapp.io');
+    }
 }
 
 // Update UI state
@@ -137,7 +204,7 @@ function updateUI(state, message = '', progress = 0) {
             }
             if (progressContainer) progressContainer.style.display = 'none';
             if (currentUpdate && newVersionDisplay && newVersionText) {
-                newVersionText.textContent = `v${currentUpdate.version}`;
+                newVersionText.textContent = parseVersion(currentUpdate.version).display;
                 newVersionDisplay.style.display = 'block';
             }
             if (currentUpdate && currentUpdate.body && changelogContainer && changelogContent) {
@@ -216,7 +283,9 @@ function updateUI(state, message = '', progress = 0) {
             
         case 'no-updates':
             if (statusText) {
-                statusText.textContent = 'You are running the latest version';
+                statusText.textContent = versionInfo.preview === null
+                    ? 'You are running the latest version'
+                    : "No newer build yet. You'll be offered the official build as soon as it releases.";
                 statusText.style.display = 'block';
                 statusText.style.color = '#59fcb3';
             }
@@ -371,6 +440,10 @@ async function initializeUpdater() {
         }
         return;
     }
+
+    // Resolve the channel before anything renders or checks: the endpoint,
+    // the button label and the status copy all branch on it.
+    versionInfo = parseVersion(await getCurrentVersion());
 
     // Initialize UI when DOM is ready
     if (document.readyState === 'loading') {

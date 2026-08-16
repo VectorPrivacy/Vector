@@ -1285,29 +1285,175 @@ async function askForBanner() {
  * in-app and on the Nostr network.
  */
 async function askForStatus() {
-    const strStatus = await popupConfirm('Status', 'Set a public status for everyone to see', false, 'Custom Status');
-    if (strStatus === false) return;
+    openStatusDialog(arrProfiles.find(a => a.mine));
+}
 
-    // Display the change immediately
+/** Open the Status dialog prefilled with the current status. Emoji come from
+ *  the shared Emoji Panel in status mode (GIFs hidden); the live row renders
+ *  your avatar + the exact pill other users will see. While the panel is
+ *  open the card glides to the upper third so both stay fully visible. */
+/** The Status field's mini composer: the chat composer module with the
+ *  emoji-only grammar (inline emoji, no markdown/mentions). Lazy singleton —
+ *  the dialog's DOM is permanent, so the instance is too. */
+let _statusComposer = null;
+function _ensureStatusComposer() {
+    if (_statusComposer) return _statusComposer;
+    _statusComposer = createRichComposer(document.getElementById('status-input-host'), {
+        placeholder: "What's happening?",
+        emojiOnly: true,
+        resolveEmoji: cmpResolvePackEmoji,
+        bindEmojiImg: cmpBindEmojiImg,
+    });
+    return _statusComposer;
+}
+
+function openStatusDialog(cProfile) {
+    const strCurrent = cProfile?.status?.title || '';
+    const overlay = document.getElementById('status-dialog');
+    const input = _ensureStatusComposer();
+    const btnEmoji = document.getElementById('status-emoji-btn');
+    const btnSave = document.getElementById('status-save');
+    const btnClose = document.getElementById('status-dialog-close');
+    const btnClear = document.getElementById('status-clear');
+    const charCount = document.getElementById('status-char-count');
+    const preview = document.getElementById('status-preview');
+    const previewText = document.getElementById('status-preview-text');
+    const avatarWrap = document.getElementById('status-preview-avatar');
+
+    avatarWrap.innerHTML = '';
+    avatarWrap.appendChild(createAvatarImg(getProfileAvatarSrc(cProfile), 34, false));
+
+    const updatePreview = () => {
+        // Statuses are one line, 120 chars — the composer itself has no
+        // maxlength, so sanitize the model on every edit.
+        const clean = input.value.replace(/\n/g, ' ').slice(0, 120);
+        if (clean !== input.value) input.value = clean;
+        const txt = clean.trim();
+        preview.classList.toggle('status-preview-empty', !txt);
+        previewText.textContent = txt || 'No status';
+        if (txt) {
+            twemojify(previewText);
+            renderCustomEmojiShortcodes(previewText, equippedEmojiTags());
+        }
+        const remaining = 120 - clean.length;
+        charCount.textContent = remaining <= 30 ? String(remaining) : '';
+        charCount.classList.toggle('status-char-low', remaining <= 10);
+    };
+
+    const insertIntoStatus = (text) => {
+        const start = input.selectionStart ?? input.value.length;
+        const end = input.selectionEnd ?? start;
+        const before = input.value.slice(0, start);
+        const after = input.value.slice(end);
+        const space = before && !/\s$/.test(before) ? ' ' : '';
+        input.value = (before + space + text + after).slice(0, 120);
+        const pos = Math.min((before + space + text).length, input.value.length);
+        input.setSelectionRange(pos, pos);
+        input.focus();
+        updatePreview();
+    };
+
+    // Card position tracks the panel: glide up while it's open, recentre when
+    // it closes — regardless of WHICH path closed it (✕, outside tap, select).
+    const panelWatcher = new MutationObserver(() => {
+        overlay.classList.toggle('panel-open', picker.classList.contains('visible'));
+    });
+    panelWatcher.observe(picker, { attributes: true, attributeFilter: ['class'] });
+
+    const close = () => {
+        if (overlay.classList.contains('closing')) return;
+        panelWatcher.disconnect();
+        _emojiPanelTarget = null;
+        closeEmojiPanel();
+        document.removeEventListener('keydown', onKey);
+        popBack('status-dialog');
+        // Mirror the open pop, then actually hide (matches the 0.15s animation)
+        overlay.classList.add('closing');
+        overlay._closeTimer = setTimeout(() => {
+            overlay.classList.remove('active', 'closing', 'panel-open');
+            overlay.querySelector('.status-dialog-card').classList.remove('pop-in');
+        }, 160);
+    };
+
+    const onKey = (e) => {
+        if (e.key === 'Escape') {
+            if (picker.classList.contains('visible')) closeEmojiPanel();
+            else close();
+        }
+    };
+
+    input.value = strCurrent;
+    btnClear.classList.toggle('hidden', !strCurrent);
+    updatePreview();
+
+    input.oninput = updatePreview;
+    // Enter saves — statuses have no second line to go to.
+    input.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            btnSave.click();
+        }
+    };
+    btnEmoji.onclick = (e) => {
+        // stopPropagation: the document-level click delegate would otherwise
+        // run the panel's open/close toggle against this same click.
+        e.stopPropagation();
+        if (picker.classList.contains('visible')) closeEmojiPanel();
+        else openEmojiPanelForStatus(insertIntoStatus);
+    };
+    btnSave.onclick = () => { const v = input.value.trim(); close(); saveStatus(v); };
+    btnClear.onclick = () => { close(); saveStatus(''); };
+    btnClose.onclick = close;
+    overlay.onclick = (e) => {
+        if (e.target !== overlay) return;
+        // First outside tap dismisses the emoji panel (the document delegate
+        // handles it); the next one dismisses the dialog.
+        if (picker.classList.contains('visible')) return;
+        close();
+    };
+
+    // Cancel any in-flight close, then pop in: the animation class lands
+    // AFTER the overlay renders, because WebKit won't start one declared on
+    // a subtree emerging from display:none.
+    clearTimeout(overlay._closeTimer);
+    overlay.classList.remove('closing');
+    const card = overlay.querySelector('.status-dialog-card');
+    card.classList.remove('pop-in');
+    overlay.classList.add('active');
+    void card.offsetWidth;
+    card.classList.add('pop-in');
+    document.addEventListener('keydown', onKey);
+    pushBack('status-dialog', close);
+    if (!platformFeatures.is_mobile) input.focus();
+}
+
+/** Publish a status (optimistic local echo, rollback + alert on failure). */
+async function saveStatus(strStatus) {
     const cProfile = arrProfiles.find(a => a.mine);
     const oldStatus = cProfile.status.title;
+    const oldTags = cProfile.status.emoji_tags;
     cProfile.status.title = strStatus;
+    // Optimistic tags: the equipped-pack superset renders any :shortcode:
+    // immediately; the backend's profile_update follows with the exact set.
+    cProfile.status.emoji_tags = strStatus ? equippedEmojiTags() : [];
     renderCurrentProfile(cProfile);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
-    // Send out the status update
+    const rollback = () => {
+        cProfile.status.title = oldStatus;
+        cProfile.status.emoji_tags = oldTags;
+        renderCurrentProfile(cProfile);
+        if (domProfile.style.display === '') renderProfileTab(cProfile);
+    };
+
     try {
         const success = await invoke("update_status", { status: strStatus });
         if (!success) {
-            cProfile.status.title = oldStatus;
-            renderCurrentProfile(cProfile);
-            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            rollback();
             await popupConfirm('Status Update Failed!', 'Failed to broadcast status update to the network.', true, '', 'vector_warning.svg');
         }
     } catch (e) {
-        cProfile.status.title = oldStatus;
-        renderCurrentProfile(cProfile);
-        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        rollback();
         await popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
@@ -2354,6 +2500,25 @@ async function initSettings() {
         });
     }
 
+    // Rich Composer toggle — the inline-formatting input, with the plain textarea
+    // as the escape hatch. Stored in localStorage rather than the settings DB for
+    // two reasons: the composer is constructed at main.js module scope, long before
+    // the async settings load, and it is a per-DEVICE compatibility choice — a
+    // WebView quirk on one machine shouldn't disable it on your others.
+    const richComposerToggle = document.getElementById('rich-composer-toggle');
+    if (richComposerToggle) {
+        richComposerToggle.checked = localStorage.getItem('rich_composer') !== 'false';
+        richComposerToggle.addEventListener('change', () => {
+            localStorage.setItem('rich_composer', richComposerToggle.checked ? 'true' : 'false');
+            // The input is built once at startup, so the swap needs a fresh load.
+            popupConfirm(
+                'Restart required',
+                'The composer changes on the next app start.',
+                true,
+            );
+        });
+    }
+
     // Emoticon Suggestions toggle (:) → 🙂, :D → 😄, …; off = leave emoticons as literal text)
     const emoticonToggle = document.getElementById('emoticon-suggestions-toggle');
     if (emoticonToggle) {
@@ -2480,6 +2645,178 @@ async function initEncryptionSettings() {
     // Set up Tauri event listeners for migration progress
     setupMigrationEventListeners();
 
+    // Unlock-method row (mode display + switch)
+    await initUnlockMethodRow();
+}
+
+/**
+ * The one warning biometric-only mode ships with: removing the device's
+ * screen lock destroys the hardware key that guards this device's data.
+ * Everything else (new fingerprints, changed PIN) is safe and silent.
+ */
+async function confirmBiometricOnlyWarning() {
+    return await popupConfirm(
+        'Before you continue',
+        'Vector will be protected by your device\'s screen lock: fingerprint, face, or device PIN.<br><br>' +
+        '<b>Do not remove your phone\'s screen lock without first disabling Local Encryption in Vector</b>, ' +
+        'or this device loses access to its encrypted data and you will need to sign in with your keys again.<br><br>' +
+        'Changing your PIN or adding fingerprints is always safe.',
+        false, '', 'vector_warning.svg'
+    );
+}
+
+/** Re-sync the encryption toggle from backend truth after a state-desync refusal. */
+async function resyncEncryptionToggle() {
+    try {
+        const st = await invoke('get_encryption_status', { npub: null });
+        fEncryptionEnabled = st.enabled;
+        fSecurityType = st.security_type || 'pin';
+        const t = document.getElementById('security-encryption-toggle');
+        if (t) t.checked = st.enabled;
+        updateChangeCredentialButton();
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    } catch (e) { /* keep last known state */ }
+}
+
+/**
+ * Enable Local Encryption in biometric-only mode (generated credential,
+ * hardware-wrapped). Shared by the Local Encryption toggle's offer and a
+ * direct tap on the Biometric Unlock row. Returns true on success.
+ */
+async function enableBiometricOnlyEncryption() {
+    if (!(await confirmBiometricOnlyWarning())) return false;
+    // Set BEFORE the invoke: encryption_migration_complete fires from inside
+    // the command, and its refresh must read the new type, not the stale one.
+    const prevSecurityType = fSecurityType;
+    fSecurityType = 'biometric';
+    showMigrationModal(true);
+    try {
+        await invoke('enable_encryption_biometric');
+        updateChangeCredentialButton();
+        return true;
+    } catch (e) {
+        fSecurityType = prevSecurityType;
+        hideMigrationModal();
+        const msg = String(e);
+        if (msg.includes('already enabled') || msg.includes('already in progress')) {
+            await resyncEncryptionToggle();
+        } else if (!msg.includes('BIOMETRIC_CANCELLED')) {
+            await popupConfirm('Encryption Failed', escapeHtml(msg), true);
+        }
+        return false;
+    }
+}
+
+/**
+ * Unlock-method row: shows which credential guards this account and switches
+ * between the two MUTUALLY EXCLUSIVE modes — OS-backed (biometrics/device
+ * credential) or Vector-backed (PIN/password). Never both: one credential
+ * means one login path. Switching re-keys the store in memory (the same
+ * engine as Change PIN), so plaintext never touches disk.
+ */
+async function initUnlockMethodRow() {
+    const row = document.getElementById('unlock-method-container');
+    const label = document.getElementById('unlock-method-label');
+    const btn = document.getElementById('unlock-method-switch');
+    const infoBtn = document.getElementById('unlock-method-info');
+    if (!row || !label || !btn) return;
+
+    let bioSupported = false;
+    if (platformFeatures.os === 'android') {
+        try {
+            const st = await invoke('biometric_status');
+            bioSupported = !!st.supported;
+        } catch (e) { /* leave unsupported */ }
+    }
+
+    window.__refreshUnlockMethodRow = () => {
+        const isBio = fSecurityType === 'biometric';
+        // Hidden when encryption is off (nothing to unlock) or when the device
+        // can't do biometrics and we're already on a credential (no alternative).
+        row.style.display = fEncryptionEnabled && (bioSupported || isBio) ? '' : 'none';
+        label.textContent = isBio
+            ? 'Unlock: Biometrics'
+            : `Unlock: ${fSecurityType === 'password' ? 'Password' : 'PIN'}`;
+        btn.textContent = isBio ? 'Use PIN' : 'Use Biometrics';
+    };
+    window.__refreshUnlockMethodRow();
+
+    if (!btn.dataset.unlockBound) {
+        btn.dataset.unlockBound = '1';
+        btn.addEventListener('click', async () => {
+            if (fMigrationInProgress) return;
+            if (fSecurityType === 'biometric') {
+                await switchToCredentialMode();
+            } else {
+                await switchToBiometricMode();
+            }
+        });
+        if (infoBtn) {
+            infoBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                popupConfirm(
+                    'Unlock Method',
+                    'Your local data is always encrypted. This chooses what unlocks it:<br><br>' +
+                    '<b>Biometrics</b> uses your device security (fingerprint, face, or device PIN) with a key held in hardware.<br><br>' +
+                    '<b>PIN or Password</b> uses a credential you type and remember.',
+                    true,
+                    '',
+                    'vector-check.svg'
+                );
+            });
+        }
+    }
+}
+
+/** Vector-backed to OS-backed. The prompt happens before anything commits. */
+async function switchToBiometricMode() {
+    if (!(await confirmBiometricOnlyWarning())) return;
+    const prev = fSecurityType;
+    fSecurityType = 'biometric';
+    fMigrationRekeying = true;
+    showMigrationModal(true);
+    try {
+        await invoke('switch_to_biometric');
+        updateChangeCredentialButton();
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    } catch (e) {
+        fSecurityType = prev;
+        fMigrationRekeying = false;
+        hideMigrationModal();
+        const msg = String(e);
+        if (!msg.includes('BIOMETRIC_CANCELLED')) {
+            await popupConfirm('Could not switch', escapeHtml(msg), true);
+        }
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    }
+}
+
+/** OS-backed to Vector-backed. Needs a NEW credential, never the old one. */
+async function switchToCredentialMode() {
+    const result = await promptSecurityCredential(
+        'Switch to PIN or Password',
+        'Choose the credential that will unlock Vector from now on. There is no recovery if you forget it!'
+    );
+    if (!result) return;
+    const prev = fSecurityType;
+    fSecurityType = result.securityType;
+    fMigrationRekeying = true;
+    showMigrationModal(true);
+    try {
+        await invoke('switch_to_credential', {
+            credential: result.credential,
+            securityType: result.securityType,
+        });
+        updateChangeCredentialButton();
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    } catch (e) {
+        fSecurityType = prev;
+        fMigrationRekeying = false;
+        hideMigrationModal();
+        await popupConfirm('Could not switch', escapeHtml(String(e)), true);
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+    }
 }
 
 /**
@@ -2488,7 +2825,9 @@ async function initEncryptionSettings() {
 function updateChangeCredentialButton() {
     const container = document.getElementById('change-pin-container');
     if (!container) return;
-    if (fEncryptionEnabled) {
+    // Biometric accounts have no typeable credential to change; the
+    // unlock-method row switches them instead.
+    if (fEncryptionEnabled && fSecurityType !== 'biometric') {
         container.style.display = '';
         domSettingsChangePinLabel.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
     } else {
@@ -2536,6 +2875,25 @@ async function handleEncryptionToggleChange(e) {
  * @param {HTMLInputElement} toggle - The toggle element
  */
 async function handleEnableEncryption(toggle) {
+    // Android with capable hardware: offer biometric-only mode first — a
+    // generated credential nobody knows, unlocked solely by the OS.
+    if (platformFeatures.os === 'android') {
+        let bs = null;
+        try { bs = await invoke('biometric_status'); } catch (e) {}
+        if (bs && bs.supported) {
+            const useBio = await popupConfirm(
+                'Protect with Biometrics?',
+                'Unlock Vector with your fingerprint, face, or device PIN. No Vector PIN to remember.<br><br>Choose Cancel to set a PIN or Password instead.',
+                false, '', 'vector-check.svg', '', 'Use Biometrics'
+            );
+            if (useBio) {
+                const ok = await enableBiometricOnlyEncryption();
+                if (!ok) toggle.checked = false;
+                return;
+            }
+        }
+    }
+
     // Ask user to choose security type
     const result = await promptSecurityCredential('Set Up Encryption', 'Choose how to protect your local data. There is no recovery if you forget!');
 
@@ -2548,8 +2906,8 @@ async function handleEnableEncryption(toggle) {
     showMigrationModal(true);
 
     try {
-        await invoke('enable_encryption', { credential: result.credential, securityType: result.securityType });
         fSecurityType = result.securityType;
+        await invoke('enable_encryption', { credential: result.credential, securityType: result.securityType });
         updateChangeCredentialButton();
     } catch (e) {
         hideMigrationModal();
@@ -2928,7 +3286,10 @@ async function setupMigrationEventListeners() {
         // Update local state
         fEncryptionEnabled = document.getElementById('security-encryption-toggle').checked;
         updateChangeCredentialButton();
-        showToast(wasRekeying ? 'Credential changed' : wasEncrypting ? 'Encryption enabled' : 'Encryption disabled');
+        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        showToast(wasRekeying
+            ? (fSecurityType === 'biometric' ? 'Now unlocking with biometrics' : 'Unlock method updated')
+            : wasEncrypting ? 'Encryption enabled' : 'Encryption disabled');
     });
 }
 

@@ -103,17 +103,11 @@ static CSP: LazyLock<String> = LazyLock::new(|| {
     );
     
     let csp = Csp::DirectiveMap(m);
-    
-    // Add custom schemes for Windows/Android compatibility
-    #[cfg(any(target_os = "windows", target_os = "android"))]
-    {
-        // On Windows/Android, we use http://webxdc.localhost which needs to be in CSP
-        csp.to_string().replace("'self'", "'self' http://webxdc.localhost")
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "android")))]
-    {
-        csp.to_string()
-    }
+
+    // 'self' only: each app's window is served from its own per-partition
+    // origin, and naming a fixed host here would let an app iframe another
+    // origin's storage (including the legacy shared one).
+    csp.to_string()
 });
 
 /// Base Permissions Policy that denies all sensitive APIs by default
@@ -279,9 +273,10 @@ pub fn miniapp_protocol<R: tauri::Runtime>(
         request.uri().path()
     );
 
-    // URI format:
-    // macOS/Linux: webxdc://dummy.host/<path>
-    // Windows/Android: http://webxdc.localhost/<path>
+    // URI format (host = per-app storage partition):
+    // macOS/Linux: webxdc://<partition>.host/<path>
+    // Windows: arrives as http://webxdc.<partition>.host/<path>, reverted by
+    //          wry's prefix workaround to webxdc://<partition>.host/<path>
 
     let webview_label = ctx.webview_label().to_owned();
 

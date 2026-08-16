@@ -52,15 +52,18 @@ pub async fn has_fawkes_badge(pubkey: &PublicKey) -> Result<bool, String> {
     let filter = Filter::new()
         .author(*pubkey)
         .kind(Kind::ApplicationSpecificData)
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), "fawkes_2025")
+        .custom_tag(SingleLetterTag::LOWERCASE_D, "fawkes_2025")
         // > 1 to tolerate relays serving superseded copies of the replaceable
         // event alongside the current one.
         .limit(10);
     let mut events = client
-        .stream_events(filter, std::time::Duration::from_secs(10))
+        .stream_events(filter)
+        .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(event) = events.next().await {
+    // 0.45 streams (relay, Result<Event>) so callers can attribute per-relay failures.
+    while let Some((_relay, res)) = events.next().await {
+        let Ok(event) = res else { continue };
         if is_valid_fawkes_claim(&event.content, event.created_at.as_secs()) {
             return Ok(true);
         }
@@ -103,6 +106,46 @@ pub fn bug_hunter_tier() -> u8 {
 /// limits) read this.
 pub fn effective_tier() -> u8 {
     bug_hunter_tier().max(if has_vector_badge() { 3 } else { 0 })
+}
+
+/// Per-effective-tier cap on NEW reaction groups one user may open on a single
+/// message. Joining an existing reaction (+1) is never gated — only introducing
+/// an emoji the message doesn't yet carry spends this allowance.
+pub const NEW_REACTIONS_PER_POST_BY_TIER: [usize; 4] = [6, 6, 9, 12];
+
+/// The current account's fresh-reaction allowance per message.
+pub fn effective_max_new_reactions_per_post() -> usize {
+    NEW_REACTIONS_PER_POST_BY_TIER[effective_tier() as usize]
+}
+
+/// Sender-side gate for reacting to `reference_id` with `emoji`: joining an
+/// existing group always passes; opening a new group checks the message-wide
+/// group ceiling, then the per-tier allowance. "Groups I opened" is judged by
+/// insertion order in our own view — the earliest held reaction per emoji.
+/// `Ok(())` when the send may proceed.
+pub async fn check_new_reaction_allowance(reference_id: &str, emoji: &str) -> Result<(), String> {
+    use nostr_sdk::prelude::ToBech32;
+    let me = match crate::state::my_public_key().and_then(|pk| pk.to_bech32().ok()) {
+        Some(npub) => npub,
+        None => return Err("Not logged in".to_string()),
+    };
+    let st = crate::state::STATE.lock().await;
+    let Some((_, message)) = st.find_message(reference_id) else { return Ok(()) };
+    if message.reactions.iter().any(|r| r.emoji == emoji) {
+        return Ok(());
+    }
+    let mut first_by_emoji: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for r in &message.reactions {
+        first_by_emoji.entry(r.emoji.as_str()).or_insert(r.author_id.as_str());
+    }
+    if first_by_emoji.len() >= crate::compact::MAX_REACTION_GROUPS {
+        return Err("This message has reached its reaction limit".to_string());
+    }
+    let spent = first_by_emoji.values().filter(|a| **a == me).count();
+    if spent >= effective_max_new_reactions_per_post() {
+        return Err("You've used all your new reactions on this message".to_string());
+    }
+    Ok(())
 }
 
 /// The highest effective tier across ALL accounts on this install. The
@@ -159,76 +202,70 @@ pub fn note_own_badge_confirmed(pubkey: &PublicKey, has_badge: bool) {
 }
 
 /// Fetch our own badges and persist to the per-account cache. Called once
-/// after initial sync. The SessionGuard straddles the network fetch so a
+/// after initial sync. The std::sync::Arc<crate::db::Session> straddles the network fetch so a
 /// mid-fetch account swap can't write account A's badge into account B's DB.
 pub async fn refresh_own_badges() {
-    let session = crate::state::SessionGuard::capture();
-    let Some(pk) = crate::state::my_public_key() else {
-        crate::log_warn!("[Badges] refresh skipped — no public key");
-        return;
-    };
+    crate::db::scoped(async move {
+        let Some(pk) = crate::state::my_public_key() else {
+            crate::log_warn!("[Badges] refresh skipped — no public key");
+            return;
+        };
 
-    // Sticky: the badge is a permanent achievement, so once confirmed we never
-    // re-query (avoids a flaky relay later flipping it off) and never downgrade.
-    if has_vector_badge() {
-        crate::log_info!("[Badges] vector badge already cached — skipping refresh");
-        return;
-    }
-
-    // Throttle: skip the relay sweep if we already checked recently without
-    // success. The window is closed, so a miss now will still be a miss in an
-    // hour — no need to re-sweep on every restart.
-    let now = unix_now();
-    if let Some(last) = crate::db::get_sql_setting(BADGE_CHECK_TS_KEY.to_string())
-        .ok()
-        .flatten()
-        .and_then(|v| v.parse::<u64>().ok())
-    {
-        if now.saturating_sub(last) < RECHECK_COOLDOWN_SECS {
+        // Sticky: the badge is a permanent achievement, so once confirmed we never
+        // re-query (avoids a flaky relay later flipping it off) and never downgrade.
+        if has_vector_badge() {
+            crate::log_info!("[Badges] vector badge already cached — skipping refresh");
             return;
         }
-    }
 
-    crate::log_info!(
-        "[Badges] resolving own badges for {}…",
-        pk.to_bech32().unwrap_or_default()
-    );
-
-    // The holding relay (often the user's own) is flaky/overloaded during the
-    // heavy sync window, so retry a few times to catch it during a quiet
-    // moment. A miss leaves the badge cache untouched (records only the check
-    // time for the cooldown); the next boot past the cooldown tries again until
-    // it lands once (then sticky-cached forever).
-    const ATTEMPTS: u8 = 3;
-    for attempt in 1..=ATTEMPTS {
-        match has_fawkes_badge(&pk).await {
-            Ok(true) => {
-                if !session.is_valid() {
-                    return;
-                }
-                crate::log_info!("[Badges] vector badge confirmed (attempt {})", attempt);
-                let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+        // Throttle: skip the relay sweep if we already checked recently without
+        // success. The window is closed, so a miss now will still be a miss in an
+        // hour — no need to re-sweep on every restart.
+        let now = unix_now();
+        if let Some(last) = crate::db::get_sql_setting(BADGE_CHECK_TS_KEY.to_string())
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            if now.saturating_sub(last) < RECHECK_COOLDOWN_SECS {
                 return;
             }
-            Ok(false) => {
-                crate::log_info!("[Badges] vector badge not found (attempt {}/{})", attempt, ATTEMPTS);
+        }
+
+        crate::log_info!(
+            "[Badges] resolving own badges for {}…",
+            pk.to_bech32().unwrap_or_default()
+        );
+
+        // The holding relay (often the user's own) is flaky/overloaded during the
+        // heavy sync window, so retry a few times to catch it during a quiet
+        // moment. A miss leaves the badge cache untouched (records only the check
+        // time for the cooldown); the next boot past the cooldown tries again until
+        // it lands once (then sticky-cached forever).
+        const ATTEMPTS: u8 = 3;
+        for attempt in 1..=ATTEMPTS {
+            match has_fawkes_badge(&pk).await {
+                Ok(true) => {
+                    crate::log_info!("[Badges] vector badge confirmed (attempt {})", attempt);
+                    let _ = crate::db::set_sql_setting(BADGE_VECTOR_KEY.to_string(), "true".to_string());
+                    return;
+                }
+                Ok(false) => {
+                    crate::log_info!("[Badges] vector badge not found (attempt {}/{})", attempt, ATTEMPTS);
+                }
+                Err(e) => {
+                    crate::log_warn!("[Badges] refresh attempt {}/{} failed: {}", attempt, ATTEMPTS, e);
+                }
             }
-            Err(e) => {
-                crate::log_warn!("[Badges] refresh attempt {}/{} failed: {}", attempt, ATTEMPTS, e);
+            if attempt < ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             }
         }
-        if !session.is_valid() {
-            return;
-        }
-        if attempt < ATTEMPTS {
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-        }
-    }
-    // Record the unsuccessful pass so the cooldown applies before re-sweeping.
-    if session.is_valid() {
+        // Record the unsuccessful pass so the cooldown applies before re-sweeping.
         let _ = crate::db::set_sql_setting(BADGE_CHECK_TS_KEY.to_string(), now.to_string());
-    }
-    crate::log_info!("[Badges] vector badge not resolved this boot — will retry after cooldown");
+        crate::log_info!("[Badges] vector badge not resolved this boot — will retry after cooldown");
+    })
+    .await
 }
 
 // ── Bug Hunter (NIP-58 tiered, team-awarded) ───────────────────────────────
@@ -298,14 +335,16 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
     let award_filter = Filter::new()
         .author(issuer)
         .kind(Kind::Custom(8))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), pubkey.to_hex())
+        .custom_tag(SingleLetterTag::LOWERCASE_P, pubkey.to_hex())
         .limit(64);
     let mut awards: Vec<(EventId, u8)> = Vec::new();
     let mut stream = client
-        .stream_events(award_filter, std::time::Duration::from_secs(10))
+        .stream_events(award_filter)
+        .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(ev) = stream.next().await {
+    while let Some((_relay, res)) = stream.next().await {
+        let Ok(ev) = res else { continue };
         let coord = ev.tags.iter().find_map(|t| {
             let s = t.as_slice();
             if s.first().map(|k| k == "a").unwrap_or(false) {
@@ -328,10 +367,12 @@ async fn fetch_bug_hunter_raw(pubkey: &PublicKey) -> Result<(Vec<(EventId, u8)>,
         .limit(256);
     let mut revoked: HashSet<EventId> = HashSet::new();
     let mut rstream = client
-        .stream_events(revoke_filter, std::time::Duration::from_secs(10))
+        .stream_events(revoke_filter)
+        .timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| e.to_string())?;
-    while let Some(ev) = rstream.next().await {
+    while let Some((_relay, res)) = rstream.next().await {
+        let Ok(ev) = res else { continue };
         for t in ev.tags.iter() {
             let s = t.as_slice();
             if s.first().map(|k| k == "e").unwrap_or(false) {
@@ -370,10 +411,8 @@ fn write_cached_award_ids(ids: &[EventId]) {
 /// upgrades apply immediately; a downgrade is honored ONLY on a seen revocation,
 /// never a mere absent award (flaky relay). The ids of the awards backing the
 /// current tier are cached so a revocation still resolves after the relays purge
-/// the award itself (NIP-09 deletion). SessionGuard straddles the fetch so a
-/// mid-fetch account swap can't write account A's tier into account B.
+/// the award itself (NIP-09 deletion).
 pub async fn refresh_own_bug_hunter() {
-    let session = crate::state::SessionGuard::capture();
     let Some(pk) = crate::state::my_public_key() else {
         return;
     };
@@ -385,9 +424,6 @@ pub async fn refresh_own_bug_hunter() {
             return;
         }
     };
-    if !session.is_valid() {
-        return;
-    }
 
     // Highest non-revoked seen tier + the award ids backing it.
     let mut seen_tier = 0u8;

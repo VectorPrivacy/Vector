@@ -1,0 +1,91 @@
+name: Tests
+
+# The gate master never had: until now nothing automated ran the suites, so a
+# broken test, a missed HIGHEST_MIGRATION_ID bump (which locks users out of
+# their own accounts), or a cross-crate break reached master whenever someone
+# forgot to run them locally.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push supersedes an in-flight run for the same ref.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  vector-core:
+    name: vector-core
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates
+
+      # The bulk of Vector's logic, and no system dependencies: pure Rust.
+      # Includes `highest_migration_id_matches_the_runner`, the guard that
+      # catches a migration id added without bumping the constant.
+      - name: test
+        working-directory: crates
+        run: cargo test -p vector-core
+
+      # The GuardedKey vault stress tests are #[ignore]d because they serialize
+      # on the vault statics and cost ~40s locally (~80% of the old suite). They
+      # are hermetic, so CI is exactly where they belong.
+      #
+      # Selected BY NAME, never `--include-ignored`: #[ignore] in this repo also
+      # marks live-relay tests, which need a real network and must not gate a
+      # push.
+      - name: vault stress (ignored-by-default, hermetic)
+        working-directory: crates
+        run: cargo test -p vector-core --lib -- --ignored guarded_key
+
+  src-tauri:
+    name: src-tauri
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # Tauri needs WebKitGTK to build at all on Linux. Vulkan is deliberately
+      # absent: `--no-default-features` drops `whisper`, whose build wants
+      # glslc, and transcription is an isolated module — skipping it keeps this
+      # job minutes shorter while still compiling every command and the
+      # at-rest encryption sweep.
+      - name: install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `generate_context!` reads frontendDist at COMPILE time, so the crate
+      # won't build without dist/ — which is gitignored, and present on every
+      # dev machine. Copy mode: minification buys a test binary nothing.
+      - name: build frontend
+        run: |
+          npm ci
+          node scripts/build-frontend.mjs --copy
+
+      - name: test
+        working-directory: src-tauri
+        run: cargo test --no-default-features --lib

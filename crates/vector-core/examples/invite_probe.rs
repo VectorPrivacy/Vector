@@ -39,7 +39,8 @@ async fn main() {
 
     // 1) The bundle itself, at (kind 30078, author=signer, #d=locator).
     let bundle_filter = Filter::new().kind(Kind::Custom(30078)).author(signer_pk).identifier(locator.clone());
-    let bundles = client.fetch_events_from(relays.clone(), bundle_filter, Duration::from_secs(15)).await.unwrap();
+    let bundles = client.fetch_events(ReqTarget::manual(relays.clone().into_iter().map(|u| (u, vec![bundle_filter.clone()]))))
+        .timeout(Duration::from_secs(15)).await.unwrap();
     println!("\nEvents at the coordinate: {}", bundles.len());
     for e in bundles.iter() {
         let vsk = e.tags.iter().find_map(|t| { let s = t.as_slice(); (s.len() >= 2 && s[0] == "vsk").then(|| s[1].clone()) }).unwrap_or_default();
@@ -49,7 +50,8 @@ async fn main() {
 
     // 2) Any NIP-09 deletion (kind 5) by the token-signer referencing this coordinate (`a` tag).
     let del_filter = Filter::new().kind(Kind::Custom(5)).author(signer_pk);
-    let dels = client.fetch_events_from(relays.clone(), del_filter, Duration::from_secs(15)).await.unwrap();
+    let dels = client.fetch_events(ReqTarget::manual(relays.clone().into_iter().map(|u| (u, vec![del_filter.clone()]))))
+        .timeout(Duration::from_secs(15)).await.unwrap();
     let matching: Vec<_> = dels
         .iter()
         .filter(|e| e.tags.iter().any(|t| { let s = t.as_slice(); s.len() >= 2 && s[0] == "a" && s[1] == coord_a }))

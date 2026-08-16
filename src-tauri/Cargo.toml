@@ -1,6 +1,6 @@
 [package]
 name = "vector"
-version = "0.4.1"
+version = "0.4.3"
 description = "A humble attempt at a modern, private, complete Nostr chat client."
 authors = ["Formless Labs", "JSKitty", "YuurinBee"]
 edition = "2021"
@@ -18,6 +18,27 @@ codegen-units = 1
 opt-level = 3
 strip = true
 
+# Dev builds run the login KDF at SHIPPING speed. Argon2id is deliberately
+# expensive (150MB, 10 iterations); unoptimized it costs seconds per unlock,
+# which is paid on every dev-loop login with Local Encryption on. These crates
+# are dependencies, so optimizing them leaves our own build times and debug
+# info untouched — same code, same output, just not interpreted at a crawl.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+# The at-rest AEADs + hashes the unlock path runs alongside the KDF.
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
@@ -32,14 +53,19 @@ tauri-build = { version = "2.5.5", features = [] }
 # Vector Core — the single source of truth for all Vector logic
 vector-core = { path = "../crates/vector-core", default-features = false }
 
-nostr-sdk = { version = "0.44.1", features = ["nip06", "nip44", "nip59"] }
-nostr-blossom = "0.44.0"
+# NIP features are set on the `nostr` dep in vector-core and unify across the
+# workspace; 0.45 removed them from nostr-sdk entirely.
+nostr-sdk = "=0.45.1"
+nostr-blossom = "=0.45.0"
 bip39 = { version = "2.2.2", features = ["rand"] }
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util"] }
 futures-util = "0.3.31"
 tauri = { version = "2.10.2", features = ["macos-private-api", "protocol-asset", "image-png"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+# Same crate Tauri parses `package_info().version` with, so the Android update
+# beacon orders preview builds identically to the desktop updater plugin.
+semver = "1"
 # default-features=false drops `http2`, `default-tls`, and `macos-system-configuration` —
 # none of which Vector actually uses (rustls-tls is explicit; HTTP/1.1 is fine for
 # all relay/Blossom traffic). `charset` is kept for text-response decoding (link
@@ -154,5 +180,19 @@ tempfile = "3"
 whisper-rs-sys = { git = "https://github.com/VectorPrivacy/whisper-rs.git", branch = "master" }
 # nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
 # Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
-# Fork: https://github.com/VectorPrivacy/nostr/tree/zeroize-secretkey
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
+# Fork: https://github.com/VectorPrivacy/nostr/tree/zeroize-secretkey-v0.45.1
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey-v0.45.1" }
+# noq's published BBR3 (through 1.1.1) is a partial merge with an unchecked subtraction
+# that underflows whenever loss exceeds the loss threshold — panic in dev builds, garbage
+# inflight estimate in release (n0-computer/noq#768). Pinned to the quinn-sync commit that
+# replaces it wholesale; drop the pin once a noq release ships it (task #398).
+noq = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
+noq-proto = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
+noq-udp = { git = "https://github.com/n0-computer/noq.git", rev = "64a7e4cb9b11def5fbfc4cc419df4bfe58a94ee2" }
+# saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
+# (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
+# and its saturating ops evaluate those limits eagerly — so tor-netdoc's first
+# consensus time-range wrap spins a core forever and Tor freezes at 15%
+# bootstrap. Vendored with the probe and eagerness fixed; drop when an upstream
+# release ships the fix.
+saturating-time = { path = "../crates/vendor/saturating-time" }

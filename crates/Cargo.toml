@@ -2,7 +2,33 @@
 members = ["vector-core", "vector-cli", "vector-agent", "concord-cli", "vector-sdk"]
 resolver = "2"
 
+# Dependencies compile OPTIMIZED even in dev/test; our own crates stay unoptimized
+# so incremental builds and debug info are unaffected. The suite is dominated by
+# crypto that lives entirely in dependencies — Argon2id at 150MB/10 iterations, plus
+# the AEADs — and unoptimized those run orders of magnitude slower than shipped code.
+# Same code, same results: this changes compilation, never behaviour.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3
+
+# Our own crates under test: the vault stress tests are OUR code, so the
+# dependency override above can't reach them. 1 is the measured optimum — 2 and 3
+# both run SLOWER (50.9s / 50.2s vs 49.0s) and compile slower, because the vault's
+# cost is ~524k atomic writes per set(), which is memory-bandwidth-bound and
+# neither vectorizes nor reorders.
+[profile.test]
+opt-level = 1
+
 [patch.crates-io]
 # nostr SDK's SecretKey Drop uses non_secure_erase which the compiler can optimize away.
 # Patched to use zeroize (volatile writes) so secret key bytes are guaranteed cleared from the stack.
-nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey" }
+nostr = { git = "https://github.com/VectorPrivacy/nostr.git", branch = "zeroize-secretkey-v0.45.1" }
+# saturating-time 0.4.0's SystemTime MIN/MAX probe never terminates on Windows
+# (100ns clock granularity turns sub-1ns probe steps into no-op "successes"),
+# and its saturating ops evaluate those limits eagerly — so tor-netdoc's first
+# consensus time-range wrap spins a core forever and Tor freezes at 15%
+# bootstrap. Vendored with the probe and eagerness fixed; drop when an upstream
+# release ships the fix.
+saturating-time = { path = "vendor/saturating-time" }

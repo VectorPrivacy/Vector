@@ -21,6 +21,21 @@ pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Monotonically advance a numeric setting in ONE statement — the stored
+/// value only ever grows. For reconcile cursors and similar floors, where a
+/// read-modify-write window would let a stale or concurrent writer regress
+/// the value.
+pub fn advance_u64_setting(key: String, value: u64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value
+         WHERE CAST(excluded.value AS INTEGER) > CAST(value AS INTEGER)",
+        rusqlite::params![key, value.to_string()],
+    ).map_err(|e| format!("Failed to advance setting: {}", e))?;
+    Ok(())
+}
+
 /// Remove a setting by key.
 pub fn remove_setting(key: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
@@ -88,6 +103,7 @@ pub fn commit_account_setup(
     encryption_enabled: bool,
     security_type: Option<&str>,
     encrypted_seed: Option<&str>,
+    biometric_wrap: Option<&str>,
 ) -> Result<(), String> {
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction()
@@ -127,6 +143,25 @@ pub fn commit_account_setup(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('signer_type', 'local')",
         [],
     ).map_err(|e| format!("Failed to set signer_type: {}", e))?;
+    // Biometric-only mode: the wrapped vault key is the account's SOLE
+    // credential, so it must land in the SAME transaction that locks the
+    // store to it — a crash between commit and a separate write would leave
+    // the account permanently unrecoverable. None purges any stale wrap.
+    match biometric_wrap {
+        Some(w) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
+                rusqlite::params![w],
+            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
+        }
+        None => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+                [],
+            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
+        }
+    }
+
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
 }
@@ -243,6 +278,7 @@ pub fn commit_bunker_account_setup(
     security_type: Option<&str>,
     bunker_url_stored: &str,
     bunker_remote_pubkey_hex: &str,
+    biometric_wrap: Option<&str>,
 ) -> Result<(), String> {
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction()
@@ -281,6 +317,25 @@ pub fn commit_bunker_account_setup(
     // Drop any stale seed from a previous local-account setup on this DB.
     tx.execute("DELETE FROM settings WHERE key = 'seed'", [])
         .map_err(|e| format!("Failed to clear stale seed: {}", e))?;
+    // Biometric-only mode: the wrapped vault key is the account's SOLE
+    // credential, so it must land in the SAME transaction that locks the
+    // store to it — a crash between commit and a separate write would leave
+    // the account permanently unrecoverable. None purges any stale wrap.
+    match biometric_wrap {
+        Some(w) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
+                rusqlite::params![w],
+            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
+        }
+        None => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+                [],
+            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
+        }
+    }
+
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
 }
@@ -355,6 +410,8 @@ pub fn commit_nip55_account_setup(
     signer_package: &str,
     encryption_enabled: bool,
     security_type: Option<&str>,
+    biometric_wrap: Option<&str>,
+    pin_canary: Option<&str>,
 ) -> Result<(), String> {
     let mut conn = super::get_write_connection_guard_static()?;
     let tx = conn.transaction()
@@ -394,6 +451,43 @@ pub fn commit_nip55_account_setup(
             rusqlite::params![stale],
         ).map_err(|e| format!("Failed to clear stale {}: {}", stale, e))?;
     }
+    // Biometric-only mode: the wrapped vault key is the account's SOLE
+    // credential, so it must land in the SAME transaction that locks the
+    // store to it — a crash between commit and a separate write would leave
+    // the account permanently unrecoverable. None purges any stale wrap.
+    match biometric_wrap {
+        Some(w) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
+                rusqlite::params![w],
+            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
+        }
+        None => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+                [],
+            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
+        }
+    }
+
+    // The canary is a keyless account's ONLY wrong-PIN detector at boot —
+    // same atomicity rule as the biometric wrap: it lands with the commit or
+    // not at all. None scrubs any stale canary from a prior setup.
+    match pin_canary {
+        Some(c) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_pin_check', ?1)",
+                rusqlite::params![c],
+            ).map_err(|e| format!("Failed to set pin canary: {}", e))?;
+        }
+        None => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'nip55_pin_check'",
+                [],
+            ).map_err(|e| format!("Failed to clear pin canary: {}", e))?;
+        }
+    }
+
     tx.commit().map_err(|e| format!("Failed to commit tx: {}", e))?;
     Ok(())
 }

@@ -4,6 +4,7 @@
 //! - Typing indicators
 //! - WebXDC peer advertisement for P2P Mini Apps
 
+use vector_core::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::*;
 
 use crate::{nostr_client, active_trusted_relays};
@@ -43,7 +44,6 @@ pub async fn send_webxdc_peer_advertisement(
 ) -> bool {
     // The receiver/chat_id was captured by the caller under the CURRENT account; a swap
     // mid-await would sign + publish the NEW account's identity into the OLD account's chat.
-    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
@@ -57,23 +57,20 @@ pub async fn send_webxdc_peer_advertisement(
             // Build the peer advertisement rumor (no expiry — peer-left signal handles cleanup)
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-advertisement")
                 .tag(Tag::public_key(pubkey))
-                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
-                .tag(Tag::custom(TagKind::custom("webxdc-node-addr"), vec![node_addr]))
-                .build(my_public_key);
+                .tag(Tag::custom("d", vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom("webxdc-topic", vec![topic_id]))
+                .tag(Tag::custom("webxdc-node-addr", vec![node_addr]))
+                .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
-            if !session.is_valid() {
-                return false;
-            }
             // Gift Wrap and send to receiver via our Trusted Relays
-            match client.gift_wrap_to(relays.into_iter(), &pubkey, rumor, []).await {
+            match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }
         }
         // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
-        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, Some(&node_addr), &session).await,
+        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, Some(&node_addr)).await,
     }
 }
 
@@ -84,7 +81,6 @@ pub async fn send_webxdc_peer_left(
     topic_id: String,
 ) -> bool {
     // Same swap exposure as the advertisement — see send_webxdc_peer_advertisement.
-    let session = vector_core::state::SessionGuard::capture();
     let Some(client) = nostr_client() else { return false; };
     let Some(my_public_key) = crate::my_public_key() else { return false; };
 
@@ -94,21 +90,18 @@ pub async fn send_webxdc_peer_left(
         Ok(pubkey) => {
             let rumor = EventBuilder::new(Kind::ApplicationSpecificData, "peer-left")
                 .tag(Tag::public_key(pubkey))
-                .tag(Tag::custom(TagKind::d(), vec!["vector-webxdc-peer"]))
-                .tag(Tag::custom(TagKind::custom("webxdc-topic"), vec![topic_id]))
-                .build(my_public_key);
+                .tag(Tag::custom("d", vec!["vector-webxdc-peer"]))
+                .tag(Tag::custom("webxdc-topic", vec![topic_id]))
+                .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
-            if !session.is_valid() {
-                return false;
-            }
-            match client.gift_wrap_to(relays.into_iter(), &pubkey, rumor, []).await {
+            match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
                 Ok(_) => true,
                 Err(_) => false,
             }
         }
         // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
-        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, None, &session).await,
+        Err(_) => send_community_webxdc_signal(&receiver, &topic_id, None).await,
     }
 }
 
@@ -119,7 +112,6 @@ async fn send_community_webxdc_signal(
     channel_id: &str,
     topic_id: &str,
     node_addr: Option<&str>,
-    session: &vector_core::state::SessionGuard,
 ) -> bool {
     use vector_core::community::{service, transport::LiveTransport};
     // Dual-stack: a v2 channel seals the SAME 3310 content on its chat plane.
@@ -137,9 +129,6 @@ async fn send_community_webxdc_signal(
             ) else {
                 return false;
             };
-            if !session.is_valid() {
-                return false;
-            }
             let ch = vector_core::community::ChannelId(vector_core::simd::hex::hex_to_bytes_32(channel_id));
             let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
             return match vector_core::community::v2::service::send_webxdc_signal(&transport, &community, &ch, topic_id, node_addr).await {
@@ -160,9 +149,6 @@ async fn send_community_webxdc_signal(
     };
     // Re-check after the DB resolve: a swap here would publish the NEW account's identity
     // (both accounts can be members of the same community) under the OLD caller's intent.
-    if !session.is_valid() {
-        return false;
-    }
     let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
     match service::publish_webxdc_signal(&transport, &community, &channel, topic_id, node_addr).await {
         Ok(()) => true,

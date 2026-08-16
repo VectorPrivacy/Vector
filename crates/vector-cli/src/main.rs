@@ -178,7 +178,12 @@ async fn auto_login(core: &VectorCore) {
 
     let npub = &accounts[0];
     vector_core::db::set_current_account(npub.clone()).ok();
-    vector_core::db::init_database(npub).ok();
+    // Never `.ok()` this: it carries the downgrade block, and swallowing it
+    // would let an older build run against a newer schema.
+    if let Err(e) = vector_core::db::init_database(npub) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
 
     let pkey = match vector_core::db::get_pkey() {
         Ok(Some(k)) => k,

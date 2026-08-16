@@ -4,10 +4,9 @@
 //! uses the `EventEmitter` trait via `crate::traits::emit_event`.
 
 use nostr_sdk::prelude::*;
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 use crate::chat::{Chat, ChatType};
@@ -64,6 +63,11 @@ pub static TRUSTED_RELAYS: &[&str] = &[
     "wss://jskitty.com/nostr",
     "wss://asia.vectorapp.io/nostr",
     "wss://nostr.computingcache.com",
+    // Also listed in DISCOVERY_READ_ONLY_RELAYS: Ditto once ack'd stranger
+    // kind-10050 writes with OK true and silently dropped them, so it must
+    // never count toward the relay-list freshness anchor. General traffic
+    // (DMs, communities) is unrestricted per its NIP-11.
+    "wss://relay.ditto.pub",
 ];
 
 /// Discovery Relays: widely-used indexers queried/written for relay-list
@@ -108,10 +112,20 @@ pub async fn active_trusted_relays() -> Vec<&'static str> {
         .collect()
 }
 
-/// Blossom media servers with failover. Held in a mutex so the per-account
-/// resolver (defaults minus disabled + enabled customs) can refresh it after
-/// edits and on login. Until the DB is open, falls back to the seed list.
-pub static BLOSSOM_SERVERS: OnceLock<std::sync::Mutex<Vec<String>>> = OnceLock::new();
+/// Blossom media servers with failover: this account's resolved list (defaults
+/// minus its disabled ones, plus its enabled customs).
+///
+/// Per-account, and consequential — it decides where THIS account's
+/// attachments are uploaded, so account A's self-hosted destination must never
+/// still be selected under account B. Starts as the seed list until the
+/// account's database is open and the resolver refreshes it.
+struct BlossomServers(std::sync::Mutex<Vec<String>>);
+
+impl Default for BlossomServers {
+    fn default() -> Self {
+        Self(std::sync::Mutex::new(init_blossom_servers()))
+    }
+}
 
 pub fn init_blossom_servers() -> Vec<String> {
     crate::blossom_servers::DEFAULT_BLOSSOM_SERVERS
@@ -119,9 +133,15 @@ pub fn init_blossom_servers() -> Vec<String> {
 }
 
 pub fn get_blossom_servers() -> Vec<String> {
-    BLOSSOM_SERVERS
-        .get_or_init(|| std::sync::Mutex::new(init_blossom_servers()))
-        .lock().unwrap().clone()
+    let owner = crate::db::current_session().scoped::<BlossomServers, BlossomServers>();
+    let servers = owner.0.lock().unwrap().clone();
+    servers
+}
+
+/// Install this account's resolved server list.
+pub fn set_blossom_servers(servers: Vec<String>) {
+    let owner = crate::db::current_session().scoped::<BlossomServers, BlossomServers>();
+    *owner.0.lock().unwrap() = servers;
 }
 
 pub static MNEMONIC_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -270,32 +290,48 @@ mod resolve_encryption_enabled_tests {
 // so `reset_session()` can swap them atomically — mobile cannot rely on
 // `app.restart()`. Callers should prefer the helpers below over locking directly.
 
-pub static NOSTR_CLIENT: LazyLock<RwLock<Option<Client>>> =
-    LazyLock::new(|| RwLock::new(None));
+/// The relay client and identity this account signs and publishes with.
+///
+/// On the session, not global: a task that outlived a swap would otherwise
+/// reach the NEW account's client and publish the previous account's payload
+/// under the wrong identity. A bound task reaches the client it started with,
+/// which the swap has already shut down, so its send fails instead.
+///
+/// A login fills these before its database exists — creating an account
+/// installs the keys and client, and only reaches `init_database` once the
+/// user has chosen a PIN — which is why binding a session to a database keeps
+/// what it holds rather than replacing it.
+struct ActiveClient;
+struct ActiveIdentity;
+
+fn active_client() -> std::sync::Arc<RwLock<Option<Client>>> {
+    crate::db::current_session().scoped::<ActiveClient, _>()
+}
+
+fn active_identity() -> std::sync::Arc<RwLock<Option<PublicKey>>> {
+    crate::db::current_session().scoped::<ActiveIdentity, _>()
+}
 
 pub static MY_SECRET_KEY: crate::crypto::GuardedKey = crate::crypto::GuardedKey::empty();
-
-pub static MY_PUBLIC_KEY: LazyLock<RwLock<Option<PublicKey>>> =
-    LazyLock::new(|| RwLock::new(None));
 
 /// Get a clone of the active Nostr client. The clone is cheap — `Client`
 /// is internally `Arc`-counted, so all clones share connections, signers,
 /// and subscription state. Returns `None` when no session is active.
 #[inline]
 pub fn nostr_client() -> Option<Client> {
-    NOSTR_CLIENT.read().unwrap().as_ref().cloned()
+    active_client().read().unwrap().as_ref().cloned()
 }
 
 /// Returns `true` when there is an active session (client + pubkey set).
 #[inline]
 pub fn has_active_session() -> bool {
-    NOSTR_CLIENT.read().unwrap().is_some()
+    active_client().read().unwrap().is_some()
 }
 
 /// Get the active user's public key. `PublicKey` is `Copy`, so this is by-value.
 #[inline]
 pub fn my_public_key() -> Option<PublicKey> {
-    *MY_PUBLIC_KEY.read().unwrap()
+    *active_identity().read().unwrap()
 }
 
 /// Install the Nostr client for the current session. Replaces any prior client
@@ -303,13 +339,28 @@ pub fn my_public_key() -> Option<PublicKey> {
 /// teardown of the outgoing client.
 #[inline]
 pub fn set_nostr_client(client: Client) {
-    *NOSTR_CLIENT.write().unwrap() = Some(client);
+    *active_client().write().unwrap() = Some(client);
+}
+
+/// Install `client` only if this session has none yet, reporting whether it
+/// took. Logins race on Android, where a service-only background sync can
+/// install a client before the Activity's login reaches this point; the loser
+/// must drop its own rather than replace a live one.
+#[inline]
+pub fn set_nostr_client_if_absent(client: Client) -> bool {
+    let owner = active_client();
+    let mut slot = owner.write().unwrap();
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(client);
+    true
 }
 
 /// Install the active user's public key for the current session.
 #[inline]
 pub fn set_my_public_key(pk: PublicKey) {
-    *MY_PUBLIC_KEY.write().unwrap() = Some(pk);
+    *active_identity().write().unwrap() = Some(pk);
 }
 
 /// Atomically take the current Nostr client out of global state.
@@ -317,14 +368,14 @@ pub fn set_my_public_key(pk: PublicKey) {
 /// with new readers.
 #[inline]
 pub fn take_nostr_client() -> Option<Client> {
-    NOSTR_CLIENT.write().unwrap().take()
+    active_client().write().unwrap().take()
 }
 
 /// Clear `MY_PUBLIC_KEY`. The Nostr client is taken separately via
 /// `take_nostr_client()` so the caller can shut it down before this clear.
 #[inline]
 pub fn clear_my_public_key() {
-    *MY_PUBLIC_KEY.write().unwrap() = None;
+    *active_identity().write().unwrap() = None;
 }
 
 #[derive(Clone)]
@@ -336,134 +387,108 @@ pub struct PendingInviteAcceptance {
 // Per-session: tracks an invite captured during account-creation that should
 // be broadcast to relays once login finishes. Must reset across accounts so a
 // pending invite captured for account A doesn't auto-execute on account B.
-pub static PENDING_INVITE: LazyLock<RwLock<Option<PendingInviteAcceptance>>> =
-    LazyLock::new(|| RwLock::new(None));
+/// Per-account: an invite captured while creating account A must never
+/// auto-execute once account B is live.
+struct PendingInvite;
+
+fn pending_invite_slot() -> std::sync::Arc<RwLock<Option<PendingInviteAcceptance>>> {
+    crate::db::current_session().scoped::<PendingInvite, _>()
+}
 
 #[inline]
 pub fn pending_invite() -> Option<PendingInviteAcceptance> {
-    PENDING_INVITE.read().unwrap().clone()
+    pending_invite_slot().read().unwrap().clone()
 }
 
 #[inline]
 pub fn set_pending_invite(invite: PendingInviteAcceptance) {
-    *PENDING_INVITE.write().unwrap() = Some(invite);
+    *pending_invite_slot().write().unwrap() = Some(invite);
 }
 
 #[inline]
 pub fn clear_pending_invite() {
-    *PENDING_INVITE.write().unwrap() = None;
+    *pending_invite_slot().write().unwrap() = None;
 }
 
-pub static NOTIFIED_WELCOMES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// npubs already welcomed, so the greeting fires once per contact — per
+/// account, since the contact list is.
+pub struct NotifiedWelcomesHandle;
+
+pub static NOTIFIED_WELCOMES: NotifiedWelcomesHandle = NotifiedWelcomesHandle;
+
+impl NotifiedWelcomesHandle {
+    pub async fn lock(&self) -> tokio::sync::OwnedMutexGuard<HashSet<String>> {
+        crate::db::current_session().scoped::<Self, Mutex<HashSet<String>>>().lock_owned().await
+    }
+}
 
 // ============================================================================
 // Session generation — defends background tasks against account swaps
 // ============================================================================
 //
-// Monotonic counter bumped at the start of `reset_session()`. Background
-// tasks capture the value via `SessionGuard::capture()` at spawn time and
-// check `is_valid()` before each side-effect; a stale guard means a swap
-// occurred and the task must exit. Defends the post-swap window — when
-// `NOSTR_CLIENT` is once again Some but it's account B's client and a
-// leaked account-A task would otherwise write A's state into B's DB.
-//
-// Pairs with `db::POOL_GENERATION`: pool counter defends the connection
-// pool's Drop pathway; this counter defends application-level work.
-
-static SESSION_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Session-scoped tombstones for NIP-09-deleted DM messages. The batching flush consults
 /// this POSITIVE deletion signal — never STATE absence, which also means LRU-evicted or
 /// expired (an evicted archive message must still persist). A deletion whose target sat
 /// unflushed in a batch buffer no-ops its `delete_event`; the tombstone stops the flush
 /// from resurrecting the row. Cleared on session bump — ids are meaningless across accounts.
-static DELETED_MESSAGE_TOMBSTONES: LazyLock<std::sync::Mutex<HashSet<String>>> =
-    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+/// Event ids are meaningless across accounts, so this is per-account.
+struct DeletedMessageTombstones;
+
+fn deleted_message_tombstones() -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
+    crate::db::current_session().scoped::<DeletedMessageTombstones, _>()
+}
 
 /// Record that `message_id` was deleted this session (called where the deletion is decided).
 pub fn note_message_deleted(message_id: &str) {
-    if let Ok(mut set) = DELETED_MESSAGE_TOMBSTONES.lock() {
+    if let Ok(mut set) = deleted_message_tombstones().lock() {
         set.insert(message_id.to_string());
+    }
+}
+
+/// Seed the tombstone set from the account's durable `deleted_messages` rows,
+/// making `was_message_deleted` survive restarts and account swaps. Called at
+/// account DB init (the set was cleared by the session bump on swap).
+pub fn seed_message_tombstones(ids: Vec<String>) {
+    if let Ok(mut set) = deleted_message_tombstones().lock() {
+        set.extend(ids);
     }
 }
 
 /// Whether `message_id` was deleted this session.
 pub fn was_message_deleted(message_id: &str) -> bool {
-    DELETED_MESSAGE_TOMBSTONES.lock().map(|s| s.contains(message_id)).unwrap_or(false)
+    deleted_message_tombstones().lock().map(|s| s.contains(message_id)).unwrap_or(false)
 }
 
-/// Snapshot of the current session generation.
-#[inline]
-pub fn current_session_generation() -> u64 {
-    SESSION_GENERATION.load(Ordering::Acquire)
-}
-
-/// Advance the session generation. Called at the start of `reset_session()`
-/// so any task that captured the previous value before the swap can detect
-/// it and short-circuit before writing to the new account's state.
-#[inline]
-pub fn bump_session_generation() -> u64 {
-    if let Ok(mut set) = DELETED_MESSAGE_TOMBSTONES.lock() {
-        set.clear();
-    }
-    SESSION_GENERATION.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
-}
-
-/// Lightweight handle that remembers the session generation at the moment
-/// it was created. Pass it into background tasks (via move-capture into a
-/// spawned future) and check `is_valid()` before any side-effect.
+/// Drop the delete-tombstone set on an account switch.
 ///
-/// Cheap to copy — just a `u64`. Never holds a lock.
-#[derive(Copy, Clone, Debug)]
-pub struct SessionGuard {
-    generation: u64,
-}
-
-impl SessionGuard {
-    /// Snapshot the current session generation for later validation.
-    #[inline]
-    pub fn capture() -> Self {
-        Self { generation: current_session_generation() }
-    }
-
-    /// `true` while the captured generation still matches the live counter.
-    /// Once `false`, any captured per-account context (npub, keys, chat ids)
-    /// is no longer guaranteed to belong to the active session.
-    #[inline]
-    pub fn is_valid(&self) -> bool {
-        self.generation == current_session_generation()
-    }
-
-    /// Raw generation value (for logging / structured comparisons).
-    #[inline]
-    pub fn generation(&self) -> u64 {
-        self.generation
+/// All that survives of the old session-generation counter. Everything else it
+/// invalidated now lives on the session and goes when that does; these are
+/// keyed by event id, which means nothing across accounts either way.
+#[inline]
+pub fn clear_message_tombstones() {
+    if let Ok(mut set) = deleted_message_tombstones().lock() {
+        set.clear();
     }
 }
 
 #[cfg(test)]
-mod session_generation_tests {
-    use super::*;
+mod session_identity_tests {
 
+    /// A session held across an account switch knows it is no longer the one on
+    /// screen. This is the whole of what the generation counter used to do, and
+    /// it now falls out of the session's own identity.
     #[test]
-    fn guard_is_valid_when_no_swap_occurred() {
-        let guard = SessionGuard::capture();
-        assert!(guard.is_valid());
-    }
+    fn a_held_session_stops_being_live_once_the_account_changes() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let held = crate::db::current_session();
+        assert!(held.is_live(), "it is the account on screen to begin with");
 
-    #[test]
-    fn guard_invalidates_after_bump() {
-        let guard = SessionGuard::capture();
-        bump_session_generation();
-        assert!(!guard.is_valid(), "guard must invalidate after a swap");
-    }
+        crate::db::close_database();
 
-    #[test]
-    fn bump_advances_counter_monotonically() {
-        let before = current_session_generation();
-        let after = bump_session_generation();
-        assert_eq!(after, before.wrapping_add(1));
-        assert_eq!(current_session_generation(), after);
+        assert!(!held.is_live(), "and is not, once the account has switched");
+        assert!(crate::db::current_session().is_live(), "whoever came next is");
+        assert_ne!(held.id(), crate::db::current_session_id(), "they are different sessions");
     }
 }
 
@@ -483,13 +508,13 @@ mod session_globals_tests {
         clear_pending_invite();
 
         // PublicKey: set → get → clear.
-        // Use a deterministic key from a hex seed; nostr_sdk::Keys::generate()
+        // Use a deterministic key from a hex seed; nostr_sdk::prelude::Keys::generate()
         // would also work but the deterministic form makes failures easier
         // to reproduce.
         let keys = Keys::parse(
             "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5",
         ).expect("parse test nsec");
-        let pk = keys.public_key;
+        let pk = keys.public_key();
 
         assert_eq!(my_public_key(), None, "starts as None");
 
@@ -576,38 +601,76 @@ mod session_globals_tests {
         clear_pending_nip55_setup();
         assert!(pending_nip55_setup().is_none(), "cleared returns None");
 
-        // SessionGuard interaction — capturing then bumping invalidates the
-        // captured guard. This mirrors the contract every Tauri command that
-        // mutates per-account state relies on (see CLAUDE.md SessionGuard
-        // section).
-        let guard = SessionGuard::capture();
-        assert!(guard.is_valid(), "fresh capture is valid");
-        bump_session_generation();
-        assert!(!guard.is_valid(),
-            "captured guard must invalidate after generation bump");
+        // A session held across the switch knows it is no longer current.
+        let held = crate::db::current_session();
+        assert!(held.is_live(), "the account on screen to begin with");
+        crate::db::close_database();
+        assert!(!held.is_live(), "and not, once the account has switched");
     }
 }
 
-pub static WRAPPER_ID_CACHE: LazyLock<Mutex<WrapperIdCache>> = LazyLock::new(|| Mutex::new(WrapperIdCache::new()));
+/// Which wrapper events this account has already ingested.
+///
+/// Per-account: the ids come from its relays and gate writes to its database.
+/// Same handle shape as [`STATE`], and for the same reason.
+pub struct WrapperIdCacheHandle;
 
-pub static STATE: LazyLock<Mutex<ChatState>> = LazyLock::new(|| Mutex::new(ChatState::new()));
+pub static WRAPPER_ID_CACHE: WrapperIdCacheHandle = WrapperIdCacheHandle;
+
+impl WrapperIdCacheHandle {
+    pub async fn lock(&self) -> tokio::sync::OwnedMutexGuard<WrapperIdCache> {
+        crate::db::current_session().scoped::<Self, Mutex<WrapperIdCache>>().lock_owned().await
+    }
+}
+
+/// The account's chats and profiles in memory.
+///
+/// Locking resolves the session THIS work belongs to, so a task bound by
+/// [`crate::db::spawn_bound`] reaches the state of the account it started
+/// under — for its whole life, whoever logs in meanwhile. A swap installs a
+/// fresh session, and with it a fresh state; the previous account's is dropped
+/// with the session rather than cleared field by field.
+///
+/// Deliberately a handle rather than the `Mutex` itself: `STATE.lock().await`
+/// reads the same at every call site, and cannot be hoisted into a `static` or
+/// a long-lived struct where it would freeze one account's state in place.
+pub struct ChatStateHandle;
+
+pub static STATE: ChatStateHandle = ChatStateHandle;
+
+impl ChatStateHandle {
+    pub async fn lock(&self) -> tokio::sync::OwnedMutexGuard<ChatState> {
+        crate::db::current_session().chat_state().lock_owned().await
+    }
+
+    /// For callers that must not block — notably Android's WebView threads,
+    /// which have no tokio runtime.
+    pub fn try_lock(&self) -> Result<tokio::sync::OwnedMutexGuard<ChatState>, tokio::sync::TryLockError> {
+        crate::db::current_session().chat_state().try_lock_owned()
+    }
+}
 
 /// Chat id currently visible to the user with auto-mark eligibility — set by
 /// the frontend when the chat is open AND pinned to bottom AND the window is
 /// active. Used by the inbound event handler to mark new messages read on
 /// arrival, so the dock badge never bumps for messages the user is actively
 /// watching. Cleared when any of those conditions flips.
-pub static ACTIVE_CHAT: LazyLock<RwLock<Option<String>>> =
-    LazyLock::new(|| RwLock::new(None));
+/// Per-account: the id is one of this account's chats, and a contact shared
+/// with another account would otherwise let A's open chat mark B's messages read.
+struct ActiveChat;
+
+fn active_chat() -> std::sync::Arc<RwLock<Option<String>>> {
+    crate::db::current_session().scoped::<ActiveChat, _>()
+}
 
 pub fn set_active_chat(chat_id: Option<String>) {
-    if let Ok(mut guard) = ACTIVE_CHAT.write() {
+    if let Ok(mut guard) = active_chat().write() {
         *guard = chat_id;
     }
 }
 
 pub fn get_active_chat() -> Option<String> {
-    ACTIVE_CHAT.read().ok().and_then(|g| g.clone())
+    active_chat().read().ok().and_then(|g| g.clone())
 }
 
 // ============================================================================
@@ -615,7 +678,17 @@ pub fn get_active_chat() -> Option<String> {
 // ============================================================================
 
 pub static PROCESSING_GATE: AtomicBool = AtomicBool::new(true);
-pub static PENDING_EVENTS: LazyLock<Mutex<Vec<(Event, bool)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// Events parked while the processing gate is closed (encryption migration).
+/// Per-account: they are this account's inbound traffic, awaiting its key.
+pub struct PendingEventsHandle;
+
+pub static PENDING_EVENTS: PendingEventsHandle = PendingEventsHandle;
+
+impl PendingEventsHandle {
+    pub async fn lock(&self) -> tokio::sync::OwnedMutexGuard<Vec<(Event, bool)>> {
+        crate::db::current_session().scoped::<Self, Mutex<Vec<(Event, bool)>>>().lock_owned().await
+    }
+}
 
 #[inline]
 pub fn is_processing_allowed() -> bool { PROCESSING_GATE.load(Ordering::Acquire) }
@@ -633,11 +706,12 @@ pub struct ChatState {
     pub interner: NpubInterner,
     pub is_syncing: bool,
     pub db_loaded: bool,
-    /// Authoritative per-chat RAW unread counts (chat_identifier → count), so the badge recount is an
+    /// Authoritative per-chat unread counts (chat_identifier → count), so the badge recount is an
     /// in-RAM fold instead of a whole-DB scan. Seeded once per account from `db::unread_counts` (see
     /// `unread_seeded`), then kept current per-chat: cleared on read, reconciled from the DB
-    /// (`db::unread_count_for_chat`) on inbound / delete / mark-unread. RAW = pre muted/blocked
-    /// filter; the sum applies those, matching `sum_unread_from`. Cleared on account reset.
+    /// (`db::unread_count_for_chat`) on inbound / delete / mark-unread. SENDER-level muted/blocked
+    /// filtering is baked into the DB-sourced values (mute/block toggles reseed); CHAT-level
+    /// filtering happens at fold time, matching `sum_unread_from`. Cleared on account reset.
     pub unread_cache: std::collections::HashMap<String, u32>,
     /// False until `unread_cache` has been seeded from the DB for this account. Guards the one-time
     /// seed so the full-scan query runs once per login, never per message.
@@ -1051,10 +1125,10 @@ impl ChatState {
                         continue;
                     }
                 }
-            } else if !chat.metadata.custom_fields.contains_key("community_id") {
-                // A Community row without its owning community_id is a bare
-                // persistence anchor (a sibling channel the UI doesn't surface) —
-                // its unreads can't be seen or cleared, so they must not badge.
+            } else if !chat.is_surfaced_community_channel() {
+                // Only a community's PRIMARY channel gets a row; a bare persistence anchor
+                // or a sibling channel is invisible, so its unreads can't be seen or
+                // cleared and must not badge.
                 continue;
             }
             total += counts.get(&chat.id).copied().unwrap_or(0);
@@ -1101,6 +1175,13 @@ impl ChatState {
     }
 
     pub fn count_unread_messages(&self) -> u32 {
+        // Sender-level mutes: a muted DM silences that person's community messages too.
+        let muted_senders: std::collections::HashSet<u16> = self
+            .chats
+            .iter()
+            .filter(|c| c.muted && !c.is_community())
+            .filter_map(|c| self.interner.lookup(&c.id))
+            .collect();
         let mut total_unread = 0;
         for chat in &self.chats {
             if chat.muted { continue; }
@@ -1109,8 +1190,8 @@ impl ChatState {
                 if let Some(id) = self.interner.lookup(&chat.id) {
                     if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) { continue; }
                 }
-            } else if !chat.metadata.custom_fields.contains_key("community_id") {
-                // Unsurfaced sibling-channel anchor — see `sum_unread_from`.
+            } else if !chat.is_surfaced_community_channel() {
+                // Unsurfaced channel row — see `sum_unread_from`.
                 continue;
             }
             let mut unread_count = 0u32;
@@ -1118,6 +1199,7 @@ impl ChatState {
                 if msg.flags.is_mine() { break; }
                 if chat.last_read != [0u8; 32] && msg.id == chat.last_read { break; }
                 if is_group && msg.npub_idx != NO_NPUB {
+                    if muted_senders.contains(&msg.npub_idx) { continue; }
                     if self.get_profile_by_id(msg.npub_idx).map_or(false, |p| p.flags.is_blocked()) { continue; }
                 }
                 unread_count += 1;
@@ -2039,6 +2121,32 @@ mod tests {
         assert_eq!(
             state.count_unread_messages(), 1,
             "only the non-blocked member's message should count"
+        );
+    }
+
+    #[test]
+    fn count_unread_muted_sender_group_messages_skipped() {
+        let mut state = ChatState::new();
+        state.insert_or_replace_profile("npub1mutedmember", Profile::new());
+        state.insert_or_replace_profile("npub1normal", Profile::new());
+
+        // Muting a person = muting their (possibly message-less) DM row.
+        state.create_dm_chat("npub1mutedmember");
+        state.get_chat_mut("npub1mutedmember").unwrap().muted = true;
+
+        state.ensure_community_chat("grp1");
+        if let Some(chat) = state.chats.iter_mut().find(|c| c.id == "grp1") {
+            chat.metadata.custom_fields.insert("community_id".to_string(), "c".repeat(64));
+        }
+
+        let msg_muted = make_message_from(1, "muted says hi", 1700000001000, "npub1mutedmember");
+        state.add_message_to_chat("grp1", &msg_muted);
+        let msg_normal = make_message_from(2, "normal says hi", 1700000002000, "npub1normal");
+        state.add_message_to_chat("grp1", &msg_normal);
+
+        assert_eq!(
+            state.count_unread_messages(), 1,
+            "a muted sender's community messages should not count"
         );
     }
 

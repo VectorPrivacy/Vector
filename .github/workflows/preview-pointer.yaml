@@ -1,0 +1,67 @@
+name: 'preview-pointer'
+
+# Preview builds check a single fixed URL for updates:
+#   releases/download/preview/latest.json
+#
+# GitHub has no "latest including pre-releases" redirect, so that URL is a
+# permanent pointer release whose only asset is the manifest, re-pointed here
+# on every publish.
+#
+# It tracks the newest build of EITHER channel on purpose. Refreshing it when a
+# stable release publishes is what carries preview users onto the official
+# build instead of stranding them on the last preview; once they install it,
+# their client is a stable build reading the stable endpoint, and the two
+# channels have converged.
+on:
+  release:
+    types: [published]
+
+jobs:
+  repoint:
+    # Uploading to the pointer publishes nothing, but guard anyway so a manual
+    # edit of the pointer release can never re-trigger this.
+    if: github.event.release.tag_name != 'preview'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Point the preview channel at ${{ github.event.release.tag_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --pattern latest.json --dir . --clobber 2>/dev/null; then
+            echo "::warning::$TAG has no latest.json asset; preview channel left unchanged."
+            exit 0
+          fi
+
+          echo "Manifest version: $(jq -r .version latest.json)"
+
+          # `--prerelease` is load-bearing: without it the pointer would become
+          # the repo's /releases/latest and serve previews to the stable channel.
+          if ! gh release view preview --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create preview \
+              --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --title 'Preview channel' \
+              --notes 'Update channel for Vector preview builds. The manifest points at the real release; the APKs ride along because sideloaded Android previews self-update from this fixed URL.'
+          fi
+
+          gh release upload preview latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+          # Sideloaded Android previews download their next APK from
+          # releases/download/preview/<abi>.apk — a fixed URL, same shape as the
+          # manifest's. The pointer must carry the APKs or every shipped preview
+          # 404s into the browser fallback. Stable publishes mirror here too,
+          # which is what carries preview phones onto the official build.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.apk' --dir apks --clobber || true
+          if ls apks/*.apk >/dev/null 2>&1; then
+            gh release upload preview apks/*.apk --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            echo "::warning::$TAG has no APK assets; pointer APKs left unchanged."
+          fi

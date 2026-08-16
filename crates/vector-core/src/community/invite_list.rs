@@ -10,7 +10,8 @@
 //! is terminal (no leave/re-join race). The merged list is the UNION of every token each device minted,
 //! minus the union of revocations.
 
-use nostr_sdk::prelude::{Client, EventBuilder, Filter, Kind, NostrSigner, PublicKey, Tag};
+use nostr_sdk::prelude::AsyncNip44;
+use nostr_sdk::prelude::{Client, EventBuilder, Filter, Kind, PublicKey, Tag};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -188,18 +189,18 @@ fn our_last_publish() -> u64 {
 
 /// Decrypt a fetched self-list event to its JSON plaintext; a malformed/undecryptable payload degrades to
 /// empty (never an error that aborts a reconcile), matching the Community List's posture.
-async fn decrypt_self_event(client: &Client, my_pk: &PublicKey, event: &nostr_sdk::prelude::Event) -> String {
+async fn decrypt_self_event(_client: &Client, my_pk: &PublicKey, event: &nostr_sdk::prelude::Event) -> String {
     if event.content.is_empty() {
         return String::new();
     }
-    let signer = match client.signer().await {
+    let signer = match crate::signer::active_signer() {
         Ok(s) => s,
         Err(e) => {
             crate::log_warn!("[InviteList] signer unavailable for decrypt: {}", e);
             return String::new();
         }
     };
-    signer.nip44_decrypt(my_pk, &event.content).await.unwrap_or_else(|e| {
+    signer.nip44_decrypt_async(my_pk, &event.content).await.unwrap_or_else(|e| {
         crate::log_warn!("[InviteList] decrypt failed: {}", e);
         String::new()
     })
@@ -211,109 +212,105 @@ async fn decrypt_self_event(client: &Client, my_pk: &PublicKey, event: &nostr_sd
 pub async fn fetch_self_lists(
     client: &Client,
     my_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
 ) -> (CommunityList, InviteList) {
-    let filter = Filter::new()
-        .author(my_pubkey)
-        .kind(Kind::Custom(event_kind::APPLICATION_SPECIFIC))
-        .identifiers([COMMUNITY_LIST_D_TAG.to_string(), INVITE_LIST_D_TAG.to_string()])
-        .limit(2);
+    crate::db::scoped(async move {
+        let filter = Filter::new()
+            .author(my_pubkey)
+            .kind(Kind::Custom(event_kind::APPLICATION_SPECIFIC))
+            .identifiers([COMMUNITY_LIST_D_TAG.to_string(), INVITE_LIST_D_TAG.to_string()])
+            .limit(2);
 
-    let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .await
-        .unwrap_or_default();
+        let events = client
+            .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .await
+            .unwrap_or_default();
 
-    if !session.is_valid() {
-        return (super::list::load_local_list(), load_local_invite_list());
-    }
 
-    // Latest event per d-tag.
-    let mut community_ev: Option<nostr_sdk::prelude::Event> = None;
-    let mut invite_ev: Option<nostr_sdk::prelude::Event> = None;
-    for ev in events {
-        let slot = match ev.tags.identifier() {
-            Some(COMMUNITY_LIST_D_TAG) => &mut community_ev,
-            Some(INVITE_LIST_D_TAG) => &mut invite_ev,
-            _ => continue,
+        // Latest event per d-tag.
+        let mut community_ev: Option<nostr_sdk::prelude::Event> = None;
+        let mut invite_ev: Option<nostr_sdk::prelude::Event> = None;
+        for ev in events {
+            let slot = match ev.tags.identifier().as_deref() {
+                Some(COMMUNITY_LIST_D_TAG) => &mut community_ev,
+                Some(INVITE_LIST_D_TAG) => &mut invite_ev,
+                _ => continue,
+            };
+            if slot.as_ref().map_or(true, |cur| ev.created_at > cur.created_at) {
+                *slot = Some(ev);
+            }
+        }
+
+        let community = match community_ev {
+            Some(ev) if ev.created_at.as_secs() < super::list::our_last_community_publish() => {
+                super::list::load_local_list()
+            }
+            Some(ev) => CommunityList::from_json(&decrypt_self_event(client, &my_pubkey, &ev).await),
+            None => super::list::load_local_list(),
         };
-        if slot.as_ref().map_or(true, |cur| ev.created_at > cur.created_at) {
-            *slot = Some(ev);
-        }
-    }
-
-    let community = match community_ev {
-        Some(ev) if ev.created_at.as_secs() < super::list::our_last_community_publish() => {
-            super::list::load_local_list()
-        }
-        Some(ev) => CommunityList::from_json(&decrypt_self_event(client, &my_pubkey, &ev).await),
-        None => super::list::load_local_list(),
-    };
-    let invite = match invite_ev {
-        Some(ev) if ev.created_at.as_secs() < our_last_publish() => load_local_invite_list(),
-        Some(ev) => InviteList::from_json(&decrypt_self_event(client, &my_pubkey, &ev).await),
-        None => load_local_invite_list(),
-    };
-    (community, invite)
+        let invite = match invite_ev {
+            Some(ev) if ev.created_at.as_secs() < our_last_publish() => load_local_invite_list(),
+            Some(ev) => InviteList::from_json(&decrypt_self_event(client, &my_pubkey, &ev).await),
+            None => load_local_invite_list(),
+        };
+        (community, invite)
+    })
+    .await
 }
 
 /// Fetch only our Invite List (single d-tag) — the read half of a publish read-merge-write.
 pub async fn fetch_invite_list(
     client: &Client,
     my_pubkey: PublicKey,
-    session: crate::state::SessionGuard,
 ) -> InviteList {
-    let filter = Filter::new()
-        .author(my_pubkey)
-        .kind(Kind::Custom(event_kind::APPLICATION_SPECIFIC))
-        .identifier(INVITE_LIST_D_TAG)
-        .limit(1);
-    let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .await
-        .unwrap_or_default();
-    if !session.is_valid() {
-        return load_local_invite_list();
-    }
-    match events.into_iter().max_by_key(|e| e.created_at) {
-        Some(ev) if ev.created_at.as_secs() < our_last_publish() => load_local_invite_list(),
-        Some(ev) => InviteList::from_json(&decrypt_self_event(client, &my_pubkey, &ev).await),
-        None => load_local_invite_list(),
-    }
+    crate::db::scoped(async move {
+        let filter = Filter::new()
+            .author(my_pubkey)
+            .kind(Kind::Custom(event_kind::APPLICATION_SPECIFIC))
+            .identifier(INVITE_LIST_D_TAG)
+            .limit(1);
+        let events = client
+            .fetch_events(filter).timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .await
+            .unwrap_or_default();
+        match events.into_iter().max_by_key(|e| e.created_at) {
+            Some(ev) if ev.created_at.as_secs() < our_last_publish() => load_local_invite_list(),
+            Some(ev) => InviteList::from_json(&decrypt_self_event(client, &my_pubkey, &ev).await),
+            None => load_local_invite_list(),
+        }
+    })
+    .await
 }
 
 /// READ-MERGE-WRITE publish: fold the relay's copy into our local mirror (so a concurrent mint from another
 /// device survives), persist, hydrate the read model, then publish self-encrypted.
 pub async fn publish_invite_list(
     client: &Client,
-    session: crate::state::SessionGuard,
 ) -> Result<(), String> {
-    let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
+    crate::db::scoped(async move {
+        let my_pk = crate::state::my_public_key().ok_or_else(|| "Not logged in".to_string())?;
 
-    let relay = fetch_invite_list(client, my_pk, session.clone()).await;
-    if !session.is_valid() {
-        return Ok(());
-    }
-    let merged = load_local_invite_list().merge(&relay);
-    save_local_invite_list(&merged)?;
-    hydrate_read_model(&merged);
+        let relay = fetch_invite_list(client, my_pk).await;
+        let merged = load_local_invite_list().merge(&relay);
+        save_local_invite_list(&merged)?;
+        hydrate_read_model(&merged);
 
-    let signer = client.signer().await.map_err(|e| format!("Signer unavailable: {}", e))?;
-    let content = signer
-        .nip44_encrypt(&my_pk, &merged.to_json())
-        .await
-        .map_err(|e| format!("nip44 encrypt invite list: {}", e))?;
-    let builder = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
-        .tag(Tag::identifier(INVITE_LIST_D_TAG));
-    client
-        .send_event_builder(builder)
-        .await
-        .map_err(|e| format!("Failed to publish invite list (kind 30078): {}", e))?;
-    crate::log_info!(
-        "[InviteList] Published encrypted list: {} link(s), {} tombstone(s)",
-        merged.entries.len(), merged.tombstones.len(),
-    );
-    Ok(())
+        let signer = crate::signer::active_signer().map_err(|e| format!("Signer unavailable: {}", e))?;
+        let content = signer
+            .nip44_encrypt_async(&my_pk, &merged.to_json())
+            .await
+            .map_err(|e| format!("nip44 encrypt invite list: {}", e))?;
+        let builder = EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), content)
+            .tag(Tag::identifier(INVITE_LIST_D_TAG));
+        crate::sign_and_send(client, builder)
+            .await
+            .map_err(|e| format!("Failed to publish invite list (kind 30078): {}", e))?;
+        crate::log_info!(
+            "[InviteList] Published encrypted list: {} link(s), {} tombstone(s)",
+            merged.entries.len(), merged.tombstones.len(),
+        );
+        Ok(())
+    })
+    .await
 }
 
 /// Consume a remotely-received invite-list event (live cross-device path): decrypt, fold into the local
@@ -322,41 +319,37 @@ pub async fn ingest_remote_invite_list_event(
     client: &Client,
     my_pk: &PublicKey,
     event: &nostr_sdk::prelude::Event,
-    session: crate::state::SessionGuard,
 ) -> Result<InviteList, String> {
-    let incoming = InviteList::from_json(&decrypt_self_event(client, my_pk, event).await);
-    if !session.is_valid() {
-        return Ok(load_local_invite_list());
-    }
-    let merged = load_local_invite_list().merge(&incoming);
-    save_local_invite_list(&merged)?;
-    hydrate_read_model(&merged);
-    Ok(merged)
+    crate::db::scoped(async move {
+        let incoming = InviteList::from_json(&decrypt_self_event(client, my_pk, event).await);
+        let merged = load_local_invite_list().merge(&incoming);
+        save_local_invite_list(&merged)?;
+        hydrate_read_model(&merged);
+        Ok(merged)
+    })
+    .await
 }
 
 static REPUBLISH_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Coalesce rapid mint/revoke mutations into one network publish. Stamps the publish clock + captures the
-/// `SessionGuard` BEFORE the debounce sleep, mirroring the Community List.
+/// `std::sync::Arc<crate::db::Session>` BEFORE the debounce sleep, mirroring the Community List.
 pub fn republish_invite_list_debounced() {
     use std::sync::atomic::Ordering;
     stamp_published_now();
     let gen = REPUBLISH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-        if !session.is_valid() { return; }
         let client = match crate::state::nostr_client() {
             Some(c) => c,
             None => return,
         };
-        if let Err(e) = publish_invite_list(&client, session.clone()).await {
+        if let Err(e) = publish_invite_list(&client).await {
             crate::log_warn!("[InviteList] Republish failed: {} (retrying in 5s)", e);
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             if REPUBLISH_GEN.load(Ordering::SeqCst) != gen { return; }
-            if !session.is_valid() { return; }
-            if let Err(e) = publish_invite_list(&client, session).await {
+            if let Err(e) = publish_invite_list(&client).await {
                 crate::log_warn!("[InviteList] Republish retry failed: {}", e);
             }
         }

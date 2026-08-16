@@ -593,7 +593,7 @@ static RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///      in against a now-stale path.
 ///   4. Wipe key vaults, in-memory state, ID caches, and the FULL_SESSION flag.
 ///
-/// Background tasks that captured `SessionGuard` at spawn time will see
+/// Background tasks that captured `std::sync::Arc<crate::db::Session>` at spawn time will see
 /// their generation become invalid on the very first line of this function
 /// and short-circuit before any side-effect. Tasks that did NOT capture a
 /// guard rely on `NOSTR_CLIENT` going `None` during the reset window — which
@@ -607,10 +607,10 @@ pub async fn reset_session() {
     let _reset_lock = RESET_LOCK.lock().await;
 
     // FIRST: advance the session generation so every background task with a
-    // captured `SessionGuard` becomes invalid before any teardown begins.
+    // captured `std::sync::Arc<crate::db::Session>` becomes invalid before any teardown begins.
     // Tasks that wake up mid-reset see an invalid guard and exit instead of
     // writing partially-cleared state.
-    vector_core::state::bump_session_generation();
+    vector_core::state::clear_message_tombstones();
 
     if let Some(client) = vector_core::take_nostr_client() {
         let _ = client.shutdown().await;
@@ -650,36 +650,21 @@ pub async fn reset_session() {
     // NIP-55 offline-signer state: reset the observable pairing state and drop
     // any staged pairing result. On Android, also wake every stranded
     // Intent-result waiter with a cancelled sentinel — a `spawn_blocking` thread
-    // parked on the pairing/fallback condvar won't poll `is_valid()` on its own.
+    // parked on the pairing/fallback condvar cannot notice a swap on its own.
     vector_core::drain_nip55_state();
     vector_core::clear_pending_nip55_setup();
     #[cfg(target_os = "android")]
     crate::android::external_signer::on_session_reset();
+    #[cfg(target_os = "android")]
+    crate::android::biometric::on_session_reset();
 
-    // In-memory state owned by vector-core's globals.
-    {
-        let mut state = crate::STATE.lock().await;
-        state.profiles.clear();
-        state.chats.clear();
-        state.db_loaded = false;
-        state.is_syncing = false;
-        // Drop the unread cache + its seeded flag, or the next account reads A's counts and never
-        // reseeds from its own DB.
-        state.unread_cache.clear();
-        state.unread_seeded = false;
-    }
-    { crate::WRAPPER_ID_CACHE.lock().await.clear(); }
-    { crate::state::PENDING_EVENTS.lock().await.clear(); }
-    // Active-chat marker is an npub; a shared contact across accounts would
-    // otherwise let account A's open chat auto-mark account B's messages.
-    vector_core::state::set_active_chat(None);
+    // Chats, profiles, unread counts, wrapper ids, parked events, row-id
+    // caches, the sync queue, the relay caches, the theme tags, the active
+    // chat, the pending invite and the identity all belonged to the session
+    // `close_db_connection` released above, and went with it. What follows is
+    // only teardown that DOES something a drop cannot: unsubscribing,
+    // disconnecting, zeroizing, and the shell's own caches.
 
-    // Profile sync queue (long-lived processor loop services this queue
-    // forever, so we drain it instead of cancelling the task).
-    vector_core::profile::sync::clear_profile_sync_queue();
-    // Theme-pack emoji tags are account-scoped; clear so account A's theme shortcodes don't tag
-    // account B's outbound messages. The frontend re-registers B's theme only if it has one.
-    vector_core::emoji_packs::set_theme_emoji_tags(Vec::new());
 
     // Community subscription pointer + routing tables hold channel SECRET keys + account-specific
     // pseudonyms, so they MUST be cleared on swap or account A's keys/routes leak into B's session.
@@ -692,10 +677,6 @@ pub async fn reset_session() {
     vector_core::community::v2::realtime::clear().await;
     // Pooled plane connections are authed as account A's plane secret keys — close them on swap.
     vector_core::community::transport::clear_plane_pool();
-    // Community per-channel sync state (account-scoped) — drop so account B doesn't inherit
-    // A's history-start flags, paging cursors, or any stale in-flight claims. (Access-time
-    // generation checks self-reset too; this is the explicit teardown.)
-    vector_core::community::cache::clear();
 
     // Mini App realtime lobby state is account-scoped (session npubs + cached peer addrs
     // keyed by game topic). Carried across a swap it would show account A's players in
@@ -706,26 +687,6 @@ pub async fn reset_session() {
             .clear_account_scoped().await;
     }
 
-    // Pending invite captured during account creation (must NOT auto-execute
-    // on the next account).
-    crate::state::clear_pending_invite();
-
-    // Per-session caches that hold message/file content or relay diagnostics.
-    if let Ok(mut m) = crate::commands::relays::RELAY_METRICS.write() { m.clear(); }
-    if let Ok(mut l) = crate::commands::relays::RELAY_LOGS.write() { l.clear(); }
-    // Allow `monitor_relay_connections` to spawn a fresh subscriber against
-    // the next session's client. Without this reset the frontend's relay
-    // status UI freezes after the swap.
-    crate::commands::relays::MONITOR_STARTED
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-
-    // Custom Blossom upload servers — reset to the default list so account B
-    // doesn't inherit account A's self-hosted upload destination silently.
-    if let Some(servers) = vector_core::state::BLOSSOM_SERVERS.get() {
-        if let Ok(mut s) = servers.lock() {
-            *s = vector_core::state::init_blossom_servers();
-        }
-    }
 
     // Active Tor bridge socket addresses — stale after the old TorService
     // shut down. `current_circuit_hops` reads these to mark the Guard hop
@@ -741,15 +702,6 @@ pub async fn reset_session() {
         rec.cancel();
     }
 
-    // Recipient relay-list cache — recipient-keyed, so technically
-    // account-agnostic, but holds privacy-adjacent metadata about every
-    // contact account A messaged. Drop on swap.
-    vector_core::inbox_relays::clear_inbox_relay_cache();
-    // In-flight wrap confirmations carry the prior account's chat and
-    // message ids — a late OK must not "rescue" into the new session.
-    vector_core::sending::clear_wrap_confirms();
-    // Pack-author NIP-65 cache — same privacy parity as the inbox cache.
-    vector_core::emoji_packs::clear_nip65_cache();
 
     // PIVX address→balance cache — addresses derive from user keys, so
     // a cached entry from account A is meaningless (and slightly
@@ -776,12 +728,7 @@ pub async fn reset_session() {
 
     // Identity caches.
     vector_core::db::clear_current_account_in_memory();
-    vector_core::clear_my_public_key();
-    crate::db::clear_id_caches();
     let _ = clear_pending_account();
-
-    crate::commands::account::FULL_SESSION_INITIALIZED
-        .store(false, std::sync::atomic::Ordering::Release);
 
     // ORDER MATTERS: clear the encryption-enabled atomic BEFORE reopening
     // the processing gate. If we opened the gate first, a background event

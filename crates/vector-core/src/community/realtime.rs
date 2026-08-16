@@ -17,8 +17,8 @@ use tokio::sync::Mutex;
 use crate::community::{derive, inbound, roster, service, Channel, CommunityId, Epoch};
 use crate::community::transport::LiveTransport;
 use crate::event_handler::InboundEventHandler;
-use crate::state::SessionGuard;
 use crate::stored_event::event_kind;
+use crate::ClientRelayExt;
 
 /// Realtime channel-follow retry budget: a re-founding publishes the channel rekey under the NEW
 /// root right after the base rekey, so the base-3303-triggered follow can race its propagation.
@@ -205,13 +205,13 @@ pub async fn refresh_subscription(client: &Client) {
     }
 
     if let Some(old_id) = sub_guard.take() {
-        client.unsubscribe(&old_id).await;
+        let _ = client.unsubscribe(&old_id).await;
     }
     *set_guard = new_set;
 
     if pseudonyms.is_empty() {
         if let Some(old_pw) = COMMUNITY_POOLWIDE_SUB_ID.lock().await.take() {
-            client.unsubscribe(&old_pw).await;
+            let _ = client.unsubscribe(&old_pw).await;
         }
         return;
     }
@@ -219,7 +219,7 @@ pub async fn refresh_subscription(client: &Client) {
     // Community events live on the community's relays, which may differ from the user's DM relays.
     // Add them GOSSIP|PING (warm, but excluded from pool-wide DM/profile ops) and subscribe by TARGET.
     for r in &relays {
-        let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
+        let _ = client.add_managed_relay(r.as_str()).capabilities(crate::community_relay_capabilities()).await;
     }
     client.connect().await;
 
@@ -232,7 +232,7 @@ pub async fn refresh_subscription(client: &Client) {
     {
         let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
         for _ in 0..24 {
-            let pool = client.pool().all_relays().await;
+            let pool = client.relays().all().await;
             let any_live = wanted.iter().any(|u| {
                 pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)
             });
@@ -256,22 +256,33 @@ pub async fn refresh_subscription(client: &Client) {
             Kind::Custom(event_kind::COMMUNITY_CONTROL),
             Kind::Custom(event_kind::COMMUNITY_REKEY),
         ])
-        .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), pseudonyms)
+        .custom_tags(SingleLetterTag::LOWERCASE_Z, pseudonyms)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .since(Timestamp::from_secs(
+            Timestamp::now().as_secs().saturating_sub(super::REALTIME_FRESH_WINDOW_MS / 1000),
+        ))
         .limit(0);
 
     // Pool-wide subscribe — the path that streams on Android (replaces any prior one).
     {
         let mut pw = COMMUNITY_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
-            client.unsubscribe(&old).await;
+            let _ = client.unsubscribe(&old).await;
         }
-        if let Ok(out) = client.subscribe(filter.clone(), None).await {
-            *pw = Some(out.val);
+        if let Ok(out) = client.subscribe(filter.clone()).await {
+            *pw = Some(out.value);
         }
     }
     // Targeted subscribe — the path that streams on desktop.
-    if let Ok(output) = client.subscribe_to(relays.iter().cloned(), filter, None).await {
-        *sub_guard = Some(output.val);
+    if let Ok(output) = client
+        .subscribe(nostr_sdk::prelude::ReqTarget::manual(
+            relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
+        ))
+        .await
+    {
+        *sub_guard = Some(output.value);
     }
 }
 
@@ -280,101 +291,109 @@ pub async fn refresh_subscription(client: &Client) {
 /// channel via [`inbound::process_incoming`], persisted, and dispatched to `handler`. `session`
 /// straddles the relay I/O so a mid-flight account swap can't write into the swapped-in account.
 pub async fn dispatch_event(
-    session: &SessionGuard,
     event: Event,
     handler: Arc<dyn InboundEventHandler>,
 ) {
-    let Some(my_pk) = crate::my_public_key() else { return; };
-    let Some(pseudonym) = event.tags.iter().find_map(|t| {
-        let s = t.as_slice();
-        (s.len() >= 2 && s[0] == "z").then(|| s[1].clone())
-    }) else { return; };
+    crate::db::scoped(async move {
+        let Some(my_pk) = crate::my_public_key() else { return; };
+        let Some(pseudonym) = event.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "z").then(|| s[1].clone())
+        }) else { return; };
 
-    // A CONTROL edition (3308) or base/channel REKEY (3303) → follow the control plane in realtime.
-    let kind = event.kind.as_u16();
-    if kind == event_kind::COMMUNITY_CONTROL || kind == event_kind::COMMUNITY_REKEY {
-        let community_id = CONTROL_ROUTES.lock().await.get(&pseudonym).cloned();
-        if let Some(community_id) = community_id {
-            if session.is_valid() {
+        // A CONTROL edition (3308) or base/channel REKEY (3303) → follow the control plane in realtime.
+        let kind = event.kind.as_u16();
+        if kind == event_kind::COMMUNITY_CONTROL || kind == event_kind::COMMUNITY_REKEY {
+            let community_id = CONTROL_ROUTES.lock().await.get(&pseudonym).cloned();
+            if let Some(community_id) = community_id {
                 // Spawn off the loop — the refresh runs several relay fetches (seconds) and must not
                 // head-of-line-block other event consumption. It self-captures a guard + re-checks.
-                tokio::spawn(refresh_control(community_id, handler.clone()));
+                crate::db::spawn_bound(refresh_control(community_id, handler.clone()));
             }
+            return;
         }
-        return;
-    }
 
-    let Some(channel) = COMMUNITY_ROUTES.lock().await.get(&pseudonym).cloned() else {
-        return;
-    };
-    if !session.is_valid() {
-        return;
-    }
+        let Some(channel) = COMMUNITY_ROUTES.lock().await.get(&pseudonym).cloned() else {
+            return;
+        };
 
-    let outcome = {
-        let mut state = crate::state::STATE.lock().await;
-        inbound::process_incoming(&mut state, &event, &channel, &my_pk)
-    };
-    let chat_id = channel.id.to_hex();
-    match outcome {
-        Some(inbound::IncomingEvent::NewMessage(mut msg)) => {
-            // Resolve the reply preview (content/npub) from the DB before emitting,
-            // mirroring the DM realtime path. The replied-to message is often an
-            // older one that's persisted but outside the in-memory window; without
-            // this the recipient's live render finds no in-memory target and the
-            // reply shows as a plain message with no context.
-            if !msg.replied_to.is_empty() {
-                let _ = crate::db::events::populate_reply_context(&mut msg).await;
-            }
-            let _ = crate::db::events::save_message(&chat_id, &msg).await;
-            // This is the LIVE stream (limit-0 subscription) — back-paged history arrives via a
-            // separate one-shot batch, never here. So these are always genuinely new; surface them.
-            handler.on_community_message(&chat_id, &msg, true);
-        }
-        Some(inbound::IncomingEvent::Updated { target_id, message, edit_event }) => {
-            // Edits are event-sourced (folded on reload); reactions re-save the message row.
-            if let Some(ev) = edit_event {
-                let mut ev = (*ev).clone();
-                if let Ok(cid) = crate::db::id_cache::get_chat_id_by_identifier(&chat_id) {
-                    ev.chat_id = cid;
+        let outcome = {
+            let mut state = crate::state::STATE.lock().await;
+            // Waiting on the lock is an await: a swap landing here would judge this
+            // event's authority against the NEW account's synced grant heads (an
+            // uncited hide is honored or dropped on the wrong account's state) and
+            // write the result into the wrong STATE.
+            inbound::process_incoming(&mut state, &event, &channel, &my_pk)
+        };
+        let chat_id = channel.id.to_hex();
+        match outcome {
+            Some(inbound::IncomingEvent::NewMessage(mut msg)) => {
+                // Resolve the reply preview (content/npub) from the DB before emitting,
+                // mirroring the DM realtime path. The replied-to message is often an
+                // older one that's persisted but outside the in-memory window; without
+                // this the recipient's live render finds no in-memory target and the
+                // reply shows as a plain message with no context.
+                if !msg.replied_to.is_empty() {
+                    let _ = crate::db::events::populate_reply_context(&mut msg).await;
                 }
-                let _ = crate::db::events::save_event(&ev).await;
-            } else {
-                let _ = crate::db::events::save_message(&chat_id, &message).await;
+                let _ = crate::db::events::save_message(&chat_id, &msg).await;
+                // This is the LIVE stream (limit-0 subscription) — back-paged history arrives via a
+                // separate one-shot batch, never here. But a relay backfilling from a peer pushes
+                // its newly-ACCEPTED old events to live subs too, so "arrived live" is not "fresh":
+                // is_new comes from the inner send time. Stale replays still persist + surface.
+                handler.on_community_message(&chat_id, &msg, super::is_realtime_fresh(msg.at));
             }
-            handler.on_community_update(&chat_id, &target_id, &message);
+            Some(inbound::IncomingEvent::Updated { target_id, mut message, edit_event }) => {
+                // Edits are event-sourced (folded on reload); reactions re-save the message row.
+                if let Some(ev) = edit_event {
+                    let mut ev = (*ev).clone();
+                    if let Ok(cid) = crate::db::id_cache::get_chat_id_by_identifier(&chat_id) {
+                        ev.chat_id = cid;
+                    }
+                    let _ = crate::db::events::save_event(&ev).await;
+                } else {
+                    let _ = crate::db::events::save_message(&chat_id, &message).await;
+                }
+                // Re-resolve before emitting: this message came back out of STATE, whose
+                // compact form drops the quoted attachment's extension.
+                let _ = crate::db::events::populate_reply_context(&mut message).await;
+                handler.on_community_update(&chat_id, &target_id, &message);
+            }
+            Some(inbound::IncomingEvent::Removed { target_id }) => {
+                let _ = crate::db::events::delete_event(&target_id).await;
+                handler.on_community_removed(&chat_id, &target_id);
+            }
+            Some(inbound::IncomingEvent::ReactionRemoved { message_id, reaction_id, mut message }) => {
+                // Drop the reaction's kind-7 row (save is additive) and refresh the parent's chips.
+                let _ = crate::db::events::delete_event(&reaction_id).await;
+                let _ = crate::db::events::populate_reply_context(&mut message).await;
+                handler.on_community_update(&chat_id, &message_id, &message);
+            }
+            Some(inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label }) => {
+                handler.on_community_presence(
+                    &chat_id, &npub, joined, &event_id, created_at,
+                    invited_by.as_deref(), invited_label.as_deref(),
+                );
+            }
+            Some(inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at }) => {
+                handler.on_community_webxdc(
+                    &chat_id, &npub, &topic_id, node_addr.as_deref(), &event_id, created_at,
+                );
+            }
+            Some(inbound::IncomingEvent::Typing { npub, until }) => {
+                handler.on_community_typing(&chat_id, &npub, until);
+            }
+            Some(inbound::IncomingEvent::Kicked { community_id })
+            | Some(inbound::IncomingEvent::SelfLeft { community_id }) => {
+                crate::log_warn!("[v1:teardown {}] INBOUND Kicked/SelfLeft on the v1 channel plane", &community_id[..8.min(community_id.len())]);
+                // The handler owns teardown (the GUI prunes chats/relays + republishes the list; a
+                // headless consumer can call `teardown_local`). Core only routes + notifies here.
+                handler.on_community_self_removed(&community_id);
+            }
+            None => {}
         }
-        Some(inbound::IncomingEvent::Removed { target_id }) => {
-            let _ = crate::db::events::delete_event(&target_id).await;
-            handler.on_community_removed(&chat_id, &target_id);
-        }
-        Some(inbound::IncomingEvent::ReactionRemoved { message_id, reaction_id, message }) => {
-            // Drop the reaction's kind-7 row (save is additive) and refresh the parent's chips.
-            let _ = crate::db::events::delete_event(&reaction_id).await;
-            handler.on_community_update(&chat_id, &message_id, &message);
-        }
-        Some(inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label }) => {
-            handler.on_community_presence(
-                &chat_id, &npub, joined, &event_id, created_at,
-                invited_by.as_deref(), invited_label.as_deref(),
-            );
-        }
-        Some(inbound::IncomingEvent::WebxdcPeer { npub, topic_id, node_addr, event_id, created_at }) => {
-            handler.on_community_webxdc(
-                &chat_id, &npub, &topic_id, node_addr.as_deref(), &event_id, created_at,
-            );
-        }
-        Some(inbound::IncomingEvent::Typing { npub, until }) => {
-            handler.on_community_typing(&chat_id, &npub, until);
-        }
-        Some(inbound::IncomingEvent::Kicked { community_id })
-        | Some(inbound::IncomingEvent::SelfLeft { community_id }) => {
-            // The handler owns teardown (the GUI prunes chats/relays + republishes the list; a
-            // headless consumer can call `teardown_local`). Core only routes + notifies here.
-            handler.on_community_self_removed(&community_id);
-        }
-        None => {}
-    }
+    })
+    .await
 }
 
 /// Realtime control-plane follow: walk a re-founding, fold the control plane (banlist/roles/
@@ -382,93 +401,91 @@ pub async fn dispatch_event(
 /// advanced (else just refresh the route maps so the new banlist takes live effect). Mirrors the
 /// Tauri `refresh_community_control` orchestration over the already-core `catch_up_*` primitives.
 pub async fn refresh_control(community_id: String, handler: Arc<dyn InboundEventHandler>) {
-    // Claim the in-flight slot or bail (a concurrent refresh is already folding this community).
-    {
-        let mut inflight = REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        if !inflight.insert(community_id.clone()) {
-            return;
+    crate::db::scoped(async move {
+        // Claim the in-flight slot or bail (a concurrent refresh is already folding this community).
+        {
+            let mut inflight = REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+            if !inflight.insert(community_id.clone()) {
+                return;
+            }
         }
-    }
-    struct RefreshClaim(String);
-    impl Drop for RefreshClaim {
-        fn drop(&mut self) {
-            REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+        struct RefreshClaim(String);
+        impl Drop for RefreshClaim {
+            fn drop(&mut self) {
+                REFRESH_CONTROL_INFLIGHT.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+            }
         }
-    }
-    let _claim = RefreshClaim(community_id.clone());
+        let _claim = RefreshClaim(community_id.clone());
 
-    let session = SessionGuard::capture();
-    let Some(id_bytes) = hex_to_id32(&community_id) else { return; };
-    let Some(community) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { return; };
-    let bt = LiveTransport::with_timeout(Duration::from_secs(20));
-    let pre_server_epoch = community.server_root_epoch.0;
-    let pre_channel_epochs: Vec<(String, u64)> =
-        community.channels.iter().map(|c| (c.id.to_hex(), c.epoch.0)).collect();
+        let Some(id_bytes) = hex_to_id32(&community_id) else { return; };
+        let Some(community) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { return; };
+        let bt = LiveTransport::with_timeout(Duration::from_secs(20));
+        let pre_server_epoch = community.server_root_epoch.0;
+        let pre_channel_epochs: Vec<(String, u64)> =
+            community.channels.iter().map(|c| (c.id.to_hex(), c.epoch.0)).collect();
 
-    // FOLLOW FIRST: a privatize / private-ban re-founds the base under a NEW epoch + re-anchors the
-    // control plane there, so walk the rotation BEFORE folding control. An AUTHORIZED rotation that
-    // excluded us is a removal → tear down locally.
-    if let Ok(c) = service::catch_up_server_root(&bt, &community).await {
-        if !session.is_valid() { return; }
-        if c.removed { handler.on_community_self_removed(&community_id); return; }
-    }
-    if !session.is_valid() { return; }
-    let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
-    let _ = service::fetch_and_apply_control(&bt, &community).await;
-    if !session.is_valid() { return; }
-    // Banned by the just-folded banlist → torn down, nothing more to do.
-    if let Some(c) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() {
-        if service::am_i_banned(&c) {
-            handler.on_community_self_removed(&community_id);
-            return;
+        // FOLLOW FIRST: a privatize / private-ban re-founds the base under a NEW epoch + re-anchors the
+        // control plane there, so walk the rotation BEFORE folding control. An AUTHORIZED rotation that
+        // excluded us is a removal → tear down locally.
+        if let Ok(c) = service::catch_up_server_root(&bt, &community).await {
+            if c.removed {
+                crate::log_warn!("[v1:teardown {}] catch_up_server_root says REMOVED (v1 rekey walk)", &community_id[..8.min(community_id.len())]);
+                handler.on_community_self_removed(&community_id); return;
+            }
         }
-    }
-    if !session.is_valid() { return; }
+        let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
+        let _ = service::fetch_and_apply_control(&bt, &community).await;
+        // Banned by the just-folded banlist → torn down, nothing more to do.
+        if let Some(c) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() {
+            if service::am_i_banned(&c) {
+                crate::log_warn!("[v1:teardown {}] am_i_banned on the v1 refresh path", &community_id[..8.min(community_id.len())]);
+                handler.on_community_self_removed(&community_id);
+                return;
+            }
+        }
 
-    // Walk each channel's rekey chain. A re-founding rotates base AND every channel once; the channel
-    // rekey publishes right after the base rekey, so a single fetch can race propagation — retry with a
-    // short backoff until every channel reaches the expected epoch (next sync is the backstop).
-    let base_delta = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
-        .map(|c| c.server_root_epoch.0).unwrap_or(pre_server_epoch).saturating_sub(pre_server_epoch);
-    for attempt in 0..CHANNEL_FOLLOW_MAX_ATTEMPTS {
-        if !session.is_valid() { return; }
-        let Some(cur) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { break; };
-        for ch in &cur.channels {
-            let _ = service::catch_up_channel_rekeys(&bt, &cur, &ch.id).await;
+        // Walk each channel's rekey chain. A re-founding rotates base AND every channel once; the channel
+        // rekey publishes right after the base rekey, so a single fetch can race propagation — retry with a
+        // short backoff until every channel reaches the expected epoch (next sync is the backstop).
+        let base_delta = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
+            .map(|c| c.server_root_epoch.0).unwrap_or(pre_server_epoch).saturating_sub(pre_server_epoch);
+        for attempt in 0..CHANNEL_FOLLOW_MAX_ATTEMPTS {
+            let Some(cur) = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten() else { break; };
+            for ch in &cur.channels {
+                let _ = service::catch_up_channel_rekeys(&bt, &cur, &ch.id).await;
+            }
+            let caught = base_delta == 0 || crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
+                .map(|c| c.channels.iter().all(|ch| {
+                    let pre = pre_channel_epochs.iter().find(|(id, _)| id == &ch.id.to_hex()).map(|(_, e)| *e).unwrap_or(ch.epoch.0);
+                    ch.epoch.0 >= pre.saturating_add(base_delta)
+                }))
+                .unwrap_or(true);
+            if caught { break; }
+            if attempt + 1 < CHANNEL_FOLLOW_MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(CHANNEL_FOLLOW_BACKOFF_MS)).await;
+            }
         }
-        let caught = base_delta == 0 || crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten()
-            .map(|c| c.channels.iter().all(|ch| {
-                let pre = pre_channel_epochs.iter().find(|(id, _)| id == &ch.id.to_hex()).map(|(_, e)| *e).unwrap_or(ch.epoch.0);
-                ch.epoch.0 >= pre.saturating_add(base_delta)
-            }))
-            .unwrap_or(true);
-        if caught { break; }
-        if attempt + 1 < CHANNEL_FOLLOW_MAX_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(CHANNEL_FOLLOW_BACKOFF_MS)).await;
-        }
-    }
-    if !session.is_valid() { return; }
-    let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
-    let _ = service::retry_pending_read_cut(&bt, &community).await;
-    if !session.is_valid() { return; }
-    let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
+        let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
+        let _ = service::retry_pending_read_cut(&bt, &community).await;
+        let community = crate::db::community::load_community(&CommunityId(id_bytes)).ok().flatten().unwrap_or(community);
 
-    // If an epoch advanced, rebuild the FULL subscription so realtime delivery resumes at the new
-    // pseudonyms; else just refresh the route maps so the inbound drop-filter sees the new banlist.
-    let advanced = community.server_root_epoch.0 != pre_server_epoch
-        || community.channels.iter().any(|c| {
-            pre_channel_epochs.iter().find(|(id, _)| id == &c.id.to_hex()).map(|(_, e)| *e != c.epoch.0).unwrap_or(true)
-        });
-    if advanced && session.is_valid() {
-        if let Some(client) = crate::state::nostr_client() {
-            refresh_subscription(&client).await;
+        // If an epoch advanced, rebuild the FULL subscription so realtime delivery resumes at the new
+        // pseudonyms; else just refresh the route maps so the inbound drop-filter sees the new banlist.
+        let advanced = community.server_root_epoch.0 != pre_server_epoch
+            || community.channels.iter().any(|c| {
+                pre_channel_epochs.iter().find(|(id, _)| id == &c.id.to_hex()).map(|(_, e)| *e != c.epoch.0).unwrap_or(true)
+            });
+        if advanced {
+            if let Some(client) = crate::state::nostr_client() {
+                refresh_subscription(&client).await;
+            }
+        } else {
+            let _ = rebuild_routes().await;
         }
-    } else {
-        let _ = rebuild_routes().await;
-    }
-    if !session.is_valid() { return; }
-    crate::community::list::refresh_membership_current(&community);
-    handler.on_community_refreshed(&community_id);
+        crate::community::list::refresh_membership_current(&community);
+        handler.on_community_refreshed(&community_id);
+    })
+    .await
 }
 
 /// Tear down a community locally on a received removal (kick/leave/ban), RETAINING the held epoch

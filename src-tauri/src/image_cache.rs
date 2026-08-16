@@ -521,6 +521,74 @@ pub async fn get_or_cache_image<R: Runtime>(
     }
 }
 
+/// Liveness verdict for one remote media URL. `gone` is set ONLY on a
+/// definitive 404/410 — transient failures must never flag healthy media.
+#[derive(serde::Serialize)]
+pub struct RemoteMediaStatus {
+    pub url: String,
+    pub gone: bool,
+}
+
+/// True only when the host definitively reports the file gone (404/410).
+async fn probe_media_gone(url: &str) -> bool {
+    if crate::net::validate_url_not_private(url).is_err() {
+        return false;
+    }
+    let client = http_client();
+    match client.head(url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+                return true;
+            }
+            // Hosts that refuse HEAD get a 1-byte ranged GET instead.
+            if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+                || status == reqwest::StatusCode::NOT_IMPLEMENTED
+            {
+                if let Ok(r) = client
+                    .get(url)
+                    .header(reqwest::header::RANGE, "bytes=0-0")
+                    .send()
+                    .await
+                {
+                    let s = r.status();
+                    return s == reqwest::StatusCode::NOT_FOUND || s == reqwest::StatusCode::GONE;
+                }
+            }
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+/// Tauri command: probe remote media liveness, bypassing the local cache.
+/// The disk cache happily serves bytes whose origin has since deleted the
+/// file, so the uploader's own device is the LAST to notice damage — every
+/// cache-cold client sees the 404 instead.
+#[tauri::command]
+pub async fn verify_remote_media(urls: Vec<String>) -> Result<Vec<RemoteMediaStatus>, String> {
+    use futures_util::StreamExt;
+    const MAX_URLS: usize = 64;
+    const CONCURRENCY: usize = 6;
+    let mut deduped: Vec<String> = Vec::new();
+    for u in urls {
+        if deduped.len() >= MAX_URLS {
+            break;
+        }
+        if !deduped.contains(&u) {
+            deduped.push(u);
+        }
+    }
+    let results = futures_util::stream::iter(deduped.into_iter().map(|url| async move {
+        let gone = probe_media_gone(&url).await;
+        RemoteMediaStatus { url, gone }
+    }))
+    .buffer_unordered(CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    Ok(results)
+}
+
 /// Tauri command: Clear all image caches (files + stale DB/state references)
 #[tauri::command]
 pub async fn clear_image_cache<R: Runtime>(

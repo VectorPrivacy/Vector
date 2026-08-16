@@ -76,12 +76,12 @@ pub fn build_role_edition(
     authority: Option<&edition::AuthorityCitation>,
 ) -> Result<Event, String> {
     build_role_edition_unsigned(actor.public_key(), role, version, prev_hash, created_at, authority)?
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign role edition: {e}"))
 }
 
 /// The UNSIGNED RoleMetadata edition (the bunker path): build the inner, then sign it with the active
-/// `NostrSigner` (`unsigned.sign(&signer).await`) so a NIP-46 remote signer works. The sync
+/// `VectorSigner` (`unsigned.finalize_async(signer).await`) so a NIP-46 remote signer works. The sync
 /// [`build_role_edition`] is the local-keys convenience over this.
 pub fn build_role_edition_unsigned(
     author: PublicKey,
@@ -111,11 +111,11 @@ pub fn build_grant_edition(
     authority: Option<&edition::AuthorityCitation>,
 ) -> Result<Event, String> {
     build_grant_edition_unsigned(actor.public_key(), community_id, grant, version, prev_hash, created_at, authority)?
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign grant edition: {e}"))
 }
 
-/// The UNSIGNED Grant edition (the bunker path); sign with the active `NostrSigner`.
+/// The UNSIGNED Grant edition (the bunker path); sign with the active `VectorSigner`.
 pub fn build_grant_edition_unsigned(
     author: PublicKey,
     community_id: &CommunityId,
@@ -147,11 +147,11 @@ pub fn build_banlist_edition(
     authority: Option<&edition::AuthorityCitation>,
 ) -> Result<Event, String> {
     build_banlist_edition_unsigned(actor.public_key(), community_id, banned, version, prev_hash, created_at, authority)?
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign banlist edition: {e}"))
 }
 
-/// The UNSIGNED Banlist edition (the bunker path); sign with the active `NostrSigner`.
+/// The UNSIGNED Banlist edition (the bunker path); sign with the active `VectorSigner`.
 pub fn build_banlist_edition_unsigned(
     author: PublicKey,
     community_id: &CommunityId,
@@ -179,12 +179,12 @@ pub fn build_group_dissolved_edition(
     created_at: u64,
 ) -> Result<Event, String> {
     build_group_dissolved_edition_unsigned(actor.public_key(), community_id, created_at)
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign dissolved edition: {e}"))
 }
 
 /// The UNSIGNED GroupDissolved tombstone (the bunker path — the owner may sign remotely); sign with the
-/// active `NostrSigner`. No chain discipline (see [`build_group_dissolved_edition`]).
+/// active `VectorSigner`. No chain discipline (see [`build_group_dissolved_edition`]).
 pub fn build_group_dissolved_edition_unsigned(
     author: PublicKey,
     community_id: &CommunityId,
@@ -215,7 +215,7 @@ pub fn build_group_dissolved_edition_with_content(
     content: &str,
 ) -> Result<Event, String> {
     build_group_dissolved_edition_unsigned_with_content(actor.public_key(), community_id, created_at, content)
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign dissolved edition: {e}"))
 }
 
@@ -235,11 +235,11 @@ pub fn build_invite_links_edition(
     authority: Option<&edition::AuthorityCitation>,
 ) -> Result<Event, String> {
     build_invite_links_edition_unsigned(actor.public_key(), community_id, link_locators, version, prev_hash, created_at, authority)?
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign invite-links edition: {e}"))
 }
 
-/// The UNSIGNED InviteLinks edition (the bunker path); sign with the active `NostrSigner`. The entity
+/// The UNSIGNED InviteLinks edition (the bunker path); sign with the active `VectorSigner`. The entity
 /// coordinate binds to `author`, so a creator can only publish links at their own coordinate.
 pub fn build_invite_links_edition_unsigned(
     author: PublicKey,
@@ -269,11 +269,11 @@ pub fn build_community_root_edition(
     authority: Option<&edition::AuthorityCitation>,
 ) -> Result<Event, String> {
     build_community_root_edition_unsigned(actor.public_key(), community_id, meta, version, prev_hash, created_at, authority)?
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign community-root edition: {e}"))
 }
 
-/// The UNSIGNED GroupRoot edition (the bunker path); sign with the active `NostrSigner`.
+/// The UNSIGNED GroupRoot edition (the bunker path); sign with the active `VectorSigner`.
 pub fn build_community_root_edition_unsigned(
     author: PublicKey,
     community_id: &CommunityId,
@@ -301,11 +301,11 @@ pub fn build_channel_metadata_edition(
     authority: Option<&edition::AuthorityCitation>,
 ) -> Result<Event, String> {
     build_channel_metadata_edition_unsigned(actor.public_key(), channel_id, meta, version, prev_hash, created_at, authority)?
-        .sign_with_keys(actor)
+        .finalize(actor)
         .map_err(|e| format!("sign channel-metadata edition: {e}"))
 }
 
-/// The UNSIGNED ChannelMetadata edition (the bunker path); sign with the active `NostrSigner`.
+/// The UNSIGNED ChannelMetadata edition (the bunker path); sign with the active `VectorSigner`.
 pub fn build_channel_metadata_edition_unsigned(
     author: PublicKey,
     channel_id: &ChannelId,
@@ -349,10 +349,10 @@ pub fn seal_control_edition(
     let pseudonym = control_pseudonym(server_root, community_id, epoch);
     EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), content)
         .tags([
-            Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)), [pseudonym]),
-            Tag::custom(TagKind::Custom("v".into()), ["1".to_string()]),
+            Tag::custom("z", [pseudonym]),
+            Tag::custom("v", ["1".to_string()]),
         ])
-        .sign_with_keys(ephemeral)
+        .finalize(ephemeral)
         .map_err(|e| format!("sign control outer: {e}"))
 }
 
@@ -407,10 +407,10 @@ pub fn seal_dissolved_edition(ephemeral: &Keys, inner: &Event, community_id: &Co
     let pseudonym = super::derive::dissolved_pseudonym(community_id);
     EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), content)
         .tags([
-            Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)), [pseudonym]),
-            Tag::custom(TagKind::Custom("v".into()), ["1".to_string()]),
+            Tag::custom("z", [pseudonym]),
+            Tag::custom("v", ["1".to_string()]),
         ])
-        .sign_with_keys(ephemeral)
+        .finalize(ephemeral)
         .map_err(|e| format!("sign dissolved outer: {e}"))
 }
 
@@ -1073,7 +1073,7 @@ mod tests {
         };
         let eid = crate::simd::hex::hex_to_bytes_32(role_id);
         edition::build_edition_inner(owner.public_key(), VSK_ROLE, &eid, version, prev, &serde_json::to_string(&role).unwrap(), created_at, None)
-            .sign_with_keys(owner)
+            .finalize(owner)
             .unwrap()
     }
 
@@ -1084,7 +1084,7 @@ mod tests {
         let g = roles::MemberGrant { member: member_hex.to_string(), role_ids };
         let content = serde_json::to_string(&g).unwrap();
         let ev = edition::build_edition_inner(owner.public_key(), VSK_GRANT, &eid, version, prev, &content, created_at, None)
-            .sign_with_keys(owner)
+            .finalize(owner)
             .unwrap();
         (ev, eid, content)
     }
@@ -1101,7 +1101,7 @@ mod tests {
         };
         let content = serde_json::to_string(&meta).unwrap();
         edition::build_edition_inner(signer.public_key(), VSK_COMMUNITY_ROOT, &cid().0, version, prev, &content, created_at, None)
-            .sign_with_keys(signer)
+            .finalize(signer)
             .unwrap()
     }
 
@@ -1364,13 +1364,13 @@ mod tests {
         let garbage = edition::build_edition_inner(
             owner.public_key(), VSK_ROLE, &crate::simd::hex::hex_to_bytes_32(&"b".repeat(64)),
             1, None, "not json at all", 100, None,
-        ).sign_with_keys(&owner).unwrap();
+        ).finalize(&owner).unwrap();
         // Junk B: a role whose content claims a DIFFERENT role_id than its entity coordinate → skipped (binding).
         let role_b = Role { role_id: "cc".repeat(64), name: "X".into(), position: 1, permissions: Permissions::admin(), scope: RoleScope::Server, color: 0 };
         let mismatched = edition::build_edition_inner(
             owner.public_key(), VSK_ROLE, &crate::simd::hex::hex_to_bytes_32(&"dd".repeat(64)),
             1, None, &serde_json::to_string(&role_b).unwrap(), 100, None,
-        ).sign_with_keys(&owner).unwrap();
+        ).finalize(&owner).unwrap();
 
         let folded = fold_roster(&[good, garbage, mismatched], &cid(), &Default::default());
         assert!(folded.roles.role(&role_id).is_some(), "the valid role still folds through the junk");
@@ -1393,7 +1393,7 @@ mod tests {
         };
         let wrong_eid = [0x12u8; 32]; // but the edition lives at a different coordinate
         let ev = edition::build_edition_inner(owner.public_key(), VSK_ROLE, &wrong_eid, 1, None, &serde_json::to_string(&role).unwrap(), 100, None)
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap();
         let folded = fold_roster(&[ev], &cid(), &Default::default());
         assert!(folded.roles.roles.is_empty(), "entity_id != role_id → rejected");
@@ -1409,7 +1409,7 @@ mod tests {
         let g = roles::MemberGrant { member: member.clone(), role_ids: vec!["a".repeat(64)] };
         let wrong_eid = [0x34u8; 32]; // not grant_locator(cid, member)
         let ev = edition::build_edition_inner(owner.public_key(), VSK_GRANT, &wrong_eid, 1, None, &serde_json::to_string(&g).unwrap(), 100, None)
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap();
         let folded = fold_roster(&[ev], &cid(), &Default::default());
         assert!(!folded.roles.is_admin(&member), "a grant at the wrong locator does not take effect");
@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn open_rejects_non_control_outer() {
         let bogus = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_MESSAGE), "x")
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(open_control_edition(&bogus, &sr()).is_err());
     }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-channel-pins"
+description = "Enables the get_channel_pins command without any pre-configured scope."
+commands.allow = ["get_channel_pins"]
+
+[[permission]]
+identifier = "deny-get-channel-pins"
+description = "Denies the get_channel_pins command without any pre-configured scope."
+commands.deny = ["get_channel_pins"]

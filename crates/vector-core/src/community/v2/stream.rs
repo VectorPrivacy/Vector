@@ -22,8 +22,10 @@
 //! cap is enforced HERE at every nesting layer — a lenient publisher mints
 //! events a strict reader cannot decrypt.
 
-use nostr_sdk::nips::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes, ConversationKey};
-use nostr_sdk::prelude::{Event, EventBuilder, EventId, JsonUtil, Keys, Kind, PublicKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::FinalizeEvent;
+use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use super::super::{ChannelId, Epoch};
 use super::derive::GroupKey;
@@ -82,6 +84,10 @@ pub enum StreamError {
     BadWrapKind(u16),
     /// Wrap author isn't this plane's group key — not this stream's event.
     WrongStream,
+    /// A write-restricted stream's wrap signature failed to verify (CORD-01):
+    /// the signer set is narrower than the readership there, so the signature
+    /// IS the write gate and a reader MUST check it.
+    BadWrapSignature,
     /// Seal kind is neither 20013 nor 20014.
     BadSealKind(u16),
     /// The seal's Schnorr signature (or id) failed to verify.
@@ -115,6 +121,7 @@ impl std::fmt::Display for StreamError {
             StreamError::Oversize(n) => write!(f, "plaintext {n} bytes exceeds NIP-44 cap"),
             StreamError::BadWrapKind(k) => write!(f, "not a stream wrap kind: {k}"),
             StreamError::WrongStream => write!(f, "wrap author is not this stream"),
+            StreamError::BadWrapSignature => write!(f, "write-restricted wrap signature invalid"),
             StreamError::BadSealKind(k) => write!(f, "not a seal kind: {k}"),
             StreamError::BadSealSignature => write!(f, "seal signature invalid"),
             StreamError::AuthorMismatch => write!(f, "rumor pubkey != seal pubkey"),
@@ -170,31 +177,33 @@ pub fn split_ms(at_ms: u64) -> (u64, u16) {
 /// silent default, so this scans every occurrence of the tag name directly.
 pub fn resolve_ms_strict(rumor: &UnsignedEvent) -> Result<u64, StreamError> {
     let secs = rumor.created_at.as_secs();
-    let mut offset: Option<u64> = None;
-    for t in rumor.tags.iter() {
+    // FIRST occurrence wins, matching Armada (and NIP-01's usual convention for
+    // a repeated tag). Rejecting a duplicate outright is defensible in
+    // isolation, but it made the two clients disagree on whether the EVENT
+    // EXISTS — one folding it, the other dropping it — and `ms` is the ordering
+    // basis for message order, Guestbook recency and List tiebreaks, so that
+    // divergence reached membership. It costs nothing to concede: `ms` is the
+    // publisher's own value, so a second tag grants an attacker no reach they
+    // did not already have with a single one.
+    let Some(raw) = rumor.tags.iter().find_map(|t| {
         let s = t.as_slice();
-        if s.first().map(|k| k.as_str()) != Some(TAG_MS) {
-            continue;
-        }
-        if offset.is_some() {
-            // A second ms occurrence (valued or not) is ambiguous.
-            return Err(StreamError::BadMs);
-        }
-        // Present but valueless, or not a lone 0..=999 decimal without leading
-        // zeros — malformed. Digit-only FIRST: `u64::from_str` would otherwise
-        // accept a leading `+` ("+5", "+000"), a second byte-encoding a strict peer
-        // rejects — the exact cross-impl divergence this gate exists to prevent.
-        let raw = s.get(1).ok_or(StreamError::BadMs)?;
-        if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(StreamError::BadMs);
-        }
-        let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
-        if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
-            return Err(StreamError::BadMs);
-        }
-        offset = Some(n);
+        (s.first().map(|k| k.as_str()) == Some(TAG_MS)).then(|| s.get(1).cloned())
+    }) else {
+        return Ok(secs.saturating_mul(1000));
+    };
+    // Present but valueless, or not a lone 0..=999 decimal without leading
+    // zeros — malformed. Digit-only FIRST: `u64::from_str` would otherwise
+    // accept a leading `+` ("+5", "+000"), a second byte-encoding a strict peer
+    // rejects — the exact cross-impl divergence this gate exists to prevent.
+    let raw = raw.ok_or(StreamError::BadMs)?;
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(StreamError::BadMs);
     }
-    Ok(secs.saturating_mul(1000).saturating_add(offset.unwrap_or(0)))
+    let n: u64 = raw.parse().map_err(|_| StreamError::BadMs)?;
+    if n > 999 || (raw.len() > 1 && raw.starts_with('0')) {
+        return Err(StreamError::BadMs);
+    }
+    Ok(secs.saturating_mul(1000).saturating_add(n))
 }
 
 // ── build side ───────────────────────────────────────────────────────────────
@@ -209,7 +218,7 @@ pub fn build_rumor_ms(
     at_ms: u64,
 ) -> UnsignedEvent {
     let (secs, offset) = split_ms(at_ms);
-    tags.push(Tag::custom(TagKind::Custom(TAG_MS.into()), [offset.to_string()]));
+    tags.push(Tag::custom(TAG_MS, [offset.to_string()]));
     build_rumor_secs(kind, author, content, tags, secs)
 }
 
@@ -227,9 +236,8 @@ pub fn build_rumor_secs(
     // builder's byte-verbatim contract — no hidden normalization.
     let mut rumor = EventBuilder::new(Kind::Custom(kind), content)
         .tags(tags)
-        .allow_self_tagging()
         .custom_created_at(Timestamp::from_secs(at_secs))
-        .build(author);
+        .finalize_unsigned_with_id(author);
     rumor.ensure_id();
     rumor
 }
@@ -245,7 +253,7 @@ pub fn seal_content(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey) -> 
     match form {
         SealForm::Plaintext => Ok(json),
         SealForm::Encrypted => {
-            let ct = encrypt_to_bytes(group.conv_key(), json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
+            let ct = crate::community::cipher::encrypt_with_random_nonce(group.conv_key(), json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
             Ok(base64_simd::STANDARD.encode_to_string(&ct))
         }
     }
@@ -258,7 +266,7 @@ pub fn build_seal(rumor: &UnsignedEvent, form: SealForm, group: &GroupKey, autho
     let content = seal_content(rumor, form, group)?;
     EventBuilder::new(Kind::Custom(form.kind()), content)
         .custom_created_at(rumor.created_at)
-        .sign_with_keys(author_keys)
+        .finalize(author_keys)
         .map_err(|e| StreamError::Sign(e.to_string()))
 }
 
@@ -290,24 +298,24 @@ pub fn wrap_seal_with_tags(
     }
     let seal_json = seal.as_json();
     cap(seal_json.len())?;
-    let ct = encrypt_to_bytes(group.conv_key(), seal_json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
+    let ct = crate::community::cipher::encrypt_with_random_nonce(group.conv_key(), seal_json.as_bytes()).map_err(|e| StreamError::Encrypt(e.to_string()))?;
     let ephemeral = Keys::generate();
     let mut tags = vec![Tag::public_key(ephemeral.public_key())];
     tags.extend_from_slice(extra_tags);
     let wrap = EventBuilder::new(Kind::Custom(wrap_kind), base64_simd::STANDARD.encode_to_string(&ct))
         .tags(tags)
         .custom_created_at(wrap_at)
-        .sign_with_keys(group.keys())
+        .finalize(group.keys())
         .map_err(|e| StreamError::Sign(e.to_string()))?;
     Ok((wrap, ephemeral))
 }
 
 /// Signer-driven twin of [`build_seal`] + [`wrap_seal_with_tags`]: seal a rumor
-/// into its wrap using a [`NostrSigner`] for the author signature, so a NIP-46
+/// into its wrap using a [`VectorSigner`] for the author signature, so a NIP-46
 /// bunker (or NIP-55) account yields wire-identical output to the local-keys
 /// path. Only the seal signature needs the identity key; the seal content
 /// (symmetric group-key encrypt, or plaintext) and the group-key wrap do not.
-pub async fn seal_and_wrap_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn seal_and_wrap_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: PublicKey,
     rumor: &UnsignedEvent,
@@ -320,9 +328,9 @@ pub async fn seal_and_wrap_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     let content = seal_content(rumor, form, group)?;
     let unsigned = EventBuilder::new(Kind::Custom(form.kind()), content)
         .custom_created_at(rumor.created_at)
-        .build(author);
+        .finalize_unsigned_with_id(author);
     let seal = signer
-        .sign_event(unsigned)
+        .sign_event_async(unsigned)
         .await
         .map_err(|e| StreamError::Sign(e.to_string()))?;
     wrap_seal_with_tags(&seal, group, wrap_kind, wrap_at, extra_tags)
@@ -350,22 +358,41 @@ pub fn rewrap_seal(seal: &Event, new_group: &GroupKey, wrap_at: Timestamp) -> Re
 /// rumor recover → rumor.pubkey == seal.pubkey → rumor.id == computed hash
 /// (never trust a claimed id) → strict ms resolve.
 pub fn open_wrap(wrap: &Event, group: &GroupKey) -> Result<OpenedStream, StreamError> {
+    open_wrap_at(wrap, &group.pk(), group.conv_key(), false)
+}
+
+/// [`open_wrap`] against a stream READ VIEW: the address to verify by and the
+/// conversation key that opens the wraps — no signing secret needed. With
+/// `verify_wrap_sig` (a Write-Restricted Stream, CORD-01), the wrap's own
+/// signature is additionally checked: there the signer set is narrower than the
+/// readership, so unlike an ordinary stream wrap (signed with a key every
+/// reader holds — proves nothing) it proves a write-keyholder published this,
+/// and a reader MUST check it rather than lean on the relays having done so.
+pub fn open_wrap_at(
+    wrap: &Event,
+    address: &PublicKey,
+    conv_key: &nostr_sdk::prelude::nip44::v2::ConversationKey,
+    verify_wrap_sig: bool,
+) -> Result<OpenedStream, StreamError> {
     let wrap_kind = wrap.kind.as_u16();
     if wrap_kind != KIND_WRAP && wrap_kind != KIND_WRAP_EPHEMERAL {
         return Err(StreamError::BadWrapKind(wrap_kind));
     }
-    if wrap.pubkey != group.pk() {
+    if wrap.pubkey != *address {
         return Err(StreamError::WrongStream);
     }
+    if verify_wrap_sig && wrap.verify().is_err() {
+        return Err(StreamError::BadWrapSignature);
+    }
 
-    let seal_json = open_nip44(group.conv_key(), &wrap.content)?;
+    let seal_json = open_nip44(conv_key, &wrap.content)?;
     let seal: Event = Event::from_json(&seal_json).map_err(|e| StreamError::Parse(e.to_string()))?;
     let seal_form = SealForm::from_kind(seal.kind.as_u16()).ok_or(StreamError::BadSealKind(seal.kind.as_u16()))?;
     seal.verify().map_err(|_| StreamError::BadSealSignature)?;
 
     let rumor_json = match seal_form {
         SealForm::Plaintext => seal.content.clone(),
-        SealForm::Encrypted => open_nip44(group.conv_key(), &seal.content)?,
+        SealForm::Encrypted => open_nip44(conv_key, &seal.content)?,
     };
     let mut rumor: UnsignedEvent = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| StreamError::Parse(e.to_string()))?;
 
@@ -375,7 +402,7 @@ pub fn open_wrap(wrap: &Event, group: &GroupKey) -> Result<OpenedStream, StreamE
     // Never trust a claimed id: recompute from the serialized fields
     // unconditionally (`ensure_id` is a no-op when an id is present, so it
     // would wave a forged one through). An absent id just takes the computed one.
-    let computed = EventId::new(&rumor.pubkey, &rumor.created_at, &rumor.kind, &rumor.tags, &rumor.content);
+    let computed = EventId::compute(&rumor.pubkey, &rumor.created_at, &rumor.kind, &rumor.tags, &rumor.content);
     if let Some(claimed) = rumor.id {
         if claimed != computed {
             return Err(StreamError::BadRumorId);
@@ -415,8 +442,8 @@ pub fn check_channel_binding(rumor: &UnsignedEvent, channel_id: &ChannelId, epoc
 /// The standard chat binding tags for a rumor: `["channel", id]` + `["epoch", n]`.
 pub fn channel_binding_tags(channel_id: &ChannelId, epoch: Epoch) -> Vec<Tag> {
     vec![
-        Tag::custom(TagKind::Custom(TAG_CHANNEL.into()), [channel_id.to_hex()]),
-        Tag::custom(TagKind::Custom(TAG_EPOCH.into()), [epoch.0.to_string()]),
+        Tag::custom(TAG_CHANNEL, [channel_id.to_hex()]),
+        Tag::custom(TAG_EPOCH, [epoch.0.to_string()]),
     ]
 }
 
@@ -456,6 +483,13 @@ fn unique_tag_unsigned(rumor: &UnsignedEvent, name: &'static str) -> Result<Opti
 
 #[cfg(test)]
 mod tests {
+
+    /// Wrap raw `Keys` as the polymorphic signer. `VectorSigner` pins its error to
+    /// `SignerError`, which bare `Keys` doesn't satisfy, so tests go through the
+    /// same enum the app uses.
+    fn as_signer(k: &Keys) -> crate::signer::ActiveSigner {
+        crate::signer::ActiveSigner::Keys(k.clone())
+    }
     use super::super::super::{ChannelId, Epoch};
     use super::super::derive::channel_group_key;
     use super::super::kind;
@@ -504,7 +538,7 @@ mod tests {
 
         let seal_l = build_seal(&rumor, SealForm::Encrypted, &g, &author).unwrap();
         let (wrap_l, _) = wrap_seal(&seal_l, &g, KIND_WRAP, wrap_at).unwrap();
-        let (wrap_s, _) = seal_and_wrap_signed(&author, author.public_key(), &rumor, SealForm::Encrypted, &g, KIND_WRAP, wrap_at, &[])
+        let (wrap_s, _) = seal_and_wrap_signed(&as_signer(&author), author.public_key(), &rumor, SealForm::Encrypted, &g, KIND_WRAP, wrap_at, &[])
             .await
             .unwrap();
 
@@ -593,7 +627,7 @@ mod tests {
         // bytes ride verbatim).
         let seal = EventBuilder::new(Kind::Custom(KIND_SEAL_PLAINTEXT), forged_json)
             .custom_created_at(rumor.created_at)
-            .sign_with_keys(&author)
+            .finalize(&author)
             .unwrap();
         let (wrap, _) = wrap_seal(&seal, &group(), KIND_WRAP, Timestamp::from_secs(1)).unwrap();
         assert!(matches!(open_wrap(&wrap, &group()), Err(StreamError::BadRumorId)));
@@ -610,7 +644,7 @@ mod tests {
             kind::MESSAGE,
             author.public_key(),
             "x",
-            vec![Tag::custom(TagKind::Custom("ms".into()), ["999".to_string()])],
+            vec![Tag::custom("ms", ["999".to_string()])],
             1_000,
         );
         assert_eq!(resolve_ms_strict(&ok).unwrap(), 1_000_999);
@@ -622,7 +656,7 @@ mod tests {
                 kind::MESSAGE,
                 author.public_key(),
                 "x",
-                vec![Tag::custom(TagKind::Custom("ms".into()), [bad.to_string()])],
+                vec![Tag::custom("ms", [bad.to_string()])],
                 1_000,
             );
             assert!(
@@ -633,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn a_valueless_or_duplicated_ms_tag_is_malformed_not_silently_zero() {
+    fn a_valueless_ms_tag_is_malformed_and_a_duplicate_takes_the_first() {
         // A present-but-valueless ["ms"] must be BadMs, not treated as absent (a
         // silent offset-0 default would honor a rumor a spec-strict peer drops).
         let author = Keys::generate();
@@ -641,35 +675,74 @@ mod tests {
             kind::MESSAGE,
             author.public_key(),
             "x",
-            vec![Tag::custom(TagKind::Custom("ms".into()), Vec::<String>::new())],
+            vec![Tag::custom("ms", Vec::<String>::new())],
             1_000,
         );
         assert!(matches!(resolve_ms_strict(&bare), Err(StreamError::BadMs)));
-        // A valued ms plus a valueless one must not let the valued one win — two
-        // ms occurrences are ambiguous.
+        // A valueless FIRST occurrence is still malformed: first-wins picks it,
+        // and it carries no value to interpret. A later valued tag can't rescue it.
         let two = build_rumor_secs(
             kind::MESSAGE,
             author.public_key(),
             "x",
             vec![
-                Tag::custom(TagKind::Custom("ms".into()), Vec::<String>::new()),
-                Tag::custom(TagKind::Custom("ms".into()), ["5".to_string()]),
+                Tag::custom("ms", Vec::<String>::new()),
+                Tag::custom("ms", ["5".to_string()]),
             ],
             1_000,
         );
         assert!(matches!(resolve_ms_strict(&two), Err(StreamError::BadMs)));
-        // Two valued ms tags are also ambiguous.
+        // Two VALUED ms tags: the first wins, matching Armada. Rejecting the
+        // rumor instead made the two clients disagree on whether the event
+        // exists — and `ms` orders messages, Guestbook recency and List
+        // tiebreaks, so that reached membership. Conceding costs nothing: `ms`
+        // is the publisher's own value, so a second tag buys an attacker no
+        // reach a single one didn't already give them.
         let two_valued = build_rumor_secs(
             kind::MESSAGE,
             author.public_key(),
             "x",
             vec![
-                Tag::custom(TagKind::Custom("ms".into()), ["1".to_string()]),
-                Tag::custom(TagKind::Custom("ms".into()), ["2".to_string()]),
+                Tag::custom("ms", ["1".to_string()]),
+                Tag::custom("ms", ["2".to_string()]),
             ],
             1_000,
         );
-        assert!(matches!(resolve_ms_strict(&two_valued), Err(StreamError::BadMs)));
+        assert_eq!(resolve_ms_strict(&two_valued).unwrap(), 1_000_001, "the FIRST ms wins");
+    }
+
+    #[test]
+    fn tag_numbers_are_spec_shaped_decimals() {
+        use crate::community::edition::is_tag_decimal;
+        // CORD-01 §5: "its decimal form with no leading zeros".
+        for good in ["4", "0", "1099511627776"] {
+            assert!(is_tag_decimal(good), "{good:?} is decimal form");
+        }
+        for bad in ["04", "007", "00", "+4", "-4", "0x4", "1e2", " 4", "4 ", "", "4.0"] {
+            assert!(!is_tag_decimal(bad), "{bad:?} is NOT decimal form");
+        }
+    }
+
+    #[test]
+    fn a_citation_version_must_be_plain_digits() {
+        // CORD-01 §5: a tag number rides as its decimal form. `u64::from_str`
+        // accepts a leading `+`, which Armada's digit check rejects — so an
+        // action citing "+5" would be honored by one client and parked by the
+        // other. Same guard `resolve_ms_strict` already applies to `ms`.
+        let eid = "ab".repeat(32);
+        let hash = "cd".repeat(32);
+        let cite = |v: &str| {
+            let tags = nostr_sdk::prelude::Tags::from_list(vec![Tag::custom(
+                "vac",
+                [eid.clone(), v.to_string(), hash.clone()],
+            )]);
+            crate::community::edition::AuthorityCitation::from_tags(&tags)
+        };
+        assert!(cite("5").is_some(), "a plain decimal is the shape the spec names");
+        assert!(cite("+5").is_none(), "a leading plus is not decimal form");
+        assert!(cite("").is_none());
+        assert!(cite("5x").is_none());
+        assert!(cite("05").is_none(), "no leading zeros (CORD-01 §5)");
     }
 
     #[test]

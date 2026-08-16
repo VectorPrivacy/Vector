@@ -28,7 +28,9 @@ where
         let mut env = vm
             .attach_current_thread()
             .map_err(|e| format!("Failed to attach thread (bg context): {:?}", e))?;
-        return f(&mut env, ctx.as_obj());
+        let out = f(&mut env, ctx.as_obj());
+        clear_pending_exception(&mut env, &out);
+        return out;
     }
 
     // Fallback: Activity context (only safe when an Activity exists).
@@ -41,7 +43,18 @@ where
 
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
 
-    f(&mut env, &activity)
+    let out = f(&mut env, &activity);
+    clear_pending_exception(&mut env, &out);
+    out
+}
+
+/// A failed JNI call leaves its Java exception PENDING on the thread; left
+/// there, the VM aborts the whole process at detach instead of letting the
+/// Err surface (a stripped method becomes a crash rather than a message).
+fn clear_pending_exception<R>(env: &mut JNIEnv<'_>, out: &Result<R, String>) {
+    if out.is_err() && env.exception_check().unwrap_or(false) {
+        let _ = env.exception_clear();
+    }
 }
 
 /// Execute a function with the Android **Activity** JNI context specifically.
@@ -67,7 +80,9 @@ where
 
     let activity = unsafe { JObject::from_raw(ctx.context().cast()) };
 
-    f(&mut env, &activity)
+    let out = f(&mut env, &activity);
+    clear_pending_exception(&mut env, &out);
+    out
 }
 
 /// Get a system service by name

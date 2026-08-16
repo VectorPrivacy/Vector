@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::types::Attachment;
 
 const SELECT_COLS: &str = "event_id, att_index, hash, key, nonce, extension, name, url, \
-    path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash";
+    path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, fallback_urls";
 
 /// Rebuild `(event_id, Attachment)` from a row selecting `SELECT_COLS`. `downloading` is transient
 /// runtime state and is never persisted (always false on load).
@@ -32,6 +32,11 @@ fn row_to_attachment(row: &rusqlite::Row) -> rusqlite::Result<(String, Attachmen
         webxdc_topic: row.get(12)?,
         group_id: row.get(13)?,
         original_hash: row.get(14)?,
+        fallback_urls: row
+            .get::<_, String>(15)?
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect(),
     };
     Ok((event_id, att))
 }
@@ -53,13 +58,14 @@ pub fn insert_attachment_rows(conn: &rusqlite::Connection, event_id: &str, attac
     // so bulk-sync batches don't re-parse the SQL per message.
     let mut stmt = conn.prepare_cached(
         "INSERT INTO attachments (event_id, att_index, hash, key, nonce, extension, name, url, \
-         path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) \
+         path, size, img_meta, downloaded, webxdc_topic, group_id, original_hash, fallback_urls) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) \
          ON CONFLICT(event_id, att_index) DO UPDATE SET \
             key=excluded.key, nonce=excluded.nonce, extension=excluded.extension, \
             name=excluded.name, url=excluded.url, size=excluded.size, img_meta=excluded.img_meta, \
             webxdc_topic=excluded.webxdc_topic, group_id=excluded.group_id, \
             original_hash=excluded.original_hash, \
+            fallback_urls=CASE WHEN excluded.fallback_urls='' THEN fallback_urls ELSE excluded.fallback_urls END, \
             downloaded=MAX(downloaded, excluded.downloaded), \
             hash=CASE WHEN excluded.downloaded=1 THEN excluded.hash ELSE hash END, \
             path=CASE WHEN excluded.downloaded=1 THEN excluded.path ELSE path END",
@@ -71,6 +77,7 @@ pub fn insert_attachment_rows(conn: &rusqlite::Connection, event_id: &str, attac
                 event_id, i as i64, a.id, a.key, a.nonce, a.extension, a.name, a.url,
                 a.path, a.size as i64, img_meta_json, a.downloaded as i64,
                 a.webxdc_topic, a.group_id, a.original_hash,
+                a.fallback_urls.join(" "),
             ],
         ).map_err(|e| format!("insert attachment: {e}"))?;
     }

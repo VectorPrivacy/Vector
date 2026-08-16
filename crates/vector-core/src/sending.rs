@@ -4,9 +4,27 @@
 //! Clients provide a `SendCallback` for status notifications (pending/sent/failed/progress)
 //! and a `SendConfig` for retry/cancel behavior.
 
+use crate::event_ext::FinalizeUnsignedWithId;
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use nostr_sdk::prelude::*;
+
+/// NIP-59's gift-wrap backdating window (0 to 2 days).
+///
+/// nostr 0.45 made its own copy of this private, but the wrap timestamps we mint
+/// must stay inside the window readers expect, so it's pinned here rather than
+/// re-guessed per call site.
+pub const NIP59_RANDOM_TIMESTAMP_TWEAK: Range<u64> = 0..172_800;
+
+/// `Timestamp::now()` backdated by a random offset inside the NIP-59 window.
+///
+/// 0.45.0 removed `Timestamp::tweaked`; this mirrors what nip59 does internally.
+pub fn tweaked_timestamp() -> Timestamp {
+    use ::rand::Rng;
+    let secs: u64 = ::rand::thread_rng().gen_range(NIP59_RANDOM_TIMESTAMP_TWEAK);
+    Timestamp::from_secs(Timestamp::now().as_secs().saturating_sub(secs))
+}
 
 use crate::state::{nostr_client, my_public_key, STATE};
 use crate::types::{Message, Attachment};
@@ -162,31 +180,31 @@ struct WrapConfirm {
     /// failed — from then on `note_relay_ok` performs the rescue itself.
     loop_exited: AtomicBool,
     notify: tokio::sync::Notify,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
     registered_at: std::time::Instant,
 }
 
-static WRAP_CONFIRMS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<EventId, Arc<WrapConfirm>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+/// Entries carry this account's chat and message ids, so a late OK must only
+/// ever rescue a message in the account that sent it.
+struct WrapConfirms;
+
+fn wrap_confirms() -> Arc<std::sync::Mutex<std::collections::HashMap<EventId, Arc<WrapConfirm>>>> {
+    crate::db::current_session().scoped::<WrapConfirms, _>()
+}
 
 /// An OK this long after the last publish attempt is a ghost — drop the
 /// entry rather than resurrect a message the user has moved past.
 const WRAP_CONFIRM_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn register_wrap_confirm(entry: Arc<WrapConfirm>) {
-    let mut map = WRAP_CONFIRMS.lock().unwrap();
+    let owner = wrap_confirms();
+    let mut map = owner.lock().unwrap();
     map.retain(|_, e| e.registered_at.elapsed() < WRAP_CONFIRM_TTL);
     map.insert(entry.wrap_id, entry);
 }
 
 fn remove_wrap_confirm(wrap_id: &EventId) {
-    WRAP_CONFIRMS.lock().unwrap().remove(wrap_id);
-}
-
-/// Clear on session swap — entries carry per-account chat/message ids.
-pub fn clear_wrap_confirms() {
-    WRAP_CONFIRMS.lock().unwrap().clear();
+    wrap_confirms().lock().unwrap().remove(wrap_id);
 }
 
 /// Feed a relay `OK` for an outbound event back into the send pipeline.
@@ -199,7 +217,8 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
         return;
     }
     let entry = {
-        let map = WRAP_CONFIRMS.lock().unwrap();
+        let owner = wrap_confirms();
+        let map = owner.lock().unwrap();
         map.get(event_id).cloned()
     };
     let Some(entry) = entry else { return };
@@ -210,11 +229,11 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
     {
         return;
     }
-    if !entry.session.is_valid() {
+    if !entry.session.is_live() {
         remove_wrap_confirm(&entry.wrap_id);
         return;
     }
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         rescue_failed_as_sent(&entry).await;
         remove_wrap_confirm(&entry.wrap_id);
     });
@@ -223,9 +242,6 @@ pub fn note_relay_ok(event_id: &EventId, accepted: bool) {
 /// Flip an already-failed message back to Sent — a late relay OK proved
 /// the wrap was delivered.
 async fn rescue_failed_as_sent(entry: &WrapConfirm) {
-    if !entry.session.is_valid() {
-        return;
-    }
     let finalized = {
         let mut state = STATE.lock().await;
         state.update_message(&entry.pending_id, |msg| {
@@ -253,18 +269,13 @@ async fn rescue_failed_as_sent(entry: &WrapConfirm) {
 }
 
 /// Fire-and-forget the self-send recovery copy + persist its wrap key.
-/// SessionGuard skips publish + DB write on swap; without it account A's
-/// wrap key would corrupt account B's nip17_keys delete-history.
 fn spawn_self_send(client: Client, my_pk: PublicKey, rumor: UnsignedEvent) {
     let rid_for_self = rumor.id;
-    let session = crate::state::SessionGuard::capture();
-    tokio::spawn(async move {
-        if !session.is_valid() { return; }
+    crate::db::spawn_bound(async move {
         match crate::inbox_relays::send_gift_wrap_retained(
             &client, &my_pk, rumor, [],
         ).await {
             Ok(self_outcome) if !self_outcome.output.success.is_empty() => {
-                if !session.is_valid() { return; }
                 if let Some(rid) = rid_for_self {
                     if let Err(e) = crate::db::nip17_keys::store_wrap_key(
                         &self_outcome.wrap_event_id,
@@ -369,7 +380,7 @@ async fn retry_send_gift_wrap(
                 rescued: AtomicBool::new(false),
                 loop_exited: AtomicBool::new(false),
                 notify: tokio::sync::Notify::new(),
-                session: crate::state::SessionGuard::capture(),
+                session: crate::db::current_session(),
                 registered_at: std::time::Instant::now(),
             });
             register_wrap_confirm(entry.clone());
@@ -612,21 +623,23 @@ pub async fn send_dm(
 
     // Build the rumor
     let milliseconds = now.as_millis() % 1000;
-    let mut rumor = EventBuilder::private_msg_rumor(receiver, content);
+    // NIP-17 rumor: kind 14 + recipient p-tag (upstream's `make_rumor` is private).
+    let mut rumor = EventBuilder::new(Kind::PrivateDirectMessage, content)
+        .tag(Tag::public_key(receiver));
 
     if let Some(reply_id) = reply_to {
         if !reply_id.is_empty() {
             rumor = rumor.tag(Tag::custom(
-                TagKind::e(),
+                "e",
                 [reply_id.to_string(), String::new(), "reply".to_string()],
             ));
         }
     }
 
-    let mut rumor = rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    let mut rumor = rumor.tag(Tag::custom("ms", [milliseconds.to_string()]));
     for et in &emoji_tags {
         rumor = rumor.tag(Tag::custom(
-            TagKind::custom("emoji"),
+            "emoji",
             [et.shortcode.clone(), et.url.clone()],
         ));
     }
@@ -635,7 +648,7 @@ pub async fn send_dm(
     if let Some(exp) = config.expiration {
         rumor = rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
     }
-    let built_rumor = rumor.build(my_pk);
+    let built_rumor = rumor.finalize_unsigned_with_id(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 
     // Send via gift-wrap with retry
@@ -694,7 +707,6 @@ pub async fn resend_failed_dm(
     // is this account's; a swap before the STATE flip must abort (returning
     // "handled" so the caller never falls back to a fresh send in the WRONG
     // account). retry_send_gift_wrap re-guards its own STATE/DB writes.
-    let session = crate::state::SessionGuard::capture();
     let payload = match crate::db::nip17_keys::get_resend_payload_by_pending(failed_msg_id)? {
         Some(p) => p,
         None => return Ok(false),
@@ -702,9 +714,6 @@ pub async fn resend_failed_dm(
     let client = nostr_client().ok_or("Not logged in")?;
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
-    if !session.is_valid() {
-        return Ok(true);
-    }
 
     // Flip the red row back to "sending"; the retry loop's own fail/finalize
     // path returns it to red or promotes it to sent.
@@ -760,7 +769,7 @@ pub async fn send_file_dm(
     // Sign the Blossom auth event via the active client signer so bunker
     // accounts route through NostrConnect (the user's identity key lives on
     // the remote signer; MY_SECRET_KEY only holds the NIP-46 client key).
-    let signer = client.signer().await
+    let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer unavailable: {}", e))?;
 
     let now = std::time::SystemTime::now()
@@ -881,36 +890,58 @@ pub async fn send_file_dm(
     }
     callback.on_upload_complete(receiver_npub, &pending_id, &file_hash, &upload_url);
 
+    // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride the
+    // rumor as NIP-17 `fallback` tags so the message survives its primary
+    // host dying later; zero mirrors never delays or fails the send.
+    let mirror_urls = crate::blossom::mirror_blob_to_servers(
+        signer.clone(),
+        &upload_url,
+        crate::state::get_blossom_servers(),
+        2,
+        std::time::Duration::from_secs(5),
+    ).await;
+    if !mirror_urls.is_empty() {
+        let mut state = STATE.lock().await;
+        state.update_message(&pending_id, |msg| {
+            if let Some(att) = msg.attachments.last_mut() {
+                att.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+            }
+        });
+    }
+
     // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
         .tag(Tag::public_key(receiver))
-        .tag(Tag::custom(TagKind::custom("file-type"), [mime_type]))
-        .tag(Tag::custom(TagKind::custom("size"), [encrypted_size.to_string()]))
-        .tag(Tag::custom(TagKind::custom("encryption-algorithm"), ["aes-gcm"]))
-        .tag(Tag::custom(TagKind::custom("decryption-key"), [params.key.as_str()]))
-        .tag(Tag::custom(TagKind::custom("decryption-nonce"), [params.nonce.as_str()]))
-        .tag(Tag::custom(TagKind::custom("ox"), [file_hash.clone()]));
+        .tag(Tag::custom("file-type", [mime_type]))
+        .tag(Tag::custom("size", [encrypted_size.to_string()]))
+        .tag(Tag::custom("encryption-algorithm", ["aes-gcm"]))
+        .tag(Tag::custom("decryption-key", [params.key.as_str()]))
+        .tag(Tag::custom("decryption-nonce", [params.nonce.as_str()]))
+        .tag(Tag::custom("ox", [file_hash.clone()]));
+    for fb in &mirror_urls {
+        file_rumor = file_rumor.tag(Tag::custom("fallback", [fb.as_str()]));
+    }
     if !filename.is_empty() {
-        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("name"), [filename]));
+        file_rumor = file_rumor.tag(Tag::custom("name", [filename]));
     }
     if let Some(ref topic) = webxdc_topic {
-        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("webxdc-topic"), [topic.as_str()]));
+        file_rumor = file_rumor.tag(Tag::custom("webxdc-topic", [topic.as_str()]));
     }
     // Include image preview metadata for compatible rendering across all clients
     if let Some(ref meta) = img_meta {
         if !meta.thumbhash.is_empty() {
             // `thumbhash` names the value accurately; receivers read `thumb` too
             // (legacy), so this stays backward-compatible in both directions.
-            file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("thumbhash"), [meta.thumbhash.as_str()]));
+            file_rumor = file_rumor.tag(Tag::custom("thumbhash", [meta.thumbhash.as_str()]));
         }
-        file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("dim"), [format!("{}x{}", meta.width, meta.height)]));
+        file_rumor = file_rumor.tag(Tag::custom("dim", [format!("{}x{}", meta.width, meta.height)]));
     }
-    file_rumor = file_rumor.tag(Tag::custom(TagKind::custom("ms"), [milliseconds.to_string()]));
+    file_rumor = file_rumor.tag(Tag::custom("ms", [milliseconds.to_string()]));
     if let Some(exp) = config.expiration {
         file_rumor = file_rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
     }
 
-    let built_rumor = file_rumor.build(my_pk);
+    let built_rumor = file_rumor.finalize_unsigned_with_id(my_pk);
     let event_id = built_rumor.id.ok_or("Rumor has no id")?.to_hex();
 
     retry_send_gift_wrap(

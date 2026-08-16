@@ -575,21 +575,68 @@ try {
 })();
 "#;
 
+/// Storage partition for a Mini App. Browser storage keys on ORIGIN, so the
+/// partition becomes the origin's host: reserved marketplace ids keep their
+/// storage across app updates, everything else keys on content — an unknown
+/// app's new version starts clean. Reserved ids are host-sanitized and
+/// suffixed with a digest so distinct ids stay distinct after sanitizing.
+/// Android serves this as an `http://` hostname label (63-char cap, no edge
+/// hyphens) — the digest carries uniqueness, the readable part is a courtesy.
+#[allow(dead_code)] // Unused on Windows only
+async fn miniapp_storage_partition(file_hash: &str) -> String {
+    let reserved = {
+        let state = MARKETPLACE_STATE.read().await;
+        state.get_app_by_hash(file_hash).map(|a| a.id.clone())
+    };
+    match reserved {
+        Some(id) if super::marketplace::is_safe_app_id(&id) => {
+            use sha2::{Digest, Sha256};
+            let mut sanitized: String = id
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                .collect();
+            sanitized.truncate(24);
+            let sanitized = sanitized.trim_matches('-');
+            let mut h = Sha256::new();
+            h.update(id.as_bytes());
+            let tag = bytes_to_hex_string(&h.finalize());
+            if sanitized.is_empty() {
+                format!("app-{}", &tag[..8])
+            } else {
+                format!("{}-{}", sanitized, &tag[..8])
+            }
+        }
+        _ => file_hash[..32.min(file_hash.len())].to_ascii_lowercase(),
+    }
+}
+
 /// Get the base URL for Mini Apps based on platform
 #[allow(dead_code)] // Used on desktop only
-fn get_miniapp_base_url() -> Result<tauri::Url, Error> {
+fn get_miniapp_base_url(partition: &str) -> Result<tauri::Url, Error> {
     // URI format:
-    // mac/linux:         webxdc://dummy.host/<path>
-    // windows/android:   http://webxdc.localhost/<path>
-    #[cfg(any(target_os = "windows", target_os = "android"))]
+    // mac/linux:  webxdc://<partition>.host/<path>
+    // windows:    http://webxdc.<partition>.host/<path> — wry's WebView2
+    //             workaround intercepts by PREFIX (`http://webxdc.*`) and
+    //             strips it back to `webxdc://<partition>.host/`, so
+    //             per-partition hosts ride the existing filter untouched
+    // android:    unused (mini-apps run in the native overlay WebView)
+    #[cfg(target_os = "windows")]
     {
+        format!("http://webxdc.{}.host/", partition)
+            .parse()
+            .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = partition;
         "http://webxdc.localhost/"
             .parse()
             .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
     }
     #[cfg(not(any(target_os = "windows", target_os = "android")))]
     {
-        "webxdc://dummy.host/"
+        format!("webxdc://{}.host/", partition)
             .parse()
             .map_err(|e: url::ParseError| Error::Anyhow(e.into()))
     }
@@ -716,293 +763,517 @@ pub async fn miniapp_open(
     href: Option<String>,
     topic_id: Option<String>,
 ) -> Result<(), Error> {
-    log_info!("[WEBXDC] miniapp_open called: chat={}, msg={}", chat_id, message_id);
-    let path = PathBuf::from(&file_path);
+    vector_core::db::scoped(async move {
+        log_info!("[WEBXDC] miniapp_open called: chat={}, msg={}", chat_id, message_id);
+        let path = PathBuf::from(&file_path);
 
-    // Generate unique ID from file hash
-    let id = format!("miniapp_{:x}", md5_hash(&file_path));
-    // For marketplace apps (empty chat/message), use the app id as the window label
-    // This ensures a valid label like "miniapp:solo:abc123" instead of "miniapp::"
-    let window_label = if chat_id.is_empty() && message_id.is_empty() {
-        format!("miniapp:solo:{}", id)
-    } else {
-        format!("miniapp:{}:{}", chat_id, message_id)
-    };
+        // Generate unique ID from file hash
+        let id = format!("miniapp_{:x}", md5_hash(&file_path));
+        // For marketplace apps (empty chat/message), use the app id as the window label
+        // This ensures a valid label like "miniapp:solo:abc123" instead of "miniapp::"
+        let window_label = if chat_id.is_empty() && message_id.is_empty() {
+            format!("miniapp:solo:{}", id)
+        } else {
+            format!("miniapp:{}:{}", chat_id, message_id)
+        };
     
-    log_trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
+        log_trace!("Opening Mini App: {} ({}, {}) with href: {:?}, topic: {:?}", window_label, chat_id, message_id, href, topic_id);
 
-    let state = app.state::<MiniAppsState>();
+        let state = app.state::<MiniAppsState>();
 
-    // Check if already open
-    log_trace!("[MiniApp] Checking for existing instance...");
-    if let Some((existing_label, _existing_instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
+        // Check if already open
+        log_trace!("[MiniApp] Checking for existing instance...");
+        if let Some((existing_label, _existing_instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
+            #[cfg(target_os = "android")]
+            {
+                // On Android, navigate the existing overlay if open
+                if crate::android::miniapp::is_miniapp_open().unwrap_or(false) {
+                    if let Some(ref href_value) = href {
+                        let _ = crate::android::miniapp::send_to_miniapp("navigate", href_value);
+                    }
+                    return Ok(());
+                } else {
+                    // Overlay was closed but state was never cleaned up.
+                    // Full Iroh shutdown — next preconnect creates a fresh instance.
+                    log_warn!("Instance exists but overlay closed, full cleanup: {}", existing_label);
+
+                    let channel_state = state.remove_realtime_channel(&existing_label).await;
+                    if let Some(channel) = channel_state {
+                        let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
+                        if let Some(my_pk) = crate::my_public_key() {
+                            let Ok(my_npub) = my_pk.to_bech32();
+                            state.remove_session_peer(&channel.topic, &my_npub).await;
+                        }
+                        let chat_id_clone = chat_id.clone();
+                        vector_core::db::spawn_bound(async move {
+                            crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
+                        });
+                    }
+                    // Destroy Iroh completely — guarantees clean state for session 2
+                    state.realtime.shutdown_iroh().await;
+                    state.remove_instance(&existing_label).await;
+                }
+            }
+
+            #[cfg(not(target_os = "android"))]
+            {
+                // Desktop: Focus existing window
+                if let Some(window) = app.get_webview_window(&existing_label) {
+                    // If href is provided, navigate to it
+                    if let Some(ref href_value) = href {
+                        let mut nav_url = window.url().map_err(Error::Tauri)?;
+                        // Append href to the base URL (href should start with / or be a relative path)
+                        let href_path = href_value.trim_start_matches('/');
+                        nav_url.set_path(&format!("/{}", href_path));
+                        log_trace!("Navigating existing Mini App to: {}", nav_url);
+                        window.navigate(nav_url)?;
+                    }
+                    window.show()?;
+                    window.set_focus()?;
+                    return Ok(());
+                } else {
+                    // Window was closed but instance still exists, clean up
+                    log_warn!("Instance exists but window missing, cleaning up: {}", existing_label);
+                    state.remove_instance(&existing_label).await;
+                }
+            }
+        }
+    
+        // Load the package (with timeout to prevent infinite hang)
+        log_trace!("[MiniApp] Loading package for {}...", window_label);
+        let package = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            state.get_or_load_package(&id, path)
+        ).await
+        .map_err(|_| {
+            log_error!("[MiniApp] Package load TIMED OUT after 15s for: {}", file_path);
+            Error::Anyhow(anyhow::anyhow!("miniapp_open: package load timed out after 15s for: {}", file_path))
+        })??;
+        log_trace!("[MiniApp] Package loaded successfully: {}", package.manifest.name);
+    
+        // Parse the topic ID if provided (from the message's webxdc-topic tag)
+        let realtime_topic = if let Some(ref topic_str) = topic_id {
+            match super::realtime::decode_topic_id(topic_str) {
+                Ok(topic) => Some(topic),
+                Err(e) => {
+                    log_warn!("Failed to decode topic ID '{}': {}", topic_str, e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    
+        // Create the instance
+        let instance = MiniAppInstance {
+            package: (*package).clone(),
+            chat_id: chat_id.clone(),
+            message_id: message_id.clone(),
+            window_label: window_label.clone(),
+            realtime_topic,
+            instance_id: super::state::next_instance_id(),
+        };
+    
+        // Register the instance before creating the window
+        state.add_instance(instance.clone()).await;
+
+        // Preconnect: if this Mini App uses the realtime API, create the gossip channel
+        // and connect to peers in the background. joinRealtimeChannel() awaits the
+        // signal, then just attaches the event listener — preconnect is the sole initiator.
+        let (pc_tx, pc_rx) = tokio::sync::watch::channel(false);
+        state.set_preconnect_signal(&window_label, pc_rx).await;
+        {
+            let app_pc = app.clone();
+            let pkg_path = package.path.clone();
+            let pkg_name = package.manifest.name.clone();
+            let chat_id_pc = chat_id.clone();
+            let msg_id_pc = message_id.clone();
+            let topic_str = topic_id.clone();
+            let rt_topic = instance.realtime_topic;
+            let label_pc = window_label.clone();
+            // chat_id_pc belongs to the account current NOW; preconnect spans Iroh init
+            // (seconds) — bail before the session-scoped writes/sends if the account swaps.
+            vector_core::db::spawn_bound(async move {
+                log_info!("[WEBXDC] Preconnect: scanning '{}' for realtime API (path: {:?})", pkg_name, pkg_path);
+                let uses_rt = tokio::task::spawn_blocking(move || {
+                    MiniAppPackage::scan_for_realtime_api(&pkg_path)
+                }).await.unwrap_or(false);
+
+                if !uses_rt {
+                    log_info!("[WEBXDC] Preconnect: '{}' does NOT use realtime API, skipping", pkg_name);
+                    drop(pc_tx);
+                    return;
+                }
+                log_info!("[WEBXDC] Preconnect: '{}' uses realtime API, initializing Iroh", pkg_name);
+
+                // Compute topic (same logic as joinRealtimeChannel)
+                let topic = rt_topic.unwrap_or_else(|| {
+                    super::realtime::derive_topic_id(&pkg_name, &chat_id_pc, &msg_id_pc)
+                });
+                let topic_encoded = match topic_str {
+                    Some(ts) => ts,
+                    None => super::realtime::encode_topic_id(&topic),
+                };
+
+                let state = app_pc.state::<super::state::MiniAppsState>();
+                let iroh = match state.realtime.get_or_init().await {
+                    Ok(i) => i,
+                    Err(e) => { log_warn!("[WEBXDC] Preconnect: Iroh init failed: {e}"); return; }
+                };
+
+                // Collect any cached peer addresses (from advertisements that arrived
+                // before we opened) + persisted peers from the DB to use as bootstrap.
+                let mut bootstrap_peers: Vec<iroh::EndpointAddr> = Vec::new();
+
+                // Cached from recent Nostr advertisements
+                let cached = state.take_peer_addrs(&topic).await;
+                bootstrap_peers.extend(cached);
+
+                // Persisted from DB
+                let my_npub = crate::my_public_key()
+                    .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+                    .unwrap_or_default();
+                if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
+                    for record in &records {
+                        if let Ok(addr) = super::realtime::decode_node_addr(&record.node_addr_encoded) {
+                            bootstrap_peers.push(addr);
+                        }
+                    }
+                }
+
+                log_info!("[WEBXDC] Preconnect: joining with {} bootstrap peers", bootstrap_peers.len());
+
+                // Create gossip channel with bootstrap peers and NO event target.
+                // Incoming data is BUFFERED (not dropped) until joinRealtimeChannel
+                // sets the target and flushes.
+                if let Err(e) = iroh.join_channel(topic, bootstrap_peers, None, Some(app_pc.clone()), label_pc.clone(), None).await {
+                    log_warn!("[WEBXDC] Preconnect: join_channel failed: {e}");
+                    return;
+                }
+
+                state.set_realtime_channel(&label_pc, super::state::RealtimeChannelState {
+                    topic, active: true,
+                }).await;
+
+                // Send advertisement so peers know we're online (skip if the account
+                let node_addr = iroh.get_node_addr();
+                if let Ok(encoded) = super::realtime::encode_node_addr(&node_addr) {
+                    crate::commands::realtime::send_webxdc_peer_advertisement(
+                        chat_id_pc, topic_encoded.clone(), encoded,
+                    ).await;
+                }
+
+                if let Some(pk) = crate::my_public_key() {
+                    let npub = pk.to_bech32().unwrap();
+                    state.add_session_peer(topic, npub).await;
+                }
+
+                if let Some(main_window) = app_pc.get_webview_window("main") {
+                    let session_peers = state.get_session_peers(&topic).await;
+                    let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                        "topic": topic_encoded,
+                        "peer_count": session_peers.len(),
+                        "peers": session_peers,
+                        "is_active": true,
+                    }));
+                }
+
+                log_info!("[WEBXDC] Preconnect: Iroh ready for '{}'", label_pc);
+                let _ = pc_tx.send(true);
+
+                // Connect to known peers (runs after signal — doesn't block joinRealtimeChannel).
+                // Single attempt, 5s timeout — stale peers fail fast.
+                let my_npub = crate::my_public_key()
+                    .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+                    .unwrap_or_default();
+                let mut connected_ids = std::collections::HashSet::new();
+
+                if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
+                    if !records.is_empty() {
+                        log_info!("[WEBXDC] Preconnect: trying {} persisted peers", records.len());
+                        for record in &records {
+                            state.add_session_peer(topic, record.npub.clone()).await;
+                        }
+                        let peers: Vec<_> = records.iter().filter_map(|r| {
+                            match super::realtime::decode_node_addr(&r.node_addr_encoded) {
+                                Ok(addr) => { connected_ids.insert(addr.id); Some(addr) }
+                                Err(e) => { log_warn!("[WEBXDC] Preconnect: bad peer addr: {e}"); None }
+                            }
+                        }).collect();
+                        for addr in peers {
+                            let peer_id = addr.id;
+                            // 15s, not less: a freshly-created Iroh node (game reopen on
+                            // Android = full shutdown + recreate) spends 3-5s on the relay
+                            // handshake alone before the dial can start — a tight timeout
+                            // strands the node neighborless on the topic.
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(15),
+                                iroh.try_add_peer(&topic, &addr),
+                            ).await {
+                                Ok(Ok(_)) => log_info!("[WEBXDC] Preconnect: connected to peer {}", peer_id),
+                                Ok(Err(e)) => log_trace!("[WEBXDC] Preconnect: peer {} failed: {e}", peer_id),
+                                Err(_) => log_trace!("[WEBXDC] Preconnect: peer {} timed out (stale?)", peer_id),
+                            }
+                        }
+                    }
+                }
+
+                let cached = state.take_peer_addrs(&topic).await;
+                for addr in cached.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(15),
+                        iroh.try_add_peer(&topic, &addr),
+                    ).await;
+                }
+            });
+        }
+
+        // ========================================
+        // Android: Use native WebView overlay
+        // ========================================
         #[cfg(target_os = "android")]
         {
-            // On Android, navigate the existing overlay if open
-            if crate::android::miniapp::is_miniapp_open().unwrap_or(false) {
-                if let Some(ref href_value) = href {
-                    let _ = crate::android::miniapp::send_to_miniapp("navigate", href_value);
-                }
-                return Ok(());
-            } else {
-                // Overlay was closed but state was never cleaned up.
-                // Full Iroh shutdown — next preconnect creates a fresh instance.
-                log_warn!("Instance exists but overlay closed, full cleanup: {}", existing_label);
+            log_info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
 
-                let channel_state = state.remove_realtime_channel(&existing_label).await;
-                if let Some(channel) = channel_state {
-                    let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
-                    if let Some(my_pk) = crate::my_public_key() {
-                        let Ok(my_npub) = my_pk.to_bech32();
-                        state.remove_session_peer(&channel.topic, &my_npub).await;
-                    }
-                    let chat_id_clone = chat_id.clone();
-                    // chat_id belongs to the account current NOW — bail in the task if it swaps.
-                    let session = vector_core::state::SessionGuard::capture();
-                    tokio::spawn(async move {
-                        if !session.is_valid() { return; }
-                        crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
-                    });
-                }
-                // Destroy Iroh completely — guarantees clean state for session 2
-                state.realtime.shutdown_iroh().await;
-                state.remove_instance(&existing_label).await;
+            // Open the native overlay WebView
+            crate::android::miniapp::open_miniapp_overlay(
+                &window_label,
+                &file_path,
+                &chat_id,
+                &message_id,
+                href.as_deref(),
+                &miniapp_storage_partition(&package.file_hash).await,
+            ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
+
+            // Record to Mini Apps history
+            let attachment_ref = file_path.clone();
+            if let Err(e) = crate::db::record_miniapp_opened(
+                package.manifest.name.clone(),
+                file_path.clone(),
+                attachment_ref,
+            ) {
+                log_warn!("Failed to record Mini App to history: {}", e);
             }
+
+            return Ok(());
         }
 
+        // ========================================
+        // Desktop: Use WebviewWindowBuilder
+        // ========================================
         #[cfg(not(target_os = "android"))]
         {
-            // Desktop: Focus existing window
-            if let Some(window) = app.get_webview_window(&existing_label) {
-                // If href is provided, navigate to it
-                if let Some(ref href_value) = href {
-                    let mut nav_url = get_miniapp_base_url()?;
-                    // Append href to the base URL (href should start with / or be a relative path)
-                    let href_path = href_value.trim_start_matches('/');
-                    nav_url.set_path(&format!("/{}", href_path));
-                    log_trace!("Navigating existing Mini App to: {}", nav_url);
-                    window.navigate(nav_url)?;
-                }
-                window.show()?;
-                window.set_focus()?;
-                return Ok(());
-            } else {
-                // Window was closed but instance still exists, clean up
-                log_warn!("Instance exists but window missing, cleaning up: {}", existing_label);
-                state.remove_instance(&existing_label).await;
-            }
+        // Build the initial URL - append href if provided
+        let mut initial_url =
+            get_miniapp_base_url(&miniapp_storage_partition(&package.file_hash).await)?;
+        if let Some(ref href_value) = href {
+            // Append href to the base URL (href should start with / or be a relative path)
+            let href_path = href_value.trim_start_matches('/');
+            initial_url.set_path(&format!("/{}", href_path));
+            log_trace!("Mini App will open at: {}", initial_url);
         }
-    }
+        let initial_url_clone = initial_url.clone();
     
-    // Load the package (with timeout to prevent infinite hang)
-    log_trace!("[MiniApp] Loading package for {}...", window_label);
-    let package = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        state.get_or_load_package(&id, path)
-    ).await
-    .map_err(|_| {
-        log_error!("[MiniApp] Package load TIMED OUT after 15s for: {}", file_path);
-        Error::Anyhow(anyhow::anyhow!("miniapp_open: package load timed out after 15s for: {}", file_path))
-    })??;
-    log_trace!("[MiniApp] Package loaded successfully: {}", package.manifest.name);
+        // Get the dummy proxy URL for network isolation (Linux only)
+        // macOS: skipped due to version requirements
+        // Windows: skipped due to WebView2 freeze issues
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        let dummy_proxy_url = DUMMY_LOCALHOST_PROXY_URL
+            .as_ref()
+            .map_err(|_| Error::BlackholeProxyUnavailable)?;
     
-    // Parse the topic ID if provided (from the message's webxdc-topic tag)
-    let realtime_topic = if let Some(ref topic_str) = topic_id {
-        match super::realtime::decode_topic_id(topic_str) {
-            Ok(topic) => Some(topic),
-            Err(e) => {
-                log_warn!("Failed to decode topic ID '{}': {}", topic_str, e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-    
-    // Create the instance
-    let instance = MiniAppInstance {
-        package: (*package).clone(),
-        chat_id: chat_id.clone(),
-        message_id: message_id.clone(),
-        window_label: window_label.clone(),
-        realtime_topic,
-        instance_id: super::state::next_instance_id(),
-    };
-    
-    // Register the instance before creating the window
-    state.add_instance(instance.clone()).await;
-
-    // Preconnect: if this Mini App uses the realtime API, create the gossip channel
-    // and connect to peers in the background. joinRealtimeChannel() awaits the
-    // signal, then just attaches the event listener — preconnect is the sole initiator.
-    let (pc_tx, pc_rx) = tokio::sync::watch::channel(false);
-    state.set_preconnect_signal(&window_label, pc_rx).await;
-    {
-        let app_pc = app.clone();
-        let pkg_path = package.path.clone();
-        let pkg_name = package.manifest.name.clone();
-        let chat_id_pc = chat_id.clone();
-        let msg_id_pc = message_id.clone();
-        let topic_str = topic_id.clone();
-        let rt_topic = instance.realtime_topic;
-        let label_pc = window_label.clone();
-        // chat_id_pc belongs to the account current NOW; preconnect spans Iroh init
-        // (seconds) — bail before the session-scoped writes/sends if the account swaps.
-        let pc_session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            log_info!("[WEBXDC] Preconnect: scanning '{}' for realtime API (path: {:?})", pkg_name, pkg_path);
-            let uses_rt = tokio::task::spawn_blocking(move || {
-                MiniAppPackage::scan_for_realtime_api(&pkg_path)
-            }).await.unwrap_or(false);
-
-            if !uses_rt {
-                log_info!("[WEBXDC] Preconnect: '{}' does NOT use realtime API, skipping", pkg_name);
-                drop(pc_tx);
-                return;
-            }
-            log_info!("[WEBXDC] Preconnect: '{}' uses realtime API, initializing Iroh", pkg_name);
-
-            // Compute topic (same logic as joinRealtimeChannel)
-            let topic = rt_topic.unwrap_or_else(|| {
-                super::realtime::derive_topic_id(&pkg_name, &chat_id_pc, &msg_id_pc)
-            });
-            let topic_encoded = match topic_str {
-                Some(ts) => ts,
-                None => super::realtime::encode_topic_id(&topic),
-            };
-
-            let state = app_pc.state::<super::state::MiniAppsState>();
-            let iroh = match state.realtime.get_or_init().await {
-                Ok(i) => i,
-                Err(e) => { log_warn!("[WEBXDC] Preconnect: Iroh init failed: {e}"); return; }
-            };
-
-            // Collect any cached peer addresses (from advertisements that arrived
-            // before we opened) + persisted peers from the DB to use as bootstrap.
-            let mut bootstrap_peers: Vec<iroh::EndpointAddr> = Vec::new();
-
-            // Cached from recent Nostr advertisements
-            let cached = state.take_peer_addrs(&topic).await;
-            bootstrap_peers.extend(cached);
-
-            // Persisted from DB
-            let my_npub = crate::my_public_key()
-                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
-                .unwrap_or_default();
-            if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
-                for record in &records {
-                    if let Ok(addr) = super::realtime::decode_node_addr(&record.node_addr_encoded) {
-                        bootstrap_peers.push(addr);
-                    }
+        let mut window_builder = WebviewWindowBuilder::new(
+            &app,
+            &window_label,
+            WebviewUrl::CustomProtocol(initial_url.clone()),
+        )
+        .title(&package.manifest.name)
+        .inner_size(480.0, 640.0)
+        .min_inner_size(320.0, 480.0)
+        .resizable(true)
+        .focused(true)
+        // Use initialization_script_for_all_frames like DeltaChat does
+        .initialization_script_for_all_frames(INIT_SCRIPT)
+        // Enable devtools in debug mode only
+        .devtools(cfg!(debug_assertions))
+        .on_navigation({
+            // Pin navigation to this window's own origin: serving routes by
+            // window label while storage keys on origin, so hopping to another
+            // partition's host would run this app's code against that app's
+            // storage.
+            let own_scheme = initial_url.scheme().to_string();
+            let own_host = initial_url.host_str().map(str::to_string);
+            move |url| {
+                let allowed =
+                    url.scheme() == own_scheme && url.host_str().map(str::to_string) == own_host;
+                if !allowed {
+                    log_warn!("Blocked navigation to: {}", url);
                 }
-            }
-
-            log_info!("[WEBXDC] Preconnect: joining with {} bootstrap peers", bootstrap_peers.len());
-
-            // Create gossip channel with bootstrap peers and NO event target.
-            // Incoming data is BUFFERED (not dropped) until joinRealtimeChannel
-            // sets the target and flushes.
-            if let Err(e) = iroh.join_channel(topic, bootstrap_peers, None, Some(app_pc.clone()), label_pc.clone(), None).await {
-                log_warn!("[WEBXDC] Preconnect: join_channel failed: {e}");
-                return;
-            }
-
-            state.set_realtime_channel(&label_pc, super::state::RealtimeChannelState {
-                topic, active: true,
-            }).await;
-
-            // Send advertisement so peers know we're online (skip if the account
-            // swapped during Iroh init — chat_id_pc belongs to the old session).
-            if !pc_session.is_valid() { return; }
-            let node_addr = iroh.get_node_addr();
-            if let Ok(encoded) = super::realtime::encode_node_addr(&node_addr) {
-                crate::commands::realtime::send_webxdc_peer_advertisement(
-                    chat_id_pc, topic_encoded.clone(), encoded,
-                ).await;
-            }
-
-            if let Some(pk) = crate::my_public_key() {
-                let npub = pk.to_bech32().unwrap();
-                state.add_session_peer(topic, npub).await;
-            }
-
-            if let Some(main_window) = app_pc.get_webview_window("main") {
-                let session_peers = state.get_session_peers(&topic).await;
-                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                    "topic": topic_encoded,
-                    "peer_count": session_peers.len(),
-                    "peers": session_peers,
-                    "is_active": true,
-                }));
-            }
-
-            log_info!("[WEBXDC] Preconnect: Iroh ready for '{}'", label_pc);
-            let _ = pc_tx.send(true);
-
-            // Connect to known peers (runs after signal — doesn't block joinRealtimeChannel).
-            // Single attempt, 5s timeout — stale peers fail fast.
-            let my_npub = crate::my_public_key()
-                .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
-                .unwrap_or_default();
-            let mut connected_ids = std::collections::HashSet::new();
-
-            if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
-                if !records.is_empty() {
-                    log_info!("[WEBXDC] Preconnect: trying {} persisted peers", records.len());
-                    for record in &records {
-                        state.add_session_peer(topic, record.npub.clone()).await;
-                    }
-                    let peers: Vec<_> = records.iter().filter_map(|r| {
-                        match super::realtime::decode_node_addr(&r.node_addr_encoded) {
-                            Ok(addr) => { connected_ids.insert(addr.id); Some(addr) }
-                            Err(e) => { log_warn!("[WEBXDC] Preconnect: bad peer addr: {e}"); None }
-                        }
-                    }).collect();
-                    for addr in peers {
-                        let peer_id = addr.id;
-                        // 15s, not less: a freshly-created Iroh node (game reopen on
-                        // Android = full shutdown + recreate) spends 3-5s on the relay
-                        // handshake alone before the dial can start — a tight timeout
-                        // strands the node neighborless on the topic.
-                        match tokio::time::timeout(
-                            std::time::Duration::from_secs(15),
-                            iroh.try_add_peer(&topic, &addr),
-                        ).await {
-                            Ok(Ok(_)) => log_info!("[WEBXDC] Preconnect: connected to peer {}", peer_id),
-                            Ok(Err(e)) => log_trace!("[WEBXDC] Preconnect: peer {} failed: {e}", peer_id),
-                            Err(_) => log_trace!("[WEBXDC] Preconnect: peer {} timed out (stale?)", peer_id),
-                        }
-                    }
-                }
-            }
-
-            let cached = state.take_peer_addrs(&topic).await;
-            for addr in cached.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(15),
-                    iroh.try_add_peer(&topic, &addr),
-                ).await;
+                allowed
             }
         });
-    }
+    
+        // Platform-specific security settings
+    
+        // macOS: Disable link preview
+        #[cfg(target_os = "macos")]
+        {
+            window_builder = window_builder.allow_link_preview(false);
+        }
+    
+        // Non-macOS/non-Windows: Use dummy proxy for network isolation
+        // Note: On macOS, proxy_url increases minimum version to 14, so we skip it
+        // Note: On Windows, both proxy_url and additional_browser_args cause WebView2 to freeze
+        //       We rely on CSP for security on Windows instead
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+        {
+            window_builder = window_builder.proxy_url(dummy_proxy_url.clone());
+        }
+    
+        let window = Arc::new(window_builder.build()?);
+    
+        // Set up window close handler
+        let window_label_for_handler = window_label.clone();
+        let app_handle_for_handler = app.app_handle().clone();
+        let window_clone = Arc::clone(&window);
+    
+        // Track if we're already closing
+        let is_closing = std::sync::atomic::AtomicBool::new(false);
+    
+        // URL for navigating before close (to trigger unload events)
+        let webxdc_js_url = {
+            let mut url = initial_url_clone.clone();
+            url.set_path("/webxdc.js");
+            url
+        };
+    
+        window.on_window_event(move |event| {
+            match event {
+                tauri::WindowEvent::Destroyed => {
+                    log_info!("Mini App window destroyed: {}", window_label_for_handler);
+                    let app_handle = app_handle_for_handler.clone();
+                    let label = window_label_for_handler.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_handle.state::<MiniAppsState>();
 
-    // ========================================
-    // Android: Use native WebView overlay
-    // ========================================
-    #[cfg(target_os = "android")]
-    {
-        log_info!("Opening Mini App on Android: {} in overlay", package.manifest.name);
+                        // Snapshot the instance THIS destroy is for — a rapid reopen of the
+                        // same message re-registers the label with a NEW instance, and this
+                        // async teardown must not delete it (see remove_instance_if below).
+                        let closing_instance = state.get_instance(&label).await;
 
-        // Open the native overlay WebView
-        crate::android::miniapp::open_miniapp_overlay(
-            &window_label,
-            &file_path,
-            &chat_id,
-            &message_id,
-            href.as_deref(),
-        ).map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to open Mini App overlay: {}", e)))?;
+                        // Full teardown: remove channel state, leave QUIC, clean session peers
+                        let channel_state = state.remove_realtime_channel(&label).await;
 
+                        if let Some(channel) = channel_state {
+                            let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
+
+                            // Tear down the QUIC channel completely (close connections, abort tasks).
+                            // try_get, NOT get_or_init: teardown must never resurrect a fresh endpoint.
+                            if let Some(iroh) = state.realtime.try_get().await {
+                                if let Err(e) = iroh.leave_channel(channel.topic, &label).await {
+                                    log_warn!("[WEBXDC] Failed to leave channel on close: {}", e);
+                                }
+                            }
+
+                            // Remove ourselves from session peers
+                            if let Some(my_pk) = crate::my_public_key() {
+                                let my_npub = my_pk.to_bech32().unwrap();
+                                state.remove_session_peer(&channel.topic, &my_npub).await;
+                            }
+
+                            // Emit status update — session_peers is the single source of truth
+                            let session_peers = state.get_session_peers(&channel.topic).await;
+                            let peer_count = session_peers.len();
+                            if let Some(main_window) = app_handle.get_webview_window("main") {
+                                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                                    "topic": topic_encoded,
+                                    "peer_count": peer_count,
+                                    "peers": session_peers,
+                                    "is_active": false,
+                                    "has_pending_peers": peer_count > 0,
+                                }));
+                            }
+
+                            // Send peer-left via Nostr so other clients update their lobby state
+                            // (from the CLOSING instance — a live lookup could return a
+                            // reopened successor's instance instead)
+                            if let Some(ref instance) = closing_instance {
+                                let chat_id = instance.chat_id.clone();
+                                let topic_for_left = topic_encoded.clone();
+                                // chat_id belongs to the account current NOW — bail if it swaps.
+                                vector_core::db::spawn_bound(async move {
+                                    if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
+                                        log_warn!("[WEBXDC] Failed to send peer-left signal");
+                                    }
+                                });
+                            }
+                        } else if let Some(instance) = closing_instance.as_ref() {
+                            // SOLO app (no realtime channel was ever joined): still clear the optimistic
+                            // "Playing"/"online" the in-chat card set on open, so it resets live instead of
+                            // lingering until a chat re-render. Multiplayer is handled by the branch above.
+                            if let Some(topic) = instance.realtime_topic.as_ref() {
+                                let topic_encoded = super::realtime::encode_topic_id(topic);
+                                if let Some(main_window) = app_handle.get_webview_window("main") {
+                                    let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                                        "topic": topic_encoded,
+                                        "peer_count": 0,
+                                        "peers": Vec::<String>::new(),
+                                        "is_active": false,
+                                        "has_pending_peers": false,
+                                    }));
+                                }
+                            }
+                        }
+
+                        // Remove the instance — ONLY if it's still the one this destroy was for.
+                        if let Some(instance) = closing_instance {
+                            state.remove_instance_if(&label, instance.instance_id).await;
+                        }
+                    });
+                }
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // Handle close gracefully to allow sendUpdate() calls to complete
+                    // This is a workaround for https://github.com/deltachat/deltachat-desktop/issues/3321
+                    let is_closing_already = is_closing.swap(true, std::sync::atomic::Ordering::Relaxed);
+                    if is_closing_already {
+                        log_trace!("Second CloseRequested event, closing now");
+                        return;
+                    }
+                
+                    log_trace!("CloseRequested on Mini App window, will delay close");
+                
+                    // Navigate to webxdc.js to trigger unload events
+                    // This allows sendUpdate() calls in visibilitychange/unload handlers to complete
+                    if let Err(err) = window_clone.navigate(webxdc_js_url.clone()) {
+                        log_error!("Failed to navigate before close: {err}");
+                        return;
+                    }
+                
+                    // Hide the window immediately for better UX
+                    window_clone.hide()
+                        .inspect_err(|err| log_warn!("Failed to hide window: {err}"))
+                        .ok();
+                
+                    api.prevent_close();
+                
+                    let window_clone2 = Arc::clone(&window_clone);
+                    tauri::async_runtime::spawn(async move {
+                        // Wait a bit for any pending sendUpdate() calls
+                        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                        log_trace!("Delay elapsed, closing Mini App window");
+                        window_clone2.close()
+                            .inspect_err(|err| log_error!("Failed to close window: {err}"))
+                            .ok();
+                    });
+                }
+                _ => {}
+            }
+        });
+    
+        log_info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
+    
         // Record to Mini Apps history
+        // Use file_path as attachment_ref since it uniquely identifies the Mini App
         let attachment_ref = file_path.clone();
         if let Err(e) = crate::db::record_miniapp_opened(
             package.manifest.name.clone(),
@@ -1012,230 +1283,10 @@ pub async fn miniapp_open(
             log_warn!("Failed to record Mini App to history: {}", e);
         }
 
-        return Ok(());
-    }
-
-    // ========================================
-    // Desktop: Use WebviewWindowBuilder
-    // ========================================
-    #[cfg(not(target_os = "android"))]
-    {
-    // Build the initial URL - append href if provided
-    let mut initial_url = get_miniapp_base_url()?;
-    if let Some(ref href_value) = href {
-        // Append href to the base URL (href should start with / or be a relative path)
-        let href_path = href_value.trim_start_matches('/');
-        initial_url.set_path(&format!("/{}", href_path));
-        log_trace!("Mini App will open at: {}", initial_url);
-    }
-    let initial_url_clone = initial_url.clone();
-    
-    // Get the dummy proxy URL for network isolation (Linux only)
-    // macOS: skipped due to version requirements
-    // Windows: skipped due to WebView2 freeze issues
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let dummy_proxy_url = DUMMY_LOCALHOST_PROXY_URL
-        .as_ref()
-        .map_err(|_| Error::BlackholeProxyUnavailable)?;
-    
-    let mut window_builder = WebviewWindowBuilder::new(
-        &app,
-        &window_label,
-        WebviewUrl::CustomProtocol(initial_url.clone()),
-    )
-    .title(&package.manifest.name)
-    .inner_size(480.0, 640.0)
-    .min_inner_size(320.0, 480.0)
-    .resizable(true)
-    .focused(true)
-    // Use initialization_script_for_all_frames like DeltaChat does
-    .initialization_script_for_all_frames(INIT_SCRIPT)
-    // Enable devtools in debug mode only
-    .devtools(cfg!(debug_assertions))
-    .on_navigation(move |url| {
-        // Only allow navigation within the webxdc:// scheme or webxdc.localhost
-        let scheme = url.scheme();
-        let allowed = scheme == "webxdc" || (scheme == "http" && url.host_str() == Some("webxdc.localhost"));
-        if !allowed {
-            log_warn!("Blocked navigation to: {}", url);
-        }
-        allowed
-    });
-    
-    // Platform-specific security settings
-    
-    // macOS: Disable link preview
-    #[cfg(target_os = "macos")]
-    {
-        window_builder = window_builder.allow_link_preview(false);
-    }
-    
-    // Non-macOS/non-Windows: Use dummy proxy for network isolation
-    // Note: On macOS, proxy_url increases minimum version to 14, so we skip it
-    // Note: On Windows, both proxy_url and additional_browser_args cause WebView2 to freeze
-    //       We rely on CSP for security on Windows instead
-    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    {
-        window_builder = window_builder.proxy_url(dummy_proxy_url.clone());
-    }
-    
-    let window = Arc::new(window_builder.build()?);
-    
-    // Set up window close handler
-    let window_label_for_handler = window_label.clone();
-    let app_handle_for_handler = app.app_handle().clone();
-    let window_clone = Arc::clone(&window);
-    
-    // Track if we're already closing
-    let is_closing = std::sync::atomic::AtomicBool::new(false);
-    
-    // URL for navigating before close (to trigger unload events)
-    let webxdc_js_url = {
-        let mut url = initial_url_clone.clone();
-        url.set_path("/webxdc.js");
-        url
-    };
-    
-    window.on_window_event(move |event| {
-        match event {
-            tauri::WindowEvent::Destroyed => {
-                log_info!("Mini App window destroyed: {}", window_label_for_handler);
-                let app_handle = app_handle_for_handler.clone();
-                let label = window_label_for_handler.clone();
-                tauri::async_runtime::spawn(async move {
-                    let state = app_handle.state::<MiniAppsState>();
-
-                    // Snapshot the instance THIS destroy is for — a rapid reopen of the
-                    // same message re-registers the label with a NEW instance, and this
-                    // async teardown must not delete it (see remove_instance_if below).
-                    let closing_instance = state.get_instance(&label).await;
-
-                    // Full teardown: remove channel state, leave QUIC, clean session peers
-                    let channel_state = state.remove_realtime_channel(&label).await;
-
-                    if let Some(channel) = channel_state {
-                        let topic_encoded = super::realtime::encode_topic_id(&channel.topic);
-
-                        // Tear down the QUIC channel completely (close connections, abort tasks).
-                        // try_get, NOT get_or_init: teardown must never resurrect a fresh endpoint.
-                        if let Some(iroh) = state.realtime.try_get().await {
-                            if let Err(e) = iroh.leave_channel(channel.topic, &label).await {
-                                log_warn!("[WEBXDC] Failed to leave channel on close: {}", e);
-                            }
-                        }
-
-                        // Remove ourselves from session peers
-                        if let Some(my_pk) = crate::my_public_key() {
-                            let my_npub = my_pk.to_bech32().unwrap();
-                            state.remove_session_peer(&channel.topic, &my_npub).await;
-                        }
-
-                        // Emit status update — session_peers is the single source of truth
-                        let session_peers = state.get_session_peers(&channel.topic).await;
-                        let peer_count = session_peers.len();
-                        if let Some(main_window) = app_handle.get_webview_window("main") {
-                            let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                                "topic": topic_encoded,
-                                "peer_count": peer_count,
-                                "peers": session_peers,
-                                "is_active": false,
-                                "has_pending_peers": peer_count > 0,
-                            }));
-                        }
-
-                        // Send peer-left via Nostr so other clients update their lobby state
-                        // (from the CLOSING instance — a live lookup could return a
-                        // reopened successor's instance instead)
-                        if let Some(ref instance) = closing_instance {
-                            let chat_id = instance.chat_id.clone();
-                            let topic_for_left = topic_encoded.clone();
-                            // chat_id belongs to the account current NOW — bail if it swaps.
-                            let session = vector_core::state::SessionGuard::capture();
-                            tokio::spawn(async move {
-                                if !session.is_valid() { return; }
-                                if !crate::commands::realtime::send_webxdc_peer_left(chat_id, topic_for_left).await {
-                                    log_warn!("[WEBXDC] Failed to send peer-left signal");
-                                }
-                            });
-                        }
-                    } else if let Some(instance) = closing_instance.as_ref() {
-                        // SOLO app (no realtime channel was ever joined): still clear the optimistic
-                        // "Playing"/"online" the in-chat card set on open, so it resets live instead of
-                        // lingering until a chat re-render. Multiplayer is handled by the branch above.
-                        if let Some(topic) = instance.realtime_topic.as_ref() {
-                            let topic_encoded = super::realtime::encode_topic_id(topic);
-                            if let Some(main_window) = app_handle.get_webview_window("main") {
-                                let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-                                    "topic": topic_encoded,
-                                    "peer_count": 0,
-                                    "peers": Vec::<String>::new(),
-                                    "is_active": false,
-                                    "has_pending_peers": false,
-                                }));
-                            }
-                        }
-                    }
-
-                    // Remove the instance — ONLY if it's still the one this destroy was for.
-                    if let Some(instance) = closing_instance {
-                        state.remove_instance_if(&label, instance.instance_id).await;
-                    }
-                });
-            }
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                // Handle close gracefully to allow sendUpdate() calls to complete
-                // This is a workaround for https://github.com/deltachat/deltachat-desktop/issues/3321
-                let is_closing_already = is_closing.swap(true, std::sync::atomic::Ordering::Relaxed);
-                if is_closing_already {
-                    log_trace!("Second CloseRequested event, closing now");
-                    return;
-                }
-                
-                log_trace!("CloseRequested on Mini App window, will delay close");
-                
-                // Navigate to webxdc.js to trigger unload events
-                // This allows sendUpdate() calls in visibilitychange/unload handlers to complete
-                if let Err(err) = window_clone.navigate(webxdc_js_url.clone()) {
-                    log_error!("Failed to navigate before close: {err}");
-                    return;
-                }
-                
-                // Hide the window immediately for better UX
-                window_clone.hide()
-                    .inspect_err(|err| log_warn!("Failed to hide window: {err}"))
-                    .ok();
-                
-                api.prevent_close();
-                
-                let window_clone2 = Arc::clone(&window_clone);
-                tauri::async_runtime::spawn(async move {
-                    // Wait a bit for any pending sendUpdate() calls
-                    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                    log_trace!("Delay elapsed, closing Mini App window");
-                    window_clone2.close()
-                        .inspect_err(|err| log_error!("Failed to close window: {err}"))
-                        .ok();
-                });
-            }
-            _ => {}
-        }
-    });
-    
-    log_info!("Opened Mini App: {} in window {}", package.manifest.name, window_label);
-    
-    // Record to Mini Apps history
-    // Use file_path as attachment_ref since it uniquely identifies the Mini App
-    let attachment_ref = file_path.clone();
-    if let Err(e) = crate::db::record_miniapp_opened(
-        package.manifest.name.clone(),
-        file_path.clone(),
-        attachment_ref,
-    ) {
-        log_warn!("Failed to record Mini App to history: {}", e);
-    }
-
-    Ok(())
-    } // End of #[cfg(not(target_os = "android"))] block
+        Ok(())
+        } // End of #[cfg(not(target_os = "android"))] block
+    })
+    .await
 }
 
 /// Close a Mini App window
@@ -1283,9 +1334,7 @@ pub async fn miniapp_close(
             // Send peer-left via Nostr
             let chat_id_clone = chat_id.clone();
             // chat_id belongs to the account current NOW — bail in the task if it swaps.
-            let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !session.is_valid() { return; }
+            vector_core::db::spawn_bound(async move {
                 crate::commands::realtime::send_webxdc_peer_left(chat_id_clone, topic_encoded).await;
             });
         }
@@ -1421,135 +1470,136 @@ pub async fn miniapp_join_realtime_channel(
     state: State<'_, MiniAppsState>,
     channel: Channel<RealtimeEvent>,
 ) -> Result<JoinRealtimeResult, Error> {
-    let label = window.label();
+    vector_core::db::scoped(async move {
+        let label = window.label();
 
-    if !label.starts_with("miniapp:") {
-        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
-    }
+        if !label.starts_with("miniapp:") {
+            return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+        }
 
-    let instance = state.get_instance(label).await
-        .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
+        let instance = state.get_instance(label).await
+            .ok_or_else(|| Error::InstanceNotFoundByLabel(label.to_string()))?;
 
-    let topic = if let Some(t) = instance.realtime_topic {
-        t
-    } else {
-        log_info!("[WEBXDC] No webxdc-topic tag, deriving local topic for: {}", label);
-        super::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
-    };
+        let topic = if let Some(t) = instance.realtime_topic {
+            t
+        } else {
+            log_info!("[WEBXDC] No webxdc-topic tag, deriving local topic for: {}", label);
+            super::realtime::derive_topic_id(&instance.package.manifest.name, &instance.chat_id, &instance.message_id)
+        };
 
-    let topic_encoded = encode_topic_id(&topic);
+        let topic_encoded = encode_topic_id(&topic);
 
-    // Wait for preconnect to finish initializing Iroh (up to 10s).
-    // Preconnect handles: Iroh init (2-5s), advertisement, session peers, status.
-    // If preconnect already finished, this returns instantly.
-    if let Some(mut rx) = state.take_preconnect_signal(label).await {
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            rx.wait_for(|ready| *ready),
-        ).await;
-    }
+        // Wait for preconnect to finish initializing Iroh (up to 10s).
+        // Preconnect handles: Iroh init (2-5s), advertisement, session peers, status.
+        // If preconnect already finished, this returns instantly.
+        if let Some(mut rx) = state.take_preconnect_signal(label).await {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                rx.wait_for(|ready| *ready),
+            ).await;
+        }
 
-    // The window can close while this join is in flight (its teardown removes the
-    // instance); a dead game must not re-create the gossip channel as a zombie.
-    if state.get_instance(label).await.is_none() {
-        return Err(Error::InstanceNotFoundByLabel(label.to_string()));
-    }
+        // The window can close while this join is in flight (its teardown removes the
+        // instance); a dead game must not re-create the gossip channel as a zombie.
+        if state.get_instance(label).await.is_none() {
+            return Err(Error::InstanceNotFoundByLabel(label.to_string()));
+        }
 
-    // Iroh is pre-initialized by preconnect — this is instant (~5ns atomic load)
-    let iroh = state.realtime.get_or_init().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        // Iroh is pre-initialized by preconnect — this is instant (~5ns atomic load)
+        let iroh = state.realtime.get_or_init().await
+            .map_err(|e| Error::RealtimeError(e.to_string()))?;
 
-    // Create the gossip channel WITH the event target — no data can be dropped
-    let event_target = EventTarget::TauriChannel(channel);
-    let ws_targets = Some(state.realtime.ws_senders.clone());
-    let (is_rejoin, _) = iroh.join_channel(topic, vec![], Some(event_target), Some(app.clone()), label.to_string(), ws_targets).await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        // Create the gossip channel WITH the event target — no data can be dropped
+        let event_target = EventTarget::TauriChannel(channel);
+        let ws_targets = Some(state.realtime.ws_senders.clone());
+        let (is_rejoin, _) = iroh.join_channel(topic, vec![], Some(event_target), Some(app.clone()), label.to_string(), ws_targets).await
+            .map_err(|e| Error::RealtimeError(e.to_string()))?;
 
-    let topic_encoded_clone = topic_encoded.clone();
-    if is_rejoin {
-        log_info!("[WEBXDC] Re-joined existing channel: {} (topic: {})", label, topic_encoded);
-    } else {
-        log_info!("[WEBXDC] Joined new channel: {} (topic: {})", label, topic_encoded);
-    }
+        let topic_encoded_clone = topic_encoded.clone();
+        if is_rejoin {
+            log_info!("[WEBXDC] Re-joined existing channel: {} (topic: {})", label, topic_encoded);
+        } else {
+            log_info!("[WEBXDC] Joined new channel: {} (topic: {})", label, topic_encoded);
+        }
 
-    state.set_realtime_channel(label, RealtimeChannelState { topic, active: true }).await;
+        state.set_realtime_channel(label, RealtimeChannelState { topic, active: true }).await;
 
-    if !is_rejoin {
-        // Preconnect didn't run (scan false negative or non-realtime app).
-        // Do peer connections + advertisement here as fallback.
-        let my_npub = crate::my_public_key()
-            .and_then(|pk| ToBech32::to_bech32(&pk).ok())
-            .unwrap_or_default();
-        let mut connected_ids = std::collections::HashSet::new();
+        if !is_rejoin {
+            // Preconnect didn't run (scan false negative or non-realtime app).
+            // Do peer connections + advertisement here as fallback.
+            let my_npub = crate::my_public_key()
+                .and_then(|pk| ToBech32::to_bech32(&pk).ok())
+                .unwrap_or_default();
+            let mut connected_ids = std::collections::HashSet::new();
 
-        if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
-            if !records.is_empty() {
-                log_info!("[WEBXDC] Connecting to {} persisted peers for topic {}", records.len(), topic_encoded);
-                for record in &records {
-                    state.add_session_peer(topic, record.npub.clone()).await;
-                }
-                let peers: Vec<_> = records.iter().filter_map(|record| {
-                    match super::realtime::decode_node_addr(&record.node_addr_encoded) {
-                        Ok(addr) => { connected_ids.insert(addr.id); Some(addr) }
-                        Err(e) => { log_warn!("[WEBXDC] Failed to decode persisted peer addr: {}", e); None }
+            if let Ok(records) = crate::db::get_active_peer_advertisements(&topic_encoded, &my_npub) {
+                if !records.is_empty() {
+                    log_info!("[WEBXDC] Connecting to {} persisted peers for topic {}", records.len(), topic_encoded);
+                    for record in &records {
+                        state.add_session_peer(topic, record.npub.clone()).await;
                     }
-                }).collect();
-                for addr in peers {
-                    let peer_id = addr.id;
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(15),
-                        iroh.try_add_peer(&topic, &addr),
-                    ).await {
-                        Ok(Ok(_)) => log_info!("[WEBXDC] Connected to persisted peer {}", peer_id),
-                        Ok(Err(e)) => log_trace!("[WEBXDC] Peer {} failed: {e}", peer_id),
-                        Err(_) => log_trace!("[WEBXDC] Peer {} timed out (stale?)", peer_id),
+                    let peers: Vec<_> = records.iter().filter_map(|record| {
+                        match super::realtime::decode_node_addr(&record.node_addr_encoded) {
+                            Ok(addr) => { connected_ids.insert(addr.id); Some(addr) }
+                            Err(e) => { log_warn!("[WEBXDC] Failed to decode persisted peer addr: {}", e); None }
+                        }
+                    }).collect();
+                    for addr in peers {
+                        let peer_id = addr.id;
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(15),
+                            iroh.try_add_peer(&topic, &addr),
+                        ).await {
+                            Ok(Ok(_)) => log_info!("[WEBXDC] Connected to persisted peer {}", peer_id),
+                            Ok(Err(e)) => log_trace!("[WEBXDC] Peer {} failed: {e}", peer_id),
+                            Err(_) => log_trace!("[WEBXDC] Peer {} timed out (stale?)", peer_id),
+                        }
                     }
                 }
             }
+
+            let cached_addrs = state.take_peer_addrs(&topic).await;
+            for addr in cached_addrs.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(15),
+                    iroh.try_add_peer(&topic, &addr),
+                ).await;
+            }
         }
 
-        let cached_addrs = state.take_peer_addrs(&topic).await;
-        for addr in cached_addrs.into_iter().filter(|a| !connected_ids.contains(&a.id)) {
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                iroh.try_add_peer(&topic, &addr),
-            ).await;
+        // Send advertisement if preconnect didn't
+        if !is_rejoin {
+            let node_addr = iroh.get_node_addr();
+            if let Ok(encoded) = encode_node_addr(&node_addr) {
+                let chat_id = instance.chat_id.clone();
+                let te = topic_encoded.clone();
+                // chat_id belongs to the account current NOW — bail in the task if it swaps.
+                vector_core::db::spawn_bound(async move {
+                    crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, te, encoded).await;
+                });
+            }
         }
-    }
 
-    // Send advertisement if preconnect didn't
-    if !is_rejoin {
-        let node_addr = iroh.get_node_addr();
-        if let Ok(encoded) = encode_node_addr(&node_addr) {
-            let chat_id = instance.chat_id.clone();
-            let te = topic_encoded.clone();
-            // chat_id belongs to the account current NOW — bail in the task if it swaps.
-            let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !session.is_valid() { return; }
-                crate::commands::realtime::send_webxdc_peer_advertisement(chat_id, te, encoded).await;
-            });
+        // Add self + emit status
+        if let Some(my_pk) = crate::my_public_key() {
+            let npub = my_pk.to_bech32().unwrap();
+            state.add_session_peer(topic, npub).await;
         }
-    }
 
-    // Add self + emit status
-    if let Some(my_pk) = crate::my_public_key() {
-        let npub = my_pk.to_bech32().unwrap();
-        state.add_session_peer(topic, npub).await;
-    }
+        if let Some(main_window) = app.get_webview_window("main") {
+            let session_peers = state.get_session_peers(&topic).await;
+            let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
+                "topic": topic_encoded_clone,
+                "peer_count": session_peers.len(),
+                "peers": session_peers,
+                "is_active": true,
+            }));
+        }
 
-    if let Some(main_window) = app.get_webview_window("main") {
-        let session_peers = state.get_session_peers(&topic).await;
-        let _ = main_window.emit("miniapp_realtime_status", serde_json::json!({
-            "topic": topic_encoded_clone,
-            "peer_count": session_peers.len(),
-            "peers": session_peers,
-            "is_active": true,
-        }));
-    }
-
-    let ws_url = state.realtime.ws_url();
-    Ok(JoinRealtimeResult { topic: topic_encoded, ws_url })
+        let ws_url = state.realtime.ws_url();
+        Ok(JoinRealtimeResult { topic: topic_encoded, ws_url })
+    })
+    .await
 }
 
 /// Send realtime data via invoke fallback (used when WS fast-path isn't available).
@@ -1924,10 +1974,10 @@ pub async fn marketplace_publish_app(
 ) -> Result<String, Error> {
     use crate::{nostr_client, get_blossom_servers};
 
-    let client = nostr_client()
+    let _client = nostr_client()
         .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("Nostr client not initialized")))?;
 
-    let signer = client.signer().await
+    let signer = vector_core::signer::active_signer()
         .map_err(|e| Error::Anyhow(anyhow::anyhow!("Failed to get signer: {}", e)))?;
 
     let blossom_servers = get_blossom_servers();
@@ -2048,4 +2098,207 @@ pub async fn miniapp_get_granted_permissions_for_window(
     } else {
         Err(Error::Anyhow(anyhow::anyhow!("Could not find Mini App instance")))
     }
+}
+
+/// A URL-shared Mini App resolved to a playable local package.
+#[derive(Serialize, Clone)]
+pub struct UrlXdcInfo {
+    pub path: String,
+    pub hash: String,
+    pub name: String,
+    pub topic: String,
+}
+
+struct UrlXdcProgressReporter<'a> {
+    url: &'a str,
+}
+
+impl crate::net::ProgressReporter for UrlXdcProgressReporter<'_> {
+    fn report_progress(&self, percentage: Option<u8>, _bytes: Option<u64>, _speed: Option<f64>) -> Result<(), &'static str> {
+        // Gated emitter: progress for an account no longer on screen paints nothing
+        vector_core::traits::emit_event("webxdc_url_progress", &serde_json::json!({
+            "url": self.url,
+            "progress": percentage.unwrap_or(0),
+        }));
+        Ok(())
+    }
+
+    fn report_complete(&self) -> Result<(), &'static str> {
+        vector_core::traits::emit_event("webxdc_url_progress", &serde_json::json!({
+            "url": self.url,
+            "progress": 100,
+        }));
+        Ok(())
+    }
+}
+
+/// Resolve a pasted `.xdc` URL into a playable local package.
+///
+/// `download: false` is the render-time cache probe and must never touch the
+/// network — merely receiving a message must not become a tracking beacon.
+/// The package cache is content-addressed and account-agnostic (public bytes,
+/// same trust shape as the marketplace); only the url→hash latch lives in
+/// per-account settings.
+///
+/// The realtime topic is derived, not minted: a URL has no file event to
+/// carry a topic tag, so every recipient computes the same
+/// `derive_url_topic_id(url, msg_id)`. The bytes stay out of it — servers
+/// rebuild identical apps into new hashes, and two players who tapped the
+/// same card at different times must still land in the same session.
+#[tauri::command]
+pub async fn miniapp_resolve_url_xdc(
+    app: AppHandle,
+    url: String,
+    msg_id: String,
+    download: bool,
+) -> Result<Option<UrlXdcInfo>, Error> {
+    // Commands are unbound: pin the whole operation to the account that asked,
+    // so the latch lands in ITS settings and a swap mid-download refuses the result
+    vector_core::db::scoped_result(resolve_url_xdc_inner(app, url, msg_id, download)).await
+}
+
+async fn resolve_url_xdc_inner(
+    app: AppHandle,
+    url: String,
+    msg_id: String,
+    download: bool,
+) -> Result<Option<UrlXdcInfo>, Error> {
+    use sha2::{Digest, Sha256};
+    let url_key = {
+        let mut h = Sha256::new();
+        h.update(url.as_bytes());
+        bytes_to_hex_string(&h.finalize())
+    };
+    let dir = app.path().app_data_dir().map_err(Error::Tauri)?.join("miniapps").join("url");
+    let kv_key = format!("xdcurl:{}", url_key);
+    // Per-message latch: a message resolved once stays pinned to that exact
+    // version — its card, bytes and realtime topic never drift. Freshness is
+    // decided per NEW message, at tap time, against the server.
+    let msg_key = {
+        let mut h = Sha256::new();
+        h.update(url.as_bytes());
+        h.update(b"|");
+        h.update(msg_id.as_bytes());
+        format!("xdcmsg:{}", bytes_to_hex_string(&h.finalize()))
+    };
+
+    let read_latch = |raw: &str| -> Option<(String, String)> {
+        let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let hash = v.get("hash")?.as_str()?.to_string();
+        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("Mini App").to_string();
+        // The stored hash becomes a path component — never trust it raw
+        (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then_some((hash, name))
+    };
+
+    if let Ok(Some(saved)) = crate::db::get_sql_setting(msg_key.clone()) {
+        if let Some((hash, name)) = read_latch(&saved) {
+            let path = dir.join(format!("{}.xdc", hash));
+            if path.exists() {
+                return Ok(Some(UrlXdcInfo {
+                    path: path.to_string_lossy().into_owned(),
+                    topic: vector_core::webxdc::derive_url_topic_id(&url, &msg_id),
+                    hash,
+                    name,
+                }));
+            }
+        }
+    }
+    if !download {
+        return Ok(None);
+    }
+
+    // Only http(s), only .xdc paths — anything else never leaves the app
+    let lower = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) || !lower.ends_with(".xdc") {
+        return Err(Error::InvalidPackage("Not a Mini App URL".to_string()));
+    }
+
+    // Revalidate: a re-post of a known URL reuses the cache only when the
+    // server says the content is unchanged — the same URL legitimately changes
+    // between posts during rapid xdc development. No validator = re-download.
+    vector_core::net::validate_url_not_private(&url).map_err(|e| Error::InvalidPackage(e.to_string()))?;
+    let current_validator = fetch_url_validator(&url).await;
+    if let (Ok(Some(saved)), Some(cur)) = (crate::db::get_sql_setting(kv_key.clone()), current_validator.as_deref()) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&saved) {
+            let stored = v.get("etag").and_then(|e| e.as_str()).unwrap_or_default();
+            if !stored.is_empty() && stored == cur {
+                if let Some((hash, name)) = read_latch(&saved) {
+                    let path = dir.join(format!("{}.xdc", hash));
+                    if path.exists() {
+                        let _ = crate::db::set_sql_setting(
+                            msg_key.clone(),
+                            serde_json::json!({ "hash": hash, "name": name }).to_string(),
+                        );
+                        return Ok(Some(UrlXdcInfo {
+                            path: path.to_string_lossy().into_owned(),
+                            topic: vector_core::webxdc::derive_url_topic_id(&url, &msg_id),
+                            hash,
+                            name,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    let reporter = UrlXdcProgressReporter { url: &url };
+    let bytes = crate::net::download_with_reporter(&url, &reporter, None)
+        .await
+        .map_err(|e| Error::InvalidPackage(e.to_string()))?;
+
+    // Validate BEFORE the cache write — garbage never lands on disk, and the
+    // gates match the opener's exactly, or the latch pins a package that can
+    // never open
+    let fallback = lower.rsplit('/').next().unwrap_or("app.xdc").to_string();
+    MiniAppPackage::validate_bytes_openable(&bytes)?;
+    let (manifest, _icon) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback)?;
+
+    let hash = {
+        let mut h = Sha256::new();
+        h.update(&bytes);
+        bytes_to_hex_string(&h.finalize())
+    };
+    std::fs::create_dir_all(&dir).map_err(Error::Io)?;
+    let path = dir.join(format!("{}.xdc", hash));
+    // Temp + atomic rename: a crash mid-write must never leave a truncated
+    // file at the content-addressed path, and a re-download heals one
+    let tmp = dir.join(format!("{}.xdc.tmp-{}", hash, std::process::id()));
+    std::fs::write(&tmp, &bytes).map_err(Error::Io)?;
+    std::fs::rename(&tmp, &path).map_err(Error::Io)?;
+    let name = if manifest.name.is_empty() { fallback } else { manifest.name.clone() };
+    let _ = crate::db::set_sql_setting(
+        kv_key,
+        serde_json::json!({ "hash": hash, "name": name, "etag": current_validator.unwrap_or_default() }).to_string(),
+    );
+    let _ = crate::db::set_sql_setting(
+        msg_key,
+        serde_json::json!({ "hash": hash, "name": name }).to_string(),
+    );
+
+    Ok(Some(UrlXdcInfo {
+        path: path.to_string_lossy().into_owned(),
+        topic: vector_core::webxdc::derive_url_topic_id(&url, &msg_id),
+        hash,
+        name,
+    }))
+}
+
+/// The URL's freshness validator: ETag preferred, Last-Modified fallback.
+/// None (no validator, or HEAD failed) means a re-post cannot prove the cache
+/// is current and must re-download.
+async fn fetch_url_validator(url: &str) -> Option<String> {
+    let client = vector_core::net::build_http_client_with_options(
+        std::time::Duration::from_secs(20),
+        Some(std::time::Duration::from_secs(10)),
+        true,
+    )
+    .ok()?;
+    let res = client.head(url).send().await.ok()?;
+    let headers = res.headers();
+    headers
+        .get("etag")
+        .or_else(|| headers.get("last-modified"))?
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
 }

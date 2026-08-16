@@ -11,6 +11,7 @@
 //! authorization — the signature proves WHO acted; the roster (§roles) decides WHETHER they were
 //! allowed, and [`super::version::fold`] decides which edition is current.
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use super::version;
 use crate::stored_event::event_kind;
 use nostr_sdk::prelude::*;
@@ -31,6 +32,17 @@ const PROTOCOL_VERSION: &str = "1";
 /// the OWNER acts (supreme, no grant to cite).
 pub const TAG_AUTHORITY_CITATION: &str = "vac";
 
+/// CORD-01 §5: a tag number rides as "its decimal form with no leading zeros".
+/// So `"4"` and `"0"` are the shape; `"04"`, `"+4"` and `""` are not.
+/// `u64::from_str` accepts a leading `+` and any number of leading zeros, and a
+/// peer that doesn't would drop an event we honored — a divergence neither side
+/// can see, because a declined parse is never logged.
+pub fn is_tag_decimal(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw.bytes().all(|b| b.is_ascii_digit())
+        && !(raw.len() > 1 && raw.starts_with('0'))
+}
+
 /// The pinned authority an actor claims for an action (mechanism a). Points at the actor's own
 /// authorizing edition (their Grant — or a RoleMetadata for a role-position claim) by stable
 /// coordinate + the exact version/hash, so the verifier resolves authority against that frozen point,
@@ -49,7 +61,7 @@ impl AuthorityCitation {
     /// The signed `vac` tag carrying this citation.
     pub fn to_tag(&self) -> Tag {
         Tag::custom(
-            TagKind::Custom(TAG_AUTHORITY_CITATION.into()),
+            TAG_AUTHORITY_CITATION,
             [
                 crate::simd::hex::bytes_to_hex_32(&self.entity_id),
                 self.version.to_string(),
@@ -68,6 +80,14 @@ impl AuthorityCitation {
         })?;
         let valid_hex = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
         if !valid_hex(&s.0) || !valid_hex(&s.2) {
+            return None;
+        }
+        // Digit-only BEFORE the parse: CORD-01 §5 says a tag number rides as its
+        // decimal form, and `u64::from_str` accepts a leading `+` ("+5") that a
+        // digit-checking peer rejects — so the two would disagree on whether a
+        // citation exists at all, one honoring the action and the other parking
+        // it. Same guard `resolve_ms_strict` already applies to `ms`.
+        if !is_tag_decimal(&s.1) {
             return None;
         }
         Some(AuthorityCitation {
@@ -93,13 +113,13 @@ pub fn build_edition_inner(
     authority: Option<&AuthorityCitation>,
 ) -> UnsignedEvent {
     let mut tags = vec![
-        Tag::custom(TagKind::Custom(TAG_SUBKIND.into()), [vsk.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_ENTITY.into()), [crate::simd::hex::bytes_to_hex_32(entity_id)]),
-        Tag::custom(TagKind::Custom(TAG_EVERSION.into()), [version.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_VERSION.into()), [PROTOCOL_VERSION.to_string()]),
+        Tag::custom(TAG_SUBKIND, [vsk.to_string()]),
+        Tag::custom(TAG_ENTITY, [crate::simd::hex::bytes_to_hex_32(entity_id)]),
+        Tag::custom(TAG_EVERSION, [version.to_string()]),
+        Tag::custom(TAG_VERSION, [PROTOCOL_VERSION.to_string()]),
     ];
     if let Some(p) = prev_hash {
-        tags.push(Tag::custom(TagKind::Custom(TAG_EPREV.into()), [crate::simd::hex::bytes_to_hex_32(p)]));
+        tags.push(Tag::custom(TAG_EPREV, [crate::simd::hex::bytes_to_hex_32(p)]));
     }
     // The pinned authority proof: absent when the OWNER signs (supreme), present for a delegated
     // admin so verifiers resolve their rank at the cited grant version. Outside the version-chain
@@ -110,7 +130,7 @@ pub fn build_edition_inner(
     EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), content)
         .tags(tags)
         .custom_created_at(Timestamp::from_secs(created_at_secs))
-        .build(author)
+        .finalize_unsigned_with_id(author)
 }
 
 /// A signature-verified, parsed edition.
@@ -175,7 +195,7 @@ pub fn parse_edition_inner(inner: &Event) -> Result<ParsedEdition, EditionError>
     // Digit-only: `u64::from_str` accepts a leading `+`, so "+5"/"5" would fold to
     // one version as distinct signed inners (a convergence fork). Shared v1/v2 grammar.
     let ev_raw = get(TAG_EVERSION).ok_or(EditionError::MissingField("ev"))?;
-    if ev_raw.is_empty() || !ev_raw.bytes().all(|b| b.is_ascii_digit()) {
+    if !is_tag_decimal(&ev_raw) {
         return Err(EditionError::BadField("ev"));
     }
     let version: u64 = ev_raw.parse().map_err(|_| EditionError::BadField("ev"))?;
@@ -227,7 +247,7 @@ mod tests {
         let actor = Keys::generate();
         let prev = version::edition_hash(&eid(), 1, None, b"{}");
         let inner = build_edition_inner(actor.public_key(), VSK_GRANT, &eid(), 2, Some(&prev), "{\"role_ids\":[]}", 1_700_000_000, None)
-            .sign_with_keys(&actor)
+            .finalize(&actor)
             .unwrap();
 
         let parsed = parse_edition_inner(&inner).expect("valid edition parses");
@@ -255,7 +275,7 @@ mod tests {
         let actor = Keys::generate();
         let cite = AuthorityCitation { entity_id: [0xab; 32], version: 7, edition_hash: [0xcd; 32] };
         let inner = build_edition_inner(actor.public_key(), VSK_GRANT, &eid(), 1, None, "{}", 100, Some(&cite))
-            .sign_with_keys(&actor)
+            .finalize(&actor)
             .unwrap();
         let parsed = parse_edition_inner(&inner).unwrap();
         assert_eq!(parsed.authority.as_ref(), Some(&cite), "citation round-trips");
@@ -264,7 +284,7 @@ mod tests {
 
         // An uncited edition (owner-signed) parses with authority == None.
         let owner = build_edition_inner(actor.public_key(), VSK_GRANT, &eid(), 1, None, "{}", 100, None)
-            .sign_with_keys(&actor)
+            .finalize(&actor)
             .unwrap();
         assert_eq!(parse_edition_inner(&owner).unwrap().authority, None);
     }
@@ -288,7 +308,7 @@ mod tests {
     fn genesis_edition_has_no_prev() {
         let actor = Keys::generate();
         let inner = build_edition_inner(actor.public_key(), "1", &eid(), 1, None, "{}", 100, None)
-            .sign_with_keys(&actor)
+            .finalize(&actor)
             .unwrap();
         let parsed = parse_edition_inner(&inner).unwrap();
         assert_eq!(parsed.prev_hash, None, "first edition cites no predecessor");
@@ -300,7 +320,7 @@ mod tests {
         // Re-sign integrity: flipping the content after signing breaks the inner Schnorr sig.
         let actor = Keys::generate();
         let inner = build_edition_inner(actor.public_key(), "3", &eid(), 1, None, "{\"a\":1}", 100, None)
-            .sign_with_keys(&actor)
+            .finalize(&actor)
             .unwrap();
         let mut json: serde_json::Value = serde_json::from_str(&inner.as_json()).unwrap();
         json["content"] = serde_json::Value::String("{\"a\":2}".into()); // tamper
@@ -313,8 +333,8 @@ mod tests {
         // An inner event lacking the entity-id tag is a parse error, never a panic.
         let actor = Keys::generate();
         let inner = EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), "{}")
-            .tags([Tag::custom(TagKind::Custom("vsk".into()), ["3".to_string()])])
-            .sign_with_keys(&actor)
+            .tags([Tag::custom("vsk", ["3".to_string()])])
+            .finalize(&actor)
             .unwrap();
         assert!(matches!(parse_edition_inner(&inner), Err(EditionError::MissingField("eid"))));
     }
@@ -328,15 +348,15 @@ mod tests {
         let hash = crate::simd::hex::bytes_to_hex_32(&[0xAB; 32]);
         let base = || -> Vec<Tag> {
             vec![
-                Tag::custom(TagKind::Custom("vsk".into()), ["1".to_string()]),
-                Tag::custom(TagKind::Custom("eid".into()), [crate::simd::hex::bytes_to_hex_32(&eid())]),
-                Tag::custom(TagKind::Custom("ev".into()), ["1".to_string()]),
-                Tag::custom(TagKind::Custom("ep".into()), [hash.clone()]),
-                Tag::custom(TagKind::Custom("vac".into()), [crate::simd::hex::bytes_to_hex_32(&eid()), "1".to_string(), hash.clone()]),
+                Tag::custom("vsk", ["1".to_string()]),
+                Tag::custom("eid", [crate::simd::hex::bytes_to_hex_32(&eid())]),
+                Tag::custom("ev", ["1".to_string()]),
+                Tag::custom("ep", [hash.clone()]),
+                Tag::custom("vac", [crate::simd::hex::bytes_to_hex_32(&eid()), "1".to_string(), hash.clone()]),
             ]
         };
         let build = |tags: Vec<Tag>| EventBuilder::new(Kind::Custom(event_kind::COMMUNITY_CONTROL), "{}")
-            .tags(tags).sign_with_keys(&actor).unwrap();
+            .tags(tags).finalize(&actor).unwrap();
         assert!(parse_edition_inner(&build(base())).is_ok(), "a clean 5-tag base edition parses");
         for name in ["vsk", "eid", "ev", "ep", "vac"] {
             let mut tags = base();

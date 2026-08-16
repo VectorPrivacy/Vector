@@ -12,7 +12,25 @@
 /// bytes from a screenshot, etc.) or on a platform not yet wired.
 #[tauri::command]
 pub async fn read_clipboard_files() -> Result<Vec<String>, String> {
-    read_clipboard_files_impl()
+    // Clipboard managers (macOS pasteboard history, Windows history tools)
+    // re-serve a copied file as a `file://` URI STRING where the native formats
+    // normally carry plain paths. Every consumer downstream expects a
+    // filesystem path, so normalize at this one shared boundary — an
+    // unparseable URI passes through untouched rather than vanishing.
+    Ok(read_clipboard_files_impl()?
+        .into_iter()
+        .map(|s| {
+            if s.starts_with("file://") {
+                tauri::Url::parse(&s)
+                    .ok()
+                    .and_then(|u| u.to_file_path().ok())
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or(s)
+            } else {
+                s
+            }
+        })
+        .collect())
 }
 
 #[cfg(target_os = "macos")]
@@ -55,10 +73,30 @@ fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
 
 #[cfg(target_os = "windows")]
 fn read_clipboard_files_impl() -> Result<Vec<String>, String> {
-    // CF_HDROP → Vec<String> of paths. Absent format (text/image/empty clipboard)
-    // or a transient open failure both yield an empty list so paste falls back,
-    // mirroring the other platforms (a missing file list is not an error here).
-    Ok(clipboard_win::get_clipboard(clipboard_win::formats::FileList).unwrap_or_default())
+    // Probe CF_HDROP WITHOUT opening the clipboard (IsClipboardFormatAvailable):
+    // this runs on every paste, and a text/image clipboard must not contend for
+    // the open at all. Absent format = no file paste, not an error.
+    if !clipboard_win::is_format_avail(clipboard_win::formats::CF_HDROP) {
+        return Ok(Vec::new());
+    }
+    // The open races the WebView2 PROCESS, which snapshots the clipboard around
+    // the paste event — and clipboard-win's built-in retries are Sleep(0)
+    // scheduler yields that burn out inside that window. Retry with a real
+    // backoff, and surface the final failure instead of swallowing it into an
+    // empty list: the frontend catches and falls back to the in-band file blob.
+    let mut last_err = String::new();
+    for attempt in 0..20u32 {
+        match clipboard_win::get_clipboard::<Vec<String>, _>(clipboard_win::formats::FileList) {
+            Ok(paths) => return Ok(paths),
+            Err(e) => {
+                last_err = e.to_string();
+                if attempt < 19 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+    Err(format!("clipboard file read failed: {last_err}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -147,7 +185,21 @@ fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
     // `set_clipboard` helper can't reach it — call the trait method on a slice
     // under our own clipboard guard instead.
     use clipboard_win::{formats::FileList, Clipboard, Setter};
-    let _clip = Clipboard::new_attempts(10).map_err(|e| format!("Failed to open clipboard: {}", e))?;
+    // new_attempts retries are Sleep(0) yields — worthless against another
+    // process holding the clipboard (WebView2, clipboard-history tools). Real
+    // backoff: ~200ms worst case before giving up.
+    let mut clip = None;
+    for attempt in 0..20u32 {
+        match Clipboard::new_attempts(0) {
+            Ok(c) => {
+                clip = Some(c);
+                break;
+            }
+            Err(e) if attempt == 19 => return Err(format!("Failed to open clipboard: {}", e)),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    }
+    let _clip = clip;
     FileList
         .write_clipboard(&paths[..])
         .map_err(|e| format!("Clipboard write failed: {}", e))

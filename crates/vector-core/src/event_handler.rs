@@ -80,6 +80,28 @@ pub trait InboundEventHandler: Send + Sync {
     /// Local data is torn down (epoch keys retained); the platform surfaces it + refreshes subs.
     fn on_community_self_removed(&self, _community_id: &str) {}
 
+    /// A Private channel is now readable — its key arrived, by rekey delivery or
+    /// by a grant's key vend. `channel_id` is the 32-byte hex id.
+    ///
+    /// The inverse of the silent-mute failure: a bot granted access can act the
+    /// moment it can actually read, rather than polling for a channel it has no
+    /// way to know it is waiting on.
+    ///
+    /// `backfilled` counts the messages that predate the grant and were pulled
+    /// into LOCAL STATE before this fired. They are history, not delivery: none
+    /// of them reach [`on_message`](Self::on_message) — read them explicitly
+    /// (`get_messages_before`) and decide what deserves acting on.
+    fn on_channel_keyed(&self, _community_id: &str, _channel_id: &str, _backfilled: usize) {}
+
+    /// The realtime Community subscription REGISTERED: healthy relays deliver
+    /// live channel events from this moment (AUTH-gating relays join as their
+    /// stream auth completes in the background). Fires once per
+    /// [`listen`](crate::VectorCore::listen), after the startup refresh commits —
+    /// even when `communities` is 0, so "subscribed to nothing" and "still
+    /// connecting" are distinguishable. Before this, messages are only
+    /// recoverable by a later sync, not live.
+    fn on_subscription_ready(&self, _communities: usize) {}
+
     /// A Community's control plane was refreshed in realtime (banlist/roles/metadata/mode change,
     /// or a re-founding followed). The platform re-reads display state.
     fn on_community_refreshed(&self, _community_id: &str) {}
@@ -121,11 +143,22 @@ struct BufferedDm {
 pub struct BatchingPersist<'a> {
     inner: &'a dyn InboundEventHandler,
     buf: std::sync::Mutex<Vec<BufferedDm>>,
+    /// The account whose messages are in the buffer.
+    ///
+    /// Held rather than resolved at flush time: this outlives the calls that
+    /// fill it, and a flush reached after a swap would otherwise write one
+    /// account's inbox into another's. Holding it means the buffer always
+    /// drains where it was filled, from any caller, bound or not.
+    session: std::sync::Arc<crate::db::Session>,
 }
 
 impl<'a> BatchingPersist<'a> {
     pub fn new(inner: &'a dyn InboundEventHandler) -> Self {
-        Self { inner, buf: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            inner,
+            buf: std::sync::Mutex::new(Vec::new()),
+            session: crate::db::current_session(),
+        }
     }
 
     /// How many messages are waiting — the loop's flush-threshold probe.
@@ -133,44 +166,53 @@ impl<'a> BatchingPersist<'a> {
         self.buf.lock().map(|b| b.len()).unwrap_or(0)
     }
 
-    /// Drain the buffer into batched transactions (grouped by chat, arrival order kept).
-    /// On a stale session the drained messages are DROPPED, never written into the next
-    /// account's DB — their wrappers stay unledgered, so negentropy re-delivers them when
-    /// the original account returns.
-    pub async fn flush(&self, session: &crate::state::SessionGuard) -> usize {
-        let mut drained: Vec<BufferedDm> = match self.buf.lock() {
-            Ok(mut b) => b.drain(..).collect(),
-            Err(_) => return 0,
-        };
-        if drained.is_empty() || !session.is_valid() {
-            return 0;
-        }
-        // A deletion may have landed (live subscription or this stream) while an entry sat
-        // buffered: its delete_event no-ops on the not-yet-written row, so persisting the
-        // buffered copy would resurrect a deleted message. Keyed on the POSITIVE deletion
-        // tombstone, never STATE absence — the LRU evicts old messages from STATE, and
-        // archive-synced history is exactly that tail (an evicted message must still
-        // persist). A dropped entry's wrapper stays unledgered and re-delivers next sync,
-        // where the DB dedup sees the (still-deleted) state cleanly.
-        drained.retain(|e| !crate::state::was_message_deleted(&e.msg.id));
-        if drained.is_empty() {
-            return 0;
-        }
-        // Group by chat preserving first-seen chat order + per-chat arrival order.
-        let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
-        for e in &drained {
-            match groups.iter_mut().find(|(c, _)| c == &e.chat_id) {
-                Some((_, v)) => v.push((&e.msg, e.wrapper)),
-                None => groups.push((e.chat_id.clone(), vec![(&e.msg, e.wrapper)])),
+    /// Drain the buffer into batched transactions (grouped by chat, arrival order kept),
+    /// against the account that filled it.
+    pub async fn flush(&self) -> usize {
+        self.try_flush().await.unwrap_or(0)
+    }
+
+    /// [`Self::flush`], but a persist failure is distinguishable from "nothing
+    /// to write" — callers that gate follow-on effects on the ledger actually
+    /// holding the batch (reconcile-cursor births) need the difference: an
+    /// advance over an unledgered batch skips those events forever.
+    pub async fn try_flush(&self) -> Result<usize, String> {
+        crate::db::with_session(self.session.clone(), async move {
+            let mut drained: Vec<BufferedDm> = match self.buf.lock() {
+                Ok(mut b) => b.drain(..).collect(),
+                Err(_) => return Ok(0),
+            };
+            if drained.is_empty() {
+                return Ok(0);
             }
-        }
-        match crate::db::events::save_messages_batch_multi(&groups, Some(session)).await {
-            Ok(n) => n,
-            Err(e) => {
-                crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
-                0
+            // A deletion may have landed (live subscription or this stream) while an entry sat
+            // buffered: its delete_event no-ops on the not-yet-written row, so persisting the
+            // buffered copy would resurrect a deleted message. Keyed on the POSITIVE deletion
+            // tombstone, never STATE absence — the LRU evicts old messages from STATE, and
+            // archive-synced history is exactly that tail (an evicted message must still
+            // persist). A dropped entry's wrapper stays unledgered and re-delivers next sync,
+            // where the DB dedup sees the (still-deleted) state cleanly.
+            drained.retain(|e| !crate::state::was_message_deleted(&e.msg.id));
+            if drained.is_empty() {
+                return Ok(0);
             }
-        }
+            // Group by chat preserving first-seen chat order + per-chat arrival order.
+            let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
+            for e in &drained {
+                match groups.iter_mut().find(|(c, _)| c == &e.chat_id) {
+                    Some((_, v)) => v.push((&e.msg, e.wrapper)),
+                    None => groups.push((e.chat_id.clone(), vec![(&e.msg, e.wrapper)])),
+                }
+            }
+            match crate::db::events::save_messages_batch_multi(&groups).await {
+                Ok(n) => Ok(n),
+                Err(e) => {
+                    crate::log_warn!("[Sync] batched persist failed ({} msgs): {}", drained.len(), e);
+                    Err(e)
+                }
+            }
+        })
+        .await
     }
 }
 
@@ -317,7 +359,7 @@ pub enum PreparedEvent {
 /// Safe to call from multiple tokio tasks concurrently.
 pub async fn prepare_event(
     event: Event,
-    client: &Client,
+    _client: &Client,
     my_public_key: PublicKey,
 ) -> PreparedEvent {
     let wrapper_created_at = event.created_at.as_secs();
@@ -336,9 +378,22 @@ pub async fn prepare_event(
         return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
     }
 
+    // The persistent ledger too, not just the events table: a DELETED message has no
+    // events row, so without this a wrap re-served after a restart (relays ignore
+    // NIP-09 freely) re-processes cleanly and resurrects the message.
+    if crate::db::wrappers::processed_wrapper_exists(&wrapper_event_id_bytes) {
+        return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+    }
+
     // Unwrap gift wrap (CPU-bound ECDH + ChaCha20Poly1305)
     let unwrap_start = std::time::Instant::now();
-    let (rumor, sender) = match client.unwrap_gift_wrap(&event).await {
+    let signer = match crate::signer::active_signer() {
+        Ok(s) => s,
+        Err(_) => return PreparedEvent::ErrorSkip {
+            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
+        },
+    };
+    let (rumor, sender) = match UnwrappedGift::from_gift_wrap_async(&signer, &event).await {
         Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
         Err(_) => return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
@@ -455,11 +510,114 @@ pub async fn prepare_event(
 /// negentropy fetch queued events for commit), bail before any STATE /
 /// DB write. Centralized so individual spawn sites (sync.rs fetch_messages,
 /// archive task, sync_dms, subscription_handler) don't have to wrap.
-/// Whether a parked-invite candidate is already past the sender's NIP-40 deadline.
-/// `0` means the sender declared none, which stays permanent — an invite whose sender never
-/// promised a deadline is not ours to revoke.
-fn expired_invite(expires_at: u64) -> bool {
-    expires_at != 0 && expires_at <= nostr_sdk::prelude::Timestamp::now().as_secs()
+/// Direct Invites live 24 hours BY DESIGN, and the RECIPIENT enforces it: a
+/// sender that omits the NIP-40 tag (older clients, other implementations)
+/// must not mint a permanent invite, and an archive sync that resurrects a
+/// months-old wrap must not park a ghost (a re-founded community's stale
+/// invite has no held id for the exists-guard to match). The sender's
+/// declared deadline is honored when EARLIER; the rumor-age lifetime is the
+/// ceiling either way. One hour of slack absorbs sender clock skew.
+pub const DIRECT_INVITE_LIFETIME_SECS: u64 = 24 * 3600 + 3600;
+
+/// Park the Private-Channel keys a CATCH-UP bundle carries that we don't hold.
+///
+/// This is delivery, never authority: nothing is adopted here. The bundle's
+/// self-certification is checked (a forged community binding never parks), the
+/// keys are stashed, and [`judge_channel_key_vend`] rules on them against our own
+/// fold after the next control follow. A vend that races its Grant therefore
+/// parks quietly instead of being dropped, which is what makes an admin's grant
+/// actually reach a member who is already in the community.
+///
+/// `inviter` is the seal author's npub (bech32) — recorded so the judge can
+/// require an entitled vendor.
+fn park_catch_up_channel_keys(
+    community_id: &str,
+    bundle_json: &str,
+    inviter: &str,
+) {
+    use crate::community::v2::invite::CommunityInvite;
+    let Ok(bundle) = CommunityInvite::from_bundle_json(bundle_json) else { return };
+    // (1) Self-cert: the bundle cannot claim to be this community while naming a
+    // different owner. Cheap, and it keeps garbage out of the park table.
+    let (Some(cid), Some(owner), Some(salt)) = (
+        crate::simd::hex::hex_to_bytes_32_checked(&bundle.community_id),
+        crate::simd::hex::hex_to_bytes_32_checked(&bundle.owner),
+        crate::simd::hex::hex_to_bytes_32_checked(&bundle.owner_salt),
+    ) else {
+        return;
+    };
+    if !crate::community::v2::derive::verify_community_id(&crate::community::CommunityId(cid), &owner, &salt) {
+        log_warn!("[community] catch-up bundle failed self-certification — dropped");
+        return;
+    }
+    let Ok(sender) = PublicKey::parse(inviter) else { return };
+    let sender_hex = sender.to_hex();
+    // The commit path's guard was captured before an await; re-check before the
+    // writes below or a swap mid-commit parks account A's channel key into
+    // account B's database.
+    let held = crate::db::community::load_community_v2(&crate::community::CommunityId(cid)).ok().flatten();
+    let mut parked_any = false;
+    for grant in &bundle.channels {
+        let Some(chan) = crate::simd::hex::hex_to_bytes_32_checked(&grant.id) else { continue };
+        let Some(key) = crate::simd::hex::hex_to_bytes_32_checked(&grant.key) else { continue };
+        // Only park what we LACK: a key at or below the held epoch is already
+        // superseded, and a public channel's "key" is just the root.
+        if let Some(c) = held.as_ref().and_then(|h| h.channel(&crate::community::ChannelId(chan))) {
+            if !c.private || (c.key.is_some() && grant.epoch <= c.epoch.0) {
+                continue;
+            }
+        }
+        if let Err(e) = crate::db::community::park_channel_key(community_id, &grant.id, grant.epoch, &key, &sender_hex) {
+            log_warn!("[community] parking a vended channel key failed: {e}");
+            continue;
+        }
+        parked_any = true;
+    }
+    // Judge it now rather than whenever the next edition happens by. A vend that
+    // lands AFTER its Grant folded changes no control state, so without a nudge
+    // there is nothing left to trigger the re-judge.
+    if parked_any {
+        crate::community::v2::realtime::enqueue_follow(&crate::community::CommunityId(cid));
+    }
+}
+
+fn expired_invite(expires_at: u64, rumor_created_at: u64) -> bool {
+    let now = nostr_sdk::prelude::Timestamp::now().as_secs();
+    if expires_at != 0 && expires_at <= now {
+        return true;
+    }
+    rumor_created_at.saturating_add(DIRECT_INVITE_LIFETIME_SECS) <= now
+}
+
+#[cfg(test)]
+mod invite_expiry_tests {
+    use super::*;
+
+    fn now() -> u64 {
+        nostr_sdk::prelude::Timestamp::now().as_secs()
+    }
+
+    #[test]
+    fn declared_deadline_is_honored() {
+        assert!(expired_invite(now() - 10, now()));
+        assert!(!expired_invite(now() + 3600, now()));
+    }
+
+    #[test]
+    fn tagless_invites_die_at_the_recipient_lifetime() {
+        // Fresh, no tag: parks.
+        assert!(!expired_invite(0, now() - 3600));
+        // A day-and-slack old, no tag: never parks — the class the archive
+        // recovery resurrected (months-old invite to a re-founded community).
+        assert!(expired_invite(0, now() - DIRECT_INVITE_LIFETIME_SECS));
+        assert!(expired_invite(0, now() - 90 * 24 * 3600));
+    }
+
+    #[test]
+    fn lifetime_caps_a_generous_declared_deadline() {
+        // Sender promised a week — the recipient's 24h ceiling still wins.
+        assert!(expired_invite(now() + 7 * 24 * 3600, now() - DIRECT_INVITE_LIFETIME_SECS));
+    }
 }
 
 pub async fn commit_prepared_event(
@@ -467,8 +625,8 @@ pub async fn commit_prepared_event(
     is_new: bool,
     handler: &dyn InboundEventHandler,
 ) -> bool {
-    let session = crate::state::SessionGuard::capture();
-    if !session.is_valid() {
+    let session = crate::db::current_session();
+    if !session.is_live() {
         return false;
     }
     match prepared {
@@ -628,10 +786,10 @@ pub async fn commit_prepared_event(
                 return false;
             }
 
-            // Already past the sender's NIP-40 deadline (a catch-up sync of a stale wrap, or a
-            // relay that ignores expiry): never park it. Relays only stop DELIVERING an expired
-            // invite; a parked row would outlive the deadline locally.
-            if expired_invite(expires_at) {
+            // Past the sender's deadline OR past the recipient-enforced 24h
+            // lifetime (a catch-up sync of a stale wrap, a relay that ignores
+            // expiry, a sender that never set the tag): never park it.
+            if expired_invite(expires_at, rumor_created_at) {
                 return false;
             }
 
@@ -682,11 +840,11 @@ pub async fn commit_prepared_event(
                     handler.on_community_invite(&community_id);
                     // Warm the community's first page in the background so a subsequent Accept opens
                     // populated instead of paying the join sync. RAM-only + best-effort; promotion on
-                    // Join re-validates freshness. SessionGuard'd so a mid-flight swap is a no-op.
+                    // Join re-validates freshness. std::sync::Arc<crate::db::Session>'d so a mid-flight swap is a no-op.
                     let invite_warm = invite.clone();
-                    let bg = crate::state::SessionGuard::capture();
+                    let bg = crate::db::current_session();
                     tokio::spawn(async move {
-                        if !bg.is_valid() {
+                        if !bg.is_live() {
                             return;
                         }
                         crate::community::service::preload_community(&invite_warm).await;
@@ -708,8 +866,8 @@ pub async fn commit_prepared_event(
             if is_mine {
                 return false;
             }
-            // Past the sender's NIP-40 deadline — see the v1 arm.
-            if expired_invite(expires_at) {
+            // Past the sender's deadline or the 24h lifetime — see the v1 arm.
+            if expired_invite(expires_at, rumor_created_at) {
                 return false;
             }
             // Idempotency on the INNER community_id (already validated hex), not the
@@ -718,7 +876,13 @@ pub async fn commit_prepared_event(
                 Some(b) => crate::community::CommunityId(b),
                 None => return false,
             };
+            // Already a member? Then this is not an invitation but a CATCH-UP: a
+            // grant's Private-Channel key vend (CORD-03 "delivered on grant"), or
+            // an admin healing us forward. Park the keys we lack for the judge to
+            // rule on after the next control fold — dropping it here is why a
+            // granted member (or bot) stayed silently keyless.
             if crate::db::community::community_exists(&held).unwrap_or(false) {
+                park_catch_up_channel_keys(&community_id, &bundle_json, &inviter);
                 return false;
             }
             if crate::db::community::pending_invite_exists(&community_id).unwrap_or(false) {
@@ -789,6 +953,14 @@ async fn commit_dm_message(
             &wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17,
         );
     };
+    // A tombstoned (user-deleted) message must never re-commit, whatever wrap
+    // carried it — a retry wrap this device never ledgered can still deliver
+    // the deleted rumor. Ledger the wrap so it stops re-delivering.
+    if crate::state::was_message_deleted(&msg.id) {
+        ledger_wrapper();
+        return false;
+    }
+
     // Dedup: check if message already in DB
     if let Ok(true) = crate::db::events::message_exists_in_db(&msg.id) {
         // Already in DB — try to backfill wrapper_event_id
@@ -868,12 +1040,8 @@ async fn commit_reaction(
         } else { None }
     };
 
-    if let Some((chat_id, msg)) = msg_for_emit {
-        crate::traits::emit_event("message_update", &serde_json::json!({
-            "old_id": &reaction.reference_id,
-            "message": &msg,
-            "chat_id": &chat_id
-        }));
+    if let Some((chat_id, mut msg)) = msg_for_emit {
+        crate::traits::emit_message_update(&chat_id, &reaction.reference_id, &mut msg).await;
         let _ = crate::db::events::save_message(&chat_id, &msg).await;
         handler.on_reaction_received(&chat_id, &msg);
     }
@@ -913,12 +1081,8 @@ async fn commit_edit(
             msg.apply_edit(new_content.to_string(), edited_at, emoji_tags.clone());
         })
     };
-    if let Some(msg) = msg_for_emit {
-        crate::traits::emit_event("message_update", &serde_json::json!({
-            "old_id": message_id,
-            "message": msg,
-            "chat_id": contact
-        }));
+    if let Some(mut msg) = msg_for_emit {
+        crate::traits::emit_message_update(contact, message_id, &mut msg).await;
     }
     true
 }
@@ -982,7 +1146,7 @@ async fn commit_deletion(
             None => false,
         }
     } else {
-        match nostr_sdk::PublicKey::from_bech32(&chat_id) {
+        match nostr_sdk::prelude::PublicKey::from_bech32(&chat_id) {
             Ok(counterpart) => sender == &counterpart,
             Err(_) => false, // chat id wasn't an npub (shouldn't happen for DMs)
         }
@@ -1005,8 +1169,13 @@ async fn commit_deletion(
         None => return false,
     };
     // Tombstone BEFORE the row delete: the target may sit unflushed in a sync batch buffer
-    // (delete_event below would no-op) — the flush consults this and drops it.
+    // (delete_event below would no-op) — the flush consults this and drops it. The durable
+    // row keeps the refusal across restarts: the sender's NIP-09 may never land on every
+    // relay, and this side must not resurrect what it already agreed to drop.
     crate::state::note_message_deleted(target_event_id);
+    if let Err(e) = crate::db::events::add_message_tombstone(target_event_id) {
+        crate::log_warn!("[NIP-17 cooperative-delete] tombstone write failed: {}", e);
+    }
 
     // Nuke any cached attachment files for this message — sender asked
     // for the message to disappear, and a downloaded file the receiver
@@ -1062,7 +1231,7 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
     };
 
     // Authorization: only the reaction's own author may revoke it.
-    let authorized = nostr_sdk::PublicKey::parse(&author_npub)
+    let authorized = nostr_sdk::prelude::PublicKey::parse(&author_npub)
         .map(|pk| pk == *sender)
         .unwrap_or(false);
     if !authorized {
@@ -1077,7 +1246,7 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
         let mut state = crate::state::STATE.lock().await;
         state.remove_reaction_from_message(&message_id, target_reaction_id)
     };
-    let message = match updated {
+    let mut message = match updated {
         Some((_cid, msg)) => msg,
         None => return false,
     };
@@ -1088,14 +1257,7 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
         eprintln!("[reaction-delete] DB delete failed for {}: {}", target_reaction_id, e);
     }
 
-    crate::traits::emit_event(
-        "message_update",
-        &serde_json::json!({
-            "old_id": &message_id,
-            "message": &message,
-            "chat_id": &chat_id,
-        }),
-    );
+    crate::traits::emit_message_update(&chat_id, &message_id, &mut message).await;
     true
 }
 

@@ -7,7 +7,6 @@
 //! - Android file handling
 
 use std::sync::Arc;
-use nostr_sdk::prelude::*;
 use tokio::sync::Mutex as TokioMutex;
 use std::sync::LazyLock;
 
@@ -175,6 +174,7 @@ pub async fn start_cached_bytes_compression() -> Result<(), String> {
     }
 
     // Spawn compression task (no min_savings - checked later by caller)
+    // spawn-detached: image compression — CPU work on bytes already in hand.
     tokio::spawn(async move {
         let result = compress_bytes_internal(bytes, &extension, None);
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
@@ -653,6 +653,7 @@ pub async fn start_image_precompression(file_path: String) -> Result<(), String>
 
     // Spawn the compression task
     let path_clone = file_path.clone();
+    // spawn-detached: same, for a path already resolved.
     tokio::spawn(async move {
         let result = compress_image_internal(&path_clone);
         let mut cache = COMPRESSION_CACHE.lock().await;
@@ -755,6 +756,32 @@ pub struct ZipEntry {
 #[tauri::command]
 pub fn is_directory(path: String) -> bool {
     std::path::Path::new(&path).is_dir()
+}
+
+/// Inline base64 preview for an image OUTSIDE the asset-protocol scope (pasted
+/// via a clipboard manager, dragged from an arbitrary folder) — the webview's
+/// asset:// route refuses those paths by design. Image-only (sniffed from magic
+/// bytes, never the extension) and size-capped, so it can't grow into a general
+/// file-read primitive.
+#[tauri::command]
+pub async fn read_image_preview(path: String) -> Result<String, String> {
+    const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".to_string());
+    }
+    if meta.len() > MAX_PREVIEW_BYTES {
+        return Err("file too large for an inline preview".to_string());
+    }
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
+    if !mime.starts_with("image/") {
+        return Err("not an image".to_string());
+    }
+    Ok(format!("data:{};base64,{}", mime, base64_simd::STANDARD.encode_to_string(&bytes)))
 }
 
 /// Zip a directory and return metadata about the result

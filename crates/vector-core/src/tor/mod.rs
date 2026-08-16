@@ -104,7 +104,9 @@ pub enum TorStatus {
 /// listener that bridges incoming connections into the Tor network.
 pub struct TorService {
     /// Arti's high-level client — owns circuits, the directory cache, etc.
-    client: TorClient<PreferredRuntime>,
+    /// Explicitly `Arc` since arti 2.4.0; clones are refcount handles exactly
+    /// as the old implicit-Arc semantics were, so teardown reasoning holds.
+    client: Arc<TorClient<PreferredRuntime>>,
     /// Where the SOCKS5 listener is bound. `127.0.0.1:<ephemeral>`.
     socks_addr: SocketAddr,
     /// Drop signal for the SOCKS accept loop. `take()`-d on stop.
@@ -256,6 +258,7 @@ impl TorService {
         // the value as a radial progress bar via the comet dasharray.
         let bootstrap_events = client.bootstrap_events();
         let log_progress = !bridges.is_empty();
+        // spawn-detached: logging the Tor daemon's bootstrap progress; the daemon is process-wide.
         tokio::spawn(async move {
             let mut events = bootstrap_events;
             while let Some(status) = events.next().await {
@@ -299,6 +302,7 @@ impl TorService {
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let client_for_socks = client.clone();
+        // spawn-detached: the SOCKS listener runs for the daemon's life, serving whoever is live.
         let socks_join = tokio::spawn(async move {
             socks::run(listener, client_for_socks, shutdown_rx).await;
             log_info!("[Tor] SOCKS5 listener stopped");
@@ -411,6 +415,7 @@ impl TorService {
         let _guard = BootstrapGuard;
 
         let bootstrap_events = self.client.bootstrap_events();
+        // spawn-detached: bootstrap progress again — same daemon, same reason.
         tokio::spawn(async move {
             let mut events = bootstrap_events;
             while let Some(status) = events.next().await {
@@ -479,7 +484,7 @@ impl TorService {
     }
 
     /// Raw SOCKS5 listener address — used by clients that take a `SocketAddr`
-    /// directly instead of a URL (e.g. `nostr_sdk::ClientOptions::proxy`).
+    /// directly instead of a URL (e.g. `nostr_sdk::prelude::ClientOptions::proxy`).
     pub fn socks_addr(&self) -> SocketAddr {
         self.socks_addr
     }
@@ -738,6 +743,7 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
     let netdir = svc
         .client
         .dirmgr()
+        .map_err(|e| format!("dirmgr unavailable: {e}"))?
         .netdir(Timeliness::Timely)
         .map_err(|e| format!("netdir unavailable: {e}"))?;
 
@@ -758,6 +764,7 @@ pub async fn current_circuit_hops(force_new: bool) -> Result<Vec<CircuitHop>, St
     let tunnel = svc
         .client
         .circmgr()
+        .map_err(|e| format!("circmgr unavailable: {e}"))?
         .get_or_launch_exit(netdir.as_ref().into(), &[], isolation)
         .await
         .map_err(|e| format!("launch exit: {e}"))?;

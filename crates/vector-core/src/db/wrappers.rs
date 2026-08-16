@@ -71,6 +71,31 @@ pub fn load_processed_wrappers() -> Result<Vec<[u8; 32]>, String> {
     Ok(rows.flatten().collect())
 }
 
+/// [`load_processed_wrappers`] bounded to `wrapper_created_at >= since_secs` —
+/// the dedup cache only needs the window the planned reconciles can touch;
+/// anything older that still arrives dedups through the DB fallback.
+pub fn load_processed_wrappers_since(since_secs: u64) -> Result<Vec<[u8; 32]>, String> {
+    let conn = match super::get_db_connection_guard_static() {
+        Ok(c) => c,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut stmt = conn.prepare(
+        "SELECT wrapper_id FROM processed_wrappers WHERE transport = 0 AND wrapper_created_at >= ?1",
+    ).map_err(|e| format!("Failed to prepare processed_wrappers query: {}", e))?;
+    let rows = stmt.query_map(rusqlite::params![since_secs as i64], |row| {
+        let blob: Vec<u8> = row.get(0)?;
+        if blob.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&blob);
+            Ok(arr)
+        } else {
+            Err(rusqlite::Error::InvalidParameterCount(blob.len(), 32))
+        }
+    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
+
+    Ok(rows.flatten().collect())
+}
+
 /// Load recent wrapper IDs from events table (last N days) as raw bytes.
 pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
     let conn = match super::get_db_connection_guard_static() {
@@ -94,15 +119,23 @@ pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
          AND e.created_at >= ?1 AND c.chat_type != 2"
     ).map_err(|e| format!("Failed to prepare wrapper_id query: {}", e))?;
 
-    let hex_ids: Vec<String> = stmt.query_map(rusqlite::params![cutoff_secs as i64], |row| {
-        row.get::<_, String>(0)
-    }).map_err(|e| format!("Failed to query wrapper_ids: {}", e))?
-    .flatten().collect();
+    // Decoded straight off the borrowed column text. Collecting owned `String`s
+    // first would allocate once per row and hold the whole hex set resident
+    // alongside the decoded one, for no gain — each id is read exactly once.
+    let mut rows = stmt
+        .query(rusqlite::params![cutoff_secs as i64])
+        .map_err(|e| format!("Failed to query wrapper_ids: {}", e))?;
 
-    let mut result = Vec::with_capacity(hex_ids.len());
-    for hex in hex_ids {
+    let mut result: Vec<[u8; 32]> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("Failed to read wrapper_id row: {}", e))?
+    {
+        let Ok(hex) = row.get_ref(0).and_then(|v| v.as_str().map_err(Into::into)) else {
+            continue;
+        };
         if hex.len() == 64 {
-            result.push(crate::simd::hex::hex_to_bytes_32(&hex));
+            result.push(crate::simd::hex::hex_to_bytes_32(hex));
         }
     }
     Ok(result)
@@ -110,34 +143,81 @@ pub fn load_recent_wrapper_ids(days: u64) -> Result<Vec<[u8; 32]>, String> {
 
 /// Load all processed wrappers as (EventId, Timestamp) pairs for negentropy (NIP-77).
 pub fn load_negentropy_items() -> Result<Vec<(EventId, Timestamp)>, String> {
+    load_negentropy_items_inner(None)
+}
+
+/// Fingerprint items no older than `since_secs`.
+///
+/// Reconnect and quick reconciles cover a window of days, not all of history —
+/// on an established account that is a few dozen items out of six figures, so
+/// the bound belongs in SQL rather than in a filter over a fully materialised
+/// set.
+pub fn load_negentropy_items_since(
+    since_secs: u64,
+) -> Result<Vec<(EventId, Timestamp)>, String> {
+    load_negentropy_items_inner(Some(since_secs))
+}
+
+fn load_negentropy_items_inner(
+    since_secs: Option<u64>,
+) -> Result<Vec<(EventId, Timestamp)>, String> {
     let conn = super::get_db_connection_guard_static()
         .map_err(|_| "No DB connection".to_string())?;
 
     // NIP-77 reconciles gift-wraps for our pubkey, so fingerprint ONLY the 'nip17' carrier.
     // Concord outer events share the ledger for dedup but must never enter DM negentropy.
-    let mut stmt = conn.prepare(
-        "SELECT wrapper_id, wrapper_created_at FROM processed_wrappers WHERE transport = 0"
-    ).map_err(|e| format!("Failed to prepare negentropy query: {}", e))?;
+    //
+    // Ordered so negentropy's `seal()` sorts an already-sorted set rather than a
+    // scan-ordered one. This is only cheap because `idx_processed_wrappers_neg`
+    // (migration 87) carries all three columns: against an index missing
+    // `wrapper_id` the same ORDER BY costs a temp B-tree and a row lookup per
+    // hit, which is far more than the sort it saves.
+    let sql = if since_secs.is_some() {
+        "SELECT wrapper_id, wrapper_created_at FROM processed_wrappers \
+         WHERE transport = 0 AND wrapper_created_at >= ?1 \
+         ORDER BY wrapper_created_at, wrapper_id"
+    } else {
+        "SELECT wrapper_id, wrapper_created_at FROM processed_wrappers \
+         WHERE transport = 0 \
+         ORDER BY wrapper_created_at, wrapper_id"
+    };
 
-    let items: Vec<_> = stmt.query_map([], |row| {
-        let blob: Vec<u8> = row.get(0)?;
-        let created_at: i64 = row.get(1)?;
-        Ok((blob, created_at))
-    }).map_err(|e| format!("Failed to query processed_wrappers: {}", e))?
-    .flatten()
-    .filter_map(|(blob, ts)| {
-        if blob.len() == 32 {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&blob);
-            Some((
-                EventId::from_byte_array(arr),
-                Timestamp::from_secs(ts as u64),
-            ))
-        } else {
-            None
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("Failed to prepare negentropy query: {}", e))?;
+
+    // Ids are read as borrowed blobs: `get::<Vec<u8>>` would heap-allocate once
+    // per row, which on a six-figure set is the bulk of this function's cost.
+    let mut rows = match since_secs {
+        Some(since) => stmt.query(rusqlite::params![since as i64]),
+        None => stmt.query([]),
+    }
+    .map_err(|e| format!("Failed to query processed_wrappers: {}", e))?;
+
+    let mut items: Vec<(EventId, Timestamp)> = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("Failed to read processed_wrappers row: {}", e))?
+    {
+        let Ok(blob) = row.get_ref(0).and_then(|v| v.as_blob().map_err(Into::into)) else {
+            continue;
+        };
+        if blob.len() != 32 {
+            continue;
         }
-    })
-    .collect();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(blob);
+        // A malformed row is skipped, never fatal: callers fall back to an empty
+        // set on `Err`, and an empty fingerprint set tells negentropy we hold
+        // nothing, which re-downloads the entire history.
+        let Ok(created_at) = row.get::<_, i64>(1) else {
+            continue;
+        };
+        items.push((
+            EventId::from_byte_array(arr),
+            Timestamp::from_secs(created_at as u64),
+        ));
+    }
 
     Ok(items)
 }

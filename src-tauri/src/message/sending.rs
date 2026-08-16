@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use nostr_sdk::prelude::*;
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// Cancel flags for in-progress uploads, keyed by pending message ID.
@@ -105,9 +104,9 @@ impl SendCallback for TauriSendCallback {
         // its real id, orphaning that row as a ghost duplicate on reload.
         if old_id.starts_with("pending-") && old_id != msg.id {
             let pending_id = old_id.to_string();
-            let session = vector_core::state::SessionGuard::capture();
-            tokio::spawn(async move {
-                if !session.is_valid() { return; }
+            let session = vector_core::db::current_session();
+            vector_core::db::spawn_bound(async move {
+                if !session.is_live() { return; }
                 let _ = vector_core::db::events::delete_event(&pending_id);
             });
         }
@@ -134,11 +133,9 @@ impl SendCallback for TauriSendCallback {
     fn on_persist(&self, chat_id: &str, msg: &Message) {
         let chat_id = chat_id.to_string();
         let msg = msg.clone();
-        // SessionGuard so a swap before the DB write doesn't persist
-        // account A's outgoing message as a phantom chat row in B's DB.
-        let session = vector_core::state::SessionGuard::capture();
-        tokio::spawn(async move {
-            if !session.is_valid() { return; }
+        // Bound, so a swap before the write persists account A's outgoing
+        // message to A's database rather than as a phantom row in B's.
+        vector_core::db::spawn_bound(async move {
             let _ = crate::db::save_message(&chat_id, &msg).await;
         });
     }
@@ -165,15 +162,20 @@ pub struct MessageDeleteOptions {
     pub can_admin_hide: bool,
 }
 
-/// Load the owning Community of a channel. `Ok(None)` is a confident "not a
-/// community channel" (or none stored locally); `Err(())` means a store read
-/// failed, so no confident verdict exists.
-fn load_community_for_channel(chat_id: &str) -> Result<Option<vector_core::community::Community>, ()> {
+/// A channel's moderation context: the proven owner (whichever protocol proves it)
+/// plus the folded roster. Resolved once per community and reused across the page,
+/// since a bulk verdict judges every row against the same authority.
+///
+/// `Ok(None)` is a confident "not a community channel"; `Err(())` means a store
+/// read failed, so no confident verdict exists.
+type ModerationContext = (Option<String>, vector_core::community::roles::CommunityRoles);
+
+fn moderation_context_for_channel(chat_id: &str) -> Result<Option<ModerationContext>, ()> {
     let Some(cid) = vector_core::db::community::community_id_for_channel(chat_id).map_err(|_| ())? else {
         return Ok(None);
     };
-    let bytes = vector_core::simd::hex::hex_to_bytes_32(&cid);
-    vector_core::db::community::load_community(&vector_core::community::CommunityId(bytes)).map_err(|_| ())
+    let roster = vector_core::db::community::get_community_roles(&cid).map_err(|_| ())?;
+    Ok(Some((vector_core::community::moderation::owner_hex(&cid), roster)))
 }
 
 /// Shared resolver behind `get_message_delete_options` and
@@ -185,7 +187,7 @@ fn load_community_for_channel(chat_id: &str) -> Result<Option<vector_core::commu
 async fn resolve_delete_options(
     message_ids: &[String],
 ) -> HashMap<String, MessageDeleteOptions> {
-    use nostr_sdk::EventId;
+    use nostr_sdk::prelude::EventId;
     use vector_core::ChatType;
 
     struct Ctx {
@@ -233,32 +235,32 @@ async fn resolve_delete_options(
     }
 
     let me_pk = vector_core::state::my_public_key();
-    // Memoise community loads across the batch (channel_id → load outcome). The memo keeps
-    // Err distinct from Ok(None): a failed read must omit the verdict (below), not cache a
+    // Memoise the moderation context across the batch (channel_id → owner + roster). The memo
+    // keeps Err distinct from Ok(None): a failed read must omit the verdict (below), not cache a
     // confident "no community" for every row of the channel.
-    let mut community_cache: HashMap<String, Result<Option<vector_core::community::Community>, ()>> =
-        HashMap::new();
+    let mut community_cache: HashMap<String, Result<Option<ModerationContext>, ()>> = HashMap::new();
     let mut out = HashMap::with_capacity(ctxs.len());
 
     for (id, ctx) in ctxs {
         // Moderation-hide: on someone ELSE's Community message, offer "Hide" iff we hold the
         // authority to actually publish it — MANAGE_MESSAGES + outrank the author (owner OR
-        // admin). Mirrors the publish gate via the same shared `can_moderation_hide`, so the
-        // button can't disagree with what the publish allows. A paged-out row (chat type
-        // unknown) resolves through the same community lookup; non-community chats yield None.
+        // admin). Same predicate the publish gate and every receiving peer run, so the button
+        // can't disagree with what the plane will honor. A paged-out row (chat type unknown)
+        // resolves through the same lookup; non-community chats yield None.
         let maybe_community = matches!(ctx.chat_type, Some(ChatType::Community)) || ctx.chat_type.is_none();
         let can_admin_hide = if !ctx.mine && maybe_community {
             match (ctx.author.as_deref(), &me_pk) {
                 (Some(author_hex), Some(me)) => {
                     let community = community_cache
                         .entry(ctx.chat_id.clone())
-                        .or_insert_with(|| load_community_for_channel(&ctx.chat_id));
+                        .or_insert_with(|| moderation_context_for_channel(&ctx.chat_id));
                     match community {
                         // Transient store failure: omit rather than cache a false "no Hide".
                         Err(()) => continue,
                         Ok(None) => false,
-                        Ok(Some(c)) => vector_core::community::service::can_moderation_hide(
-                            c,
+                        Ok(Some((owner, roster))) => vector_core::community::moderation::can_hide(
+                            owner.as_deref(),
+                            roster,
                             &me.to_hex(),
                             author_hex,
                         ),
@@ -375,7 +377,7 @@ pub async fn get_message_delete_meta_bulk(
 /// explanatory popup.
 #[tauri::command]
 pub async fn delete_own_message(message_id: String) -> Result<vector_core::DeleteOutcome, String> {
-    use nostr_sdk::EventId;
+    use nostr_sdk::prelude::EventId;
     use vector_core::ChatType;
 
     // Confirm the message exists, is ours, and grab its chat type.
@@ -479,17 +481,18 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
                 }
             }
         }
-        // Best-effort: free any blob already uploaded before the wrap failed.
+        // Best-effort: free any blob already uploaded before the wrap failed,
+        // mirrors included.
         let remote_urls: Vec<String> = msg.attachments.iter()
-            .filter_map(|a| if a.url.is_empty() { None } else { Some(a.url.to_string()) })
+            .flat_map(|a| a.all_urls().map(str::to_string))
             .collect();
         if !remote_urls.is_empty() {
             // Best-effort blob cleanup — route through the active client
             // signer so bunker users sign auth events under their identity
             // instead of the client-key (which would fail with the server's
             // pubkey check).
-            if let Some(client) = nostr_client() {
-                if let Ok(signer) = client.signer().await {
+            if let Some(_client) = nostr_client() {
+                if let Ok(signer) = vector_core::signer::active_signer() {
                     vector_core::blossom::delete_blobs_best_effort(signer, remote_urls);
                 }
             }
@@ -595,7 +598,7 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
             .collect();
 
         if !attachments_to_delete.is_empty() {
-            tokio::spawn(async move {
+            vector_core::db::spawn_bound(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
                 let download_dir = vector_core::db::get_download_dir();

@@ -14,7 +14,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
-use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId};
+use nostr_sdk::prelude::{Client, Event, Filter, Kind, PublicKey, RelayStatus, RelayUrl, SubscriptionId, Timestamp};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
@@ -23,7 +23,7 @@ use super::stream;
 use super::{derive, inbound};
 use crate::community::{CommunityId, ConcordProtocol, Epoch};
 use crate::event_handler::InboundEventHandler;
-use crate::state::SessionGuard;
+use crate::ClientRelayExt;
 
 /// The targeted subscription id (streams on desktop).
 static V2_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::new(|| Mutex::new(None));
@@ -32,6 +32,31 @@ static V2_POOLWIDE_SUB_ID: LazyLock<Mutex<Option<SubscriptionId>>> = LazyLock::n
 /// The current author-set (sorted hex) — an unchanged set skips a churny
 /// unsubscribe+resubscribe, exactly like v1's `COMMUNITY_SUB_SET`.
 static V2_SUB_SET: LazyLock<Mutex<Vec<String>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// Session generation of the last COMPLETED [`refresh_subscription`] pass, or
+/// `u64::MAX` before any. Generation-keyed rather than a bare bool so an account
+/// swap invalidates it automatically — a per-account global that survived a swap
+/// would report account A's readiness for account B.
+static V2_SUB_READY_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+#[inline]
+fn mark_subscription_ready() {
+    V2_SUB_READY_GEN.store(
+        crate::db::current_session_id(),
+        std::sync::atomic::Ordering::Release,
+    );
+}
+
+/// Whether the v2 Community subscription pass has COMPLETED for the active
+/// session: live channel events are being delivered (or there is genuinely
+/// nothing to subscribe to). `false` during the cold-start window where the
+/// relay-connect wait + stream-auth priming are still running — the state a
+/// health-checking bot could previously not distinguish from "subscribed to
+/// nothing".
+pub fn subscription_ready() -> bool {
+    V2_SUB_READY_GEN.load(std::sync::atomic::Ordering::Acquire)
+        == crate::db::current_session_id()
+}
 /// Outer-wrap ids already dispatched, so the handler fires EXACTLY ONCE per
 /// message. The relay pool delivers the same wrap under both the targeted and
 /// pool-wide subs and from every relay independently, so without this a bot's
@@ -49,7 +74,7 @@ const SEEN_WRAPS_CAP: usize = 8192;
 /// whole-row-save and clobber each other. This replaces the old gate/rerun/
 /// spawn-vs-await machinery: an enqueue never blocks its caller, and a junk-wrap
 /// flood coalesces to at most one queued + one running follow per community.
-/// Reset on session swap (the worker exits when its `SessionGuard` invalidates or
+/// Reset on session swap (the worker exits when its `std::sync::Arc<crate::db::Session>` invalidates or
 /// its channel closes).
 static V2_FOLLOW_TX: LazyLock<StdMutex<Option<UnboundedSender<CommunityId>>>> = LazyLock::new(|| StdMutex::new(None));
 /// Community ids currently queued or processing — coalesces a burst to one follow.
@@ -68,13 +93,21 @@ pub(crate) fn follow_lock(id: &CommunityId) -> Arc<Mutex<()>> {
     V2_FOLLOW_LOCKS.lock().unwrap().entry(id.0).or_default().clone()
 }
 
+/// The author set the live v2 subscription CURRENTLY carries (sorted hex).
+/// Diagnostics: comparing this against the freshly-derived plane authors is the
+/// one-glance test for "did a rotation leave this client subscribed to a dead
+/// epoch" — the failure that otherwise only shows up as silent missing events.
+pub async fn subscribed_author_set() -> Vec<String> {
+    V2_SUB_SET.lock().await.clone()
+}
+
 /// Diagnostics: run the three follow stages once for `id` UNDER the follow lock
 /// (so it can't race the worker into a whole-row clobber) and return each
 /// stage's outcome as a display string. Reloads freshly-persisted state between
 /// stages, exactly like [`follow_community`]. Mutating — same writes a live
 /// follow makes; the lock serializes it against the worker.
 #[cfg(debug_assertions)]
-pub async fn debug_run_follow_stages(id: &CommunityId, session: &SessionGuard) -> (String, String, String) {
+pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<crate::db::Session>) -> (String, String, String) {
     let lock = follow_lock(id);
     let _guard = lock.lock().await;
     let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
@@ -93,14 +126,14 @@ pub async fn debug_run_follow_stages(id: &CommunityId, session: &SessionGuard) -
     let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
         return (rekeys, "community gone".into(), "-".into());
     };
-    let control = match super::service::follow_control(&transport, &c, session).await {
+    let control = match super::service::follow_control(&transport, &c).await {
         Ok(v) => format!("Ok(changed={})", v.is_some()),
         Err(e) => format!("ERR: {e}"),
     };
     let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
         return (rekeys, control, "community gone".into());
     };
-    let guestbook = match super::service::sync_guestbook(&transport, &c, session).await {
+    let guestbook = match super::service::sync_guestbook(&transport, &c).await {
         Ok(fresh) => format!("Ok(fresh={})", fresh.len()),
         Err(e) => format!("ERR: {e}"),
     };
@@ -122,8 +155,8 @@ pub async fn clear() {
     *V2_POOLWIDE_SUB_ID.lock().await = None;
     V2_SUB_SET.lock().await.clear();
     V2_SEEN_WRAPS.lock().await.clear();
-    // Drop the queue sender so the worker's channel closes and it exits (its
-    // SessionGuard also invalidates); the next login spawns a fresh worker.
+    // Drop the queue sender so the worker's channel closes and it exits; the
+    // next login spawns a fresh worker.
     *V2_FOLLOW_TX.lock().unwrap() = None;
     V2_FOLLOW_PENDING.lock().unwrap().clear();
     V2_FOLLOW_LOCKS.lock().unwrap().clear();
@@ -170,7 +203,9 @@ pub fn plane_authors(communities: &[CommunityV2]) -> Vec<PublicKey> {
 /// source of truth shared by [`plane_authors`] (subscribe) and
 /// [`inbound::dispatch_wrap`] (recognize) so the two can't drift.
 pub(crate) fn control_author(c: &CommunityV2) -> PublicKey {
-    derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk()
+    // A split epoch's address is the HELD control_pk (CORD-02 §5); a legacy
+    // epoch derives it from the community_root as always.
+    super::control::ControlPlane::of(c).pk()
 }
 
 /// The next-epoch rekey plane addresses for a community: the base rotation
@@ -222,7 +257,7 @@ pub async fn refresh_subscription(client: &Client) {
         if !relays.is_empty() {
             // Community relays ride GOSSIP|PING (warm but excluded from pool-wide DM ops).
             for r in &relays {
-                let _ = client.pool().add_relay(r.as_str(), crate::community_relay_options()).await;
+                let _ = client.add_managed_relay(r.as_str()).capabilities(crate::community_relay_capabilities()).await;
             }
             client.connect().await;
             // Wait briefly for at least one relay to actually connect (a subscribe
@@ -230,20 +265,17 @@ pub async fn refresh_subscription(client: &Client) {
             // trap as v1).
             let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
             for _ in 0..24 {
-                let pool = client.pool().all_relays().await;
+                let pool = client.relays().all().await;
                 if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            // AUTH-gating relays serve the planes only to a stream-authenticated
-            // connection, and a live subscription isn't auto-retried after the gate.
-            // Register every held plane's key + prime the connection auth (a cheap
-            // gated fetch the responder answers) so the subscription below streams.
+            // Register every held plane's key BEFORE subscribing, so the responder
+            // can answer any NIP-42 challenge our REQs trigger. Cheap + local.
             for c in &communities {
                 super::streamauth::register_community(c);
             }
-            super::streamauth::prime_auth(client, &relays).await;
         }
     }
 
@@ -270,37 +302,82 @@ pub async fn refresh_subscription(client: &Client) {
     // failed pool-wide subscribe would otherwise stay absent until the author-set
     // changes, and Android streams via the pool-wide path).
     if sub_guard.is_some() && *set_guard == new_set && (authors.is_empty() || V2_POOLWIDE_SUB_ID.lock().await.is_some()) {
+        mark_subscription_ready(); // an unchanged live sub is a completed pass
         return; // the pool re-applies the live subs across reconnects.
     }
     if let Some(old) = sub_guard.take() {
-        client.unsubscribe(&old).await;
+        let _ = client.unsubscribe(&old).await;
     }
     *set_guard = new_set;
 
     if authors.is_empty() {
         if let Some(old_pw) = V2_POOLWIDE_SUB_ID.lock().await.take() {
-            client.unsubscribe(&old_pw).await;
+            let _ = client.unsubscribe(&old_pw).await;
         }
+        // Completed with nothing to hear: READY with zero planes, which is a
+        // different observable state from "still connecting".
+        mark_subscription_ready();
         return;
     }
 
     let filter = Filter::new()
         .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
         .authors(authors)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .since(Timestamp::from_secs(
+            Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000),
+        ))
         .limit(0);
 
     {
         let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
         if let Some(old) = pw.take() {
-            client.unsubscribe(&old).await;
+            let _ = client.unsubscribe(&old).await;
         }
-        if let Ok(out) = client.subscribe(filter.clone(), None).await {
-            *pw = Some(out.val);
+        if let Ok(out) = client.subscribe(filter.clone()).await {
+            *pw = Some(out.value);
         }
     }
-    if let Ok(out) = client.subscribe_to(relays.iter().cloned(), filter, None).await {
-        *sub_guard = Some(out.val);
+    if let Ok(out) = client
+        .subscribe(nostr_sdk::prelude::ReqTarget::manual(
+            relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
+        ))
+        .await
+    {
+        *sub_guard = Some(out.value);
     }
+    mark_subscription_ready();
+    drop(set_guard);
+    drop(sub_guard);
+
+    // AUTH-gating relays serve the planes only to a stream-authenticated
+    // connection, and a live subscription isn't auto-retried after the gate. The
+    // priming used to run BEFORE the subscribe, which gated the whole registration
+    // on the slowest relay: a set with dead or auth-refusing members left the
+    // client deaf for a minute while healthy relays sat idle. Prime in the
+    // BACKGROUND instead — healthy relays stream from the registration above, and
+    // each gating relay's auth completion re-sends the subs (`resubscribe_relay`
+    // via the responder), so it joins the moment IT is ready, gating nobody else.
+    prime_auth_in_background(client, relays);
+}
+
+/// In-flight coalescer for the background auth prime: boot fires many refreshes
+/// (dispatch, absorb, reconnect) and each spawning its own prime would stampede
+/// the gating relays with duplicate auth fetches.
+static PRIME_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn prime_auth_in_background(client: &Client, relays: Vec<String>) {
+    use std::sync::atomic::Ordering;
+    if relays.is_empty() || PRIME_IN_FLIGHT.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return;
+    }
+    let client = client.clone();
+    crate::db::spawn_bound(async move {
+        super::streamauth::prime_auth(&client, &relays).await;
+        PRIME_IN_FLIGHT.store(false, Ordering::Release);
+    });
 }
 
 /// Re-send the CURRENT v2 subscriptions (same ids) to ONE relay. An AUTH-gating
@@ -324,9 +401,18 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
     let filter = Filter::new()
         .kinds([Kind::Custom(stream::KIND_WRAP), Kind::Custom(stream::KIND_WRAP_EPHEMERAL)])
         .authors(authors)
+        // limit(0) suppresses the stored dump at REQ time, but a relay that
+        // ACCEPTS a backfilled old event later pushes it to matching live subs
+        // regardless — the `since` floor excludes those at the relay.
+        .since(Timestamp::from_secs(
+            Timestamp::now().as_secs().saturating_sub(crate::community::REALTIME_FRESH_WINDOW_MS / 1000),
+        ))
         .limit(0);
     for id in [targeted, poolwide].into_iter().flatten() {
-        let _ = client.subscribe_with_id_to([relay.clone()], id, filter.clone(), None).await;
+        let _ = client
+            .subscribe(nostr_sdk::prelude::ReqTarget::single(relay.clone(), [filter.clone()]))
+            .with_id(id)
+            .await;
     }
 }
 
@@ -334,96 +420,142 @@ pub(crate) async fn resubscribe_relay(client: &Client, relay: &RelayUrl) {
 /// and fire the matching handler callback (via the shared bridge). Persistence to
 /// the local DB is deferred (bots deliver via the callback; GUI history is v1 for
 /// now). `session` gates against a mid-flight account swap.
-pub async fn dispatch_event(session: &SessionGuard, event: Event, handler: Arc<dyn InboundEventHandler>) {
-    let Some(my_pk) = crate::my_public_key() else {
-        return;
-    };
-    if !session.is_valid() {
-        return;
-    }
-    // Fire EXACTLY ONCE per wrap: the pool re-delivers the same event under both
-    // subs and from every relay. `insert` returns false if already dispatched.
-    {
-        let mut seen = V2_SEEN_WRAPS.lock().await;
-        if !seen.insert(event.id.to_bytes()) {
+pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>) {
+    crate::db::scoped(async move {
+        let Some(my_pk) = crate::my_public_key() else {
             return;
-        }
-        if seen.len() > SEEN_WRAPS_CAP {
-            let keep = event.id.to_bytes();
-            seen.clear();
-            seen.insert(keep);
-        }
-    }
-    let communities = load_held_v2();
-    for c in &communities {
-        match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
-            inbound::DispatchedV2::NotOurs => continue,
-            // A control OR a rekey wrap: just enqueue a follow for this community.
-            // Non-blocking + coalesced — the single follow worker serializes control
-            // and rekey per community (no concurrent whole-row clobber) off this hot
-            // path, so a junk-wrap flood can't head-of-line-block the notification loop.
-            inbound::DispatchedV2::Control { .. } | inbound::DispatchedV2::Rekey { .. } => {
-                enqueue_follow(c.id());
+        };
+        // Fire EXACTLY ONCE per wrap: the pool re-delivers the same event under both
+        // subs and from every relay. `insert` returns false if already dispatched.
+        {
+            let mut seen = V2_SEEN_WRAPS.lock().await;
+            if !seen.insert(event.id.to_bytes()) {
                 return;
             }
-            inbound::DispatchedV2::Dissolved { community_id } => {
-                // Death wins (CORD-02 §9): seal read-only + surface the grave, ONCE
-                // (a re-wrapped tombstone with a fresh outer id must not re-fire the
-                // handler). The next load_held_v2 excludes it, so its planes also
-                // stop being subscribed + routed.
-                if crate::db::community::set_community_dissolved(&community_id).unwrap_or(false) {
-                    handler.on_community_dissolved(&community_id);
-                    if let Some(client) = crate::state::nostr_client() {
-                        refresh_subscription(&client).await;
-                    }
-                }
-                return;
+            if seen.len() > SEEN_WRAPS_CAP {
+                let keep = event.id.to_bytes();
+                seen.clear();
+                seen.insert(keep);
             }
-            // A chat event, opened but NOT yet applied: persist first (dedup by inner
-            // id + the author-scoped edit/delete checks), then fire the callback from
-            // the outcome — v1's exact model. A re-wrapped duplicate (any keyholder
-            // can re-seal a signed rumor into a fresh 1059), the relay echo of our
-            // own send, or a forged edit/delete yields no outcome and re-fires
-            // nothing.
-            inbound::DispatchedV2::Chat { channel_id, event } => {
-                if !session.is_valid() {
+        }
+        let communities = load_held_v2();
+        for c in &communities {
+            match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
+                inbound::DispatchedV2::NotOurs => continue,
+                // A control OR a rekey wrap: just enqueue a follow for this community.
+                // Non-blocking + coalesced — the single follow worker serializes control
+                // and rekey per community (no concurrent whole-row clobber) off this hot
+                // path, so a junk-wrap flood can't head-of-line-block the notification loop.
+                inbound::DispatchedV2::Control { .. } | inbound::DispatchedV2::Rekey { .. } => {
+                    enqueue_follow(c.id());
                     return;
                 }
-                match inbound::persist_chat_event(&event, &channel_id, &my_pk, session).await {
-                    Some(inbound::ChatPersist::New(message)) => handler.on_community_message(&channel_id, &message, true),
-                    // A reaction or an edit: the folded TARGET row (its id is the
-                    // target's) — the same payload v1 hands this callback.
-                    Some(inbound::ChatPersist::Updated { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
-                    // An un-react re-renders the PARENT (its chips changed) — the
-                    // same surface a landed reaction drives.
-                    Some(inbound::ChatPersist::ReactionRemoved { message, .. }) => handler.on_community_update(&channel_id, &message.id, &message),
-                    Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
-                    None => {}
-                }
-                return;
-            }
-            inbound::DispatchedV2::Presence { .. } => {
-                // Live membership motion: fold it into the persisted Guestbook so
-                // the memberlist stays a local read (the presence callback already
-                // fired inline). Reopen here — the dispatcher stays pure — and
-                // refresh the overview when it lands.
-                if !session.is_valid() {
-                    return;
-                }
-                let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
-                if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
-                    if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
-                        let changed = super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false);
-                        if changed && session.is_valid() {
-                            handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
+                inbound::DispatchedV2::Dissolved { community_id } => {
+                    // Death wins (CORD-02 §9): seal read-only + surface the grave, ONCE
+                    // (a re-wrapped tombstone with a fresh outer id must not re-fire the
+                    // handler). The next load_held_v2 excludes it, so its planes also
+                    // stop being subscribed + routed.
+                    if crate::db::community::set_community_dissolved(&community_id).unwrap_or(false) {
+                        handler.on_community_dissolved(&community_id);
+                        if let Some(client) = crate::state::nostr_client() {
+                            refresh_subscription(&client).await;
                         }
                     }
+                    return;
                 }
-                return;
+                // A chat event, opened but NOT yet applied: persist first (dedup by inner
+                // id + the author-scoped edit/delete checks), then fire the callback from
+                // the outcome — v1's exact model. A re-wrapped duplicate (any keyholder
+                // can re-seal a signed rumor into a fresh 1059), the relay echo of our
+                // own send, or a forged edit/delete yields no outcome and re-fires
+                // nothing.
+                inbound::DispatchedV2::Chat { channel_id, event } => {
+                    match inbound::persist_chat_event(&event, &channel_id, &my_pk).await {
+                        // "New" = first ingest, which a relay-backfill replay of a month-old
+                        // event also satisfies — is_new comes from the inner send time so
+                        // stale replays persist + surface without ringing anything.
+                        Some(inbound::ChatPersist::New(message)) => {
+                            let fresh = crate::community::is_realtime_fresh(message.at);
+                            handler.on_community_message(&channel_id, &message, fresh);
+                        }
+                        // A reaction or an edit: the folded TARGET row (its id is the
+                        // target's) — the same payload v1 hands this callback. Both come
+                        // back out of STATE, whose compact form drops the quoted
+                        // attachment's extension, so re-resolve before rendering.
+                        Some(inbound::ChatPersist::Updated { mut message, .. }) => {
+                            let _ = crate::db::events::populate_reply_context(&mut message).await;
+                            handler.on_community_update(&channel_id, &message.id, &message);
+                        }
+                        // An un-react re-renders the PARENT (its chips changed) — the
+                        // same surface a landed reaction drives.
+                        Some(inbound::ChatPersist::ReactionRemoved { mut message, .. }) => {
+                            let _ = crate::db::events::populate_reply_context(&mut message).await;
+                            handler.on_community_update(&channel_id, &message.id, &message);
+                        }
+                        Some(inbound::ChatPersist::Removed(target_id)) => handler.on_community_removed(&channel_id, &target_id),
+                        None => {}
+                    }
+                    return;
+                }
+                inbound::DispatchedV2::Presence { .. } => {
+                    // Live membership motion: fold it into the persisted Guestbook so
+                    // the memberlist stays a local read (the presence callback already
+                    // fired inline). Reopen here — the dispatcher stays pure — and
+                    // refresh the overview when it lands.
+                    let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
+                    if let Ok(opened) = super::stream::open_wrap(&event, &gb) {
+                        if let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) {
+                            let changed = super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false);
+                            if changed {
+                                handler.on_community_refreshed(&crate::simd::hex::bytes_to_hex_32(&c.id().0));
+                            }
+                        }
+                    }
+                    return;
+                }
+                inbound::DispatchedV2::Kick { target } => {
+                    let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch);
+                    let Ok(opened) = super::stream::open_wrap(&event, &gb) else { return };
+                    let Ok(ev) = super::guestbook::parse_guestbook_event(&opened) else { return };
+                    if !super::service::ingest_guestbook_event(c, ev, event.created_at.as_secs()).unwrap_or(false) {
+                        return;
+                    }
+                    let community_id = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+                    // Self-removal rides the AUTHORIZED fold, never the wrap: the store takes
+                    // any Kick rumor, so acting on arrival would let any member evict anyone.
+                    // Fail-closed — a kick our roster can't justify leaves us in place.
+                    //
+                    // The COALESCE verdict, not the memberlist: on a rejoin the store starts
+                    // empty while the control fold has already re-derived our old ban mark, so
+                    // the memberlist legitimately excludes us for the window before the
+                    // Guestbook catches up. A stale Kick landing in that window would read as
+                    // an authorized eviction. Coalescing asks only what our latest authorized
+                    // entry is, so a fresh Join beats the old Kick and an empty store decides
+                    // nothing.
+                    let evicted = my_pk == target && super::service::stored_kick_verdict(c, &my_pk);
+                    if evicted {
+                        // WARN, not info: `log_info!` is compiled out in release, and a
+                        // self-eviction is exactly the destructive, hard-to-diagnose event
+                        // that must leave a trace on a shipped build.
+                        crate::log_warn!(
+                            "[v2:teardown {}] KICK: the authorized guestbook fold rules us kicked",
+                            &community_id[..8.min(community_id.len())]
+                        );
+                        handler.on_community_self_removed(&community_id);
+                    } else {
+                        crate::log_debug!(
+                            "[v2:kick {}] declined: target={} is not ruled kicked by the fold",
+                            &community_id[..8.min(community_id.len())], &target.to_hex()[..8]
+                        );
+                        handler.on_community_refreshed(&community_id);
+                    }
+                    return;
+                }
+                _ => return, // typing (and non-surfaced guestbook kinds) handled inline by the dispatcher.
             }
-            _ => return, // typing (and non-surfaced guestbook kinds) handled inline by the dispatcher.
         }
-    }
+    })
+    .await
 }
 
 /// Whether a live follow worker is draining the queue (a `listen()` is running).
@@ -460,7 +592,7 @@ pub fn enqueue_follow(id: &CommunityId) {
 /// Spawn the single follow worker for this session. Installs the queue sender and
 /// drains it, running one combined follow per community at a time. Replacing the
 /// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
-/// worker exits; the captured `SessionGuard` also stops it. Idempotent per session.
+/// worker exits; the captured `std::sync::Arc<crate::db::Session>` also stops it. Idempotent per session.
 pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
     // Re-send every pending id into the fresh queue: parked pre-worker
@@ -474,12 +606,9 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
         }
     }
     *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
-    let session = SessionGuard::capture();
-    tokio::spawn(async move {
+    let session = crate::db::current_session();
+    crate::db::spawn_bound(async move {
         while let Some(id) = rx.recv().await {
-            if !session.is_valid() {
-                break;
-            }
             // Remove from pending BEFORE running, so a trigger arriving DURING the
             // follow re-enqueues (and is processed after) rather than being lost.
             V2_FOLLOW_PENDING.lock().unwrap().remove(&id.0);
@@ -494,90 +623,136 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
 /// address, and a self-removal tears the community down (skipping control). No-op
 /// without a live client — unit tests drive `service::follow_control` /
 /// `follow_rekeys` directly.
-async fn follow_community(session: &SessionGuard, id: &CommunityId, handler: &dyn InboundEventHandler) {
-    let Some(client) = crate::state::nostr_client() else {
-        return;
-    };
-    // Serialize against an inline (headless) follow of the same community — the
-    // queue only serializes triggers routed THROUGH it.
-    let lock = follow_lock(id);
-    let _guard = lock.lock().await;
-    let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
-    let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &CommunityId, handler: &dyn InboundEventHandler) {
+    crate::db::scoped(async move {
+        let Some(client) = crate::state::nostr_client() else {
+            return;
+        };
+        // Serialize against an inline (headless) follow of the same community — the
+        // queue only serializes triggers routed THROUGH it.
+        let lock = follow_lock(id);
+        let _guard = lock.lock().await;
+        let community_id = crate::simd::hex::bytes_to_hex_32(&id.0);
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
 
-    // Rekey first (fresh DB state).
-    let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
-        return; // community gone (left / removed).
-    };
-    match super::service::follow_rekeys(&transport, &current, session).await {
-        // A tombstone surfaced during catch-up (an offline member learning of a
-        // death) — the flag is set; seal + surface, and stop following.
-        Ok(follow) if follow.dissolved => {
-            if !session.is_valid() {
+        // Rekey first (fresh DB state).
+        let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
+            return; // community gone (left / removed).
+        };
+        match super::service::follow_rekeys(&transport, &current, session).await {
+            // A tombstone surfaced during catch-up (an offline member learning of a
+            // death) — the flag is set; seal + surface, and stop following.
+            Ok(follow) if follow.dissolved => {
+                crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
+                handler.on_community_dissolved(&community_id);
                 return;
             }
-            handler.on_community_dissolved(&community_id);
-            return;
+            Ok(follow) if follow.self_removed => {
+                crate::log_warn!("[v2:teardown {}] REKEY EXCLUSION: an authorized rotation left us out", &community_id[..8.min(community_id.len())]);
+                let _ = crate::db::community::delete_community(&community_id);
+                refresh_subscription(&client).await;
+                handler.on_community_self_removed(&community_id);
+                return;
+            }
+            Ok(follow) if follow.updated.is_some() => {
+                refresh_subscription(&client).await;
+                handler.on_community_refreshed(&community_id);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // Surfaced, not swallowed: with EOSE-verified fetches an AUTH-gated
+                // or dead rekey plane now reports here instead of masquerading as
+                // "no rotation" — the exact signature of an epoch wedge.
+                crate::log_warn!("[v2:follow {}] rekey follow failed (will retry on next trigger): {}", &community_id[..8.min(community_id.len())], e);
+                return;
+            }
         }
-        Ok(follow) if follow.self_removed => {
-            if !session.is_valid() {
-                return;
-            }
-            let _ = crate::db::community::delete_community(&community_id);
-            refresh_subscription(&client).await;
-            handler.on_community_self_removed(&community_id);
+
+        // Control second, on the (possibly new-root) freshly-reloaded state.
+        let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return;
-        }
-        Ok(follow) if follow.updated.is_some() => {
-            if !session.is_valid() {
-                return;
+        };
+        let control_changed = matches!(
+            super::service::follow_control(&transport, &current).await,
+            Ok(Some(_))
+        );
+        // Re-judge parked key vends on EVERY pass, not only when the fold moved. A
+        // vend that lands AFTER its Grant folded has nothing left to change the
+        // control plane, so gating this on `changed` strands it until some unrelated
+        // edition happens by (CORD-03 "delivered on grant").
+        if let Ok(Some(folded)) = crate::db::community::load_community_v2(id) {
+            let keyed = super::service::absorb_parked_channel_keys(&folded, session);
+            if !keyed.is_empty() {
+                crate::log_info!(
+                    "[v2:follow {}] adopted {} vended private-channel key(s)",
+                    &community_id[..8.min(community_id.len())],
+                    keyed.len()
+                );
+                // A newly-keyed channel adds its chat plane to the readable set, and
+                // the live subscription is addressed BY that set — without a rebuild
+                // we hold the key and still never hear the channel. Independent of
+                // `control_changed`: adopting a parked vend changes no control state.
+                refresh_subscription(&client).await;
             }
+            for ch in keyed {
+                let hex = crate::simd::hex::bytes_to_hex_32(&ch.0);
+                // Read what was said while we were locked out. The live subscription
+                // only carries what arrives NEXT, so without this a member granted
+                // access walks into a room that looks empty. The count rides the hook:
+                // backfilled history is NOT dispatched as live messages, and without
+                // the number a handler cannot even tell there is history to go read.
+                let backfilled = crate::VectorCore::v2_backfill_channel(
+                    id, &hex, 50, 2, None, None,
+                    crate::community::transport::Evidence::Fast, 12,
+                )
+                .await;
+                handler.on_channel_keyed(&community_id, &hex, backfilled);
+            }
+        }
+        if control_changed {
             refresh_subscription(&client).await;
             handler.on_community_refreshed(&community_id);
+            // A control change can reveal rekey work that predates it — a just-announced
+            // private channel's key crate is already sitting on its rekey plane (the key
+            // ships BEFORE the vsk-2), and this pass's rekey walk ran before the channel
+            // existed. Queue one more pass; it coalesces and converges (an unchanged
+            // control fold doesn't re-queue).
+            enqueue_follow(id);
         }
-        Ok(_) => {}
-        Err(e) => {
-            // Surfaced, not swallowed: with EOSE-verified fetches an AUTH-gated
-            // or dead rekey plane now reports here instead of masquerading as
-            // "no rotation" — the exact signature of an epoch wedge.
-            crate::log_warn!("[v2:follow {}] rekey follow failed (will retry on next trigger): {}", &community_id[..8.min(community_id.len())], e);
-            return;
-        }
-    }
 
-    // Control second, on the (possibly new-root) freshly-reloaded state.
-    let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
-        return;
-    };
-    if let Ok(Some(_)) = super::service::follow_control(&transport, &current, session).await {
-        if !session.is_valid() {
-            return;
+        // Banned by the banlist we just folded → self-remove NOW, not when the Refounding
+        // eventually lands. A Ban composes three layers (CORD-04 §6) and their guarantees
+        // arrive at different speeds: the Banlist edition is instant, the Refounding is
+        // "heavy and asynchronous" by design. Waiting on the rotation to notice our own
+        // removal left the target sitting in a community that had already dropped them from
+        // its member count — silenced, still looking joined. Checked unconditionally: a
+        // banlist-only change folds no document, so `follow_control` returns None for it.
+        // v1 has done this since it shipped (`am_i_banned` in its own realtime refresh).
+        if let Some(me) = crate::my_public_key() {
+            if crate::db::community::is_author_banned(&community_id, &me) {
+                crate::log_warn!("[v2:teardown {}] SELF-BAN: our npub is in the folded banlist", &community_id[..8.min(community_id.len())]);
+                handler.on_community_self_removed(&community_id);
+                return;
+            }
         }
-        refresh_subscription(&client).await;
-        handler.on_community_refreshed(&community_id);
-        // A control change can reveal rekey work that predates it — a just-announced
-        // private channel's key crate is already sitting on its rekey plane (the key
-        // ships BEFORE the vsk-2), and this pass's rekey walk ran before the channel
-        // existed. Queue one more pass; it coalesces and converges (an unchanged
-        // control fold doesn't re-queue).
-        enqueue_follow(id);
-    }
 
-    // Guestbook third: catch the membership store up from its cursor. Boot and
-    // reconnect land here through this same queue, so the memberlist is a local
-    // read by the time any panel asks — and every join/leave the catch-up folds
-    // surfaces as a presence line (real-rumor-id keyed, so a line each path also
-    // saw live inserts exactly once).
-    let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
-        return;
-    };
-    if let Ok(fresh) = super::service::sync_guestbook(&transport, &current, session).await {
-        if fresh.is_empty() || !session.is_valid() {
+        // Guestbook third: catch the membership store up from its cursor. Boot and
+        // reconnect land here through this same queue, so the memberlist is a local
+        // read by the time any panel asks — and every join/leave the catch-up folds
+        // surfaces as a presence line (real-rumor-id keyed, so a line each path also
+        // saw live inserts exactly once).
+        let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return;
+        };
+        if let Ok(fresh) = super::service::sync_guestbook(&transport, &current).await {
+            if fresh.is_empty() {
+                return;
+            }
+            surface_presence(&current, &fresh, handler);
+            handler.on_community_refreshed(&community_id);
         }
-        surface_presence(&current, &fresh, handler);
-        handler.on_community_refreshed(&community_id);
-    }
+    })
+    .await
 }
 
 /// Fire the presence-line surface for freshly-folded guestbook events — the
@@ -629,6 +804,23 @@ mod tests {
     }
 
     #[test]
+    fn subscription_readiness_is_scoped_to_the_session_that_marked_it() {
+        // Generation-keyed on purpose: a bare bool would survive an account swap
+        // and report account A's readiness for account B — the exact class of
+        // per-account-global bug the swap-cache sweep exists to prevent.
+        //
+        // Bumping the GLOBAL generation invalidates every live std::sync::Arc<crate::db::Session>, so
+        // serialize with the swap-sensitive tests via the same guard they hold.
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        mark_subscription_ready();
+        assert!(subscription_ready(), "marked for the current session");
+        crate::db::close_database();
+        assert!(!subscription_ready(), "an account swap invalidates it");
+        mark_subscription_ready();
+        assert!(subscription_ready(), "the new session's own pass re-arms it");
+    }
+
+    #[test]
     fn plane_authors_covers_the_dispatched_planes_only() {
         let c = a_community("A");
         let authors = plane_authors(std::slice::from_ref(&c));
@@ -636,7 +828,9 @@ mod tests {
         // Subscribed: the guestbook, the control plane, and the one public channel
         // (the planes dispatch_wrap handles). Exactly those three.
         let gb = derive::guestbook_group_key(&c.community_root, c.id(), c.root_epoch).pk();
-        let control = derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk();
+        // The split address (the held control_pk), not the legacy derivation.
+        let control = crate::community::v2::control::ControlPlane::of(&c).pk();
+        assert_ne!(control, derive::control_group_key(&c.community_root, c.id(), c.root_epoch).pk());
         let general = {
             let (s, e) = c.channel_secret(&c.channels[0]);
             derive::channel_group_key(&s, &c.channels[0].id, e).pk()
@@ -701,7 +895,7 @@ mod tests {
             s
         };
         std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(acct.clone()).unwrap();
         crate::db::init_database(&acct).unwrap();
         let _ = crate::state::take_nostr_client();
@@ -729,10 +923,9 @@ mod tests {
         // must fire EXACTLY ONCE (no duplicate bot replies) — and only AFTER the
         // persist outcome (the callbacks-from-persist model).
         let rec = Arc::new(Recorder::default());
-        let session = SessionGuard::capture();
         crate::community::v2::realtime::clear().await; // fresh seen-set for the test
-        dispatch_event(&session, wrap.clone(), rec.clone()).await;
-        dispatch_event(&session, wrap, rec.clone()).await;
+        dispatch_event(wrap.clone(), rec.clone()).await;
+        dispatch_event(wrap, rec.clone()).await;
 
         let got = rec.got.lock().unwrap();
         assert_eq!(got.len(), 1, "a re-delivered wrap fires the handler exactly once");
@@ -806,7 +999,7 @@ mod tests {
             s
         };
         std::fs::create_dir_all(tmp.path().join(&acct)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(acct.clone()).unwrap();
         crate::db::init_database(&acct).unwrap();
         let _ = crate::state::take_nostr_client();
@@ -828,12 +1021,11 @@ mod tests {
         assert!(!crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap(), "not yet locally sealed");
 
         let rec = Arc::new(Recorder::default());
-        let session = SessionGuard::capture();
         clear().await;
         // Fire the SAME tombstone twice AND a fresh re-wrap of its verified seal
         // (distinct outer id) — death must be announced exactly once.
-        dispatch_event(&session, tombstone.clone(), rec.clone()).await;
-        dispatch_event(&session, tombstone, rec.clone()).await;
+        dispatch_event(tombstone.clone(), rec.clone()).await;
+        dispatch_event(tombstone, rec.clone()).await;
         assert!(crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&community.id().0)).unwrap());
 
         // A member posts a fresh message to #general AFTER the tombstone. It must
@@ -843,7 +1035,7 @@ mod tests {
         let cgroup = derive::channel_group_key(&community.community_root, &general, community.root_epoch);
         let rumor = super::super::chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "into the grave", None, &[], vec![], 9_000);
         let (mw, _) = super::super::chat::seal_chat_rumor(&rumor, &cgroup, &member, nostr_sdk::prelude::Timestamp::from_secs(9), false).unwrap();
-        dispatch_event(&session, mw, rec.clone()).await;
+        dispatch_event(mw, rec.clone()).await;
 
         assert_eq!(rec.deaths.lock().unwrap().len(), 1, "death is announced exactly once");
         assert!(rec.messages.lock().unwrap().is_empty(), "a post-tombstone message is never honored (CORD-02 §9)");

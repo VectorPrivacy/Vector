@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pin-community-message"
+description = "Enables the pin_community_message command without any pre-configured scope."
+commands.allow = ["pin_community_message"]
+
+[[permission]]
+identifier = "deny-pin-community-message"
+description = "Denies the pin_community_message command without any pre-configured scope."
+commands.deny = ["pin_community_message"]

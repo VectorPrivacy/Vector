@@ -23,9 +23,19 @@ pub(crate) static MIGRATION_IN_PROGRESS: std::sync::atomic::AtomicBool =
 /// migration that returns early or panics can't leave the guard stuck.
 struct MigrationGuard;
 impl MigrationGuard {
-    fn enter() -> Self {
-        MIGRATION_IN_PROGRESS.store(true, std::sync::atomic::Ordering::Release);
-        Self
+    /// Exclusive entry: two concurrent migrations racing the same vault is
+    /// the split-key shape all over again (the loser's rollback clears the
+    /// winner's key), so a second entrant is refused, never queued.
+    fn try_enter() -> Result<Self, String> {
+        MIGRATION_IN_PROGRESS
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| "A migration is already in progress".to_string())?;
+        Ok(Self)
     }
 }
 impl Drop for MigrationGuard {
@@ -220,7 +230,7 @@ pub fn get_encryption_and_key<R: Runtime>(handle: AppHandle<R>) -> Result<BootEn
 #[command]
 pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), String> {
     // Mark migration in flight so reset_session() refuses to fire mid-tx.
-    let _guard = MigrationGuard::enter();
+    let _guard = MigrationGuard::try_enter()?;
 
     // Close the processing gate — events are queued until we reopen
     close_processing_gate();
@@ -234,11 +244,8 @@ pub async fn disable_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), 
 
     match result {
         Ok(()) => {
-            // Drop the NIP-55 PIN canary — the account is plaintext now, so boot
-            // won't derive a key to check it against, and a re-enable rewrites it.
-            if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
-                let _ = vector_core::db::remove_setting("nip55_pin_check");
-            }
+            // No vault key means nothing for biometrics to unlock.
+            crate::commands::biometric::clear_biometric_enrollment();
             let _ = handle.emit("encryption_migration_complete", ());
             Ok(())
         }
@@ -286,35 +293,38 @@ pub async fn enable_encryption<R: Runtime>(
     handle: AppHandle<R>,
     credential: String,
     security_type: String,
+    biometric_wrap: Option<String>,
 ) -> Result<(), String> {
-    let _guard = MigrationGuard::enter();
+    let _guard = MigrationGuard::try_enter()?;
+    // Already-enabled guard: re-running would derive a key from the given
+    // credential, fail verification against the existing ciphertext, roll
+    // back, and CLEAR the correct in-session vault key on the way out.
+    if vector_core::state::is_encryption_enabled_fast() {
+        return Err("Encryption is already enabled".to_string());
+    }
     // Derive key from credential (this is the slow Argon2 step)
     let key = crate::crypto::hash_pass(credential).await;
     crate::ENCRYPTION_KEY.set(key, &[&crate::MY_SECRET_KEY]);
+
+    // Keyless account: the canary (its only wrong-PIN detector at boot) rides
+    // the migration transaction below, encrypted under the new key directly.
+    let nip55_canary = if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
+        Some(encrypt_with_key(crate::commands::account::NIP55_PIN_CANARY, &key))
+    } else {
+        None
+    };
 
     // Close the processing gate
     close_processing_gate();
 
     // Do the actual migration work
-    let result = enable_encryption_work(&handle, &security_type);
+    let result = enable_encryption_work(&handle, &security_type, biometric_wrap.as_deref(), nip55_canary.as_deref());
 
     // ALWAYS reopen gate and drain queued events, regardless of success/failure (audit C2)
     drain_pending_events(&handle).await;
 
     match result {
         Ok(()) => {
-            // NIP-55 keyless account: no pkey whose failed decrypt would reject a
-            // wrong PIN at boot, so persist the verification canary (same as
-            // setup_encryption). `set_encryption_enabled(true)` already ran inside
-            // the committed transaction, so maybe_encrypt encrypts it under the
-            // new key. Without this, toggling Local Encryption on a keyless
-            // account leaves boot unable to detect a wrong PIN → split-key corruption.
-            if vector_core::signer_kind() == vector_core::SignerKind::Nip55 {
-                let canary = crate::crypto::maybe_encrypt(
-                    crate::commands::account::NIP55_PIN_CANARY.to_string(),
-                ).await;
-                let _ = vector_core::db::set_sql_setting("nip55_pin_check".to_string(), canary);
-            }
             let _ = handle.emit("encryption_migration_complete", ());
             Ok(())
         }
@@ -333,13 +343,15 @@ pub async fn enable_encryption<R: Runtime>(
 fn enable_encryption_work<R: Runtime>(
     handle: &AppHandle<R>,
     security_type: &str,
+    biometric_wrap: Option<&str>,
+    nip55_canary: Option<&str>,
 ) -> Result<(), String> {
     // Read the encryption key from the guarded vault
     let mut key: [u8; 32] = crate::ENCRYPTION_KEY.get()
         .ok_or("No encryption key available".to_string())?;
 
     // Run transactional migration (all-or-nothing via SQLite transaction, audit C3/C4)
-    let result = enable_encryption_transactional(handle, &key, security_type);
+    let result = enable_encryption_transactional(handle, &key, security_type, biometric_wrap, nip55_canary);
     key.zeroize();
 
     result
@@ -480,6 +492,7 @@ fn disable_encryption_transactional<R: Runtime>(
 
     decrypt_setting_in_tx(&tx, "seed", key, |v| v.contains(' '))?;
     decrypt_setting_in_tx(&tx, "pkey", key, |v| v.starts_with("nsec"))?;
+    decrypt_setting_in_tx(&tx, "bunker_url", key, |v| v.starts_with("bunker://"))?;
     decrypt_pivx_in_tx(&tx, key)?;
     decrypt_community_in_tx(&tx, key)?;
 
@@ -491,6 +504,24 @@ fn disable_encryption_transactional<R: Runtime>(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('encryption_enabled', 'false')",
         [],
     ).map_err(|e| format!("Failed to update encryption_enabled: {}", e))?;
+
+    // Plaintext account needs no wrong-PIN detector and no unlock method —
+    // drop both in-tx so no reader can infer a mode that no longer exists.
+    tx.execute(
+        "DELETE FROM settings WHERE key = 'nip55_pin_check'",
+        [],
+    ).map_err(|e| format!("Failed to clear pin canary: {}", e))?;
+    tx.execute(
+        "DELETE FROM settings WHERE key = 'security_type'",
+        [],
+    ).map_err(|e| format!("Failed to clear security_type: {}", e))?;
+
+    // The biometric wrap holds the PRE-migration derived key — drop it in the
+    // SAME transaction so no crash window can leave a stale wrap behind.
+    tx.execute(
+        "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+        [],
+    ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
 
     tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_state', '')",
@@ -523,6 +554,8 @@ fn enable_encryption_transactional<R: Runtime>(
     handle: &AppHandle<R>,
     key: &[u8; 32],
     security_type: &str,
+    biometric_wrap: Option<&str>,
+    nip55_canary: Option<&str>,
 ) -> Result<(), String> {
     let mut conn = crate::account_manager::get_write_connection_guard(handle)?;
     let tx = conn.transaction()
@@ -606,6 +639,7 @@ fn enable_encryption_transactional<R: Runtime>(
 
     encrypt_setting_in_tx(&tx, "seed", key, |v| v.contains(' '))?;
     encrypt_setting_in_tx(&tx, "pkey", key, |v| v.starts_with("nsec"))?;
+    encrypt_setting_in_tx(&tx, "bunker_url", key, |v| v.starts_with("bunker://"))?;
     encrypt_pivx_in_tx(&tx, key)?;
     encrypt_community_in_tx(&tx, key)?;
 
@@ -622,6 +656,34 @@ fn enable_encryption_transactional<R: Runtime>(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
         rusqlite::params![security_type],
     ).map_err(|e| format!("Failed to update security_type: {}", e))?;
+
+    // Keyless-account canary: same atomicity rule as the wrap — the only
+    // wrong-PIN detector must land with the flags that make it load-bearing.
+    if let Some(c) = nip55_canary {
+        tx.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('nip55_pin_check', ?1)",
+            rusqlite::params![c],
+        ).map_err(|e| format!("Failed to set pin canary: {}", e))?;
+    }
+
+    // Biometric-only enable carries its wrap INTO this transaction — the row
+    // is the account's sole credential, so it must land atomically with the
+    // flags that lock the store to it. Otherwise drop any stale wrap (it
+    // holds a pre-migration key) in the same transaction.
+    match biometric_wrap {
+        Some(w) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
+                rusqlite::params![w],
+            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
+        }
+        None => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+                [],
+            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
+        }
+    }
 
     tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_state', '')",
@@ -862,13 +924,11 @@ mod xform_tests {
         }
     }
 
-    /// Sweep parity: every encrypted community_public_invites column must survive
-    /// enable → rekey → disable (a column missed by the sweep garbles on the first rekey).
-    #[test]
-    fn public_invite_label_survives_enable_rekey_disable() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    /// The Concord tables exactly as the sweep addresses them (columns it does
+    /// not touch omitted).
+    fn migrate_test_schema(conn: &rusqlite::Connection) {
         conn.execute_batch(
-            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT);
+            "CREATE TABLE communities (community_id TEXT, server_root_key BLOB, name TEXT, relays TEXT, description TEXT, icon TEXT, banner TEXT, banlist TEXT, owner_attestation TEXT, roles TEXT, invite_registry TEXT, owner_pubkey TEXT, owner_salt TEXT, meta_extra TEXT, control_pk TEXT, control_root BLOB);
              CREATE TABLE community_channels (channel_id TEXT, channel_key BLOB, name TEXT);
              CREATE TABLE community_epoch_keys (key BLOB);
              CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
@@ -876,6 +936,55 @@ mod xform_tests {
              CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
              CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);",
         ).unwrap();
+    }
+
+    /// Sweep parity for the v2 columns: the owner commitment and the CORD-02 §2
+    /// control pair must survive enable → rekey → disable. A missed column stays
+    /// under the old key — the pair silently drops to read-only on load, and a
+    /// garbled owner commitment fails the whole v2 load.
+    #[test]
+    fn v2_control_pair_survives_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate_test_schema(&conn);
+        let control_root: Vec<u8> = vec![0x5Au8; 32];
+        conn.execute(
+            "INSERT INTO communities (community_id, server_root_key, name, relays, banlist, roles, invite_registry, owner_pubkey, owner_salt, meta_extra, control_pk, control_root)
+             VALUES (?1, ?2, 'n', '[]', '[]', '{}', '[]', ?3, ?4, '{\"custom\":null,\"extra\":{}}', ?5, ?6)",
+            rusqlite::params!["cc".repeat(32), vec![0x11u8; 32], "ab".repeat(32), "cd".repeat(32), "ef".repeat(32), control_root],
+        ).unwrap();
+        let read = |c: &rusqlite::Connection| -> (String, String, Vec<u8>) {
+            c.query_row("SELECT owner_pubkey, control_pk, control_root FROM communities", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            }).unwrap()
+        };
+
+        let tx = conn.transaction().unwrap();
+        encrypt_community_in_tx(&tx, &K).unwrap();
+        tx.commit().unwrap();
+        let (owner_pk, control_pk, root) = read(&conn);
+        assert_ne!(owner_pk, "ab".repeat(32), "owner commitment must be wrapped after enable");
+        assert_ne!(control_pk, "ef".repeat(32), "control_pk must be wrapped after enable");
+        assert_ne!(root, vec![0x5Au8; 32], "control_root must be wrapped after enable");
+
+        let tx = conn.transaction().unwrap();
+        rekey_community_in_tx(&tx, &K, &K2).unwrap();
+        tx.commit().unwrap();
+
+        let tx = conn.transaction().unwrap();
+        decrypt_community_in_tx(&tx, &K2).unwrap();
+        tx.commit().unwrap();
+        let (owner_pk, control_pk, root) = read(&conn);
+        assert_eq!(owner_pk, "ab".repeat(32), "owner commitment survives enable → rekey → disable");
+        assert_eq!(control_pk, "ef".repeat(32), "control_pk survives enable → rekey → disable");
+        assert_eq!(root, vec![0x5Au8; 32], "control_root survives enable → rekey → disable");
+    }
+
+    /// Sweep parity: every encrypted community_public_invites column must survive
+    /// enable → rekey → disable (a column missed by the sweep garbles on the first rekey).
+    #[test]
+    fn public_invite_label_survives_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate_test_schema(&conn);
         conn.execute(
             "INSERT INTO community_public_invites (token, url, label) VALUES (?1, ?2, ?3)",
             rusqlite::params!["ab".repeat(32), "https://vectorapp.io/invite#x", "Reddit"],
@@ -917,27 +1026,35 @@ fn migrate_community_in_tx(
     enc: Option<&[u8; 32]>,
     dec: Option<&[u8; 32]>,
 ) -> Result<(), String> {
-    // communities: 1 secret BLOB + identifying text (some nullable).
-    let rows: Vec<(String, Vec<u8>, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, String, String)> = {
+    // communities: 2 secret BLOBs + identifying text (some nullable). Every
+    // encrypted column save_community / save_community_v2 writes MUST appear
+    // here, or it stays under the old key after a rekey and garbles on read.
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, Vec<u8>, String, String, Option<String>, Option<String>, Option<String>, String, Option<String>, String, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<Vec<u8>>)> = {
         let mut stmt = tx.prepare(
-            "SELECT community_id, server_root_key, name, relays, description, icon, banner, banlist, owner_attestation, roles, invite_registry FROM communities",
+            "SELECT community_id, server_root_key, name, relays, description, icon, banner, banlist, owner_attestation, roles, invite_registry, owner_pubkey, owner_salt, meta_extra, control_pk, control_root FROM communities",
         ).map_err(|e| format!("prepare communities: {e}"))?;
         let mapped = stmt.query_map([], |r| Ok((
             r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?,
             r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?, r.get::<_, Option<String>>(6)?,
             r.get::<_, String>(7)?, r.get::<_, Option<String>>(8)?, r.get::<_, String>(9)?, r.get::<_, String>(10)?,
+            r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, Option<String>>(13)?,
+            r.get::<_, Option<String>>(14)?, r.get::<_, Option<Vec<u8>>>(15)?,
         ))).map_err(|e| format!("query communities: {e}"))?;
         mapped.filter_map(|r| r.ok()).collect()
     };
-    for (id, root, name, relays, desc, icon, banner, banlist, owner, roles, registry) in rows {
+    for (id, root, name, relays, desc, icon, banner, banlist, owner, roles, registry, owner_pk, owner_salt, meta_extra, control_pk, control_root) in rows {
         tx.execute(
             "UPDATE communities SET server_root_key=?1, name=?2, relays=?3, description=?4, icon=?5,
-                banner=?6, banlist=?7, owner_attestation=?8, roles=?9, invite_registry=?10 WHERE community_id=?11",
+                banner=?6, banlist=?7, owner_attestation=?8, roles=?9, invite_registry=?10,
+                owner_pubkey=?11, owner_salt=?12, meta_extra=?13, control_pk=?14, control_root=?15 WHERE community_id=?16",
             rusqlite::params![
                 xform_blob(&root, enc, dec)?, xform_text(&name, enc, dec)?, xform_text(&relays, enc, dec)?,
                 xform_text_opt(&desc, enc, dec)?, xform_text_opt(&icon, enc, dec)?, xform_text_opt(&banner, enc, dec)?,
                 xform_text(&banlist, enc, dec)?, xform_text_opt(&owner, enc, dec)?, xform_text(&roles, enc, dec)?,
-                xform_text(&registry, enc, dec)?, id,
+                xform_text(&registry, enc, dec)?, xform_text_opt(&owner_pk, enc, dec)?, xform_text_opt(&owner_salt, enc, dec)?,
+                xform_text_opt(&meta_extra, enc, dec)?, xform_text_opt(&control_pk, enc, dec)?,
+                control_root.as_deref().map(|b| xform_blob(b, enc, dec)).transpose()?, id,
             ],
         ).map_err(|e| format!("update communities: {e}"))?;
     }
@@ -1242,6 +1359,119 @@ pub async fn verify_credential<R: Runtime>(
 // Re-Keying (Change PIN/Password)
 // ============================================================================
 
+/// Does `key` provably decrypt this account's material? Checks whichever
+/// anchor the account shape has: the pkey ciphertext (local/bunker) or the
+/// canary (keyless NIP-55). No anchor (plaintext pkey, no canary) = nothing to
+/// contradict, so accept — matching every other credential check in the app.
+fn old_key_is_valid<R: Runtime>(handle: &AppHandle<R>, key: &[u8; 32]) -> bool {
+    let Ok(conn) = crate::account_manager::get_db_connection_guard(handle) else {
+        return false;
+    };
+    let pkey: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'pkey'", [], |r| r.get(0))
+        .ok();
+    if let Some(p) = pkey {
+        if !p.starts_with("nsec") {
+            return matches!(decrypt_with_key(&p, key), Ok(d) if d.starts_with("nsec"));
+        }
+    }
+    let canary: Option<String> = conn
+        .query_row("SELECT value FROM settings WHERE key = 'nip55_pin_check'", [], |r| r.get(0))
+        .ok();
+    if let Some(c) = canary {
+        return matches!(
+            decrypt_with_key(&c, key),
+            Ok(d) if d == crate::commands::account::NIP55_PIN_CANARY
+        );
+    }
+    true
+}
+
+/// Re-key from the CURRENTLY UNLOCKED vault key to `new_key`, flipping
+/// `security_type` and the biometric wrap in the same transaction.
+///
+/// This is how the two encryption modes swap: the old key comes from the live
+/// session (the user is unlocked, so no credential needs retyping — and the
+/// biometric-side credential is one nobody knows by design). Plaintext never
+/// touches disk: every row is decrypted and re-encrypted in memory inside one
+/// transaction, exactly like Change PIN.
+pub(crate) async fn rekey_from_vault<R: Runtime>(
+    handle: AppHandle<R>,
+    mut new_key: [u8; 32],
+    security_type: &str,
+    biometric_wrap: Option<String>,
+    session: std::sync::Arc<vector_core::db::Session>,
+) -> Result<(), String> {
+    let _guard = MigrationGuard::try_enter()?;
+    // Re-validated INSIDE the guard: `reset_session` refuses while a migration
+    // is in flight, so from here the account cannot change under us. Before the
+    // guard, a swap could have landed while we derived the key — re-keying then
+    // would rewrite the swapped-in account's store with this key.
+    if !session.is_live() {
+        new_key.zeroize();
+        return Err("Account changed, nothing was modified".to_string());
+    }
+    if !vector_core::state::is_encryption_enabled_fast() {
+        new_key.zeroize();
+        return Err("Local Encryption is not enabled".to_string());
+    }
+    let mut old_key: [u8; 32] = crate::ENCRYPTION_KEY
+        .get()
+        .ok_or("Session is locked, unlock before changing the security mode")?;
+
+    // The old key drives a whole-database re-encrypt, and rows that fail to
+    // decrypt are SKIPPED rather than fatal — so a wrong old key would commit
+    // an account full of orphaned ciphertext. Prove it round-trips first.
+    if !old_key_is_valid(&handle, &old_key) {
+        old_key.zeroize();
+        new_key.zeroize();
+        return Err("Session key does not match this account".to_string());
+    }
+
+    close_processing_gate();
+    let result = rekey_encryption_transactional(
+        &handle, &old_key, &new_key, security_type, biometric_wrap.as_deref(),
+    );
+    old_key.zeroize();
+
+    // Vault flips to the new key BEFORE the drain so queued events encrypt
+    // under the key the database now holds.
+    if result.is_ok() {
+        crate::ENCRYPTION_KEY.set(new_key, &[&crate::MY_SECRET_KEY]);
+    }
+    new_key.zeroize();
+    drain_pending_events(&handle).await;
+
+    match result {
+        Ok(()) => {
+            let _ = handle.emit("encryption_migration_complete", ());
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Switch an encrypted account to a typed credential (PIN or password),
+/// dropping any OS-held wrap. Used to leave biometric mode, and as the
+/// credential-change path that doesn't require retyping the old one.
+#[command]
+pub async fn switch_to_credential<R: Runtime>(
+    handle: AppHandle<R>,
+    credential: String,
+    security_type: String,
+) -> Result<(), String> {
+    if credential.trim().is_empty() {
+        return Err("Credential must not be empty".to_string());
+    }
+    if security_type != "pin" && security_type != "password" {
+        return Err("Invalid security type".to_string());
+    }
+    let session = vector_core::db::current_session();
+    let _switch = crate::commands::biometric::SwitchGuard::try_enter()?;
+    let new_key = crate::crypto::hash_pass(credential).await;
+    rekey_from_vault(handle, new_key, &security_type, None, session).await
+}
+
 /// Re-key all encrypted data with a new credential (PIN or password).
 ///
 /// Forensically safe: plaintext never touches disk — each row is decrypted in
@@ -1261,7 +1491,7 @@ pub async fn rekey_encryption<R: Runtime>(
     new_credential: String,
     security_type: String,
 ) -> Result<(), String> {
-    let _guard = MigrationGuard::enter();
+    let _guard = MigrationGuard::try_enter()?;
 
     // 1. Derive old key and verify it by test-decrypting pkey
     let old_key = crate::crypto::hash_pass(old_credential).await;
@@ -1288,7 +1518,7 @@ pub async fn rekey_encryption<R: Runtime>(
     close_processing_gate();
 
     // 4. Perform transactional re-key (all-or-nothing via SQLite transaction)
-    let result = rekey_encryption_transactional(&handle, &old_key, &new_key, &security_type);
+    let result = rekey_encryption_transactional(&handle, &old_key, &new_key, &security_type, None);
 
     // 5. Update vault to new key BEFORE draining queued events.
     // Events queued during the rekey must be encrypted with the NEW key so they
@@ -1305,6 +1535,10 @@ pub async fn rekey_encryption<R: Runtime>(
 
     match result {
         Ok(()) => {
+            // The biometric wrap holds the OLD derived key — clear it rather
+            // than silently unlocking into a key that no longer decrypts
+            // anything. Re-enabling in Settings re-wraps the new key.
+            crate::commands::biometric::clear_biometric_enrollment();
             let _ = handle.emit("encryption_migration_complete", ());
             println!("[Rekey] Re-keying complete");
             Ok(())
@@ -1327,6 +1561,7 @@ fn rekey_encryption_transactional<R: Runtime>(
     old_key: &[u8; 32],
     new_key: &[u8; 32],
     security_type: &str,
+    biometric_wrap: Option<&str>,
 ) -> Result<(), String> {
     use crate::crypto::{encrypt_with_key, decrypt_with_key};
 
@@ -1423,6 +1658,12 @@ fn rekey_encryption_transactional<R: Runtime>(
 
     rekey_setting_in_tx(&tx, "pkey", old_key, new_key)?;
     rekey_setting_in_tx(&tx, "seed", old_key, new_key)?;
+    // A keyless (NIP-55) account has no pkey, so the canary is its ONLY
+    // wrong-credential detector; a bunker account cannot log in without its
+    // url. Both are key-derived, so both move with the key or the account is
+    // locked out at the NEXT boot rather than at the failing operation.
+    rekey_setting_in_tx(&tx, "nip55_pin_check", old_key, new_key)?;
+    rekey_setting_in_tx(&tx, "bunker_url", old_key, new_key)?;
     rekey_pivx_in_tx(&tx, old_key, new_key)?;
     rekey_community_in_tx(&tx, old_key, new_key)?;
 
@@ -1434,6 +1675,25 @@ fn rekey_encryption_transactional<R: Runtime>(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('security_type', ?1)",
         rusqlite::params![security_type],
     ).map_err(|e| format!("Failed to update security_type: {}", e))?;
+
+    // The wrap always moves with the key it protects, inside this transaction:
+    // Some = the new key's wrap (switching TO biometric), None = drop any wrap
+    // (credential change, or switching AWAY from biometric). A crash can never
+    // leave a wrap that holds a key the store no longer uses.
+    match biometric_wrap {
+        Some(w) => {
+            tx.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('biometric_wrapped_key', ?1)",
+                rusqlite::params![w],
+            ).map_err(|e| format!("Failed to set biometric wrap: {}", e))?;
+        }
+        None => {
+            tx.execute(
+                "DELETE FROM settings WHERE key = 'biometric_wrapped_key'",
+                [],
+            ).map_err(|e| format!("Failed to clear biometric wrap: {}", e))?;
+        }
+    }
 
     tx.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_state', '')",
@@ -1462,8 +1722,16 @@ fn rekey_setting_in_tx(
     ).ok();
 
     if let Some(encrypted_val) = val {
-        let plaintext = decrypt_with_key(&encrypted_val, old_key)
-            .map_err(|_| format!("Failed to decrypt setting '{}'", key))?;
+        // A row that isn't ciphertext under `old_key` and isn't hex at all was
+        // written plaintext (e.g. bunker_url stored before encryption was
+        // enabled) — wrap it under the new key rather than failing the rekey.
+        let looks_encrypted = encrypted_val.len() >= 56
+            && encrypted_val.bytes().all(|b| b.is_ascii_hexdigit());
+        let plaintext = match decrypt_with_key(&encrypted_val, old_key) {
+            Ok(p) => p,
+            Err(_) if !looks_encrypted => encrypted_val.clone(),
+            Err(_) => return Err(format!("Failed to decrypt setting '{}'", key)),
+        };
 
         let re_encrypted = encrypt_with_key(&plaintext, new_key);
 
@@ -1507,4 +1775,87 @@ fn rekey_pivx_in_tx(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod rekey_setting_tests {
+    use super::*;
+    use crate::crypto::{encrypt_with_key, decrypt_with_key};
+    const OLD: [u8; 32] = [3u8; 32];
+    const NEW: [u8; 32] = [5u8; 32];
+
+    fn conn() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);").unwrap();
+        c
+    }
+    fn put(c: &rusqlite::Connection, k: &str, v: &str) {
+        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![k, v]).unwrap();
+    }
+    fn get(c: &rusqlite::Connection, k: &str) -> String {
+        c.query_row("SELECT value FROM settings WHERE key = ?1", rusqlite::params![k], |r| r.get(0)).unwrap()
+    }
+
+    /// The bug that shipped: a keyless account's canary stayed under the dead
+    /// key, so the NEXT cold boot rejected the correct credential.
+    #[test]
+    fn canary_survives_rekey() {
+        let mut c = conn();
+        put(&c, "nip55_pin_check", &encrypt_with_key(crate::commands::account::NIP55_PIN_CANARY, &OLD));
+        let tx = c.transaction().unwrap();
+        rekey_setting_in_tx(&tx, "nip55_pin_check", &OLD, &NEW).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            decrypt_with_key(&get(&c, "nip55_pin_check"), &NEW).unwrap(),
+            crate::commands::account::NIP55_PIN_CANARY
+        );
+    }
+
+    /// Same shape for bunker accounts: an un-rekeyed url = permanent login failure.
+    #[test]
+    fn bunker_url_survives_rekey() {
+        let mut c = conn();
+        let url = "bunker://abc?relay=wss://relay.example";
+        put(&c, "bunker_url", &encrypt_with_key(url, &OLD));
+        let tx = c.transaction().unwrap();
+        rekey_setting_in_tx(&tx, "bunker_url", &OLD, &NEW).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(decrypt_with_key(&get(&c, "bunker_url"), &NEW).unwrap(), url);
+    }
+
+    /// A row written before encryption was enabled is plaintext: wrap it under
+    /// the new key rather than failing the whole migration.
+    #[test]
+    fn plaintext_row_is_adopted_not_fatal() {
+        let mut c = conn();
+        let url = "bunker://plain?relay=wss://r.example";
+        put(&c, "bunker_url", url);
+        let tx = c.transaction().unwrap();
+        rekey_setting_in_tx(&tx, "bunker_url", &OLD, &NEW).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(decrypt_with_key(&get(&c, "bunker_url"), &NEW).unwrap(), url);
+    }
+
+    /// Ciphertext that does NOT belong to `old_key` must abort the rekey — the
+    /// alternative is committing a value nobody can ever decrypt.
+    #[test]
+    fn wrong_old_key_aborts() {
+        let mut c = conn();
+        put(&c, "pkey", &encrypt_with_key("nsec1example", &[9u8; 32]));
+        let tx = c.transaction().unwrap();
+        assert!(rekey_setting_in_tx(&tx, "pkey", &OLD, &NEW).is_err());
+    }
+
+    /// Absent rows are a no-op (accounts legitimately lack pkey, seed, canary).
+    #[test]
+    fn missing_row_is_noop() {
+        let mut c = conn();
+        let tx = c.transaction().unwrap();
+        rekey_setting_in_tx(&tx, "nip55_pin_check", &OLD, &NEW).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            c.query_row("SELECT count(*) FROM settings", [], |r| r.get::<_, i64>(0)).unwrap(), 0
+        );
+    }
 }

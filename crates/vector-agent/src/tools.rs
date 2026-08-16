@@ -135,6 +135,45 @@ pub struct EditCommunityMetadataRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateChannelRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "Channel name")]
+    pub name: String,
+    #[schemars(description = "Private channel: its own key + a channel-scoped access role. Only members granted that role can read it — grant_channel_access sends them the key. Default false (public: every member reads it).")]
+    #[serde(default)]
+    pub private: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ChannelRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "Channel id (hex)")]
+    pub channel_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RenameChannelRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "Channel id (hex)")]
+    pub channel_id: String,
+    #[schemars(description = "New channel name")]
+    pub name: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ChannelMemberRequest {
+    #[schemars(description = "Community id (hex)")]
+    pub community_id: String,
+    #[schemars(description = "Channel id (hex)")]
+    pub channel_id: String,
+    #[schemars(description = "The member's npub")]
+    pub npub: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SendCommunityMessageRequest {
     #[schemars(description = "Channel id (the hex chat id of a Community channel)")]
     pub channel_id: String,
@@ -195,7 +234,7 @@ impl VectorAgent {
     /// prior listener ended when `swap_session` shut its client down.
     fn respawn_listener(&self) {
         let buffer = self.message_buffer.clone();
-        tokio::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             let handler = Arc::new(crate::handler::AgentEventHandler::with_buffer(buffer));
             if let Err(e) = VectorCore.listen(handler).await {
                 eprintln!("[vector-agent] re-listen error: {}", e);
@@ -413,16 +452,16 @@ impl VectorAgent {
 
     // === Communities ===
 
-    #[tool(description = "List all Vector Communities held locally (owned or joined), each with its channels and channel ids. Use a channel id as the chat_id for get_messages.")]
+    #[tool(description = "List all Vector Communities held locally (owned or joined), each with its channels and channel ids. Use a channel id as the chat_id for get_messages. `dissolved: true` means the community is permanently sealed — its history still reads, but no message or change will EVER be accepted again, so do not try to post there.")]
     async fn list_communities(&self) -> Result<CallToolResult, McpError> {
         let communities = self.core.list_communities().await;
         let json = serde_json::to_string_pretty(&communities).unwrap_or_else(|_| "[]".into());
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Create a new Vector Community (single 'general' channel) owned by this identity. Signs the owner attestation so the creator is the proven owner. Returns the community + channel ids.")]
+    #[tool(description = "Create a new Concord v2 Community (single 'general' channel) owned by this identity. The community_id self-certifies the owner, so ownership can't be forged. Returns the community + channel ids. Channels (incl. private ones) can only be managed on v2, and v1 is post-timelock — new v1 invites are refused — so this always creates v2.")]
     async fn create_community(&self, Parameters(req): Parameters<CreateCommunityRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.create_community(&req.name).await {
+        match self.core.create_community_v2(&req.name).await {
             Ok(summary) => Ok(CallToolResult::success(vec![Content::text(
                 serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into())
             )])),
@@ -430,9 +469,61 @@ impl VectorAgent {
         }
     }
 
+    // === Channels (CORD-03) ===
+
+    #[tool(description = "Create a channel in a Community (Concord v2 only). A PRIVATE channel mints its own key plus a channel-scoped access Role that IS its access list — only you can read it until you grant_channel_access to someone. A public one is readable by every member. Returns the new channel id (hex).")]
+    async fn create_channel(&self, Parameters(req): Parameters<CreateChannelRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.create_channel(&req.community_id, &req.name, req.private).await {
+            Ok(id) => Ok(CallToolResult::success(vec![Content::text(id)])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Rename a channel. A versioned edit of the same entity, so its id and history survive.")]
+    async fn rename_channel(&self, Parameters(req): Parameters<RenameChannelRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.rename_channel(&req.community_id, &req.channel_id, &req.name).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("renamed")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Delete (tombstone) a channel. TERMINAL — the id is never reused, and history stays readable to anyone who already holds its keys.")]
+    async fn delete_channel(&self, Parameters(req): Parameters<ChannelRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.delete_channel(&req.community_id, &req.channel_id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("deleted")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Grant an npub read access to a PRIVATE channel: adds the channel's access role and vends them the key over a direct invite. They pick it up on their next sync — cross-client (Armada included).")]
+    async fn grant_channel_access(&self, Parameters(req): Parameters<ChannelMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.grant_channel_access(&req.community_id, &req.channel_id, &req.npub).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("granted + key vended")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Revoke an npub's read access to a PRIVATE channel: drops the access role and REKEYS the channel so the removal actually severs them. They keep whatever history they already read — a rekey protects the future, never the past.")]
+    async fn revoke_channel_access(&self, Parameters(req): Parameters<ChannelMemberRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.revoke_channel_access(&req.community_id, &req.channel_id, &req.npub).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("revoked + channel rekeyed")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Who may read a private channel: its channel-scoped access roles, the members holding them, the owner, and whether WE currently hold its key (`readable`). A private channel we know of but hold no key for reads false — that is 'granted but the key hasn't arrived', not 'not a member'.")]
+    async fn channel_access(&self, Parameters(req): Parameters<ChannelRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.channel_access(&req.community_id, &req.channel_id) {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into())
+            )])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "Mint a shareable public invite link for a Community this identity owns. Returns the URL.")]
     async fn create_public_invite(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
-        match self.core.create_public_invite(&req.community_id).await {
+        match self.core.create_public_invite(&req.community_id, None, None).await {
             Ok(url) => Ok(CallToolResult::success(vec![Content::text(url)])),
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }

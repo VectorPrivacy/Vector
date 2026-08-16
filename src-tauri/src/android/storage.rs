@@ -308,8 +308,32 @@ pub fn migrate_old_downloads() {
 }
 
 /// Open a file via an ACTION_VIEW chooser. Returns true if an activity launched.
+/// An `.apk` instead goes to the system package installer (or, until Vector is
+/// trusted as an install source, to the settings screen that grants it).
 pub fn open_file(path: &str) -> Result<bool, String> {
     call_file_action("openFile", path)
+}
+
+/// Whether the user has trusted Vector as an app install source ("Install unknown
+/// apps"). NOT a runtime permission — there is no dialog to request it, so the
+/// only route is the settings screen `open_file` sends them to. Fail-closed: an
+/// unreadable answer reads as "not yet", which costs at most a settings trip.
+pub fn can_install_apks() -> bool {
+    with_android_context(|env, activity| {
+        let cls = load_class(env, activity, "io/vectorapp/VectorFiles")?;
+        let res = env
+            .call_static_method(
+                &cls,
+                "canInstallApks",
+                "(Landroid/content/Context;)Z",
+                &[JValue::Object(activity)],
+            )
+            .map_err(|e| format!("canInstallApks: {:?}", e))?
+            .z()
+            .map_err(|e| format!("canInstallApks bool: {:?}", e))?;
+        Ok(res)
+    })
+    .unwrap_or(false)
 }
 
 /// Share a file via Android's share sheet (ACTION_SEND). Returns true if launched.

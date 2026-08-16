@@ -23,7 +23,7 @@
 //! `community::version::EDITION_LABEL`), which upstream froze verbatim.
 
 use hkdf::Hkdf;
-use nostr_sdk::nips::nip44::v2::ConversationKey;
+use nostr_sdk::prelude::nip44::v2::ConversationKey;
 use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
 use sha2::{Digest, Sha256};
 
@@ -32,6 +32,7 @@ use super::super::{ChannelId, CommunityId, Epoch};
 /// A.6 purpose labels. Part of the wire format — append, never edit or reuse.
 const LABEL_CHANNEL: &str = "concord/channel";
 const LABEL_CONTROL: &str = "concord/control";
+const LABEL_CONTROL_SIGNER: &str = "concord/control-signer";
 const LABEL_REKEY_PSEUDONYM: &str = "concord/rekey-pseudonym";
 const LABEL_BASE_REKEY_PSEUDONYM: &str = "concord/base-rekey-pseudonym";
 const LABEL_RECIPIENT_PSEUDONYM: &str = "concord/recipient-pseudonym";
@@ -42,6 +43,7 @@ const LABEL_VOICE_SENDER: &str = "concord/voice-sender";
 const LABEL_DISSOLVED: &str = "concord/dissolved";
 const LABEL_GRANT: &str = "concord/grant";
 const LABEL_BANLIST: &str = "concord/banlist";
+const LABEL_PINS: &str = "concord/pins";
 const LABEL_INVITE_LINKS: &str = "concord/invite-links";
 const LABEL_INVITE_KEY: &str = "concord/invite-key";
 /// A.4 community_id commitment prefix — plain SHA-256, NOT the hkdf shape.
@@ -109,6 +111,14 @@ pub struct GroupKey {
 }
 
 impl GroupKey {
+    /// Assemble a SPLIT write group (CORD-01 Write-Restricted Streams): the
+    /// control_root-derived signer keypair paired with the community_root-derived
+    /// read conv_key. Only the Control Plane composes keys this way — every
+    /// other plane's signer and conv_key come from one derivation.
+    pub(crate) fn from_parts(keys: Keys, conv_key: ConversationKey) -> Self {
+        GroupKey { keys, conv_key }
+    }
+
     fn derive(label: &str, secret: &[u8], id32: &[u8; 32], epoch: Option<u64>) -> Self {
         let info = build_info(label, id32, epoch);
         let sk = hkdf_to_secret_key(secret, &info);
@@ -157,9 +167,23 @@ pub fn channel_group_key(secret: &[u8; 32], channel_id: &ChannelId, epoch: Epoch
     GroupKey::derive(LABEL_CHANNEL, secret, &channel_id.0, Some(epoch.0))
 }
 
-/// The Control Plane's group key (community_root-keyed, community-id-bound).
+/// The Control Plane's community_root-keyed group key (CORD-02 §5).
+///
+/// Post-split this is the plane's READ key: its conv_key encrypts the wraps for
+/// every member. On a LEGACY (pre-split) epoch the same derivation was the whole
+/// plane — its pk the address and wrap signer too — retained for reading such
+/// epochs; the two schemes never collide (different labels, different addresses).
 pub fn control_group_key(community_root: &[u8; 32], community_id: &CommunityId, epoch: Epoch) -> GroupKey {
     GroupKey::derive(LABEL_CONTROL, community_root, &community_id.0, Some(epoch.0))
+}
+
+/// The Control Plane's control_root-keyed SIGNER keypair (CORD-02 §2/§5): its pk
+/// is the plane's address, its staff-only sk signs the wraps. Every member holds
+/// the derived `control_pk` (delivered, never derived — only the owner and staff
+/// hold the `control_root` input); wrap content encrypts under
+/// [`control_group_key`]'s conv_key, not this one's.
+pub fn control_signer_group_key(control_root: &[u8; 32], community_id: &CommunityId, epoch: Epoch) -> GroupKey {
+    GroupKey::derive(LABEL_CONTROL_SIGNER, control_root, &community_id.0, Some(epoch.0))
 }
 
 /// The Guestbook Plane's group key (community_root-keyed, community-id-bound).
@@ -225,6 +249,11 @@ pub fn grant_locator(community_id: &CommunityId, member_xonly: &[u8; 32]) -> [u8
 /// The community-wide Banlist coordinate.
 pub fn banlist_locator(community_id: &CommunityId) -> [u8; 32] {
     hkdf32(&community_id.0, &build_info(LABEL_BANLIST, &ZERO32, None))
+}
+
+/// A Channel's Pin List coordinate (CORD-04 §7).
+pub fn pins_locator(community_id: &CommunityId, channel_id: &ChannelId) -> [u8; 32] {
+    hkdf32(&community_id.0, &build_info(LABEL_PINS, &channel_id.0, None))
 }
 
 /// A creator's invite-link Registry coordinate (CORD-05 §5) — bound to the
@@ -342,6 +371,9 @@ mod tests {
     const GOLDEN_CHANNEL_E0_PK: &str = "7a5c5dff759a63f1fc2779864487432bae3d1ea72c4ffabd39f4c1fdaf62097a";
     const GOLDEN_CHANNEL_EMULTI_PK: &str = "f20c7d192cc87615d7341e86f38f85303f4708b40232d4fea521ab8217767391";
     const GOLDEN_CONTROL_E0_PK: &str = "c43df20bf4d6eeaea5149619662ffe9b211f31e11bb4a59f56b6e906f702d46f";
+    const GOLDEN_CONTROL_SIGNER_E0_SEED: &str = "c4a3e8354d95137132087356412b67b53e025d127d45de45cff9ecf45b0c24f6";
+    const GOLDEN_CONTROL_SIGNER_E0_PK: &str = "718aef388257f3fd9f1bfae5cf2cbd0594a2ffc31adb5c1fe22c502c046acaee";
+    const GOLDEN_CONTROL_SIGNER_EMULTI_PK: &str = "e27235cc13be2f9ad65648e01ff2b63402846469c8638b5386c625688194ec7d";
     const GOLDEN_GUESTBOOK_E0_PK: &str = "ad09de582026fa7a052db18bb5827fa24c15e929d59aadcc91efb8508f5368ad";
     const GOLDEN_CHANNEL_REKEY_E1_PK: &str = "7c55cdb957e9db2b4800d687b2a07d3f7066b1a35824a1e86ba871f55e87e8b5";
     const GOLDEN_BASE_REKEY_E1_PK: &str = "fb2fa44fba66ba15595f784255a1cb569531db8784432ac0e4fe838498dd9dea";
@@ -379,6 +411,20 @@ mod tests {
     #[test]
     fn control_group_key_golden_vector() {
         assert_eq!(control_group_key(&secret(), &cid(), Epoch(0)).pk_hex(), GOLDEN_CONTROL_E0_PK);
+    }
+
+    #[test]
+    fn control_signer_group_key_golden_vectors() {
+        // Same fixed inputs as the control read key, different label — the split's
+        // signer address must land elsewhere (CORD-02 §5: the two never collide).
+        let gk = control_signer_group_key(&secret(), &cid(), Epoch(0));
+        assert_eq!(hex(gk.keys().secret_key().as_secret_bytes()), GOLDEN_CONTROL_SIGNER_E0_SEED);
+        assert_eq!(gk.pk_hex(), GOLDEN_CONTROL_SIGNER_E0_PK);
+        assert_ne!(gk.pk_hex(), GOLDEN_CONTROL_E0_PK);
+        assert_eq!(
+            control_signer_group_key(&secret(), &cid(), Epoch(EPOCH_MULTI)).pk_hex(),
+            GOLDEN_CONTROL_SIGNER_EMULTI_PK
+        );
     }
 
     #[test]
@@ -454,6 +500,7 @@ mod tests {
         let pks = [
             channel_group_key(&secret(), &chan(), Epoch(0)).pk_hex(),
             control_group_key(&secret(), &cid(), Epoch(0)).pk_hex(),
+            control_signer_group_key(&secret(), &cid(), Epoch(0)).pk_hex(),
             guestbook_group_key(&secret(), &cid(), Epoch(0)).pk_hex(),
             channel_rekey_group_key(&secret(), &chan(), Epoch(0)).pk_hex(),
             base_rekey_group_key(&secret(), &cid(), Epoch(0)).pk_hex(),

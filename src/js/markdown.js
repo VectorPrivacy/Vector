@@ -217,7 +217,33 @@ function initializeMarked() {
         }
     };
 
-    marked.use({ tokenizer, renderer, extensions: [noPreviewAutolink, spoilerExtension] });
+    // Subtext: a line starting `-# ` renders small and muted (Discord's tiny
+    // text). Block-level so it can interrupt a paragraph; inline formatting
+    // still applies within the line.
+    const subtextExtension = {
+        name: 'subtext',
+        level: 'block',
+        start(src) {
+            const m = src.match(/(^|\n)-# /);
+            return m ? m.index + m[1].length : undefined;
+        },
+        tokenizer(src) {
+            const match = /^-# ([^\n]*)(?:\n|$)/.exec(src);
+            if (match) {
+                return {
+                    type: 'subtext',
+                    raw: match[0],
+                    text: match[1],
+                    tokens: this.lexer.inlineTokens(match[1])
+                };
+            }
+        },
+        renderer(token) {
+            return `<small class="md-subtext">${this.parser.parseInline(token.tokens)}</small>`;
+        }
+    };
+
+    marked.use({ tokenizer, renderer, extensions: [noPreviewAutolink, spoilerExtension, subtextExtension] });
 }
 
 /**
@@ -479,7 +505,7 @@ function parseMarkdown(md) {
 
     const SAFE_TAGS = [
         'a', 'abbr', 'b', 'blockquote', 'br', 'code', 'del', 'details', 'div', 'em', 'h1', 'h2', 'h3', 'h4',
-        'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's', 'span', 'strong', 'sub',
+        'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 's', 'small', 'span', 'strong', 'sub',
         'summary', 'sup', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'u', 'ul'
     ];
 
@@ -491,7 +517,7 @@ function parseMarkdown(md) {
 
     // Whitelist of allowed class prefixes (for highlight.js and our own classes)
     const ALLOWED_CLASS_PREFIXES = ['hljs', 'language-'];
-    const ALLOWED_CLASSES = ['code-block-wrapper', 'markdown-paragraph', 'spoiler-wrapper', 'spoiler', 'revealed'];
+    const ALLOWED_CLASSES = ['code-block-wrapper', 'markdown-paragraph', 'spoiler-wrapper', 'spoiler', 'revealed', 'md-subtext'];
 
     // Create a one-time hook for this sanitization call
     DOMPurify.removeAllHooks();

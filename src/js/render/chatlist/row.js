@@ -141,6 +141,17 @@ function renderChat(chat, primaryColor) {
         divHeader.appendChild(botIcon);
     }
 
+    // Pinned marker: after the type icon, before the timestamp. Accent-coloured
+    // like the bot badge, because it marks the user's OWN choice rather than
+    // what the chat is.
+    if (arrPinnedChats.includes(chatPinKey(chat))) {
+        const pinIcon = document.createElement('span');
+        pinIcon.className = 'icon icon-pin chatlist-type-icon';
+        pinIcon.addEventListener('mouseenter', () => showGlobalTooltip('Pinned', pinIcon));
+        pinIcon.addEventListener('mouseleave', hideGlobalTooltip);
+        divHeader.appendChild(pinIcon);
+    }
+
     // Inline time-ago (unread-only). Read rows keep the right-aligned variant
     // appended further down.
     const cLastMsgForHeader = chat.messages[chat.messages.length - 1];
@@ -231,7 +242,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         items.push({
             label: 'Mark as Read',
             icon: 'check',
-            onClick: () => { markChatCaughtUp(chat); renderChatlist(); },
+            onClick: () => { markChatCaughtUp(chat, /* explicit */ true); renderChatlist(); },
         });
     } else if (!chat.muted && chatCanMarkUnread(chat)) {
         // Muted chats never show an unread badge, so offering it there would be a silent no-op.
@@ -245,8 +256,27 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         label: chat.muted ? 'Unmute' : 'Mute',
         icon: 'volume-mute',
         onClick: async () => {
+            if (blockedBySync()) return;
             chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
             renderChatlist();
+        },
+    });
+    // Pin/Unpin. Keyed by chatPinKey, so a Community pins as the COMMUNITY —
+    // its general row is what the pin then hoists.
+    const strPinKey = chatPinKey(chat);
+    const fPinned = arrPinnedChats.includes(strPinKey);
+    items.push({
+        label: fPinned ? 'Unpin' : 'Pin',
+        icon: 'pin',
+        onClick: async () => {
+            if (blockedBySync()) return;
+            try {
+                arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: strPinKey });
+                sortChats();
+                renderChatlist();
+            } catch (e) {
+                showToast(e);
+            }
         },
     });
     if (!isGroup) {
@@ -256,6 +286,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
             icon: 'x-user',
             danger: true,
             onClick: async () => {
+                if (blockedBySync()) return;
                 const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: chat.id });

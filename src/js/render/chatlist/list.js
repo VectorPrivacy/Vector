@@ -17,6 +17,49 @@
 let lastChatlistStateHash = '';
 
 /**
+ * Whether a Community chat is the one row its community gets in the list.
+ *
+ * Every channel is registered and synced, but this release renders a community as a
+ * SINGLE row: its primary channel ("general", else the first one). The backend stamps
+ * `primary_channel` onto every channel row, so a sibling is any row whose own id isn't
+ * that value. Rows written before the stamp existed fall back to rendering — better a
+ * duplicate row than a community that silently disappears from the list.
+ */
+function isPrimaryChannelChat(chat) {
+    const primary = chat?.metadata?.custom_fields?.primary_channel;
+    return !primary || primary === chat.id;
+}
+
+/**
+ * Whether a chat gets a row in the chat list — i.e. whether the user can SEE it.
+ *
+ * The single source of truth for "does this chat exist in the UI", shared by the row
+ * builder and by every unread indicator. Anything invisible here must not be counted
+ * anywhere, or an indicator lights for a chat the user cannot open to clear: a blocked
+ * DM or a sibling channel has no row, so its unread is unreachable.
+ *
+ * Keep this as the ONLY definition. The back-chevron dot previously had its own copy of
+ * these rules and drifted out of sync with the rows.
+ */
+function chatIsVisibleInList(chat) {
+    if (!chat) return false;
+    const isGroup = chatIsGroup(chat);
+    // Own profile lives in Bookmarks/Notes, not the list.
+    if (chat.id === strPubkey) return false;
+    if (isGroup) {
+        // A Community row with no owning community is a bare persistence anchor.
+        if (!chat.metadata?.custom_fields?.community_id) return false;
+        // Sibling channels stay synced and addressable but get no row of their own.
+        if (!isPrimaryChannelChat(chat)) return false;
+        return true;
+    }
+    // DMs appear once they have content, and blocked senders never appear.
+    if (chat.messages.length === 0) return false;
+    if (getProfile(chat.id)?.is_blocked) return false;
+    return true;
+}
+
+/**
  * Generate a hash representing the current state of all chats
  */
 function generateChatlistStateHash() {
@@ -52,6 +95,10 @@ function generateChatlistStateHash() {
             profile?.avatar,
             profile?.avatar_cached,
             chat.muted,
+            // Pin state, not just position: pinning the chat that already sits
+            // at the top changes no order, so without this the glyph would
+            // never paint (the hash would match and the render be skipped).
+            arrPinnedChats.includes(chatPinKey(chat)),
             profile?.is_blocked,
             isGroup ? chat.metadata?.avatar_cached : undefined,
             isGroup ? chat.metadata?.custom_fields?.name : undefined,
@@ -71,10 +118,12 @@ function generateChatlistStateHash() {
 function renderChatlist() {
     if (fInit) return;
 
-    // Newest-first with creation/join-time fallback for message-less communities — the one
-    // chokepoint that guarantees order no matter which path added a chat (create, join,
-    // boot, message). Without it a freshly-surfaced chat stays wherever it was appended.
-    arrChats.sort((a, b) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+    // Pinned first, then newest-first with a creation/join-time fallback for
+    // message-less communities — the one chokepoint that guarantees order no
+    // matter which path added a chat (create, join, boot, message). Without it a
+    // freshly-surfaced chat stays wherever it was appended, and a pin set by any
+    // other path is undone by the next render.
+    sortChats();
 
     // Generate a hash of the current RENDERABLE state
     const currentStateHash = generateChatlistStateHash();
@@ -96,30 +145,13 @@ function renderChatlist() {
 
     // Then render regular chats
     for (const chat of arrChats) {
-        // For groups, we show them even if they have no messages yet
-        // For DMs, we only show them if they have messages
-        if (!chatIsGroup(chat) && chat.messages.length === 0) continue;
-
-        // A Community row without its owning community_id is a bare persistence
-        // anchor (a channel row auto-created by the message persist).
-        if (chatIsGroup(chat) && !chat.metadata?.custom_fields?.community_id) continue;
-
-        // One row per community: its non-primary channels render nested under it
-        // (see renderCommunityChannels), not beside it.
-        if (chatIsGroup(chat) && !isPrimaryChannelChat(chat)) continue;
+        // Visibility (own profile, bare anchors, sibling channels, empty or blocked DMs)
+        // is decided by `chatIsVisibleInList` so the unread indicators can share it.
+        if (!chatIsVisibleInList(chat)) continue;
 
         // Message-less community: lazy-load its latest membership event so the preview can show
         // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
         if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);
-
-        // Do not render our own profile: it is accessible via the Bookmarks/Notes section
-        if (chat.id === strPubkey) continue;
-
-        // Hide DM chats with blocked users from the chat list
-        if (!chatIsGroup(chat)) {
-            const chatProfile = getProfile(chat.id);
-            if (chatProfile?.is_blocked) continue;
-        }
 
         const divContact = renderChat(chat, primaryColor);
         fragment.appendChild(divContact);
@@ -139,9 +171,16 @@ function renderChatlist() {
     // message and groups the user has joined; if the fragment came out
     // empty AND there are no pending invites, surface a friendly nudge
     // so the user understands what to do next.
-    if (!fragment.firstElementChild && arrCommunityInvites.length === 0) {
+    const fEmptyList = !fragment.firstElementChild && arrCommunityInvites.length === 0;
+    if (fEmptyList) {
         fragment.appendChild(buildChatlistEmptyState());
+        fragment.appendChild(buildChatlistIntro());
     }
+
+    // The bottom fadeout exists to soften a scrolling list; over the empty
+    // state it just washes out the intro.
+    const fadeout = document.querySelector('#chats .fadeout-bottom');
+    if (fadeout) fadeout.style.display = fEmptyList ? 'none' : '';
 
     // Replace the existing list in one native call
     domChatList.replaceChildren(fragment);
@@ -167,28 +206,140 @@ function renderChatlist() {
  */
 function buildChatlistEmptyState() {
     const wrap = document.createElement('div');
-    wrap.className = 'chatlist-empty-state';
+    wrap.className = 'chatlist-get-started btn';
+    wrap.setAttribute('role', 'button');
     wrap.innerHTML = `
-        <div class="chatlist-empty-state-icon">
-            <span class="icon icon-chats"></span>
+        <div class="chatlist-get-started-badge">
+            <span class="icon icon-add-user"></span>
         </div>
-        <h3>No chats yet</h3>
-        <p>Start a <strong>New Chat</strong> or create a <strong>Group Chat</strong> from the buttons above. Messages you receive from other Vector users will appear here automatically.</p>
-        <button class="chatlist-empty-state-share cancel-btn" type="button">
-            Share My Contact
-        </button>
+        <div class="chatlist-get-started-text">
+            <h4>Get Started</h4>
+            <p>Create your first private chat.</p>
+        </div>
+        <div class="chatlist-get-started-watermark">
+            <span class="icon icon-add-user"></span>
+        </div>
     `;
-    const btn = wrap.querySelector('.chatlist-empty-state-share');
-    btn.addEventListener('click', () => {
-        if (!strPubkey) return;
-        const profileUrl = `https://vectorapp.io/profile/${strPubkey}`;
-        navigator.clipboard.writeText(profileUrl).then(() => {
-            showToast('Contact Link Copied');
-        }).catch(() => {
-            showToast('Failed to Copy Contact Link');
-        });
-    });
+    // Rides the New Chat button's own handler, so the two can never diverge.
+    wrap.addEventListener('click', () => document.getElementById('new-chat-btn')?.click());
     return wrap;
+}
+
+/**
+ * Bottom-of-list welcome: Viktor points fresh accounts at the Hub. Rides the
+ * list fragment, so the first real chat render sweeps it away with the rest.
+ */
+function buildChatlistIntro() {
+    const wrap = document.createElement('div');
+    wrap.className = 'chatlist-intro';
+    wrap.innerHTML = `
+        <img class="chatlist-intro-viktor" alt="Viktor">
+        <div class="chatlist-intro-text">
+            <h4>Welcome to Vector!</h4>
+            <p>Feel free to <span class="chatlist-intro-link">join the public community</span> to learn more about Vector, discuss privacy, and make some new friends.</p>
+        </div>
+    `;
+    wrap.querySelector('.chatlist-intro-link').addEventListener('click', () => {
+        openUrl('https://vectorapp.io/hub');
+    });
+
+    bindViktor(wrap.querySelector('.chatlist-intro-viktor'));
+    return wrap;
+}
+
+/** Viktor greets on the first paint after login; page-lifetime latch. */
+let fViktorGreeted = false;
+
+const VIKTOR_SMILE = '/icons/viktor-smile.gif';
+
+/**
+ * Idle pose, rasterised once from the smile clip's first frame — drawImage
+ * of an animated image always takes frame one, so no separate still ships
+ * and the idle can never drift from the clip it pauses.
+ */
+let viktorIdleSrc = null;
+const viktorIdleReady = (() => {
+    const probe = new Image();
+    probe.src = VIKTOR_SMILE;
+    return probe.decode().then(() => {
+        const c = document.createElement('canvas');
+        c.width = probe.naturalWidth;
+        c.height = probe.naturalHeight;
+        c.getContext('2d').drawImage(probe, 0, 0);
+        viktorIdleSrc = c.toDataURL('image/png');
+    }).catch(() => { viktorIdleSrc = VIKTOR_SMILE; });
+})();
+
+/**
+ * Viktor's little state machine. GIFs can't be paused, so every state is a
+ * file swap: idle = the smile's first frame, hover = the smile loop, click =
+ * one exclamation. Leaving mid-smile lets the loop in progress finish rather
+ * than cutting him off, and both clips share the idle frame at their seams.
+ */
+function bindViktor(img) {
+    const SMILE = VIKTOR_SMILE;
+    const EXCLAIM = '/icons/viktor-exclaim.gif';
+    const SMILE_MS = 1500;
+    const EXCLAIM_MS = 1600;
+    let mode = 'idle';
+    let hovering = false;
+    let smileStart = 0;
+    let timer = null;
+
+    // WebKit animates GIFs on a shared document-wide clock: re-assigning the
+    // same URL joins the cycle mid-flight instead of starting at frame one,
+    // which reads as a snap against the still. A unique query per play forces
+    // a genuine restart; the file is a local asset, so the refetch is free.
+    let playSeq = 0;
+    const fresh = (url) => `${url}?play=${++playSeq}`;
+
+    const toIdle = () => { mode = 'idle'; if (viktorIdleSrc) img.src = viktorIdleSrc; };
+    const smile = () => {
+        clearTimeout(timer);
+        mode = 'smile';
+        smileStart = Date.now();
+        img.src = fresh(SMILE);
+    };
+    const exclaim = () => {
+        clearTimeout(timer);
+        mode = 'exclaim';
+        img.src = fresh(EXCLAIM);
+        timer = setTimeout(() => (hovering ? smile() : toIdle()), EXCLAIM_MS);
+    };
+
+    // The still rasterises async on first use; paint it as soon as it lands.
+    if (viktorIdleSrc) toIdle();
+    else viktorIdleReady.then(() => { if (mode === 'idle') toIdle(); });
+
+    img.addEventListener('pointerenter', (e) => {
+        if (e.pointerType !== 'mouse') return;
+        hovering = true;
+        if (mode === 'idle') smile();
+        else if (mode === 'smile') clearTimeout(timer);
+    });
+    img.addEventListener('pointerleave', (e) => {
+        if (e.pointerType !== 'mouse') return;
+        hovering = false;
+        if (mode !== 'smile') return;
+        // Let the loop in progress run to its end before settling to idle.
+        const remainder = SMILE_MS - ((Date.now() - smileStart) % SMILE_MS);
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+            if (mode === 'smile' && !hovering) toIdle();
+        }, remainder);
+    });
+    img.addEventListener('click', exclaim);
+
+    // Boot greeting: one exclamation as the login fade-in lands.
+    if (!fViktorGreeted) {
+        fViktorGreeted = true;
+        const kick = () => setTimeout(exclaim, 150);
+        if (domChatList.classList.contains('intro-anim')) {
+            domChatList.addEventListener('animationend', kick, { once: true });
+        } else {
+            setTimeout(kick, 400);
+        }
+    }
 }
 
 /**
@@ -236,6 +387,14 @@ function updateChatlistPreview(chatId) {
 }
 
 /**
+ * Whether a sender's DM chat is muted: a muted person is silent in every
+ * chat, so their community messages don't badge either. DM ids ARE npubs.
+ */
+function senderIsMuted(npub) {
+    return arrChats.some(c => c.muted && c.id === npub);
+}
+
+/**
  * Count the quantity of unread messages
  * @param {Chat} chat - The Chat we're checking
  * @returns {number} - The amount of unread messages, if any
@@ -269,10 +428,11 @@ function countUnreadMessages(chat) {
             break;
         }
 
-        // Skip messages from blocked users in group chats
+        // Skip messages from blocked or muted users in group chats
         if (chatIsGroup(chat) && msg.npub) {
             const authorProfile = getProfile(msg.npub);
             if (authorProfile?.is_blocked) continue;
+            if (senderIsMuted(msg.npub)) continue;
         }
 
         // Count this message as unread
@@ -337,6 +497,8 @@ function countPingMessages(chat) {
         if (isGroup && msg.npub) {
             const authorProfile = getProfile(msg.npub);
             if (authorProfile?.is_blocked) continue;
+            // A muted sender never pings, even through an unmuted channel.
+            if (senderIsMuted(msg.npub)) continue;
         }
         if (!msg.content) continue;
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);

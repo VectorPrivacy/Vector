@@ -12,7 +12,7 @@
 //! read back correctly, so the toggle/PIN-rekey flows and the one-time backfill are safe to re-run.
 
 use nostr_sdk::prelude::{Keys, PublicKey, SecretKey};
-use nostr_sdk::ToBech32;
+use nostr_sdk::prelude::ToBech32;
 use rusqlite::{params, OptionalExtension};
 
 use crate::community::{Channel, ChannelId, ChannelKey, Community, CommunityId, Epoch, ServerRootKey};
@@ -146,6 +146,182 @@ pub fn save_community(community: &Community) -> Result<(), String> {
     Ok(())
 }
 
+// ── Parked Private-Channel key vends (CORD-03 "delivered on grant") ──────────
+
+/// One parked key vend awaiting the control fold that proves its grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingChannelKey {
+    /// Row id — the discharge handle, since several candidates may name one channel.
+    pub id: i64,
+    pub channel_id: String,
+    pub epoch: u64,
+    pub key: [u8; 32],
+    /// Seal author — judged as an entitled vendor before the key is accepted.
+    pub sender: String,
+    pub received_at: i64,
+}
+
+/// Most candidate vends retained per channel, and per community overall.
+///
+/// Parking is reachable by ANY npub that can gift-wrap us, so these bound what a
+/// stranger can make us store — and decrypt on every follow pass. Small, because
+/// more than a couple of live candidates for one channel is already pathological.
+const MAX_PARKED_PER_CHANNEL: usize = 4;
+const MAX_PARKED_PER_COMMUNITY: usize = 64;
+
+/// Park a vended channel key as a CANDIDATE.
+///
+/// Deliberately NOT a single slot keyed on (community, channel): parking is open
+/// to any sender, so a slot lets a stranger pre-empt the entitled vendor's key
+/// and silently suppress delivery. Every vend is its own row, the judge tries
+/// them all, and the caps evict oldest-first so an unprovable flood cannot push
+/// out a provable row indefinitely.
+///
+/// `sender` is encrypted at rest with a per-write nonce, so it can be neither a
+/// key nor a dedupe column — hence oldest-first eviction rather than per-sender
+/// replacement.
+pub fn park_channel_key(
+    community_id: &str,
+    channel_id: &str,
+    epoch: u64,
+    key: &[u8; 32],
+    sender: &str,
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("park channel key tx: {e}"))?;
+    let enc = enc_key(key)?;
+    let enc_sender = enc_txt(sender)?;
+    tx.execute(
+        "INSERT INTO pending_channel_keys
+            (community_id, channel_id, epoch, channel_key, sender, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![community_id, channel_id, epoch as i64, &enc[..], enc_sender, now_secs()],
+    )
+    .map_err(|e| format!("park channel key: {e}"))?;
+    // Trim this channel's candidates, then the community's total. `id` is the
+    // arrival order (autoincrement), so this is oldest-first without trusting
+    // any attacker-supplied field.
+    tx.execute(
+        "DELETE FROM pending_channel_keys WHERE id IN (
+            SELECT id FROM pending_channel_keys
+             WHERE community_id = ?1 AND channel_id = ?2
+             ORDER BY id DESC LIMIT -1 OFFSET ?3)",
+        params![community_id, channel_id, MAX_PARKED_PER_CHANNEL as i64],
+    )
+    .map_err(|e| format!("trim parked channel keys: {e}"))?;
+    tx.execute(
+        "DELETE FROM pending_channel_keys WHERE id IN (
+            SELECT id FROM pending_channel_keys
+             WHERE community_id = ?1
+             ORDER BY id DESC LIMIT -1 OFFSET ?2)",
+        params![community_id, MAX_PARKED_PER_COMMUNITY as i64],
+    )
+    .map_err(|e| format!("trim parked community keys: {e}"))?;
+    tx.commit().map_err(|e| format!("park channel key commit: {e}"))?;
+    Ok(())
+}
+
+/// Every parked vend for a community, for the post-fold re-judge.
+pub fn get_pending_channel_keys(community_id: &str) -> Result<Vec<PendingChannelKey>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    // Newest first: the freshest candidate is the likeliest genuine vend, so a
+    // pile of stale squatters costs at most a few failed judgements.
+    let mut stmt = conn
+        .prepare("SELECT id, channel_id, epoch, channel_key, sender, received_at FROM pending_channel_keys WHERE community_id = ?1 ORDER BY id DESC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, channel_id, epoch, blob, sender, received_at) = row.map_err(|e| e.to_string())?;
+        // A key that won't decrypt is unusable — drop it rather than failing the
+        // whole re-judge for its sake.
+        let Ok(key) = dec_key(&blob) else { continue };
+        out.push(PendingChannelKey { id, channel_id, epoch: epoch as u64, key, sender: dec_txt(&sender), received_at });
+    }
+    Ok(out)
+}
+
+/// Seat a channel key on a channel that currently holds NONE, without the
+/// monotonic epoch guard.
+///
+/// [`advance_channel_epoch`] requires `new_epoch > current`, which is right for a
+/// rotation but wrong for first delivery: a keyless record parks at epoch 0 (the
+/// rekey-scan cursor) and a client that mints born-private channels at epoch 0
+/// vends exactly that epoch, so the guard would silently refuse the only key we
+/// will ever be offered. A keyless channel has no key to lose, so any authorized
+/// delivery is strictly an improvement.
+pub fn seat_channel_key(
+    community_id: &str,
+    channel_id: &str,
+    epoch: u64,
+    key: &[u8; 32],
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let tx = conn.unchecked_transaction().map_err(|e| format!("seat channel key tx: {e}"))?;
+    // "Keyless" is the caller's read of a snapshot; re-establish it HERE, inside the
+    // transaction that writes. Seating over a real key is a downgrade to whatever a
+    // vend offered, and only lock discipline stands between this and that today.
+    // A keyless private channel stores the community_root as its placeholder.
+    let placeholder: Vec<u8> = tx
+        .query_row(
+            "SELECT server_root_key FROM communities WHERE community_id = ?1",
+            params![community_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("seat channel key root: {e}"))?;
+    let current: Vec<u8> = tx
+        .query_row(
+            "SELECT channel_key FROM community_channels WHERE community_id = ?1 AND channel_id = ?2",
+            params![community_id, channel_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("seat channel key read: {e}"))?;
+    // Ciphertext carries a per-write nonce, so the comparison has to be on plaintext.
+    if dec_key(&current)? != dec_key(&placeholder)? {
+        return Err("channel already holds a key — seating would downgrade it".to_string());
+    }
+    store_epoch_key_tx(&tx, community_id, channel_id, epoch, key)?;
+    let enc = enc_key(key)?;
+    tx.execute(
+        "UPDATE community_channels SET epoch = ?1, channel_key = ?2
+           WHERE community_id = ?3 AND channel_id = ?4",
+        params![epoch as i64, &enc[..], community_id, channel_id],
+    )
+    .map_err(|e| format!("seat channel key: {e}"))?;
+    tx.commit().map_err(|e| format!("seat channel key commit: {e}"))?;
+    Ok(())
+}
+
+/// Discharge ONE candidate (refused, superseded, expired, or undecodable).
+pub fn drop_pending_channel_key(id: i64) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute("DELETE FROM pending_channel_keys WHERE id = ?1", params![id])
+        .map_err(|e| format!("drop pending channel key: {e}"))?;
+    Ok(())
+}
+
+/// Discharge every candidate for a channel — a key landed, so the rest are moot.
+pub fn drop_pending_channel_keys_for(community_id: &str, channel_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM pending_channel_keys WHERE community_id = ?1 AND channel_id = ?2",
+        params![community_id, channel_id],
+    )
+    .map_err(|e| format!("drop pending channel keys: {e}"))?;
+    Ok(())
+}
+
 /// Store one held epoch key in the multi-held archive. `scope_id` is a channel_id hex or
 /// [`crate::community::SERVER_ROOT_SCOPE_HEX`]. The `(community, scope, epoch)` PK makes a write for
 /// one epoch unable to disturb another epoch's key — so retained history survives a rekey. Uses
@@ -224,6 +400,20 @@ pub fn advance_channel_epoch(
 /// `server_root_key`) iff `new_epoch` exceeds the current base epoch (monotonic, compared in RUST). A
 /// caught-up OLDER base epoch is archived (its control/base history stays decryptable) but never
 /// regresses the head. Returns whether the head advanced.
+/// The community row's CURRENT base epoch — the cheap freshness probe a
+/// root-derived write compares its in-hand struct against.
+pub fn get_server_root_epoch(community_id: &str) -> Result<Option<u64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT server_root_epoch FROM communities WHERE community_id = ?1",
+        params![community_id],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|v| v.map(|e| e as u64))
+    .map_err(|e| format!("get server root epoch: {e}"))
+}
+
 pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
     let conn = super::get_write_connection_guard_static()?;
     let tx = conn.unchecked_transaction().map_err(|e| format!("advance server root tx: {e}"))?;
@@ -714,15 +904,22 @@ pub fn purge_pending_invites_for_held_communities() -> Result<usize, String> {
     Ok(n)
 }
 
-/// Drop parked invites whose sender-declared NIP-40 expiry has passed. Reads already hide
-/// them; this reclaims the rows (and keeps the newest-wins cap honest). Rows with no declared
-/// expiry are never touched. Returns the count purged.
+/// Drop parked invites past their sender-declared NIP-40 expiry OR past the
+/// recipient-enforced 24h lifetime (measured from park time — conservative,
+/// since parking postdates sending). The lifetime leg is what clears rows
+/// parked by builds that predate the ingest-time rule: a machine dormant for
+/// a month otherwise boots into a page of fossil invites no other culler can
+/// touch (no declared expiry, never held, never tombstoned). Returns the
+/// count purged.
 pub fn purge_expired_pending_invites() -> Result<usize, String> {
     let conn = super::get_write_connection_guard_static()?;
+    let now = now_secs();
     let n = conn
         .execute(
-            "DELETE FROM pending_community_invites WHERE expires_at != 0 AND expires_at <= ?1",
-            params![now_secs()],
+            "DELETE FROM pending_community_invites
+              WHERE (expires_at != 0 AND expires_at <= ?1)
+                 OR received_at <= ?2",
+            params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64],
         )
         .map_err(|e| format!("purge expired pending invites: {e}"))?;
     Ok(n)
@@ -735,12 +932,14 @@ pub fn list_pending_invites() -> Result<Vec<PendingCommunityInvite>, String> {
         .prepare(
             "SELECT community_id, bundle_json, inviter_npub, received_at, expires_at
                FROM pending_community_invites
-              WHERE expires_at = 0 OR expires_at > ?1
+              WHERE (expires_at = 0 OR expires_at > ?1)
+                AND received_at > ?2
               ORDER BY received_at DESC",
         )
         .map_err(|e| e.to_string())?;
+    let now = now_secs();
     let rows = stmt
-        .query_map(params![now_secs()], |r| {
+        .query_map(params![now, now - crate::event_handler::DIRECT_INVITE_LIFETIME_SECS as i64], |r| {
             Ok(PendingCommunityInvite {
                 community_id: r.get(0)?,
                 bundle_json: dec_txt(&r.get::<_, String>(1)?),
@@ -786,6 +985,20 @@ pub fn delete_pending_invite(community_id: &str) -> Result<(), String> {
 }
 
 /// Whether an invite for this id is already parked (inbound dedup).
+/// When a parked invite ARRIVED (unix secs), or `None` if none is parked. The
+/// supersession key for the purge: an invite that arrived AFTER a removal is a genuine
+/// re-invite, not residue of the leave.
+pub fn pending_invite_received_at(community_id: &str) -> Result<Option<i64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    conn.query_row(
+        "SELECT received_at FROM pending_community_invites WHERE community_id = ?1",
+        params![community_id],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| format!("pending_invite_received_at: {e}"))
+}
+
 pub fn pending_invite_exists(community_id: &str) -> Result<bool, String> {
     let conn = super::get_db_connection_guard_static()?;
     let found: Option<i64> = conn
@@ -1003,6 +1216,12 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         Some("DELETE FROM community_public_invites WHERE community_id = ?1"),
         Some("DELETE FROM community_invite_link_sets WHERE community_id = ?1"),
         Some("DELETE FROM pending_community_invites WHERE community_id = ?1"),
+        // Parked key vends. Dropped even under `retain_keys`: those are OUR held
+        // epoch keys kept for a later self-scrub, whereas a parked vend is
+        // undelivered key material for a community we no longer hold — nothing
+        // re-judges it once the community is gone, and it would resurrect on
+        // re-join to seat a stale epoch.
+        Some("DELETE FROM pending_channel_keys WHERE community_id = ?1"),
         // Per-entity edition heads (keyless model) — else stale refuse-downgrade floors + self_hash
         // anchors survive a leave/re-join and reject a legitimately reset chain.
         Some("DELETE FROM community_edition_heads WHERE community_id = ?1"),
@@ -1309,6 +1528,53 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
         .unwrap()
         .insert(community_id.to_string(), std::sync::Arc::new(banlist_set_from_hexes(banned_hex)));
     Ok(())
+}
+
+/// Per-npub ban marks: lowercase-hex npub → `created_at` (secs) of the newest AUTHORIZED
+/// banlist edition that named them. Retained past an un-ban on purpose — it is what stops a
+/// pre-ban Join resurrecting a phantom member (CORD-02 §5 counts observation forward of the
+/// latest Leave, Kick **or Ban**).
+pub fn get_community_ban_marks(community_id: &str) -> Result<std::collections::BTreeMap<String, u64>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT banlist_marks FROM communities WHERE community_id = ?1",
+            params![community_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("get ban marks: {e}"))?;
+    Ok(json.and_then(|j| serde_json::from_str(&dec_txt(&j)).ok()).unwrap_or_default())
+}
+
+/// MERGE fresh ban marks into the stored set, keeping the LATER time per npub and never
+/// dropping an npub. A fold only sees the editions still in its window, so replacing
+/// wholesale would forget every ban that has since aged out — precisely the history the
+/// suppression depends on.
+pub fn merge_community_ban_marks(community_id: &str, marks: &std::collections::BTreeMap<String, u64>) -> Result<bool, String> {
+    if marks.is_empty() {
+        return Ok(false);
+    }
+    let mut stored = get_community_ban_marks(community_id)?;
+    let mut changed = false;
+    for (npub, at) in marks {
+        let slot = stored.entry(npub.clone()).or_insert(0);
+        if *at > *slot {
+            *slot = *at;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(false);
+    }
+    let json = enc_txt(&serde_json::to_string(&stored).map_err(|e| e.to_string())?)?;
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "UPDATE communities SET banlist_marks = ?1 WHERE community_id = ?2",
+        params![json, community_id],
+    )
+    .map_err(|e| format!("set ban marks: {e}"))?;
+    Ok(true)
 }
 
 /// The `created_at` (secs) of the banlist edition currently stored, or 0 if none. The version
@@ -1868,11 +2134,14 @@ pub fn set_migration_checked(community_id: &str) -> Result<(), String> {
 pub fn set_migration_ledger(v1_community_id: &str, v2_community_id: &str, phase: i64, twin_json: &str) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     let wrapped = enc_txt(twin_json)?;
+    // Stamp every write: a row parked mid-ladder is the crash-resume signal, and
+    // without a time it can't say whether that crash was seconds or weeks ago.
+    let now = now_secs();
     conn.execute(
         "INSERT INTO community_migrations (community_id, v2_community_id, phase, twin, updated_at)
-         VALUES (?1, ?2, ?3, ?4, 0)
-         ON CONFLICT(community_id) DO UPDATE SET v2_community_id=?2, phase=?3, twin=?4",
-        params![v1_community_id, v2_community_id, phase, wrapped],
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(community_id) DO UPDATE SET v2_community_id=?2, phase=?3, twin=?4, updated_at=?5",
+        params![v1_community_id, v2_community_id, phase, wrapped, now],
     )
     .map_err(|e| format!("set migration ledger: {e}"))?;
     Ok(())
@@ -1925,14 +2194,25 @@ pub fn reparent_channels_and_fence(v1_community_id: &str, v2_community_id: &str)
     Ok(())
 }
 
-/// Communities the boot sweep must probe: sealed (`dissolved = 1`), never flipped, and not
-/// yet migration-checked. Returns their ids.
+/// v1 communities the boot sweep must probe for a migration signpost: never flipped and
+/// not yet migration-checked, SEALED OR NOT. Sealed ones sort first (the common case);
+/// bounded per sweep so a long v1 tail can't storm the relays on every boot.
 pub fn migration_sweep_candidates() -> Result<Vec<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
+    // Deliberately NOT gated on `dissolved = 1`. Sealing happens inside the control
+    // fold, and the boot control probe can veto that fold indefinitely: the probe is
+    // `since`-windowed over the CONTROL plane, while the authoritative migration
+    // tombstone lives at the rotation-stable DISSOLVED coordinate. Once the probe
+    // cursor passes the tombstone, a migrated-away community looks quiet forever, so
+    // it never seals — and a seal-gated sweep could never reach it. An unsealed v1 is
+    // exactly the state that needs the probe most.
     let mut stmt = conn
         .prepare(
             "SELECT community_id FROM communities
-             WHERE dissolved = 1 AND migrated_to IS NULL AND migration_checked = 0",
+             WHERE migrated_to IS NULL AND migration_checked = 0
+               AND (protocol IS NULL OR protocol = 1)
+             ORDER BY dissolved DESC
+             LIMIT 40",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -2126,21 +2406,26 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
         .then(|| serde_json::to_string(&CommunityMetaStash { custom: c.meta_custom.clone(), extra: c.meta_extra.clone() }).map_err(|e| e.to_string()))
         .transpose()?;
     let enc_stash = enc_txt_opt(&stash_json)?;
+    // The split pair (CORD-02 §2): the address as encrypted hex (owner_pubkey's
+    // treatment), the secret as an encrypted blob (server_root_key's).
+    let enc_control_pk = enc_txt_opt(&c.control_pk.map(|p| p.to_hex()))?;
+    let enc_control_root = c.control_root.as_ref().map(enc_key).transpose()?;
 
     let tx = conn.unchecked_transaction().map_err(|e| format!("save v2 community tx: {e}"))?;
     tx.execute(
         "INSERT INTO communities
             (community_id, server_root_key, name, relays, created_at, description,
-             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner, meta_extra)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12, ?13)
+             server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt, icon, banner, meta_extra,
+             control_pk, control_root)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(community_id) DO UPDATE SET
             server_root_key=?2, name=?3, relays=?4, description=?6,
             server_root_epoch=?7, dissolved=?8, protocol=2, owner_pubkey=?9, owner_salt=?10,
-            icon=?11, banner=?12, meta_extra=?13",
+            icon=?11, banner=?12, meta_extra=?13, control_pk=?14, control_root=?15",
         params![
             id_hex, enc_root, enc_name, enc_relays, created, enc_desc,
             c.root_epoch.0 as i64, c.dissolved as i64, enc_owner_pk, enc_owner_salt,
-            enc_icon, enc_banner, enc_stash,
+            enc_icon, enc_banner, enc_stash, enc_control_pk, enc_control_root,
         ],
     )
     .map_err(|e| format!("save v2 community: {e}"))?;
@@ -2224,7 +2509,7 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         .query_row(
             "SELECT server_root_key, name, relays, created_at, description,
                     server_root_epoch, dissolved, protocol, owner_pubkey, owner_salt,
-                    icon, banner, meta_extra
+                    icon, banner, meta_extra, control_pk, control_root
              FROM communities WHERE community_id = ?1",
             params![id_hex],
             |r| {
@@ -2242,12 +2527,14 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
                     r.get::<_, Option<String>>(10)?,
                     r.get::<_, Option<String>>(11)?,
                     r.get::<_, Option<String>>(12)?,
+                    r.get::<_, Option<String>>(13)?,
+                    r.get::<_, Option<Vec<u8>>>(14)?,
                 ))
             },
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e)) = row
+    let Some((root_blob, name_e, relays_e, created, desc_e, root_epoch, dissolved, protocol, owner_pk_e, owner_salt_e, icon_e, banner_e, stash_e, control_pk_e, control_root_b)) = row
     else {
         return Ok(None);
     };
@@ -2326,10 +2613,26 @@ pub fn load_community_v2(id: &CommunityId) -> Result<Option<crate::community::v2
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
 
+    // The split pair (CORD-02 §2). Fail closed on corruption: an unparseable
+    // address degrades to the legacy view, and a secret that no longer derives
+    // to the held address is dropped to read-only rather than signing at an
+    // address nobody reads.
+    let control_pk = control_pk_e
+        .as_deref()
+        .and_then(|e| nostr_sdk::prelude::PublicKey::from_hex(&dec_txt(e)).ok());
+    let control_root = match (control_pk, control_root_b) {
+        (Some(pk), Some(blob)) => dec_key(&blob).ok().filter(|cr| {
+            crate::community::v2::derive::control_signer_group_key(cr, id, Epoch(root_epoch as u64)).pk() == pk
+        }),
+        _ => None,
+    };
+
     Ok(Some(CommunityV2 {
         identity,
         community_root,
         root_epoch: Epoch(root_epoch as u64),
+        control_pk,
+        control_root,
         name: dec_txt(&name_e),
         description: desc_e.map(|d| dec_txt(&d)),
         icon,
@@ -2392,6 +2695,7 @@ pub fn set_guestbook(
 
 #[cfg(test)]
 mod tests {
+    use nostr_sdk::prelude::FinalizeEvent;
     use super::*;
 
     static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -2421,7 +2725,7 @@ mod tests {
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
@@ -2695,7 +2999,6 @@ mod tests {
 
     #[test]
     fn owner_is_protected_from_the_banlist_a_member_is_not() {
-        use nostr_sdk::JsonUtil;
         let (_tmp, _guard) = init_test_db();
         let mut community = Community::create("HQ", "general", vec!["wss://r".into()]);
         // Give it a proven owner (index 0).
@@ -2705,7 +3008,7 @@ mod tests {
                 owner_id.public_key(),
                 &community.id.to_hex(),
             )
-            .sign_with_keys(&owner_id)
+            .finalize(&owner_id)
             .unwrap()
             .as_json(),
         );
@@ -2951,23 +3254,27 @@ mod tests {
     }
 
     #[test]
-    fn migration_sweep_candidates_are_sealed_unflipped_unchecked() {
+    fn migration_sweep_candidates_include_unsealed_v1() {
         let (_tmp, _guard) = init_test_db();
         let a = Community::create("A", "g", vec![]);
         let b = Community::create("B", "g", vec![]);
         let c = Community::create("C", "g", vec![]);
         for x in [&a, &b, &c] { save_community(x).unwrap(); }
-        // a: sealed, unchecked → candidate. b: sealed but flipped → not. c: live → not.
         set_community_dissolved(&a.id.to_hex()).unwrap();
         set_community_dissolved(&b.id.to_hex()).unwrap();
         set_migrated_to(&b.id.to_hex(), &"ab".repeat(32)).unwrap();
         let cands = migration_sweep_candidates().unwrap();
-        assert!(cands.contains(&a.id.to_hex()));
+        assert!(cands.contains(&a.id.to_hex()), "sealed + unchecked is a candidate");
         assert!(!cands.contains(&b.id.to_hex()), "flipped is not a candidate");
-        assert!(!cands.contains(&c.id.to_hex()), "live is not a candidate");
-        // Marking checked converges the sweep.
+        // The regression this guards: a community migrated away whose control fold was
+        // vetoed by the boot probe never seals, so a seal-gated sweep could never reach
+        // it — leaving it stuck on v1 forever with no self-heal.
+        assert!(cands.contains(&c.id.to_hex()), "UNSEALED v1 is a candidate too");
+        // Marking checked converges the sweep for either kind.
         set_migration_checked(&a.id.to_hex()).unwrap();
-        assert!(!migration_sweep_candidates().unwrap().contains(&a.id.to_hex()));
+        set_migration_checked(&c.id.to_hex()).unwrap();
+        let after = migration_sweep_candidates().unwrap();
+        assert!(!after.contains(&a.id.to_hex()) && !after.contains(&c.id.to_hex()));
     }
 
     #[test]
@@ -3093,4 +3400,45 @@ mod tests {
         assert!(list_pending_invites().unwrap().is_empty(), "receipt time does not extend the deadline");
         assert!(get_pending_invite(&cid).unwrap().is_none());
     }
+}
+
+// ── Pin lists (CORD-04 §7) ───────────────────────────────────────────────────
+
+/// Persist a channel's folded Pin List head — the RAW carried content (either
+/// self-describing form), never a re-serialization: republishing must carry the
+/// exact bytes, and the byte cap judges what the wire carried. Encrypted at
+/// rest like the banlist — a public-form list carries disclosed message keys.
+///
+/// Monotonic IN THE STATEMENT: fold persists and publish echoes race (the fold
+/// reads relay windows while an echo lands), and a read-check-then-write let a
+/// stale fold clobber a newer echo. Equal versions still write — a same-version
+/// fork's converged winner must be adoptable. Returns whether a row changed.
+pub fn set_community_pins(community_id: &str, channel_id: &str, content: &str, version: i64) -> Result<bool, String> {
+    let enc = enc_txt(content)?;
+    let conn = super::get_write_connection_guard_static()?;
+    let changed = conn
+        .execute(
+            "INSERT INTO community_pins (community_id, channel_id, content, version) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(community_id, channel_id) DO UPDATE SET
+                 content = excluded.content, version = excluded.version
+             WHERE excluded.version >= community_pins.version",
+            params![community_id, channel_id, enc, version],
+        )
+        .map_err(|e| format!("set pins: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// A channel's stored Pin List head: `(raw content, version)`, `None` when no
+/// edition has ever folded for it.
+pub fn get_community_pins(community_id: &str, channel_id: &str) -> Result<Option<(String, i64)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT content, version FROM community_pins WHERE community_id = ?1 AND channel_id = ?2",
+            params![community_id, channel_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("get pins: {e}"))?;
+    Ok(row.map(|(content, version)| (dec_txt(&content), version)))
 }

@@ -29,7 +29,237 @@ use std::sync::{LazyLock, RwLock};
 use std::time::Duration;
 
 use nostr_sdk::prelude::*;
-use nostr_connect::prelude::{AuthUrlHandler, NostrConnect, NostrConnectURI};
+use nostr_connect::prelude::{AuthUrlHandler, NostrConnect, NostrConnectUri};
+
+// ============================================================================
+// SignerError + VectorSigner — the capability-trait bundle
+// ============================================================================
+
+/// Boxed future returned by every async signer capability.
+///
+/// nostr 0.45.0 inlined this shape into its trait signatures and stopped
+/// exporting an alias, so Vector owns the name.
+pub type BoxedFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Error from any signing backend.
+///
+/// nostr 0.45 deleted `NostrSigner` and split it into per-capability traits,
+/// each carrying its own associated `Error`. Vector normalises all four onto
+/// this one type so the polymorphic seam stays a single trait bound and callers
+/// keep one error to handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignerError(String);
+
+impl SignerError {
+    /// Wrap a backend error (bunker RPC, NIP-55 IPC, local crypto).
+    #[inline]
+    pub fn backend<E>(e: E) -> Self
+    where
+        E: core::fmt::Display,
+    {
+        Self(e.to_string())
+    }
+}
+
+impl core::fmt::Display for SignerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl core::error::Error for SignerError {}
+
+impl From<&str> for SignerError {
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for SignerError {
+    #[inline]
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+/// Every capability Vector's polymorphic signing paths need, in one bound.
+///
+/// Pinning `Error = SignerError` is what makes the bundle usable as a single
+/// bound; it's viable because the concrete-`Keys` paths have their own
+/// non-generic overloads (`build_list_event` vs `build_list_event_signed`), so
+/// bare `Keys` is never passed here.
+pub trait VectorSigner:
+    AsyncGetPublicKey<Error = SignerError>
+    + AsyncSignEvent<Error = SignerError>
+    + AsyncNip04<Error = SignerError>
+    + AsyncNip44<Error = SignerError>
+{
+}
+
+impl<T> VectorSigner for T
+where
+    T: ?Sized
+        + AsyncGetPublicKey<Error = SignerError>
+        + AsyncSignEvent<Error = SignerError>
+        + AsyncNip04<Error = SignerError>
+        + AsyncNip44<Error = SignerError>,
+{
+}
+
+// ============================================================================
+// ActiveSigner — the session's signer, resolved on demand
+// ============================================================================
+
+/// The signer for the active session.
+///
+/// nostr 0.45 removed `ClientBuilder::signer` / `Client::signer`: events are
+/// built and signed outside the client now, so Vector owns this dispatch.
+///
+/// A concrete enum rather than `Arc<dyn ...>` on purpose. 0.45 ships no blanket
+/// capability impls for `Arc<T>`, and the orphan rule forbids adding them, so a
+/// trait object would force every call site to deref. This also keeps dispatch
+/// static.
+///
+/// Deliberately NOT cached in a static: [`active_signer`] rebuilds it per call
+/// from state that is already swap-managed (`SIGNER_KIND`, `BUNKER_SIGNER`,
+/// `MY_PUBLIC_KEY`). A cached signer would be one more per-account global to
+/// invalidate on `reset_session`, and a stale one signs the new account's events
+/// under the old identity.
+#[derive(Debug, Clone)]
+pub enum ActiveSigner {
+    /// Local key from the GuardedKey vault.
+    Local(crate::crypto::GuardedSigner),
+    /// Remote NIP-46 bunker, with reachability reporting.
+    Bunker(WatchedBunkerSigner),
+    /// On-device NIP-55 signer app reached over Android IPC.
+    Nip55(crate::nip55::Nip55Signer),
+    /// Raw keys — headless/CLI consumers and tests, which have a vault key but
+    /// no notion of signer modes.
+    Keys(Keys),
+}
+
+macro_rules! dispatch {
+    ($self:ident, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            ActiveSigner::Local(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
+            ActiveSigner::Bunker(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
+            ActiveSigner::Nip55(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
+            ActiveSigner::Keys(s) => s.$method($($arg),*).await.map_err(SignerError::backend),
+        }
+    };
+}
+
+impl AsyncGetPublicKey for ActiveSigner {
+    type Error = SignerError;
+
+    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, Self::Error>> {
+        Box::pin(async move { dispatch!(self, get_public_key_async) })
+    }
+}
+
+impl AsyncSignEvent for ActiveSigner {
+    type Error = SignerError;
+
+    fn sign_event_async(&self, unsigned: UnsignedEvent) -> BoxedFuture<'_, Result<Event, Self::Error>> {
+        Box::pin(async move { dispatch!(self, sign_event_async, unsigned) })
+    }
+}
+
+impl AsyncNip04 for ActiveSigner {
+    type Error = SignerError;
+
+    fn nip04_encrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        content: &'a str,
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { dispatch!(self, nip04_encrypt_async, public_key, content) })
+    }
+
+    fn nip04_decrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        encrypted_content: &'a str,
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { dispatch!(self, nip04_decrypt_async, public_key, encrypted_content) })
+    }
+}
+
+impl AsyncNip44 for ActiveSigner {
+    type Error = SignerError;
+
+    fn nip44_encrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        content: &'a str,
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { dispatch!(self, nip44_encrypt_async, public_key, content) })
+    }
+
+    fn nip44_decrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        payload: &'a str,
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { dispatch!(self, nip44_decrypt_async, public_key, payload) })
+    }
+}
+
+/// Test-only signer override consulted by [`active_signer`].
+#[cfg(test)]
+static TEST_SIGNER: LazyLock<RwLock<Option<ActiveSigner>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+/// Install (or clear) the test signer override.
+#[cfg(test)]
+pub(crate) fn set_test_signer(signer: Option<ActiveSigner>) {
+    if let Ok(mut g) = TEST_SIGNER.write() {
+        *g = signer;
+    }
+}
+
+/// Resolve the active session's signer.
+///
+/// Fails CLOSED on identity mismatch: a remote-signer account's vault holds its
+/// *client* keypair, whose pubkey is not the identity. Signing with it emits
+/// wrong-identity events that self-reject on every reader (AuthorMismatch), so
+/// erroring here surfaces the misconfiguration instead of a silently
+/// undeliverable send.
+pub fn active_signer() -> Result<ActiveSigner, String> {
+    // Tests model a remote-signer account (identity signable, local vault empty),
+    // which production resolves from `BUNKER_SIGNER`. There's no such handle to
+    // fabricate in-process, so tests inject the signer directly.
+    #[cfg(test)]
+    if let Some(s) = TEST_SIGNER.read().ok().and_then(|g| g.clone()) {
+        return Ok(s);
+    }
+    match signer_kind() {
+        SignerKind::Bunker => {
+            let inner = bunker_signer()
+                .ok_or("bunker account has no live signer (not yet connected)")?;
+            Ok(ActiveSigner::Bunker(WatchedBunkerSigner::new(inner)))
+        }
+        SignerKind::Nip55 => {
+            let pk = crate::state::my_public_key().ok_or("no active identity")?;
+            Ok(ActiveSigner::Nip55(crate::nip55::Nip55Signer::new(pk)))
+        }
+        SignerKind::Local => {
+            let keys = crate::state::MY_SECRET_KEY
+                .to_keys()
+                .ok_or("no signer available (no local key)")?;
+            if let Some(pk) = crate::state::my_public_key() {
+                if keys.public_key() != pk {
+                    return Err("local key does not match the active identity (remote-signer account with no live signer)".to_string());
+                }
+                return Ok(ActiveSigner::Local(crate::crypto::GuardedSigner::new(pk)));
+            }
+            // No bound identity: headless/CLI consumers and tests.
+            Ok(ActiveSigner::Keys(keys))
+        }
+    }
+}
 
 // ============================================================================
 // SignerKind — discriminator
@@ -177,8 +407,8 @@ pub fn take_bunker_signer() -> Option<NostrConnect> {
 /// Returns an empty Vec on any parse failure — the caller treats this as a
 /// display-only signal and renders a generic fallback instead of erroring.
 pub fn parse_bunker_relays(bunker_url: &str) -> Vec<String> {
-    match NostrConnectURI::parse(bunker_url) {
-        Ok(NostrConnectURI::Bunker { relays, .. }) => {
+    match NostrConnectUri::parse(bunker_url) {
+        Ok(NostrConnectUri::Bunker { relays, .. }) => {
             relays.into_iter().map(|r| r.to_string()).collect()
         }
         _ => Vec::new(),
@@ -191,10 +421,10 @@ pub fn parse_bunker_relays(bunker_url: &str) -> Vec<String> {
 /// versus a different bunker (which requires logout first). Cheap — no
 /// network.
 pub fn parse_bunker_remote_pubkey(bunker_url: &str) -> Result<String, String> {
-    let uri = NostrConnectURI::parse(bunker_url)
+    let uri = NostrConnectUri::parse(bunker_url)
         .map_err(|e| format!("Invalid bunker URL: {}", e))?;
     match uri {
-        NostrConnectURI::Bunker { remote_signer_public_key, .. } => {
+        NostrConnectUri::Bunker { remote_signer_public_key, .. } => {
             // Force lowercase. `to_hex()` already returns lowercase per
             // nostr-sdk, but normalising here lets callers compare hex
             // forms with `==` without worrying about a future upstream
@@ -203,7 +433,7 @@ pub fn parse_bunker_remote_pubkey(bunker_url: &str) -> Result<String, String> {
         }
         // Client-initiated URIs aren't supported as login entry points in v1;
         // they're for the reverse direction (we hand a URL to the signer).
-        NostrConnectURI::Client { .. } => {
+        NostrConnectUri::Client { .. } => {
             Err("Client-initiated URIs not supported here; use a bunker:// URL".into())
         }
     }
@@ -269,12 +499,22 @@ pub fn vector_metadata() -> NostrConnectMetadata {
 pub fn build_nostrconnect_uri(
     client_pubkey: PublicKey,
     relays: Vec<RelayUrl>,
-) -> NostrConnectURI {
-    NostrConnectURI::Client {
+) -> NostrConnectUri {
+    NostrConnectUri::Client {
         public_key: client_pubkey,
         relays,
         metadata: vector_metadata(),
+        secret: random_connect_secret(),
     }
+}
+
+/// Fresh NIP-46 pairing secret. The signer echoes it in the `connect` response;
+/// a mismatch means someone else answered, so it must be unguessable per session.
+fn random_connect_secret() -> String {
+    use ::rand::RngCore;
+    let mut bytes = [0u8; 16];
+    ::rand::rngs::OsRng.fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Build a `NostrConnect` for a client-initiated session — generates the
@@ -291,17 +531,15 @@ pub fn build_nostrconnect_session(
     relays: Vec<RelayUrl>,
     timeout: Duration,
 ) -> Result<(NostrConnect, String), String> {
-    let uri = build_nostrconnect_uri(client_keys.public_key, relays);
+    let uri = build_nostrconnect_uri(client_keys.public_key(), relays);
     // Append the NIP-46 `perms=` scope. nostr-sdk's `Display` impl doesn't
     // write it, so the SDK-built URI is fine to hand back to `NostrConnect`
     // (which doesn't read perms locally), while the signer app on the other
     // side parses the appended query param to render its pairing screen.
     //
-    // NIP-46 also defines a `secret=` query param the signer should echo
-    // in its connect response for spoof detection. Not emitted: current
-    // signers (Amber) return only `"ack"`, and the SDK's response parser
-    // accepts only `"ack"` — a secret round-trip would short-circuit at
-    // both ends. Revisit when ecosystem support lands.
+    // The NIP-46 `secret` IS emitted now (0.45 requires it, and its response
+    // parser accepts both a spec-compliant secret echo and Amber's bare `"ack"`),
+    // so spoof detection costs nothing in interop.
     let mut uri_string = uri.to_string();
     let perms = VECTOR_NIP46_PERMS.join(",");
     if !perms.is_empty() {
@@ -325,7 +563,7 @@ pub fn build_bunker_signer(
     client_keys: Keys,
     timeout: Duration,
 ) -> Result<NostrConnect, String> {
-    let uri = NostrConnectURI::parse(bunker_url)
+    let uri = NostrConnectUri::parse(bunker_url)
         .map_err(|e| format!("Invalid bunker URL: {}", e))?;
     NostrConnect::new(uri, client_keys, timeout, None)
         .map_err(|e| format!("Bunker init failed: {}", e))
@@ -339,7 +577,7 @@ pub fn build_bunker_signer(
 /// prompts the user once during initial pairing.
 pub async fn prewarm_bunker(signer: &NostrConnect) -> Result<PublicKey, String> {
     signer
-        .get_public_key()
+        .get_public_key_async()
         .await
         .map_err(|e| format!("Bunker prewarm failed: {}", e))
 }
@@ -418,29 +656,29 @@ pub fn set_bunker_state(new_state: BunkerConnectionState) {
 // State flips are deduplicated by `set_bunker_state` (same-value writes are
 // no-ops), so the per-call overhead is just one atomic load.
 
-/// `NostrSigner` wrapper that emits `BunkerConnectionState` transitions on
+/// `VectorSigner` wrapper that emits `BunkerConnectionState` transitions on
 /// every signing outcome. The inner `NostrConnect` is cheaply clonable
 /// (internally Arc'd), so this is also Clone.
 ///
-/// Captures a `SessionGuard` at construction; state flips after `reset_session`
+/// Captures a `std::sync::Arc<crate::db::Session>` at construction; state flips after `reset_session`
 /// are no-ops to avoid leaking signer-state events across an account swap (an
 /// in-flight signing call resolving after the new account is installed would
 /// otherwise emit `bunker_state: offline` against a local-account session).
 #[derive(Debug, Clone)]
 pub struct WatchedBunkerSigner {
     inner: NostrConnect,
-    session: crate::state::SessionGuard,
+    session: std::sync::Arc<crate::db::Session>,
 }
 
 impl WatchedBunkerSigner {
     pub fn new(inner: NostrConnect) -> Self {
-        Self { inner, session: crate::state::SessionGuard::capture() }
+        Self { inner, session: crate::db::current_session() }
     }
 
     /// Flip state only when the captured session is still active.
     #[inline]
     fn flip(&self, state: BunkerConnectionState) {
-        if self.session.is_valid() {
+        if self.session.is_live() {
             set_bunker_state(state);
         }
     }
@@ -448,96 +686,87 @@ impl WatchedBunkerSigner {
     /// Test-only view onto the captured guard so a test can assert the
     /// wrapper is bound to the session generation at construction.
     #[cfg(test)]
-    pub(crate) fn session_generation_for_test(&self) -> u64 {
-        self.session.generation()
+    pub(crate) fn session_id_for_test(&self) -> u64 {
+        self.session.id()
     }
 }
 
-impl NostrSigner for WatchedBunkerSigner {
-    fn backend(&self) -> SignerBackend<'_> {
-        self.inner.backend()
-    }
-
-    fn get_public_key<'a>(&'a self) -> BoxedFuture<'a, Result<PublicKey, SignerError>> {
-        Box::pin(async move {
-            match self.inner.get_public_key().await {
-                Ok(pk) => {
-                    self.flip(BunkerConnectionState::Online);
-                    Ok(pk)
-                }
-                Err(e) => {
-                    self.flip(BunkerConnectionState::Offline);
-                    Err(e)
-                }
+impl WatchedBunkerSigner {
+    /// Record the reachability implied by an outcome and normalise the bunker's
+    /// error into `SignerError`.
+    #[inline]
+    fn watch<T, E>(&self, res: Result<T, E>) -> Result<T, SignerError>
+    where
+        E: core::fmt::Display,
+    {
+        match res {
+            Ok(v) => {
+                self.flip(BunkerConnectionState::Online);
+                Ok(v)
             }
-        })
-    }
-
-    fn sign_event<'a>(&'a self, unsigned: UnsignedEvent) -> BoxedFuture<'a, Result<Event, SignerError>> {
-        Box::pin(async move {
-            match self.inner.sign_event(unsigned).await {
-                Ok(event) => {
-                    self.flip(BunkerConnectionState::Online);
-                    Ok(event)
-                }
-                Err(e) => {
-                    self.flip(BunkerConnectionState::Offline);
-                    Err(e)
-                }
+            Err(e) => {
+                self.flip(BunkerConnectionState::Offline);
+                Err(SignerError::backend(e))
             }
-        })
+        }
     }
+}
 
-    fn nip04_encrypt<'a>(
+impl AsyncGetPublicKey for WatchedBunkerSigner {
+    type Error = SignerError;
+
+    fn get_public_key_async(&self) -> BoxedFuture<'_, Result<PublicKey, Self::Error>> {
+        Box::pin(async move { self.watch(self.inner.get_public_key_async().await) })
+    }
+}
+
+impl AsyncSignEvent for WatchedBunkerSigner {
+    type Error = SignerError;
+
+    fn sign_event_async(&self, unsigned: UnsignedEvent) -> BoxedFuture<'_, Result<Event, Self::Error>> {
+        Box::pin(async move { self.watch(self.inner.sign_event_async(unsigned).await) })
+    }
+}
+
+impl AsyncNip04 for WatchedBunkerSigner {
+    type Error = SignerError;
+
+    fn nip04_encrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
-        Box::pin(async move {
-            match self.inner.nip04_encrypt(public_key, content).await {
-                Ok(s) => { self.flip(BunkerConnectionState::Online); Ok(s) }
-                Err(e) => { self.flip(BunkerConnectionState::Offline); Err(e) }
-            }
-        })
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { self.watch(self.inner.nip04_encrypt_async(public_key, content).await) })
     }
 
-    fn nip04_decrypt<'a>(
+    fn nip04_decrypt_async<'a>(
+        &'a self,
+        public_key: &'a PublicKey,
+        encrypted_content: &'a str,
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move {
+            self.watch(self.inner.nip04_decrypt_async(public_key, encrypted_content).await)
+        })
+    }
+}
+
+impl AsyncNip44 for WatchedBunkerSigner {
+    type Error = SignerError;
+
+    fn nip44_encrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
         content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
-        Box::pin(async move {
-            match self.inner.nip04_decrypt(public_key, content).await {
-                Ok(s) => { self.flip(BunkerConnectionState::Online); Ok(s) }
-                Err(e) => { self.flip(BunkerConnectionState::Offline); Err(e) }
-            }
-        })
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { self.watch(self.inner.nip44_encrypt_async(public_key, content).await) })
     }
 
-    fn nip44_encrypt<'a>(
+    fn nip44_decrypt_async<'a>(
         &'a self,
         public_key: &'a PublicKey,
-        content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
-        Box::pin(async move {
-            match self.inner.nip44_encrypt(public_key, content).await {
-                Ok(s) => { self.flip(BunkerConnectionState::Online); Ok(s) }
-                Err(e) => { self.flip(BunkerConnectionState::Offline); Err(e) }
-            }
-        })
-    }
-
-    fn nip44_decrypt<'a>(
-        &'a self,
-        public_key: &'a PublicKey,
-        content: &'a str,
-    ) -> BoxedFuture<'a, Result<String, SignerError>> {
-        Box::pin(async move {
-            match self.inner.nip44_decrypt(public_key, content).await {
-                Ok(s) => { self.flip(BunkerConnectionState::Online); Ok(s) }
-                Err(e) => { self.flip(BunkerConnectionState::Offline); Err(e) }
-            }
-        })
+        payload: &'a str,
+    ) -> BoxedFuture<'a, Result<String, Self::Error>> {
+        Box::pin(async move { self.watch(self.inner.nip44_decrypt_async(public_key, payload).await) })
     }
 }
 
@@ -560,7 +789,7 @@ impl NostrSigner for WatchedBunkerSigner {
 pub struct VectorAuthUrlHandler;
 
 impl AuthUrlHandler for VectorAuthUrlHandler {
-    fn on_auth_url<'a>(&'a self, auth_url: Url) -> BoxedFuture<'a, Result<()>> {
+    fn on_auth_url<'a>(&'a self, auth_url: Url) -> BoxedFuture<'a, std::result::Result<(), nostr_connect::error::Error>> {
         Box::pin(async move {
             crate::traits::emit_event_json(
                 "bunker_auth_url",
@@ -722,8 +951,8 @@ mod tests {
         let signer_keys = Keys::generate();
         let r1 = RelayUrl::parse("wss://relay1.example").unwrap();
         let r2 = RelayUrl::parse("wss://relay2.example").unwrap();
-        let uri = NostrConnectURI::Bunker {
-            remote_signer_public_key: signer_keys.public_key,
+        let uri = NostrConnectUri::Bunker {
+            remote_signer_public_key: signer_keys.public_key(),
             relays: vec![r1.clone(), r2.clone()],
             secret: None,
         };
@@ -746,7 +975,7 @@ mod tests {
         // form we want to surface relays for.
         let client_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
-        let client_uri = build_nostrconnect_uri(client_keys.public_key, vec![relay]);
+        let client_uri = build_nostrconnect_uri(client_keys.public_key(), vec![relay]);
         assert!(parse_bunker_relays(&client_uri.to_string()).is_empty(),
             "client URI must not surface as a bunker relay list");
     }
@@ -765,7 +994,7 @@ mod tests {
         // attacker-controlled client pubkey as "the remote signer".
         let client_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
-        let uri = build_nostrconnect_uri(client_keys.public_key, vec![relay]);
+        let uri = build_nostrconnect_uri(client_keys.public_key(), vec![relay]);
         let err = parse_bunker_remote_pubkey(&uri.to_string())
             .expect_err("client URI must be rejected");
         assert!(err.contains("Client-initiated"), "unexpected error: {}", err);
@@ -777,14 +1006,14 @@ mod tests {
         // result is forced to lowercase regardless of upstream casing choice.
         let signer_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
-        let uri = NostrConnectURI::Bunker {
-            remote_signer_public_key: signer_keys.public_key,
+        let uri = NostrConnectUri::Bunker {
+            remote_signer_public_key: signer_keys.public_key(),
             relays: vec![relay],
             secret: None,
         };
         let parsed = parse_bunker_remote_pubkey(&uri.to_string())
             .expect("valid bunker URI");
-        assert_eq!(parsed, signer_keys.public_key.to_hex().to_ascii_lowercase());
+        assert_eq!(parsed, signer_keys.public_key().to_hex().to_ascii_lowercase());
         assert_eq!(parsed, parsed.to_ascii_lowercase(),
             "callers may compare with == — output must already be lowercase");
     }
@@ -853,11 +1082,10 @@ mod tests {
     }
 
     // Combined into one #[test] to serialise mutation of process-wide globals
-    // (SESSION_GENERATION, BUNKER_STATE, BUNKER_SIGNER). See the rationale on
+    // (BUNKER_STATE, BUNKER_SIGNER). See the rationale on
     // `atomic_state_round_trips_and_drains` above.
     #[test]
     fn watched_signer_session_gate_and_state_transitions() {
-        use crate::state::{bump_session_generation, current_session_generation};
 
         // Build a real NostrConnect so we can wrap it. We never call any of
         // its async methods (those would require a relay) — only the inner
@@ -865,8 +1093,8 @@ mod tests {
         let client_keys = Keys::generate();
         let relay = RelayUrl::parse("wss://relay.example").unwrap();
         let signer_keys = Keys::generate();
-        let uri = NostrConnectURI::Bunker {
-            remote_signer_public_key: signer_keys.public_key,
+        let uri = NostrConnectUri::Bunker {
+            remote_signer_public_key: signer_keys.public_key(),
             relays: vec![relay],
             secret: None,
         };
@@ -877,9 +1105,9 @@ mod tests {
             None,
         ).expect("NostrConnect builds");
 
-        let gen_before = current_session_generation();
+        let gen_before = crate::db::current_session_id();
         let watched = WatchedBunkerSigner::new(nc);
-        assert_eq!(watched.session_generation_for_test(), gen_before,
+        assert_eq!(watched.session_id_for_test(), gen_before,
             "WatchedBunkerSigner must capture the live session generation at construction");
 
         // Pre-swap: flip emits because the captured guard matches.
@@ -892,7 +1120,7 @@ mod tests {
         // guard goes stale; subsequent flips must be ignored so a leftover
         // in-flight signing call from the previous account can't leak
         // bunker_state changes into the new session.
-        bump_session_generation();
+        crate::db::close_database();
         set_bunker_state(BunkerConnectionState::Online);
         watched.flip(BunkerConnectionState::Offline);
         assert_eq!(bunker_state(), BunkerConnectionState::Online,

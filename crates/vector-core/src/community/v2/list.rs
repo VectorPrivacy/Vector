@@ -1,4 +1,5 @@
-//! The Community List — CORD-02 §8 (kind 13302).
+//! The Community List document — CORD-02 §8. The wire form it serializes
+//! into lives in [`super::list_frag`].
 //!
 //! A member's own memberships sync across their devices *and* their clients as
 //! one self-encrypted, replaceable event: every Community they're in and every
@@ -25,18 +26,8 @@
 //! stale device wipes a sibling's change; (2) a decrypt failure must never
 //! clobber a populated local list — treat an unreadable event as "no news".
 
-use nostr_sdk::nips::nip44::{self, Version};
-use nostr_sdk::prelude::{Event, EventBuilder, Keys, Kind, PublicKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-
-use super::kind;
-use super::stream;
-
-/// The membership cap (CORD-02 §8). Bounds the common case; the NIP-44 byte cap
-/// ([`stream::NIP44_MAX_PLAINTEXT`]) is the actual law — join material carrying
-/// private-channel keys can overflow the event well below 50.
-pub const MAX_MEMBERSHIPS: usize = 50;
 
 /// Join material — the invite bundle's MEMBERSHIP subset (CORD-02 §8): never
 /// the icon (a rehydrating device folds it from the Control Plane), never the
@@ -53,8 +44,26 @@ pub struct JoinMaterial {
     pub owner_salt: String,
     pub community_root: String,
     pub root_epoch: u64,
+    /// The current epoch's Control Plane signer pubkey (CORD-02 §2/§8) — read
+    /// access to the plane, never write. Absent = a legacy pre-split epoch,
+    /// whose Control folds at the member-derivable legacy address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_pk: Option<String>,
+    /// STAFF ONLY: the current epoch's `control_root` write secret (hex). The
+    /// list is NIP-44-encrypted to self and already carries the
+    /// `community_root`, so this is the same trust class — it is how a
+    /// staffer's write key survives across their own devices (CORD-02 §8).
+    /// Delivered by a staff-making Grant's `control_wrap` (CORD-04 §3) or a
+    /// 136-byte base blob (CORD-06 §1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_root: Option<String>,
     /// The PRIVATE channels held (public ones derive from the root — CORD-03).
+    /// ABSENT, not empty, when the writer holds no keys — armada omits the field.
+    /// Required once, which rejected the whole vault for the commonest case there
+    /// is: a membership with no private channels.
+    #[serde(default)]
     pub channels: Vec<ChannelKeyRef>,
+    #[serde(default)]
     pub relays: Vec<String>,
     pub name: String,
     /// Round-tripped verbatim: `held_roots`, `refounder`, and anything a peer
@@ -69,9 +78,20 @@ pub struct JoinMaterial {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelKeyRef {
     pub id: String,
-    pub key: String,
+    /// ABSENT when the writer knows the channel but holds no key for it — armada
+    /// lists private channels the account has not been granted. Required here
+    /// once, which made ONE unkeyed channel reject the whole document and strand
+    /// the account on a stale copy, so it must stay optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub epoch: u64,
     pub name: String,
+    /// Round-tripped verbatim, like every other level of the document. armada
+    /// carries `priors` here — a channel's retired keys, which is how history
+    /// spanning a rekey stays readable; dropping them on republish takes that
+    /// history dark for every device the account owns.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One membership: the community id plus its two snapshots and the add time.
@@ -109,18 +129,12 @@ pub struct CommunityList {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Errors from building or parsing the 13302 event / enforcing the caps.
+/// Errors from serializing or encrypting the List document.
 #[derive(Debug)]
 pub enum ListError {
     Json(String),
     Nip44(String),
     Sign(String),
-    /// The event isn't kind 13302.
-    WrongKind(u16),
-    /// The live membership set exceeds [`MAX_MEMBERSHIPS`].
-    TooManyMemberships(usize),
-    /// The serialized (pre-encryption) list exceeds the NIP-44 plaintext cap.
-    Oversize(usize),
 }
 
 impl std::fmt::Display for ListError {
@@ -129,9 +143,6 @@ impl std::fmt::Display for ListError {
             ListError::Json(e) => write!(f, "json: {e}"),
             ListError::Nip44(e) => write!(f, "nip44: {e}"),
             ListError::Sign(e) => write!(f, "sign: {e}"),
-            ListError::WrongKind(k) => write!(f, "not a community-list event: kind {k}"),
-            ListError::TooManyMemberships(n) => write!(f, "{n} memberships exceeds the {MAX_MEMBERSHIPS} cap"),
-            ListError::Oversize(n) => write!(f, "serialized list {n} bytes exceeds the NIP-44 plaintext cap"),
         }
     }
 }
@@ -285,83 +296,11 @@ impl CommunityList {
         self.entries.iter().filter(|e| self.is_live(&e.community_id)).collect()
     }
 
-    /// Verify the list is publishable: within the membership cap AND under the
-    /// NIP-44 plaintext byte cap (the law — private-channel keys can overflow
-    /// the event well below 50 memberships). Call before every publish.
-    pub fn assert_fits(&self) -> Result<(), ListError> {
-        let live = self.live_entries().len();
-        if live > MAX_MEMBERSHIPS {
-            return Err(ListError::TooManyMemberships(live));
-        }
-        let bytes = serde_json::to_string(self).map_err(|e| ListError::Json(e.to_string()))?.len();
-        if bytes > stream::NIP44_MAX_PLAINTEXT {
-            return Err(ListError::Oversize(bytes));
-        }
-        Ok(())
-    }
-}
-
-// ── The 13302 event (self-encrypted, replaceable) ────────────────────────────
-
-/// Build the member's kind-13302 Community List: the document NIP-44-encrypted
-/// to SELF and signed by the member's real key. Refuses to build an event that
-/// violates a cap (a strict reader would drop an oversize one).
-///
-/// On READ the caller merges into the local mirror, never replaces — see the
-/// module doc.
-pub fn build_list_event(my_keys: &Keys, list: &CommunityList) -> Result<Event, ListError> {
-    list.assert_fits()?;
-    let json = serde_json::to_string(list).map_err(|e| ListError::Json(e.to_string()))?;
-    let content = nip44::encrypt(my_keys.secret_key(), &my_keys.public_key(), json.as_bytes(), Version::V2)
-        .map_err(|e| ListError::Nip44(e.to_string()))?;
-    EventBuilder::new(Kind::Custom(kind::COMMUNITY_LIST), content)
-        .sign_with_keys(my_keys)
-        .map_err(|e| ListError::Sign(e.to_string()))
-}
-
-/// Decrypt + parse a kind-13302 event with the member's own keys. A decrypt
-/// failure surfaces as an error the caller MUST treat as "no news" — never let
-/// it clobber a populated local list.
-pub fn parse_list_event(event: &Event, my_keys: &Keys) -> Result<CommunityList, ListError> {
-    if event.kind.as_u16() != kind::COMMUNITY_LIST {
-        return Err(ListError::WrongKind(event.kind.as_u16()));
-    }
-    let json = nip44::decrypt(my_keys.secret_key(), &my_keys.public_key(), &event.content)
-        .map_err(|e| ListError::Nip44(e.to_string()))?;
-    serde_json::from_str(&json).map_err(|e| ListError::Json(e.to_string()))
-}
-
-/// [`build_list_event`] via a [`NostrSigner`]: self-encrypts to `my_pk` and signs
-/// the 13302 through the signer. `my_pk` must equal `my_public_key()`.
-pub async fn build_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
-    signer: &S,
-    my_pk: PublicKey,
-    list: &CommunityList,
-) -> Result<Event, ListError> {
-    list.assert_fits()?;
-    let json = serde_json::to_string(list).map_err(|e| ListError::Json(e.to_string()))?;
-    let content = signer.nip44_encrypt(&my_pk, &json).await.map_err(|e| ListError::Nip44(e.to_string()))?;
-    let unsigned = EventBuilder::new(Kind::Custom(kind::COMMUNITY_LIST), content).build(my_pk);
-    signer.sign_event(unsigned).await.map_err(|e| ListError::Sign(e.to_string()))
-}
-
-/// [`parse_list_event`] via a [`NostrSigner`] (self-decrypt to `my_pk`).
-pub async fn parse_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
-    signer: &S,
-    my_pk: PublicKey,
-    event: &Event,
-) -> Result<CommunityList, ListError> {
-    if event.kind.as_u16() != kind::COMMUNITY_LIST {
-        return Err(ListError::WrongKind(event.kind.as_u16()));
-    }
-    let json = signer.nip44_decrypt(&my_pk, &event.content).await.map_err(|e| ListError::Nip44(e.to_string()))?;
-    serde_json::from_str(&json).map_err(|e| ListError::Json(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::prelude::Keys;
 
     fn material(root_epoch: u64, name: &str) -> JoinMaterial {
         JoinMaterial {
@@ -370,6 +309,8 @@ mod tests {
             owner_salt: "b".repeat(64),
             community_root: "d".repeat(64),
             root_epoch,
+            control_pk: None,
+            control_root: None,
             channels: vec![],
             relays: vec![],
             name: name.to_string(),
@@ -393,6 +334,64 @@ mod tests {
 
     fn list(entries: Vec<CommunityListEntry>, tombstones: Vec<Tombstone>) -> CommunityList {
         CommunityList { entries, tombstones, extra: serde_json::Map::new() }
+    }
+
+    #[test]
+    fn a_channel_listed_without_a_key_does_not_reject_the_whole_document() {
+        // GOLDEN, armada-shaped: it lists private channels the account holds NO key
+        // for, omitting `key` entirely. `key` was a required String, so ONE such
+        // channel failed the whole parse and pinned the account to a stale copy —
+        // cross-device sync stopped dead the day private channels shipped.
+        let json = r#"{
+          "entries": [{
+            "community_id": "aa",
+            "seed":    {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,"channels":[],"relays":[],"name":"n"},
+            "current": {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,
+                        "channels":[
+                          {"id":"c1","key":"kk","epoch":2,"name":"keyed"},
+                          {"id":"c2","epoch":0,"name":"not-granted"}
+                        ],
+                        "relays":[],"name":"n"},
+            "added_at": 5
+          }],
+          "tombstones": []
+        }"#;
+        let parsed: CommunityList = serde_json::from_str(json).expect("a keyless channel must parse");
+        let chans = &parsed.entries[0].current.channels;
+        assert_eq!(chans.len(), 2, "both channels survive");
+        assert_eq!(chans[0].key.as_deref(), Some("kk"));
+        assert_eq!(chans[1].key, None, "an unheld channel is known but keyless");
+        assert_eq!(chans[1].name, "not-granted", "and still carries its identity");
+    }
+
+    #[test]
+    fn join_material_that_vends_no_keys_omits_channels_entirely() {
+        // armada drops `channels` when it holds no keys ("the type promises an
+        // array while the wire promises nothing"). A required Vec would reject the
+        // whole vault document for the commonest case of all: a public community.
+        let json = r#"{
+          "entries": [{
+            "community_id": "aa",
+            "seed":    {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,"relays":[],"name":"n"},
+            "current": {"community_id":"aa","owner":"o","owner_salt":"s","community_root":"r","root_epoch":1,"relays":[],"name":"n"},
+            "added_at": 5
+          }],
+          "tombstones": []
+        }"#;
+        let parsed: CommunityList = serde_json::from_str(json).expect("absent `channels` must parse");
+        assert!(parsed.entries[0].current.channels.is_empty(), "no keys held");
+        assert!(parsed.is_live("aa"), "and the membership still counts");
+    }
+
+    #[test]
+    fn a_keyless_channel_is_never_written_back() {
+        // Shipped builds require `key`, so emitting a keyless entry would inflict
+        // this very bug on them. Absent, not null.
+        let c = ChannelKeyRef { id: "c".into(), key: None, epoch: 0, name: "n".into(), extra: Default::default() };
+        let s = serde_json::to_string(&c).unwrap();
+        assert!(!s.contains("key"), "no `key` field at all, got {s}");
+        let keyed = ChannelKeyRef { id: "c".into(), key: Some("kk".into()), epoch: 1, name: "n".into(), extra: Default::default() };
+        assert!(serde_json::to_string(&keyed).unwrap().contains(r#""key":"kk""#), "keyed stays byte-identical");
     }
 
     #[test]
@@ -509,58 +508,6 @@ mod tests {
         assert_eq!(reparsed["entries"][0]["seed"]["held_roots"][0]["epoch"], 1);
         assert_eq!(reparsed["entries"][0]["seed"]["refounder"], "rr");
         assert_eq!(reparsed["entries"][0]["seed"]["weird"], 123);
-    }
-
-    #[test]
-    fn assert_fits_enforces_the_membership_cap_on_the_live_set() {
-        let mut entries = vec![];
-        for i in 0..(MAX_MEMBERSHIPS + 1) {
-            entries.push(entry(&format!("{i:064x}"), 100, material(0, "x"), material(0, "x")));
-        }
-        let l = list(entries, vec![]);
-        assert_eq!(l.live_entries().len(), MAX_MEMBERSHIPS + 1);
-        assert!(matches!(l.assert_fits(), Err(ListError::TooManyMemberships(n)) if n == MAX_MEMBERSHIPS + 1));
-    }
-
-    #[test]
-    fn assert_fits_catches_an_oversize_list_well_under_the_membership_cap() {
-        // One membership whose join material carries enough private-channel keys
-        // to blow the NIP-44 plaintext cap.
-        let mut jm = material(0, "x");
-        for i in 0..600u64 {
-            jm.channels.push(ChannelKeyRef {
-                id: format!("{i:064x}"),
-                key: "e".repeat(64),
-                epoch: 0,
-                name: "c".into(),
-            });
-        }
-        let l = list(vec![entry(&"f".repeat(64), 100, jm.clone(), jm)], vec![]);
-        assert_eq!(l.live_entries().len(), 1);
-        assert!(matches!(l.assert_fits(), Err(ListError::Oversize(_))));
-        // build_list_event refuses it too — never mint an event a strict reader drops.
-        let keys = Keys::generate();
-        assert!(matches!(build_list_event(&keys, &l), Err(ListError::Oversize(_))));
-    }
-
-    #[test]
-    fn list_event_round_trips_and_rejects_wrong_kind_or_recipient() {
-        let keys = Keys::generate();
-        let l = list(
-            vec![entry(&"a".repeat(64), 5, material(1, "seed"), material(3, "current"))],
-            vec![tomb(&"b".repeat(64), 9)],
-        );
-        let ev = build_list_event(&keys, &l).unwrap();
-        assert_eq!(ev.kind.as_u16(), kind::COMMUNITY_LIST);
-        assert_eq!(parse_list_event(&ev, &keys).unwrap(), l);
-
-        // A non-13302 event is rejected outright.
-        let wrong = EventBuilder::new(Kind::Custom(1), "x").sign_with_keys(&keys).unwrap();
-        assert!(matches!(parse_list_event(&wrong, &keys), Err(ListError::WrongKind(1))));
-
-        // Another account can't decrypt it (fail-closed — caller keeps its list).
-        let other = Keys::generate();
-        assert!(parse_list_event(&ev, &other).is_err());
     }
 
     #[test]

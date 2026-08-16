@@ -57,6 +57,42 @@ const emojiSearch = document.getElementById('emoji-search-input');
  */
 let strCurrentReactionReference = "";
 
+/** When set, non-reaction selections insert via this callback instead of the
+ *  chat input — the Status dialog points it at its own field. Owned by the
+ *  dialog's lifecycle: it clears the target when it closes. */
+let _emojiPanelTarget = null;
+
+/**
+ * Open the panel for a dialog-owned input: selections route to `onInsert`,
+ * GIFs are hidden (statuses carry text + emoji only), and the panel rises
+ * above the dialog overlay. Mirrors openEmojiPanel's deferred-render shape so
+ * the open transition starts this frame and content fills in after.
+ */
+function openEmojiPanelForStatus(onInsert) {
+    _emojiPanelTarget = { insert: onInsert };
+    document.querySelector('.picker-mode-btn[data-mode="emoji"]')?.click();
+    picker.classList.add('visible', 'emoji-picker-status-mode', 'emoji-picker-no-gifs');
+    picker.classList.remove('emoji-picker-message-type');
+    picker.style.bottom = '';
+    requestAnimationFrame(() => requestAnimationFrame(async () => {
+        if (!picker.classList.contains('visible')) return;
+        await loadEmojiUsage();
+        if (!picker.classList.contains('visible')) return;
+        resetEmojiPicker();
+        renderEmojiPanel();
+        initCollapsibleSections();
+        if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
+            emojiSearch.focus();
+        }
+        if (!emojiPacksLoaded) {
+            loadEmojiPacks();
+        }
+        loadEmojiPacks({ refresh: true });
+        _attachEmojiPackReveal();
+        _rearmVisiblePackCanvases();
+    }));
+}
+
 /**
  * Opens the Emoji Input Panel
  *
@@ -163,7 +199,7 @@ function closeEmojiPanel() {
     emojiSearch.value = '';
     // Auto-save any in-progress pack edit before the panel disappears.
     if (_pc.open) closeEmojiPackCreator();
-    picker.classList.remove('visible');
+    picker.classList.remove('visible', 'emoji-picker-status-mode', 'emoji-picker-no-gifs');
     picker.style.bottom = ''; // Reset to CSS default
     strCurrentReactionReference = '';
     // Drop the canvas rAF so we don't tick under opacity:0.
@@ -894,8 +930,8 @@ async function _sharePackToClipboard(pack) {
         // Share as a vectorapp.io URL — friends without Vector get a
         // working web preview, friends with Vector get the OS-level
         // deep-link interception that pops the Pack Details modal.
-        // pack.id IS the naddr; no IPC round-trip needed to derive it.
-        const url = `https://vectorapp.io/emojis/pack/${pack.id}`;
+        // Relay hints ride the shared naddr; the canonical pack.id stays bare.
+        const url = `https://vectorapp.io/emojis/pack/${await _shareNaddr(pack.id)}`;
         await navigator.clipboard.writeText(url);
         if (typeof showToast === 'function') showToast('Copied to Clipboard');
         // Close the picker so the user lands back in their chat ready
@@ -993,10 +1029,11 @@ function renderEmojiPackSidebar() {
             plate.textContent = _packTitleInitial(pack);
             btn.appendChild(plate);
         }
-        // Right-click on desktop, long-press on Android — both open the
-        // Share / Remove menu.
-        attachLongPressContextMenu(btn, (x, y) => _showPackTabMenu(pack, x, y));
-        _installPackTabReorder(btn);
+        // Reorder-drag, long-press menu and rail scrolling all start as the same
+        // press, so ONE arbiter owns them — two independent handlers each with
+        // their own timers can't agree on who claimed the gesture. Right-click
+        // is wired inside it too.
+        _installPackTabGestures(btn, pack);
         sidebar.appendChild(btn);
     }
 
@@ -1017,61 +1054,256 @@ function renderEmojiPackSidebar() {
 // driven approach as the in-pack emoji reorder (Tauri swallows HTML5 drag
 // events); before/after is decided by the pointer's Y vs each tab's midpoint.
 let _packTabDragActive = false;
-function _installPackTabReorder(tab) {
-    tab.addEventListener('pointerdown', (ev) => {
+
+// Touch gesture budget for the pack rail. A pointer has to mean one of three
+// things and the only honest disambiguator is "did it move, and when":
+//   move early            → the rail scrolls (a rail of many packs must scroll)
+//   still at ARM, then move → reorder
+//   still at MENU         → context menu
+// Without the arm delay, the first 6px of an attempted scroll started a drag,
+// so a user with enough packs to need scrolling could never reach the ones
+// off-screen. Slop matches the long-press tolerance so the two agree on what
+// "held still" means.
+const _PT_ARM_MS = 180;
+const _PT_MENU_MS = 500;
+const _PT_SLOP_PX = 8;
+// Menu → drag promotion threshold. Deliberately larger than the plain drag
+// threshold: the wobble of a finger lifting off must not dismiss a menu the
+// user held for, while a decisive pull clearly means "actually, drag it".
+const _PT_MENU_DRAG_PX = 14;
+
+/**
+ * Arbitrate the three things one press can mean on a list that both scrolls and
+ * reorders. Shared by the pack rail and the pack-creator grid — each supplies its
+ * own drag mechanics, but the disambiguation must be identical or the picker
+ * teaches two different gestures for the same motion.
+ *
+ * Deliberately NOT axis-aware in the grid's case: "horizontal means drag, vertical
+ * means scroll" misfires constantly on the diagonal drift of a real thumb, and
+ * press-then-drag is the platform convention anyway.
+ *
+ * @param {HTMLElement} el
+ * @param {object}   h
+ * @param {(x:number,y:number)=>void} h.onMenu      long-press / right-click
+ * @param {(ev:PointerEvent)=>void}   h.onDragStart threshold crossed while armed
+ * @param {(ev:PointerEvent)=>void}   h.onDragMove
+ * @param {(ev:PointerEvent)=>void}   h.onDragEnd
+ * @param {(ev:PointerEvent)=>boolean} [h.ignore]   skip the gesture entirely
+ * @param {string} [h.armClass]  toggled while a drag is possible but not started
+ */
+function installReorderGestures(el, h) {
+    el.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        h.onMenu(ev.clientX, ev.clientY);
+    });
+
+    el.addEventListener('pointerdown', (ev) => {
         if (ev.button !== 0) return;
+        if (h.ignore?.(ev)) return;
         const startX = ev.clientX;
         const startY = ev.clientY;
+        const isTouch = ev.pointerType === 'touch';
         let dragging = false;
-        let ghost = null;
-        let offX = 0;
-        let offY = 0;
+        // A mouse has a separate button for the menu, so it may drag at once.
+        let armed = !isTouch;
+        // Set once the gesture belongs to something else (a scroll).
+        let claimed = false;
+        // The long-press menu is showing but the finger is still down.
+        let menuOpen = false;
+        let armTimer = null;
+        let menuTimer = null;
+
+        const clearTimers = () => {
+            if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+            if (menuTimer) { clearTimeout(menuTimer); menuTimer = null; }
+        };
+        const disarm = () => {
+            armed = false;
+            if (h.armClass) el.classList.remove(h.armClass);
+            // Hand panning back to the browser.
+            el.style.touchAction = '';
+        };
+
+        if (isTouch) {
+            armTimer = setTimeout(() => {
+                armTimer = null;
+                armed = true;
+                if (h.armClass) el.classList.add(h.armClass);
+                // Take the gesture from the browser: with `touch-action: pan-y` it
+                // would keep panning on vertical movement and ignore our
+                // preventDefault. Legal to flip now precisely because arming
+                // required a still finger — no pan has begun to interrupt.
+                el.style.touchAction = 'none';
+                // Confirms "you may now drag" without stealing the gesture, so
+                // letting go still just taps.
+                navigator.vibrate?.(8);
+            }, _PT_ARM_MS);
+            menuTimer = setTimeout(() => {
+                menuTimer = null;
+                menuOpen = true;
+                el.dataset.suppressClick = '1';
+                navigator.vibrate?.(14);
+                h.onMenu(startX, startY);
+                // The gesture stays live (listeners + touch-action untouched): the
+                // held press may still PROMOTE to a drag — moving past
+                // _PT_MENU_DRAG_PX closes the menu and starts dragging — while
+                // simply lifting leaves the menu open for interaction.
+            }, _PT_MENU_MS);
+        }
+
+        // Swallow the scroll once the gesture is OURS — armed, menu open, or
+        // dragging. The browser latches its pan-y right at TOUCHSTART (the
+        // inline touch-action flip at arm doesn't re-latch mid-gesture), so any
+        // un-prevented vertical move in the armed/menu windows lets the native
+        // pan claim the gesture and pointercancel us — which killed menu→drag
+        // promotion in every direction except pure-horizontal. Before the arm
+        // lands, moves stay unprevented so a quick swipe scrolls natively.
+        // Non-passive because Android WebView defaults touchmove to passive,
+        // where preventDefault is ignored and the list scrolls under the drag.
+        const onTouchMove = (te) => { if (dragging || armed || menuOpen) te.preventDefault(); };
 
         const onMove = (mv) => {
             if (!dragging) {
-                if (Math.hypot(mv.clientX - startX, mv.clientY - startY) < _PC_DRAG_THRESHOLD_PX) return;
+                if (claimed) return;
+                const dist = Math.hypot(mv.clientX - startX, mv.clientY - startY);
+                if (menuOpen) {
+                    // Menu → drag promotion: a decisive pull while still holding
+                    // closes the menu and hands the press to the reorder drag.
+                    if (dist < _PT_MENU_DRAG_PX) return;
+                    h.closeMenu?.();
+                    menuOpen = false;
+                    dragging = true;
+                    h.onDragStart(mv);
+                    h.onDragMove(mv);
+                    return;
+                }
+                if (!armed) {
+                    // Moved before the hold landed: a scroll. Stand down so the
+                    // list pans natively.
+                    if (dist > _PT_SLOP_PX) {
+                        claimed = true;
+                        clearTimers();
+                        teardown();
+                    }
+                    return;
+                }
+                if (dist < _PC_DRAG_THRESHOLD_PX) return;
+                // Moving rules out the long-press menu.
+                clearTimers();
                 dragging = true;
-                _packTabDragActive = true;
-                tab.classList.add('is-dragging');
-                const rect = tab.getBoundingClientRect();
-                ghost = tab.cloneNode(true);
-                ghost.classList.add('emoji-pack-tab-ghost');
-                ghost.classList.remove('is-dragging');
-                ghost.style.position = 'fixed';
-                ghost.style.left = `${rect.left}px`;
-                ghost.style.top = `${rect.top}px`;
-                ghost.style.width = `${rect.width}px`;
-                ghost.style.height = `${rect.height}px`;
-                ghost.style.pointerEvents = 'none';
-                ghost.style.zIndex = '2200';
-                document.body.appendChild(ghost);
-                offX = rect.width / 2;
-                offY = rect.height / 2;
+                h.onDragStart(mv);
             }
-            if (ghost) {
-                ghost.style.left = `${mv.clientX - offX}px`;
-                ghost.style.top = `${mv.clientY - offY}px`;
-            }
-            _updatePackTabDropTarget(mv.clientY);
+            h.onDragMove(mv);
         };
 
-        const onUp = (up) => {
+        function teardown() {
             window.removeEventListener('pointermove', onMove);
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
-            if (!dragging) return;
-            tab.dataset.suppressClick = '1';
-            tab.classList.remove('is-dragging');
-            _packTabDragActive = false;
-            if (ghost) ghost.remove();
-            const target = _resolvePackTabDropTarget(up.clientY);
-            _clearPackTabDropMarkers();
-            if (target) _applyPackTabReorder(tab, target);
+            window.removeEventListener('touchmove', onTouchMove);
+        }
+
+        const onUp = (up) => {
+            clearTimers();
+            teardown();
+            const wasDragging = dragging;
+            dragging = false;
+            disarm();
+            if (wasDragging) h.onDragEnd(up);
         };
 
         window.addEventListener('pointermove', onMove);
         window.addEventListener('pointerup', onUp);
         window.addEventListener('pointercancel', onUp);
+        window.addEventListener('touchmove', onTouchMove, { passive: false });
+    });
+}
+
+// Auto-scroll while a pack drag sits at (or past) the rail's vertical edges,
+// so a long rail can be traversed in one drag instead of drag-scroll-drag hops.
+// Speed is proportional to the overshoot (gentle just inside the edge, capped
+// well below flick speed); the loop self-terminates when the pointer returns
+// inside the band, the rail hits its end, or the drag ends.
+const _PT_AUTOSCROLL_ZONE_PX = 14;
+const _PT_AUTOSCROLL_MAX_PX = 9; // per frame
+let _packRailAutoRaf = null;
+let _packRailDragY = 0;
+
+function _packRailAutoScrollTick() {
+    _packRailAutoRaf = null;
+    const sidebar = document.querySelector('.emoji-sidebar');
+    if (!sidebar || !_packTabDragActive) return;
+    const r = sidebar.getBoundingClientRect();
+    let v = 0;
+    if (_packRailDragY < r.top + _PT_AUTOSCROLL_ZONE_PX) {
+        v = -Math.min(_PT_AUTOSCROLL_MAX_PX, (r.top + _PT_AUTOSCROLL_ZONE_PX - _packRailDragY) * 0.25);
+    } else if (_packRailDragY > r.bottom - _PT_AUTOSCROLL_ZONE_PX) {
+        v = Math.min(_PT_AUTOSCROLL_MAX_PX, (_packRailDragY - (r.bottom - _PT_AUTOSCROLL_ZONE_PX)) * 0.25);
+    }
+    if (!v) return;
+    const before = sidebar.scrollTop;
+    sidebar.scrollTop = before + v;
+    if (sidebar.scrollTop === before) return; // rail end reached
+    // The tabs moved under a still pointer — keep the drop marker honest.
+    _updatePackTabDropTarget(_packRailDragY);
+    _packRailAutoRaf = requestAnimationFrame(_packRailAutoScrollTick);
+}
+
+function _packRailAutoScroll(y) {
+    _packRailDragY = y;
+    if (!_packRailAutoRaf) _packRailAutoRaf = requestAnimationFrame(_packRailAutoScrollTick);
+}
+
+function _packRailAutoScrollStop() {
+    if (_packRailAutoRaf) { cancelAnimationFrame(_packRailAutoRaf); _packRailAutoRaf = null; }
+}
+
+function _installPackTabGestures(tab, pack) {
+    let ghost = null;
+    let offX = 0;
+    let offY = 0;
+
+    installReorderGestures(tab, {
+        armClass: 'is-drag-armed',
+        onMenu: (x, y) => _showPackTabMenu(pack, x, y),
+        closeMenu: () => hideContextMenu(),
+        onDragStart: () => {
+            _packTabDragActive = true;
+            tab.classList.add('is-dragging');
+            const rect = tab.getBoundingClientRect();
+            ghost = tab.cloneNode(true);
+            ghost.classList.add('emoji-pack-tab-ghost');
+            ghost.classList.remove('is-dragging', 'is-drag-armed');
+            ghost.style.position = 'fixed';
+            ghost.style.left = `${rect.left}px`;
+            ghost.style.top = `${rect.top}px`;
+            ghost.style.width = `${rect.width}px`;
+            ghost.style.height = `${rect.height}px`;
+            ghost.style.pointerEvents = 'none';
+            ghost.style.zIndex = '2200';
+            document.body.appendChild(ghost);
+            offX = rect.width / 2;
+            offY = rect.height / 2;
+        },
+        onDragMove: (mv) => {
+            if (ghost) {
+                ghost.style.left = `${mv.clientX - offX}px`;
+                ghost.style.top = `${mv.clientY - offY}px`;
+            }
+            _updatePackTabDropTarget(mv.clientY);
+            _packRailAutoScroll(mv.clientY);
+        },
+        onDragEnd: (up) => {
+            _packRailAutoScrollStop();
+            tab.dataset.suppressClick = '1';
+            tab.classList.remove('is-dragging');
+            _packTabDragActive = false;
+            if (ghost) { ghost.remove(); ghost = null; }
+            const target = _resolvePackTabDropTarget(up.clientY);
+            _clearPackTabDropMarkers();
+            if (target) _applyPackTabReorder(tab, target);
+        },
     });
 }
 
@@ -1173,6 +1405,10 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
                 if (p.classList && p.classList.contains('emoji-pack-emoji')) return NodeFilter.FILTER_REJECT;
                 p = p.parentElement;
             }
+            // A `g` regex's test() resumes from the PREVIOUS node's lastIndex —
+            // when twemoji has split the text into segments, that silently
+            // rejects every other node holding a shortcode.
+            pattern.lastIndex = 0;
             return pattern.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
         }
     });
@@ -1287,6 +1523,21 @@ function _naddrKind(naddr) {
     }
     _naddrKindCache.set(key, kind);
     return kind;
+}
+
+/**
+ * The shareable form of a pack naddr: same coordinate, plus relay hints
+ * naming the PACK's home (the author's NIP-65 write relays — a subscribed
+ * pack does not live on the sharer's relays). The canonical hint-less `id`
+ * stays the cache/identity key; hints are minted per-share. Falls back to
+ * the bare naddr on any failure.
+ */
+async function _shareNaddr(naddr) {
+    try {
+        return await window.__TAURI__.core.invoke('get_pack_share_naddr', { naddr });
+    } catch {
+        return naddr;
+    }
 }
 
 /**
@@ -1719,13 +1970,13 @@ function _buildPackPreviewThumbs(left, pack) {
     grid.attachVisibilityObserver(null);   // viewport-rooted
 }
 
-function _onPackPreviewCopyClick(btn, card) {
+async function _onPackPreviewCopyClick(btn, card) {
     const naddr = card.dataset.naddr;
     if (!naddr) return;
     // Copy the shareable vectorapp.io URL (matches the "Share Pack" action),
     // not the bare naddr — the URL gives a web preview on other platforms and
     // the OS deep-link interception for Vector users.
-    const shareUrl = `https://vectorapp.io/emojis/pack/${naddr}`;
+    const shareUrl = `https://vectorapp.io/emojis/pack/${await _shareNaddr(naddr)}`;
     navigator.clipboard.writeText(shareUrl).then(() => {
         const icon = btn.querySelector('.icon');
         if (!icon) return;
@@ -2686,6 +2937,66 @@ const _pc = {
     dirty: false,            // tracks unsaved changes for auto-save on exit
 };
 
+// Remote URLs whose host definitively deleted the file (404/410). The editor
+// renders from the local cache, which keeps serving bytes the host removed
+// long ago — so the creator's own device needs an explicit remote probe to
+// see the damage every cache-cold client already sees.
+const _pcDeadUrls = new Set();
+
+function _pcGoneMessage() {
+    return emojiUnavailableMessage('404 not found').replace(/<br\s*\/?>/gi, ' ');
+}
+
+function _pcMarkCellBroken(cell, message) {
+    cell.classList.add('emoji-creator-cell-broken');
+    cell.title = message;
+}
+
+/** Probe the pack's remote media past the warm cache and mark dead cells.
+ *  Only a definitive 404/410 marks anything — a flaky host stays quiet. */
+async function _pcVerifyRemoteMedia() {
+    const packId = _pc.editingId;
+    const urls = _pc.emojis.map(e => e.url).filter(u => _isCacheableEmojiUrl(u));
+    if (_isCacheableEmojiUrl(_pc.logoUrl)) urls.push(_pc.logoUrl);
+    if (!urls.length) return;
+    let results;
+    try {
+        results = await invoke('verify_remote_media', { urls });
+    } catch (e) {
+        console.warn('[pack-creator] remote media verify failed:', e);
+        return;
+    }
+    const gone = results.filter(r => r.gone);
+    if (!gone.length) return;
+    for (const r of gone) _pcDeadUrls.add(r.url);
+    // The editor may have closed or switched packs while we probed.
+    if (!_pc.open || _pc.editingId !== packId) return;
+    // Mark in place rather than re-rendering — a re-render mid-drag would
+    // yank cells out from under the pointer.
+    const grid = document.getElementById('emoji-creator-grid');
+    if (grid) {
+        grid.querySelectorAll('.emoji-creator-cell').forEach(cell => {
+            const e = _pc.emojis[Number(cell.dataset.idx)];
+            if (e && e.url && _pcDeadUrls.has(e.url)) _pcMarkCellBroken(cell, _pcGoneMessage());
+        });
+    }
+    if (_pcDeadUrls.has(_pc.logoUrl)) _pcRenderLogo();
+}
+
+/** URLs a blob cleanup must NOT delete: Blossom is content-addressed, so a
+ *  removed cell's queued URL can be the very blob a re-add of identical
+ *  bytes just published, or a blob another pack shares. Extras carry the
+ *  just-published pack's URLs (arrEmojiPacks is stale at drain time). */
+function _pcLiveBlobUrls(extras = []) {
+    const live = new Set(extras.filter(Boolean));
+    for (const p of arrEmojiPacks) {
+        if (p.id === _pc.editingId) continue;
+        for (const em of (p.emojis || [])) if (em.url) live.add(em.url);
+        if (p.image_url) live.add(p.image_url);
+    }
+    return live;
+}
+
 function openEmojiPackCreator(id) {
     const editingPack = id ? arrEmojiPacks.find(p => p.id === id) : null;
     // Creating a new pack while at the equipped-pack cap would be
@@ -2698,6 +3009,7 @@ function openEmojiPackCreator(id) {
     }
 
     _pcRevokeBlobUrls();
+    _pcDeadUrls.clear();
     _pc.open = true;
     _pc.saving = false;
     _pc.dirty = false;
@@ -2722,6 +3034,7 @@ function openEmojiPackCreator(id) {
     }
     _pcShowView(true);
     _pcSyncDom();
+    if (editingPack) _pcVerifyRemoteMedia();
     // Reset the scroll container to the top — without this, opening
     // edit mode for a pack while the picker was already scrolled to
     // that pack's section leaves the creator showing its grid bottom
@@ -2806,7 +3119,9 @@ function _pcRevokeBlobUrls() {
 
 function _pcSyncDom() {
     document.getElementById('emoji-creator-name').value = _pc.name;
-    document.getElementById('emoji-creator-delete').hidden = _pc.mode !== 'edit';
+    // Shown in BOTH modes: 'edit' deletes the published pack, 'create' discards the
+    // draft. Hiding it in create mode left the only exit labelled "Save and exit".
+    document.getElementById('emoji-creator-delete').hidden = false;
     _pcRenderLogo();
     _pcRenderGrid();
 }
@@ -2815,6 +3130,8 @@ function _pcRenderLogo() {
     const btn = document.getElementById('emoji-creator-logo');
     if (!btn) return;
     btn.innerHTML = '';
+    btn.classList.remove('emoji-creator-cell-broken');
+    btn.title = '';
     if (_pc.logoBlobUrl) {
         // Local preview of an in-progress upload — blob: URL is safe.
         const img = document.createElement('img');
@@ -2829,6 +3146,9 @@ function _pcRenderLogo() {
         bindCachedEmojiImg(img, _pc.logoUrl, 'emoji_pack_icon');
         btn.appendChild(img);
         btn.classList.add('has-image');
+        const logoDead = _pcDeadUrls.has(_pc.logoUrl);
+        btn.classList.toggle('emoji-creator-cell-broken', logoDead);
+        btn.title = logoDead ? 'This pack icon is no longer available (it may have been deleted).' : '';
     } else {
         btn.innerHTML = '<span class="icon icon-image"></span>';
         btn.classList.remove('has-image');
@@ -2859,9 +3179,9 @@ function _pcRenderGrid() {
             // The editor must NEVER hide a failed emoji — the creator has to see it's broken and
             // remove/replace it. Mark the cell broken (reason on hover); keep it and its controls.
             bindCachedEmojiImg(img, e.url, 'emoji', (el, reason) => {
-                cell.classList.add('emoji-creator-cell-broken');
-                cell.title = emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' ');
+                _pcMarkCellBroken(cell, emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '));
             });
+            if (_pcDeadUrls.has(e.url)) _pcMarkCellBroken(cell, _pcGoneMessage());
         }
         img.alt = `:${e.shortcode}:`;
         img.draggable = false;
@@ -2914,24 +3234,12 @@ function _pcRenderGrid() {
         });
         cell.dataset.emojiTooltip = `:${e.shortcode}:`;
 
-        // Right-click (desktop) + long-press (mobile) context menu.
-        // Mobile users have no hover-× to reach, so this is the only
-        // path to delete on touch. The reorder handler's drag threshold
-        // (move > _PC_DRAG_THRESHOLD_PX) and the long-press tolerance
-        // (8px) don't fight — moving past either cancels both gestures.
-        if (typeof attachLongPressContextMenu === 'function') {
-            attachLongPressContextMenu(cell, (x, y) => {
-                if (typeof showContextMenu !== 'function') return;
-                showContextMenu({
-                    x, y,
-                    items: [
-                        { label: 'Rename Emoji', icon: 'edit',  onClick: () => _pcRenameEmoji(idx) },
-                        { label: 'Delete Emoji', icon: 'trash', danger: true, onClick: () => _pcRemoveEmoji(idx) },
-                    ],
-                });
-            });
-        }
-
+        // Reorder-drag, long-press menu (the only delete path on touch, with no
+        // hover-× to reach) and grid scrolling all begin as the same press, so ONE
+        // arbiter owns them. The previous pair of handlers each ran their own
+        // timers and could not agree who claimed the gesture: at 6px the drag won
+        // and the 8px long-press cancelled itself, so scrolling the grid was
+        // impossible. Right-click is wired inside it too.
         _pcInstallReorderHandlers(cell, idx);
         grid.appendChild(cell);
     });
@@ -2982,69 +3290,70 @@ function _pcClearDropMarkers() {
 const _PC_DRAG_THRESHOLD_PX = 6;
 let _pcDragActive = false;
 function _pcInstallReorderHandlers(cell, idx) {
-    cell.addEventListener('pointerdown', (ev) => {
-        if (ev.button !== 0) return;
-        if (ev.target.closest('.emoji-creator-cell-remove')) return;
-        const startX = ev.clientX;
-        const startY = ev.clientY;
-        let dragging = false;
-        let ghost = null;
-        let ghostOffsetX = 0;
-        let ghostOffsetY = 0;
+    let ghost = null;
+    let ghostOffsetX = 0;
+    let ghostOffsetY = 0;
 
-        const onMove = (mv) => {
-            if (!dragging) {
-                if (Math.hypot(mv.clientX - startX, mv.clientY - startY) < _PC_DRAG_THRESHOLD_PX) return;
-                dragging = true;
-                _pcDragActive = true;
-                cell.classList.add('is-dragging');
-                // Clear any stuck hover state — we own this class now,
-                // so a drag start is the right moment to normalize it.
-                const grid = document.getElementById('emoji-creator-grid');
-                if (grid) {
-                    grid.querySelectorAll('.is-hovered').forEach(c =>
-                        c.classList.remove('is-hovered'));
-                }
-                const rect = cell.getBoundingClientRect();
-                ghost = cell.cloneNode(true);
-                // Drop transient state from the clone so it reads as a static
-                // preview: kill the remove button, the hover-only chrome, and
-                // any nested pointer-capturing behaviour.
-                ghost.classList.add('emoji-creator-cell-ghost');
-                ghost.classList.remove('is-dragging');
-                const ghostRemove = ghost.querySelector('.emoji-creator-cell-remove');
-                if (ghostRemove) ghostRemove.remove();
-                ghost.style.position = 'fixed';
-                ghost.style.left = `${rect.left}px`;
-                ghost.style.top = `${rect.top}px`;
-                ghost.style.width = `${rect.width}px`;
-                ghost.style.height = `${rect.height}px`;
-                ghost.style.pointerEvents = 'none';
-                ghost.style.zIndex = '2200';
-                document.body.appendChild(ghost);
-                // Ghost is scaled (transform: scale 0.6) around its center,
-                // so centering the unscaled box on the cursor keeps the
-                // visible thumbnail anchored under the pointer regardless of
-                // where the user grabbed the cell.
-                ghostOffsetX = rect.width / 2;
-                ghostOffsetY = rect.height / 2;
+    installReorderGestures(cell, {
+        armClass: 'is-drag-armed',
+        // The remove-× is its own target; a press there must never become a drag.
+        ignore: (ev) => !!ev.target.closest('.emoji-creator-cell-remove'),
+        onMenu: (x, y) => {
+            if (typeof showContextMenu !== 'function') return;
+            showContextMenu({
+                x, y,
+                items: [
+                    { label: 'Rename Emoji', icon: 'edit',  onClick: () => _pcRenameEmoji(idx) },
+                    { label: 'Delete Emoji', icon: 'trash', danger: true, onClick: () => _pcRemoveEmoji(idx) },
+                ],
+            });
+        },
+        onDragStart: () => {
+            _pcDragActive = true;
+            cell.classList.add('is-dragging');
+            // Clear any stuck hover state — we own this class now, so a drag
+            // start is the right moment to normalize it.
+            const grid = document.getElementById('emoji-creator-grid');
+            if (grid) {
+                grid.querySelectorAll('.is-hovered').forEach(c =>
+                    c.classList.remove('is-hovered'));
             }
+            const rect = cell.getBoundingClientRect();
+            ghost = cell.cloneNode(true);
+            // Drop transient state from the clone so it reads as a static
+            // preview: kill the remove button, the hover-only chrome, and any
+            // nested pointer-capturing behaviour.
+            ghost.classList.add('emoji-creator-cell-ghost');
+            ghost.classList.remove('is-dragging', 'is-drag-armed');
+            const ghostRemove = ghost.querySelector('.emoji-creator-cell-remove');
+            if (ghostRemove) ghostRemove.remove();
+            ghost.style.position = 'fixed';
+            ghost.style.left = `${rect.left}px`;
+            ghost.style.top = `${rect.top}px`;
+            ghost.style.width = `${rect.width}px`;
+            ghost.style.height = `${rect.height}px`;
+            ghost.style.pointerEvents = 'none';
+            ghost.style.zIndex = '2200';
+            document.body.appendChild(ghost);
+            // Ghost is scaled (transform: scale 0.6) around its center, so
+            // centering the unscaled box on the cursor keeps the visible
+            // thumbnail anchored under the pointer regardless of where the
+            // user grabbed the cell.
+            ghostOffsetX = rect.width / 2;
+            ghostOffsetY = rect.height / 2;
+        },
+        onDragMove: (mv) => {
             if (ghost) {
                 ghost.style.left = `${mv.clientX - ghostOffsetX}px`;
                 ghost.style.top  = `${mv.clientY - ghostOffsetY}px`;
             }
             _pcUpdateDropTarget(mv.clientX, mv.clientY);
-        };
-
-        const onUp = (up) => {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-            window.removeEventListener('pointercancel', onUp);
-            if (!dragging) return;
+        },
+        onDragEnd: (up) => {
             cell.dataset.suppressClick = '1';
             cell.classList.remove('is-dragging');
             _pcDragActive = false;
-            if (ghost) ghost.remove();
+            if (ghost) { ghost.remove(); ghost = null; }
             const target = _pcResolveDropTarget(up.clientX, up.clientY);
             _pcClearDropMarkers();
             if (!target) return;
@@ -3058,11 +3367,7 @@ function _pcInstallReorderHandlers(cell, idx) {
             _pc.emojis.splice(to, 0, moved);
             _pc.dirty = true;
             _pcRenderGrid();
-        };
-
-        window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp);
-        window.addEventListener('pointercancel', onUp);
+        },
     });
 }
 
@@ -4061,7 +4366,8 @@ async function _pcSave() {
         // evict each URL from the emoji cache memo on success so a stale
         // local path can't outlive its deleted Blossom file.
         if (_pc.pendingBlobDeletes.length > 0) {
-            const queue = _pc.pendingBlobDeletes.slice();
+            const live = _pcLiveBlobUrls(emojis.map(x => x.url).concat(logoUrl ? [logoUrl] : []));
+            const queue = _pc.pendingBlobDeletes.filter(url => !live.has(url));
             _pc.pendingBlobDeletes = [];
             Promise.allSettled(queue.map(async url => {
                 try {
@@ -4126,7 +4432,49 @@ function _pcSetSavingChrome(on) {
 }
 
 async function _pcDelete() {
-    if (!_pc.editingId || _pc.saving) return;
+    if (_pc.saving) return;
+    // Create mode: nothing exists yet to delete, so this is "discard the draft" —
+    // and it's the only non-committal way out of the creator, since the other exit
+    // is labelled "Save and exit". Draft emojis hold a File + blobUrl and are not
+    // uploaded until save, so there's normally nothing server-side to sweep; a
+    // `url` only appears on a cell whose upload landed during a save that later
+    // failed, and those are already queued in `pendingBlobDeletes`.
+    // A successful save closes the creator, so an open create-mode editor has never
+    // published — which is what the discard copy promises the user. Belt-and-braces
+    // in case a future change keeps it open after saving: adopt the saved id so this
+    // takes the real delete path rather than claiming nothing exists.
+    if (!_pc.editingId && _pc.savedPackId) _pc.editingId = _pc.savedPackId;
+    if (!_pc.editingId) {
+        const discard = await _pcShowConfirm({
+            title: 'Discard This Pack?',
+            detail: 'This pack was never saved. The emojis you added will be lost.',
+            icon: 'vector_warning.svg',
+            tone: 'danger',
+            confirmText: 'DISCARD',
+        });
+        if (!discard) return;
+        // Sweep anything a failed save already pushed to Blossom, so bailing out
+        // can't strand orphan blobs. Best-effort and unblocking.
+        const liveElsewhere = _pcLiveBlobUrls();
+        const orphans = _pc.emojis.map(e => e.url).filter(Boolean)
+            .concat(_pc.pendingBlobDeletes, _pc.logoUrl ? [_pc.logoUrl] : [])
+            .filter(url => !liveElsewhere.has(url));
+        _pc.pendingBlobDeletes = [];
+        if (orphans.length) {
+            Promise.allSettled(orphans.map(url =>
+                invoke('emoji_pack_delete_blob', { url })
+                    .then(() => _emojiCacheMemo.delete(url))
+            )).catch(() => {});
+        }
+        _pc.dirty = false;
+        _pc.open = false;
+        _pc.emojis = [];
+        _pc.logoFile = null;
+        _pc.logoUrl = '';
+        _pcShowView(false);
+        _pcRevokeBlobUrls();
+        return;
+    }
     // In-panel confirm — popupConfirm lives outside .emoji-picker and
     // any click on it would trip the outside-close handler, snapping
     // the picker shut mid-flow.
@@ -4145,14 +4493,16 @@ async function _pcDelete() {
     // current _pc.emojis (what's on screen) rather than arrEmojiPacks
     // because the user may have removed cells in this edit session that
     // haven't been re-published yet — those files should still die.
+    // Blobs another pack shares (content-addressed dedup) must survive.
+    const liveElsewhere = _pcLiveBlobUrls();
     const cellOps = _pc.emojis
         .map((e, idx) => ({ idx, url: e.url }))
-        .filter(op => Boolean(op.url));
-    const logoUrl = _pc.logoUrl || '';
+        .filter(op => Boolean(op.url) && !liveElsewhere.has(op.url));
+    const logoUrl = (_pc.logoUrl && !liveElsewhere.has(_pc.logoUrl)) ? _pc.logoUrl : '';
     // Any URLs queued for cleanup (× removals + replaced logo) get
     // swept here too so a "delete pack" run after an unsaved edit still
     // tears down those orphans.
-    const pendingExtras = _pc.pendingBlobDeletes.slice();
+    const pendingExtras = _pc.pendingBlobDeletes.filter(url => !liveElsewhere.has(url));
     _pc.pendingBlobDeletes = [];
 
     // Full-panel overlay survives the whole flow so the user gets a
@@ -4349,7 +4699,7 @@ function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
     if (!keepOpen) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-        domChatMessageInput.focus();
+        if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 }
 
@@ -4799,6 +5149,134 @@ emojiSearch.addEventListener('input', (e) => {
     }
 });
 
+// Scroll-spy for the rail: the highlight tracked clicks only, so scrolling the
+// emoji panel left it pointing at whatever was last tapped.
+//
+// Suppressed briefly after a tab click — that scroll is `behavior: 'smooth'`, and
+// following it would strobe the highlight through every section it passes on the
+// way to the one the user actually picked.
+let _emojiSpyMuteUntil = 0;
+let _emojiSpyFrame = 0;
+
+// Rail follow: ease toward a target scrollTop instead of handing each change to
+// `scrollIntoView({ behavior: 'smooth' })`. That restarts a fixed-duration
+// animation per section crossed, so a continuous scroll came out as a series of
+// discrete lurches. Lerping toward a target that can move mid-flight reads as one
+// fluid motion however fast the panel is scrolled.
+const _RAIL_EDGE_PAD_PX = 14;
+const _RAIL_LERP_PER_FRAME = 0.16;
+let _railTarget = null;
+let _railRaf = 0;
+let _railLastTs = 0;
+
+function _railStop() {
+    if (_railRaf) cancelAnimationFrame(_railRaf);
+    _railRaf = 0;
+    _railTarget = null;
+}
+
+function _railStep(ts) {
+    const rail = document.querySelector('.emoji-sidebar');
+    if (!rail || _railTarget === null) { _railStop(); return; }
+    // Frame-rate independent: the same glide on a 120Hz panel as on 60Hz.
+    const dt = _railLastTs ? Math.min(ts - _railLastTs, 64) : 16.67;
+    _railLastTs = ts;
+    const k = 1 - Math.pow(1 - _RAIL_LERP_PER_FRAME, dt / 16.67);
+
+    const delta = _railTarget - rail.scrollTop;
+    if (Math.abs(delta) < 0.5) {
+        rail.scrollTop = _railTarget;
+        _railStop();
+        return;
+    }
+    rail.scrollTop += delta * k;
+    _railRaf = requestAnimationFrame(_railStep);
+}
+
+// Minimal move that brings `tab` fully into the rail with a margin — the old
+// `block: 'nearest'` + `scroll-padding` behaviour, computed here now that we own
+// the animation, so the inset lives in one place instead of two.
+function _railFollow(tab) {
+    const rail = document.querySelector('.emoji-sidebar');
+    if (!rail) return;
+    const max = rail.scrollHeight - rail.clientHeight;
+    if (max <= 0) return;
+    const top = tab.offsetTop - _RAIL_EDGE_PAD_PX;
+    const bottom = tab.offsetTop + tab.offsetHeight + _RAIL_EDGE_PAD_PX;
+    const from = _railTarget ?? rail.scrollTop;
+
+    let target = from;
+    if (top < from) target = top;
+    else if (bottom > from + rail.clientHeight) target = bottom - rail.clientHeight;
+    target = Math.max(0, Math.min(target, max));
+    if (Math.abs(target - rail.scrollTop) < 0.5) return;
+
+    _railTarget = target;
+    if (!_railRaf) {
+        _railLastTs = 0;
+        _railRaf = requestAnimationFrame(_railStep);
+    }
+}
+
+function _tabForSection(section) {
+    if (section.classList.contains('emoji-pack-section')) {
+        const id = section.dataset.packId;
+        return id
+            ? document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(id)}"]`)
+            : null;
+    }
+    // Stock sections are `#emoji-<category>` against `[data-category]` tabs.
+    const category = section.id?.startsWith('emoji-') ? section.id.slice(6) : '';
+    return category
+        ? document.querySelector(`.emoji-category-btn[data-category="${CSS.escape(category)}"]`)
+        : null;
+}
+
+function _syncActiveSectionTab() {
+    if (Date.now() < _emojiSpyMuteUntil) return;
+    const main = document.querySelector('.emoji-main');
+    // Creator mode hides every section, so there's nothing to track.
+    if (!main || _pc.open) return;
+    const sections = [...main.querySelectorAll('.emoji-section')]
+        .filter(s => !s.hidden && s.offsetParent !== null);
+    if (!sections.length) return;
+
+    // Detector line at the panel's CENTRE, not its top edge. Against the top, a
+    // one-pixel sliver of the outgoing section still counted as current while the
+    // next one filled the whole view. Sections stack contiguously, so the last one
+    // whose top is at or above the midpoint is the one occupying the centre — and
+    // it degrades correctly at the ends, where no section spans the midpoint.
+    const rect = main.getBoundingClientRect();
+    const mid = rect.top + rect.height / 2;
+    let current = sections[0];
+    for (const s of sections) {
+        if (s.getBoundingClientRect().top <= mid) current = s;
+        else break;
+    }
+
+    const tab = _tabForSection(current);
+    if (!tab || tab.classList.contains('active')) return;
+    document.querySelectorAll('.emoji-category-btn').forEach(b => {
+        b.classList.toggle('active', b === tab);
+    });
+    // The rail scrolls too, so a pack scrolled past off-rail would highlight
+    // invisibly. Only moves when the tab isn't comfortably in view.
+    _railFollow(tab);
+}
+
+// Grabbing the rail wins over an in-flight follow — never animate against the
+// user's own finger.
+document.querySelector('.emoji-sidebar')?.addEventListener('pointerdown', _railStop);
+document.querySelector('.emoji-sidebar')?.addEventListener('wheel', _railStop, { passive: true });
+
+document.querySelector('.emoji-main')?.addEventListener('scroll', () => {
+    if (_emojiSpyFrame) return;
+    _emojiSpyFrame = requestAnimationFrame(() => {
+        _emojiSpyFrame = 0;
+        _syncActiveSectionTab();
+    });
+}, { passive: true });
+
 // Delegated category-button click handler. Single source of truth for
 // both stock tabs (rendered at parse time) and pack tabs (appended at
 // runtime); the bare forEach binding only saw the stock three.
@@ -4837,7 +5315,12 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
     // Pixel-accurate contain-intrinsic-size on every pack section (see
     // renderEmojiPackSections) means nothing resizes under the scroll, so a
     // single smooth scroll lands on target — no post-jump correction needed.
-    if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (section) {
+        // Hold the spy off while the smooth scroll travels, so the highlight
+        // stays on the tab that was clicked instead of chasing the animation.
+        _emojiSpyMuteUntil = Date.now() + 700;
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
 });
 
 /**
@@ -4847,6 +5330,11 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
  * @param {boolean} autoSpace - If true, adds spaces around inserted text when adjacent to non-whitespace
  */
 function insertAtCursor(text, autoSpace = false) {
+    // Dialog-owned target (Status dialog) intercepts the insert wholesale.
+    if (_emojiPanelTarget) {
+        _emojiPanelTarget.insert(text);
+        return;
+    }
     const input = domChatMessageInput;
     const start = input.selectionStart;
     const end = input.selectionEnd;
@@ -4900,7 +5388,7 @@ picker.addEventListener('click', (e) => {
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
     if (!e.shiftKey) picker.classList.remove('visible');
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-        domChatMessageInput.focus();
+        if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 }, true);
 
@@ -4943,7 +5431,7 @@ picker.addEventListener('click', (e) => {
             }
             // Focus chat input (desktop only - mobile keyboards are disruptive)
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-                domChatMessageInput.focus();
+                if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
         }
     }
@@ -4991,7 +5479,7 @@ emojiSearch.onkeydown = async (e) => {
             strCurrentReactionReference = '';
             domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-                domChatMessageInput.focus();
+                if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
             return;
         }
@@ -5039,7 +5527,7 @@ emojiSearch.onkeydown = async (e) => {
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-            domChatMessageInput.focus();
+            if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     } else if (e.code === 'Escape') {
         // Close the Mini App launch dialog if open
@@ -5063,7 +5551,7 @@ emojiSearch.onkeydown = async (e) => {
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
-            domChatMessageInput.focus();
+            if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     }
 };
@@ -5735,7 +6223,7 @@ function selectGif(gifId) {
 
     // Focus the input (desktop only)
     if (!platformFeatures.is_mobile) {
-        domChatMessageInput.focus();
+        if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
 
     // Auto-send only if input was empty (just the GIF)

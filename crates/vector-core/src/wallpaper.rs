@@ -25,6 +25,7 @@
 //!   content: "" (unused; metadata lives in tags)
 //! ```
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -284,7 +285,6 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     // Capture session at entry — the upload + gift-wrap send below take
     // seconds, and a mid-publish account swap must not write this
     // wallpaper into the new account (re-checked before the STATE/DB write).
-    let session = crate::state::SessionGuard::capture();
 
     let blur = blur.min(30);
     let dim = dim.min(100);
@@ -323,10 +323,8 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     let params = crypto::generate_encryption_params();
     let encrypted = crypto::encrypt_data(&bytes, &params)?;
 
-    let client = crate::state::nostr_client().ok_or("Not logged in")?;
-    let signer = client
-        .signer()
-        .await
+    let _client = crate::state::nostr_client().ok_or("Not logged in")?;
+    let signer = crate::signer::active_signer()
         .map_err(|e| format!("Signer: {}", e))?;
     let my_pk = crate::state::my_public_key().ok_or("Public key not set")?;
     // The chat the wallpaper belongs to, tagged on the rumor below. Without it,
@@ -378,39 +376,39 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
         // to the correct chat rather than defaulting to our self-chat.
         .tag(Tag::public_key(recipient_pk))
         .tag(Tag::custom(
-            TagKind::Custom("url".into()),
+            "url",
             vec![upload_url.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("decryption-key".into()),
+            "decryption-key",
             vec![params.key.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("decryption-nonce".into()),
+            "decryption-nonce",
             vec![params.nonce.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("x".into()),
+            "x",
             vec![plaintext_hash.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("m".into()),
+            "m",
             vec![mime.clone()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("size".into()),
+            "size",
             vec![encrypted.len().to_string()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("blur".into()),
+            "blur",
             vec![blur.to_string()],
         ))
         .tag(Tag::custom(
-            TagKind::Custom("dim".into()),
+            "dim",
             vec![dim.to_string()],
         ))
         .custom_created_at(Timestamp::from(created_at))
-        .build(my_pk);
+        .finalize_unsigned_with_id(my_pk);
 
     // SEND FIRST, commit on success. Wallpaper is a sync feature — if the
     // recipient (and our other devices) can't see it, there's no value in
@@ -442,9 +440,6 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     // Account swapped during upload/send: the rumor already went to the
     // original recipient, but the local commit below (preview promotion,
     // STATE, DB) would land in the new account's storage. Skip it.
-    if !session.is_valid() {
-        return Ok(());
-    }
 
     // Send succeeded — promote the preview file to the active slot.
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
@@ -490,7 +485,7 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
     if !prev_url.is_empty() && prev_uploader == me_npub {
         let signer_clone = signer.clone();
         let prev_url_clone = prev_url.clone();
-        tokio::spawn(async move {
+        crate::db::spawn_bound(async move {
             if let Err(e) =
                 crate::blossom::delete_blob_by_url(signer_clone, &prev_url_clone).await
             {
@@ -568,7 +563,6 @@ pub async fn apply_received_wallpaper(
     // Capture session NOW — the download below can take seconds, and a
     // mid-fetch account swap must not let us write account A's wallpaper
     // into account B's STATE/DB (re-checked before every write below).
-    let session = crate::state::SessionGuard::capture();
 
     let blur = blur.unwrap_or(0).min(30);
     let dim = dim.unwrap_or(50).min(100);
@@ -661,10 +655,6 @@ pub async fn apply_received_wallpaper(
 
     // Account swap during the download invalidates everything below — the
     // chat npub, the DB pool, and the per-account wallpapers dir all belong
-    // to a session that may no longer be active. Bail before any write.
-    if !session.is_valid() {
-        return Ok(());
-    }
 
     let active = wallpapers_dir()?.join(format!("{}.{}", chat_npub, extension));
     clean_chat_files(chat_npub, FileKind::Active, None)?;
@@ -704,10 +694,10 @@ pub async fn apply_received_wallpaper(
             .and_then(|pk| pk.to_bech32().ok())
             .unwrap_or_default();
         if !me_npub.is_empty() && prev_uploader == me_npub {
-            if let Some(client) = crate::state::nostr_client() {
-                if let Ok(signer) = client.signer().await {
+            if let Some(_client) = crate::state::nostr_client() {
+                if let Ok(signer) = crate::signer::active_signer() {
                     let prev_url_clone = prev_url.clone();
-                    tokio::spawn(async move {
+                    crate::db::spawn_bound(async move {
                         if let Err(e) =
                             crate::blossom::delete_blob_by_url(signer, &prev_url_clone).await
                         {
@@ -788,10 +778,10 @@ async fn delete_prior_blob_if_ours(prev_url: &str, prev_uploader: &str) {
     if me_npub.is_empty() || prev_uploader != me_npub {
         return;
     }
-    if let Some(client) = crate::state::nostr_client() {
-        if let Ok(signer) = client.signer().await {
+    if let Some(_client) = crate::state::nostr_client() {
+        if let Ok(signer) = crate::signer::active_signer() {
             let prev_url = prev_url.to_string();
-            tokio::spawn(async move {
+            crate::db::spawn_bound(async move {
                 if let Err(e) = crate::blossom::delete_blob_by_url(signer, &prev_url).await {
                     log_warn!("[Wallpaper] DELETE prev blob {} failed: {}", prev_url, e);
                 }
@@ -865,7 +855,6 @@ async fn emit_wallpaper_removed(
 /// recipient and our other devices clear it too (latest-write-wins by
 /// `created_at`), then DELETEs our blob and wipes local STATE/DB.
 pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
-    let session = crate::state::SessionGuard::capture();
 
     let my_pk = crate::state::my_public_key().ok_or("Public key not set")?;
     let recipient_pk = PublicKey::from_bech32(chat_npub)
@@ -880,7 +869,7 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
         .tag(Tag::identifier(WALLPAPER_DTAG_VALUE))
         .tag(Tag::public_key(recipient_pk))
         .custom_created_at(Timestamp::from(created_at))
-        .build(my_pk);
+        .finalize_unsigned_with_id(my_pk);
 
     let pending_id = format!("pending-wallpaper-rm-{}", created_at);
     let send_config = crate::sending::SendConfig {
@@ -903,9 +892,6 @@ pub async fn remove_wallpaper(chat_npub: &str) -> Result<(), String> {
 
     // Account swapped mid-send — the tombstone already went out, but the
     // local commit below would land in the new account's storage. Skip it.
-    if !session.is_valid() {
-        return Ok(());
-    }
 
     clean_chat_files(chat_npub, FileKind::Active, None)?;
     let me_npub = my_pk.to_bech32().unwrap_or_default();

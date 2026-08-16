@@ -25,6 +25,11 @@ pub struct Message {
     /// in-memory message can't supply.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replied_to_attachment_extension: Option<String>,
+    /// The replied-to message's NIP-30 emoji tags, for off-screen targets:
+    /// without them the quote renders raw `:shortcodes:` and nothing later
+    /// corrects it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replied_to_emoji_tags: Option<Vec<EmojiTag>>,
     pub preview_metadata: Option<SiteMetadata>,
     pub attachments: Vec<Attachment>,
     pub reactions: Vec<Reaction>,
@@ -73,6 +78,7 @@ impl Default for Message {
             replied_to_npub: None,
             replied_to_has_attachment: None,
             replied_to_attachment_extension: None,
+            replied_to_emoji_tags: None,
             preview_metadata: None,
             attachments: Vec::new(),
             reactions: Vec::new(),
@@ -97,7 +103,7 @@ impl EmojiTag {
     /// parser — keeps the wire format and renderer aligned.
     pub fn extract_from_tags<'a, I>(tags: I) -> Vec<EmojiTag>
     where
-        I: IntoIterator<Item = &'a nostr_sdk::Tag>,
+        I: IntoIterator<Item = &'a nostr_sdk::prelude::Tag>,
     {
         let mut out: Vec<EmojiTag> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -170,7 +176,13 @@ impl Message {
         }
 
         if let Some(ref mut history) = self.edit_history {
-            if history.iter().any(|e| e.edited_at == edited_at) {
+            // One edit per timestamp — but the BASE revision is not an edit. History
+            // is seeded with the original at the message's own `at`, and deduping
+            // against that entry silently dropped any edit made inside that same
+            // millisecond: the message just refused to change. Skip the base slot,
+            // keep repeat-edit suppression exactly as it was.
+            let base_slot = usize::from(history.first().is_some_and(|e| e.edited_at == self.at));
+            if history.iter().skip(base_slot).any(|e| e.edited_at == edited_at) {
                 return;
             }
             history.push(EditEntry { content: new_content, edited_at });
@@ -191,12 +203,11 @@ impl Message {
     /// Unlike the src-tauri version, this does NOT emit events — the caller
     /// is responsible for notifying the UI via `emit_event`.
     pub fn add_reaction(&mut self, reaction: Reaction) -> bool {
-        if !self.reactions.iter().any(|r| r.id == reaction.id) {
-            self.reactions.push(reaction);
-            true
-        } else {
-            false
+        if self.reactions.iter().any(|r| r.id == reaction.id || r.same_slot(&reaction)) {
+            return false;
         }
+        self.reactions.push(reaction);
+        true
     }
 
     // ========================================================================
@@ -302,6 +313,10 @@ pub struct Attachment {
     pub group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub original_hash: Option<String>,
+    /// Mirror URLs serving the same ciphertext (NIP-17 / imeta `fallback`),
+    /// tried in order when the primary `url` fails.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fallback_urls: Vec<String>,
 }
 
 impl Default for Attachment {
@@ -321,7 +336,19 @@ impl Default for Attachment {
             webxdc_topic: None,
             group_id: None,
             original_hash: None,
+            fallback_urls: Vec::new(),
         }
+    }
+}
+
+impl Attachment {
+    /// Every remote URL holding this attachment's blob: the primary plus each
+    /// mirror the send fanned out to. Deletion must sweep ALL of them — a
+    /// surviving mirror keeps the "deleted" file alive.
+    pub fn all_urls(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.url.as_str())
+            .chain(self.fallback_urls.iter().map(String::as_str))
+            .filter(|u| !u.is_empty())
     }
 }
 
@@ -363,6 +390,16 @@ pub struct Reaction {
     /// reaction chip survives reloads + missing pack subscriptions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emoji_url: Option<String>,
+}
+
+impl Reaction {
+    /// Do these occupy the same slot in a message's reaction set? That set is keyed
+    /// by (author, emoji): one person reacting with one emoji is ONE reaction however
+    /// many events carry it. Event ids differ per send, so id equality alone lets a
+    /// re-send from another device, a retry, or a foreign client double the count.
+    pub fn same_slot(&self, other: &Reaction) -> bool {
+        self.author_id == other.author_id && self.emoji == other.emoji
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -464,6 +501,26 @@ mod tests {
         let history = msg.edit_history.as_ref().expect("edit_history should exist");
         assert_eq!(history.len(), 2, "duplicate timestamp edit should be ignored, history should have 2 entries");
         assert_eq!(msg.content, "edit1", "content should remain from first edit at timestamp 2000");
+    }
+
+    #[test]
+    fn apply_edit_lands_when_it_shares_the_message_timestamp() {
+        // Editing within a millisecond of sending is ordinary on a fast build
+        // (and trivial over IPC). History is seeded with the original at the
+        // message's own `at`, so the timestamp dedup mistook the base revision
+        // for a prior edit and dropped the edit entirely — the message silently
+        // refused to change.
+        let mut msg = Message { content: "original".to_string(), at: 1000, ..Default::default() };
+        msg.apply_edit("edited!".to_string(), 1000, Vec::new());
+        assert_eq!(msg.content, "edited!", "an edit sharing the message's stamp still applies");
+        assert!(msg.edited);
+        let history = msg.edit_history.as_ref().expect("edit_history should exist");
+        assert_eq!(history.len(), 2, "base revision + the edit");
+        assert_eq!(history[0].content, "original", "the base revision stays first");
+
+        // Repeat suppression is untouched: the same edit again is absorbed.
+        msg.apply_edit("edited!".to_string(), 1000, Vec::new());
+        assert_eq!(msg.edit_history.as_ref().unwrap().len(), 2, "a repeat of that edit is ignored");
     }
 
     #[test]
@@ -598,6 +655,29 @@ mod tests {
         assert_eq!(msg.reactions.len(), 5, "all 5 unique reactions should be added");
     }
 
+    #[test]
+    fn add_reaction_rejects_a_resend_under_a_new_event_id() {
+        let mut msg = Message::default();
+        let slot = |id: &str, emoji: &str| Reaction {
+            id: id.to_string(),
+            reference_id: "msg1".to_string(),
+            author_id: "user1".to_string(),
+            emoji: emoji.to_string(),
+            emoji_url: None,
+        };
+        assert!(msg.add_reaction(slot("r1", "\u{1F44D}")));
+        assert!(
+            !msg.add_reaction(slot("r2", "\u{1F44D}")),
+            "a fresh event id is still the same (author, emoji) slot — this is the double-count"
+        );
+        assert_eq!(msg.reactions.len(), 1);
+        assert!(
+            msg.add_reaction(slot("r3", "\u{2764}\u{FE0F}")),
+            "a different emoji from the same author is its own reaction"
+        );
+        assert_eq!(msg.reactions.len(), 2);
+    }
+
     // ========================================================================
     // Message serde tests
     // ========================================================================
@@ -610,6 +690,7 @@ mod tests {
             content: "Hello world".to_string(),
             replied_to: "def456".to_string(),
             replied_to_content: Some("previous msg".to_string()),
+            replied_to_emoji_tags: None,
             replied_to_npub: Some("npub1xyz".to_string()),
             replied_to_has_attachment: Some(true),
             replied_to_attachment_extension: Some("png".to_string()),
@@ -660,6 +741,7 @@ mod tests {
             replied_to_npub: None,
             replied_to_has_attachment: None,
             replied_to_attachment_extension: None,
+            replied_to_emoji_tags: None,
             npub: None,
             edit_history: None,
             ..Default::default()
@@ -740,6 +822,7 @@ mod tests {
             webxdc_topic: Some("game".to_string()),
             group_id: Some("g1".to_string()),
             original_hash: Some("sha256hash".to_string()),
+            fallback_urls: Vec::new(),
         };
 
         let json = serde_json::to_string(&att).expect("serialize should succeed");
@@ -800,7 +883,7 @@ mod tests {
     #[test]
     fn mentions_specific_npub() {
         // Generate a real npub for testing
-        let keys = nostr_sdk::Keys::generate();
+        let keys = nostr_sdk::prelude::Keys::generate();
         let npub = keys.public_key().to_bech32().unwrap();
         let msg = Message {
             content: format!("hey @{} check this", npub),
@@ -821,8 +904,8 @@ mod tests {
 
     #[test]
     fn extract_mentions_multiple() {
-        let keys1 = nostr_sdk::Keys::generate();
-        let keys2 = nostr_sdk::Keys::generate();
+        let keys1 = nostr_sdk::prelude::Keys::generate();
+        let keys2 = nostr_sdk::prelude::Keys::generate();
         let npub1 = keys1.public_key().to_bech32().unwrap();
         let npub2 = keys2.public_key().to_bech32().unwrap();
         let content = format!("cc @{} and @{} for review", npub1, npub2);
@@ -859,7 +942,7 @@ mod tests {
 
     #[test]
     fn extract_mentions_bare_and_prefixed_shapes() {
-        let npub = nostr_sdk::Keys::generate().public_key().to_bech32().unwrap();
+        let npub = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
         for content in [
             format!("{}", npub),
             format!("rep given to nostr:{}! nice", npub),
@@ -873,7 +956,7 @@ mod tests {
 
     #[test]
     fn extract_mentions_rejects_glued_tokens() {
-        let npub = nostr_sdk::Keys::generate().public_key().to_bech32().unwrap();
+        let npub = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
         // Glued into a longer alphanumeric token on either side = not a mention.
         assert!(super::extract_mentions(&format!("x{}", npub)).is_empty());
         assert!(super::extract_mentions(&format!("{}9", npub)).is_empty());

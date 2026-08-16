@@ -277,7 +277,7 @@ static FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// A marketplace `d`-tag id is attacker-controlled and becomes a filesystem path (`<id>.xdc`).
 /// Allow only a bounded, separator-free, traversal-free token so an id can never escape the
 /// miniapps dir. Permits reverse-DNS / slug / hash ids; bans `/`, `\`, `..`, absolute/UNC paths.
-fn is_safe_app_id(id: &str) -> bool {
+pub(super) fn is_safe_app_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && !id.contains("..")
@@ -404,7 +404,7 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
 
 /// Build a Nostr event for publishing a Mini App to the marketplace
 #[allow(dead_code)]
-pub async fn build_marketplace_event<T: NostrSigner>(
+pub async fn build_marketplace_event<T: vector_core::signer::VectorSigner>(
     signer: &T,
     app_id: &str,
     name: &str,
@@ -421,21 +421,21 @@ pub async fn build_marketplace_event<T: NostrSigner>(
     permissions: Option<&str>, // comma-separated permissions string
 ) -> Result<Event, String> {
     let mut tags = vec![
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("d")), vec![app_id.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("name")), vec![name.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("description")), vec![description.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("version")), vec![version.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("x")), vec![blossom_hash.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("url")), vec![download_url.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("size")), vec![size.to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("t")), vec!["miniapp".to_string()]),
-        Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("t")), vec!["webxdc".to_string()]),
+        Tag::custom("d", vec![app_id.to_string()]),
+        Tag::custom("name", vec![name.to_string()]),
+        Tag::custom("description", vec![description.to_string()]),
+        Tag::custom("version", vec![version.to_string()]),
+        Tag::custom("x", vec![blossom_hash.to_string()]),
+        Tag::custom("url", vec![download_url.to_string()]),
+        Tag::custom("size", vec![size.to_string()]),
+        Tag::custom("t", vec!["miniapp".to_string()]),
+        Tag::custom("t", vec!["webxdc".to_string()]),
     ];
 
     // Add optional icon with MIME type: ["icon", "<url>", "<mime-type>"]
     if let Some((icon_url, mime_type)) = icon_info {
         tags.push(Tag::custom(
-            TagKind::Custom(std::borrow::Cow::Borrowed("icon")),
+            "icon",
             vec![icon_url.to_string(), mime_type.to_string()]
         ));
     }
@@ -444,7 +444,7 @@ pub async fn build_marketplace_event<T: NostrSigner>(
     if let Some(dev) = developer {
         if !dev.is_empty() {
             tags.push(Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("dev")),
+                "dev",
                 vec![dev.to_string()]
             ));
         }
@@ -454,7 +454,7 @@ pub async fn build_marketplace_event<T: NostrSigner>(
     if let Some(src) = source_url {
         if !src.is_empty() {
             tags.push(Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("src")),
+                "src",
                 vec![src.to_string()]
             ));
         }
@@ -462,14 +462,14 @@ pub async fn build_marketplace_event<T: NostrSigner>(
 
     // Add category tags
     for category in categories {
-        tags.push(Tag::custom(TagKind::Custom(std::borrow::Cow::Borrowed("t")), vec![category.to_string()]));
+        tags.push(Tag::custom("t", vec![category.to_string()]));
     }
 
     // Add optional permissions tag
     if let Some(perms) = permissions {
         if !perms.is_empty() {
             tags.push(Tag::custom(
-                TagKind::Custom(std::borrow::Cow::Borrowed("permissions")),
+                "permissions",
                 vec![perms.to_string()]
             ));
         }
@@ -481,7 +481,7 @@ pub async fn build_marketplace_event<T: NostrSigner>(
         .tags(tags);
 
     event_builder
-        .sign(signer)
+        .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign marketplace event: {}", e))
 }
@@ -513,7 +513,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
     // Build filter for marketplace events
     let mut filter = Filter::new()
         .kind(Kind::from(MINIAPP_MARKETPLACE_KIND))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::T), "miniapp");
+        .custom_tag(SingleLetterTag::LOWERCASE_T, "miniapp");
 
     // If trusted_only, filter by trusted publishers
     if trusted_only {
@@ -530,7 +530,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
 
     // Fetch events from relays
     let events = client
-        .fetch_events(filter, std::time::Duration::from_secs(10))
+        .fetch_events(filter).timeout(std::time::Duration::from_secs(10))
         .await
         .map_err(|e| format!("Failed to fetch marketplace events: {}", e))?;
 
@@ -580,6 +580,7 @@ pub async fn fetch_marketplace_apps(trusted_only: bool) -> Result<Vec<Marketplac
                 let app_id = app.id.clone();
                 let icon_url = app.icon_url.clone().unwrap();
 
+                // spawn-detached: the marketplace icon cache is app-wide, not per-account.
                 tokio::spawn(async move {
                     cache_miniapp_icon(&handle, &app_id, &icon_url).await;
                 });
@@ -739,6 +740,7 @@ pub async fn install_marketplace_app<R: tauri::Runtime>(
         let handle_clone = handle.clone();
         let app_id_clone = app_id.to_string();
         let icon_url_clone = icon_url.clone();
+        // spawn-detached: same.
         tokio::spawn(async move {
             recache_miniapp_icon(&handle_clone, &app_id_clone, &icon_url_clone).await;
         });
@@ -1003,6 +1005,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
         let handle_clone = handle.clone();
         let app_id_clone = app_id.to_string();
         let icon_url_clone = icon_url.clone();
+        // spawn-detached: same.
         tokio::spawn(async move {
             recache_miniapp_icon(&handle_clone, &app_id_clone, &icon_url_clone).await;
         });
@@ -1014,7 +1017,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
 
 /// Publish a Mini App to the marketplace (upload to Blossom + publish Nostr event)
 #[allow(dead_code)]
-pub async fn publish_to_marketplace<T: NostrSigner + Clone>(
+pub async fn publish_to_marketplace<T: vector_core::signer::VectorSigner + Clone>(
     signer: T,
     xdc_path: &str,
     app_id: &str,

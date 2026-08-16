@@ -2,7 +2,6 @@
 //!
 //! This module handles sending, receiving, and managing messages.
 
-use nostr_sdk::prelude::*;
 use tauri::Emitter;
 
 use crate::net;

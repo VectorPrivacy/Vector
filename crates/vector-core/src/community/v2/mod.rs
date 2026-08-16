@@ -24,7 +24,11 @@ pub mod guestbook;
 pub mod inbound;
 pub mod invite;
 pub mod list;
+pub mod list_frag;
+pub mod pin_keys;
+pub mod pins;
 pub mod realtime;
+pub mod volley;
 pub mod rekey;
 pub mod roles;
 pub mod service;
@@ -72,7 +76,12 @@ pub mod kind {
     /// keypair at an empty `d` (CORD-05 §2). Outside the wrap.
     pub const INVITE_BUNDLE: u16 = 33301;
     /// A member's self-encrypted Community List (replaceable). Outside the wrap.
+    /// RETIRED by the fragmented form below — a replaceable kind holds one event
+    /// per pubkey, so it cannot shard, and the List outgrew what relays accept.
     pub const COMMUNITY_LIST: u16 = 13302;
+    /// The fragmented Community List (CORD-02 §8): addressable, one event per
+    /// fragment at `d` = the fragment index in decimal. Outside the wrap.
+    pub const COMMUNITY_LIST_FRAG: u16 = 33302;
     /// A creator's self-encrypted Invite List (replaceable). Outside the wrap.
     pub const INVITE_LIST: u16 = 13303;
 }
@@ -94,4 +103,6 @@ pub mod vsk {
     pub const INVITE_LIVE: &str = "6";
     pub const INVITE_REVOKED: &str = "9";
     pub const DISSOLVED: &str = "10";
+    /// One Pin List per Channel at `pins_locator` (CORD-04 §7).
+    pub const PINS: &str = "11";
 }

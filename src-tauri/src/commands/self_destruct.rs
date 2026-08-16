@@ -4,7 +4,6 @@
 //! send path resolves it to an absolute NIP-40 expiry at send time, so setting
 //! the timer here makes every subsequent DM in that chat self-destruct.
 
-use vector_core::state::SessionGuard;
 
 /// Configured self-destruct duration (seconds) for a chat, or null for
 /// permanent. Read by the picker + composer indicator.
@@ -16,12 +15,11 @@ pub async fn get_self_destruct_timer(chat_id: String) -> Result<Option<u64>, Str
 /// Set (or clear, with null / 0) the self-destruct duration for a chat.
 #[tauri::command]
 pub async fn set_self_destruct_timer(chat_id: String, secs: Option<u64>) -> Result<(), String> {
-    // Per-account KV write — guard against a mid-call account swap.
-    let session = SessionGuard::capture();
-    if !session.is_valid() {
-        return Err("Account changed".into());
-    }
-    vector_core::self_destruct::set_chat_duration_secs(&chat_id, secs)
+    vector_core::db::scoped(async move {
+        // Per-account KV write — guard against a mid-call account swap.
+        vector_core::self_destruct::set_chat_duration_secs(&chat_id, secs)
+    })
+    .await
 }
 
 // Handlers: get_self_destruct_timer, set_self_destruct_timer

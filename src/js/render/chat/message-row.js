@@ -16,8 +16,9 @@ const _dmsgPreviewFetchedIds = new Set();
 
 // Unique-emoji ceiling for a message's reaction row. At this count the "+"
 // add-reaction shortcut is dropped (no more can be shown), and the reaction
-// picker's shift multi-react auto-closes.
-const MAX_DISPLAYED_REACTIONS = 8;
+// picker's shift multi-react auto-closes. Mirrors vector-core's
+// MAX_REACTION_GROUPS — the backend refuses groups past it.
+const MAX_DISPLAYED_REACTIONS = 12;
 
 /**
  * Build a complete `.dmsg` row DOM element for a Message.
@@ -186,6 +187,10 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
             // aligns with the name rather than floating up to the reply line.
             body.insertBefore(replyDiv, body.firstChild);
             row.classList.add('dmsg--has-reply');
+        } else {
+            // The parent hasn't arrived yet — a recency-first sync can deliver a reply
+            // before the message it quotes. Marked so its arrival can fill the strip in.
+            row.dataset.replyPending = msg.replied_to;
         }
     }
 
@@ -266,11 +271,21 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     }
 
 
+    // ---- URL-shared Mini App -------------------------------------------------
+    // An .xdc link renders as a playable game card (same file-box pipeline as
+    // an uploaded Mini App); it also supersedes the OpenGraph card below.
+    const xdcUrl = (!msg.pending && !msg.failed && !isRevealedBlockedMsg) ? findXdcUrl(msg.content) : null;
+    if (xdcUrl) {
+        const xdcTarget = document.createElement('div');
+        content.appendChild(xdcTarget);
+        renderXdcUrlCard(xdcTarget, msg, xdcUrl);
+    }
+
     // ---- Link preview (OpenGraph) ------------------------------------------
     // A vectorapp.io profile link renders as a mention pill; an OpenGraph
     // card for the same URL would be redundant.
     const skipWebPreview = /https?:\/\/vectorapp\.io\/profile\/npub1[a-z0-9]{58}/i.test(msg.content || '');
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !isRevealedBlockedMsg) {
+    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !xdcUrl && !isRevealedBlockedMsg) {
         const previewEl = _dmsgBuildLinkPreview(msg);
         if (previewEl) content.appendChild(previewEl);
     }
@@ -451,7 +466,10 @@ function _fmtCountdown(secs) {
 
 function _dmsgBuildReplyContext(msg, sender) {
     const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
-    const chat = sender ? getDMChat(sender.id) : arrChats.find(c => c.id === strOpenChat);
+    // The quoted message lives in the chat being rendered. `sender` is the row's
+    // author, so a DM lookup by their npub finds nothing in a Community and the
+    // quote loses its in-memory fallback entirely.
+    const chat = getChat(strOpenChat) || (sender ? getDMChat(sender.id) : undefined);
     const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
 
     if (!hasBackendContext && !cMsg) return null;
@@ -509,8 +527,15 @@ function _dmsgBuildReplyContext(msg, sender) {
         spanRef.innerHTML = buildReplyPreviewHtml(replyContent);
         twemojify(spanRef);
         // Inline custom emojis in the quoted reply, matching in-chat rendering.
-        const replyEmojiTags = cMsg?.emoji_tags || msg.replied_to_emoji_tags;
-        if (replyEmojiTags && replyEmojiTags.length && typeof renderCustomEmojiShortcodes === 'function') {
+        // The message's tags can lose a hydration race on first paint and a
+        // painted row never self-corrects, so the user's own equipped packs
+        // backstop them. Message tags come LAST: the renderer's map keeps the
+        // last entry per shortcode, so the sender's mapping wins conflicts.
+        const msgTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null)
+            || msg.replied_to_emoji_tags || [];
+        const equipped = (typeof equippedEmojiTags === 'function') ? equippedEmojiTags() : [];
+        const replyEmojiTags = [...equipped, ...msgTags];
+        if (replyEmojiTags.length && typeof renderCustomEmojiShortcodes === 'function') {
             renderCustomEmojiShortcodes(spanRef, replyEmojiTags);
         }
     } else if (hasAttachment) {
@@ -558,6 +583,36 @@ function _dmsgBuildReplyContext(msg, sender) {
     if (spanRef) divRef.appendChild(spanRef);
 
     return divRef;
+}
+
+/**
+ * Fill in the reply strips of rows that quote `parentId`, now that it has arrived.
+ * Rows render their quote once and never retry, so without this a reply delivered
+ * ahead of its parent stays context-less until the chat is reopened.
+ */
+function backfillReplyContext(parentId) {
+    if (!parentId) return;
+    const rows = document.querySelectorAll(`[data-reply-pending="${CSS.escape(parentId)}"]`);
+    if (!rows.length) return;
+    const chat = getChat(strOpenChat);
+    let inserted = false;
+    for (const row of rows) {
+        const msg = chat?.messages.find(m => m.id === row.id);
+        if (!msg) continue;
+        const replyDiv = _dmsgBuildReplyContext(msg, getProfile(msg.npub));
+        if (!replyDiv) continue;
+        const body = row.querySelector('.dmsg-body');
+        if (!body) continue;
+        body.insertBefore(replyDiv, body.firstChild);
+        row.classList.add('dmsg--has-reply');
+        delete row.dataset.replyPending;
+        inserted = true;
+    }
+    // A strip is a row that grew after layout — same class as a media load or the
+    // unread divider, so it goes through the same compensator or the view drifts
+    // off the bottom. Only when something actually landed: an unconditional call
+    // would soft-scroll on every arriving message.
+    if (inserted) compensateChatScrollForResize();
 }
 
 function _dmsgBuildBlockedPlaceholder(msg) {
@@ -608,7 +663,11 @@ function _dmsgBuildCommandLine(msg, cmd) {
 
     const author = document.createElement('span');
     author.classList.add('dmsg-command-author');
-    author.textContent = getName(msg.mine ? strPubkey : (msg.npub || ''));
+    // Tagged like every other rendered name so a rename can find it — the chat
+    // is DOM-windowed, so nothing rebuilds these rows to pick a new name up.
+    const strAuthorNpub = msg.mine ? strPubkey : (msg.npub || '');
+    if (strAuthorNpub) author.dataset.npub = strAuthorNpub;
+    author.textContent = getName(strAuthorNpub);
     line.appendChild(author);
 
     line.appendChild(document.createTextNode(' ran '));
@@ -908,7 +967,9 @@ function _dmsgRenderFileAttachment(target, msg, cAttachment) {
 
         if (isMiniApp) {
             try {
-                const attachment = msg.attachments.find(a => a.path === path);
+                // URL-shared Mini Apps pass a synthetic attachment that is not
+                // in msg.attachments — fall back to the one we rendered from
+                const attachment = msg.attachments.find(a => a.path === path) || cAttachment;
                 const topicId = attachment?.webxdc_topic || null;
                 const shouldOpen = await checkChatMiniAppPermissions(path);
                 if (!shouldOpen) return;
@@ -928,6 +989,10 @@ function _dmsgRenderFileAttachment(target, msg, cAttachment) {
                 // no-op — the open threw before any optimistic status, so the card stays "Click to Play".
                 showToast(String(err));
             }
+        } else if (platformFeatures.os === 'android') {
+            // No file manager to reveal into — open the file itself
+            // (an .apk routes through the system installer flow)
+            openAndroidAttachment(path);
         } else {
             revealItemInDir(path);
         }
@@ -1084,6 +1149,12 @@ function _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAtt
     }
 }
 
+/** Failed-download label: carries the backend's reason so a red box is diagnosable at a glance. */
+function _dmsgDownloadFailedText(cAttachment) {
+    const reason = (cAttachment.download_error || '').slice(0, 64);
+    return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
+}
+
 function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAttachment, isRevealedBlockedMsg) {
     const willAutoDownload = AUTO_DOWNLOAD_ENABLED && !isRevealedBlockedMsg && cAttachment.size > 0
         && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
@@ -1121,7 +1192,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
                     iDownload.setAttribute('msg', msg.id);
                     iDownload.classList.add('btn');
                     iDownload.textContent = cAttachment.download_failed
-                        ? 'Download Failed · Tap to Retry'
+                        ? _dmsgDownloadFailedText(cAttachment)
                         : `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
                     iDownload.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background-color:rgba(0,0,0,0.8);padding:8px 15px;border-radius:6px;color:white;cursor:pointer;font-size:12px;white-space:nowrap;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;';
                     container.appendChild(iDownload);
@@ -1144,7 +1215,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
                 const fallbackState = willAutoDownload ? 'downloading' : 'download';
                 const { fileDiv: fallbackDiv, statusSpan: fallbackStatus } = createFileBox(cAttachment, fallbackState);
                 if (cAttachment.download_failed && fallbackStatus) {
-                    fallbackStatus.innerText = 'Download Failed · Tap to Retry';
+                    fallbackStatus.innerText = _dmsgDownloadFailedText(cAttachment);
                 }
                 if (!willAutoDownload) {
                     fallbackDiv.addEventListener('click', () => {
@@ -1156,7 +1227,7 @@ function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAt
     } else if (!willAutoDownload) {
         const { fileDiv: dlFileDiv, statusSpan: dlStatus } = createFileBox(cAttachment, 'download');
         if (cAttachment.download_failed && dlStatus) {
-            dlStatus.innerText = 'Download Failed · Tap to Retry';
+            dlStatus.innerText = _dmsgDownloadFailedText(cAttachment);
         }
         dlFileDiv.addEventListener('click', () => {
             startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
@@ -1440,9 +1511,10 @@ function _dmsgBuildReactions(msg) {
     for (const [emoji, g] of groups) {
         reactionsRow.appendChild(_dmsgBuildReactionChip(emoji, g, msg.id));
     }
-    // The "+" only shows while there's at least one reaction and we're below the
-    // unique-emoji ceiling — the floating toolbar's 😀 starts the first thread.
-    if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS) {
+    // The "+" only shows while there's at least one reaction and the user can
+    // still open a new group (unique-emoji ceiling AND their personal fresh
+    // allowance) — the floating toolbar's 😀 starts the first thread.
+    if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg)) {
         reactionsRow.appendChild(_dmsgBuildReactionsAddButton(msg.id));
     }
     return reactionsRow;
@@ -1493,11 +1565,13 @@ function _dmsgRollReactionCount(chip, toCount) {
         { duration, easing });
 }
 
-// Ensure the "+" shortcut exists (and sits last) below the unique-emoji ceiling,
-// and is gone at/above it.
+// Ensure the "+" shortcut exists (and sits last) below the unique-emoji ceiling
+// and the user's personal fresh allowance, and is gone at/above either.
 function _dmsgSyncReactionsAddButton(row, msgId, uniqueCount) {
     let addBtn = row.querySelector(':scope > .dmsg-reactions-add');
-    const wantBtn = uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS;
+    const cMsg = _dmsgLookupMessage(document.getElementById(msgId));
+    const wantBtn = uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS
+        && !newReactionGroupBlockReason(cMsg);
     if (wantBtn) {
         if (!addBtn) addBtn = _dmsgBuildReactionsAddButton(msgId);
         row.appendChild(addBtn);  // append = keep it last (moves it if it existed)
@@ -1658,10 +1732,15 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             ? reactionsRow.querySelector(`.reaction[data-emoji="${CSS.escape(emoji)}"]`)
             : null;
         if (existing) {
-            // Roll the count up (don't replace — replacing with the decoy's count
-            // of 1 would lose any prior count from other users' reactions).
-            _dmsgRollReactionCount(existing, _dmsgReactionCount(existing) + 1);
-            existing.setAttribute('data-reacted', 'true');
+            // Already ours: the set is keyed by (author, emoji), so picking the same
+            // emoji again adds nothing. Bumping would strand a wrong count — the send
+            // is refused as a duplicate, so no update comes back to correct it.
+            if (existing.getAttribute('data-reacted') !== 'true') {
+                // Roll the count up (don't replace — replacing with the decoy's count
+                // of 1 would lose any prior count from other users' reactions).
+                _dmsgRollReactionCount(existing, _dmsgReactionCount(existing) + 1);
+                existing.setAttribute('data-reacted', 'true');
+            }
         } else {
             // New emoji — insert BEFORE the trailing "+" add-reaction shortcut so the
             // chip lands in the same slot it'll occupy after the upcoming message_update
@@ -1671,13 +1750,17 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
             else reactionsRow.appendChild(spanReaction);
             spanReaction.classList.add('reaction-enter');
             spanReaction.addEventListener('animationend', () => spanReaction.classList.remove('reaction-enter'), { once: true });
-            // If this insert pushed us to the unique-emoji ceiling, drop the "+"
-            // shortcut now so it doesn't linger until message_update re-renders.
-            if (addBtn && reactionsRow.querySelectorAll('.reaction').length >= MAX_DISPLAYED_REACTIONS) {
-                addBtn.remove();
-            }
         }
     }
+    // The "+" tracks what's on screen, not what has been confirmed: a decoy chip
+    // is a visible reaction, so the shortcut belongs beside it right away rather
+    // than a publish round-trip later. Same helper the reconcile uses, so the
+    // appear/disappear rule can't drift between the two paths.
+    _dmsgSyncReactionsAddButton(
+        reactionsRow,
+        spanReaction.dataset.msgId || rowEl.id,
+        reactionsRow.querySelectorAll(':scope > .reaction').length,
+    );
     // Reaction chips can grow the row's height (first chip adds a whole
     // row, wrapped chips bump to a new line). Honour the user's
     // pinned-to-bottom state — softChatScroll no-ops if they've scrolled
@@ -1685,15 +1768,16 @@ function _dmsgInjectReaction(rowEl, spanReaction) {
     if (typeof softChatScroll === 'function') softChatScroll();
 }
 
-/** True once a message's reaction row holds the max unique emojis it can show
- *  (the "+" is gone). The reaction picker uses this to auto-close a shift
- *  multi-react when there's no more room to add. */
+/** True once no more reactions can be added to a message — the row holds the
+ *  max unique emojis it can show, or the user's personal fresh allowance is
+ *  spent (the "+" is gone either way). The reaction picker uses this to
+ *  auto-close a shift multi-react when there's no more room to add. */
 function _reactionRowAtCapacity(msgId) {
     if (!msgId) return false;
-    const chips = document.getElementById(msgId)
-        ?.querySelector('.dmsg-reactions')
-        ?.querySelectorAll('.reaction');
-    return !!chips && chips.length >= MAX_DISPLAYED_REACTIONS;
+    const rowEl = document.getElementById(msgId);
+    const chips = rowEl?.querySelector('.dmsg-reactions')?.querySelectorAll('.reaction');
+    if (chips && chips.length >= MAX_DISPLAYED_REACTIONS) return true;
+    return !!newReactionGroupBlockReason(_dmsgLookupMessage(rowEl));
 }
 
 // Delegated click handler — replaces per-row inline onclick closures for

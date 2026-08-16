@@ -53,11 +53,8 @@ pub fn record_accepted(
     mime_type: &str,
     is_encrypted: bool,
     size_bytes: u64,
-    session: crate::state::SessionGuard,
 ) -> Result<(), String> {
-    if !session.is_valid() { return Ok(()); }
     let conn = crate::db::get_write_connection_guard_static()?;
-    if !session.is_valid() { return Ok(()); }
     let server = norm_url(server_url);
     let mime = mime_type.to_lowercase();
     let enc = if is_encrypted { 1i64 } else { 0i64 };
@@ -86,11 +83,8 @@ pub fn record_rejected_mime(
     server_url: &str,
     mime_type: &str,
     is_encrypted: bool,
-    session: crate::state::SessionGuard,
 ) -> Result<(), String> {
-    if !session.is_valid() { return Ok(()); }
     let conn = crate::db::get_write_connection_guard_static()?;
-    if !session.is_valid() { return Ok(()); }
     let server = norm_url(server_url);
     let mime = mime_type.to_lowercase();
     let enc = if is_encrypted { 1i64 } else { 0i64 };
@@ -116,11 +110,8 @@ pub fn record_rejected_size(
     mime_type: &str,
     is_encrypted: bool,
     size_bytes: u64,
-    session: crate::state::SessionGuard,
 ) -> Result<(), String> {
-    if !session.is_valid() { return Ok(()); }
     let conn = crate::db::get_write_connection_guard_static()?;
-    if !session.is_valid() { return Ok(()); }
     let server = norm_url(server_url);
     let mime = mime_type.to_lowercase();
     let enc = if is_encrypted { 1i64 } else { 0i64 };

@@ -6,6 +6,7 @@
 //! provides an adapter over `NOSTR_CLIENT`; tests use [`MemoryRelay`].
 
 use nostr_sdk::prelude::*;
+use crate::ClientRelayExt;
 
 /// How much relay coverage a fetch waits to witness before returning.
 ///
@@ -57,6 +58,9 @@ pub struct Query {
     pub k_tags: Vec<String>,
     /// Author pubkeys (hex) to match (OR). Empty = any author.
     pub authors: Vec<String>,
+    /// Event ids (hex) to match (OR). Empty = any id. Used to recover a known
+    /// wrap verbatim (e.g. re-opening a message's seal to build a pin proof).
+    pub ids: Vec<String>,
     /// Lower bound on `created_at` (seconds), inclusive.
     pub since: Option<u64>,
     /// Upper bound on `created_at` (seconds), inclusive — pages OLDER history (events
@@ -92,6 +96,9 @@ impl Query {
         if !self.authors.is_empty() && !self.authors.iter().any(|a| *a == event.pubkey.to_hex()) {
             return false;
         }
+        if !self.ids.is_empty() && !self.ids.iter().any(|i| *i == event.id.to_hex()) {
+            return false;
+        }
         if !self.z_tags.is_empty() && !self.matches_single_letter("z", &self.z_tags, event) {
             return false;
         }
@@ -124,24 +131,31 @@ impl Query {
         }
         if !self.z_tags.is_empty() {
             filter = filter
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::Z), self.z_tags.clone());
+                .custom_tags(SingleLetterTag::LOWERCASE_Z, self.z_tags.clone());
         }
         if !self.d_tags.is_empty() {
             filter = filter.identifiers(self.d_tags.clone());
         }
         if !self.p_tags.is_empty() {
             filter = filter
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::P), self.p_tags.clone());
+                .custom_tags(SingleLetterTag::LOWERCASE_P, self.p_tags.clone());
         }
         if !self.k_tags.is_empty() {
             filter = filter
-                .custom_tags(SingleLetterTag::lowercase(Alphabet::K), self.k_tags.clone());
+                .custom_tags(SingleLetterTag::LOWERCASE_K, self.k_tags.clone());
         }
         if !self.authors.is_empty() {
             let authors: Vec<PublicKey> =
                 self.authors.iter().filter_map(|a| PublicKey::from_hex(a).ok()).collect();
             if !authors.is_empty() {
                 filter = filter.authors(authors);
+            }
+        }
+        if !self.ids.is_empty() {
+            let ids: Vec<EventId> =
+                self.ids.iter().filter_map(|i| EventId::from_hex(i).ok()).collect();
+            if !ids.is_empty() {
+                filter = filter.ids(ids);
             }
         }
         if let Some(since) = self.since {
@@ -342,8 +356,41 @@ fn with_breaker_at<R>(
 }
 
 /// Is `url` inside a trip cooldown right now?
+/// Drop targets whose socket cannot progress without external intervention.
+///
+/// With pool auto-reconnect OFF (Vector owns reconnects), a relay sitting in
+/// `Terminated`/`Shutdown`/`Banned` will not move until the reconcile loop
+/// revives it — it is physically incapable of answering THIS call, so waiting
+/// out its per-relay budget yields the same nothing as skipping it. This is not
+/// the breaker's job: the breaker judges relays that ANSWER badly and must not
+/// shrink a Quorum/Full evidence denominator; a dead socket was never part of
+/// the reachable denominator to begin with. `Connecting`/`Pending`/unknown stay
+/// eligible (a just-added relay may finish its handshake mid-fetch), and an
+/// all-dead set falls back to the full list so the honest-timeout error paths
+/// still run.
+fn drop_unrevivable(targets: Vec<String>, is_unrevivable: impl Fn(&str) -> bool) -> Vec<String> {
+    let alive: Vec<String> = targets.iter().filter(|r| !is_unrevivable(r)).cloned().collect();
+    if alive.is_empty() {
+        targets
+    } else {
+        alive
+    }
+}
+
+/// [`drop_unrevivable`] against a live pool's current statuses.
+async fn drop_unrevivable_targets(client: &Client, targets: Vec<String>) -> Vec<String> {
+    use nostr_sdk::prelude::RelayStatus;
+    let pool = client.relays().all().await;
+    drop_unrevivable(targets, |r| {
+        RelayUrl::parse(r)
+            .ok()
+            .and_then(|u| pool.get(&u).map(|rl| matches!(rl.status(), RelayStatus::Terminated | RelayStatus::Shutdown | RelayStatus::Banned)))
+            .unwrap_or(false)
+    })
+}
+
 fn breaker_tripped(url: &str) -> bool {
-    breaker_tripped_at(crate::state::current_session_generation(), url)
+    breaker_tripped_at(crate::db::current_session_id(), url)
 }
 
 fn breaker_tripped_at(generation: u64, url: &str) -> bool {
@@ -357,7 +404,7 @@ fn breaker_tripped_at(generation: u64, url: &str) -> bool {
 /// Record a per-relay fetch outcome. Success resets the entry; a failure counts
 /// toward a trip only when the relay had its full timeout budget.
 fn breaker_record(url: &str, success: bool, full_budget: bool) {
-    breaker_record_at(crate::state::current_session_generation(), url, success, full_budget)
+    breaker_record_at(crate::db::current_session_id(), url, success, full_budget)
 }
 
 fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: bool) {
@@ -377,15 +424,13 @@ fn breaker_record_at(generation: u64, url: &str, success: bool, full_budget: boo
     })
 }
 
-/// `until` forces Full — a back-page verdict (the history-start latch) trusts
-/// "nothing older than the cursor" only against the completest union the
-/// reachable relay set allows. A floor in the transport, not trust in callers.
+/// Callers own their evidence tier. The chat plane is flat, linear data — an
+/// event exists or it doesn't — so no transport floor promotes its reads.
+/// Every site that draws a completeness-sensitive conclusion from an `until`
+/// walk (the v1 history-start latch, join-verify's genesis anchor, refound
+/// compaction, guestbook folds) REQUESTS Full explicitly at its own Query.
 fn effective_evidence(query: &Query) -> Evidence {
-    if query.until.is_some() {
-        Evidence::Full
-    } else {
-        query.evidence
-    }
+    query.evidence
 }
 
 // ── Plane connection pool (fetch_plane) ─────────────────────────────────────
@@ -448,7 +493,7 @@ pub fn clear_plane_pool() {
         // generation (a fetch_plane that captured the old value before the swap)
         // sees the mismatch and disconnects its client instead of re-pooling one
         // still authed as the swapped-out account's plane key.
-        g.0 = crate::state::current_session_generation();
+        g.0 = crate::db::current_session_id();
         g.1.drain().map(|(_, p)| p.client).collect()
     };
     disconnect_clients(drained);
@@ -521,6 +566,79 @@ fn demotion_allowed() -> bool {
     }
 }
 
+/// Dial every held community's relay set on the shared warm client, ahead of
+/// first use — the volley otherwise pays the TLS/WS dial (and the gating
+/// relay's NIP-42 challenge round) inside its own wall time. Fire-and-forget.
+/// Session-gated between the per-account DB reads and the shared-client
+/// mutation: a swap mid-read must not warm account A's relays under B.
+pub async fn prewarm_held_communities() {
+    crate::db::scoped(async move {
+        let mut relays: Vec<String> = Vec::new();
+        for id in crate::db::community::list_community_ids().unwrap_or_default() {
+            match crate::db::community::community_protocol(&id).ok().flatten() {
+                Some(crate::community::ConcordProtocol::V2) => {
+                    if let Ok(Some(c)) = crate::db::community::load_community_v2(&id) {
+                        relays.extend(c.relays.iter().cloned());
+                    }
+                }
+                _ => {
+                    if let Ok(Some(c)) = crate::db::community::load_community(&id) {
+                        relays.extend(c.relays.iter().cloned());
+                    }
+                }
+            }
+        }
+        relays.sort();
+        relays.dedup();
+        if relays.is_empty() {
+            return;
+        }
+        let Ok(client) = LiveTransport::warm_client(&relays, std::time::Duration::from_secs(4)).await
+        else {
+            return;
+        };
+        // Elicit each relay's NIP-42 challenge NOW: a gating relay challenges on
+        // the first gated REQ (never on connect), and challenges are
+        // per-connection — without this the volley's priming pays the full
+        // challenge round inside its own wall time every boot. The responder
+        // remembers the challenge; the volley's prime then replays it instantly.
+        crate::community::v2::streamauth::ensure_responder(&client);
+        let probe = Keys::generate();
+        let filter = Query {
+            kinds: vec![crate::community::v2::stream::KIND_WRAP],
+            authors: vec![probe.public_key().to_hex()],
+            limit: Some(1),
+            ..Default::default()
+        }
+        .to_filter();
+        let mut elicits = futures_util::stream::FuturesUnordered::new();
+        for r in &relays {
+            let c = client.clone();
+            let f = filter.clone();
+            let r = r.clone();
+            elicits.push(async move {
+                let _ = fetch_relay_eose_filters(&c, &r, vec![f], std::time::Duration::from_secs(3)).await;
+            });
+        }
+        use futures_util::StreamExt;
+        while elicits.next().await.is_some() {}
+    })
+    .await
+}
+
+/// Why a genuine-EOSE read failed — callers that retry must not treat a
+/// burned deadline like an AUTH-gate CLOSED (the retry exists for the
+/// latter; repeating the former doubles a dead relay's cost).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EoseFail {
+    /// The relay CLOSED the REQ (includes auth-required).
+    Closed,
+    /// The deadline elapsed without an EOSE.
+    Deadline,
+    /// No usable connection (lookup/send failure, shutdown, stream end).
+    Gone,
+}
+
 /// Fetch one relay to GENUINE EOSE, or fail. `Client::fetch_events_from` (and
 /// the whole nostr-sdk 0.44 fetch stack) returns `Ok(collected)` on timeout,
 /// disconnect, and relay-CLOSED alike — success does NOT mean EOSE, which would
@@ -537,29 +655,61 @@ pub async fn fetch_relay_eose(
     filter: Filter,
     timeout: std::time::Duration,
 ) -> Result<Vec<Event>, ()> {
-    let relay = client.pool().relay(url).await.map_err(|_| ())?;
+    fetch_relay_eose_filters(client, url, vec![filter], timeout).await.map_err(|_| ())
+}
+
+/// [`fetch_relay_eose`] for a multi-filter REQ (one frame, many filters — the
+/// batched-volley shape). Raw REQ/CLOSE frames: the subscribe builder takes a
+/// single filter, and the auto-close bookkeeping is unnecessary for a one-shot
+/// read we close ourselves on every exit.
+pub async fn fetch_relay_eose_filters(
+    client: &Client,
+    url: &str,
+    filters: Vec<Filter>,
+    timeout: std::time::Duration,
+) -> Result<Vec<Event>, EoseFail> {
+    let relay = client.relay(url).await.map_err(|_| EoseFail::Gone)?.ok_or(EoseFail::Gone)?;
     // Subscribe to notifications BEFORE the REQ so the EOSE can't slip past.
     let mut notifications = relay.notifications();
     let sub_id = SubscriptionId::generate();
-    let auto_close = SubscribeAutoCloseOptions::default()
-        .exit_policy(ReqExitPolicy::ExitOnEOSE)
-        .timeout(Some(timeout));
+    // Close on every exit — this REQ bypasses the pool's subscription map.
+    // Constructed BEFORE the send: cancellation during the send await must
+    // not leave a queued REQ unguarded (a CLOSE for a never-sent REQ is
+    // harmless). Drop can't await, so the CLOSE rides a detached task; all
+    // callers drop on runtime threads (a JNI-thread drop would silently skip
+    // the CLOSE, not panic).
+    struct CloseGuard(Relay, SubscriptionId);
+    impl Drop for CloseGuard {
+        fn drop(&mut self) {
+            let relay = self.0.clone();
+            let id = self.1.clone();
+            // spawn-detached: sends a relay CLOSE, touches no account state.
+            tokio::spawn(async move {
+                let _ = relay
+                    .send_msg(nostr_sdk::prelude::ClientMessage::Close(std::borrow::Cow::Owned(id)))
+                    .await;
+            });
+        }
+    }
+    let _close = CloseGuard(relay.clone(), sub_id.clone());
     relay
-        .subscribe_with_id(sub_id.clone(), filter, SubscribeOptions::default().close_on(Some(auto_close)))
+        .send_msg(nostr_sdk::prelude::ClientMessage::Req {
+            subscription_id: std::borrow::Cow::Borrowed(&sub_id),
+            filters: filters.into_iter().map(std::borrow::Cow::Owned).collect(),
+        })
         .await
-        .map_err(|_| ())?;
+        .map_err(|_| EoseFail::Gone)?;
     let deadline = tokio::time::Instant::now() + timeout;
     let mut events: Vec<Event> = Vec::new();
     let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
     loop {
-        let notification = match tokio::time::timeout_at(deadline, notifications.recv()).await {
-            Ok(Ok(n)) => n,
-            // Lagged: the broadcast skipped messages under a flood — keep
-            // draining; a missed EOSE degrades to the deadline (a failure,
-            // never a false success).
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return Err(()),
-            Err(_) => return Err(()), // deadline: timeout is NOT EOSE
+        // 0.45 hands back a Stream, so there's no broadcast-lag case to drain:
+        // the stream ending is the closed case, and the deadline is still a
+        // failure rather than a false EOSE.
+        let notification = match tokio::time::timeout_at(deadline, notifications.next()).await {
+            Ok(Some(n)) => n,
+            Ok(None) => return Err(EoseFail::Gone),
+            Err(_) => return Err(EoseFail::Deadline), // timeout is NOT EOSE
         };
         match notification {
             RelayNotification::Event { subscription_id, event } if subscription_id == sub_id => {
@@ -567,7 +717,7 @@ pub async fn fetch_relay_eose(
                     events.push(*event);
                 }
             }
-            RelayNotification::Message { message } => match message {
+            RelayNotification::Message { message } => match *message {
                 RelayMessage::Event { subscription_id, event } if *subscription_id == sub_id => {
                     if seen.insert(event.id) {
                         events.push(event.into_owned());
@@ -575,11 +725,15 @@ pub async fn fetch_relay_eose(
                 }
                 RelayMessage::EndOfStoredEvents(id) if *id == sub_id => return Ok(events),
                 RelayMessage::Closed { subscription_id, .. } if *subscription_id == sub_id => {
-                    return Err(()); // relay refused the REQ (incl. auth-required)
+                    return Err(EoseFail::Closed); // refused (incl. auth-required)
                 }
                 _ => {}
             },
-            RelayNotification::Shutdown => return Err(()),
+            RelayNotification::RelayStatus { status }
+                if status == nostr_sdk::prelude::RelayStatus::Shutdown =>
+            {
+                return Err(EoseFail::Gone);
+            }
             _ => {}
         }
     }
@@ -690,20 +844,20 @@ pub async fn prune_unneeded_community_relays(candidates: &[String]) {
         }
     }
 
-    let pool = client.pool();
+    let pool = client;
     // all_relays(): community relays carry GOSSIP, so they're absent from `relays()` (READ/WRITE only).
-    let pooled = pool.all_relays().await;
+    let pooled = pool.relays().all().await;
     for url in candidates {
         if still_needed.contains(url) {
             continue;
         }
-        if let Ok(parsed) = nostr_sdk::RelayUrl::parse(url) {
+        if let Ok(parsed) = nostr_sdk::prelude::RelayUrl::parse(url) {
             if let Some(relay) = pooled.get(&parsed) {
-                if relay.flags().has_read() || relay.flags().has_write() {
+                if relay.capabilities().load().can_read() || relay.capabilities().load().can_write() {
                     continue; // a real chat relay (or an overlap) — never sever
                 }
             }
-            let _ = pool.force_remove_relay(parsed).await; // plain remove_relay refuses GOSSIP
+            let _ = pool.remove_relay(parsed).force().await; // plain remove refuses GOSSIP
             forget_warmed_relay(url);
         }
     }
@@ -721,7 +875,7 @@ pub struct LiveTransport {
 
 impl Default for LiveTransport {
     fn default() -> Self {
-        Self { timeout: std::time::Duration::from_secs(10) }
+        Self::with_timeout(std::time::Duration::from_secs(10))
     }
 }
 
@@ -730,8 +884,13 @@ impl LiveTransport {
         Self::default()
     }
 
+    /// Tor-aware: every caller's budget is sized for clearnet, and a community fetch
+    /// that expires returns the same "no relay answered" as a genuinely dead relay —
+    /// so under Tor the control plane reads as unreachable and rekey/catch-up silently
+    /// stop. Raised to a floor here rather than at ~65 call sites; `max()` keeps any
+    /// caller that already asked for longer.
     pub fn with_timeout(timeout: std::time::Duration) -> Self {
-        Self { timeout }
+        Self { timeout: crate::relay_request_timeout(timeout) }
     }
 
     /// Grab the app's persistent client and make sure it's connected to `relays` — the Community's relays
@@ -739,7 +898,7 @@ impl LiveTransport {
     /// the pool doesn't hold yet is added idempotently (mirrors what the realtime subscription does), then
     /// `connect()` kicks it without disturbing the already-connected majority. Never shut this client down:
     /// it is shared. Errors only if there is no client yet or every relay url was invalid.
-    async fn warm_client(relays: &[String], connect_timeout: std::time::Duration) -> Result<Client, String> {
+    pub(crate) async fn warm_client(relays: &[String], connect_timeout: std::time::Duration) -> Result<Client, String> {
         if relays.is_empty() {
             return Err("community has no relays configured".to_string());
         }
@@ -758,7 +917,7 @@ impl LiveTransport {
         // Fast path: every one of these relays was already warmed this session → the pool holds and
         // (auto-)maintains them, so skip the redundant add_relay + connect churn that otherwise runs on
         // EVERY fetch/publish. Account swaps bump the generation, dropping the cache.
-        let generation = crate::state::current_session_generation();
+        let generation = crate::db::current_session_id();
         {
             let warmed = WARMED_RELAYS.lock().unwrap_or_else(|e| e.into_inner());
             if warmed.0 == generation && relays.iter().all(|r| warmed.1.contains(r)) {
@@ -767,14 +926,18 @@ impl LiveTransport {
         }
 
         // `add_relay` returns Ok(true) if NEWLY added, Ok(false) if the pool already held it.
-        // Community relays join GOSSIP|PING (see `community_relay_options`) so they stay 24/7 warm
-        // without pulling the user's DM/profile traffic onto relays they don't own. An overlap
-        // relay already in the pool as a user relay keeps its READ+WRITE flags (add_relay no-ops).
+        // Community relays join GOSSIP-only (see `community_relay_capabilities`) so they stay warm
+        // without pulling the user's DM/profile traffic onto relays they don't own — omitting the
+        // capabilities would default them to READ|WRITE and leak the user's own traffic there. An
+        // overlap relay already in the pool as a user relay keeps its READ+WRITE (add_relay no-ops).
         let mut added_new = false;
         let mut succeeded: Vec<&String> = Vec::new();
         for url in relays {
-            let opts = crate::community_relay_options();
-            match client.pool().add_relay(url.as_str(), opts).await {
+            match client
+                .add_managed_relay(url.as_str())
+                .capabilities(crate::community_relay_capabilities())
+                .await
+            {
                 Ok(true) => { added_new = true; succeeded.push(url); }
                 Ok(false) => { succeeded.push(url); }
                 Err(_) => {}
@@ -788,7 +951,7 @@ impl LiveTransport {
             // returns before sockets are up, so WAIT for it — otherwise the immediate fetch/send reaches
             // zero relays. Already-connected relays return instantly in `success`, so the warm majority
             // adds no latency; only the genuinely-new relay's handshake is awaited (bounded).
-            let _ = client.try_connect(connect_timeout).await;
+            let _ = client.try_connect().timeout(connect_timeout).await;
         } else {
             // Every relay already warm in the pool — cheap re-kick of any dropped connection, no wait.
             client.connect().await;
@@ -826,6 +989,11 @@ impl LiveTransport {
                 targets.push(r.clone());
             }
         }
+        // Even a Full drain skips a DEAD socket: with pool auto-reconnect off, a
+        // Terminated relay cannot answer this call no matter how long we wait, so
+        // its timeout buys byte-identical evidence to skipping it — and paid per
+        // PAGE, it is what stretched one dead relay into a minute-long rotation.
+        targets = drop_unrevivable_targets(&client, targets).await;
 
         // Fast tier: skip tripped relays outright (pure bandwidth save — the
         // evidence bar is ≥1 success either way, and the union self-heals).
@@ -884,6 +1052,7 @@ impl LiveTransport {
                     base_timeout
                 };
                 let full_budget = timeout >= base_timeout;
+                // spawn-detached: relay I/O only — no account storage is touched.
                 tokio::spawn(async move {
                     let out = fetch_relay_eose(&client, &r, filter, timeout).await;
                     (r, full_budget, out)
@@ -971,8 +1140,7 @@ impl LiveTransport {
             let seen: std::collections::HashSet<EventId> = result.iter().map(|e| e.id).collect();
             // Captured BEFORE the drain spawn: the drain can outlive an account swap, and
             // stragglers fetched under the prior session must not feed the new one's ingest.
-            let session = crate::state::SessionGuard::capture();
-            tokio::spawn(async move {
+            crate::db::spawn_bound(async move {
                 let mut extra: Vec<Event> = Vec::new();
                 let mut extra_ids: std::collections::HashSet<EventId> = std::collections::HashSet::new();
                 while let Some(joined) = fetches.next().await {
@@ -990,9 +1158,6 @@ impl LiveTransport {
                         }
                     }
                 }
-                if !session.is_valid() {
-                    return;
-                }
                 submit_stragglers(extra);
             });
         }
@@ -1008,21 +1173,23 @@ impl Transport for LiveTransport {
         let timeout = self.timeout;
         let mut targets: Vec<String> = Vec::new();
         for r in relays { if !targets.contains(r) { targets.push(r.clone()); } }
+        // A dead socket can't ACK and won't be revived mid-send — don't spawn at it.
+        targets = drop_unrevivable_targets(&client, targets).await;
         // Fan out one send per relay and RETURN on the first ACK — never wait for the slowest relay (a
         // distant/ratelimited one must not gate a reaction/edit/message). Each send is SPAWNED, so the rest
         // keep delivering to every relay after we return (dropping a JoinHandle detaches, it doesn't abort).
-        // Single attempt — durable retry is publish_durable's job. The sends only touch relays, no per-account
-        // state, so no SessionGuard is needed.
+        // Single attempt — durable retry is publish_durable's job.
         use futures_util::stream::{FuturesUnordered, StreamExt};
         let mut sends: FuturesUnordered<_> = targets
             .into_iter()
             .map(|r| {
                 let client = client.clone();
                 let event = event.clone();
+                // spawn-detached: relay I/O only — no account storage is touched.
                 tokio::spawn(async move {
                     matches!(
-                        tokio::time::timeout(timeout, client.send_event_to(vec![r.clone()], &event)).await,
-                        Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains(&u)).unwrap_or(false)
+                        tokio::time::timeout(timeout, client.send_event(&event).to(vec![r.clone()])).await,
+                        Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false)
                     )
                 })
             })
@@ -1057,7 +1224,7 @@ impl Transport for LiveTransport {
             targets = relays.to_vec();
         }
         let filter = query.to_filter();
-        let generation = crate::state::current_session_generation();
+        let generation = crate::db::current_session_id();
         let key = plane_pool_key(&plane.public_key().to_hex(), &targets);
 
         // Reuse a warm, already-authed pooled connection if one exists — this is
@@ -1069,27 +1236,43 @@ impl Transport for LiveTransport {
         } else {
             // Cold: a dedicated connection authed AS the plane key (a NIP-42
             // connection holds ONE identity; the shared client's is the user's).
-            let opts = crate::nostr_client_options().automatic_authentication(true);
-            let client = nostr_sdk::Client::builder().signer(plane.clone()).opts(opts).build();
+            // Authenticates as the PLANE key, not the user — hence its own
+            // authenticator rather than `nostr_client_builder()`, which resolves the
+            // session identity.
+            let client = crate::apply_tor_proxy(
+                nostr_sdk::prelude::Client::builder().authenticator(
+                    nostr_sdk::prelude::SignerAuthenticator::new(plane.clone()),
+                ),
+            )
+            .build();
             // Community relay options (GOSSIP|PING + Tor-aware ConnectionMode): a
             // bare add_relay leaves ConnectionMode::Direct, so under active Tor the
             // plane fetch — and the NIP-42 auth AS the plane key — would connect
             // direct and tie the user's IP to community membership.
             for r in &targets {
-                let _ = client.pool().add_relay(r.clone(), crate::community_relay_options()).await;
+                let _ = client.add_managed_relay(r.clone()).capabilities(crate::community_relay_capabilities()).await;
             }
             client.connect().await;
             // Warmup with the gated filter shape triggers each relay's NIP-42
             // challenge so auto-auth completes ONCE here; pooled reuses skip it.
             for r in &targets {
                 let _ = client
-                    .fetch_events_from(vec![r.clone()], filter.clone(), std::time::Duration::from_secs(5))
+                    .fetch_events(nostr_sdk::prelude::ReqTarget::single(r.clone(), [filter.clone()]))
+                    // Tor-aware: this warmup carries a NIP-42 challenge round trip, so a
+                    // clearnet 5s budget expires mid-auth and every relay ends up
+                    // unauthenticated — which surfaces as `0/N attempted` below.
+                    .timeout(crate::relay_request_timeout(std::time::Duration::from_secs(5)))
                     .await;
             }
             let ev = plane_pool_insert(generation, key, client.clone());
             disconnect_clients(ev);
             client
         };
+
+        // This walk is SERIAL, so a dead socket taxes every page its full budget;
+        // judged against the PLANE pool's statuses (a separate client — nothing
+        // revives its members, so an unrevivable one here is dead for good).
+        let targets = drop_unrevivable_targets(&client, targets).await;
 
         let mut result: Vec<Event> = Vec::new();
         let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
@@ -1141,12 +1324,16 @@ impl Transport for LiveTransport {
         let mut acked_any = false;
         let _ = tokio::time::timeout(CONFIRM_WINDOW, async {
             loop {
-                let sends = pending.iter().cloned().map(|r| {
+                // Per ROUND, not from `pending`: a dead socket stays pending (the
+                // reconcile loop may revive it before the stragglers give up) but a
+                // confirm round must not spend its budget on a relay that cannot ACK.
+                let round = drop_unrevivable_targets(&client, pending.clone()).await;
+                let sends = round.iter().cloned().map(|r| {
                     let client = &client;
                     let event = &event;
                     Box::pin(async move {
-                        match tokio::time::timeout(timeout, client.send_event_to(vec![r.clone()], event)).await {
-                            Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains(&u)).unwrap_or(false) => Ok(r),
+                        match tokio::time::timeout(timeout, client.send_event(event).to(vec![r.clone()])).await {
+                            Ok(Ok(out)) if RelayUrl::parse(&r).map(|u| out.success.contains_key(&u)).unwrap_or(false) => Ok(r),
                             _ => Err(()),
                         }
                     })
@@ -1172,13 +1359,14 @@ impl Transport for LiveTransport {
         // MAX_PUBLISH_ATTEMPTS at a 750ms backoff, so it can't run forever). The caller returns NOW with its
         // confirmed ACK; 's fetch-union heals anything that never lands. The client is shared — not torn
         // down — so the spawned task just drops its handle when finished.
+        // spawn-detached: relay I/O only — no account storage is touched.
         tokio::spawn(async move {
             let client_ref = &client;
             let event_ref = &event;
             let _ = durable_broadcast(&pending, MAX_PUBLISH_ATTEMPTS, backoff, move |round| {
                 Box::pin(async move {
-                    match tokio::time::timeout(timeout, client_ref.send_event_to(round.clone(), event_ref)).await {
-                        Ok(Ok(output)) => round.into_iter().filter(|p| RelayUrl::parse(p).map(|u| output.success.contains(&u)).unwrap_or(false)).collect(),
+                    match tokio::time::timeout(timeout, client_ref.send_event(event_ref).to(round.clone())).await {
+                        Ok(Ok(output)) => round.into_iter().filter(|p| RelayUrl::parse(p).map(|u| output.success.contains_key(&u)).unwrap_or(false)).collect(),
                         _ => Vec::new(),
                     }
                 })
@@ -1218,6 +1406,13 @@ pub(crate) mod memory {
             }
         }
 
+        /// Total stored events across every relay url — lets a test assert that a
+        /// code path published NOTHING, which an absence-of-effect check can't
+        /// express by fetching (an empty result also means "never published").
+        pub fn stored_count(&self) -> usize {
+            self.per_relay.lock().unwrap().values().map(|v| v.len()).sum()
+        }
+
         /// Open a live subscription: every subsequent publish/inject matching `query` is
         /// delivered — ephemerals included, which stream but are never stored.
         pub fn subscribe(&self, query: Query) -> tokio::sync::mpsc::UnboundedReceiver<Event> {
@@ -1247,7 +1442,7 @@ pub(crate) mod memory {
             // Replaceable kinds: parameterized (30000-39999, keyed by (kind, pubkey, d-tag)) AND
             // standard (10000-19999, plus 0/3, keyed by (kind, pubkey) — the d-tag is "") — a relay keeps
             // only the latest at that coordinate, so a new event REPLACES the old (NIP-01). This is what
-            // makes a revocation tombstone overwrite a bundle, and a fresh 13302 supersede the last one,
+            // makes a revocation tombstone overwrite a bundle, and a fresh Community List supersede the last one,
             // even on relays that ignore deletions — model it so tests match real relay behavior.
             let d_tag = |e: &Event| e.tags.iter().find_map(|t| {
                 let s = t.as_slice();
@@ -1366,6 +1561,24 @@ pub(crate) mod memory {
 mod tests {
     use super::*;
 
+    // ── Dead-socket target filtering ──────────────────────────────────────────
+
+    #[test]
+    fn a_dead_socket_is_skipped_but_a_connecting_or_unknown_one_is_not() {
+        let targets: Vec<String> = ["wss://dead", "wss://connecting", "wss://unknown"].map(String::from).into();
+        let out = drop_unrevivable(targets, |r| r == "wss://dead");
+        assert_eq!(out, ["wss://connecting", "wss://unknown"].map(String::from).to_vec());
+    }
+
+    #[test]
+    fn an_all_dead_set_falls_back_to_the_full_list() {
+        // Offline (or a status race) must keep the honest-timeout error paths —
+        // an instant empty-target "success" would read as a confident empty.
+        let targets: Vec<String> = ["wss://a", "wss://b"].map(String::from).into();
+        let out = drop_unrevivable(targets.clone(), |_| true);
+        assert_eq!(out, targets);
+    }
+
     // ── Tor gate (community publish over a not-yet-bootstrapped Tor) ──────────
     // Hermetic: drives `wait_until_tor_ready` with an injected predicate, so no
     // live Tor is needed and the result is deterministic.
@@ -1401,10 +1614,10 @@ mod tests {
     fn evt(kind: u16, z: &str) -> Event {
         EventBuilder::new(Kind::Custom(kind), "x")
             .tags([Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                "z",
                 [z.to_string()],
             )])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap()
     }
 
@@ -1420,7 +1633,7 @@ mod tests {
     fn evt_at(kind: u16, secs: u64) -> Event {
         EventBuilder::new(Kind::Custom(kind), "x")
             .custom_created_at(Timestamp::from(secs))
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap()
     }
 
@@ -1430,10 +1643,10 @@ mod tests {
         EventBuilder::new(Kind::Custom(kind), "x")
             .custom_created_at(Timestamp::from(secs))
             .tags([Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                "z",
                 [z.to_string()],
             )])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap()
     }
 
@@ -1479,10 +1692,10 @@ mod tests {
         let matching = EventBuilder::new(Kind::Custom(3300), "x")
             .custom_created_at(Timestamp::from(150))
             .tags([Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                "z",
                 ["abc".to_string()],
             )])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(filter.match_event(&matching, MatchEventOptions::new()), "to_filter must accept what matches() accepts");
         assert!(q.matches(&matching));
@@ -1491,29 +1704,29 @@ mod tests {
         let wrong_kind = EventBuilder::new(Kind::Custom(3301), "x")
             .custom_created_at(Timestamp::from(150))
             .tags([Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Z)),
+                "z",
                 ["abc".to_string()],
             )])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap();
         assert!(!filter.match_event(&wrong_kind, MatchEventOptions::new()));
     }
 
     /// Build an event carrying one arbitrary single-letter tag (recipient `p`, wrapped-kind `k`).
-    fn evt_sl(kind: u16, letter: Alphabet, value: &str) -> Event {
+    fn evt_sl(kind: u16, letter: SingleLetterTag, value: &str) -> Event {
         EventBuilder::new(Kind::Custom(kind), "x")
             .tags([Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(letter)),
+                letter.as_char().to_string(),
                 [value.to_string()],
             )])
-            .sign_with_keys(&Keys::generate())
+            .finalize(&Keys::generate())
             .unwrap()
     }
 
     #[test]
     fn to_filter_and_matches_agree_on_authors() {
         let keys = Keys::generate();
-        let e = EventBuilder::new(Kind::Custom(1059), "x").sign_with_keys(&keys).unwrap();
+        let e = EventBuilder::new(Kind::Custom(1059), "x").finalize(&keys).unwrap();
         let q = Query { kinds: vec![1059], authors: vec![keys.public_key().to_hex()], ..Default::default() };
         assert!(q.matches(&e));
         assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
@@ -1525,7 +1738,7 @@ mod tests {
     #[test]
     fn to_filter_and_matches_agree_on_p_tags() {
         let recipient = Keys::generate().public_key().to_hex();
-        let e = evt_sl(1059, Alphabet::P, &recipient);
+        let e = evt_sl(1059, SingleLetterTag::LOWERCASE_P, &recipient);
         let q = Query { kinds: vec![1059], p_tags: vec![recipient], ..Default::default() };
         assert!(q.matches(&e));
         assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
@@ -1536,7 +1749,7 @@ mod tests {
 
     #[test]
     fn to_filter_and_matches_agree_on_k_tags() {
-        let e = evt_sl(1059, Alphabet::K, "3311");
+        let e = evt_sl(1059, SingleLetterTag::LOWERCASE_K, "3311");
         let q = Query { kinds: vec![1059], k_tags: vec!["3311".into()], ..Default::default() };
         assert!(q.matches(&e));
         assert!(q.to_filter().match_event(&e, MatchEventOptions::new()));
@@ -1697,7 +1910,7 @@ mod tests {
             relay.subscribe(Query { kinds: vec![1059], p_tags: vec![alice.clone()], ..Default::default() });
         let mut sub_bob =
             relay.subscribe(Query { kinds: vec![1059], p_tags: vec![bob.clone()], ..Default::default() });
-        let wrap = evt_sl(1059, Alphabet::P, &alice);
+        let wrap = evt_sl(1059, SingleLetterTag::LOWERCASE_P, &alice);
         relay.publish(&wrap, &relays).await.unwrap();
         assert_eq!(sub_alice.try_recv().unwrap().id, wrap.id, "addressed recipient gets it live");
         assert!(sub_bob.try_recv().is_err(), "a differently-addressed subscriber does not");
@@ -1815,12 +2028,12 @@ mod tests {
     // ── The evidence floor ───────────────────────────────────────────────────
 
     #[test]
-    fn until_forces_full_evidence_and_default_is_quorum() {
+    fn declared_evidence_stands_and_default_is_quorum() {
         assert_eq!(Query::default().evidence, Evidence::Quorum, "unclassified sites get Quorum");
         assert_eq!(
             effective_evidence(&Query { until: Some(1), evidence: Evidence::Fast, ..Default::default() }),
-            Evidence::Full,
-            "a back-page can never ride Fast — the history-start latch needs the full union"
+            Evidence::Fast,
+            "chat pagination rides its declared tier — absence verdicts request Full themselves"
         );
         assert_eq!(
             effective_evidence(&Query { evidence: Evidence::Fast, ..Default::default() }),

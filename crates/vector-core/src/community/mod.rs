@@ -16,6 +16,7 @@ pub mod invite;
 pub mod invite_list;
 pub mod list;
 pub mod metadata;
+pub mod moderation;
 pub mod edition;
 pub mod migration;
 pub mod owner;
@@ -34,6 +35,26 @@ use nostr_sdk::prelude::PublicKey;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// How fresh an inner send time must be to surface as a REALTIME event (ms).
+/// Generous against sender clock skew and relay push latency; tiny against the
+/// hours-to-months staleness of a relay-to-relay backfill replay.
+pub const REALTIME_FRESH_WINDOW_MS: u64 = 300_000;
+
+/// Whether an inner send time is fresh enough to surface as REALTIME. The live
+/// subscriptions are limit-0 (never history), but a relay backfilling from a
+/// peer ACCEPTS old events as new writes and pushes them to matching live subs
+/// — without this gate a month-old join or mention surfaces as if it just
+/// happened (bots welcome long-gone joiners, answer stale mentions). Gates only
+/// the "new" surfaces (`is_new`, bot events, pings); folding and persistence
+/// are NEVER gated on freshness.
+pub fn is_realtime_fresh(at_ms: u64) -> bool {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    at_ms.saturating_add(REALTIME_FRESH_WINDOW_MS) >= now_ms
+}
 
 /// Which Concord protocol a community runs. Vector carries both for a migration
 /// window: v1 (the shipped `#z`-addressed stack) and v2 (the self-certifying-id
@@ -144,6 +165,12 @@ impl core::fmt::Debug for ServerRootKey {
 /// key keyed by `(scope_id, epoch)`.
 pub const SERVER_ROOT_SCOPE_HEX: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The epoch-key-archive scope for a v2 `control_root` (CORD-02 §2): non-hex on
+/// purpose, so it collides with neither a channel id nor the root sentinel.
+/// Reserves the pair beside the root at mint (retry idempotency) and archives
+/// the secret per epoch.
+pub const CONTROL_ROOT_SCOPE: &str = "control-root";
 
 /// 32 cryptographically-random bytes (OsRng).
 pub(crate) fn random_32() -> [u8; 32] {
@@ -324,5 +351,23 @@ impl Community {
             owner_attestation: None,
             dissolved: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    // The realtime gate: a just-sent event is fresh; a relay-backfill replay
+    // (hours to months old) and far-future junk are not "new" surfaces.
+    #[test]
+    fn realtime_freshness_window() {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(is_realtime_fresh(now_ms), "just-sent is fresh");
+        assert!(is_realtime_fresh(now_ms - REALTIME_FRESH_WINDOW_MS / 2), "modest delay is fresh");
+        assert!(!is_realtime_fresh(now_ms - 3_600_000), "an hour-old replay is not");
+        assert!(!is_realtime_fresh(now_ms.saturating_sub(30 * 24 * 3_600_000)), "a month-old replay is not");
+        assert!(is_realtime_fresh(now_ms + 60_000), "sender clock slightly ahead still fresh");
     }
 }

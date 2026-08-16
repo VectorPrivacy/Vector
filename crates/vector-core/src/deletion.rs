@@ -14,6 +14,7 @@
 //! does not (and cannot) delete messages sent by others — those wraps
 //! were signed by ephemeral keys we never held.
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use nostr_sdk::prelude::*;
 
 use crate::inbox_relays::{get_publish_tracker, send_gift_wrap};
@@ -79,7 +80,15 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     let client = nostr_client().ok_or("Not logged in")?;
     // Session captured for the relay-nuke loop — without this, an
     // account-A wrap-key purge could land in account B's nip17_keys.
-    let session = crate::state::SessionGuard::capture();
+    // Durable tombstone FIRST: NIP-09 is best-effort and relays ignore it
+    // freely — without this, a surviving wrap re-served after a restart
+    // re-ingests cleanly (the events row is gone, the session set is empty)
+    // and the message resurrects, now key-less and only Limited-deletable.
+    let rumor_hex = rumor_id.to_hex();
+    if let Err(e) = crate::db::events::add_message_tombstone(&rumor_hex) {
+        crate::log_warn!("[NIP-17 delete] tombstone write failed: {}", e);
+    }
+    crate::state::note_message_deleted(&rumor_hex);
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(rumor_id)
         .unwrap_or_default();
 
@@ -105,7 +114,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
                     matches!(chat.chat_type, crate::chat::ChatType::DirectMessage),
                     "delete_own_dm called on non-DM chat — caller bug"
                 );
-                let recipient = nostr_sdk::PublicKey::from_bech32(&chat.id).ok();
+                let recipient = nostr_sdk::prelude::PublicKey::from_bech32(&chat.id).ok();
                 (msg.attachments.clone(), recipient)
             }
             None => (Vec::new(), None),
@@ -126,11 +135,11 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // Local cache nuke (canonicalize + managed-dir-only inside helper).
     delete_cached_attachment_files(&unique_attachments);
 
-    // Blossom URLs derived from the filtered (refcount-aware) set.
+    // Blossom URLs derived from the filtered (refcount-aware) set — the
+    // primary plus every mirror (same hash, other origins).
     let attachment_urls: Vec<String> = unique_attachments
         .iter()
-        .map(|a| a.url.to_string())
-        .filter(|u| !u.is_empty())
+        .flat_map(|a| a.all_urls().map(str::to_string))
         .collect();
 
     let wraps_total = keys.len();
@@ -140,14 +149,11 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // retained wrap keys for this rumor.
     for stored in keys.iter() {
         let client = client.clone();
-        let task_session = session;
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
-        tokio::spawn(async move {
-            if !task_session.is_valid() { return; }
+        crate::db::spawn_bound(async move {
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
-            if !task_session.is_valid() { return; }
             if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
                 crate::log_warn!("[NIP-17 delete] failed to purge wrap key: {}", e);
             }
@@ -184,7 +190,7 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     // signing with the NIP-46 client keypair returns 401).
     let mut blobs_dispatched = 0usize;
     if !attachment_urls.is_empty() {
-        if let Ok(signer) = client.signer().await {
+        if let Ok(signer) = crate::signer::active_signer() {
             blobs_dispatched = attachment_urls.len();
             crate::blossom::delete_blobs_best_effort(signer, attachment_urls);
         }
@@ -214,7 +220,6 @@ pub async fn delete_own_reaction(
     recipient: PublicKey,
 ) -> Result<DeleteOutcome, String> {
     let client = nostr_client().ok_or("Not logged in")?;
-    let session = crate::state::SessionGuard::capture();
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(reaction_id)
         .unwrap_or_default();
 
@@ -224,14 +229,11 @@ pub async fn delete_own_reaction(
     // Layer 1 — relay-level nuke per retained wrap key.
     for stored in keys.iter() {
         let client = client.clone();
-        let task_session = session;
         let wrap_event_id = stored.wrap_event_id;
         let secret = stored.secret.clone();
         let relay_urls = stored.relay_urls.clone();
-        tokio::spawn(async move {
-            if !task_session.is_valid() { return; }
+        crate::db::spawn_bound(async move {
             delete_wrap_per_relay(&client, wrap_event_id, secret, relay_urls).await;
-            if !task_session.is_valid() { return; }
             if let Err(e) = crate::db::nip17_keys::purge_wrap_keys(&[wrap_event_id]) {
                 crate::log_warn!("[reaction delete] failed to purge wrap key: {}", e);
             }
@@ -287,8 +289,8 @@ async fn delete_wrap_per_relay(
     let ephemeral_keys = Keys::new(secret);
     let deletion = match EventBuilder::new(Kind::EventDeletion, "")
         .tag(Tag::event(wrap_event_id))
-        .tag(Tag::custom(TagKind::custom("k"), ["1059"]))
-        .sign_with_keys(&ephemeral_keys)
+        .tag(Tag::custom("k", ["1059"]))
+        .finalize(&ephemeral_keys)
     {
         Ok(ev) => ev,
         Err(e) => {
@@ -463,7 +465,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
     /// Pause between rate-limit retries.
     const RATELIMIT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
 
-    let pool = client.pool();
+    let pool = client;
     let relays = pool.relays().await;
     let relay = match relays.get(url) {
         Some(r) => r.clone(),
@@ -491,7 +493,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                 if let Some(wrap_id) = extract_target_event_id(event) {
                     let url_clone = url.clone();
                     let client_clone = client.clone();
-                    tokio::spawn(async move {
+                    crate::db::spawn_bound(async move {
                         verify_relay_dropped(&client_clone, &url_clone, &wrap_id).await;
                     });
                 }
@@ -541,7 +543,7 @@ async fn send_to_one_relay(client: &Client, url: &RelayUrl, event: &Event) -> bo
                     if let Some(wrap_id) = extract_target_event_id(event) {
                         let url_clone = url.clone();
                         let client_clone = client.clone();
-                        tokio::spawn(async move {
+                        crate::db::spawn_bound(async move {
                             verify_relay_dropped(&client_clone, &url_clone, &wrap_id).await;
                         });
                     }
@@ -574,7 +576,7 @@ fn extract_target_event_id(deletion: &Event) -> Option<EventId> {
 async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &EventId) {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    let pool = client.pool();
+    let pool = client;
     let relays = pool.relays().await;
     let relay = match relays.get(url) {
         Some(r) => r.clone(),
@@ -583,11 +585,9 @@ async fn verify_relay_dropped(client: &Client, url: &RelayUrl, wrap_event_id: &E
 
     let filter = Filter::new().id(*wrap_event_id);
     match relay
-        .fetch_events(
-            filter,
-            std::time::Duration::from_secs(5),
-            ReqExitPolicy::ExitOnEOSE,
-        )
+        .fetch_events(filter)
+        .timeout(std::time::Duration::from_secs(5))
+        .policy(ReqExitPolicy::ExitOnEOSE)
         .await
     {
         Ok(events) => {
@@ -640,9 +640,9 @@ async fn publish_cooperative_hide(
     // after 30 days. The `k` lets the receiver remove the right thing.
     let rumor = EventBuilder::new(Kind::EventDeletion, "")
         .tag(Tag::event(*target_rumor_id))
-        .tag(Tag::custom(TagKind::custom("k"), [original_kind.to_string()]))
+        .tag(Tag::custom("k", [original_kind.to_string()]))
         .tag(Tag::expiration(Timestamp::from(expiration_ts)))
-        .build(my_pk);
+        .finalize_unsigned_with_id(my_pk);
 
     // Wrap and send to recipient. Also wrap and send to self so other
     // devices belonging to the user drop the message from their local

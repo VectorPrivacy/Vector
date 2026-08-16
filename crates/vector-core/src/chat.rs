@@ -236,6 +236,26 @@ impl Chat {
 
     pub fn is_community(&self) -> bool { matches!(self.chat_type, ChatType::Community) }
 
+    /// Whether this Community channel is the row its community actually shows in the chat
+    /// list. Every channel is registered and synced, but a community surfaces as a SINGLE
+    /// row: the one whose id matches its `primary_channel` stamp.
+    ///
+    /// Anything deciding what the user can SEE or CLEAR must gate on this, not on the
+    /// presence of `community_id` — a sibling channel's unread would otherwise badge the
+    /// OS with no row to open. A row written before the stamp existed is assumed surfaced
+    /// (it re-stamps on the next registration), which matches the chat list's own
+    /// fallback so the two can't disagree.
+    pub fn is_surfaced_community_channel(&self) -> bool {
+        let cf = &self.metadata.custom_fields;
+        if !cf.contains_key("community_id") {
+            return false; // bare persistence anchor from the message-persist path
+        }
+        match cf.get("primary_channel") {
+            Some(primary) => *primary == self.id,
+            None => true,
+        }
+    }
+
     pub fn has_participant(&self, npub: &str, interner: &NpubInterner) -> bool {
         interner.lookup(npub).map_or(false, |h| self.participants.contains(&h))
     }
@@ -369,6 +389,43 @@ mod tests {
     use crate::types::Message;
     use crate::compact::NpubInterner;
     use crate::simd::hex::bytes_to_hex_32;
+
+    /// The single discriminator behind three user-visible behaviours: whether a channel
+    /// gets a chat-list row, whether its unread badges the OS, and whether it rings a
+    /// notification. Every channel is registered and synced; only the primary surfaces.
+    #[test]
+    fn only_the_primary_channel_of_a_community_is_surfaced() {
+        let mut interner = NpubInterner::new();
+        let primary_id = make_hex_id(0x21);
+        let sibling_id = make_hex_id(0x22);
+
+        let mut stamp = |id: &str, community: bool, primary: Option<&str>| {
+            let mut chat = Chat::new_community_channel(id.to_string(), Vec::new(), &mut interner);
+            if community {
+                chat.metadata.custom_fields.insert("community_id".into(), make_hex_id(0x99));
+            }
+            if let Some(p) = primary {
+                chat.metadata.custom_fields.insert("primary_channel".into(), p.to_string());
+            }
+            chat
+        };
+
+        // A bare persistence anchor (auto-created by the message persist) has no community
+        // metadata at all and has never been surfaced.
+        assert!(!stamp(&sibling_id, false, None).is_surfaced_community_channel());
+
+        // The community's primary row: the one row the list renders.
+        assert!(stamp(&primary_id, true, Some(&primary_id)).is_surfaced_community_channel());
+
+        // A sibling channel: registered, synced, addressable — but no row, so its unread
+        // must not badge and its messages must not ring.
+        assert!(!stamp(&sibling_id, true, Some(&primary_id)).is_surfaced_community_channel());
+
+        // Written before the stamp existed: assumed surfaced, so a community can't silently
+        // vanish from the list (and it re-stamps on the next registration). Matches the chat
+        // list's own fallback — the two must not disagree.
+        assert!(stamp(&primary_id, true, None).is_surfaced_community_channel());
+    }
 
     // ========================================================================
     // Helpers

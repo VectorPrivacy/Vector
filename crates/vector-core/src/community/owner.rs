@@ -11,6 +11,7 @@
 //! transit, so outsiders learn nothing; only members see who the owner is. (The community is
 //! keyless — there is no management/authority key to bind; `community_id` alone is the anchor.)
 
+use crate::event_ext::FinalizeUnsignedWithId;
 use crate::stored_event::event_kind;
 use nostr_sdk::prelude::*;
 
@@ -25,10 +26,10 @@ pub fn build_owner_attestation_unsigned(
 ) -> UnsignedEvent {
     EventBuilder::new(Kind::Custom(event_kind::APPLICATION_SPECIFIC), "")
         .tags([Tag::custom(
-            TagKind::Custom(TAG_OWNER.into()),
+            TAG_OWNER,
             [community_id.to_string()],
         )])
-        .build(owner_pubkey)
+        .finalize_unsigned_with_id(owner_pubkey)
 }
 
 /// Verify an owner-attestation event (JSON). Returns the PROVEN owner pubkey iff the signature
@@ -57,7 +58,7 @@ mod tests {
         let cid = "a".repeat(64);
 
         let signed = build_owner_attestation_unsigned(owner.public_key(), &cid)
-            .sign_with_keys(&owner)
+            .finalize(&owner)
             .unwrap();
         let json = signed.as_json();
 
@@ -72,7 +73,7 @@ mod tests {
         // forger's pubkey, never the victim's, so they can't make the UI crown someone else.
         let mallory = Keys::generate();
         let forged = build_owner_attestation_unsigned(mallory.public_key(), &cid)
-            .sign_with_keys(&mallory)
+            .finalize(&mallory)
             .unwrap()
             .as_json();
         assert_eq!(verify_owner_attestation(&forged, &cid), Some(mallory.public_key()));

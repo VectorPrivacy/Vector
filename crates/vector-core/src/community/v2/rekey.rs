@@ -37,14 +37,15 @@
 //! apply-path concern keyed on prior-vs-current-root addressing) sits in the
 //! service layer.
 
-use nostr_sdk::nips::nip44::v2::{decrypt_to_bytes, encrypt_to_bytes, ConversationKey};
-use nostr_sdk::prelude::{Event, Keys, PublicKey, SecretKey, Tag, TagKind, Timestamp, UnsignedEvent};
+use nostr_sdk::prelude::nip44::v2::{decrypt_to_bytes, ConversationKey};
+use nostr_sdk::prelude::{Event, Keys, PublicKey, SecretKey, Tag, Timestamp, UnsignedEvent};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::super::{ChannelId, CommunityId, Epoch};
 use super::derive::{
-    base_rekey_group_key, channel_rekey_group_key, epoch_key_commitment, recipient_locator, GroupKey,
+    base_rekey_group_key, channel_rekey_group_key, control_signer_group_key, epoch_key_commitment,
+    recipient_locator, GroupKey,
 };
 use super::stream::{self, OpenedStream, SealForm, StreamError};
 
@@ -124,6 +125,15 @@ pub enum RekeyError {
     Crypto(String),
     /// The wrapped plaintext isn't the expected 72-byte layout.
     BadBlobLength(usize),
+    /// A base blob's plaintext isn't one of the three fixed widths (CORD-06 §1):
+    /// 72 (legacy pre-split), 104 (member), 136 (staff).
+    BadBaseBlobWidth(usize),
+    /// A 136-byte base blob's `new_control_root` doesn't derive to its
+    /// `new_control_pk` — refused whole rather than adopting a plane split from
+    /// its readers (CORD-06 §1).
+    ControlPairMismatch,
+    /// A Grant's `control_wrap` plaintext isn't the fixed 40 bytes (CORD-04 §3).
+    BadControlWrapLength(usize),
     /// The blob's bound scope ≠ the coordinate it's being opened under (splice).
     ScopeSplice,
     /// The blob's bound epoch ≠ the coordinate it's being opened under (splice).
@@ -146,6 +156,9 @@ impl std::fmt::Display for RekeyError {
             RekeyError::Stream(e) => write!(f, "stream: {e}"),
             RekeyError::Crypto(e) => write!(f, "crypto: {e}"),
             RekeyError::BadBlobLength(n) => write!(f, "rekey blob plaintext is {n} bytes, expected 72"),
+            RekeyError::BadBaseBlobWidth(n) => write!(f, "base rekey blob plaintext is {n} bytes, expected 72, 104 or 136"),
+            RekeyError::ControlPairMismatch => write!(f, "base rekey blob control_root does not derive to its control_pk"),
+            RekeyError::BadControlWrapLength(n) => write!(f, "control_wrap plaintext is {n} bytes, expected 40"),
             RekeyError::ScopeSplice => write!(f, "rekey blob scope binding mismatch (splice)"),
             RekeyError::EpochSplice => write!(f, "rekey blob epoch binding mismatch (splice)"),
             RekeyError::NotARekey(k) => write!(f, "rumor kind {k} is not a rekey"),
@@ -203,6 +216,165 @@ pub fn parse_bound_plaintext(pt: &[u8], scope: RekeyScope, epoch: Epoch) -> Resu
     Ok(new_key)
 }
 
+// ── The base-rotation blob forms (CORD-06 §1) ────────────────────────────────
+//
+// A base rotation's blob widens past the 72-byte channel layout to carry the
+// next epoch's Control Plane keys (CORD-02 §2): every member's blob appends
+// `new_control_pk[32]` (104 bytes), a staff recipient's additionally
+// `new_control_root[32]` (136). The width declares the form; a 72-byte BASE
+// blob is the legacy pre-split rotation — honored when reading old epochs,
+// never minted by a compliant Rotator. Any other width is malformed.
+
+/// What a base blob delivered (CORD-06 §1); the width declared the form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseKeyDelivery {
+    pub new_root: [u8; 32],
+    /// The next epoch's Control Plane address — absent on a legacy 72-byte
+    /// blob, whose acceptor folds that epoch's Control at the legacy
+    /// member-derivable address instead (CORD-06 §3).
+    pub control_pk: Option<[u8; 32]>,
+    /// The staff write secret (136-byte form only), already verified to derive
+    /// to `control_pk`.
+    pub control_root: Option<[u8; 32]>,
+}
+
+fn bound_base_plaintext(epoch: Epoch, new_root: &[u8; 32], control_pk: &[u8; 32], control_root: Option<&[u8; 32]>) -> Vec<u8> {
+    let mut pt = Vec::with_capacity(if control_root.is_some() { 136 } else { 104 });
+    pt.extend_from_slice(&bound_plaintext(RekeyScope::Root, epoch, new_root));
+    pt.extend_from_slice(control_pk);
+    if let Some(cr) = control_root {
+        pt.extend_from_slice(cr);
+    }
+    pt
+}
+
+/// The base64 string a BASE blob's NIP-44 layer encrypts (D5) — the 104-byte
+/// member form, or the 136-byte staff form when `control_root` rides.
+pub fn bound_base_plaintext_b64(epoch: Epoch, new_root: &[u8; 32], control_pk: &[u8; 32], control_root: Option<&[u8; 32]>) -> String {
+    base64_simd::STANDARD.encode_to_string(bound_base_plaintext(epoch, new_root, control_pk, control_root))
+}
+
+/// Parse + verify a decrypted BASE blob plaintext (CORD-06 §1): 72 (legacy
+/// pre-split), 104 (member), 136 (staff). The scope must be the all-zero base
+/// sentinel and the epoch must match the coordinate (unspliceable), and a
+/// 136-byte blob's `new_control_root` must derive to exactly its
+/// `new_control_pk` (CORD-02 §5) — a mismatched pair refuses the WHOLE blob
+/// rather than adopting a plane split from its readers.
+///
+/// A width ABOVE 136 is a future form this build predates. Refusing it would
+/// re-create the pre-split brick (a member forks off at the rotation until
+/// they update), so it degrades per CORD-06 §3's lenient grade instead: the
+/// frozen 72-byte prefix yields the root (membership and every Chat plane
+/// survive), the family's appended offsets yield the control pair when they
+/// still verify (the derive check fails closed on a reordered layout), and
+/// whatever the extra bytes govern freezes — a safe prompt to update, never a
+/// fork. Widths between the defined forms fit no append-only extension and
+/// stay malformed.
+pub fn parse_bound_base_plaintext(pt: &[u8], community_id: &CommunityId, epoch: Epoch) -> Result<BaseKeyDelivery, RekeyError> {
+    if !matches!(pt.len(), 72 | 104 | 136) && pt.len() < 137 {
+        return Err(RekeyError::BadBaseBlobWidth(pt.len()));
+    }
+    let new_root = parse_bound_plaintext(&pt[..72], RekeyScope::Root, epoch)?;
+    if pt.len() == 72 {
+        return Ok(BaseKeyDelivery { new_root, control_pk: None, control_root: None });
+    }
+    let mut control_pk = [0u8; 32];
+    control_pk.copy_from_slice(&pt[72..104]);
+    if pt.len() == 104 {
+        return Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: None });
+    }
+    let mut control_root = [0u8; 32];
+    control_root.copy_from_slice(&pt[104..136]);
+    if control_signer_group_key(&control_root, community_id, epoch).pk().to_bytes() != control_pk {
+        if pt.len() == 136 {
+            return Err(RekeyError::ControlPairMismatch);
+        }
+        // Future form whose 104..136 bytes are no longer the secret: keep the
+        // verified prefix fields, drop the unverifiable ones.
+        return Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: None });
+    }
+    Ok(BaseKeyDelivery { new_root, control_pk: Some(control_pk), control_root: Some(control_root) })
+}
+
+/// Build one BASE blob via a [`VectorSigner`] — the 104-byte member form, or
+/// 136 with `control_root` for a staff recipient (CORD-04 §3). Mirrors
+/// [`build_blob`]; the locator is the same public Root-scope locator.
+pub async fn build_base_blob<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    rotator_xonly: &[u8; 32],
+    recipient_pk: &PublicKey,
+    epoch: Epoch,
+    new_root: &[u8; 32],
+    control_pk: &[u8; 32],
+    control_root: Option<&[u8; 32]>,
+) -> Result<RekeyBlob, RekeyError> {
+    let inner_b64 = Zeroizing::new(bound_base_plaintext_b64(epoch, new_root, control_pk, control_root));
+    let wrapped = signer
+        .nip44_encrypt_async(recipient_pk, inner_b64.as_str())
+        .await
+        .map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    Ok(RekeyBlob {
+        locator: blob_locator(rotator_xonly, &recipient_pk.to_bytes(), RekeyScope::Root, epoch),
+        wrapped,
+    })
+}
+
+/// Open a BASE blob addressed to me via a [`VectorSigner`]. Mirror of
+/// [`open_blob`], but width-tolerant per CORD-06 §1 — the returned delivery
+/// says which form arrived.
+pub async fn open_base_blob<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    rotator_pk: &PublicKey,
+    community_id: &CommunityId,
+    epoch: Epoch,
+    blob: &RekeyBlob,
+) -> Result<BaseKeyDelivery, RekeyError> {
+    let inner_b64 = Zeroizing::new(
+        signer
+            .nip44_decrypt_async(rotator_pk, &blob.wrapped)
+            .await
+            .map_err(|e| RekeyError::Crypto(e.to_string()))?,
+    );
+    let pt = Zeroizing::new(
+        base64_simd::STANDARD
+            .decode_to_vec(inner_b64.as_bytes())
+            .map_err(|e| RekeyError::Crypto(e.to_string()))?,
+    );
+    parse_bound_base_plaintext(&pt, community_id, epoch)
+}
+
+// ── The Grant's control_wrap plaintext (CORD-04 §3) ──────────────────────────
+
+/// `epoch_be[8] ‖ control_root[32]` — the staff write key as delivered inside a
+/// staff-making Grant, NIP-44-encrypted under the granter↔member pairwise key
+/// (the rekey-blob discipline: fixed width, the epoch INSIDE the ciphertext).
+pub fn encode_control_wrap(epoch: Epoch, control_root: &[u8; 32]) -> [u8; 40] {
+    let mut pt = [0u8; 40];
+    pt[..8].copy_from_slice(&epoch.0.to_be_bytes());
+    pt[8..].copy_from_slice(control_root);
+    pt
+}
+
+/// The base64 string a control_wrap's NIP-44 layer encrypts (string-typed
+/// signer surfaces, the D5 transport discipline).
+pub fn control_wrap_b64(epoch: Epoch, control_root: &[u8; 32]) -> String {
+    base64_simd::STANDARD.encode_to_string(encode_control_wrap(epoch, control_root))
+}
+
+/// Parse a decrypted 40-byte control_wrap plaintext. The caller verifies the
+/// secret derives to the `control_pk` it holds for the named epoch — any
+/// mismatch is dropped, never adopted (CORD-04 §3).
+pub fn parse_control_wrap(pt: &[u8]) -> Result<(Epoch, [u8; 32]), RekeyError> {
+    if pt.len() != 40 {
+        return Err(RekeyError::BadControlWrapLength(pt.len()));
+    }
+    let mut epoch_be = [0u8; 8];
+    epoch_be.copy_from_slice(&pt[..8]);
+    let mut control_root = [0u8; 32];
+    control_root.copy_from_slice(&pt[8..]);
+    Ok((Epoch(u64::from_be_bytes(epoch_be)), control_root))
+}
+
 /// The public per-recipient locator (D1). Both parties compute it from public
 /// keys alone; it addresses the blob and nothing more.
 pub fn blob_locator(rotator_xonly: &[u8; 32], recipient_xonly: &[u8; 32], scope: RekeyScope, epoch: Epoch) -> String {
@@ -223,7 +395,7 @@ pub fn build_blob_local(
 ) -> Result<RekeyBlob, RekeyError> {
     let inner_b64 = Zeroizing::new(bound_plaintext_b64(scope, epoch, new_key));
     let ck = ConversationKey::derive(rotator_sk, recipient_pk).map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let payload = encrypt_to_bytes(&ck, inner_b64.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
+    let payload = crate::community::cipher::encrypt_with_random_nonce(&ck, inner_b64.as_bytes()).map_err(|e| RekeyError::Crypto(e.to_string()))?;
     Ok(RekeyBlob {
         locator: blob_locator(rotator_xonly, &recipient_pk.to_bytes(), scope, epoch),
         wrapped: base64_simd::STANDARD.encode_to_string(&payload),
@@ -255,12 +427,12 @@ pub fn open_blob_local(
     parse_bound_plaintext(&pt, scope, epoch)
 }
 
-/// Build one blob via a [`NostrSigner`] (the bunker / NIP-55 path). Wire-identical
+/// Build one blob via a [`VectorSigner`] (the bunker / NIP-55 path). Wire-identical
 /// to [`build_blob_local`]: `signer.nip44_encrypt(recipient, bound_plaintext_b64)`
 /// whose conversation key is ECDH(signer_identity, recipient) — the same key the
 /// local path derives from the raw rotator secret. The `wrapped` field is the
 /// standard NIP-44 payload string (D5), so both paths emit identical wire.
-pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_blob<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_xonly: &[u8; 32],
     recipient_pk: &PublicKey,
@@ -270,7 +442,7 @@ pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
 ) -> Result<RekeyBlob, RekeyError> {
     let inner_b64 = Zeroizing::new(bound_plaintext_b64(scope, epoch, new_key));
     let wrapped = signer
-        .nip44_encrypt(recipient_pk, inner_b64.as_str())
+        .nip44_encrypt_async(recipient_pk, inner_b64.as_str())
         .await
         .map_err(|e| RekeyError::Crypto(e.to_string()))?;
     Ok(RekeyBlob {
@@ -279,10 +451,10 @@ pub async fn build_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     })
 }
 
-/// Open a blob addressed to me via a [`NostrSigner`]. Mirror of [`open_blob_local`]:
+/// Open a blob addressed to me via a [`VectorSigner`]. Mirror of [`open_blob_local`]:
 /// `signer.nip44_decrypt(rotator, blob.wrapped)` yields the base64 bound plaintext,
 /// then the scope/epoch bound check gates it. Per D1 the locator is NOT gated.
-pub async fn open_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn open_blob<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_pk: &PublicKey,
     scope: RekeyScope,
@@ -291,7 +463,7 @@ pub async fn open_blob<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
 ) -> Result<[u8; 32], RekeyError> {
     let inner_b64 = Zeroizing::new(
         signer
-            .nip44_decrypt(rotator_pk, &blob.wrapped)
+            .nip44_decrypt_async(rotator_pk, &blob.wrapped)
             .await
             .map_err(|e| RekeyError::Crypto(e.to_string()))?,
     );
@@ -331,6 +503,9 @@ pub struct RekeyChunk {
     /// This chunk's `(i, n)` — 1-based, `i <= n`.
     pub chunk: (u32, u32),
     pub blobs: Vec<RekeyBlob>,
+    /// The rotator's `vac` (CORD-06 §Authority: "a rotation cites the Grant it
+    /// acts under like any authority action"). `None` when the owner rotates.
+    pub citation: Option<crate::community::edition::AuthorityCitation>,
 }
 
 /// The key that groups chunks of ONE rotation: `(rotator, scope_id, new_epoch,
@@ -358,6 +533,7 @@ pub fn build_rekey_rumor(
     chunk_i: u32,
     chunk_n: u32,
     at_secs: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> Result<UnsignedEvent, RekeyError> {
     if new_epoch.0 <= prev_epoch.0 {
         return Err(RekeyError::NonMonotonicEpoch);
@@ -369,13 +545,19 @@ pub fn build_rekey_rumor(
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
     let content = serde_json::to_string(blobs).map_err(|e| RekeyError::Crypto(e.to_string()))?;
-    let tags = vec![
-        Tag::custom(TagKind::Custom(TAG_SCOPE.into()), [scope.to_hex()]),
-        Tag::custom(TagKind::Custom(TAG_NEW_EPOCH.into()), [new_epoch.0.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_PREV_EPOCH.into()), [prev_epoch.0.to_string()]),
-        Tag::custom(TagKind::Custom(TAG_PREV_COMMIT.into()), [crate::simd::hex::bytes_to_hex_32(prev_commit)]),
-        Tag::custom(TagKind::Custom(TAG_CHUNK.into()), [chunk_i.to_string(), chunk_n.to_string()]),
+    let mut tags = vec![
+        Tag::custom(TAG_SCOPE, [scope.to_hex()]),
+        Tag::custom(TAG_NEW_EPOCH, [new_epoch.0.to_string()]),
+        Tag::custom(TAG_PREV_EPOCH, [prev_epoch.0.to_string()]),
+        Tag::custom(TAG_PREV_COMMIT, [crate::simd::hex::bytes_to_hex_32(prev_commit)]),
+        Tag::custom(TAG_CHUNK, [chunk_i.to_string(), chunk_n.to_string()]),
     ];
+    // CORD-06 §Authority: "a rotation cites the Grant it acts under like any
+    // authority action (CORD-04's `vac`), so a just-demoted admin's rotation is
+    // never honored by a lagging client." The owner cites nothing.
+    if let Some(c) = citation {
+        tags.push(c.to_tag());
+    }
     // Rekeys fold by their tags, not time; still stamp created_at for the wire.
     Ok(stream::build_rumor_secs(super::kind::REKEY, rotator, &content, tags, at_secs))
 }
@@ -422,6 +604,7 @@ pub fn build_rekey_chunks_local(
     prev_commit: &[u8; 32],
     blobs: &[RekeyBlob],
     at_secs: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
@@ -441,6 +624,7 @@ pub fn build_rekey_chunks_local(
             idx as u32 + 1,
             n,
             at_secs,
+            citation,
         )?;
         let (wrap, _) = seal_rekey_chunk(&rumor, rekey_group, rotator_keys, Timestamp::from_secs(at_secs))?;
         out.push(wrap);
@@ -449,10 +633,10 @@ pub fn build_rekey_chunks_local(
 }
 
 /// Signer-driven twin of [`build_rekey_chunks_local`] for bunker / NIP-55 accounts:
-/// each chunk's encrypted seal signs through a [`NostrSigner`]. `rotator_pk` must
+/// each chunk's encrypted seal signs through a [`VectorSigner`]. `rotator_pk` must
 /// equal `my_public_key()`. Wire-identical to the local path.
 #[allow(clippy::too_many_arguments)]
-pub async fn build_rekey_chunks<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_pk: PublicKey,
     rekey_group: &GroupKey,
@@ -462,6 +646,7 @@ pub async fn build_rekey_chunks<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     prev_commit: &[u8; 32],
     blobs: &[RekeyBlob],
     at_secs: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
@@ -471,7 +656,7 @@ pub async fn build_rekey_chunks<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
     let n = groups.len() as u32;
     let mut out = Vec::with_capacity(groups.len());
     for (idx, group_blobs) in groups.iter().enumerate() {
-        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs)?;
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs, citation)?;
         let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
         out.push(wrap);
     }
@@ -518,6 +703,7 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         prev_commit,
         chunk: (chunk_i, chunk_n),
         blobs,
+        citation: crate::community::edition::AuthorityCitation::from_tags(&rumor.tags),
     })
 }
 
@@ -570,6 +756,9 @@ pub struct Rotation {
     pub declared_chunks: u32,
     /// Distinct chunk indices actually held.
     pub held_chunks: std::collections::BTreeSet<u32>,
+    /// The rotator's `vac`, taken from the first chunk seen (every chunk of one
+    /// rotation carries the same citation — they share a signer and an action).
+    pub citation: Option<crate::community::edition::AuthorityCitation>,
 }
 
 impl Rotation {
@@ -615,6 +804,7 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
             blobs: Vec::new(),
             declared_chunks: c.chunk.1,
             held_chunks: std::collections::BTreeSet::new(),
+            citation: c.citation.clone(),
         });
         if entry.held_chunks.insert(c.chunk.0) {
             entry.blobs.extend(c.blobs.iter().cloned());
@@ -664,10 +854,13 @@ fn unique_tag(rumor: &UnsignedEvent, name: &'static str) -> Result<Option<String
 }
 
 fn parse_u64(rumor: &UnsignedEvent, name: &'static str) -> Result<u64, RekeyError> {
-    unique_tag(rumor, name)?
-        .ok_or(RekeyError::BadTag(name))?
-        .parse::<u64>()
-        .map_err(|_| RekeyError::BadTag(name))
+    let raw = unique_tag(rumor, name)?.ok_or(RekeyError::BadTag(name))?;
+    // Spec-shaped decimal, not a bare `parse` — that takes "+2" and "02" as
+    // epochs a stricter peer refuses (CORD-01 §5).
+    if !crate::community::edition::is_tag_decimal(&raw) {
+        return Err(RekeyError::BadTag(name));
+    }
+    raw.parse::<u64>().map_err(|_| RekeyError::BadTag(name))
 }
 
 fn parse_chunk(rumor: &UnsignedEvent) -> Result<(u32, u32), RekeyError> {
@@ -676,6 +869,9 @@ fn parse_chunk(rumor: &UnsignedEvent) -> Result<(u32, u32), RekeyError> {
         let s = t.as_slice();
         if s.len() >= 3 && s[0] == TAG_CHUNK {
             if found.is_some() {
+                return Err(RekeyError::BadTag(TAG_CHUNK));
+            }
+            if !crate::community::edition::is_tag_decimal(&s[1]) || !crate::community::edition::is_tag_decimal(&s[2]) {
                 return Err(RekeyError::BadTag(TAG_CHUNK));
             }
             let i: u32 = s[1].parse().map_err(|_| RekeyError::BadTag(TAG_CHUNK))?;
@@ -692,8 +888,14 @@ fn parse_chunk(rumor: &UnsignedEvent) -> Result<(u32, u32), RekeyError> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Wrap raw `Keys` as the polymorphic signer. `VectorSigner` pins its error to
+    /// `SignerError`, which bare `Keys` doesn't satisfy, so tests go through the
+    /// same enum the app uses.
+    fn as_signer(k: &Keys) -> crate::signer::ActiveSigner {
+        crate::signer::ActiveSigner::Keys(k.clone())
+    }
     use super::*;
-    use nostr_sdk::prelude::JsonUtil;
 
     fn keys(byte: u8) -> Keys {
         Keys::new(SecretKey::from_slice(&[byte; 32]).unwrap())
@@ -733,7 +935,7 @@ mod tests {
 
     #[tokio::test]
     async fn signer_blob_is_wire_compatible_with_local_both_directions() {
-        // A remote signer (here a plain Keys, which impls NostrSigner) must build
+        // A remote signer (here a plain Keys, which impls VectorSigner) must build
         // AND open blobs interchangeably with the raw-key path — the CORD-06 D5
         // "identical wire" guarantee the bunker/NIP-55 integration rests on.
         let rotator = keys(7);
@@ -744,17 +946,17 @@ mod tests {
 
         // local build -> signer open
         let blob_l = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).unwrap();
-        let got_s = open_blob(&recipient, &rotator.public_key(), scope, epoch, &blob_l).await.unwrap();
+        let got_s = open_blob(&as_signer(&recipient), &rotator.public_key(), scope, epoch, &blob_l).await.unwrap();
         assert_eq!(got_s, key, "signer opens a local-built blob");
 
         // signer build -> local open (+ identical public locator)
-        let blob_s = build_blob(&rotator, &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).await.unwrap();
+        let blob_s = build_blob(&as_signer(&rotator), &xonly(&rotator), &recipient.public_key(), scope, epoch, &key).await.unwrap();
         assert_eq!(blob_s.locator, blob_l.locator, "same public locator regardless of build path");
         let got_l = open_blob_local(recipient.secret_key(), &rotator.public_key(), scope, epoch, &blob_s).unwrap();
         assert_eq!(got_l, key, "local opens a signer-built blob");
 
         // signer build -> signer open
-        let got_ss = open_blob(&recipient, &rotator.public_key(), scope, epoch, &blob_s).await.unwrap();
+        let got_ss = open_blob(&as_signer(&recipient), &rotator.public_key(), scope, epoch, &blob_s).await.unwrap();
         assert_eq!(got_ss, key, "signer round-trips its own blob");
     }
 
@@ -762,9 +964,9 @@ mod tests {
     async fn signer_blob_bound_check_still_gates_scope_epoch_splice() {
         let rotator = keys(7);
         let recipient = keys(8);
-        let blob = build_blob(&rotator, &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[9u8; 32]).await.unwrap();
-        assert!(open_blob(&recipient, &rotator.public_key(), RekeyScope::Root, Epoch(2), &blob).await.is_err(), "epoch splice rejected");
-        assert!(open_blob(&recipient, &rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &blob).await.is_err(), "scope splice rejected");
+        let blob = build_blob(&as_signer(&rotator), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &[9u8; 32]).await.unwrap();
+        assert!(open_blob(&as_signer(&recipient), &rotator.public_key(), RekeyScope::Root, Epoch(2), &blob).await.is_err(), "epoch splice rejected");
+        assert!(open_blob(&as_signer(&recipient), &rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &blob).await.is_err(), "scope splice rejected");
     }
 
     #[test]
@@ -875,7 +1077,7 @@ mod tests {
         let key = [0xABu8; 32];
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &key).unwrap();
         let commit = epoch_key_commitment(Epoch(0), &[0xEEu8; 32]);
-        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &commit, &[blob.clone()], 1, 1, 100).unwrap();
+        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &commit, &[blob.clone()], 1, 1, 100, None).unwrap();
         let (wrap, _) = seal_rekey_chunk(&rumor, &group, &rotator, Timestamp::from_secs(100)).unwrap();
 
         // The wrap is signed by the group key, not the rotator (no identity on the wire).
@@ -905,7 +1107,7 @@ mod tests {
         let group = base_rekey_group(&prior_root, &community, Epoch(1));
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &new_root).unwrap();
         let commit = epoch_key_commitment(Epoch(0), &prior_root);
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &commit, &[blob], 100).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &commit, &[blob], 100, None).unwrap();
         assert_eq!(chunks.len(), 1);
 
         let opened = stream::open_wrap(&chunks[0], &group).unwrap();
@@ -932,7 +1134,7 @@ mod tests {
                 build_blob_local(rotator.secret_key(), &xonly(&rotator), &r.public_key(), RekeyScope::Root, Epoch(1), &[0xCDu8; 32]).unwrap()
             })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None).unwrap();
         assert_eq!(chunks.len(), 1, "a full send chunk is exactly one event");
         assert!(chunks[0].as_json().len() <= 65_536, "a full chunk must fit a 64KB relay event");
     }
@@ -945,7 +1147,7 @@ mod tests {
         let blobs: Vec<RekeyBlob> = (0..MAX_REKEY_BLOBS_PER_EVENT + 1)
             .map(|_| RekeyBlob { locator: "aa".repeat(32), wrapped: "x".into() })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100, None).unwrap();
         assert_eq!(chunks.len(), 2);
         let parsed: Vec<RekeyChunk> = chunks.iter().map(|w| parse_rekey_chunk(&stream::open_wrap(w, &group).unwrap()).unwrap()).collect();
         assert_eq!(parsed[0].chunk, (1, 2));
@@ -958,7 +1160,7 @@ mod tests {
     fn plaintext_sealed_rekey_is_rejected() {
         let rotator = keys(1);
         let group = channel_rekey_group(&root(), &CHAN, Epoch(1));
-        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &[0u8; 32], &[], 1, 1, 100).unwrap();
+        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &[0u8; 32], &[], 1, 1, 100, None).unwrap();
         let seal = stream::build_seal(&rumor, SealForm::Plaintext, &group, &rotator).unwrap();
         let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, Timestamp::from_secs(1)).unwrap();
         let opened = stream::open_wrap(&wrap, &group).unwrap();
@@ -969,7 +1171,7 @@ mod tests {
     fn non_monotonic_epoch_is_refused_at_mint_and_on_parse() {
         let rotator = keys(1);
         assert!(matches!(
-            build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(1), &[0u8; 32], &[], 1, 1, 100),
+            build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(1), &[0u8; 32], &[], 1, 1, 100, None),
             Err(RekeyError::NonMonotonicEpoch)
         ));
     }
@@ -979,7 +1181,7 @@ mod tests {
         let rotator = keys(1);
         for (i, n) in [(0u32, 1u32), (2, 1), (1, 0)] {
             assert!(
-                matches!(build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &[], i, n, 100), Err(RekeyError::BadChunkIndex)),
+                matches!(build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &[], i, n, 100, None), Err(RekeyError::BadChunkIndex)),
                 "chunk ({i},{n}) must be rejected"
             );
         }
@@ -996,6 +1198,7 @@ mod tests {
             prev_commit: epoch_key_commitment(Epoch(prev_epoch), prev_key),
             chunk: (i, n),
             blobs,
+            citation: None,
         }
     }
 
@@ -1075,6 +1278,148 @@ mod tests {
         let rots = collect_rotations(&[c.clone(), c]);
         assert_eq!(rots.len(), 1);
         assert_eq!(rots[0].blobs.len(), 1, "re-delivering a chunk must not double its blobs");
+    }
+
+    // ── base blob forms + control_wrap (CORD-06 §1, CORD-04 §3) ──────────────
+
+    #[test]
+    fn base_blob_forms_are_width_declared() {
+        let community = CommunityId([0x77u8; 32]);
+        let new_root = [0xABu8; 32];
+        let control_root = [0x5Cu8; 32];
+        let epoch = Epoch(3);
+        let control_pk = control_signer_group_key(&control_root, &community, epoch).pk().to_bytes();
+
+        // 104-byte member form: root + pk, no secret.
+        let member = bound_base_plaintext(epoch, &new_root, &control_pk, None);
+        assert_eq!(member.len(), 104);
+        let d = parse_bound_base_plaintext(&member, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, None);
+
+        // 136-byte staff form carries the secret, verified against its own pk.
+        let staff = bound_base_plaintext(epoch, &new_root, &control_pk, Some(&control_root));
+        assert_eq!(staff.len(), 136);
+        let d = parse_bound_base_plaintext(&staff, &community, epoch).unwrap();
+        assert_eq!(d.control_root, Some(control_root));
+        assert_eq!(d.control_pk, Some(control_pk));
+
+        // Legacy 72-byte base form yields the root alone.
+        let legacy = bound_plaintext(RekeyScope::Root, epoch, &new_root);
+        let d = parse_bound_base_plaintext(&legacy, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, None);
+        assert_eq!(d.control_root, None);
+    }
+
+    #[test]
+    fn base_blob_mismatched_control_pair_is_refused_whole() {
+        let community = CommunityId([0x77u8; 32]);
+        let control_pk = control_signer_group_key(&[0x5Cu8; 32], &community, Epoch(3)).pk().to_bytes();
+        // A secret that does NOT derive to the carried pk — the whole blob is
+        // dropped, the new_root included (never a partial adoption).
+        let bad = bound_base_plaintext(Epoch(3), &[0xABu8; 32], &control_pk, Some(&[0x11u8; 32]));
+        assert!(matches!(
+            parse_bound_base_plaintext(&bad, &community, Epoch(3)),
+            Err(RekeyError::ControlPairMismatch)
+        ));
+    }
+
+    #[test]
+    fn base_blob_rejects_any_other_width_and_splices() {
+        let community = CommunityId([0x77u8; 32]);
+        // Below and between the defined forms: no append-only extension fits.
+        for n in [0usize, 71, 73, 100, 105, 135] {
+            assert!(matches!(
+                parse_bound_base_plaintext(&vec![0u8; n], &community, Epoch(1)),
+                Err(RekeyError::BadBaseBlobWidth(m)) if m == n
+            ));
+        }
+        // The scope and epoch bind INSIDE the ciphertext (unspliceable).
+        let control_root = [0x5Cu8; 32];
+        let pk = control_signer_group_key(&control_root, &community, Epoch(3)).pk().to_bytes();
+        let pt = bound_base_plaintext(Epoch(3), &[0xABu8; 32], &pk, None);
+        assert!(matches!(parse_bound_base_plaintext(&pt, &community, Epoch(4)), Err(RekeyError::EpochSplice)));
+        let mut channel_scoped = pt.clone();
+        channel_scoped[..32].copy_from_slice(&[0x42u8; 32]);
+        assert!(matches!(parse_bound_base_plaintext(&channel_scoped, &community, Epoch(3)), Err(RekeyError::ScopeSplice)));
+    }
+
+    #[tokio::test]
+    async fn base_blob_round_trips_member_and_staff_forms() {
+        let rotator = keys(7);
+        let member = keys(8);
+        let staffer = keys(9);
+        let community = CommunityId([0x77u8; 32]);
+        let epoch = Epoch(2);
+        let new_root = [0xEEu8; 32];
+        let control_root = [0xDDu8; 32];
+        let control_pk = control_signer_group_key(&control_root, &community, epoch).pk().to_bytes();
+
+        let mb = build_base_blob(&as_signer(&rotator), &xonly(&rotator), &member.public_key(), epoch, &new_root, &control_pk, None).await.unwrap();
+        let d = open_base_blob(&as_signer(&member), &rotator.public_key(), &community, epoch, &mb).await.unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, None, "a member blob never carries the secret");
+
+        let sb = build_base_blob(&as_signer(&rotator), &xonly(&rotator), &staffer.public_key(), epoch, &new_root, &control_pk, Some(&control_root)).await.unwrap();
+        let d = open_base_blob(&as_signer(&staffer), &rotator.public_key(), &community, epoch, &sb).await.unwrap();
+        assert_eq!(d.control_root, Some(control_root));
+
+        // The locator is the same public Root-scope slot the legacy form used.
+        assert_eq!(mb.locator, blob_locator(&xonly(&rotator), &xonly(&member), RekeyScope::Root, epoch));
+        // And a legacy 72-byte blob still opens through the base opener.
+        let legacy = build_blob(&as_signer(&rotator), &xonly(&rotator), &member.public_key(), RekeyScope::Root, epoch, &new_root).await.unwrap();
+        let d = open_base_blob(&as_signer(&member), &rotator.public_key(), &community, epoch, &legacy).await.unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, None);
+    }
+
+    #[test]
+    fn a_future_wider_base_blob_degrades_instead_of_forking() {
+        // The pre-split lesson (CORD-06 §3): a width this build predates must
+        // never park the member at the old epoch — extract the frozen prefix
+        // and whatever appended fields still verify.
+        let community = CommunityId([0x77u8; 32]);
+        let new_root = [0xABu8; 32];
+        let control_root = [0x5Cu8; 32];
+        let epoch = Epoch(3);
+        let control_pk = control_signer_group_key(&control_root, &community, epoch).pk().to_bytes();
+
+        // A hypothetical 168-byte form that appended a field after the secret.
+        let mut future = bound_base_plaintext(epoch, &new_root, &control_pk, Some(&control_root));
+        future.extend_from_slice(&[0x99u8; 32]);
+        let d = parse_bound_base_plaintext(&future, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, Some(control_root), "held offsets still verify → full function");
+
+        // One that REPLACED the secret's bytes: the derive check fails closed
+        // to the verified prefix, never a refusal (membership must survive).
+        let mut reordered = bound_base_plaintext(epoch, &new_root, &control_pk, Some(&[0x44u8; 32]));
+        reordered.extend_from_slice(&[0x99u8; 32]);
+        let d = parse_bound_base_plaintext(&reordered, &community, epoch).unwrap();
+        assert_eq!(d.new_root, new_root);
+        assert_eq!(d.control_pk, Some(control_pk));
+        assert_eq!(d.control_root, None, "an unverifiable secret is dropped, not adopted");
+
+        // The prefix's splice bindings still gate a future form.
+        assert!(parse_bound_base_plaintext(&future, &community, Epoch(4)).is_err());
+    }
+
+    #[test]
+    fn control_wrap_layout_is_frozen_and_round_trips() {
+        let pt = encode_control_wrap(Epoch(7), &[0xCDu8; 32]);
+        assert_eq!(pt.len(), 40);
+        let expected = format!("{}{}", "0000000000000007", "cd".repeat(32));
+        assert_eq!(crate::simd::hex::bytes_to_hex_string(&pt), expected);
+        let (epoch, root) = parse_control_wrap(&pt).unwrap();
+        assert_eq!(epoch, Epoch(7));
+        assert_eq!(root, [0xCDu8; 32]);
+        for n in [0usize, 39, 41, 72] {
+            assert!(matches!(parse_control_wrap(&vec![0u8; n]), Err(RekeyError::BadControlWrapLength(m)) if m == n));
+        }
     }
 
     #[test]

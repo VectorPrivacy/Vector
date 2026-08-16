@@ -9,10 +9,19 @@ description: |
     - Built-in Tor integration
     - Multi-Device and Multi-Account support
     - Remote signing (NIP-46 bunker) login
+    - Amber (NIP-55) offline signing
+    - Self-destructing messages with per-chat timers
+    - Bots with Discord-style slash commands
+    - Holographic achievement badges (NIP-58)
     - Public community invite links
     - Custom emoji packs and chat wallpapers
     - Voice messaging
     - Private local AI for multilingual translations
+    - Profile QR cards with in-app camera scanning
+    - Pinned chats and pinned Community messages, synced across devices
+    - Biometric unlock with your phone's lock screen
+    - Private notifications: hide sender and content from your notification shade
+    - Photos strip EXIF and location metadata by default
     - Zero metadata leakage
     - Integrated WebXDC mini-app store (Nexus)
     - Mentions, reactions, emoji shortcodes, image spoilers, and rich link previews
@@ -50,13 +59,18 @@ images:
     - https://vectorapp.io/images/vector_screenshot_05.png
 supported_nips:
     - "06"
+    - "09"
     - "17"
     - "24"
     - "25"
     - "30"
     - "38"
+    - "40"
+    - "42"
     - "44"
     - "46"
+    - "55"
+    - "58"
     - "59"
     - "65"
     - "77"

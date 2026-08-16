@@ -15,6 +15,43 @@ use crate::{db, STATE, Message};
 // Message Retrieval Commands
 // ============================================================================
 
+/// Hydrate STATE with a DB-loaded window, then serve the SAME window back
+/// FROM STATE. The frontend must only ever hold the representation that
+/// action paths (downloads, reactions, deletes) resolve against — returning
+/// the DB composition instead hands it a second, subtly different copy whose
+/// divergences surface as action-time lookup failures.
+async fn serve_window_from_state(
+    chat_id: &str,
+    messages: Vec<Message>,
+) -> Result<Vec<Message>, String> {
+    vector_core::db::scoped(async move {
+        if messages.is_empty() {
+            return Ok(messages);
+        }
+        // A mid-load account swap must not write these rows into the new
+        // account's STATE (the batch insert even creates the chat if missing);
+        let ids: Vec<String> = messages.iter().map(|m| m.id.clone()).collect();
+        let mut served = {
+            let mut state = STATE.lock().await;
+            state.add_messages_to_chat_batch(chat_id, messages);
+            let Some(chat) = state.get_chat(chat_id) else {
+                return Ok(Vec::new());
+            };
+            let mut served = Vec::with_capacity(ids.len());
+            for id in &ids {
+                if let Some(compact) = chat.get_compact_message(id) {
+                    served.push(compact.to_message(&state.interner));
+                }
+            }
+            served
+        };
+        // Reply quotes are view-time decoration, not compact identity.
+        let _ = vector_core::db::events::populate_reply_contexts(served.iter_mut().collect()).await;
+        Ok(served)
+    })
+    .await
+}
+
 /// Get paginated messages for a chat directly from the database
 /// Also adds the messages to the backend state for cache synchronization
 #[tauri::command]
@@ -24,36 +61,9 @@ pub async fn get_chat_messages_paginated<R: Runtime>(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
-    // Load messages from database
     let messages = db::get_chat_messages_paginated(&chat_id, limit, offset).await?;
 
-    // Also add these messages to the backend state for cache synchronization
-    // This ensures operations like fetch_msg_metadata can find the messages
-    // Clone for return, move originals to batch (zero-copy in batch insert)
-    let messages_for_return = messages.clone();
-
-    if !messages.is_empty() {
-        #[cfg(debug_assertions)]
-        let start = std::time::Instant::now();
-        let mut state = STATE.lock().await;
-
-        // Use batch insert with zero-copy (moves the messages)
-        // `added` feeds only the debug-gated CacheStats below.
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let added = state.add_messages_to_chat_batch(&chat_id, messages);
-
-        #[cfg(debug_assertions)]
-        if added > 0 {
-            state.cache_stats.insert_count += added as u64;
-            state.cache_stats.record_insert(start.elapsed());
-            let chats_clone = state.chats.clone();
-            state.cache_stats.update_from_chats(&chats_clone);
-            println!("[CacheStats] paginated load: added {} msgs in {:?}", added, start.elapsed());
-            state.cache_stats.log();
-        }
-    }
-
-    Ok(messages_for_return)
+    serve_window_from_state(&chat_id, messages).await
 }
 
 /// Get the total message count for a chat
@@ -74,38 +84,14 @@ pub async fn get_message_views<R: Runtime>(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<Message>, String> {
+
     // Convert chat identifier to database ID
     let chat_int_id = db::get_chat_id_by_identifier(&chat_id)?;
 
     // Get materialized message views from events
     let messages = db::get_message_views(chat_int_id, limit, offset).await?;
 
-    // Sync to backend state for cache compatibility (batch insert for efficiency)
-    // Clone for return, move originals to batch (zero-copy in batch insert)
-    let messages_for_return = messages.clone();
-
-    if !messages.is_empty() {
-        #[cfg(debug_assertions)]
-        let start = std::time::Instant::now();
-        let mut state = STATE.lock().await;
-
-        // Use batch insert with zero-copy (moves the messages)
-        // `added` feeds only the debug-gated CacheStats below.
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let added = state.add_messages_to_chat_batch(&chat_id, messages);
-
-        #[cfg(debug_assertions)]
-        if added > 0 {
-            state.cache_stats.insert_count += added as u64;
-            state.cache_stats.record_insert(start.elapsed());
-            let chats_clone = state.chats.clone();
-            state.cache_stats.update_from_chats(&chats_clone);
-            println!("[CacheStats] message_views load: added {} msgs in {:?}", added, start.elapsed());
-            state.cache_stats.log();
-        }
-    }
-
-    Ok(messages_for_return)
+    serve_window_from_state(&chat_id, messages).await
 }
 
 /// Get messages around a specific message ID (for scrolling to replied-to messages)
@@ -119,35 +105,9 @@ pub async fn get_messages_around_id<R: Runtime>(
 ) -> Result<Vec<Message>, String> {
     // Snapshot the session before the DB await so a mid-load account swap can't write the prior
     // account's messages (and an auto-created chat) into the new account's STATE.
-    let session = vector_core::state::SessionGuard::capture();
     let messages = db::get_messages_around_id(&chat_id, &target_message_id, context_before).await?;
 
-    // Sync to backend state so fetch_msg_metadata and other functions can find these messages
-    // Clone for return, move originals to batch (zero-copy in batch insert)
-    let messages_for_return = messages.clone();
-
-    if !messages.is_empty() && session.is_valid() {
-        #[cfg(debug_assertions)]
-        let start = std::time::Instant::now();
-        let mut state = STATE.lock().await;
-
-        // Use batch insert with zero-copy (moves the messages)
-        // `added` feeds only the debug-gated CacheStats below.
-        #[cfg_attr(not(debug_assertions), allow(unused_variables))]
-        let added = state.add_messages_to_chat_batch(&chat_id, messages);
-
-        #[cfg(debug_assertions)]
-        if added > 0 {
-            state.cache_stats.insert_count += added as u64;
-            state.cache_stats.record_insert(start.elapsed());
-            let chats_clone = state.chats.clone();
-            state.cache_stats.update_from_chats(&chats_clone);
-            println!("[CacheStats] messages_around load: added {} msgs in {:?}", added, start.elapsed());
-            state.cache_stats.log();
-        }
-    }
-
-    Ok(messages_for_return)
+    serve_window_from_state(&chat_id, messages).await
 }
 
 /// Anchored (random-access) message window: `before` messages up to and
@@ -164,22 +124,13 @@ pub async fn get_messages_around<R: Runtime>(
 ) -> Result<Vec<Message>, String> {
     // Snapshot the session before the DB await: a swap during the load must not write account A's
     // messages into account B's STATE (add_messages_to_chat_batch even creates the chat if missing).
-    let session = vector_core::state::SessionGuard::capture();
     // Clamp the window. Trusted callers pass <=51; the cap bounds a hostile-frontend DoS (each row is
     // decrypted + composed + cloned into STATE) without affecting any real use.
     let before = before.min(512);
     let after = after.min(512);
     let messages = db::get_messages_around(&chat_id, &anchor_id, before, after).await?;
 
-    // Sync to backend state so fetch_msg_metadata and friends can find these messages.
-    let messages_for_return = messages.clone();
-
-    if !messages.is_empty() && session.is_valid() {
-        let mut state = STATE.lock().await;
-        state.add_messages_to_chat_batch(&chat_id, messages);
-    }
-
-    Ok(messages_for_return)
+    serve_window_from_state(&chat_id, messages).await
 }
 
 // ============================================================================
@@ -254,12 +205,8 @@ async fn ensure_unread_seeded() {
     }
     // The DB read straddles an await; a swap could land, so guard the seed against writing account
     // A's counts into account B's freshly-swapped state.
-    let session = vector_core::state::SessionGuard::capture();
     let counts = crate::db::unread_counts().await.unwrap_or_default();
     let mut state = STATE.lock().await;
-    if !session.is_valid() {
-        return;
-    }
     if !state.unread_seeded {
         state.unread_seed(counts);
     }
@@ -269,12 +216,8 @@ async fn ensure_unread_seeded() {
 /// cache. Used where an O(1) delta would be unsafe: a delete, a mark-unread retreat, or a batch
 /// backfill that adds messages outside the live inbound path.
 pub async fn reconcile_chat_unread(chat_id: &str) {
-    let session = vector_core::state::SessionGuard::capture();
     let count = vector_core::db::events::unread_count_for_chat(chat_id).await.unwrap_or(0);
     let mut state = STATE.lock().await;
-    if !session.is_valid() {
-        return;
-    }
     // Before the seed the whole map is (re)built from the DB anyway, so only patch a live cache.
     if state.unread_seeded {
         state.unread_set(chat_id, count);
@@ -334,16 +277,16 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
 /// with 0 unread are omitted (the frontend treats a missing entry as 0).
 #[tauri::command]
 pub async fn get_unread_counts() -> std::collections::HashMap<String, u32> {
-    // The frontend's authoritative per-chat badge fetch (boot + refresh). Reseed the cache from the
-    // DB here so this call also HEALS any incremental drift; the per-message badge path stays a pure
-    // in-RAM fold between these refreshes.
-    let session = vector_core::state::SessionGuard::capture();
-    let counts = crate::db::unread_counts().await.unwrap_or_default();
-    let mut state = STATE.lock().await;
-    if session.is_valid() {
+    vector_core::db::scoped(async move {
+        // The frontend's authoritative per-chat badge fetch (boot + refresh). Reseed the cache from the
+        // DB here so this call also HEALS any incremental drift; the per-message badge path stays a pure
+        // in-RAM fold between these refreshes.
+        let counts = crate::db::unread_counts().await.unwrap_or_default();
+        let mut state = STATE.lock().await;
         state.unread_seed(counts);
-    }
-    state.unread_snapshot()
+        state.unread_snapshot()
+    })
+    .await
 }
 
 /// Tell the backend which chat the user is actively watching, so inbound

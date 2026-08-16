@@ -70,14 +70,14 @@ async fn main() -> vector_sdk::Result<()> {
             }
             client.connect().await;
             let filter = Filter::new().kind(Kind::Custom(21059)).author(plane_pk);
-            if let Err(e) = client.subscribe(filter, None).await {
+            if let Err(e) = client.subscribe(filter).await {
                 println!("[{relay}] subscribe failed: {e}");
                 return;
             }
             println!("[{relay}] subscribed");
             let mut notifications = client.notifications();
-            while let Ok(n) = notifications.recv().await {
-                if let RelayPoolNotification::Event { event, .. } = n {
+            while let Some(n) = notifications.next().await {
+                if let ClientNotification::Event { event, .. } = n {
                     println!(
                         "[{relay}] ← 21059 wrap id={} wrap_created_at={} size={}B",
                         &event.id.to_hex()[..12],

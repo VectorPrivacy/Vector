@@ -208,6 +208,7 @@ function _populateMiniProfile(popup, npub, profile, opts) {
         txt.className = 'mini-profile-status-text';
         txt.textContent = statusText;
         twemojify(txt);
+        renderCustomEmojiShortcodes(txt, profile?.status?.emoji_tags || []);
         status.appendChild(txt);
         popup.appendChild(status);
     }

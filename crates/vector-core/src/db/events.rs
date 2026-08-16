@@ -312,19 +312,18 @@ fn write_batch_rows(rows: &[BatchRow<'_>]) -> Result<usize, String> {
 pub async fn save_messages_batch(
     chat_id: &str,
     messages: &[&Message],
-    session: Option<&crate::state::SessionGuard>,
 ) -> Result<usize, String> {
-    if messages.is_empty() {
-        return Ok(0);
-    }
-    let with_wrappers: Vec<(&Message, Option<([u8; 32], u64)>)> =
-        messages.iter().map(|m| (*m, None)).collect();
-    let mut rows = Vec::with_capacity(messages.len());
-    prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
-    if session.is_some_and(|s| !s.is_valid()) {
-        return Ok(0);
-    }
-    write_batch_rows(&rows)
+    crate::db::scoped(async move {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        let with_wrappers: Vec<(&Message, Option<([u8; 32], u64)>)> =
+            messages.iter().map(|m| (*m, None)).collect();
+        let mut rows = Vec::with_capacity(messages.len());
+        prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
+        write_batch_rows(&rows)
+    })
+    .await
 }
 
 /// Multi-chat variant for the DM sync stream: gift-wrapped messages span many contacts, and
@@ -333,20 +332,19 @@ pub async fn save_messages_batch(
 /// `BatchRow::wrapper`). Groups keep their slice order; everything lands in ONE transaction.
 pub async fn save_messages_batch_multi(
     groups: &[(String, Vec<(&Message, Option<([u8; 32], u64)>)>)],
-    session: Option<&crate::state::SessionGuard>,
 ) -> Result<usize, String> {
-    let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
-    if total == 0 {
-        return Ok(0);
-    }
-    let mut rows = Vec::with_capacity(total);
-    for (chat_id, messages) in groups {
-        prepare_batch_rows(chat_id, messages, &mut rows).await?;
-    }
-    if session.is_some_and(|s| !s.is_valid()) {
-        return Ok(0);
-    }
-    write_batch_rows(&rows)
+    crate::db::scoped(async move {
+        let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
+        if total == 0 {
+            return Ok(0);
+        }
+        let mut rows = Vec::with_capacity(total);
+        for (chat_id, messages) in groups {
+            prepare_batch_rows(chat_id, messages, &mut rows).await?;
+        }
+        write_batch_rows(&rows)
+    })
+    .await
 }
 
 /// Convert a Message to a StoredEvent.
@@ -459,6 +457,17 @@ pub async fn save_system_event_at(
     invited_by: Option<&str>,
     invited_label: Option<&str>,
 ) -> Result<bool, String> {
+    // A blank conversation id is a caller bug, never a conversation. Left to
+    // `get_or_create_chat_id` it MINTS a chat row keyed by "" — and since the
+    // identifier is UNIQUE, every such write from every community collapses into
+    // one phantom row that nothing can open and the boot sweep can only report.
+    // A blank conversation id is a caller bug, never a conversation. Left to
+    // `get_or_create_chat_id` it MINTS a chat row keyed by "" — and since the
+    // identifier is UNIQUE, every such write from every community collapses into
+    // one phantom row that nothing can open and the boot sweep can only report.
+    if conversation_id.trim().is_empty() {
+        return Err("system event has no conversation id".to_string());
+    }
     let chat_id = super::id_cache::get_or_create_chat_id(conversation_id)?;
 
     let now_secs = std::time::SystemTime::now()
@@ -569,6 +578,34 @@ pub async fn delete_event(event_id: &str) -> Result<(), String> {
         rusqlite::params![event_id],
     ).map_err(|e| format!("Failed to delete event: {}", e))?;
     Ok(())
+}
+
+/// Record a durable delete tombstone for `event_id`. The events row is gone after a
+/// delete, so this is the only thing that lets ingest refuse a wrap a relay
+/// re-serves across restarts (NIP-09 is best-effort — relays ignore it freely).
+pub fn add_message_tombstone(event_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    conn.execute(
+        "INSERT OR IGNORE INTO deleted_messages (event_id, deleted_at) VALUES (?1, ?2)",
+        rusqlite::params![event_id, now],
+    ).map_err(|e| format!("Failed to save delete tombstone: {}", e))?;
+    Ok(())
+}
+
+/// Every recorded delete tombstone, for seeding the in-session set at account init.
+pub fn load_message_tombstones() -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare("SELECT event_id FROM deleted_messages")
+        .map_err(|e| format!("Failed to prepare tombstone query: {}", e))?;
+    let ids = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query tombstones: {}", e))?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(ids)
 }
 
 /// The stored author (npub) of an event, or `None` if the row (or DB) is absent. Lets the
@@ -908,6 +945,9 @@ pub struct ReplyContext {
     /// Extension of the attachment, when the replied-to message is a file, so
     /// the reply quote can label the type even when the target is off-screen.
     pub extension: Option<String>,
+    /// The target's NIP-30 emoji tags — without them an off-screen quote
+    /// renders raw `:shortcodes:` and nothing ever corrects it.
+    pub emoji_tags: Vec<crate::types::EmojiTag>,
 }
 
 /// Fetch reply context for a list of message IDs.
@@ -920,7 +960,7 @@ pub async fn get_reply_contexts(
         return Ok(HashMap::new());
     }
 
-    let (events, edits): (Vec<(String, i32, String, Option<String>, Option<String>)>, Vec<(String, String)>) = {
+    let (events, edits): (Vec<(String, i32, String, Option<String>, Option<String>)>, Vec<(String, String, Option<String>)>) = {
         let conn = super::get_db_connection_guard_static()?;
 
         let placeholders: String = (0..message_ids.len())
@@ -949,7 +989,7 @@ pub async fn get_reply_contexts(
 
         // Query latest edits
         let edit_sql = format!(
-            "SELECT reference_id, content FROM events \
+            "SELECT reference_id, content, tags FROM events \
              WHERE kind = {} AND reference_id IN ({}) \
              ORDER BY created_at DESC, received_at DESC",
             event_kind::MESSAGE_EDIT, placeholders
@@ -957,7 +997,8 @@ pub async fn get_reply_contexts(
         let mut edit_stmt = conn.prepare(&edit_sql)
             .map_err(|e| format!("Failed to prepare edit query: {}", e))?;
         let edit_rows = edit_stmt.query_map(params_dyn.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?))
         }).map_err(|e| format!("Failed to query edits: {}", e))?;
         let edits_result: Vec<_> = edit_rows.filter_map(|r| r.ok()).collect();
 
@@ -965,9 +1006,9 @@ pub async fn get_reply_contexts(
     };
 
     // Build latest edit map (first = most recent since ordered DESC)
-    let mut latest_edits: HashMap<String, String> = HashMap::new();
-    for (ref_id, content) in edits {
-        latest_edits.entry(ref_id).or_insert(content);
+    let mut latest_edits: HashMap<String, (String, Option<String>)> = HashMap::new();
+    for (ref_id, content, tags) in edits {
+        latest_edits.entry(ref_id).or_insert((content, tags));
     }
 
     // Batch the file replies' attachments (one query, not one per reply) for the extension below.
@@ -981,7 +1022,23 @@ pub async fn get_reply_contexts(
     let mut contexts = HashMap::new();
     for (id, kind, original_content, npub, tags) in events {
         let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
-        let content_to_decrypt = latest_edits.get(&id).cloned().unwrap_or(original_content);
+        let latest_edit = latest_edits.get(&id);
+        let content_to_decrypt = latest_edit
+            .map(|(c, _)| c.clone())
+            .unwrap_or(original_content);
+
+        // Same rule as the message loader: an edit's tags replace the
+        // original's, so the quote's emoji match the content it shows.
+        let parse_emoji = |json: &Option<String>| -> Vec<crate::types::EmojiTag> {
+            json.as_deref()
+                .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
+                .map(|parsed| crate::types::EmojiTag::extract_from_stored(&parsed))
+                .unwrap_or_default()
+        };
+        let emoji_tags = match latest_edit {
+            Some((_, edit_tags)) => parse_emoji(edit_tags),
+            None => parse_emoji(&tags),
+        };
 
         let decrypted_content = if kind == event_kind::CHAT_MESSAGE as i32
             || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
@@ -1012,7 +1069,7 @@ pub async fn get_reply_contexts(
             None
         };
 
-        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension });
+        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension, emoji_tags });
     }
 
     Ok(contexts)
@@ -1040,6 +1097,7 @@ pub async fn populate_reply_contexts(messages: Vec<&mut Message>) -> Result<(), 
             message.replied_to_npub = ctx.npub.clone();
             message.replied_to_has_attachment = Some(ctx.has_attachment);
             message.replied_to_attachment_extension = ctx.extension.clone();
+            message.replied_to_emoji_tags = if ctx.emoji_tags.is_empty() { None } else { Some(ctx.emoji_tags.clone()) };
         }
     }
     Ok(())
@@ -1059,6 +1117,7 @@ pub async fn populate_reply_context(message: &mut Message) -> Result<(), String>
         message.replied_to_npub = ctx.npub.clone();
         message.replied_to_has_attachment = Some(ctx.has_attachment);
         message.replied_to_attachment_extension = ctx.extension.clone();
+        message.replied_to_emoji_tags = if ctx.emoji_tags.is_empty() { None } else { Some(ctx.emoji_tags.clone()) };
     }
 
     Ok(())
@@ -1180,13 +1239,19 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             match event.kind {
                 k if k == event_kind::REACTION => {
                     let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
-                    reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
+                    let reaction = Reaction {
                         id: event.id.clone(),
                         reference_id: ref_id.clone(),
                         author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
                         emoji: event.content.clone(),
                         emoji_url,
-                    });
+                    };
+                    // Rows predating the (author, emoji) rule — or written by a client
+                    // that never had it — must not resurrect a double count on reload.
+                    let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
+                    if !slot.iter().any(|r| r.same_slot(&reaction)) {
+                        slot.push(reaction);
+                    }
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
                     let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
@@ -1267,7 +1332,7 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             expiration,
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
-            replied_to_attachment_extension: None,
+            replied_to_attachment_extension: None, replied_to_emoji_tags: None,
             preview_metadata, attachments, reactions, at,
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
@@ -1276,6 +1341,11 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
             addressed_bots,
         });
     }
+
+    // Rows whose NIP-40 expiry passed while out of STATE (app closed, chat
+    // unopened) must never reach a renderer — strip them here, at the single
+    // DB→Message chokepoint, and purge their remnants in the background.
+    crate::self_destruct::strip_expired(&mut messages);
 
     // Step 5: Reply context
     let reply_ids: Vec<String> = messages.iter()
@@ -1452,12 +1522,18 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             match event.kind {
                 k if k == event_kind::REACTION => {
                     let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
-                    reactions_by_msg.entry(ref_id.clone()).or_default().push(Reaction {
+                    let reaction = Reaction {
                         id: event.id.clone(), reference_id: ref_id.clone(),
                         author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
                         emoji: event.content.clone(),
                         emoji_url,
-                    });
+                    };
+                    // Rows predating the (author, emoji) rule — or written by a client
+                    // that never had it — must not resurrect a double count on reload.
+                    let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
+                    if !slot.iter().any(|r| r.same_slot(&reaction)) {
+                        slot.push(reaction);
+                    }
                 }
                 k if k == event_kind::MESSAGE_EDIT => {
                     let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
@@ -1539,7 +1615,7 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
             expiration,
             id: event.id, content, replied_to,
             replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
-            replied_to_attachment_extension: None,
+            replied_to_attachment_extension: None, replied_to_emoji_tags: None,
             preview_metadata, attachments, reactions, at: event.created_at * 1000,
             pending: event.pending, failed: event.failed, mine: event.mine,
             npub: event.npub, wrapper_event_id: event.wrapper_event_id,
@@ -1570,6 +1646,13 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
         }
     }
 
+    // An expired self-destruct as a chat's last message must not flash in the
+    // chat list — strip + background-purge; the preview shows empty until the
+    // next boot resolves the prior message, same as a mid-session sweep.
+    for msgs in result.values_mut() {
+        crate::self_destruct::strip_expired(msgs);
+    }
+
     Ok(result)
 }
 
@@ -1578,7 +1661,9 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// messages newer than the most recent "anchor" (our own message OR the `last_read` marker,
 /// whichever is latest). A never-read chat (empty `last_read`, no own message) counts all its
 /// non-mine messages. Returns `chat_identifier → count`; chats with 0 unread are omitted.
-/// Muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
+/// CHAT-level muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
+/// SENDER-level filtering happens here: a message whose author's DM is muted or whose profile
+/// is blocked never counts, in any chat — muting a person silences their community messages too.
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
     // Anchor computed once per chat in the CTE so the count scan doesn't re-derive it per row. The
@@ -1599,6 +1684,10 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
              SELECT a.chat_identifier, COUNT(*) AS unread \
              FROM events e JOIN anchors a ON a.chat_id = e.chat_id \
              WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 AND e.created_at > a.anchor_ts \
+               AND (e.npub IS NULL OR e.npub NOT IN ( \
+                     SELECT chat_identifier FROM chats WHERE muted = 1 \
+                     UNION \
+                     SELECT npub FROM profiles WHERE is_blocked = 1)) \
              GROUP BY a.chat_identifier",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
@@ -1627,6 +1716,10 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
         .query_row(
             "SELECT COUNT(*) FROM events e JOIN chats c ON e.chat_id = c.id \
              WHERE c.chat_identifier = ?4 AND e.kind IN (?1, ?2, ?3) AND e.mine = 0 \
+               AND (e.npub IS NULL OR e.npub NOT IN ( \
+                     SELECT chat_identifier FROM chats WHERE muted = 1 \
+                     UNION \
+                     SELECT npub FROM profiles WHERE is_blocked = 1)) \
                AND e.created_at > COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
@@ -1711,19 +1804,22 @@ pub async fn compute_unread_anchor(chat_identifier: &str) -> Result<UnreadMark, 
 pub async fn flush_message_batch(
     chat_id: &str,
     pending: &mut Vec<&Message>,
-    session: &crate::state::SessionGuard,
+    session: &std::sync::Arc<crate::db::Session>,
 ) {
-    if pending.is_empty() {
-        return;
-    }
-    if !session.is_valid() {
+    crate::db::scoped(async move {
+        if pending.is_empty() {
+            return;
+        }
+        if !session.is_live() {
+            pending.clear();
+            return;
+        }
+        if let Err(e) = save_messages_batch(chat_id, pending).await {
+            crate::log_warn!("[DB] batch flush failed for {}: {}", chat_id, e);
+        }
         pending.clear();
-        return;
-    }
-    if let Err(e) = save_messages_batch(chat_id, pending, Some(session)).await {
-        crate::log_warn!("[DB] batch flush failed for {}: {}", chat_id, e);
-    }
-    pending.clear();
+    })
+    .await
 }
 
 /// Batch save messages for a chat — one transaction for the whole slice.
@@ -1732,7 +1828,7 @@ pub async fn save_chat_messages(chat_id: &str, messages: &[Message]) -> Result<(
         return Ok(());
     }
     let refs: Vec<&Message> = messages.iter().collect();
-    save_messages_batch(chat_id, &refs, None).await.map(|_| ())
+    save_messages_batch(chat_id, &refs).await.map(|_| ())
 }
 
 #[cfg(test)]
@@ -1765,7 +1861,7 @@ mod tests {
         let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let account = make_test_npub(n);
         std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
-        crate::db::set_app_data_dir(tmp.path().to_path_buf());
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
         crate::db::set_current_account(account.clone()).unwrap();
         crate::db::init_database(&account).unwrap();
         (tmp, guard)
@@ -1930,6 +2026,58 @@ mod tests {
         assert_eq!(unread().await, 0, "last_read=m8 clears all");
         save_message(chat, &mk("m9", 2004, false)).await.unwrap();
         assert_eq!(unread().await, 1, "one arrival after last_read");
+    }
+
+    // Muting a person (their DM row) or blocking them silences their messages in EVERY chat's
+    // count — community messages from a muted sender must not badge.
+    #[tokio::test]
+    async fn unread_counts_exclude_muted_and_blocked_senders() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_mute_exclusion";
+        let mk = |id: &str, secs: u64, npub: &str| Message {
+            id: id.into(), content: "x".into(), at: secs * 1000, mine: false,
+            npub: Some(npub.to_string()),
+            ..Default::default()
+        };
+        save_message(chat, &mk("n1", 1000, "npub1noisy")).await.unwrap();
+        save_message(chat, &mk("q1", 1001, "npub1quiet")).await.unwrap();
+
+        let map = || async { unread_counts().await.unwrap().get(chat).copied().unwrap_or(0) };
+        let one = || async { unread_count_for_chat(chat).await.unwrap() };
+        assert_eq!(map().await, 2, "both senders count while neither is muted");
+        assert_eq!(one().await, 2);
+
+        // Mute npub1noisy: their (message-less) DM row exists purely to carry the flag.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "INSERT INTO chats (chat_identifier, chat_type, participants, created_at, muted) \
+                 VALUES ('npub1noisy', 0, '', 1000, 1)",
+                [],
+            ).unwrap();
+        }
+        assert_eq!(map().await, 1, "muted sender's message stops counting");
+        assert_eq!(one().await, 1);
+
+        // Block npub1quiet: same exclusion via the profiles flag.
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute(
+                "INSERT INTO profiles (npub, is_blocked) VALUES ('npub1quiet', 1) \
+                 ON CONFLICT(npub) DO UPDATE SET is_blocked = 1",
+                [],
+            ).unwrap();
+        }
+        assert_eq!(map().await, 0, "blocked sender's message stops counting too");
+        assert_eq!(one().await, 0);
+
+        // Unmute → the count comes straight back (nothing was consumed).
+        {
+            let conn = crate::db::get_write_connection_guard_static().unwrap();
+            conn.execute("UPDATE chats SET muted = 0 WHERE chat_identifier = 'npub1noisy'", []).unwrap();
+        }
+        assert_eq!(map().await, 1, "unmuting restores the sender's count");
+        assert_eq!(one().await, 1);
     }
 
     // The single-chat reconcile query must agree with the full map for every state the cache
@@ -2192,6 +2340,36 @@ mod tests {
     // Regression: a "read to here" marker that lands on a system event (kind 30078, not a counted
     // kind, e.g. the windowed jump-reveal path marking off the raw tail) must still clear unread.
     // The anchor keys off the marker row's time whatever its kind, so it can't wedge at 99+.
+    /// A blank conversation id is refused, never minted into a chat row. Left to
+    /// `get_or_create_chat_id` it created a chat keyed by "" — and because the
+    /// identifier is UNIQUE, presence from EVERY channel-less community collapsed
+    /// into that one unopenable row (82 events across weeks, on a live account).
+    #[tokio::test]
+    async fn a_system_event_with_a_blank_conversation_id_is_refused() {
+        let (_tmp, _guard) = init_test_db();
+        let before = chat_row_count();
+        for blank in ["", "   "] {
+            assert!(
+                save_system_event_at("ev", blank, SystemEventType::MemberJoined, "npubX", None, 100, None, None)
+                    .await
+                    .is_err(),
+                "a blank conversation id must be refused, not minted"
+            );
+        }
+        assert_eq!(chat_row_count(), before, "and no chat row is created");
+        // A real id still works.
+        assert!(
+            save_system_event_at("ev2", "real-chat", SystemEventType::MemberJoined, "npubX", None, 100, None, None)
+                .await
+                .unwrap()
+        );
+    }
+
+    fn chat_row_count() -> i64 {
+        let conn = crate::db::get_db_connection_guard_static().unwrap();
+        conn.query_row("SELECT count(*) FROM chats", [], |r| r.get(0)).unwrap()
+    }
+
     #[tokio::test]
     async fn unread_clears_when_last_read_is_a_system_event() {
         let (_tmp, _guard) = init_test_db();
@@ -2320,7 +2498,7 @@ mod tests {
         }).collect();
         let refs: Vec<&Message> = msgs.iter().collect();
 
-        let saved = save_messages_batch(chat, &refs, None).await.unwrap();
+        let saved = save_messages_batch(chat, &refs).await.unwrap();
         assert_eq!(saved, 5, "every message written");
 
         for i in 0..5u64 {
@@ -2362,7 +2540,7 @@ mod tests {
 
         // Re-delivery re-save without a wrapper id, reaction still attached.
         msg.wrapper_event_id = None;
-        let saved = save_messages_batch(chat, &[&msg], None).await.unwrap();
+        let saved = save_messages_batch(chat, &[&msg]).await.unwrap();
         assert_eq!(saved, 1);
 
         let conn = crate::db::get_db_connection_guard_static().unwrap();
@@ -2380,7 +2558,7 @@ mod tests {
     // chats with their gift-wrap ledger entries; a flush against a stale session drops the
     // buffer AND leaves the wrappers unledgered (that's what makes the drop recoverable).
     #[tokio::test]
-    async fn batching_persist_flushes_multi_chat_and_drops_on_stale_session() {
+    async fn batching_persist_flushes_multi_chat_and_drains_into_the_account_that_filled_it() {
         let (_tmp, _guard) = init_test_db();
         let handler = crate::event_handler::NoOpEventHandler;
         let batcher = crate::event_handler::BatchingPersist::new(&handler);
@@ -2420,8 +2598,7 @@ mod tests {
         };
         assert!(!ledgered(wrap_a1.0), "wrapper unledgered while its message sits buffered");
 
-        let session = crate::state::SessionGuard::capture();
-        assert_eq!(batcher.flush(&session).await, 3, "all buffered messages written");
+        assert_eq!(batcher.flush().await, 3, "all buffered messages written");
         assert_eq!(batcher.buffered(), 0);
         assert!(event_exists("bp_a1").unwrap() && event_exists("bp_b1").unwrap() && event_exists("bp_a2").unwrap());
         assert!(ledgered(wrap_a1.0) && ledgered(wrap_b1.0), "wrappers ledgered with the flush");
@@ -2429,17 +2606,30 @@ mod tests {
         let b = crate::db::id_cache::get_chat_id_by_identifier("npub1chatb").unwrap();
         assert_ne!(a, b, "rows grouped under their own chats");
 
-        // Stale session: buffered messages are dropped, never written — and the wrapper
-        // stays out of the negentropy fingerprint set, so the message re-delivers.
-        let stale = mk("bp_stale", "npub1chata");
-        seed("npub1chata", &stale).await;
-        let wrap_stale = ([0x5Eu8; 32], 333u64);
-        batcher.buffer_persist("npub1chata", &stale, Some(wrap_stale));
-        crate::state::bump_session_generation();
-        assert_eq!(batcher.flush(&session).await, 0, "stale flush writes nothing");
-        assert!(!event_exists("bp_stale").unwrap(), "stale message never reached the DB");
-        assert!(!ledgered(wrap_stale.0), "dropped message's wrapper NOT ledgered — negentropy will re-deliver it");
-        assert_eq!(batcher.buffered(), 0, "stale buffer drained, not retried into the next account");
+        // A swap between buffering and flushing. The batcher holds the account
+        // that filled it, so the drain lands there rather than in whoever is
+        // live by the time it runs — the buffer is one account's inbox.
+        let filled_under = crate::db::current_session();
+        let late = mk("bp_late", "npub1chata");
+        seed("npub1chata", &late).await;
+        let wrap_late = ([0x5Eu8; 32], 333u64);
+        batcher.buffer_persist("npub1chata", &late, Some(wrap_late));
+
+        let next = make_test_npub(TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        std::fs::create_dir_all(crate::db::shared_test_data_dir().join(&next)).unwrap();
+        crate::db::set_current_account(next.clone()).unwrap();
+        crate::db::init_database(&next).unwrap();
+
+        assert_eq!(batcher.flush().await, 1, "the buffer still drains");
+        assert!(
+            crate::db::with_session(filled_under, async {
+                event_exists("bp_late").unwrap() && ledgered(wrap_late.0)
+            })
+            .await,
+            "written to the account that received it, and its wrapper ledgered there"
+        );
+        assert!(!event_exists("bp_late").unwrap(), "the account swapped in never sees it");
+        assert_eq!(batcher.buffered(), 0, "and the buffer is empty either way");
     }
 
     // A deletion landing while its target sits buffered must not resurrect the message:
@@ -2448,6 +2638,28 @@ mod tests {
     // The filter keys on the POSITIVE tombstone, never STATE absence — an LRU-evicted (but
     // not deleted) message MUST still persist and ledger, or archive sync could silently
     // drop the exact history it exists to persist.
+    #[tokio::test]
+    async fn a_delete_tombstone_survives_a_restart() {
+        // NIP-09 is best-effort: a relay that ignored it re-serves the wrap days
+        // later. The events row is gone by then and the in-session tombstone set
+        // died with the process — only the durable row lets ingest keep refusing.
+        let (_tmp, _guard) = init_test_db();
+        let msg = Message {
+            id: "resurrect-me".into(), content: "note".into(), at: 1_000_000,
+            mine: true, ..Default::default()
+        };
+        save_message("npub1notes", &msg).await.unwrap();
+        add_message_tombstone("resurrect-me").unwrap();
+        delete_event("resurrect-me").await.unwrap();
+
+        // Simulated restart/swap: the in-session set dies...
+        crate::db::close_database();
+        assert!(!crate::state::was_message_deleted("resurrect-me"), "session set cleared");
+        // ...and account init re-seeds the refusal from the durable rows.
+        crate::state::seed_message_tombstones(load_message_tombstones().unwrap());
+        assert!(crate::state::was_message_deleted("resurrect-me"), "the durable tombstone re-seeds");
+    }
+
     #[tokio::test]
     async fn buffered_message_deleted_before_flush_never_persists() {
         let (_tmp, _guard) = init_test_db();
@@ -2500,11 +2712,28 @@ mod tests {
         }
         batcher.buffer_persist(chat, &m3, Some(wrap_evicted));
 
-        let session = crate::state::SessionGuard::capture();
-        assert_eq!(batcher.flush(&session).await, 1, "tombstoned target dropped, evicted message written");
+        assert_eq!(batcher.flush().await, 1, "tombstoned target dropped, evicted message written");
         assert!(!event_exists("del_sametask").unwrap(), "purged message never persisted");
         assert!(!event_exists("del_crosstask").unwrap(), "tombstoned message never persisted");
         assert!(event_exists("evicted_ok").unwrap(), "evicted-but-not-deleted message persisted");
         assert!(ledgered(wrap_evicted.0), "evicted message's wrapper ledgered with it");
     }
+}
+
+/// The stored context a pin proof needs to recover a message's wrap: its
+/// `wrapper_event_id` and the rumor's stored tags (for the epoch binding).
+pub fn get_event_wrap_context(event_id: &str) -> Result<Option<(Option<String>, Vec<Vec<String>>)>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let row: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT wrapper_event_id, tags FROM events WHERE id = ?1",
+            rusqlite::params![event_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("get wrap context: {e}"))?;
+    Ok(row.map(|(wrap, tags_json)| {
+        let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
+        (wrap, tags)
+    }))
 }

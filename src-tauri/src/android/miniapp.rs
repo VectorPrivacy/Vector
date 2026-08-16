@@ -62,6 +62,7 @@ pub fn open_miniapp_overlay(
     chat_id: &str,
     message_id: &str,
     href: Option<&str>,
+    partition: &str,
 ) -> Result<(), String> {
     log_info!(
         "Opening Mini App overlay: {} (chat: {}, message: {})",
@@ -104,12 +105,17 @@ pub fn open_miniapp_overlay(
             .new_string(OVERLAY_HTML)
             .map_err(|e| format!("Failed to create overlay html string: {:?}", e))?;
 
-        // Call MiniAppManager.openMiniApp(miniappId, packagePath, chatId, messageId, href, overlayHtml)
+        // Per-app storage partition: becomes the origin host `<partition>.localhost`
+        let j_partition = env
+            .new_string(partition)
+            .map_err(|e| format!("Failed to create partition string: {:?}", e))?;
+
+        // Call MiniAppManager.openMiniApp(miniappId, packagePath, chatId, messageId, href, overlayHtml, partition)
         // Note: We need to run on UI thread, so we call via the activity
         env.call_static_method(
             manager_class,
             "openMiniApp",
-            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
             &[
                 JValue::Object(&j_miniapp_id),
                 JValue::Object(&j_package_path),
@@ -117,6 +123,7 @@ pub fn open_miniapp_overlay(
                 JValue::Object(&j_message_id),
                 JValue::Object(&j_href),
                 JValue::Object(&j_overlay_html),
+                JValue::Object(&j_partition),
             ],
         )
         .map_err(|e| format!("Failed to call MiniAppManager.openMiniApp: {:?}", e))?;

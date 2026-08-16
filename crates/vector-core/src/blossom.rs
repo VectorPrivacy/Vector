@@ -1,5 +1,6 @@
-use nostr_sdk::{NostrSigner, Url, Event, EventBuilder, Timestamp, JsonUtil};
-use nostr_sdk::hashes::{sha256::Hash as Sha256Hash, Hash};
+use crate::signer::VectorSigner;
+use nostr_sdk::prelude::{Event, FinalizeEventAsync, Timestamp, Url};
+use bitcoin_hashes::sha256::Hash as Sha256Hash;
 use nostr_blossom::prelude::*;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::{Body, StatusCode};
@@ -24,7 +25,9 @@ impl ProgressTrackingStream {
     fn new(data: Arc<Vec<u8>>, bytes_sent: Arc<Mutex<u64>>) -> Self {
         let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
 
-        // Spawn a background task to feed the stream
+        // Spawn a background task to feed the stream. NOT bound: this pumps
+        // bytes already in hand into a channel and never touches account state.
+        // spawn-detached: byte-pump into a channel; the bytes are already in hand.
         tokio::spawn(async move {
             let chunk_size = 64 * 1024; // 64 KB chunks - only unavoidable copy
             let mut position = 0;
@@ -77,7 +80,7 @@ async fn build_auth_header<T>(
     hash: Sha256Hash,
 ) -> Result<HeaderValue, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     // Create Blossom authorization
     let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
@@ -89,8 +92,8 @@ where
     );
 
     // Sign the authorization event
-    let auth_event: Event = EventBuilder::blossom_auth(auth)
-        .sign(signer)
+    let auth_event: Event = auth
+        .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
 
@@ -115,7 +118,7 @@ pub async fn upload_blob_with_progress<T>(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let retry_count = retry_count.unwrap_or(0);
     let retry_spacing = retry_spacing.unwrap_or(std::time::Duration::from_secs(1));
@@ -207,7 +210,7 @@ async fn upload_attempt<T>(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
@@ -391,7 +394,7 @@ where
             (true, Some(r))  => r,
             (true, None)     => "Unknown error".to_string(),
         };
-        crate::log_warn!("[Blossom Error] Upload failed with status {}: {}", status, display);
+        crate::log_net_fail!("[Blossom] upload rejected: HTTP {} — {}", status, display);
         Err(format!("Upload failed with status {}: {}", status, display))
     }
 }
@@ -407,7 +410,7 @@ pub async fn upload_blob<T>(
     read_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     let upload_url = server_url.join("upload")
         .map_err(|e| format!("Invalid server URL: {}", e))?;
@@ -464,6 +467,38 @@ where
     }
 }
 
+/// Post-upload liveness gate: confirm the server actually SERVES the blob it
+/// just ACKed. Some servers 2xx an upload they dedupe against a stale index
+/// or quietly drop — the ACK is worthless, only a cache-cold fetch tells the
+/// truth. A definitive 404/410 (after a short grace retry) fails the server;
+/// anything else passes, so a flaky HEAD can't sink a good upload.
+async fn uploaded_blob_serves(url: &str) -> bool {
+    let client = match crate::net::build_http_client(std::time::Duration::from_secs(10)) {
+        Ok(c) => c,
+        Err(_) => return true,
+    };
+    for attempt in 0..2 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        match client.head(url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
+                    continue;
+                }
+                return true;
+            }
+            Err(_) => {
+                crate::log_net_info!("[Blossom] {} unreachable for post-upload verify — assuming stored", url);
+                return true;
+            }
+        }
+    }
+    crate::log_net_fail!("[Blossom] {} ACKed the upload but serves 404/410 — treating as dropped", url);
+    false
+}
+
 /// Upload to multiple Blossom servers with failover, in input order.
 ///
 /// **Does NOT participate in the capability cache.** Used by the
@@ -478,7 +513,7 @@ pub async fn upload_blob_with_failover<T>(
     read_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let mut last_error = String::from("No servers available");
 
@@ -486,7 +521,7 @@ where
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
-                crate::log_warn!("[Blossom Error] Invalid server URL '{}': {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] invalid server URL '{}': {}", server_url_str, e);
                 last_error = format!("Invalid server URL: {}", e);
                 continue;
             }
@@ -497,16 +532,25 @@ where
 
         match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type, read_timeout).await {
             Ok(url) => {
-                crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
+                if !uploaded_blob_serves(&url).await {
+                    crate::log_warn!(
+                        "[Blossom Error] {} ACKed the upload but does not serve {} — failing over",
+                        server_url_str, url,
+                    );
+                    last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
+                    continue;
+                }
+                crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
                 return Ok(url);
             }
             Err(e) => {
-                crate::log_warn!("[Blossom Error] Upload failed to {}: {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
                 last_error = e;
             }
         }
     }
 
+    crate::log_net_fail!("[Blossom] ALL servers failed; last error: {}", last_error);
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
 }
 
@@ -523,7 +567,7 @@ pub async fn upload_blob_with_progress_and_failover<T>(
     cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let mut last_error = String::from("No servers available");
 
@@ -533,7 +577,6 @@ where
     let mime_for_routing = mime_type.unwrap_or("application/octet-stream");
     let ranked = crate::blossom_capabilities::rank_servers(server_urls, mime_for_routing, is_encrypted, size_bytes);
     // Pin capability writes to the account that started the upload.
-    let upload_session = crate::state::SessionGuard::capture();
 
     for (index, server_url_str) in ranked.iter().enumerate() {
         if let Some(ref flag) = cancel_flag {
@@ -545,7 +588,7 @@ where
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
-                crate::log_warn!("[Blossom Error] Invalid server URL '{}': {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] invalid server URL '{}': {}", server_url_str, e);
                 last_error = format!("Invalid server URL: {}", e);
                 continue;
             }
@@ -565,9 +608,18 @@ where
             cancel_flag.clone(),
         ).await {
             Ok(url) => {
-                crate::log_info!("[Blossom] Upload successful to: {}", server_url_str);
+                if !uploaded_blob_serves(&url).await {
+                    crate::log_warn!(
+                        "[Blossom Error] {} ACKed the upload but does not serve {} — failing over",
+                        server_url_str, url,
+                    );
+                    last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
+                    let _ = progress_callback(Some(0), Some(0));
+                    continue;
+                }
+                crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
                 if let Err(err) = crate::blossom_capabilities::record_accepted(
-                    server_url_str, mime_for_routing, is_encrypted, size_bytes, upload_session,
+                    server_url_str, mime_for_routing, is_encrypted, size_bytes,
                 ) {
                     crate::log_warn!("[Blossom Cap] record_accepted failed: {}", err);
                 }
@@ -577,19 +629,19 @@ where
                 if e == "Upload cancelled" {
                     return Err(e);
                 }
-                crate::log_warn!("[Blossom Error] Upload failed to {}: {}", server_url_str, e);
+                crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
                 let status = parse_status_from_error(&e);
                 // `[INTEGRITY]` = server stored a different hash (transformed the
                 // blob); route around it exactly like a hard MIME rejection.
                 if e.contains("[INTEGRITY]") || crate::blossom_capabilities::is_mime_rejection(status, &e) {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, mime_for_routing, is_encrypted, upload_session,
+                        server_url_str, mime_for_routing, is_encrypted,
                     ) {
                         crate::log_warn!("[Blossom Cap] record_rejected_mime failed: {}", err);
                     }
                 } else if crate::blossom_capabilities::is_size_rejection(status) {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_size(
-                        server_url_str, mime_for_routing, is_encrypted, size_bytes, upload_session,
+                        server_url_str, mime_for_routing, is_encrypted, size_bytes,
                     ) {
                         crate::log_warn!("[Blossom Cap] record_rejected_size failed: {}", err);
                     }
@@ -602,6 +654,7 @@ where
         }
     }
 
+    crate::log_net_fail!("[Blossom] ALL servers failed; last error: {}", last_error);
     Err(format!("All Blossom servers failed. Last error: {}", last_error))
 }
 
@@ -615,7 +668,7 @@ async fn build_delete_auth_header<T>(
     hash: Sha256Hash,
 ) -> Result<HeaderValue, String>
 where
-    T: NostrSigner,
+    T: VectorSigner,
 {
     let expiration = Timestamp::now() + std::time::Duration::from_secs(300);
     let auth = BlossomAuthorization::new(
@@ -625,8 +678,8 @@ where
         BlossomAuthorizationScope::BlobSha256Hashes(vec![hash]),
     );
 
-    let auth_event: Event = EventBuilder::blossom_auth(auth)
-        .sign(signer)
+    let auth_event: Event = auth
+        .finalize_async(signer)
         .await
         .map_err(|e| format!("Failed to sign auth event: {}", e))?;
 
@@ -646,7 +699,7 @@ pub async fn delete_blob<T>(
     hash: Sha256Hash,
 ) -> Result<(), String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     let auth_header = build_delete_auth_header(&signer, hash).await?;
 
@@ -678,13 +731,9 @@ where
     }
 }
 
-/// Parse a Blossom blob URL into (origin, hash) and DELETE that blob.
-/// Awaitable single-URL variant of `delete_blobs_best_effort` — caller
-/// drives sequencing + per-URL UI feedback.
-pub async fn delete_blob_by_url<T>(signer: T, url_str: &str) -> Result<(), String>
-where
-    T: NostrSigner + Clone,
-{
+/// Parse a Blossom blob URL into its server origin and SHA-256 hash
+/// (last non-empty path segment, optional `.ext` stripped).
+pub fn parse_blob_url(url_str: &str) -> Result<(Url, Sha256Hash), String> {
     let parsed = Url::parse(url_str)
         .map_err(|e| format!("Invalid Blossom URL: {}", e))?;
     let last_segment = parsed
@@ -694,11 +743,29 @@ where
     let hash_str = last_segment.split('.').next().unwrap_or("");
     let hash = Sha256Hash::from_str(hash_str)
         .map_err(|e| format!("Path is not a SHA-256 hash: {}", e))?;
-
     let mut origin = parsed.clone();
     origin.set_path("/");
     origin.set_query(None);
     origin.set_fragment(None);
+    Ok((origin, hash))
+}
+
+/// Verify a downloaded body against its URL's content address.
+/// `Some(true)` = bytes match the blob hash, `Some(false)` = the source served
+/// the wrong bytes, `None` = the URL carries no content address to check.
+pub fn verify_blob_content(url_str: &str, bytes: &[u8]) -> Option<bool> {
+    let (_, expected) = parse_blob_url(url_str).ok()?;
+    Some(Sha256Hash::hash(bytes) == expected)
+}
+
+/// Parse a Blossom blob URL into (origin, hash) and DELETE that blob.
+/// Awaitable single-URL variant of `delete_blobs_best_effort` — caller
+/// drives sequencing + per-URL UI feedback.
+pub async fn delete_blob_by_url<T>(signer: T, url_str: &str) -> Result<(), String>
+where
+    T: VectorSigner + Clone,
+{
+    let (origin, hash) = parse_blob_url(url_str)?;
 
     crate::log_info!("[Blossom] DELETE {} from {}", hash, origin);
     // Hard ceiling — a black-holed server must not hang the caller's
@@ -723,12 +790,167 @@ where
     }
 }
 
+/// Derive BUD-03 hash-swap candidates: the same content-address on each of
+/// `servers`. Blossom URLs are `<origin>/<sha256>[.ext]`, so any server in
+/// the author's list may serve a blob whose embedded URLs have all died.
+/// Servers matching `primary_url`'s origin (already tried) are skipped.
+pub fn hash_swap_candidates(primary_url: &str, servers: &[String]) -> Vec<String> {
+    let Ok((primary_origin, hash)) = parse_blob_url(primary_url) else {
+        return Vec::new();
+    };
+    // Extension from the parsed path segment, never the raw string — a raw
+    // rsplit would drag the query/fragment along into every derived URL.
+    let ext = Url::parse(primary_url)
+        .ok()
+        .and_then(|u| {
+            u.path_segments()
+                .and_then(|segs| segs.rev().find(|s| !s.is_empty()).map(|s| s.to_string()))
+        })
+        .and_then(|leaf| leaf.split_once('.').map(|(_, e)| e.to_string()))
+        .filter(|e| !e.is_empty() && e.len() <= 8 && e.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let leaf = match ext {
+        Some(e) => format!("{}.{}", hash, e),
+        None => hash.to_string(),
+    };
+    servers
+        .iter()
+        .filter_map(|s| {
+            let base = Url::parse(&format!("{}/", s.trim_end_matches('/'))).ok()?;
+            if base.origin() == primary_origin.origin() {
+                return None;
+            }
+            base.join(&leaf).ok().map(|u| u.to_string())
+        })
+        .collect()
+}
+
+/// BUD-04: ask `target_server` to mirror the blob at `source_url` by pulling
+/// it server-to-server (the client sends one small JSON request, never the
+/// bytes). Authorized by the same hash-scoped upload event as a direct
+/// upload. The mirror's ACK gets the same serve-check as an upload ACK.
+/// Returns the mirror's URL for the blob.
+pub async fn mirror_blob<T>(signer: T, target_server: &Url, source_url: &str) -> Result<String, String>
+where
+    T: VectorSigner + Clone,
+{
+    let (source_origin, hash) = parse_blob_url(source_url)?;
+    if target_server.origin() == source_origin.origin() {
+        return Err("Mirror target is the source server".to_string());
+    }
+    let auth_header = build_auth_header(&signer, hash).await?;
+    let mirror_url = target_server
+        .join("mirror")
+        .map_err(|e| format!("Invalid mirror URL: {}", e))?;
+
+    let client = crate::net::build_http_client(std::time::Duration::from_secs(30))?;
+    let response = client
+        .put(mirror_url)
+        .header(AUTHORIZATION, auth_header)
+        .header(CONTENT_TYPE, "application/json")
+        .body(format!("{{\"url\":{}}}", serde_json::to_string(source_url).map_err(|e| e.to_string())?))
+        .send()
+        .await
+        .map_err(|e| format!("Mirror request failed: {}", e))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| "<no body>".into());
+        return Err(format!("Mirror failed with status {}: {}", status, body));
+    }
+    let descriptor: BlobDescriptor = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse mirror response: {}", e))?;
+    if descriptor.sha256 != hash {
+        return Err(format!(
+            "[INTEGRITY] {} mirrored a different hash (returned {}, expected {})",
+            target_server, descriptor.sha256, hash,
+        ));
+    }
+    let url = descriptor.url.to_string();
+    // BUD-04: the mirror serves the blob ITSELF. A descriptor pointing at a
+    // foreign origin, a downgraded scheme, or carrying a query string is a
+    // protocol violation (or a tracking beacon) — never embed it in messages.
+    let same_origin = Url::parse(&url)
+        .map(|u| u.origin() == target_server.origin() && u.query().is_none())
+        .unwrap_or(false);
+    if !same_origin {
+        return Err(format!("{} returned a foreign descriptor URL: {}", target_server, url));
+    }
+    if !uploaded_blob_serves(&url).await {
+        return Err(format!("{} ACKed the mirror but does not serve it", target_server));
+    }
+    Ok(url)
+}
+
+/// Best-effort BUD-04 fan-out: mirror `source_url` onto up to `max_mirrors`
+/// of the user's other servers, concurrently, under one wall-clock `budget`.
+/// Returns only the mirror URLs that verifiably serve — the caller embeds
+/// these as NIP-17 / imeta `fallback` sources. Never fails the send: an
+/// empty Vec just means the message ships with no fallbacks.
+pub async fn mirror_blob_to_servers<T>(
+    signer: T,
+    source_url: &str,
+    server_urls: Vec<String>,
+    max_mirrors: usize,
+    budget: std::time::Duration,
+) -> Vec<String>
+where
+    T: VectorSigner + Clone,
+{
+    let source_origin = match parse_blob_url(source_url) {
+        Ok((origin, _)) => origin,
+        Err(e) => {
+            crate::log_debug!("[Blossom Mirror] unparseable source {}: {}", source_url, e);
+            return Vec::new();
+        }
+    };
+    let targets: Vec<Url> = server_urls
+        .iter()
+        .filter_map(|s| Url::parse(s).ok())
+        .filter(|u| u.origin() != source_origin.origin())
+        .take(max_mirrors)
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+
+    let futures = targets.into_iter().map(|target| {
+        let signer = signer.clone();
+        let source = source_url.to_string();
+        async move {
+            // Per-target budget: a hung server cancels only itself. A mirror
+            // that completed must keep its result — an unrecorded live copy
+            // is invisible to every future deletion sweep.
+            match tokio::time::timeout(budget, mirror_blob(signer, &target, &source)).await {
+                Ok(Ok(url)) => {
+                    crate::log_net_info!("[Blossom Mirror] {} now serves {}", target, url);
+                    Some(url)
+                }
+                Ok(Err(e)) => {
+                    crate::log_net_fail!("[Blossom Mirror] {} refused: {}", target, e);
+                    None
+                }
+                Err(_) => {
+                    crate::log_net_fail!("[Blossom Mirror] {} exceeded {:?} budget", target, budget);
+                    None
+                }
+            }
+        }
+    });
+    futures_util::future::join_all(futures)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// Fire-and-forget DELETE for each parseable blob URL. Pairs with
 /// `delete_own_dm` so removing a NIP-17 file message also removes
 /// the ciphertext from the server it was uploaded to.
 pub fn delete_blobs_best_effort<T>(signer: T, urls: Vec<String>)
 where
-    T: NostrSigner + Clone + Send + Sync + 'static,
+    T: VectorSigner + Clone + Send + Sync + 'static,
 {
     for url_str in urls {
         let url = match Url::parse(&url_str) {
@@ -756,6 +978,7 @@ where
         origin.set_fragment(None);
 
         let signer = signer.clone();
+        // spawn-detached: deleting one probe blob from a server — signer in hand, no account storage.
         tokio::spawn(async move {
             if let Err(e) = delete_blob(signer, &origin, hash).await {
                 crate::log_warn!("[Blossom delete] {} from {}: {}", hash, origin, e);
@@ -771,13 +994,11 @@ where
 pub async fn probe_servers_for_octet_stream<T>(
     signer: T,
     server_urls: Vec<String>,
-    session: crate::state::SessionGuard,
 ) -> Result<usize, String>
 where
-    T: NostrSigner + Clone,
+    T: VectorSigner + Clone,
 {
     use rand::RngCore;
-    if !session.is_valid() { return Ok(0); }
     if server_urls.is_empty() { return Ok(0); }
 
     const PROBE_MIME: &str = "application/octet-stream";
@@ -788,7 +1009,6 @@ where
 
     let mut probed = 0usize;
     for server_url_str in &server_urls {
-        if !session.is_valid() { return Ok(probed); }
         if crate::blossom_capabilities::has_fresh_capability_for(server_url_str, PROBE_MIME, true) {
             continue;
         }
@@ -840,7 +1060,7 @@ where
                 );
                 if refuses_deletion {
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, PROBE_MIME, true, session,
+                        server_url_str, PROBE_MIME, true,
                     ) {
                         crate::log_warn!("[Blossom Probe] record_rejected_mime failed: {}", err);
                     }
@@ -848,7 +1068,7 @@ where
                     crate::log_info!("[Blossom Probe] {} refuses deletion; routing around", server_url_str);
                 } else {
                     if let Err(e) = crate::blossom_capabilities::record_accepted(
-                        server_url_str, PROBE_MIME, true, payload_size, session,
+                        server_url_str, PROBE_MIME, true, payload_size,
                     ) {
                         crate::log_warn!("[Blossom Probe] record_accepted failed: {}", e);
                     }
@@ -865,7 +1085,7 @@ where
                         continue;
                     }
                     if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, PROBE_MIME, true, session,
+                        server_url_str, PROBE_MIME, true,
                     ) {
                         crate::log_warn!("[Blossom Probe] record_rejected_mime failed: {}", err);
                     }
@@ -925,6 +1145,43 @@ mod parse_status_tests {
 }
 
 #[cfg(test)]
+mod hash_swap_tests {
+    use super::hash_swap_candidates;
+
+    const HASH: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    #[test]
+    fn derives_clean_leaves_and_skips_the_source_origin() {
+        // Query + fragment on the primary must NOT leak into derived URLs,
+        // the source origin is skipped, junk servers are dropped.
+        let primary = format!("https://a.example/{}.png?utm=track#frag", HASH);
+        let servers = vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string(),
+            "not a url".to_string(),
+        ];
+        assert_eq!(
+            hash_swap_candidates(&primary, &servers),
+            vec![format!("https://b.example/{}.png", HASH)],
+        );
+    }
+
+    #[test]
+    fn extensionless_primary_yields_the_bare_hash() {
+        let primary = format!("https://a.example/{}", HASH);
+        assert_eq!(
+            hash_swap_candidates(&primary, &["https://b.example/".to_string()]),
+            vec![format!("https://b.example/{}", HASH)],
+        );
+    }
+
+    #[test]
+    fn unparseable_primary_yields_nothing() {
+        assert!(hash_swap_candidates("https://a.example/not-a-hash.png", &["https://b.example".to_string()]).is_empty());
+    }
+}
+
+#[cfg(test)]
 mod hash_extract_tests {
     use super::extract_hash_from_blossom_url;
 
@@ -958,7 +1215,7 @@ mod hash_extract_tests {
 
     #[test]
     fn x_sha256_simd_hex_matches_lowerhex() {
-        use nostr_sdk::hashes::{sha256::Hash as Sha256Hash, Hash};
+        use bitcoin_hashes::sha256::Hash as Sha256Hash;
         // The X-SHA-256 header swapped format!("{:x}") for the SIMD encoder; they MUST agree
         // byte-for-byte (sha256::Hash displays in forward order — a reversed-display hash type would
         // silently corrupt the upload header).

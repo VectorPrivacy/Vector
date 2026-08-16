@@ -9,7 +9,7 @@
 //! CLI provides a no-op or logging implementation.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, LazyLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nostr_sdk::prelude::*;
@@ -87,6 +87,10 @@ pub struct ProfileSyncQueue {
     processing: HashSet<String>,
     last_fetched: HashMap<String, Instant>,
     is_processing: bool,
+}
+
+impl Default for ProfileSyncQueue {
+    fn default() -> Self { Self::new() }
 }
 
 impl ProfileSyncQueue {
@@ -193,16 +197,13 @@ impl ProfileSyncQueue {
 // Global queue
 // ============================================================================
 
-static PROFILE_SYNC_QUEUE: LazyLock<Arc<Mutex<ProfileSyncQueue>>> =
-    LazyLock::new(|| Arc::new(Mutex::new(ProfileSyncQueue::new())));
+/// Queued work for THIS account's contacts. The processor loop is
+/// process-lifetime and services whichever queue the live session holds, so a
+/// swap leaves the prior account's entries behind rather than fetching them.
+struct ProfileSyncQueueKey;
 
-/// Drop every queued profile-sync entry. Called by `reset_session()` so the
-/// long-lived `start_profile_sync_processor` loop doesn't service the prior
-/// account's contacts after an inline session swap.
-pub fn clear_profile_sync_queue() {
-    if let Ok(mut q) = PROFILE_SYNC_QUEUE.lock() {
-        q.clear();
-    }
+fn profile_sync_queue() -> Arc<Mutex<ProfileSyncQueue>> {
+    crate::db::current_session().scoped::<ProfileSyncQueueKey, _>()
 }
 
 // ============================================================================
@@ -244,7 +245,6 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
     // fetches can sleep multi-second; we re-check before writing back
     // to STATE / DB so a mid-fetch swap doesn't land account A's
     // profile in account B's storage.
-    let session = crate::state::SessionGuard::capture();
 
     let profile_pubkey = match PublicKey::from_bech32(npub.as_str()) {
         Ok(pk) => pk,
@@ -258,6 +258,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
 
     // Grab old status (or create profile if missing)
     let (old_status_title, old_status_purpose, old_status_url): (String, String, String);
+    let old_status_emoji_tags: Vec<crate::types::EmojiTag>;
     {
         let mut state = STATE.lock().await;
         match state.get_profile(&npub) {
@@ -265,12 +266,14 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                 old_status_title = p.status_title().to_string();
                 old_status_purpose = p.status_purpose().to_string();
                 old_status_url = p.status_url().to_string();
+                old_status_emoji_tags = p.status_emoji_tags().to_vec();
             }
             None => {
                 state.insert_or_replace_profile(&npub, Profile::new());
                 old_status_title = String::new();
                 old_status_purpose = String::new();
                 old_status_url = String::new();
+                old_status_emoji_tags = Vec::new();
             }
         }
     }
@@ -281,35 +284,47 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
         .kind(Kind::from_u16(30315))
         .limit(1);
 
-    let (status_title, status_purpose, status_url) = match client
-        .fetch_events(status_filter, Duration::from_secs(15))
+    let (status_title, status_purpose, status_url, status_emoji_tags) = match client
+        .fetch_events(status_filter).timeout(Duration::from_secs(15))
         .await
     {
         Ok(res) => {
             if !res.is_empty() {
                 let status_event = res.first().unwrap();
                 (
-                    status_event.content.clone(),
+                    clamp_status(status_event.content.clone()),
                     status_event.tags.first()
                         .and_then(|t| t.content())
                         .unwrap_or_default()
                         .to_string(),
                     String::new(),
+                    crate::types::EmojiTag::extract_from_tags(status_event.tags.iter()),
                 )
             } else {
-                (old_status_title, old_status_purpose, old_status_url)
+                (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags)
             }
         }
-        Err(_) => (old_status_title, old_status_purpose, old_status_url),
+        Err(_) => (old_status_title, old_status_purpose, old_status_url, old_status_emoji_tags),
     };
 
     // Fetch metadata from relays
+    // `Client::fetch_metadata` is gone: fetch the newest kind-0 and parse it.
     let fetch_result = client
-        .fetch_metadata(profile_pubkey, Duration::from_secs(15))
-        .await;
+        .fetch_events(
+            Filter::new()
+                .author(profile_pubkey)
+                .kind(Kind::Metadata)
+                .limit(1),
+        )
+        .timeout(Duration::from_secs(15))
+        .await
+        .map(|events| {
+            events
+                .into_iter()
+                .max_by_key(|e| e.created_at)
+                .and_then(|e| Metadata::from_json(&e.content).ok())
+        });
 
-    // Abandon the fetch result if a swap happened during the await.
-    if !session.is_valid() { return false; }
 
     match fetch_result {
         Ok(meta) => {
@@ -330,7 +345,8 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         // Update status
                         let status_changed = profile.status_title() != status_title.as_str()
                             || profile.status_purpose() != status_purpose.as_str()
-                            || profile.status_url() != status_url.as_str();
+                            || profile.status_url() != status_url.as_str()
+                            || profile.status_emoji_tags() != status_emoji_tags.as_slice();
                         // Only touch the extras box when there's a real status to store or one
                         // already exists to clear — never materialize an empty box on the common
                         // status-less profile (that would make it larger than before the split).
@@ -341,6 +357,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                             ex.status_title = status_title.into_boxed_str();
                             ex.status_purpose = status_purpose.into_boxed_str();
                             ex.status_url = status_url.into_boxed_str();
+                            ex.status_emoji_tags = status_emoji_tags.into_boxed_slice();
                         }
 
                         // Update metadata
@@ -510,9 +527,9 @@ async fn update_profile_inner(
     // Build and sign Kind 0 metadata event
     let metadata_json = serde_json::to_string(&meta).unwrap();
     let metadata_event = EventBuilder::new(Kind::Metadata, metadata_json)
-        .tag(Tag::custom(TagKind::Custom(String::from("client").into()), vec!["vector"]));
+        .tag(Tag::custom("client", vec!["vector"]));
 
-    let Ok(event) = client.sign_event_builder(metadata_event).await else {
+    let Ok(event) = crate::sign_builder(metadata_event).await else {
         return false;
     };
 
@@ -556,9 +573,24 @@ async fn update_profile_inner(
 
 /// Update the current user's status (kind 30315) and broadcast to relays.
 ///
+/// Status length cap in Unicode scalar characters, enforced on BOTH sides:
+/// our own publishes and every stored inbound status. Characters, not bytes —
+/// a byte cap would chop emoji-heavy statuses to a third of what text gets.
+pub const STATUS_MAX_CHARS: usize = 120;
+
+/// Truncate a status to [`STATUS_MAX_CHARS`] on a character boundary.
+fn clamp_status(s: String) -> String {
+    if s.chars().count() <= STATUS_MAX_CHARS {
+        s
+    } else {
+        s.chars().take(STATUS_MAX_CHARS).collect()
+    }
+}
+
 /// Status is ephemeral — updated in STATE + frontend but not persisted to DB.
 /// (Re-fetched from relays on next `load_profile` call.)
 pub async fn update_status(status: String) -> bool {
+    let status = clamp_status(status);
     let client = match nostr_client() {
         Some(c) => c,
         None => return false,
@@ -569,11 +601,16 @@ pub async fn update_status(status: String) -> bool {
         None => return false,
     };
 
-    // Build and sign kind 30315 status event
-    let status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
-        .tag(Tag::custom(TagKind::d(), vec!["general"]));
+    // Build and sign kind 30315 status event. `:shortcode:`s from the user's
+    // equipped packs ride along as NIP-30 tags so other clients render them.
+    let emoji_tags = crate::emoji_packs::resolve_outbound_emoji_tags(&status);
+    let mut status_builder = EventBuilder::new(Kind::from_u16(30315), status.as_str())
+        .tag(Tag::custom("d", vec!["general"]));
+    for et in &emoji_tags {
+        status_builder = status_builder.tag(Tag::custom("emoji", [et.shortcode.clone(), et.url.clone()]));
+    }
 
-    let Ok(event) = client.sign_event_builder(status_builder).await else {
+    let Ok(event) = crate::sign_builder(status_builder).await else {
         return false;
     };
 
@@ -596,9 +633,14 @@ pub async fn update_status(status: String) -> bool {
                 let ex = profile.extras_mut();
                 ex.status_purpose = "general".into();
                 ex.status_title = status.into_boxed_str();
+                ex.status_emoji_tags = emoji_tags.into_boxed_slice();
             }
 
             let slim = state.serialize_profile(id).unwrap();
+            // Persist NOW: without this the new status (and its emoji tags)
+            // survives a reboot only if a self-profile sync happens to run
+            // before the app closes.
+            let _ = crate::db::profiles::set_profile(&slim);
             emit_event("profile_update", &slim);
             true
         }
@@ -723,7 +765,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
                 let npub = state.interner.resolve(own_profile.id).unwrap_or("").to_string();
                 drop(state);
 
-                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+                let owner = profile_sync_queue();
+                let mut queue = owner.lock().unwrap();
                 queue.add(npub, SyncPriority::Low, false);
             }
             last_own_profile_sync = Instant::now();
@@ -731,7 +774,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
         // Get next batch (lock scoped)
         let (should_wait, batch) = {
-            let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+            let owner = profile_sync_queue();
+            let mut queue = owner.lock().unwrap();
 
             if queue.is_processing {
                 (true, vec![])
@@ -752,7 +796,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
         if batch.is_empty() {
             {
-                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+                let owner = profile_sync_queue();
+                let mut queue = owner.lock().unwrap();
                 queue.is_processing = false;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -762,16 +807,13 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
         // Session captured per-batch so a swap aborts the loop before
         // account A's queue work lands in account B's DB. The next
         // outer-loop iteration picks up the new session's queue cleanly.
-        let batch_session = crate::state::SessionGuard::capture();
 
         for entry in &batch {
-            if !batch_session.is_valid() {
-                break;
-            }
             load_profile(entry.npub.clone(), handler.as_ref()).await;
 
             {
-                let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+                let owner = profile_sync_queue();
+                let mut queue = owner.lock().unwrap();
                 queue.mark_done(&entry.npub);
             }
 
@@ -780,7 +822,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
         // Release processing lock
         {
-            let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+            let owner = profile_sync_queue();
+            let mut queue = owner.lock().unwrap();
             queue.is_processing = false;
         }
 
@@ -794,7 +837,8 @@ pub async fn start_profile_sync_processor(handler: Arc<dyn ProfileSyncHandler>) 
 
 /// Queue a single profile for syncing.
 pub fn queue_profile_sync(npub: String, priority: SyncPriority, force_refresh: bool) {
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     queue.add(npub, priority, force_refresh);
 }
 
@@ -840,7 +884,8 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
     drop(state);
 
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     for (npub, priority) in profiles_to_queue {
         queue.add(npub, priority, false);
     }
@@ -848,7 +893,8 @@ pub async fn queue_chat_profiles(chat_id: String, is_opening: bool) {
 
 /// Force immediate refresh of a profile (for user clicks).
 pub fn refresh_profile_now(npub: String) {
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     queue.add(npub, SyncPriority::Critical, true);
 }
 
@@ -878,7 +924,8 @@ pub async fn sync_all_profiles() {
 
     drop(state);
 
-    let mut queue = PROFILE_SYNC_QUEUE.lock().unwrap();
+    let owner = profile_sync_queue();
+    let mut queue = owner.lock().unwrap();
     for (npub, priority) in profiles_to_queue {
         queue.add(npub, priority, false);
     }
@@ -887,6 +934,25 @@ pub async fn sync_all_profiles() {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod status_clamp_tests {
+    use super::*;
+
+    #[test]
+    fn a_status_clamps_at_120_characters_not_bytes() {
+        assert_eq!(clamp_status("hi".to_string()), "hi");
+        let exact: String = "a".repeat(STATUS_MAX_CHARS);
+        assert_eq!(clamp_status(exact.clone()), exact, "at the cap is untouched");
+        let long = "b".repeat(10_000);
+        assert_eq!(clamp_status(long).chars().count(), STATUS_MAX_CHARS);
+        // Characters, not bytes: 120 four-byte emoji survive whole.
+        let emoji: String = "\u{1F980}".repeat(STATUS_MAX_CHARS);
+        let clamped = clamp_status(format!("{emoji}overflow"));
+        assert_eq!(clamped.chars().count(), STATUS_MAX_CHARS);
+        assert_eq!(clamped, emoji, "truncation lands on a character boundary");
+    }
+}
 
 #[cfg(test)]
 mod tests {

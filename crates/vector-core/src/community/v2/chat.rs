@@ -26,8 +26,7 @@
 //! rumor kind govern meaning. Publishers still MUST put typing on 21059
 //! (relays MUST NOT store it) — that is a send-side duty, not a read gate.
 
-use nostr_sdk::prelude::{
-    Alphabet, Event, Keys, PublicKey, SingleLetterTag, Tag, TagKind, Timestamp, UnsignedEvent,
+use nostr_sdk::prelude::{Event, Keys, PublicKey, Tag, Timestamp, UnsignedEvent,
 };
 
 use super::super::{ChannelId, Epoch};
@@ -118,7 +117,7 @@ pub fn build_message_rumor(
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     if let Some((parent_id, parent_author)) = reply_to {
         tags.push(Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::Q)),
+            "q",
             [parent_id.to_string(), String::new(), parent_author.to_string()],
         ));
     }
@@ -165,18 +164,18 @@ pub fn build_comment_rumor(
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     let (root_id, root_kind, root_author) = parent_root.unwrap_or((parent_id_hex, parent_kind, parent_author_hex));
-    tags.push(Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::K)), [root_kind.to_string()]));
+    tags.push(Tag::custom("K", [root_kind.to_string()]));
     tags.push(Tag::custom(
-        TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::E)),
+        "E",
         [root_id.to_string(), String::new(), root_author.to_string()],
     ));
-    tags.push(Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::P)), [root_author.to_string()]));
-    tags.push(Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)), [parent_kind.to_string()]));
+    tags.push(Tag::custom("P", [root_author.to_string()]));
+    tags.push(Tag::custom("k", [parent_kind.to_string()]));
     tags.push(Tag::custom(
-        TagKind::e(),
+        "e",
         [parent_id_hex.to_string(), String::new(), parent_author_hex.to_string()],
     ));
-    tags.push(Tag::custom(TagKind::p(), [parent_author_hex.to_string()]));
+    tags.push(Tag::custom("p", [parent_author_hex.to_string()]));
     for (shortcode, url) in emoji {
         tags.push(emoji_tag(shortcode, url));
     }
@@ -201,10 +200,10 @@ pub fn build_reaction_rumor(
     at_ms: u64,
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
-    tags.push(Tag::custom(TagKind::e(), [target_rumor_id_hex.to_string()]));
-    tags.push(Tag::custom(TagKind::p(), [target_author_hex.to_string()]));
+    tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
+    tags.push(Tag::custom("p", [target_author_hex.to_string()]));
     tags.push(Tag::custom(
-        TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
+        "k",
         [target_kind.to_string()],
     ));
     if let Some((shortcode, url)) = emoji {
@@ -213,9 +212,14 @@ pub fn build_reaction_rumor(
     stream::build_rumor_ms(kind::REACTION, author, emoji_content, tags, at_ms)
 }
 
-/// Build a kind-5 delete rumor (NIP-09): `e` = the author's OWN rumor id,
-/// `k` = its kind. Semantic within the plane only — members stop rendering;
-/// the wrap ciphertext on relays needs a separate NIP-09 scrub by its `p` tag.
+/// Build a kind-5 delete rumor (NIP-09): `e` = the target rumor id, `k` = its
+/// kind. Semantic within the plane only — members stop rendering; the wrap
+/// ciphertext on relays needs a separate NIP-09 scrub by its `p` tag.
+///
+/// `citation` is the moderator's `vac` (CORD-04 §5) when this deletes SOMEONE
+/// ELSE's message: peers resolve the removal against that exact Grant version.
+/// A self-delete carries none, and neither does the owner (supreme, no grant to
+/// cite) — so an absent `vac` never widens what a delete may reach.
 pub fn build_delete_rumor(
     author: PublicKey,
     channel_id: &ChannelId,
@@ -223,13 +227,17 @@ pub fn build_delete_rumor(
     target_rumor_id_hex: &str,
     target_kind: u16,
     at_ms: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
-    tags.push(Tag::custom(TagKind::e(), [target_rumor_id_hex.to_string()]));
+    tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
     tags.push(Tag::custom(
-        TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
+        "k",
         [target_kind.to_string()],
     ));
+    if let Some(c) = citation {
+        tags.push(c.to_tag());
+    }
     stream::build_rumor_ms(kind::DELETE, author, "", tags, at_ms)
 }
 
@@ -245,7 +253,7 @@ pub fn build_edit_rumor(
     at_ms: u64,
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
-    tags.push(Tag::custom(TagKind::e(), [target_rumor_id_hex.to_string()]));
+    tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
     stream::build_rumor_ms(kind::EDIT, author, new_content, tags, at_ms)
 }
 
@@ -306,9 +314,9 @@ pub fn seal_chat_rumor(
 }
 
 /// Signer-driven twin of [`seal_chat_rumor`] for bunker / NIP-55 accounts: the
-/// author seal signs through a [`NostrSigner`]; the group-key wrap is unchanged.
+/// author seal signs through a [`VectorSigner`]; the group-key wrap is unchanged.
 /// `author` is the identity the signer signs as (must equal `my_public_key()`).
-pub async fn seal_chat_rumor_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn seal_chat_rumor_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: nostr_sdk::prelude::PublicKey,
     rumor: &UnsignedEvent,
@@ -522,7 +530,7 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
 // ── Tag helpers ──────────────────────────────────────────────────────────────
 
 fn emoji_tag(shortcode: &str, url: &str) -> Tag {
-    Tag::custom(TagKind::Custom(TAG_EMOJI.into()), [shortcode.to_string(), url.to_string()])
+    Tag::custom(TAG_EMOJI, [shortcode.to_string(), url.to_string()])
 }
 
 /// The unique tag named `name`, or None. More than one match = ambiguous,
@@ -604,7 +612,7 @@ mod tests {
         let parent = Keys::generate();
         let parent_id = "aa".repeat(32);
         let imeta = Tag::custom(
-            TagKind::Custom("imeta".into()),
+            "imeta",
             ["url https://x/f.png".to_string(), "m image/png".to_string()],
         );
         let rumor = build_message_rumor(
@@ -741,17 +749,17 @@ mod tests {
         let root_id = "ef".repeat(32);
         let parent_id = "12".repeat(32);
         let tags = vec![
-            Tag::custom(TagKind::Custom("channel".into()), [crate::simd::hex::bytes_to_hex_32(&chan().0)]),
-            Tag::custom(TagKind::Custom("epoch".into()), ["0".to_string()]),
-            Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::K)), ["9".to_string()]),
+            Tag::custom("channel", [crate::simd::hex::bytes_to_hex_32(&chan().0)]),
+            Tag::custom("epoch", ["0".to_string()]),
+            Tag::custom("K", ["9".to_string()]),
             Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::E)),
+                "E",
                 [root_id.clone(), String::new(), root_author.public_key().to_hex()],
             ),
-            Tag::custom(TagKind::SingleLetter(SingleLetterTag::uppercase(Alphabet::P)), [root_author.public_key().to_hex()]),
-            Tag::custom(TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)), ["1111".to_string()]),
-            Tag::custom(TagKind::e(), [parent_id.clone(), String::new(), parent_author.public_key().to_hex()]),
-            Tag::custom(TagKind::p(), [parent_author.public_key().to_hex()]),
+            Tag::custom("P", [root_author.public_key().to_hex()]),
+            Tag::custom("k", ["1111".to_string()]),
+            Tag::custom("e", [parent_id.clone(), String::new(), parent_author.public_key().to_hex()]),
+            Tag::custom("p", [parent_author.public_key().to_hex()]),
         ];
         let rumor = stream::build_rumor_ms(kind::COMMENT, author.public_key(), "nested reply", tags, AT);
         let ChatEvent::Message { reply_to, .. } = open(&seal(&rumor, &author)).unwrap() else {
@@ -798,7 +806,7 @@ mod tests {
         let author = Keys::generate();
         let mut tags = stream::channel_binding_tags(&chan(), Epoch(0));
         for id in ["ab", "ff"] {
-            tags.push(Tag::custom(TagKind::e(), [
+            tags.push(Tag::custom("e", [
                 id.repeat(32),
                 String::new(),
                 Keys::generate().public_key().to_hex(),
@@ -883,7 +891,7 @@ mod tests {
     #[test]
     fn delete_round_trip_and_optional_target_kind() {
         let author = Keys::generate();
-        let rumor = build_delete_rumor(author.public_key(), &chan(), Epoch(0), &"cd".repeat(32), kind::MESSAGE, AT);
+        let rumor = build_delete_rumor(author.public_key(), &chan(), Epoch(0), &"cd".repeat(32), kind::MESSAGE, AT, None);
         let ChatEvent::Delete { target, target_kind, .. } = open(&seal(&rumor, &author)).unwrap() else {
             panic!("expected a Delete");
         };
@@ -892,7 +900,7 @@ mod tests {
 
         // A k-less delete (the tag is optional in NIP-09) parses with None.
         let mut tags = stream::channel_binding_tags(&chan(), Epoch(0));
-        tags.push(Tag::custom(TagKind::e(), ["cd".repeat(32)]));
+        tags.push(Tag::custom("e", ["cd".repeat(32)]));
         let bare = stream::build_rumor_ms(kind::DELETE, author.public_key(), "", tags, AT);
         let ChatEvent::Delete { target_kind, .. } = open(&seal(&bare, &author)).unwrap() else {
             panic!("expected a Delete");
@@ -915,7 +923,7 @@ mod tests {
     #[test]
     fn webxdc_round_trip_is_opaque() {
         let author = Keys::generate();
-        let app_tag = Tag::custom(TagKind::Custom("xdc".into()), ["state-update".to_string()]);
+        let app_tag = Tag::custom("xdc", ["state-update".to_string()]);
         let rumor = build_webxdc_rumor(
             author.public_key(),
             &chan(),
@@ -1048,9 +1056,9 @@ mod tests {
     fn duplicate_e_tag_on_a_reaction_is_rejected() {
         let author = Keys::generate();
         let mut tags = stream::channel_binding_tags(&chan(), Epoch(0));
-        tags.push(Tag::custom(TagKind::e(), ["aa".repeat(32)]));
-        tags.push(Tag::custom(TagKind::e(), ["bb".repeat(32)]));
-        tags.push(Tag::custom(TagKind::p(), [Keys::generate().public_key().to_hex()]));
+        tags.push(Tag::custom("e", ["aa".repeat(32)]));
+        tags.push(Tag::custom("e", ["bb".repeat(32)]));
+        tags.push(Tag::custom("p", [Keys::generate().public_key().to_hex()]));
         let rumor = stream::build_rumor_ms(kind::REACTION, author.public_key(), "+", tags, AT);
         assert!(matches!(
             open(&seal(&rumor, &author)),
@@ -1113,16 +1121,16 @@ mod tests {
         assert!(matches!(open(&seal(&rumor, &author)), Err(ChatError::BadTag(TAG_QUOTE))));
         // Delete: a k tag that isn't an integer kind.
         let mut tags = stream::channel_binding_tags(&chan(), Epoch(0));
-        tags.push(Tag::custom(TagKind::e(), ["cd".repeat(32)]));
+        tags.push(Tag::custom("e", ["cd".repeat(32)]));
         tags.push(Tag::custom(
-            TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::K)),
+            "k",
             ["nine".to_string()],
         ));
         let rumor = stream::build_rumor_ms(kind::DELETE, author.public_key(), "", tags, AT);
         assert!(matches!(open(&seal(&rumor, &author)), Err(ChatError::BadTag(TAG_TARGET_KIND))));
         // Reaction missing its p target author entirely.
         let mut tags = stream::channel_binding_tags(&chan(), Epoch(0));
-        tags.push(Tag::custom(TagKind::e(), ["cd".repeat(32)]));
+        tags.push(Tag::custom("e", ["cd".repeat(32)]));
         let rumor = stream::build_rumor_ms(kind::REACTION, author.public_key(), "+", tags, AT);
         assert!(matches!(
             open(&seal(&rumor, &author)),

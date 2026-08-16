@@ -19,13 +19,14 @@
 //! owner or a fake key for a real Community. Every bundle passes [`CommunityInvite::validate`]
 //! before it is trusted, whichever lane carried it.
 
-use nostr_sdk::nips::nip44::{
+use crate::event_ext::FinalizeUnsignedWithId;
+use nostr_sdk::prelude::FinalizeEvent;
+use nostr_sdk::prelude::nip44::{
     self,
-    v2::{decrypt_to_bytes, encrypt_to_bytes, ConversationKey},
+    v2::{decrypt_to_bytes, ConversationKey},
 };
-use nostr_sdk::nips::nip59::RANGE_RANDOM_TIMESTAMP_TWEAK;
 use nostr_sdk::prelude::{
-    Event, EventBuilder, FromBech32, JsonUtil, Keys, Kind, PublicKey, Tag, TagKind, Timestamp, ToBech32, UnsignedEvent,
+    Event, EventBuilder, FromBech32, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32, UnsignedEvent,
 };
 use serde::{Deserialize, Serialize};
 
@@ -137,7 +138,20 @@ pub struct CommunityInvite {
     /// The base access key (32-byte hex) at `root_epoch`.
     pub community_root: String,
     pub root_epoch: u64,
+    /// The Control Plane's signer pubkey at `root_epoch` (CORD-02 §5):
+    /// subscribe, verify, read — never write. Absent = a legacy, pre-split
+    /// Community (fold Control at the legacy address instead, CORD-06 §3).
+    /// Taken on trust — it derives from a secret the joiner never holds, so
+    /// nothing in the bundle can prove it; a wrong one is eclipse-class
+    /// self-harm by the inviter, never forged authority (CORD-05 §1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_pk: Option<String>,
+    /// ABSENT, not empty, when the bundle vends no channel keys — armada omits it
+    /// (and re-fills it defensively on read). A required Vec here rejects the whole
+    /// bundle, which is a JOIN failure, not just a stale read.
+    #[serde(default)]
     pub channels: Vec<ChannelGrant>,
+    #[serde(default)]
     pub relays: Vec<String>,
     /// Preview name so a parked invite renders; the Control fold is the authority.
     pub name: String,
@@ -226,7 +240,7 @@ pub fn build_bundle_event(
     let content = seal_bundle(bundle_key, &json)?;
     EventBuilder::new(Kind::Custom(kind::INVITE_BUNDLE), content)
         .tags([d_empty(), vsk_tag(vsk::INVITE_LIVE)])
-        .sign_with_keys(link_signer)
+        .finalize(link_signer)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -236,7 +250,7 @@ pub fn build_bundle_event(
 pub fn build_revocation(link_signer: &Keys) -> Result<Event, InviteError> {
     EventBuilder::new(Kind::Custom(kind::INVITE_BUNDLE), "")
         .tags([d_empty(), vsk_tag(vsk::INVITE_REVOKED)])
-        .sign_with_keys(link_signer)
+        .finalize(link_signer)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -397,13 +411,13 @@ pub fn decode_fragment(fragment: &str) -> Result<([u8; TOKEN_LEN], Vec<String>),
 /// no identifier bytes, no relay entries (relays travel in the fragment), keeping
 /// it as short as an naddr gets.
 pub fn bundle_naddr(link_signer: &PublicKey) -> Result<String, InviteError> {
-    let coord = nostr_sdk::nips::nip01::Coordinate {
+    let coord = nostr_sdk::prelude::nip01::Coordinate {
         kind: Kind::Custom(kind::INVITE_BUNDLE),
         public_key: *link_signer,
         identifier: String::new(),
     };
-    let n19 = nostr_sdk::nips::nip19::Nip19Coordinate { coordinate: coord, relays: Vec::new() };
-    nostr_sdk::nips::nip19::Nip19::Coordinate(n19)
+    let n19 = nostr_sdk::prelude::nip19::Nip19Coordinate { coordinate: coord, relays: Vec::new() };
+    nostr_sdk::prelude::nip19::Nip19::Coordinate(n19)
         .to_bech32()
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
@@ -510,11 +524,11 @@ pub fn merge_invite_lists(a: InviteList, b: InviteList) -> InviteList {
 /// NIP-44-encrypted to SELF and signed by the creator's real key. Replaceable, one
 /// per creator. On READ the caller MERGES into the local mirror, never replaces.
 pub fn build_invite_list_event(my_keys: &Keys, list: &InviteList) -> Result<Event, InviteError> {
-    use nostr_sdk::nips::nip44::{encrypt, Version};
+    use nostr_sdk::prelude::nip44::{encrypt, Version};
     let json = serde_json::to_string(list).map_err(|e| InviteError::Json(e.to_string()))?;
     let content = encrypt(my_keys.secret_key(), &my_keys.public_key(), json.as_bytes(), Version::V2).map_err(|e| InviteError::Crypto(e.to_string()))?;
     EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content)
-        .sign_with_keys(my_keys)
+        .finalize(my_keys)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -522,7 +536,7 @@ pub fn build_invite_list_event(my_keys: &Keys, list: &InviteList) -> Result<Even
 /// failure MUST be treated as "no news" by the caller — never a clobber of a
 /// populated local list.
 pub fn parse_invite_list_event(event: &Event, my_keys: &Keys) -> Result<InviteList, InviteError> {
-    use nostr_sdk::nips::nip44::decrypt;
+    use nostr_sdk::prelude::nip44::decrypt;
     if event.kind.as_u16() != kind::INVITE_LIST {
         return Err(InviteError::BadEvent("not a kind-13303 invite list"));
     }
@@ -571,14 +585,14 @@ pub fn build_direct_invite(
     // The unsigned kind-3313 rumor, authored (claimed) by the inviter.
     let mut rumor = EventBuilder::new(Kind::Custom(kind::DIRECT_INVITE), json)
         .custom_created_at(Timestamp::now())
-        .build(inviter_keys.public_key());
+        .finalize_unsigned_with_id(inviter_keys.public_key());
     rumor.ensure_id();
 
     let seal_content = nip44::encrypt(inviter_keys.secret_key(), recipient, rumor.as_json(), nip44::Version::default())
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
     let seal = EventBuilder::new(Kind::Seal, seal_content)
-        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
-        .sign_with_keys(inviter_keys)
+        .custom_created_at(crate::sending::tweaked_timestamp())
+        .finalize(inviter_keys)
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
 
     let ephemeral = Keys::generate();
@@ -586,15 +600,15 @@ pub fn build_direct_invite(
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
     let mut tags = vec![
         Tag::public_key(*recipient),
-        Tag::custom(TagKind::Custom("k".into()), [kind::DIRECT_INVITE.to_string()]),
+        Tag::custom("k", [kind::DIRECT_INVITE.to_string()]),
     ];
     if let Some(ms) = bundle.expires_at {
-        tags.push(Tag::custom(TagKind::Custom("expiration".into()), [(ms / 1000).to_string()]));
+        tags.push(Tag::custom("expiration", [(ms / 1000).to_string()]));
     }
     EventBuilder::new(Kind::GiftWrap, wrap_content)
         .tags(tags)
-        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
-        .sign_with_keys(&ephemeral)
+        .custom_created_at(crate::sending::tweaked_timestamp())
+        .finalize(&ephemeral)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
@@ -629,23 +643,23 @@ pub fn unwrap_direct_invite(wrap: &Event, recipient_keys: &Keys) -> Result<(Publ
     Ok((seal.pubkey, bundle))
 }
 
-// ── Signer-driven twins (bunker / NIP-55): identical wire, identity ops via NostrSigner ──
+// ── Signer-driven twins (bunker / NIP-55): identical wire, identity ops via VectorSigner ──
 
-/// [`build_invite_list_event`] via a [`NostrSigner`]. Self-encrypts to `my_pk` and
+/// [`build_invite_list_event`] via a [`VectorSigner`]. Self-encrypts to `my_pk` and
 /// signs the 13303 through the signer. `my_pk` must equal `my_public_key()`.
-pub async fn build_invite_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_invite_list_event_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     my_pk: PublicKey,
     list: &InviteList,
 ) -> Result<Event, InviteError> {
     let json = serde_json::to_string(list).map_err(|e| InviteError::Json(e.to_string()))?;
-    let content = signer.nip44_encrypt(&my_pk, &json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
-    let unsigned = EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content).build(my_pk);
-    signer.sign_event(unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))
+    let content = signer.nip44_encrypt_async(&my_pk, &json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let unsigned = EventBuilder::new(Kind::Custom(kind::INVITE_LIST), content).finalize_unsigned_with_id(my_pk);
+    signer.sign_event_async(unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
-/// [`parse_invite_list_event`] via a [`NostrSigner`] (self-decrypt to `my_pk`).
-pub async fn parse_invite_list_event_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+/// [`parse_invite_list_event`] via a [`VectorSigner`] (self-decrypt to `my_pk`).
+pub async fn parse_invite_list_event_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     my_pk: PublicKey,
     event: &Event,
@@ -653,13 +667,13 @@ pub async fn parse_invite_list_event_signed<S: nostr_sdk::prelude::NostrSigner +
     if event.kind.as_u16() != kind::INVITE_LIST {
         return Err(InviteError::BadEvent("not a kind-13303 invite list"));
     }
-    let json = signer.nip44_decrypt(&my_pk, &event.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let json = signer.nip44_decrypt_async(&my_pk, &event.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     serde_json::from_str(&json).map_err(|e| InviteError::Json(e.to_string()))
 }
 
-/// [`build_direct_invite`] via a [`NostrSigner`]: the kind-13 seal's NIP-44 (inviter
+/// [`build_direct_invite`] via a [`VectorSigner`]: the kind-13 seal's NIP-44 (inviter
 /// → recipient) and signature go through the signer; the ephemeral wrap stays local.
-pub async fn build_direct_invite_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn build_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     inviter_pk: PublicKey,
     recipient: &PublicKey,
@@ -668,47 +682,47 @@ pub async fn build_direct_invite_signed<S: nostr_sdk::prelude::NostrSigner + ?Si
     let json = serde_json::to_string(bundle).map_err(|e| InviteError::Json(e.to_string()))?;
     let mut rumor = EventBuilder::new(Kind::Custom(kind::DIRECT_INVITE), json)
         .custom_created_at(Timestamp::now())
-        .build(inviter_pk);
+        .finalize_unsigned_with_id(inviter_pk);
     rumor.ensure_id();
     let rumor_json = rumor.as_json();
-    let seal_content = signer.nip44_encrypt(recipient, &rumor_json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let seal_content = signer.nip44_encrypt_async(recipient, &rumor_json).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     let seal_unsigned = EventBuilder::new(Kind::Seal, seal_content)
-        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
-        .build(inviter_pk);
-    let seal = signer.sign_event(seal_unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+        .custom_created_at(crate::sending::tweaked_timestamp())
+        .finalize_unsigned_with_id(inviter_pk);
+    let seal = signer.sign_event_async(seal_unsigned).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     let ephemeral = Keys::generate();
     let wrap_content = nip44::encrypt(ephemeral.secret_key(), recipient, seal.as_json(), nip44::Version::default())
         .map_err(|e| InviteError::Crypto(e.to_string()))?;
     let mut tags = vec![
         Tag::public_key(*recipient),
-        Tag::custom(TagKind::Custom("k".into()), [kind::DIRECT_INVITE.to_string()]),
+        Tag::custom("k", [kind::DIRECT_INVITE.to_string()]),
     ];
     if let Some(ms) = bundle.expires_at {
-        tags.push(Tag::custom(TagKind::Custom("expiration".into()), [(ms / 1000).to_string()]));
+        tags.push(Tag::custom("expiration", [(ms / 1000).to_string()]));
     }
     EventBuilder::new(Kind::GiftWrap, wrap_content)
         .tags(tags)
-        .custom_created_at(Timestamp::tweaked(RANGE_RANDOM_TIMESTAMP_TWEAK))
-        .sign_with_keys(&ephemeral)
+        .custom_created_at(crate::sending::tweaked_timestamp())
+        .finalize(&ephemeral)
         .map_err(|e| InviteError::Crypto(e.to_string()))
 }
 
-/// [`unwrap_direct_invite`] via a [`NostrSigner`]: both giftwrap peels decrypt
+/// [`unwrap_direct_invite`] via a [`VectorSigner`]: both giftwrap peels decrypt
 /// through the signer. Same seal-verify + author-bind gates as the local path.
-pub async fn unwrap_direct_invite_signed<S: nostr_sdk::prelude::NostrSigner + ?Sized>(
+pub async fn unwrap_direct_invite_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     wrap: &Event,
 ) -> Result<(PublicKey, CommunityInvite), InviteError> {
     if wrap.kind != Kind::GiftWrap {
         return Err(InviteError::BadEvent("not a gift wrap"));
     }
-    let seal_json = signer.nip44_decrypt(&wrap.pubkey, &wrap.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let seal_json = signer.nip44_decrypt_async(&wrap.pubkey, &wrap.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     let seal = Event::from_json(&seal_json).map_err(|e| InviteError::Json(e.to_string()))?;
     if seal.kind != Kind::Seal {
         return Err(InviteError::BadEvent("inner is not a seal"));
     }
     seal.verify().map_err(|_| InviteError::BadEvent("seal signature invalid"))?;
-    let rumor_json = signer.nip44_decrypt(&seal.pubkey, &seal.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let rumor_json = signer.nip44_decrypt_async(&seal.pubkey, &seal.content).await.map_err(|e| InviteError::Crypto(e.to_string()))?;
     let rumor = UnsignedEvent::from_json(rumor_json.as_bytes()).map_err(|e| InviteError::Json(e.to_string()))?;
     if rumor.kind.as_u16() != kind::DIRECT_INVITE {
         return Err(InviteError::BadEvent("rumor is not a direct invite"));
@@ -735,11 +749,11 @@ fn dict_url(id: u8) -> Option<&'static str> {
 }
 
 fn d_empty() -> Tag {
-    Tag::custom(TagKind::Custom("d".into()), [""])
+    Tag::custom("d", [""])
 }
 
 fn vsk_tag(value: &str) -> Tag {
-    Tag::custom(TagKind::Custom("vsk".into()), [value])
+    Tag::custom("vsk", [value])
 }
 
 fn first_tag(event: &Event, name: &str) -> Option<String> {
@@ -754,7 +768,7 @@ fn first_tag(event: &Event, name: &str) -> Option<String> {
 /// it interoperates with nostr-tools' `nip44.encrypt(json, bundle_key)`.
 pub(crate) fn seal_bundle(bundle_key: &[u8; 32], json: &str) -> Result<String, InviteError> {
     let ck = ConversationKey::new(*bundle_key);
-    let ct = encrypt_to_bytes(&ck, json.as_bytes()).map_err(|e| InviteError::Crypto(e.to_string()))?;
+    let ct = crate::community::cipher::encrypt_with_random_nonce(&ck, json.as_bytes()).map_err(|e| InviteError::Crypto(e.to_string()))?;
     Ok(base64_simd::STANDARD.encode_to_string(&ct))
 }
 
@@ -769,9 +783,9 @@ fn open_bundle(bundle_key: &[u8; 32], content: &str) -> Result<String, InviteErr
 
 fn signer_from_naddr(naddr: &str) -> Result<PublicKey, InviteError> {
     let trimmed = naddr.trim().trim_start_matches("nostr:");
-    let n19 = nostr_sdk::nips::nip19::Nip19::from_bech32(trimmed).map_err(|_| InviteError::BadLink("invalid naddr"))?;
+    let n19 = nostr_sdk::prelude::nip19::Nip19::from_bech32(trimmed).map_err(|_| InviteError::BadLink("invalid naddr"))?;
     match n19 {
-        nostr_sdk::nips::nip19::Nip19::Coordinate(c)
+        nostr_sdk::prelude::nip19::Nip19::Coordinate(c)
             if c.coordinate.kind.as_u16() == kind::INVITE_BUNDLE && c.coordinate.identifier.is_empty() =>
         {
             Ok(c.coordinate.public_key)
@@ -791,6 +805,23 @@ mod tests {
         crate::simd::hex::bytes_to_hex_32(bytes)
     }
 
+    #[test]
+    fn a_bundle_vending_no_channel_keys_omits_the_field_entirely() {
+        // armada omits `channels` when the bundle carries no keys, and re-fills it
+        // on read. Required here, a public-community invite fails to parse at all —
+        // a JOIN failure, not merely a stale read. Optional fields stay absent too.
+        let json = r#"{
+          "community_id":"aa","owner":"bb","owner_salt":"cc",
+          "community_root":"dd","root_epoch":0,"name":"Public Room"
+        }"#;
+        let inv: CommunityInvite = serde_json::from_str(json).expect("absent `channels`/`relays` must parse");
+        assert!(inv.channels.is_empty());
+        assert!(inv.relays.is_empty());
+        assert_eq!(inv.icon, None, "absent optionals are None, not an error");
+        assert_eq!(inv.expires_at, None);
+        assert_eq!(inv.name, "Public Room");
+    }
+
     /// A valid owner + bundle whose (owner, salt) reproduce its community_id.
     fn valid_bundle() -> (Keys, CommunityInvite) {
         let owner = Keys::generate();
@@ -801,6 +832,7 @@ mod tests {
             owner_salt: hex(&id.owner_salt),
             community_root: hex(&random_32()),
             root_epoch: 0,
+            control_pk: None,
             channels: vec![],
             relays: vec!["wss://a.example".into(), "wss://b.example".into()],
             name: "Test community".into(),
@@ -1056,7 +1088,7 @@ mod tests {
         let content = seal_bundle(&key, &json).unwrap();
         let event = EventBuilder::new(Kind::Custom(kind::INVITE_BUNDLE), content)
             .tags([Tag::identifier("elsewhere"), vsk_tag(vsk::INVITE_LIVE)])
-            .sign_with_keys(&link)
+            .finalize(&link)
             .unwrap();
         assert!(matches!(
             parse_bundle_event(&event, &link.public_key(), &key),
@@ -1182,7 +1214,7 @@ mod tests {
                 .unwrap();
         let forged = EventBuilder::new(Kind::GiftWrap, wrap_ct)
             .tags([Tag::public_key(recipient.public_key())])
-            .sign_with_keys(&ephemeral)
+            .finalize(&ephemeral)
             .unwrap();
         assert!(unwrap_direct_invite(&forged, &recipient).is_err());
     }
@@ -1197,17 +1229,17 @@ mod tests {
         // Hand-build the shape with a kind-9 rumor instead of 3313.
         let mut rumor = EventBuilder::new(Kind::Custom(9), json)
             .custom_created_at(Timestamp::now())
-            .build(inviter.public_key());
+            .finalize_unsigned_with_id(inviter.public_key());
         rumor.ensure_id();
         let seal_ct =
             nip44::encrypt(inviter.secret_key(), &recipient.public_key(), rumor.as_json(), nip44::Version::default()).unwrap();
-        let seal = EventBuilder::new(Kind::Seal, seal_ct).sign_with_keys(&inviter).unwrap();
+        let seal = EventBuilder::new(Kind::Seal, seal_ct).finalize(&inviter).unwrap();
         let ephemeral = Keys::generate();
         let wrap_ct =
             nip44::encrypt(ephemeral.secret_key(), &recipient.public_key(), seal.as_json(), nip44::Version::default()).unwrap();
         let wrap = EventBuilder::new(Kind::GiftWrap, wrap_ct)
             .tags([Tag::public_key(recipient.public_key())])
-            .sign_with_keys(&ephemeral)
+            .finalize(&ephemeral)
             .unwrap();
         assert!(matches!(
             unwrap_direct_invite(&wrap, &recipient),

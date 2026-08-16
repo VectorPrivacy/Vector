@@ -70,13 +70,26 @@ pub struct GrantContent {
     pub member: String,
     #[serde(default)]
     pub role_ids: Vec<String>,
+    /// The staff write key riding a staff-making Grant (CORD-04 §3): the
+    /// current `control_root` NIP-44-encrypted under the granter↔member
+    /// pairwise conversation key, base64 — delivery, never authority. Its
+    /// plaintext is fixed-width `epoch_be[8] ‖ control_root[32]`, and the
+    /// recipient adopts the secret only if it derives to exactly the
+    /// `control_pk` they hold for the named epoch. Opaque pairwise ciphertext
+    /// to every other reader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_wrap: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Sanity bound on a carried `control_wrap` (a NIP-44 wrap of 40 bytes is
+/// ~130 chars); anything over is dropped on read, never carried.
+pub const MAX_CONTROL_WRAP_CHARS: usize = 1024;
+
 impl GrantContent {
     pub fn from_grant(g: &MemberGrant) -> Self {
-        GrantContent { member: g.member.clone(), role_ids: g.role_ids.clone(), extra: serde_json::Map::new() }
+        GrantContent { member: g.member.clone(), role_ids: g.role_ids.clone(), control_wrap: None, extra: serde_json::Map::new() }
     }
     pub fn into_grant(self) -> MemberGrant {
         MemberGrant { member: self.member, role_ids: self.role_ids }
@@ -99,9 +112,26 @@ pub fn grant_content_json(g: &MemberGrant) -> Result<String, String> {
     serde_json::to_string(&GrantContent::from_grant(g)).map_err(|e| e.to_string())
 }
 
+/// [`grant_content_json`] carrying the staff write key (CORD-04 §3).
+pub fn grant_content_json_with_wrap(g: &MemberGrant, control_wrap: Option<String>) -> Result<String, String> {
+    let mut content = GrantContent::from_grant(g);
+    content.control_wrap = control_wrap;
+    serde_json::to_string(&content).map_err(|e| e.to_string())
+}
+
 /// Parse a vsk-3 edition's content into a shared `MemberGrant`.
 pub fn parse_grant_content(content: &str) -> Option<MemberGrant> {
     serde_json::from_str::<GrantContent>(content).ok().map(GrantContent::into_grant)
+}
+
+/// Parse a vsk-3 edition's `control_wrap`, if one rides within bounds
+/// (CORD-04 §3). Only the grant's own member can open it — every other
+/// reader treats it as opaque bytes.
+pub fn parse_grant_control_wrap(content: &str) -> Option<String> {
+    serde_json::from_str::<GrantContent>(content)
+        .ok()?
+        .control_wrap
+        .filter(|w| !w.is_empty() && w.len() <= MAX_CONTROL_WRAP_CHARS)
 }
 
 /// Serialize a banlist to its CORD-04 §4 wire JSON (a flat array of lowercase-hex

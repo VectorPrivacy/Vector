@@ -314,6 +314,15 @@ impl VectorBot {
         &self.commands
     }
 
+    /// Whether the realtime Community subscription has REGISTERED for this
+    /// session — the pollable twin of [`BotEvent::Ready`], for health checks
+    /// from outside the event handler. `false` only during the brief cold-start
+    /// registration (a bounded relay-connect wait), before which the bot is deaf
+    /// to live community traffic.
+    pub fn subscription_ready(&self) -> bool {
+        vector_core::community::v2::realtime::subscription_ready()
+    }
+
     /// This bot's invite policy (see [`InvitePolicy`]).
     pub fn invite_policy(&self) -> &InvitePolicy {
         &self.invite_policy
@@ -558,9 +567,22 @@ impl VectorBot {
 
     /// Download a received attachment and decrypt it to plaintext bytes (fetches the encrypted blob
     /// from its Blossom URL, then AES-decrypts with the attachment's embedded key + nonce). Find
-    /// attachments on `msg.message.attachments`.
+    /// attachments on `msg.message.attachments`. Prefer
+    /// [`download_attachment_from`](Self::download_attachment_from) when you have the message —
+    /// knowing the author unlocks an extra recovery path for dead links.
     pub async fn download_attachment(&self, attachment: &Attachment) -> Result<Vec<u8>> {
         self.core.download_attachment(attachment).await
+    }
+
+    /// [`download_attachment`](Self::download_attachment) with the full source walk: the primary
+    /// URL, then any mirrors the sender embedded, then the same content-address on each server the
+    /// author advertises (BUD-03) — pass `msg.message.npub` as `author_npub`.
+    pub async fn download_attachment_from(
+        &self,
+        attachment: &Attachment,
+        author_npub: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        self.core.download_attachment_from(attachment, author_npub).await
     }
 
     /// Upload a local image (avatar, banner, …) to Blossom and return its public URL. Unlike
@@ -651,7 +673,7 @@ impl VectorBotBuilder {
             .into_iter()
             .filter_map(|n| {
                 let s = n.into();
-                nostr_sdk::PublicKey::parse(&s).ok().and_then(|pk| pk.to_bech32().ok())
+                nostr_sdk::prelude::PublicKey::parse(&s).ok().and_then(|pk| pk.to_bech32().ok())
             })
             .collect();
         self.invite_policy(InvitePolicy::Whitelist(normalized))
@@ -795,6 +817,65 @@ pub struct Channel {
     kind: ChannelKind,
 }
 
+/// A durable position in a channel's history, for paging and for building your
+/// own sync mechanism on top of [`Channel::history_before`] / [`Channel::sync_before`].
+///
+/// Ordered by `(at_ms, id)` and compared BY VALUE, so it keeps working after its
+/// message is gone (deletes, moderation hides, self-destruct timers) and stays
+/// unambiguous inside a same-millisecond burst.
+///
+/// Persist it however you like: it is serde-serializable, and its string form is
+/// **wire-stable** — `"<at_ms>:<message id hex>"` — parse it back with
+/// [`FromStr`](std::str::FromStr). A cursor is per-channel; store it keyed by the
+/// channel id.
+///
+/// ```no_run
+/// # use vector_sdk::Cursor;
+/// # fn f(msgs: &[vector_sdk::Message]) -> Result<(), Box<dyn std::error::Error>> {
+/// let cursor = Cursor::of(&msgs[0]);
+/// let saved = cursor.to_string();          // "1785979414499:0bcd2059e0b8..."
+/// let restored: Cursor = saved.parse()?;   // ...after a restart
+/// # Ok(()) }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct Cursor {
+    /// Message timestamp, unix **milliseconds**.
+    pub at_ms: u64,
+    /// Message id (64-char hex). Tiebreak within a millisecond.
+    pub id: String,
+}
+
+impl Cursor {
+    /// The cursor at `message`'s position.
+    pub fn of(message: &Message) -> Self {
+        Self { at_ms: message.at, id: message.id.clone() }
+    }
+}
+
+impl From<&Message> for Cursor {
+    fn from(m: &Message) -> Self {
+        Self::of(m)
+    }
+}
+
+impl std::fmt::Display for Cursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.at_ms, self.id)
+    }
+}
+
+impl std::str::FromStr for Cursor {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        let (at, id) = s.split_once(':').ok_or("cursor is '<at_ms>:<message id hex>'")?;
+        let at_ms: u64 = at.parse().map_err(|_| "cursor at_ms is not a number".to_string())?;
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("cursor id is not 64-char hex".to_string());
+        }
+        Ok(Self { at_ms, id: id.to_ascii_lowercase() })
+    }
+}
+
 impl Channel {
     /// The id of this chat or channel — an `npub` for a DM, a channel id for a Community channel.
     pub fn id(&self) -> &str {
@@ -814,6 +895,85 @@ impl Channel {
     /// `true` for a Community channel.
     pub fn is_community(&self) -> bool {
         matches!(self.kind, ChannelKind::Community)
+    }
+
+    /// The newest `limit` messages this bot holds LOCALLY, chronological.
+    ///
+    /// Read-only and never touches the network: it answers from the bot's own
+    /// store, which live delivery, back-fills and [`Channel::sync`] keep fed.
+    /// This is how a bot reads what a `ChannelKeyed` back-fill fetched — those
+    /// messages are history, not delivery, and never arrive as live events.
+    /// Unit is MESSAGES ([`Channel::sync`]'s unit is events).
+    pub async fn history(&self, limit: usize) -> Vec<Message> {
+        self.core.get_messages_before(&self.id, None, limit).await
+    }
+
+    /// Up to `limit` messages strictly before `cursor`, chronological — the
+    /// paging form of [`Channel::history`]. The cursor is compared by value, so
+    /// it still works after its message was deleted. Page backwards by looping:
+    /// next cursor = [`Cursor::of`] the first message of the page you just got.
+    pub async fn history_before(&self, cursor: &Cursor, limit: usize) -> Vec<Message> {
+        self.core.get_messages_before(&self.id, Some((cursor.at_ms, &cursor.id)), limit).await
+    }
+
+    /// Fetch ONE page of up to `max_events` events (per relay) from this
+    /// Community channel's relays, ingest it locally, and return how many
+    /// MESSAGES were new. `0` means the page held nothing new — the walk's
+    /// natural stop — not that the channel is empty.
+    ///
+    /// The unit is EVENTS: reactions, edits, deletes and presence share the
+    /// plane and spend the budget, so a page rarely yields `max_events` new
+    /// messages. Clamped to 500; depth comes from looping with
+    /// [`Channel::sync_before`], not from a bigger page. Read what landed with
+    /// [`Channel::history`]. Community channels only — DM recovery is
+    /// [`VectorBot::sync_dms`].
+    pub async fn sync(&self, max_events: usize) -> Result<usize> {
+        self.sync_page(max_events, None, None).await
+    }
+
+    /// [`Channel::sync`] for the page of events at and before `cursor` — the
+    /// relay-side half of a walk-until-dry loop:
+    ///
+    /// ```no_run
+    /// # async fn f(channel: &vector_sdk::Channel) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut cursor: Option<vector_sdk::Cursor> = None;
+    /// loop {
+    ///     let page = match &cursor {
+    ///         Some(c) => channel.history_before(c, 100).await,
+    ///         None => channel.history(100).await,
+    ///     };
+    ///     if page.is_empty() {
+    ///         let fetched = match &cursor {
+    ///             Some(c) => channel.sync_before(c, 200).await?,
+    ///             None => channel.sync(200).await?,
+    ///         };
+    ///         if fetched == 0 { break; } // relays dry too: true start of history
+    ///         continue;
+    ///     }
+    ///     // ...process(&page)...
+    ///     cursor = Some(vector_sdk::Cursor::of(&page[0]));
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn sync_before(&self, cursor: &Cursor, max_events: usize) -> Result<usize> {
+        // Relay filters are seconds-granular; +1 keeps the cursor's own second
+        // covered (ingest dedups the overlap — duplicates are safe, skips are not).
+        self.sync_page(max_events, Some(cursor.at_ms / 1000 + 1), None).await
+    }
+
+    /// [`Channel::sync`] bounded to events at or after `since_ms` (unix ms) —
+    /// "pull the last N days" for time-based processors.
+    pub async fn sync_since(&self, since_ms: u64, max_events: usize) -> Result<usize> {
+        self.sync_page(max_events, None, Some(since_ms / 1000)).await
+    }
+
+    async fn sync_page(&self, max_events: usize, until_s: Option<u64>, since_s: Option<u64>) -> Result<usize> {
+        if self.is_dm() {
+            return Err(Error::Other(
+                "DM history rides the DM reconcile — use bot.sync_dms(), then Channel::history reads it".into(),
+            ));
+        }
+        self.core.sync_channel_events(&self.id, max_events, until_s, since_s).await
     }
 
     /// Send a text message. Returns the new message's event id.
@@ -996,7 +1156,168 @@ impl Community {
         Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
     }
 
-    /// Observed members (best-effort, from recent activity).
+    /// Ban several members as ONE moderation unit: one banlist edition, one
+    /// grant-strip pass, and (in a private community) ONE key rotation — not one
+    /// per target. Prefer this over looping [`Member::ban`] when moderating in
+    /// bulk; N single bans cost N rotations and churn every reader N times.
+    ///
+    /// Additive: targets are appended to the existing folded banlist. The wire
+    /// caps a banlist at 500 entries, so a batch that would exceed it fails
+    /// before anything publishes.
+    ///
+    /// ```no_run
+    /// # async fn f(community: vector_sdk::Community) -> vector_sdk::Result<()> {
+    /// community.ban_many(&[
+    ///     "npub1spammer…",
+    ///     "npub1alsospam…",
+    /// ]).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn ban_many(&self, npubs: &[&str]) -> Result<()> {
+        self.core.set_members_banned(&self.id, npubs, true).await
+    }
+
+    /// Lift several bans as one unit — the reductive mirror of
+    /// [`ban_many`](Self::ban_many): one banlist edition removing every target,
+    /// no rotation.
+    pub async fn unban_many(&self, npubs: &[&str]) -> Result<()> {
+        self.core.set_members_banned(&self.id, npubs, false).await
+    }
+
+    /// Every channel in this community, **including private ones this bot cannot
+    /// read yet**.
+    ///
+    /// A private channel you have been told about but not yet handed the key for
+    /// is listed with [`is_readable`](CommunityChannel::is_readable) false. That
+    /// is the difference between "not a member" and "a member still waiting on
+    /// the key", which is otherwise indistinguishable from silence.
+    ///
+    /// ```no_run
+    /// # use vector_sdk::VectorBot;
+    /// # async fn run(bot: VectorBot) -> vector_sdk::Result<()> {
+    /// for community in bot.communities().await {
+    ///     for ch in community.channels().await {
+    ///         if ch.is_private() && !ch.is_readable() {
+    ///             eprintln!("waiting on a key for #{}", ch.name());
+    ///         }
+    ///     }
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn channels(&self) -> Vec<CommunityChannel> {
+        self.core
+            .list_communities()
+            .await
+            .into_iter()
+            .find(|v| {
+                v.get("community_id").or_else(|| v.get("id")).and_then(|i| i.as_str()) == Some(self.id.as_str())
+            })
+            .and_then(|v| v.get("channels").cloned())
+            .and_then(|c| serde_json::from_value::<Vec<CommunityChannel>>(c).ok())
+            .unwrap_or_default()
+    }
+
+    /// Whether this community has been DISSOLVED (permanently sealed by its owner).
+    ///
+    /// The local history survives — it is never auto-deleted — but the tombstone means
+    /// no relay will ever accept another message or control edit, by anyone. A bot that
+    /// does not check this retries sends into a sealed room forever, so gate any
+    /// unattended posting loop on it.
+    ///
+    /// ```no_run
+    /// # async fn f(bot: &vector_sdk::VectorBot) -> Result<(), Box<dyn std::error::Error>> {
+    /// for community in bot.communities().await {
+    ///     if community.is_dissolved().await { continue; }
+    ///     // ...safe to post
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn is_dissolved(&self) -> bool {
+        self.core
+            .list_communities()
+            .await
+            .into_iter()
+            .find(|v| {
+                v.get("community_id").or_else(|| v.get("id")).and_then(|i| i.as_str()) == Some(self.id.as_str())
+            })
+            .and_then(|v| v.get("dissolved").and_then(|d| d.as_bool()))
+            .unwrap_or(false)
+    }
+
+    /// A handle to one channel of this community by id.
+    pub fn channel(&self, channel_id: impl Into<String>) -> Channel {
+        Channel { core: self.core, id: channel_id.into(), kind: ChannelKind::Community }
+    }
+
+    /// Create a public channel — readable by every member, no key distribution.
+    /// Returns its id.
+    pub async fn create_channel(&self, name: &str) -> Result<String> {
+        self.core.create_channel(&self.id, name, false).await
+    }
+
+    /// Create a private channel: its own key, plus the channel-scoped role that
+    /// is its access list. Only you can read it until you
+    /// [`grant_access`](Self::grant_access) to someone. Returns its id.
+    pub async fn create_private_channel(&self, name: &str) -> Result<String> {
+        self.core.create_channel(&self.id, name, true).await
+    }
+
+    /// Rename a channel. Its id and history survive.
+    pub async fn rename_channel(&self, channel_id: &str, name: &str) -> Result<()> {
+        self.core.rename_channel(&self.id, channel_id, name).await
+    }
+
+    /// Delete a channel. Terminal — the id is never reused.
+    pub async fn delete_channel(&self, channel_id: &str) -> Result<()> {
+        self.core.delete_channel(&self.id, channel_id).await
+    }
+
+    /// Let `npub` read a private channel: grants its access role and sends them
+    /// the key. They pick it up on their next sync.
+    pub async fn grant_access(&self, channel_id: &str, npub: &str) -> Result<()> {
+        self.core.grant_channel_access(&self.id, channel_id, npub).await
+    }
+
+    /// Stop `npub` reading a private channel: drops the access role and rotates
+    /// the key so the removal actually takes effect. Messages they already read
+    /// stay read — rekeying protects the future, not the past.
+    pub async fn revoke_access(&self, channel_id: &str, npub: &str) -> Result<()> {
+        self.core.revoke_channel_access(&self.id, channel_id, npub).await
+    }
+
+    /// Who may read a private channel, as [`Member`] handles — the holders of its
+    /// access role. The owner is entitled whether or not they hold one, so they
+    /// appear here only if granted (a channel's creator is, so an owner-created
+    /// channel does list them).
+    pub fn channel_members(&self, channel_id: &str) -> Vec<Member> {
+        self.core
+            .channel_access(&self.id, channel_id)
+            .ok()
+            .and_then(|v| v.get("members").and_then(|m| m.as_array()).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|n| n.as_str().map(|n| self.member(n.to_string())))
+            .collect()
+    }
+
+    /// The raw access summary for a channel: its scoped roles, the members
+    /// holding them, the owner, and whether we can read it.
+    pub fn channel_access(&self, channel_id: &str) -> Result<serde_json::Value> {
+        self.core.channel_access(&self.id, channel_id)
+    }
+
+    /// Every member of this community — the Complete Memberlist.
+    ///
+    /// Unified from four sources, not just one: the Guestbook (joins/leaves/kicks),
+    /// anyone **observed publishing** on a channel, everyone the roster grants a
+    /// role to, and the proven owner. Publishing is cryptographic proof of key
+    /// possession, so someone whose Join was lost — or who never published one —
+    /// still counts. Banned npubs are subtracted.
+    ///
+    /// Ordering is respected rather than naively unioned: a member who left and
+    /// went quiet drops out, while one who posted *after* leaving counts again,
+    /// since the later evidence wins. The same rule stops an un-ban resurrecting
+    /// a phantom from pre-ban activity.
     pub async fn members(&self) -> Vec<Member> {
         self.core
             .get_community_members(&self.id)
@@ -1011,9 +1332,16 @@ impl Community {
         self.core.invite_to_community(&self.id, npub).await.map(|_| ())
     }
 
-    /// Mint a public invite link for this community.
+    /// Mint a public invite link for this community (never expires, no label —
+    /// see `create_invite_with` to set either).
     pub async fn create_invite(&self) -> Result<String> {
-        self.core.create_public_invite(&self.id).await
+        self.core.create_public_invite(&self.id, None, None).await
+    }
+
+    /// Mint a public invite link with an optional absolute expiry (unix ms) and an
+    /// attribution label, surfaced as "joined via <label>".
+    pub async fn create_invite_with(&self, expires_at_ms: Option<u64>, label: Option<String>) -> Result<String> {
+        self.core.create_public_invite(&self.id, expires_at_ms, label).await
     }
 
     /// Update the community's name and/or description.
@@ -1039,6 +1367,60 @@ impl Community {
     /// The owner + admin npubs (`{ owner, admins: [...] }`).
     pub fn roles(&self) -> Result<serde_json::Value> {
         self.core.community_roles(&self.id)
+    }
+}
+
+/// One channel of a Community, as [`Community::channels`] reports it.
+///
+/// Deliberately includes channels this bot cannot read: a private channel whose
+/// key hasn't arrived is enumerable but unreadable, and a bot that can't see the
+/// difference has no way to tell "nobody has talked to me" from "I was granted
+/// access and never got the key".
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CommunityChannel {
+    channel_id: String,
+    name: String,
+    #[serde(default)]
+    private: bool,
+    /// Absent on legacy (v1) communities, which have no private channels.
+    #[serde(default = "default_true")]
+    readable: bool,
+    #[serde(default)]
+    epoch: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl CommunityChannel {
+    /// The channel id (32-byte hex) — what [`Community::channel`] takes.
+    pub fn id(&self) -> &str {
+        &self.channel_id
+    }
+
+    /// The channel's display name. Empty for a private channel recorded before
+    /// its metadata folded.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Whether this channel is private (independently keyed, readable only by
+    /// granted role-holders).
+    pub fn is_private(&self) -> bool {
+        self.private
+    }
+
+    /// Whether this bot can actually read it. False only for a private channel
+    /// whose key hasn't been delivered yet — see [`Community::channels`].
+    pub fn is_readable(&self) -> bool {
+        self.readable
+    }
+
+    /// The channel's current key generation. Climbs on every rekey; `0` means a
+    /// private channel we hold no key for.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 }
 
@@ -1068,6 +1450,10 @@ impl Member {
     }
 
     /// Ban them (terminal; in a private community this triggers a read-cut rekey). Requires BAN.
+    ///
+    /// Bans serialize per community, so concurrent handlers calling this compose
+    /// correctly — but each single ban is its own rotation. Banning a wave? Use
+    /// [`Community::ban_many`]: one rotation for the whole batch.
     pub async fn ban(&self) -> Result<()> {
         self.core.set_member_banned(&self.community_id, &self.npub, true).await
     }
@@ -1159,7 +1545,13 @@ where
         self.dispatch(chat_id, msg, true, false);
     }
 
-    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+    fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        // The SDK's contract is realtime-only delivery (history flows through
+        // `Channel::history` + cursors) — a relay backfilling from a peer pushes
+        // stale events over the live sub, and those arrive with is_new=false.
+        if !is_new {
+            return;
+        }
         // Community has a single message hook, so derive is_file from the payload (DMs split it
         // across on_dm_received / on_file_received instead).
         self.dispatch(chat_id, msg, !msg.attachments.is_empty(), true);
@@ -1183,7 +1575,17 @@ where
 /// Community channels are unified: `chat_id` is the sender's npub for a DM, the channel id for a
 /// Community message.
 #[derive(Clone, Debug)]
+#[non_exhaustive] // event kinds grow; match with a `_` arm so additions stop being breaking
 pub enum BotEvent {
+    /// The realtime subscriptions REGISTERED: healthy relays deliver live events
+    /// from this moment. Fires once per listen, right after the startup catch-up
+    /// sync — stream auth continues in the background, and each AUTH-gating relay
+    /// joins the stream the moment its own auth completes, gating nobody else.
+    /// No longer gated on the slowest relay in the set. Fires even
+    /// with `communities: 0`, so "subscribed to nothing" and "still connecting"
+    /// are different observable states. Messages sent BEFORE this are not
+    /// delivered live; recover them with a sync + [`Channel::history`].
+    Ready { communities: usize },
     /// A new message (DM or Community channel).
     Message(IncomingMessage),
     /// A reaction or edit landed on an existing message; `message` is the updated view (inspect
@@ -1202,6 +1604,24 @@ pub enum BotEvent {
     Invite { community_id: String },
     /// This bot was removed from a Community (kicked / banned / a leave authored on another device).
     Removed { community_id: String },
+    /// A private channel became readable — its key arrived after an admin granted
+    /// access. Until this fires, the channel is listed by
+    /// [`Community::channels`] with `is_readable()` false.
+    ///
+    /// `backfilled` counts the messages that PREDATE the grant and were pulled
+    /// into local state before this event. They are history, not delivery — none
+    /// of them arrive as [`BotEvent::Message`], ever. Read them explicitly and
+    /// decide what deserves acting on:
+    ///
+    /// ```no_run
+    /// # async fn f(bot: &vector_sdk::VectorBot, community_id: &str, channel_id: &str, backfilled: usize) {
+    /// if backfilled > 0 {
+    ///     let missed = bot.community(community_id).channel(channel_id).history(backfilled).await;
+    ///     // e.g. answer the question that was asked before the grant
+    /// }
+    /// # }
+    /// ```
+    ChannelKeyed { community_id: String, channel_id: String, backfilled: usize },
 }
 
 /// Adapts a user `on_event` closure into an [`InboundEventHandler`], mapping every hook to a [`BotEvent`].
@@ -1250,7 +1670,12 @@ where
     fn on_file_received(&self, chat_id: &str, msg: &Message, _is_new: bool) {
         self.message(chat_id, msg, false, true);
     }
-    fn on_community_message(&self, chat_id: &str, msg: &Message, _is_new: bool) {
+    fn on_community_message(&self, chat_id: &str, msg: &Message, is_new: bool) {
+        // Realtime-only by contract (see `BotEvent::Ready`): a relay backfill
+        // replay arrives with is_new=false and never becomes a BotEvent.
+        if !is_new {
+            return;
+        }
         self.message(chat_id, msg, true, !msg.attachments.is_empty());
     }
     fn on_reaction_received(&self, chat_id: &str, msg: &Message) {
@@ -1271,10 +1696,17 @@ where
         npub: &str,
         joined: bool,
         _event_id: &str,
-        _created_at: u64,
+        created_at: u64,
         _invited_by: Option<&str>,
         _invited_label: Option<&str>,
     ) {
+        // Presence flows from live arrivals AND from guestbook/history folds — a
+        // sync or relay backfill replays joins that happened weeks ago. Member
+        // state still updates (core owns that); only FRESH transitions become
+        // BotEvents, or a welcome bot greets everyone who ever joined.
+        if !vector_core::community::is_realtime_fresh(created_at.saturating_mul(1000)) {
+            return;
+        }
         let (channel_id, npub) = (chat_id.to_string(), npub.to_string());
         self.emit(if joined {
             BotEvent::MemberJoin { channel_id, npub }
@@ -1297,6 +1729,16 @@ where
         });
         self.emit(BotEvent::Invite { community_id: community_id.to_string() });
     }
+    fn on_channel_keyed(&self, community_id: &str, channel_id: &str, backfilled: usize) {
+        self.emit(BotEvent::ChannelKeyed {
+            community_id: community_id.to_string(),
+            channel_id: channel_id.to_string(),
+            backfilled,
+        });
+    }
+    fn on_subscription_ready(&self, communities: usize) {
+        self.emit(BotEvent::Ready { communities });
+    }
 }
 
 // ============================================================================
@@ -1306,7 +1748,7 @@ where
 /// Classify an id: a valid bech32 `npub` is a DM, anything else (a 64-char hex channel
 /// id) is a Community channel.
 fn channel_kind_for(id: &str) -> ChannelKind {
-    if nostr_sdk::PublicKey::from_bech32(id).is_ok() {
+    if nostr_sdk::prelude::PublicKey::from_bech32(id).is_ok() {
         ChannelKind::Dm
     } else {
         ChannelKind::Community
@@ -1367,7 +1809,38 @@ fn default_data_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr_sdk::Keys;
+    use nostr_sdk::prelude::Keys;
+
+    #[test]
+    fn cursor_string_form_is_wire_stable_and_roundtrips() {
+        // GOLDEN: persisted cursors live in users' own databases — a format
+        // change corrupts every one of them, so the exact bytes are pinned.
+        let c = Cursor { at_ms: 1785979414499, id: "0b".repeat(32) };
+        let s = c.to_string();
+        assert_eq!(s, format!("1785979414499:{}", "0b".repeat(32)));
+        assert_eq!(s.parse::<Cursor>().unwrap(), c);
+        // serde too, for the JSON-storage crowd.
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(serde_json::from_str::<Cursor>(&json).unwrap(), c);
+    }
+
+    #[test]
+    fn cursor_rejects_malformed_input_instead_of_guessing() {
+        for bad in ["", "123", "abc:def", "12:notahexid", &format!("9:{}", "z".repeat(64)), &format!("x:{}", "0b".repeat(32))] {
+            assert!(bad.parse::<Cursor>().is_err(), "{bad:?} must not parse");
+        }
+        // Uppercase hex normalizes: message ids compare as lowercase.
+        let c: Cursor = format!("5:{}", "0B".repeat(32)).parse().unwrap();
+        assert_eq!(c.id, "0b".repeat(32));
+    }
+
+    #[test]
+    fn cursor_orders_by_time_then_id_inside_a_same_ms_wall() {
+        let a = Cursor { at_ms: 900, id: "aa".repeat(32) };
+        let b = Cursor { at_ms: 900, id: "bb".repeat(32) };
+        let older = Cursor { at_ms: 500, id: "ff".repeat(32) };
+        assert!(older < a && a < b, "time first, id tiebreak inside the wall");
+    }
 
     #[test]
     fn invite_policy_matrix() {
@@ -1397,5 +1870,36 @@ mod tests {
         // A 64-char hex channel id (and a raw-hex pubkey) → Community (not bech32).
         assert_eq!(channel_kind_for(&"a".repeat(64)), ChannelKind::Community);
         assert_eq!(channel_kind_for(&Keys::generate().public_key().to_hex()), ChannelKind::Community);
+    }
+
+    #[test]
+    fn a_channel_view_distinguishes_locked_from_readable() {
+        // The whole point of issue #82: a bot must be able to tell "granted but
+        // awaiting the key" from "not a member" — otherwise a mute bot is
+        // indistinguishable from a quiet room.
+        let json = serde_json::json!([
+            { "channel_id": "aa".repeat(32), "name": "general", "private": false, "readable": true, "epoch": 0 },
+            { "channel_id": "bb".repeat(32), "name": "mods", "private": true, "readable": true, "epoch": 3 },
+            { "channel_id": "cc".repeat(32), "name": "vault", "private": true, "readable": false, "epoch": 0 },
+        ]);
+        let chans: Vec<CommunityChannel> = serde_json::from_value(json).unwrap();
+
+        assert!(!chans[0].is_private() && chans[0].is_readable(), "a public channel reads");
+        assert!(chans[1].is_private() && chans[1].is_readable(), "a keyed private channel reads");
+        assert_eq!(chans[1].epoch(), 3, "its key generation is visible");
+
+        let locked = &chans[2];
+        assert!(locked.is_private() && !locked.is_readable(), "a keyless private channel is enumerable but locked");
+        assert_eq!(locked.name(), "vault", "and still nameable, so it can be reported");
+        assert_eq!(locked.id(), "cc".repeat(32), "and addressable, so access can be requested for it");
+    }
+
+    #[test]
+    fn a_legacy_channel_without_the_readable_field_is_assumed_readable() {
+        // v1 communities have no private channels and emit no `readable` — the
+        // default must not render every legacy channel as locked.
+        let json = serde_json::json!([{ "channel_id": "aa".repeat(32), "name": "general" }]);
+        let chans: Vec<CommunityChannel> = serde_json::from_value(json).unwrap();
+        assert!(chans[0].is_readable() && !chans[0].is_private());
     }
 }
