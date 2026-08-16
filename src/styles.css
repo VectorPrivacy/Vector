@@ -4706,6 +4706,18 @@ textarea#chat-input::placeholder {
   .emoji-picker.visible {
     transform: translateY(0);
   }
+
+  /* ...but that anchor belongs to the composer it sits under. Summoned from a
+     centred dialog (Status), the picker has no input on the right edge to hug,
+     so it lands in the far corner away from the field it's filling — recentre. */
+  .emoji-picker.emoji-picker-status-mode {
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%) translateY(100%);
+  }
+  .emoji-picker.emoji-picker-status-mode.visible {
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .emoji-picker-message-type {
