@@ -214,20 +214,27 @@ const profileSwitcher = {
         });
     },
 
-    async toggle() {
+    async toggle(anchor) {
         if (this.isOpen) {
             this.close();
         } else {
-            await this.open();
+            await this.open(anchor);
         }
     },
 
-    async open() {
+    /** `anchor` is where the panel hangs from: the Profile tab header ('profile',
+     *  the default) or the widescreen rail's account chip ('rail'), which drops
+     *  UP and trades the blur for a plain click-catcher — it's a menu, not a
+     *  takeover of the pane you're looking at. */
+    async open(anchor = 'profile') {
         if (this.isOpening) return;
         this.isOpening = true;
         try {
             const accounts = await multiAccount.list();
             this.render(accounts);
+            const dropup = anchor === 'rail';
+            document.getElementById('profile-switcher-panel').classList.toggle('ws-dropup', dropup);
+            document.getElementById('profile-switcher-backdrop').classList.toggle('ws-dropup', dropup);
             document.getElementById('profile-switcher-backdrop').classList.add('visible');
             document.getElementById('profile-switcher-panel').classList.add('open');
             document.getElementById('my-profile-switcher').classList.add('open');
@@ -245,8 +252,14 @@ const profileSwitcher = {
 
     close() {
         popBack('profile-switcher');
+        const panel = document.getElementById('profile-switcher-panel');
         document.getElementById('profile-switcher-backdrop').classList.remove('visible');
-        document.getElementById('profile-switcher-panel').classList.remove('open');
+        document.getElementById('profile-switcher-backdrop').classList.remove('ws-dropup');
+        panel.classList.remove('open');
+        // The rail anchors the drop-up to its chip inline; leaving it set would
+        // strand the next profile-tab open at the wrong height.
+        panel.classList.remove('ws-dropup');
+        panel.style.bottom = '';
         document.getElementById('my-profile-switcher').classList.remove('open');
         this.isOpen = false;
         const trashToggle = document.getElementById('profile-switcher-trash-toggle');

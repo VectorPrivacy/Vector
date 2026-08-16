@@ -438,6 +438,69 @@ body.ws.ws-rail-collapsed #ws-rail-account .ws-account-caret {
   display: none;
 }
 
+/* ---- The account switcher ---- */
+
+/* The Profile tab is column 3, and its dropdown hangs off that tab's header —
+   so it centres on the COLUMN, not the window. Viewport-centred, it sat off to
+   one side of the tab it belongs to, and its blur greyed out the rail, the list
+   and the conversation the user never left. */
+body.ws .profile-switcher-backdrop,
+body.ws .profile-switcher-panel {
+  left: var(--ws-main-left);
+}
+
+body.ws.ws-details .profile-switcher-backdrop,
+body.ws.ws-details .profile-switcher-panel {
+  right: var(--ws-details-w);
+}
+
+/* Opened from the rail chip it's a menu, not a takeover: it drops UP from the
+   chip, keeps the rail's width, and its backdrop only catches the click that
+   dismisses it. `bottom` is set inline against the chip (js/widescreen.js), so
+   the panel tracks the chip rather than a number that has to be maintained. */
+body.ws .profile-switcher-panel.ws-dropup {
+  top: auto;
+  left: 8px;
+  right: auto;
+  width: calc(var(--ws-rail-w) - 16px);
+  max-width: none;
+  max-height: min(50vh, 420px);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  animation: none;
+}
+
+body.ws .profile-switcher-backdrop.ws-dropup {
+  top: 0;
+  left: 0;
+  right: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* Quick-switch density: face and name, nothing else. The npub is for the Profile
+   tab's full list, where there's room to read it. */
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-npub {
+  display: none;
+}
+
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-row {
+  padding: 6px 10px;
+  gap: 10px;
+}
+
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-avatar {
+  width: 24px;
+  height: 24px;
+}
+
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-header,
+body.ws .profile-switcher-panel.ws-dropup .profile-switcher-add {
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
 /* ============================== 5. The rail ============================== */
 
 body.ws #navbar {

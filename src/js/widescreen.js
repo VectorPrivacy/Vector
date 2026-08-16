@@ -98,7 +98,11 @@ function wsAddAccountCaret(account) {
     caret.title = 'Switch account';
     caret.onclick = (e) => {
         e.stopPropagation();
-        profileSwitcher.toggle();
+        // Anchor the drop-up to the chip itself, so it stays put whatever the
+        // chip's height or the rail's footer padding become.
+        const panel = document.getElementById('profile-switcher-panel');
+        if (panel) panel.style.bottom = `${window.innerHeight - account.getBoundingClientRect().top + 6}px`;
+        profileSwitcher.toggle('rail');
     };
     account.appendChild(caret);
 }
