@@ -70,6 +70,35 @@ function renderRailShortcuts() {
     // the one case the ResizeObserver can't see.
     syncRailFade();
     markRailShortcutActive();
+    syncRailHeadBadge();
+}
+
+/**
+ * Badge the home mark while an unanswered invite waits in the DM list. Invites
+ * only render there, so inside a community they'd otherwise be out of sight
+ * with nothing pointing back at them.
+ *
+ * Wears the shortcut rows' own badge class, so it's a count beside the wordmark
+ * expanded and a corner dot collapsed without a second set of rules.
+ */
+function syncRailHeadBadge() {
+    const head = document.getElementById('ws-rail-head');
+    if (!head) return;
+    // Silent while the DM list is the pane on screen — the invites are right there.
+    const away = typeof wsListCommunityId === 'function' && !!wsListCommunityId();
+    const count = away ? arrCommunityInvites.length : 0;
+    let badge = document.getElementById('ws-rail-head-badge');
+    if (!count) {
+        badge?.remove();
+        return;
+    }
+    if (!badge) {
+        badge = document.createElement('span');
+        badge.id = 'ws-rail-head-badge';
+        badge.className = 'ws-rail-item-badge';
+        head.appendChild(badge);
+    }
+    badge.textContent = count > 99 ? '99+' : String(count);
 }
 
 function buildRailItem(chat, isCommunity) {
@@ -109,7 +138,11 @@ function buildRailItem(chat, isCommunity) {
         item.appendChild(badge);
     }
 
-    item.onclick = () => openChat(chat.id);
+    // A community's shortcut returns you to the channel you left it in, not to its
+    // primary every time — the rail row stands for the community, not a channel.
+    item.onclick = () => openChat(
+        isCommunity ? (wsChannelForCommunity(communityIdOfChat(chat)) || chat.id) : chat.id
+    );
     return item;
 }
 

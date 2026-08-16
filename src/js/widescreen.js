@@ -66,6 +66,52 @@ function wsApplyRailState() {
     document.body.classList.toggle('ws-rail-collapsed', pref || forced);
 }
 
+/* ---- The list pane's two modes ----------------------------------------------
+ * Widescreen splits navigation the way Discord does: the rail holds communities
+ * and DM shortcuts, and the pane beside it is EITHER one community's channels or
+ * the DM list. The narrow layout has no rail, so its list stays the single index
+ * of everything — every rule here is gated on widescreen.
+ */
+
+/** The community whose channels the pane is showing, or null for the DM list.
+ *  Derived from the open chat, never stored: a mode that can disagree with what's
+ *  on screen is a mode that eventually will. */
+function wsListCommunityId() {
+    if (!wsActive()) return null;
+    return communityIdOfChat(arrChats.find(c => c.id === strOpenChat)) || null;
+}
+
+/** Where you were last, per community, and your last DM. Discord returns you to
+ *  the channel you left rather than dumping you in the default one. */
+const wsLastChannel = new Map();
+let wsLastDm = null;
+
+function wsRememberOpenChat() {
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    if (!chat) return;
+    const communityId = communityIdOfChat(chat);
+    if (communityId) wsLastChannel.set(communityId, chat.id);
+    else if (chat.chat_type !== 'Community') wsLastDm = chat.id;
+}
+
+/** The channel a community's rail shortcut opens: where you left it, else its
+ *  primary — which is also the fallback when that channel has since gone. */
+function wsChannelForCommunity(communityId) {
+    const last = wsLastChannel.get(communityId);
+    if (last && arrChats.some(c => c.id === last)) return last;
+    return arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c))?.id || null;
+}
+
+/** The logo is the way home to DMs: reopen the last one, which flips the pane
+ *  back to the DM list with it. With no DMs yet, land on the list itself. */
+function wsOpenDmHome() {
+    const known = wsLastDm && arrChats.some(c => c.id === wsLastDm);
+    const target = known ? wsLastDm : arrChats.find(c =>
+        c.chat_type !== 'Community' && c.id !== strPubkey && c.messages?.length)?.id;
+    if (target) openChat(target);
+    else closeChat();
+}
+
 /** Dock the account row into the rail footer, or return it to the chat list. */
 function wsMoveAccountRow(intoRail) {
     const account = document.getElementById('account');
@@ -107,6 +153,13 @@ function wsAddAccountCaret(account) {
     account.appendChild(caret);
 }
 
+/** Mirror the pane's mode onto the body, for the chrome that belongs to one of
+ *  them: New Chat / Group Chat start DMs, so they have no place over a
+ *  community's channels. */
+function wsSyncPaneMode() {
+    document.body.classList.toggle('ws-community-pane', !!wsListCommunityId());
+}
+
 /**
  * Reflect the open chat into the shell: which column shows, and which list row
  * reads as selected. Called from openChat/closeChat (and after a list render,
@@ -114,10 +167,19 @@ function wsAddAccountCaret(account) {
  */
 function wsSyncOpenChat() {
     document.body.classList.toggle('ws-chat-open', !!strOpenChat);
-    // Entering a multi-channel community expands its channel list, which is a
-    // structural change — the rest is just re-stamping classes.
-    if (ensureOpenChannelVisible()) renderChatlist();
-    else wsMarkActiveRow();
+    wsRememberOpenChat();
+    wsSyncPaneMode();
+    if (wsActive()) {
+        // The pane's mode follows the open chat, so the render IS the switch
+        // between a community's channels and the DM list. Hash-gated, so moving
+        // between channels of one community costs nothing.
+        renderChatlist();
+    } else if (ensureOpenChannelVisible()) {
+        // Narrow: entering a multi-channel community unfolds it under its row.
+        renderChatlist();
+    }
+    wsSyncMembersPane();
+    wsMarkActiveRow();
 }
 
 /**
@@ -156,6 +218,7 @@ function wsUpdate() {
 
     document.body.classList.toggle('ws', want);
     wsMoveAccountRow(want);
+    wsSyncPaneMode();
     if (want) {
         // adjustSize() leaves an inline max-height sized against the viewport;
         // in widescreen the list is a flex child and must not stay clamped.
@@ -198,19 +261,60 @@ function wsInitDetailsPane() {
  * the observer above follows), so "already open" always means "open for this
  * chat" and a plain toggle is correct.
  */
+/* ---- The member list's open/closed preference -------------------------------
+ * One app-wide answer to "do I want to see who's here", not one per community:
+ * it lives in the SQL settings KV rather than localStorage so it travels with
+ * the account's database like every other quiet preference.
+ */
+
+let wsMembersOpen = true;   // Discord's default, until the stored value lands.
+
+async function wsLoadMembersPref() {
+    try {
+        const stored = await invoke('get_sql_setting', { key: 'ws_members_open' });
+        if (stored === 'true' || stored === 'false') wsMembersOpen = stored === 'true';
+    } catch (_) { /* first run, or no account yet: the default stands */ }
+    wsSyncMembersPane();
+}
+
+/** Only a deliberate toggle writes the preference — never the sync below, which
+ *  would turn "this community has no details to show" into "you closed it". */
+function wsSetMembersOpen(open) {
+    wsMembersOpen = open;
+    invoke('set_sql_setting', { key: 'ws_members_open', value: open ? 'true' : 'false' }).catch(() => {});
+}
+
+function wsCloseDetails() {
+    popBack('group-overview');
+    domGroupOverview.style.display = 'none';
+    domGroupOverview.removeAttribute('data-group-id');
+}
+
+/** Bring the pane in line with the preference for whatever is open now: members
+ *  beside a community, nothing beside a DM. */
+function wsSyncMembersPane() {
+    if (!wsActive()) return;
+    const chat = arrChats.find(c => c.id === strOpenChat);
+    const inCommunity = !!communityIdOfChat(chat);
+    const shown = document.body.classList.contains('ws-details');
+    if (inCommunity && wsMembersOpen && !shown) openGroupOverview(chat);
+    else if (shown && (!inCommunity || !wsMembersOpen)) wsCloseDetails();
+}
+
 function openCommunityDetails(chat) {
     if (!wsActive()) {
+        // Narrow: the member list IS the screen, and Back returns to the channel.
         closeChat();
         openGroupOverview(chat);
         return;
     }
     if (document.body.classList.contains('ws-details')) {
-        popBack('group-overview');
-        domGroupOverview.style.display = 'none';
-        domGroupOverview.removeAttribute('data-group-id');
+        wsCloseDetails();
+        wsSetMembersOpen(false);
         return;
     }
     openGroupOverview(chat);
+    wsSetMembersOpen(true);
 }
 
 function wsInitResizer() {
@@ -249,6 +353,14 @@ function wsInitResizer() {
 }
 
 function wsInitRail() {
+    // The mark at the top of the rail is the DM home button.
+    const head = document.getElementById('ws-rail-head');
+    if (head) {
+        head.classList.add('btn');
+        head.title = 'Direct Messages';
+        head.addEventListener('click', () => wsOpenDmHome());
+    }
+
     const toggle = document.getElementById('ws-rail-collapse');
     if (!toggle) return;
     toggle.addEventListener('click', () => {
@@ -265,6 +377,7 @@ window.addEventListener('DOMContentLoaded', () => {
     wsInitRail();
     wsInitDetailsPane();
     wsUpdate();
+    wsLoadMembersPref();
 });
 
 window.addEventListener('resize', wsUpdate);

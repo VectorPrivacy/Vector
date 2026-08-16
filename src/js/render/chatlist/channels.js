@@ -161,18 +161,116 @@ function communityIsV2(communityId) {
  * Rows for a community's channels, or null when there's nothing worth showing.
  * Rendered directly after the community's own row in the list.
  */
-function renderCommunityChannels(communityId) {
+function renderCommunityChannels(communityId, { pane = false } = {}) {
     const channels = getCommunityChannels(communityId);
-    if (!channels || !communityChannelsShown(communityId)) return null;
+    if (!channels) return null;
     const canManage = communityCanAddChannels(communityId);
-    if (channels.length < 2 && !canManage) return null;
+    // Nested under a row, the list is an optional disclosure: it hides when
+    // collapsed, and a lone channel isn't worth unfolding. As the pane it IS the
+    // navigation — a single-channel community still has to show that channel.
+    if (!pane && (!communityChannelsShown(communityId) || (channels.length < 2 && !canManage))) return null;
     const wrap = document.createElement('div');
-    wrap.className = 'chatlist-channels';
+    wrap.className = pane ? 'chatlist-channels chatlist-channels-pane' : 'chatlist-channels';
     for (const channel of channels) {
         wrap.appendChild(renderChannelRow(communityId, channel, canManage));
     }
     if (canManage) wrap.appendChild(renderAddChannelRow(communityId));
     return wrap;
+}
+
+/**
+ * The community's identity at the top of its channel pane: icon, name, member
+ * count. Clicking it opens the details sidebar, which is where the roster and
+ * the community's actions already live.
+ */
+function renderCommunityListHeader(communityId) {
+    const primary = arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c))
+        || arrChats.find(c => communityIdOfChat(c) === communityId);
+    const cf = primary?.metadata?.custom_fields || {};
+
+    const head = document.createElement('div');
+    head.className = 'chatlist-community-head btn';
+    head.id = 'chatlist-community-head';
+
+    const avatarSrc = primary?.metadata?.avatar_cached ? convertFileSrc(primary.metadata.avatar_cached) : null;
+    const avatar = avatarSrc ? createAvatarImg(avatarSrc, 36, true) : createPlaceholderAvatar(true, 36);
+    avatar.classList.add('chatlist-community-head-avatar');
+    head.appendChild(avatar);
+
+    const meta = document.createElement('div');
+    meta.className = 'chatlist-community-head-meta';
+
+    const name = document.createElement('span');
+    name.className = 'chatlist-community-head-name cutoff';
+    name.textContent = cf.name || 'Community';
+    twemojify(name);
+    meta.appendChild(name);
+
+    const members = document.createElement('span');
+    members.className = 'chatlist-community-head-members';
+    // Empty until the count lands; the fetch refreshes the header when it does.
+    members.textContent = communityMemberSubtext(communityId);
+    meta.appendChild(members);
+    head.appendChild(meta);
+
+    // `.icon` is absolutely positioned to fill its parent, so it needs a box of its
+    // own — dropped straight into the (sticky, therefore positioned) header it
+    // spans the whole thing and lands over the title.
+    const caretBox = document.createElement('div');
+    caretBox.className = 'chatlist-community-head-caret';
+    const caret = document.createElement('span');
+    caret.className = 'icon icon-chevron-down';
+    caretBox.appendChild(caret);
+    head.appendChild(caretBox);
+
+    refreshCommunityMemberCount(communityId);
+    head.onclick = (e) => openCommunityMenu(primary, e);
+    return head;
+}
+
+/**
+ * The community's own menu, hung off its header — Discord's server dropdown.
+ * Reuses the context-menu component, so it inherits its viewport clamping,
+ * outside-click dismissal and styling rather than growing a second one.
+ */
+function openCommunityMenu(chat, ev) {
+    if (!chat) return;
+    const cf = chat.metadata?.custom_fields || {};
+    const rect = ev.currentTarget.getBoundingClientRect();
+    // No description row: a menu item that does nothing still hovers like one, and a
+    // sentence-long label stretched the menu to twice its useful width. It reads in
+    // the details pane, which has the room for it.
+    const items = [];
+
+    items.push({
+        label: 'Invite People',
+        icon: 'add-user',
+        onClick: () => openCommunityInvitePanel(chat),
+    });
+    items.push({
+        label: chat.muted ? 'Unmute Community' : 'Mute Community',
+        icon: chat.muted ? 'volume-max' : 'volume-mute',
+        onClick: async () => {
+            chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
+            renderChatlist();
+        },
+    });
+    items.push({
+        label: 'Members',
+        icon: 'users-multi',
+        onClick: () => openCommunityDetails(chat),
+    });
+    items.push({ divider: true });
+    // Owner or member, the same entry point decides which flow it is — and both
+    // ask before doing anything.
+    items.push({
+        label: cf.is_owner === 'true' ? 'Delete Community' : 'Leave Community',
+        icon: 'x-user',
+        danger: true,
+        onClick: () => communityLeaveOrDelete(chat),
+    });
+
+    showContextMenu({ x: rect.left, y: rect.bottom + 4, items });
 }
 
 function renderAddChannelRow(communityId) {
@@ -289,6 +387,11 @@ function openCommunityChannel(communityId, channel) {
 function communityChatTitle(chat) {
     const cf = chat?.metadata?.custom_fields || {};
     const name = cf.name || '';
+    // Widescreen names the community at the top of its own channel pane, so the
+    // header only has to say which channel you're in.
+    if (typeof wsActive === 'function' && wsActive() && communityIdOfChat(chat)) {
+        return cf.channel_name ? `#${cf.channel_name}` : name;
+    }
     if (isPrimaryChannelChat(chat) || !cf.channel_name) return name;
     return `${name} › #${cf.channel_name}`;
 }

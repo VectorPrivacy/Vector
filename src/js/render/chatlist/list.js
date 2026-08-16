@@ -66,6 +66,11 @@ function generateChatlistStateHash() {
     // Build a simple array of state values (faster than creating objects)
     const states = [];
 
+    // Which pane the list IS (a community's channels vs the DM list) changes every
+    // row without changing a single chat, so the gate has to see it or switching
+    // communities would repaint nothing.
+    if (typeof wsListCommunityId === 'function') states.push(wsListCommunityId());
+
     // Add pending Community invite ids
     for (const inv of arrCommunityInvites) {
         states.push(inv.community_id, inv.name);
@@ -138,28 +143,43 @@ function renderChatlist() {
     // Prep a fragment to re-render the full list in one sweep
     const fragment = document.createDocumentFragment();
 
-    // Render invites first (at the top of the chat list)
-    for (const invite of arrCommunityInvites) {
-        fragment.appendChild(renderCommunityInviteItem(invite));
-    }
+    // Widescreen splits the pane in two: inside a community it IS that community's
+    // channel list, headed by the community itself; everywhere else it's the DM
+    // list, with communities living in the rail. The narrow layout has no rail, so
+    // it keeps the single index of everything.
+    const wsCommunityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
+    const wsDmsOnly = !wsCommunityId && typeof wsActive === 'function' && wsActive();
 
-    // Then render regular chats
-    for (const chat of arrChats) {
-        // Visibility (own profile, bare anchors, sibling channels, empty or blocked DMs)
-        // is decided by `chatIsVisibleInList` so the unread indicators can share it.
-        if (!chatIsVisibleInList(chat)) continue;
+    if (wsCommunityId) {
+        fragment.appendChild(renderCommunityListHeader(wsCommunityId));
+        const channels = renderCommunityChannels(wsCommunityId, { pane: true });
+        if (channels) fragment.appendChild(channels);
+    } else {
+        // Invites head the DM list — a channel pane is one community's own
+        // contents, so an invite to a DIFFERENT community has no business there.
+        // The rail's home mark badges while you're away (js/render/rail.js).
+        for (const invite of arrCommunityInvites) {
+            fragment.appendChild(renderCommunityInviteItem(invite));
+        }
 
-        // Message-less community: lazy-load its latest membership event so the preview can show
-        // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
-        if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);
+        for (const chat of arrChats) {
+            // Visibility (own profile, bare anchors, sibling channels, empty or blocked DMs)
+            // is decided by `chatIsVisibleInList` so the unread indicators can share it.
+            if (!chatIsVisibleInList(chat)) continue;
+            if (wsDmsOnly && chatIsGroup(chat)) continue;
 
-        const divContact = renderChat(chat, primaryColor);
-        fragment.appendChild(divContact);
+            // Message-less community: lazy-load its latest membership event so the preview can show
+            // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
+            if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);
 
-        // Nested channel list for a multi-channel community, directly under its row.
-        if (chatIsGroup(chat)) {
-            const channels = renderCommunityChannels(chat.metadata.custom_fields.community_id);
-            if (channels) fragment.appendChild(channels);
+            const divContact = renderChat(chat, primaryColor);
+            fragment.appendChild(divContact);
+
+            // Nested channel list for a multi-channel community, directly under its row.
+            if (chatIsGroup(chat)) {
+                const channels = renderCommunityChannels(chat.metadata.custom_fields.community_id);
+                if (channels) fragment.appendChild(channels);
+            }
         }
     }
 

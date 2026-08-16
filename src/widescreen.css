@@ -304,10 +304,13 @@ body.ws #group-overview-back-btn .nav-icon {
 /* The overview's vertical rhythm was drawn for a full phone screen: 100px of
    lead-in above a 100px avatar, 75px of tail. In a 300px column that pushed the
    member list below the fold. */
+/* The avatar and its lead-in are gone from this pane (it's the member list now),
+   so the space they reserved has to go too or the roster starts a third of the
+   way down an empty column. */
 body.ws #group-overview {
-  --group-overview-avatar: 72px;
-  --group-overview-avatar-lead: 22px;
-  --group-overview-tail: 18px;
+  --group-overview-avatar: 0px;
+  --group-overview-avatar-lead: 0px;
+  --group-overview-tail: 8px;
 }
 
 body.ws #group-mute-btn {
@@ -445,6 +448,279 @@ body.ws.ws-rail-collapsed #ws-rail-account .ws-account-caret {
   display: none;
 }
 
+/* ---- The list pane as a channel list ---- */
+
+/* ONE gutter for the pane. The community's icon, the section label and every
+   channel glyph start on the same left edge; each of these used to carry its own
+   padding and the column read as three ragged columns. */
+body.ws #chat-list {
+  --ws-pane-gutter: 12px;
+}
+
+/* The community's identity heads its own pane. Sticky, so the channels scroll
+   under it rather than carrying it away. */
+body.ws .chatlist-community-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  /* #chat-list centres its text — fine for rows whose text fills them, not for a
+     block that spans the pane: the name's BOX started on the gutter while the name
+     itself floated to the middle, which is what read as the icon "offsetting" it. */
+  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 10px var(--ws-pane-gutter);
+  background-color: #0d0d0d;
+  border-bottom: 1px solid var(--ws-seam);
+  transition: background-color 0.12s ease;
+  /* Level with the conversation header beside it: `.chat-header`'s 60px plus the
+     1px seam. Stated as a border-box total so the padding and the seam come out of
+     it rather than adding to it — sized by its content (a 36px avatar) the head
+     landed 4px short. */
+  box-sizing: border-box;
+  height: 61px;
+}
+
+body.ws .chatlist-community-head:hover {
+  background-color: var(--ws-hover);
+}
+
+/* Inline-sized by createAvatarImg, hence !important (as everywhere it's re-used). */
+body.ws .chatlist-community-head-avatar {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 11px !important;
+  flex-shrink: 0;
+  object-fit: cover;
+}
+
+/* flex + min-width:0 is what lets the name ellipsis at the pane's width instead
+   of sizing itself to some intrinsic guess. */
+body.ws .chatlist-community-head-meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+
+body.ws .chatlist-community-head-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 18px;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.ws .chatlist-community-head-members {
+  font-size: 12px;
+  line-height: 14px;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+/* Says the header is a menu, not a label. `position: relative` is load-bearing:
+   .icon fills its nearest positioned ancestor, which would otherwise be the
+   sticky header itself. These are mask icons, so they tint by background-color. */
+body.ws .chatlist-community-head-caret {
+  position: relative;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+body.ws .chatlist-community-head-caret .icon {
+  background-color: rgba(255, 255, 255, 0.4);
+  transition: background-color 0.12s ease;
+}
+
+body.ws .chatlist-community-head:hover .chatlist-community-head-caret .icon {
+  background-color: rgba(255, 255, 255, 0.85);
+}
+
+/* As the pane, the channel list is the navigation rather than a disclosure under
+   a row: no nested indent, and a label so the community and its channels read as
+   two things rather than one run of rows. */
+/* The nested list hangs off its community row on a 34px indent behind a guide
+   line. As the pane there's no row to hang from — and that 1px border was also
+   what put every channel a pixel right of the icon above them. */
+body.ws .chatlist-channels-pane {
+  margin: 0 0 50px;
+  padding-left: 0;
+  border-left: none;
+}
+
+body.ws .chatlist-channels-pane::before {
+  content: 'Channels';
+  display: block;
+  text-align: left;          /* the pane's inherited centring reaches here too */
+  padding: 14px var(--ws-pane-gutter) 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.36);
+}
+
+/* Same horizontal box as the header above them — no margin, padding on the
+   gutter — so the glyphs and the community's icon share one edge no matter what
+   fractional width the resizer leaves the pane at. An inset pill would have to
+   subtract its own margin back out, and lands a subpixel off. */
+body.ws .chatlist-channels-pane .chatlist-channel {
+  height: 32px;
+  margin: 0;
+  padding: 0 var(--ws-pane-gutter);
+  border-radius: 0;
+}
+
+/* New Chat and Group Chat both start DMs; over a community's channels they are
+   answers to a question nobody asked. The rail's mark is one click away. */
+body.ws.ws-community-pane #chat-new-actions {
+  display: none !important;
+}
+
+/* The community's header is a HEADER, so it starts where the pane does — level with
+   the conversation header beside it. The lead-in and the sync line below it are both
+   there to float the New Chat row off the top edge; with the row gone they left the
+   header sitting in a frame of pane background.
+
+   The line comes out of the flow rather than being trimmed, because 2px in the flow
+   is still 2px of misalignment. It keeps `width: 100%` (its fill is a scaleX from the
+   centre, so it must span the pane to scale) and rides ABOVE the sticky header, whose
+   background is opaque and would otherwise swallow it on scroll.
+
+   The side padding goes too, and BOTH the header and the channels sit in that padding
+   — so they lose it together and keep the shared left edge (the icon, the CHANNELS
+   label and every channel glyph on one gutter) that the pane is built on. Nothing is
+   lost to the scrollbar either; it overlays rather than taking width. */
+body.ws.ws-community-pane #chats {
+  padding-top: 0;
+}
+
+body.ws.ws-community-pane #sync-line {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  margin: 0;
+  z-index: 3;
+}
+
+body.ws.ws-community-pane #chat-list {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+/* ---- The details pane is the member list ---- */
+
+/* Everything the community says about ITSELF now lives in the header menu at the
+   top of its channel pane (js/render/chatlist/channels.js). What's left here is
+   the roster — Discord's member sidebar. Hidden rather than deleted from the
+   markup: the narrow layout still renders this pane as a full screen, and its
+   own header is the only place that names the community there.
+
+   Leave / Delete Community moved to that menu too, so the pane is the roster and
+   nothing else. The button stays in the markup for the narrow layout, which has
+   no community header to hang a menu on. */
+body.ws #group-overview-avatar,
+body.ws #group-overview-header-avatar-container,
+body.ws #group-overview-secondary-name,
+body.ws #group-overview-description,
+body.ws #group-overview-status,
+body.ws #group-mute-btn,
+body.ws #group-invite-member-btn,
+body.ws #group-leave-btn,
+body.ws #group-migrate-row {
+  display: none !important;
+}
+
+/* Its header keeps only the title — "Members", set by the renderer — so the
+   roster starts at the top of the column instead of a screen down. */
+body.ws #group-overview .group-overview-head,
+body.ws #group-overview > div:first-child {
+  padding-top: 0;
+}
+
+body.ws #group-member-search-input {
+  margin-top: 0;
+}
+
+/* The body's block clears the avatar, which overlaps it in the narrow pane. Here
+   the avatar frame collapses to 0, so that 40px is just a hole above the search
+   field. (Not `:first-child` — the hidden name and description are still that.) */
+body.ws #group-overview .group-overview-body > div {
+  /* Both written inline by the renderer, hence !important — the same reason the
+     rail's avatar sizing needs it. The 90% width centres a narrow column inside
+     an already-narrow one, costing ~30px of roster for nothing. */
+  margin-top: 0 !important;
+  width: auto !important;
+}
+
+/* The roster IS the pane, not a card sitting in it: the frame drew a line around
+   a column that already has an edge, and its border + inset spent width the
+   member names needed. */
+/* The search and the roster share ONE gutter down the pane, so the field's edge
+   and every member row line up. */
+body.ws #group-overview .emoji-search-container {
+  /* Inline `padding: 10px 0` from the renderer — the fifth of these in this pane,
+     so: assume inline first when a rule here looks ignored. */
+  padding: 10px !important;
+}
+
+/* The magnifier is positioned against the CONTAINER, so the container's own inset
+   left it 2px inside the field's border while the placeholder started 40px in.
+   Sits 12px into the field now, with the text clearing it by a hair under 10px. */
+body.ws #group-overview .emoji-search-container > .emoji-search-icon {
+  left: 22px !important;
+  width: 20px !important;
+  height: 20px !important;
+}
+
+/* Member rows hover like the rail's rows do: the same soft tint, so a row here
+   and a shortcut there feel like the same kind of target. */
+body.ws #group-overview .member-pick-row {
+  border-radius: 6px;
+  transition: background-color 0.12s ease;
+}
+
+body.ws #group-overview .member-pick-row:hover {
+  background-color: var(--ws-hover);
+}
+
+/* The row ships its own hover: an accent-gradient overlay that sits ON TOP of the
+   grey above, so setting a background alone just painted underneath it. Selection
+   is neutral here (see --ws-active), and the roster is no place to spend the
+   accent either. */
+body.ws #group-overview .member-pick-hover {
+  display: none !important;
+}
+
+body.ws #group-overview-members {
+  /* Inline again — the renderer writes the frame onto the element, so nothing but
+     !important reaches it. */
+  border: none !important;
+  border-radius: 0 !important;
+  /* Matches the search container's inset, so field and rows share one edge. */
+  padding: 0 10px !important;
+}
+
+/* Its action row is Invite + Leave, both of which now live in the community's
+   header menu: zero height, still spending a bottom margin — inline, so it took
+   an !important to actually collect the 10px back from above the search. */
+body.ws #group-overview .group-overview-body > div > div:first-child {
+  margin-bottom: 0 !important;
+}
+
+/* The pane is unmistakably one community's member list: the channel list already
+   names the community above it, and the roster names itself. A truncated title
+   here was the third copy. */
+body.ws #group-overview > .chat-header .profile-header-info {
+  display: none;
+}
+
 /* ---- The account switcher ---- */
 
 /* The Profile tab is column 3, and its dropdown hangs off that tab's header —
@@ -538,6 +814,9 @@ body.ws #ws-rail-head {
   padding: 0 16px;
   -webkit-user-select: none;
   user-select: none;
+  /* The pending-invite badge borrows the shortcut rows' badge, whose collapsed
+     form is a corner dot — which needs a corner to pin to. */
+  position: relative;
 }
 
 /* The lockup: layered V mark + typeface, optically balanced (the mark is a tall

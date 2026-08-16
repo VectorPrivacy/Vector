@@ -2948,6 +2948,14 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     if (openChat && openChat.metadata?.custom_fields?.community_id === communityId) {
         updateChatHeaderSubtext(openChat);
     }
+    // The channel pane's own header carries the same count. Painting it here, beside
+    // the chat header, is what makes the two land together: the chat list is
+    // hash-gated on chat state, which a member count is not part of, so left to that
+    // render the count sat empty until something unrelated moved.
+    if (typeof wsListCommunityId === 'function' && wsListCommunityId() === communityId) {
+        const domHeadMembers = document.querySelector('#chatlist-community-head .chatlist-community-head-members');
+        if (domHeadMembers) domHeadMembers.textContent = communityMemberSubtext(communityId);
+    }
     if (domGroupOverview.getAttribute('data-group-id') === communityId) {
         domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
         // The member SET changed while the overview is open — re-render the rows live so a
@@ -10139,72 +10147,63 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 // (the owner outranks all; an admin outranks non-admins — never the owner, never self).
                 // Two tiers (§7 escalation ladder): KICK is cooperative + soft (they self-remove, can
                 // rejoin with a new invite); BAN is forceful (suppressed + read-cut in a private community).
+                // Moderation lives on right-click (long-press on touch), not on a pair
+                // of buttons welded to every row: a member row is a person, and the
+                // actions are rare, destructive and outrank-gated. Same component the
+                // rest of the app uses, so it inherits dismissal + Android back.
                 if (iOutrank(m.npub) && (caps.kick || caps.ban)) {
-                    const actions = document.createElement('div');
-                    actions.className = 'member-pick-actions';
-
+                    const items = [];
                     if (caps.kick) {
-                    const kickBtn = document.createElement('button');
-                    kickBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-secondary';
-                    kickBtn.title = 'Kick (they can rejoin with a new invite)';
-                    kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
-                    kickBtn.onclick = async (e) => {
-                        e.stopPropagation();
-                        const confirmed = await popupConfirm('Kick member', `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`, false, '', 'vector_warning.svg');
-                        if (!confirmed) return;
-                        markActing(true);
-                        kickBtn.disabled = true;
-                        kickBtn.innerHTML = '<span class="icon icon-loading spin"></span>Kicking';
-                        try {
-                            await invoke('kick_community_member', { communityId, npub: m.npub });
-                            memberList = memberList.filter(x => x.npub !== m.npub);
-                            renderMembers(searchEl?.value || '');
-                            dmsgClearDeleteMetaCache();
-                            // Sync the "N members" subtext (the backend recorded the leave; this re-fetches).
-                            refreshCommunityMemberCount(communityId, true);
-                        } catch (err) {
-                            markActing(false);
-                            kickBtn.disabled = false;
-                            kickBtn.innerHTML = '<span class="icon icon-x"></span>Kick';
-                            showToast(String(err));
-                        }
-                    };
-                    actions.appendChild(kickBtn);
+                        items.push({
+                            label: 'Kick',
+                            hint: 'can rejoin with an invite',
+                            icon: 'x',
+                            onClick: async () => {
+                                const confirmed = await popupConfirm('Kick member', `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`, false, '', 'vector_warning.svg');
+                                if (!confirmed) return;
+                                markActing(true);
+                                try {
+                                    await invoke('kick_community_member', { communityId, npub: m.npub });
+                                    memberList = memberList.filter(x => x.npub !== m.npub);
+                                    renderMembers(searchEl?.value || '');
+                                    dmsgClearDeleteMetaCache();
+                                    // Sync the "N members" subtext (the backend recorded the leave).
+                                    refreshCommunityMemberCount(communityId, true);
+                                } catch (err) {
+                                    markActing(false);
+                                    showToast(String(err));
+                                }
+                            },
+                        });
                     }
-
                     if (caps.ban) {
-                    const banBtn = document.createElement('button');
-                    banBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-danger';
-                    banBtn.title = 'Ban from community';
-                    banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
-                    banBtn.onclick = async (e) => {
-                        e.stopPropagation();
-                        const confirmed = await popupConfirm('Ban member', `Ban <b>${escapeHtml(display)}</b>? They'll be removed from the community and can't rejoin unless you unban them.`, false, '', 'vector_warning.svg');
-                        if (!confirmed) return;
-                        // Banning publishes to relays + rebuilds the subscription (a few seconds);
-                        // show a spinner so the button isn't dead during the wait.
-                        markActing(true);
-                        banBtn.disabled = true;
-                        banBtn.innerHTML = '<span class="icon icon-loading spin"></span>Banning';
-                        try {
-                            await invoke('ban_community_member', { communityId, npub: m.npub });
-                            memberList = memberList.filter(x => x.npub !== m.npub);
-                            renderMembers(searchEl?.value || '');
-                            dmsgClearDeleteMetaCache();
-                            // Sync the "N members" subtext (banned members are excluded by the fold).
-                            refreshCommunityMemberCount(communityId, true);
-                        } catch (err) {
-                            markActing(false);
-                            banBtn.disabled = false;
-                            banBtn.innerHTML = '<span class="icon icon-x-user"></span>Ban';
-                            // A private-community ban can fail with the (long, important) bunker read-cut
-                            // explanation — show it as a persistent notice, not a fleeting toast.
-                            await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
-                        }
-                    };
-                    actions.appendChild(banBtn);
+                        items.push({
+                            label: 'Ban',
+                            hint: 'cannot rejoin',
+                            icon: 'x-user',
+                            danger: true,
+                            onClick: async () => {
+                                const confirmed = await popupConfirm('Ban member', `Ban <b>${escapeHtml(display)}</b>? They'll be removed from the community and can't rejoin unless you unban them.`, false, '', 'vector_warning.svg');
+                                if (!confirmed) return;
+                                // Banning publishes + rebuilds the subscription (seconds), so the
+                                // row carries the progress now that the button isn't there to.
+                                markActing(true);
+                                try {
+                                    await invoke('ban_community_member', { communityId, npub: m.npub });
+                                    memberList = memberList.filter(x => x.npub !== m.npub);
+                                    renderMembers(searchEl?.value || '');
+                                    dmsgClearDeleteMetaCache();
+                                    refreshCommunityMemberCount(communityId, true);
+                                } catch (err) {
+                                    markActing(false);
+                                    // A private-community ban can fail with the (long, important)
+                                    // bunker read-cut explanation — a persistent notice, not a toast.
+                                    await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
+                                }
+                            },
+                        });
                     }
-                    row.appendChild(actions);
+                    attachLongPressContextMenu(row, (x, y) => showContextMenu({ x, y, items }));
                 }
                 // Row → mini-profile (same popup as a chat name/avatar tap). The crown/kick/ban
                 // controls stopPropagation, so this only fires on the avatar/name/empty area.
@@ -10346,61 +10345,19 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     domGroupLeaveBtn.style.display = 'flex';
     domGroupLeaveBtn.style.opacity = '';
     domGroupLeaveBtn.style.pointerEvents = '';
-    // Shared local teardown after a leave OR a delete: the backend dropped keys/rows; mirror it in the
-    // local chat list (its own copy), resetting the open chat first so late events can't paint an orphan.
-    const tearDownCommunityLocally = async () => {
-        const goneChannelIds = new Set(
-            arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId).map(c => c.id)
-        );
-        if (goneChannelIds.has(strOpenChat)) await closeChat();
-        arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
-        domGroupOverview.style.display = 'none';
-        domGroupOverview.removeAttribute('data-group-id');
-        renderChatlist();
-        openChatlist();
+    // The flows live in `communityLeaveOrDelete`: the widescreen header menu offers
+    // the same action, and one copy keeps their wording and teardown identical.
+    if (leaveLabel) leaveLabel.innerText = isCommunityOwner ? 'Delete Community' : 'Leave';
+    domGroupLeaveBtn.onclick = async () => {
+        domGroupLeaveBtn.style.opacity = '0.5';
+        domGroupLeaveBtn.style.pointerEvents = 'none';
+        try {
+            await communityLeaveOrDelete(chat);
+        } finally {
+            domGroupLeaveBtn.style.opacity = '';
+            domGroupLeaveBtn.style.pointerEvents = '';
+        }
     };
-    if (isCommunityOwner) {
-        if (leaveLabel) leaveLabel.innerText = 'Delete Community';
-        domGroupLeaveBtn.onclick = async () => {
-            // Type-to-confirm: the destructive action requires typing the community name exactly, so it
-            // can't be fat-fingered (it ends the community for everyone, irreversibly).
-            const typed = await popupConfirm(
-                'Delete this community?',
-                `This permanently ends "<b>${escapeHtml(name)}</b>" for everyone, including you. No new messages can be sent and no one can rejoin. People can still delete their own past messages. This cannot be undone.<br><br>Type the community name to confirm:`,
-                false, name, 'vector_warning.svg');
-            if (typed === false) return;
-            if (String(typed).trim() !== name) {
-                await popupConfirm('Not Deleted', 'The name did not match, so nothing was changed.', true, '', 'vector_warning.svg');
-                return;
-            }
-            domGroupLeaveBtn.style.opacity = '0.5';
-            domGroupLeaveBtn.style.pointerEvents = 'none';
-            try {
-                await invoke('delete_community', { communityId });
-                await tearDownCommunityLocally();
-            } catch (e) {
-                domGroupLeaveBtn.style.opacity = '';
-                domGroupLeaveBtn.style.pointerEvents = '';
-                await popupConfirm('Failed to Delete', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-            }
-        };
-    } else {
-        if (leaveLabel) leaveLabel.innerText = 'Leave';
-        domGroupLeaveBtn.onclick = async () => {
-            const confirmed = await popupConfirm('Leave Community', `Leave "<b>${escapeHtml(name)}</b>"? You'll need a new invite to rejoin.`, false, '', 'vector_warning.svg');
-            if (!confirmed) return;
-            domGroupLeaveBtn.style.opacity = '0.5';
-            domGroupLeaveBtn.style.pointerEvents = 'none';
-            try {
-                await invoke('leave_community', { communityId });
-                await tearDownCommunityLocally();
-            } catch (e) {
-                domGroupLeaveBtn.style.opacity = '';
-                domGroupLeaveBtn.style.pointerEvents = '';
-                await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-            }
-        };
-    }
 
     // "Upgrade to Concord v2" — owner-only, v1-only. Reflects the migration timelock:
     // locked shows a countdown, ready arms the wizard (type-to-confirm, irreversible),
@@ -10467,6 +10424,67 @@ async function showRekeyProgressModal(title, eventName = 'community_rekey_progre
         finish: async (label) => { setProgress(100, label || 'Done!'); await new Promise(r => setTimeout(r, 700)); },
         close: () => { cancelAnimationFrame(rafId); unlisten(); overlay.remove(); },
     };
+}
+
+/**
+ * Drop a community from this client: close it if open, forget its channel rows,
+ * and land back on the list. Local only — the network side is the caller's
+ * (leave_community / delete_community), which must have succeeded first.
+ */
+async function tearDownCommunityLocally(communityId) {
+    const goneChannelIds = new Set(
+        arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId).map(c => c.id)
+    );
+    if (goneChannelIds.has(strOpenChat)) await closeChat();
+    arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
+    domGroupOverview.style.display = 'none';
+    domGroupOverview.removeAttribute('data-group-id');
+    renderChatlist();
+    openChatlist();
+}
+
+/**
+ * Leave a community, or — as its owner — end it for everyone. Top-level because
+ * two surfaces offer it: the community's header menu in widescreen, and the
+ * details pane's button in the narrow layout, which has no such header. One
+ * implementation, so the confirm wording and the teardown can't diverge between
+ * them.
+ */
+async function communityLeaveOrDelete(chat) {
+    const cf = chat?.metadata?.custom_fields || {};
+    const communityId = cf.community_id;
+    const name = cf.name || 'this community';
+    if (!communityId) return;
+
+    if (cf.is_owner === 'true') {
+        // Type-to-confirm: it ends the community for everyone, irreversibly, so it
+        // must not be reachable by a mis-click.
+        const typed = await popupConfirm(
+            'Delete this community?',
+            `This permanently ends "<b>${escapeHtml(name)}</b>" for everyone, including you. No new messages can be sent and no one can rejoin. People can still delete their own past messages. This cannot be undone.<br><br>Type the community name to confirm:`,
+            false, name, 'vector_warning.svg');
+        if (typed === false) return;
+        if (String(typed).trim() !== name) {
+            await popupConfirm('Not Deleted', 'The name did not match, so nothing was changed.', true, '', 'vector_warning.svg');
+            return;
+        }
+        try {
+            await invoke('delete_community', { communityId });
+            await tearDownCommunityLocally(communityId);
+        } catch (e) {
+            await popupConfirm('Failed to Delete', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        }
+        return;
+    }
+
+    const confirmed = await popupConfirm('Leave Community', `Leave "<b>${escapeHtml(name)}</b>"? You'll need a new invite to rejoin.`, false, '', 'vector_warning.svg');
+    if (!confirmed) return;
+    try {
+        await invoke('leave_community', { communityId });
+        await tearDownCommunityLocally(communityId);
+    } catch (e) {
+        await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+    }
 }
 
 async function openCommunityInvitePanel(chat) {
