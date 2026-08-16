@@ -348,6 +348,92 @@ body.ws #ws-rail-account #account {
   width: 100%;
 }
 
+/* Expanded, the chip is a destination rather than a list row: a soft tile with
+   the avatar beside a name stacked over its status. Restyled, never rebuilt —
+   #account is the list's own row, re-parented (see js/widescreen.js). The
+   :not() keeps this off the collapsed rail, whose rules live further down. */
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account {
+  background-color: var(--ws-hover);
+  border-radius: 12px;
+  padding: 8px 10px;
+  align-items: center;
+  transition: background-color 0.12s ease;
+}
+
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account:hover {
+  background-color: var(--ws-active);
+}
+
+/* Two rows, avatar spanning both. `display: contents` dissolves the name row so
+   the avatar and name become grid items in their own right — the alternative is
+   moving nodes, which breaks the row for the list it goes back to. */
+body.ws:not(.ws-rail-collapsed) #ws-rail-account .profile-header-info {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: center;
+}
+
+body.ws:not(.ws-rail-collapsed) #ws-rail-account .profile-header-name-row {
+  display: contents;
+}
+
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-avatar-container {
+  grid-row: 1 / span 2;
+}
+
+/* Inline-sized by createAvatarImg, hence !important (as elsewhere in the rail). */
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-avatar-container img {
+  width: 38px !important;
+  height: 38px !important;
+}
+
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-name {
+  grid-column: 2;
+  min-width: 0;
+  margin: 0;
+  color: #fff;
+  line-height: 19px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* One line, truncated: a status is often a sentence, and the rail is 232px. */
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-status {
+  grid-column: 2;
+  min-width: 0;
+  height: auto;
+  font-size: 12px;
+  line-height: 16px;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+body.ws:not(.ws-rail-collapsed) #ws-rail-account .ws-account-caret {
+  flex: none;
+  margin-left: 8px;
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid rgba(255, 255, 255, 0.4);
+  transition: border-top-color 0.12s ease;
+}
+
+body.ws:not(.ws-rail-collapsed) #ws-rail-account #account:hover .ws-account-caret {
+  border-top-color: rgba(255, 255, 255, 0.75);
+}
+
+/* Collapsed shows the avatar alone — the caret would be furniture at 72px. */
+body.ws.ws-rail-collapsed #ws-rail-account .ws-account-caret {
+  display: none;
+}
+
 /* ============================== 5. The rail ============================== */
 
 body.ws #navbar {

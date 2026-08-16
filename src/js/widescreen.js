@@ -77,10 +77,30 @@ function wsMoveAccountRow(intoRail) {
             wsAccountHome = { parent: account.parentElement, next: account.nextElementSibling };
         }
         slot.appendChild(account);
+        wsAddAccountCaret(account);
     } else {
         if (!wsAccountHome || account.parentElement !== slot) return;
+        account.querySelector('.ws-account-caret')?.remove();
         wsAccountHome.parent.insertBefore(account, wsAccountHome.next);
     }
+}
+
+/**
+ * The chip's own affordance: name opens the profile and status opens the status
+ * editor, so switching accounts needs a target of its own rather than a third
+ * meaning for the row. Added on dock and removed on undock — the row belongs to
+ * the chat list the rest of the time.
+ */
+function wsAddAccountCaret(account) {
+    if (account.querySelector('.ws-account-caret')) return;
+    const caret = document.createElement('div');
+    caret.className = 'ws-account-caret btn';
+    caret.title = 'Switch account';
+    caret.onclick = (e) => {
+        e.stopPropagation();
+        profileSwitcher.toggle();
+    };
+    account.appendChild(caret);
 }
 
 /**
