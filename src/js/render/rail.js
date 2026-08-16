@@ -11,6 +11,37 @@
 /** How many DMs the rail keeps. Communities below it are unbounded (the strip scrolls). */
 const WS_RAIL_DM_COUNT = 5;
 
+/** Depth of the strip's bottom fade with a full screen of scroll still below. */
+const WS_RAIL_FADE_MAX = 24;
+
+/** Last depth written, so a scroll frame that changes nothing writes nothing. */
+let nRailFadeDepth = -1;
+
+/**
+ * Give the fade the depth of the scroll that remains: the full ramp mid-strip,
+ * nothing once you're resting at the bottom, and 1:1 with the last 24px in
+ * between — so the scroll itself is the animation and the final row is never
+ * left dimmed.
+ */
+function syncRailFade() {
+    const domRail = document.getElementById('ws-rail-shortcuts');
+    if (!domRail) return;
+    const nBelow = domRail.scrollHeight - domRail.clientHeight - domRail.scrollTop;
+    const nDepth = Math.round(Math.max(0, Math.min(WS_RAIL_FADE_MAX, nBelow)));
+    if (nDepth === nRailFadeDepth) return;
+    nRailFadeDepth = nDepth;
+    domRail.style.setProperty('--ws-rail-fade', nDepth + 'px');
+}
+
+// Scroll is the common case; the strip also changes height when the rail
+// collapses or the window resizes, which no scroll event reports.
+(() => {
+    const domRail = document.getElementById('ws-rail-shortcuts');
+    if (!domRail) return;
+    domRail.addEventListener('scroll', syncRailFade, { passive: true });
+    new ResizeObserver(syncRailFade).observe(domRail);
+})();
+
 function renderRailShortcuts() {
     const dms = document.getElementById('ws-rail-dms');
     const spaces = document.getElementById('ws-rail-spaces');
@@ -35,6 +66,9 @@ function renderRailShortcuts() {
     // The rule between the groups only earns its keep when both sides have rows.
     dms.classList.toggle('has-rows', dmChats.length > 0);
     spaces.classList.toggle('has-rows', communityChats.length > 0);
+    // New rows change what's below without moving the strip's own box, which is
+    // the one case the ResizeObserver can't see.
+    syncRailFade();
 }
 
 function buildRailItem(chat, isCommunity) {

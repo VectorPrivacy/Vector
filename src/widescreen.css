@@ -246,6 +246,17 @@ body.ws.ws-details #settings {
   right: var(--ws-details-w);
 }
 
+/* The pins drawer sheets down from under the conversation header, so it takes the
+   same inset. Unlike Settings its details-pane variant is the COMMON case: pins
+   are a Community affordance, and a Community is what docks that column. */
+body.ws .pins-drawer {
+  left: var(--ws-main-left);
+}
+
+body.ws.ws-details .pins-drawer {
+  right: var(--ws-details-w);
+}
+
 /* The details sidebar is a narrow column, so its header joins the flex flow
    (like the conversation's) instead of being pinned to a viewport edge. */
 body.ws #group-overview > .chat-header {
@@ -384,8 +395,11 @@ body.ws #ws-rail-shortcuts {
   padding: 2px 0 6px;
   /* Same bottom fade as the chat list, but as a MASK rather than a gradient
      overlay: the rail's surface is a translucent tint over whatever the theme's
-     root colour is, so there's no single colour to fade into. */
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent);
+     root colour is, so there's no single colour to fade into. Its depth tracks the
+     scroll that's LEFT (js/render/rail.js), because a fixed ramp dims the last row
+     permanently once you've reached it. */
+  --ws-rail-fade: 24px;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--ws-rail-fade)), transparent);
 }
 
 /* The chat list's chunky 10px thumb is too much furniture inside a 232px rail. */
