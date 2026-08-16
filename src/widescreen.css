@@ -683,15 +683,46 @@ body.ws.ws-rail-collapsed #ws-rail-head {
   justify-content: center;
 }
 
+/* Collapsed, every row in the column is the same 40px tile as a rail shortcut —
+   tabs, the collapse toggle and the account alike — so the whole rail reads as
+   one column of squares rather than shortcuts above a stack of wide pills. */
 body.ws.ws-rail-collapsed #navbar .navbar-btn,
 body.ws.ws-rail-collapsed #ws-rail-collapse {
   justify-content: center;
   gap: 0;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  margin: 0 auto;
+  border-radius: 12px;
+}
+
+/* A 20px glyph drawn for a labelled row looks lost beside a 32px avatar tile. */
+body.ws.ws-rail-collapsed #navbar .navbar-icon {
+  width: 24px;
+  height: 24px;
 }
 
 body.ws.ws-rail-collapsed #ws-rail-account {
   display: flex;
   justify-content: center;
+}
+
+/* The account is the same tile, and its avatar carries it the way a shortcut's
+   does — the name and status are already hidden at this width. */
+body.ws.ws-rail-collapsed #ws-rail-account #account {
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  margin: 0 auto;
+  border-radius: 12px;
+}
+
+/* Inline-sized by createAvatarImg, hence !important (as with the shortcuts). */
+body.ws.ws-rail-collapsed #ws-rail-account #account-avatar-container img {
+  width: 32px !important;
+  height: 32px !important;
 }
 
 body.ws.ws-rail-collapsed #ws-rail-account .profile-header-info,
