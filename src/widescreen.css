@@ -480,11 +480,43 @@ body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
   color: rgba(255, 255, 255, 0.75);
 }
 
-/* Collapsed: avatars only, with the badge as a corner dot. */
+/* Collapsed: avatars only, with the badge as a corner dot. The row becomes a
+   SQUARE centred on the rail's own axis — a text row's rectangle reads as a
+   mis-sized pill once the label is gone, and the nav tabs below are centred on
+   that axis. */
 body.ws.ws-rail-collapsed .ws-rail-item {
   justify-content: center;
   gap: 0;
   position: relative;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  margin: 0 auto;
+  border-radius: 12px;
+}
+
+/* The strip's 6px scrollbar shrinks its content box, which pushed every avatar
+   3px left of the nav tabs' axis. Collapsed, the rail is too narrow to spend on
+   furniture — the wheel still scrolls it. */
+body.ws.ws-rail-collapsed #ws-rail-shortcuts {
+  scrollbar-width: none;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-shortcuts::-webkit-scrollbar {
+  width: 0;
+}
+
+/* At icon-only size the avatar IS the affordance, so it fills its square.
+   createAvatarImg writes width/height inline alongside the radius, hence
+   !important here too. */
+body.ws.ws-rail-collapsed .ws-rail-item-avatar {
+  width: 32px !important;
+  height: 32px !important;
+}
+
+/* Radius tracks the size, or a 32px tile reads as a circle with corners. */
+body.ws.ws-rail-collapsed .ws-rail-item.is-community .ws-rail-item-avatar {
+  border-radius: 10px !important;
 }
 
 body.ws.ws-rail-collapsed .ws-rail-item-name {
@@ -493,8 +525,9 @@ body.ws.ws-rail-collapsed .ws-rail-item-name {
 
 body.ws.ws-rail-collapsed .ws-rail-item-badge {
   position: absolute;
+  /* Hugs the avatar's corner, which now sits 4px inside the square row. */
   top: 2px;
-  right: 6px;
+  right: 2px;
   min-width: 9px;
   height: 9px;
   padding: 0;
