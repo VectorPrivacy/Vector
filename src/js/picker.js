@@ -68,12 +68,29 @@ let _emojiPanelTarget = null;
  * above the dialog overlay. Mirrors openEmojiPanel's deferred-render shape so
  * the open transition starts this frame and content fills in after.
  */
+/**
+ * Move the panel's anchor WITHOUT animating the move. The panel transitions
+ * `transform`, and its anchor lives in that same property — so swapping anchors
+ * while closed slides it sideways over 300ms, and an open starting inside that
+ * window interpolates both at once and rises diagonally. Suppress, swap, commit,
+ * restore: the anchor teleports, only the open/close is ever animated.
+ */
+function _setPickerAnchor(mutate) {
+    picker.style.transition = 'none';
+    mutate();
+    void picker.offsetWidth;
+    picker.style.transition = '';
+}
+
 function openEmojiPanelForStatus(onInsert) {
     _emojiPanelTarget = { insert: onInsert };
     document.querySelector('.picker-mode-btn[data-mode="emoji"]')?.click();
-    picker.classList.add('visible', 'emoji-picker-status-mode', 'emoji-picker-no-gifs');
-    picker.classList.remove('emoji-picker-message-type');
-    picker.style.bottom = '';
+    _setPickerAnchor(() => {
+        picker.classList.add('emoji-picker-status-mode', 'emoji-picker-no-gifs');
+        picker.classList.remove('emoji-picker-message-type');
+        picker.style.bottom = '';
+    });
+    picker.classList.add('visible');
     requestAnimationFrame(() => requestAnimationFrame(async () => {
         if (!picker.classList.contains('visible')) return;
         await loadEmojiUsage();
@@ -130,6 +147,11 @@ function openEmojiPanel(e) {
         const chatBox = document.getElementById('chat-box');
         const bottomPx = chatBox ? (chatBox.getBoundingClientRect().height + 10) + 'px' : '';
 
+        // A status open may still be exiting; its centred anchor must not carry
+        // into this one, and the swap has to settle before `visible` animates.
+        if (picker.classList.contains('emoji-picker-status-mode')) {
+            _setPickerAnchor(() => picker.classList.remove('emoji-picker-status-mode', 'emoji-picker-no-gifs'));
+        }
         picker.classList.add('visible');
         picker.classList.add('emoji-picker-message-type');
         if (bottomPx) picker.style.bottom = bottomPx;
@@ -199,7 +221,15 @@ function closeEmojiPanel() {
     emojiSearch.value = '';
     // Auto-save any in-progress pack edit before the panel disappears.
     if (_pc.open) closeEmojiPackCreator();
-    picker.classList.remove('visible', 'emoji-picker-status-mode', 'emoji-picker-no-gifs');
+    picker.classList.remove('visible');
+    // The anchor classes outlive the exit: dropping them now retargets the
+    // transform mid-flight and the panel leaves at an angle. Re-opening inside
+    // the window must not have its own classes stripped by this timer.
+    setTimeout(() => {
+        if (!picker.classList.contains('visible')) {
+            _setPickerAnchor(() => picker.classList.remove('emoji-picker-status-mode', 'emoji-picker-no-gifs'));
+        }
+    }, 320);
     picker.style.bottom = ''; // Reset to CSS default
     strCurrentReactionReference = '';
     // Drop the canvas rAF so we don't tick under opacity:0.
