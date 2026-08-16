@@ -24,9 +24,6 @@
   --ws-list-min: 260px;
   --ws-list-max: 520px;
   --ws-details-w: 300px;
-  /* Left edge of the "active pane" column (rail + list), for the fixed-position
-     descendants inside the tab panes that can't be grid-placed. */
-  --ws-main-left: calc(var(--ws-rail-w) + var(--ws-list-w));
 
   /* Surfaces are translucent white over the theme's own root background, so
      all 7 themes get a coherent rail/list without per-theme overrides. */
@@ -63,6 +60,19 @@ body.ws main.container {
 
 body.ws.ws-details main.container {
   grid-template-columns: var(--ws-rail-w) var(--ws-list-w) minmax(0, 1fr) var(--ws-details-w);
+}
+
+/* Left edge of the "active pane" column (rail + list), for the fixed-position
+   descendants inside the tab panes that can't be grid-placed.
+
+   Declared on the BODY, never on :root: a custom property substitutes the
+   referenced value AS COMPUTED ON ITS OWN ELEMENT, so at :root this baked in the
+   expanded 232px rail and the collapse below — which overrides --ws-rail-w on
+   body — could never reach it. That left every pane using it inset 160px past
+   the rail it was meant to clear. (--ws-list-w tracked only because
+   js/widescreen.js writes the live width to the root itself.) */
+body.ws {
+  --ws-main-left: calc(var(--ws-rail-w) + var(--ws-list-w));
 }
 
 body.ws.ws-rail-collapsed {
