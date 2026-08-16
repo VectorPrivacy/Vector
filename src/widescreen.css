@@ -31,6 +31,10 @@
   --ws-list-bg: rgba(255, 255, 255, 0.012);
   --ws-seam: rgba(255, 255, 255, 0.055);
   --ws-hover: rgba(255, 255, 255, 0.045);
+  /* Selection is a brighter step of the same neutral, not the accent: the accent
+     is the app's "this is live/yours" signal, and spending it on every selected
+     row leaves nothing to say it with. */
+  --ws-active: rgba(255, 255, 255, 0.09);
 }
 
 /* ===================== 0. Widescreen-only furniture ====================== */
@@ -440,7 +444,7 @@ body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
 }
 
 .ws-rail-item.active {
-  background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 13%, transparent);
+  background-color: var(--ws-active);
 }
 
 .ws-rail-item-avatar {
