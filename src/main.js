@@ -9680,13 +9680,20 @@ async function openGroupOverview(chat) {
     });
 
     navbarSelect('chat-btn');
-    domNavbar.style.display = 'none';
-    domChats.style.display = 'none';
     domSettings.style.display = 'none';
     domInvites.style.display = 'none';
     if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
-    domChat.style.display = 'none';
+    // Narrow, the roster IS the screen and everything else gets out of its way.
+    // Widescreen docks it as a fourth column beside panes that must stay up — and
+    // hiding them there only LOOKS right because `body.ws` forces them visible with
+    // !important. The inline none survives underneath, so narrowing the window past
+    // the threshold hands it the win and the whole app paints black.
+    if (!wsActive()) {
+        domNavbar.style.display = 'none';
+        domChats.style.display = 'none';
+        domChat.style.display = 'none';
+    }
 
     // Store which group is being viewed
     domGroupOverview.setAttribute('data-group-id', chat.id);
