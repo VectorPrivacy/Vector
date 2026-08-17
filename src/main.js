@@ -9669,6 +9669,13 @@ async function openGroupOverview(chat) {
     pushBack('group-overview', () => {
         domGroupOverview.style.display = 'none';
         domGroupOverview.removeAttribute('data-group-id');
+        // Widescreen docks the roster beside a conversation that never closed, so
+        // dismissing it is the user closing the ROSTER — record that, and don't
+        // re-enter a chat that was already open.
+        if (wsActive()) {
+            wsSetMembersOpen(false);
+            return;
+        }
         openChat(chat.id);
     });
 
@@ -10366,12 +10373,19 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     renderMigrationRow(communityId, name, chat.id);
 
     domGroupOverviewBackBtn.onclick = () => {
+        // Widescreen: this is the roster's own close button, so it goes through the
+        // same pair as the header's Members toggle. Closing by hand and skipping
+        // wsSetMembersOpen left the preference reading "open", and the next chat
+        // open re-derived the pane from it — the roster came back on its own.
+        if (wsActive()) {
+            wsCloseDetails();
+            wsSetMembersOpen(false);
+            return;
+        }
         popBack('group-overview');
         domGroupOverview.style.display = 'none';
         domGroupOverview.removeAttribute('data-group-id');
-        // Widescreen docks this as a sidebar beside a still-open conversation, so
-        // dismissing it must not re-enter the chat (and rebuild its message DOM).
-        if (!wsActive()) openChat(chat.id);
+        openChat(chat.id);
     };
 }
 
