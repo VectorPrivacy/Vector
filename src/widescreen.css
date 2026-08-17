@@ -1280,10 +1280,78 @@ body.ws.ws-resizing #chat {
 
 /* ===================== 8. Widescreen list-row polish ===================== */
 
+/* A DM row was drawn for a full-width phone list: a 50px avatar and 16/15px text
+   have room there, and none at all in a 260px pane, where every name clipped to
+   "Yuurin…" and the preview to four words. The channel rows next door read fine at
+   the same width because a channel is a glyph and a word.
+
+   So the row gets the pane's proportions: a 40px avatar, and type a step down.
+   Nothing is squeezed structurally — it's the same row, sized for its column.
+   min/max are the load-bearing pair here: `.chatlist-contact img` pins all four to
+   50px, so setting width alone does nothing (the same cap the inline emoji rule
+   already fights). */
+body.ws #chat-list .chatlist-contact > div:first-child > img,
+body.ws #chat-list .chatlist-contact > div:first-child > .placeholder-avatar {
+  width: 40px !important;
+  height: 40px !important;
+  min-width: 40px !important;
+  min-height: 40px !important;
+  max-width: 40px !important;
+  max-height: 40px !important;
+  /* An inline image leaves descender space under itself, which the frame then
+     counts as its own height: 7px that reads as the avatar sitting high, and that
+     the status dot (anchored to the frame) follows down. Placeholders were already
+     immune — styles.css makes those flex. */
+  display: block;
+}
+
+/* The avatar's frame is a flex item, so it STRETCHED to the row's height and left a
+   40px avatar pinned to its top. Sized to the avatar instead, it centres — and the
+   dot goes back to the avatar's own corner rather than the frame's. */
+body.ws #chat-list .chatlist-contact > div:first-child {
+  align-self: center;
+}
+
+/* The row comes down with the avatar, keeping the proportion it was drawn at
+   (50/62, now 40/50): the avatar fills the row's left end and the 30px corner —
+   which clamps to half the height — closes around it. Left at 62px the same curve
+   was drawn around empty space. The two text lines need 38 of the 40. */
+body.ws #chat-list .chatlist-contact {
+  height: 40px;
+  padding: 4px;
+}
+
+body.ws .chatlist-contact-header h4 {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+body.ws .chatlist-contact-preview > p {
+  font-size: 13px;
+  line-height: 18px;
+}
+
 /* The 120px reservation for avatar + timestamp + badge was tuned against a
-   full-viewport list; in a 330px pane it ate the name. */
+   full-viewport list; in a 330px pane it ate the name — and it was spent whether or
+   not anything used it. The unread pill is the only thing that ever sits there, and
+   most rows are read, so the space was reserved for nothing on nearly every row.
+   Flexing takes it back and hands it over the moment a pill does appear: the pill is
+   a flex sibling, so the text gives up exactly its width and no more.
+
+   The padding is the row's rounded end, not decoration. At 25px the corner cuts
+   ~9px into where the two text lines sit — measured, against the 5px the row's own
+   padding left — which is the ellipsis clipping the border. The pill never needs it:
+   it sits on the vertical centre, where the curve intrudes nothing. */
 body.ws .chatlist-contact-preview {
-  width: calc(100% - 88px);
+  width: auto;
+  flex: 1;
+  min-width: 0;
+  padding-right: 10px;
+  box-sizing: border-box;
+}
+
+body.ws .chatlist-contact-count {
+  flex-shrink: 0;
 }
 
 /* `margin: auto` on both sides floated the timestamp into the middle of the
@@ -1297,6 +1365,35 @@ body.ws .chatlist-contact-timestamp {
    was wrapping to a second line while "New Chat" stayed on one. */
 body.ws .new-chat-btn {
   font-size: 13px;
+}
+
+/* Below about a 300px pane the two buttons cannot both hold their label on one
+   line, so they stop sharing a line and become full-width rows instead. The basis
+   drives it: two of them plus the gap outgrow the container right about where the
+   text would wrap, so flex-wrap decides and no width threshold lives in JS.
+
+   132px, not the 128px "Group Chat" actually measures. A basis equal to the label's
+   own width leaves the buttons exactly 128.00px wide on the pane width where they
+   unstack — and the label needs a hair over that, so one single pane width still
+   wrapped. The 4px is the margin that window closes into. nowrap is the backstop:
+   at a width nobody predicted the label clips rather than reflowing the row.
+
+   Both inline `width: 50%` and the inline margins have to go for the basis to mean
+   anything. */
+body.ws #chat-new-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+body.ws #chat-new-actions .new-chat-btn {
+  flex: 1 1 132px;
+  min-width: 0;
+  width: auto !important;
+  margin: 0 !important;
+}
+
+body.ws #chat-new-actions .new-chat-btn > span:last-child {
+  white-space: nowrap;
 }
 
 body.ws .new-chat-btn .icon {
