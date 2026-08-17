@@ -229,6 +229,15 @@ function wsUpdate() {
         renderRailShortcuts();
     } else {
         document.body.classList.remove('ws-chat-open', 'ws-rail-collapsed');
+        // The roster is a docked column here and a whole screen there. Narrow, both
+        // it and the conversation are simply visible, so they stack — the roster
+        // sitting on top of the chat rather than replacing it. The conversation is
+        // where the user actually is, so the roster is what gives way.
+        //
+        // The PREFERENCE is deliberately untouched: this is the layout running out
+        // of room, not the user closing anything, and widening re-derives the pane
+        // from it through wsSyncOpenChat.
+        if (domGroupOverview.style.display !== 'none') wsCloseDetails();
         wsMarkActiveRow();
         adjustSize();
     }
