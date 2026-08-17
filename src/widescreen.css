@@ -469,13 +469,18 @@ body.ws.ws-rail-collapsed #ws-rail-account .ws-account-caret {
 
 /* ONE gutter for the pane. The community's icon, the section label and every
    channel glyph start on the same left edge; each of these used to carry its own
-   padding and the column read as three ragged columns. */
-body.ws #chat-list {
+   padding and the column read as three ragged columns.
+
+   Declared on the BODY, not on #chat-list: the header sits OUTSIDE that list now,
+   and a var() its element can't see makes the whole `padding` shorthand invalid —
+   which is a silent collapse to zero, not a fallback to the pane's edge. Same trap
+   as --ws-main-left above. */
+body.ws {
   --ws-pane-gutter: 12px;
 }
 
-/* The community's identity heads its own pane. Sticky, so the channels scroll
-   under it rather than carrying it away. */
+/* The community's identity heads its own pane, hosted above the scroller so the
+   channels scroll under it rather than carrying it away. */
 body.ws .chatlist-community-head {
   display: flex;
   align-items: center;
@@ -484,9 +489,6 @@ body.ws .chatlist-community-head {
      block that spans the pane: the name's BOX started on the gutter while the name
      itself floated to the middle, which is what read as the icon "offsetting" it. */
   text-align: left;
-  position: sticky;
-  top: 0;
-  z-index: 2;
   padding: 10px var(--ws-pane-gutter);
   background-color: #0d0d0d;
   border-bottom: 1px solid var(--ws-seam);
@@ -629,6 +631,15 @@ body.ws.ws-community-pane #sync-line {
 body.ws.ws-community-pane #chat-list {
   padding-left: 0;
   padding-right: 0;
+}
+
+/* The header's host (js/render/chatlist/list.js fills it): a sibling ABOVE the
+   scroller rather than a sticky child inside it. Sticky is pinned to the scrollport,
+   and the elastic overscroll moves the scrollport — so scrolling up past the top
+   carried the header down with it. Out here no scroll position can reach it. Empty
+   and zero-height whenever the pane isn't a community's. */
+body.ws #ws-community-head {
+  flex-shrink: 0;
 }
 
 /* ---- The details pane is the member list ---- */

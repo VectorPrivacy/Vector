@@ -150,11 +150,17 @@ function renderChatlist() {
     const wsCommunityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
     const wsDmsOnly = !wsCommunityId && typeof wsActive === 'function' && wsActive();
 
+    // The community's header lives OUTSIDE the scrolling list (its own host above
+    // it), so no scroll position — including the elastic overscroll, which moves the
+    // scrollport itself and takes `position: sticky` with it — can shift it.
+    const domCommunityHead = document.getElementById('ws-community-head');
+
     if (wsCommunityId) {
-        fragment.appendChild(renderCommunityListHeader(wsCommunityId));
+        if (domCommunityHead) domCommunityHead.replaceChildren(renderCommunityListHeader(wsCommunityId));
         const channels = renderCommunityChannels(wsCommunityId, { pane: true });
         if (channels) fragment.appendChild(channels);
     } else {
+        if (domCommunityHead) domCommunityHead.replaceChildren();
         // Invites head the DM list — a channel pane is one community's own
         // contents, so an invite to a DIFFERENT community has no business there.
         // The rail's home mark badges while you're away (js/render/rail.js).
