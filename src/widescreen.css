@@ -222,6 +222,23 @@ body.ws .chat-messages {
   padding-top: 12px;
 }
 
+/* File boxes, voice notes and audio players size themselves off the VIEWPORT
+   (`min(500px, 100vw - 100px)`), which was the conversation's own width when the
+   conversation was the whole screen. Here it's the middle column: the 500px arm
+   wins on any normal window and the box runs out past the column, under the member
+   list. Bound it by the row it sits in and keep 500px as the cap it always was.
+
+   Mini App boxes stay content-sized — their border IS the tap target — so their
+   own rule is re-stated at a specificity that survives this one. */
+body.ws .custom-audio-player {
+  width: min(100%, 500px);
+}
+
+body.ws .miniapp-attachment .custom-audio-player {
+  width: fit-content;
+  max-width: min(100%, 500px);
+}
+
 /* The list fills whatever the header block leaves, instead of measuring the
    viewport with hardcoded insets. */
 body.ws #chat-list {
