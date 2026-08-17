@@ -9407,6 +9407,13 @@ async function handleIncomingShare(payload) {
  * Open the dialog for starting a new chat
  */
 function openNewChat() {
+    // The two composers are alternatives, not layers. Left up, the other one stays
+    // behind this pane with its back entry intact, so closing this one reveals it
+    // instead of returning to the list. Not closeCreateGroup(): that navigates to
+    // the chat list, which is where we are leaving.
+    popBack('create-group');
+    domCreateGroup.style.display = 'none';
+
     pushBack('new-chat', closeChat);
     // Display the UI
     domChatNew.style.display = '';
@@ -14110,6 +14117,11 @@ function updateCreateGroupSelectionStatus() {
  * Open Create Group tab
  */
 function openCreateGroup() {
+    // Mutually exclusive with Start New Chat — see openNewChat for why the pane and
+    // its back entry both have to go.
+    popBack('new-chat');
+    domChatNew.style.display = 'none';
+
     pushBack('create-group', closeCreateGroup);
     // Show panel
     domCreateGroup.style.display = '';
