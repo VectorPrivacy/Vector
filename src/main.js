@@ -9049,6 +9049,7 @@ async function openChat(contact) {
     if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domChatNew.style.display = 'none';
+    domCreateGroup.style.display = 'none';
     domChats.style.display = 'none';
     domGroupOverview.style.display = 'none';
     // Hide the Settings/Invites tabs too — a chat opened from inside one of them (deep-link join,
@@ -9057,7 +9058,11 @@ async function openChat(contact) {
     domInvites.style.display = 'none';
     // Jumping to a chat (e.g. mini-profile "Send Message" from the member list) closes Group
     // Details for good — drop its back entry so back-nav doesn't land on a dead re-hide step.
+    // Same for the two composers: opening a conversation abandons them, so leaving their
+    // entries behind would send back-nav to a panel that is no longer on screen.
     popBack('group-overview');
+    popBack('create-group');
+    popBack('new-chat');
     domChat.style.display = '';
     // Match the fade transition the navbar/account tabs use for visual cohesion.
     domChat.classList.add('fadein-anim');
