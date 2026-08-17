@@ -62,6 +62,12 @@ if (isDev) {
     // at startup, and replacing the inode under it makes it answer index.html to
     // every asset request — a 200 the webview then fails to parse ("Unexpected
     // token '<'"), leaving a running app whose window (born hidden) is never shown.
+    //
+    // Which is why `npm run dev` runs this BEFORE `tauri dev`, not only as its
+    // beforeDevCommand: after a release build dist/ is a real directory, and by the
+    // time the beforeDevCommand replaces it the path is already resolved. Relinking
+    // first means the launch never swaps the inode at all, and this run is the no-op
+    // below. Invoking `tauri dev` directly still costs the one bad launch.
     if (distIsDevLink()) {
         console.log('  dist/ → src/ already linked (left alone; a live dev server holds this inode)');
         process.exit(0);
