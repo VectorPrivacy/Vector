@@ -11,7 +11,7 @@
  *   node scripts/build-frontend.mjs --dev    # plain copy, no minification
  */
 
-import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync, unlinkSync } from 'fs';
+import { cpSync, rmSync, readdirSync, readFileSync, writeFileSync, statSync, symlinkSync, lstatSync, unlinkSync, readlinkSync } from 'fs';
 import { join, dirname, extname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { buildSvelte } from './build-svelte.mjs';
@@ -45,14 +45,43 @@ function cleanDist() {
     } catch {}
 }
 
+// True when dist is already the dev symlink pointing at src.
+function distIsDevLink() {
+    try {
+        return lstatSync(DIST).isSymbolicLink() && readlinkSync(DIST) === SRC;
+    } catch {
+        return false;
+    }
+}
+
 if (isDev) {
     // Symlink dist → src so Tauri watches src/ changes directly.
     // Windows: 'junction' — real symlinks need Developer Mode or elevation; junctions don't.
+    //
+    // Idempotent on purpose: `tauri dev`'s static server resolves frontendDist ONCE
+    // at startup, and replacing the inode under it makes it answer index.html to
+    // every asset request — a 200 the webview then fails to parse ("Unexpected
+    // token '<'"), leaving a running app whose window (born hidden) is never shown.
+    //
+    // Which is why `npm run dev` runs this BEFORE `tauri dev`, not only as its
+    // beforeDevCommand: after a release build dist/ is a real directory, and by the
+    // time the beforeDevCommand replaces it the path is already resolved. Relinking
+    // first means the launch never swaps the inode at all, and this run is the no-op
+    // below. Invoking `tauri dev` directly still costs the one bad launch.
+    if (distIsDevLink()) {
+        console.log('  dist/ → src/ already linked (left alone; a live dev server holds this inode)');
+        process.exit(0);
+    }
     cleanDist();
     symlinkSync(SRC, DIST, process.platform === 'win32' ? 'junction' : 'dir');
     console.log('  Symlinked dist/ → src/ (hot-reload enabled)');
     process.exit(0);
 }
+
+// Replacing the dev symlink with a real dist/ is what a release or android build
+// does, and it strands any `tauri dev` still running against it — the reason a
+// build-type switch is followed by a launch that compiles, boots and shows no GUI.
+const replacedDevLink = distIsDevLink();
 
 if (isCopy) {
     // Plain copy without minification (for Android dev builds where symlinks don't work)
@@ -187,3 +216,9 @@ for (const file of htmlFiles) {
 const totalPct = ((1 - totalAfter / totalBefore) * 100).toFixed(1);
 console.log(`\n  Total: ${(totalBefore / 1024).toFixed(1)}K → ${(totalAfter / 1024).toFixed(1)}K (${totalPct}% reduction)`);
 console.log('  Done!');
+
+if (replacedDevLink) {
+    console.log('\n  NOTE: this replaced the dev symlink with a real dist/.');
+    console.log('  A `tauri dev` still running resolved the old one and will now answer');
+    console.log('  index.html to every asset — its window loads nothing. Restart it.');
+}
