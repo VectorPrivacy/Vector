@@ -291,6 +291,27 @@ body.ws .pins-drawer {
   left: var(--ws-main-left);
 }
 
+/* The attachment panel rises out of the composer, so it belongs to the composer's
+   box, not the window's. It was viewport-centred (`left: 50%` + a translateX) and a
+   viewport width, which put a panel wider than the conversation over the rail and
+   the list. Left and right define it here instead — the 8px matches the composer's
+   own inset, so the two line up edge to edge — and dropping the centring means
+   restating both ends of the slide, since the transform carried it. */
+body.ws .attachment-panel {
+  left: calc(var(--ws-main-left) + 8px);
+  right: 8px;
+  width: auto;
+  transform: translateY(100%);
+}
+
+body.ws .attachment-panel.visible {
+  transform: translateY(0);
+}
+
+body.ws.ws-details .attachment-panel {
+  right: calc(var(--ws-details-w) + 8px);
+}
+
 body.ws.ws-details .pins-drawer {
   right: var(--ws-details-w);
 }
