@@ -12100,21 +12100,63 @@ select:disabled:hover {
     position: relative;
 }
 
-/* Right-aligned moderation actions (Kick + Ban) on a member row. Always visible by default (so they
-   work on touch, which has no hover). On pointer devices they stay out of the way until the row is
-   hovered, keeping the list scannable while the tools are one hover away. */
+/* Right-aligned moderation handle on a member row: a "\22EF" that opens the same menu as
+   right-click. Always visible by default (so it works on touch, which has no hover). On
+   pointer devices it stays out of the way until the row is hovered, keeping the list
+   scannable while the tools are one hover away. */
 .member-pick-actions {
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-    transition: opacity 0.15s ease;
 }
 @media (hover: hover) {
-    .member-pick-actions { opacity: 0; }
+    /* pointer-events, not just opacity: an invisible element still hit-tests, so a
+       pointer crossing the hidden handle lit its :hover and the reveal then faded a
+       BRIGHT icon in, which dimmed again as the pointer moved on. Appearing without
+       a transition is the rest of it — the handle is a hint, and a hint that ramps
+       is a hint you watch. */
+    .member-pick-actions {
+        opacity: 0;
+        pointer-events: none;
+    }
     .member-pick-row:hover .member-pick-actions,
-    .member-pick-actions:focus-within { opacity: 1; }
+    .member-pick-actions:focus-within {
+        opacity: 1;
+        pointer-events: auto;
+    }
+}
+
+/* `.icon` is absolutely positioned to fill its nearest positioned ancestor, so the handle
+   has to BE that box rather than inheriting the row's. Mask icons tint via background. */
+.member-pick-more {
+    position: relative;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    flex-shrink: 0;
+    z-index: 1;
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+}
+
+/* Rests dim and only brightens under the pointer — the handle is a hint, not a
+   third thing competing with the name and avatar for attention. */
+.member-pick-more .icon {
+    background-color: rgba(255, 255, 255, 0.4);
+    transition: background-color 0.12s ease;
+}
+
+/* Safe to brighten the glyph again now the hidden handle is pointer-events: none —
+   :hover can only fire on one that is actually on screen, so this can't run during
+   the reveal. Eased rather than snapped, in step with the plate behind it. */
+.member-pick-more:hover {
+    background-color: rgba(255, 255, 255, 0.09);
+}
+
+.member-pick-more:hover .icon {
+    background-color: #fff;
 }
 
 .member-pick-row .member-pick-hover {

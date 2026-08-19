@@ -10230,6 +10230,30 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                         });
                     }
                     attachLongPressContextMenu(row, (x, y) => showContextMenu({ x, y, items }));
+
+                    // The same menu, with a handle. Right-click is invisible until
+                    // someone tells you it's there, so the row grows a "⋯" on hover
+                    // that opens the identical items — discoverable without welding
+                    // destructive buttons onto every row.
+                    const actions = document.createElement('div');
+                    actions.className = 'member-pick-actions';
+                    const moreBtn = document.createElement('div');
+                    // No `btn` class: its :hover drops opacity to 0.75, which fought the
+                    // brighten below — the handle appeared at full while the pointer was
+                    // still crossing the row, then dimmed the moment it landed.
+                    moreBtn.className = 'member-pick-more';
+                    moreBtn.title = 'Moderate';
+                    moreBtn.setAttribute('role', 'button');
+                    moreBtn.innerHTML = '<span class="icon icon-dots-horizontal"></span>';
+                    moreBtn.onclick = (e) => {
+                        // Not the row's mini-profile, and not the document-level
+                        // dismissal that would close the menu as it opens.
+                        e.stopPropagation();
+                        const r = moreBtn.getBoundingClientRect();
+                        showContextMenu({ x: r.left, y: r.bottom + 4, items });
+                    };
+                    actions.appendChild(moreBtn);
+                    row.appendChild(actions);
                 }
                 // Row → mini-profile (same popup as a chat name/avatar tap). The crown/kick/ban
                 // controls stopPropagation, so this only fires on the avatar/name/empty area.
