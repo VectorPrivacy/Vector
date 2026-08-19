@@ -1466,6 +1466,99 @@ pub fn community_invite_join_counts(
     Ok(per_label.into_iter().map(|(k, v)| (k, v.len() as u64)).collect())
 }
 
+/// One author's posting footprint in a Community, from the local store: how much
+/// they have said and the window they said it in. Feeds the moderation panel's
+/// tenure and volume signals ([`crate::community::raid`]). Times are seconds.
+#[derive(Debug, Clone)]
+pub struct AuthorFootprint {
+    pub npub: String,
+    pub messages: u64,
+    pub first_secs: u64,
+    pub last_secs: u64,
+}
+
+/// The `chats` row ids of a Community's channels. Deliberately not [`load_community`]:
+/// that decrypts every channel key and every retained epoch key, and all this needs is
+/// the ids. A channel with no events yet has no row and is simply absent.
+pub fn community_chat_row_ids(community_id: &str) -> Result<Vec<i64>, String> {
+    let channel_ids: Vec<String> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn
+            .prepare("SELECT channel_id FROM community_channels WHERE community_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![community_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    Ok(channel_ids.iter().filter_map(|c| super::id_cache::get_chat_id_by_identifier(c).ok()).collect())
+}
+
+/// Per-author message aggregates across a Community's channels. Counts only what a
+/// person actually SAID — kinds 14/15 — so a reaction spammer doesn't read as a
+/// conversationalist and an edit doesn't double-count its original.
+pub fn community_author_footprints(community_id: &str) -> Result<Vec<AuthorFootprint>, String> {
+    let chat_ints = community_chat_row_ids(community_id)?;
+    if chat_ints.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = crate::stored_event::event_kind::PRIVATE_DIRECT_MESSAGE;
+    let file = crate::stored_event::event_kind::FILE_ATTACHMENT;
+    let conn = super::get_db_connection_guard_static()?;
+    let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT npub, COUNT(*), MIN(created_at), MAX(created_at) FROM events \
+         WHERE chat_id IN ({placeholders}) AND kind IN ({text}, {file}) \
+           AND npub IS NOT NULL AND npub != '' \
+         GROUP BY npub"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
+            Ok(AuthorFootprint {
+                npub: r.get::<_, String>(0)?,
+                messages: r.get::<_, i64>(1)?.max(0) as u64,
+                first_secs: r.get::<_, i64>(2)?.max(0) as u64,
+                last_secs: r.get::<_, i64>(3)?.max(0) as u64,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// The newest `limit` message texts across a Community's channels, decrypted, as
+/// `(npub, created_at_secs, text)`. Newest-first is the right window for raid work:
+/// a wave is by definition recent, and reading the whole history would pay a vault
+/// decrypt per row for messages that predate the attack.
+pub fn community_recent_texts(community_id: &str, limit: usize) -> Result<Vec<(String, u64, String)>, String> {
+    let chat_ints = community_chat_row_ids(community_id)?;
+    if chat_ints.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let text = crate::stored_event::event_kind::PRIVATE_DIRECT_MESSAGE;
+    let rows: Vec<(String, u64, String)> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT npub, created_at, content FROM events \
+             WHERE chat_id IN ({placeholders}) AND kind = {text} \
+               AND npub IS NOT NULL AND npub != '' \
+             ORDER BY created_at DESC LIMIT {limit}"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, String>(2)?))
+            })
+            .map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    Ok(rows
+        .into_iter()
+        .map(|(npub, at, content)| (npub, at, crate::crypto::maybe_decrypt_text(&content)))
+        .collect())
+}
+
 /// Replace a Community's stored banlist (JSON array of hex pubkeys) + the `created_at` (secs) of
 /// the edition it came from. `at` is the version: the owner's own ban/unban writes its freshly
 /// built event time, and `fetch_and_apply_banlist` only calls this with a strictly-newer edition,
