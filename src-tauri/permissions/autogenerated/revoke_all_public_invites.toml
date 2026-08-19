@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-revoke-all-public-invites"
+description = "Enables the revoke_all_public_invites command without any pre-configured scope."
+commands.allow = ["revoke_all_public_invites"]
+
+[[permission]]
+identifier = "deny-revoke-all-public-invites"
+description = "Denies the revoke_all_public_invites command without any pre-configured scope."
+commands.deny = ["revoke_all_public_invites"]

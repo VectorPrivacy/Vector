@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-community-raid"
+description = "Enables the check_community_raid command without any pre-configured scope."
+commands.allow = ["check_community_raid"]
+
+[[permission]]
+identifier = "deny-check-community-raid"
+description = "Denies the check_community_raid command without any pre-configured scope."
+commands.deny = ["check_community_raid"]

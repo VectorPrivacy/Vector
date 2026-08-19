@@ -4639,3 +4639,118 @@ pub async fn fetch_pinned_attachment(community_id: String, channel_id: String, m
         .await
         .map_err(|e| e.to_string())
 }
+
+// ── Moderation panel (Concord v2) ────────────────────────────────────────────
+
+/// The moderation panel's whole snapshot in one read: every member with the raid
+/// evidence behind their verdict, the duplicate-text cohorts, the live invite links,
+/// banlist headroom and the caller's capabilities. Read-only.
+#[tauri::command]
+pub async fn get_moderation_intel(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.community_moderation_intel(&community_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Ban a whole wave as ONE moderation unit: one banlist edition, one strip, one
+/// re-founding. Banning them one by one would mint a rotation per member and let
+/// racing editions erase each other.
+#[tauri::command]
+pub async fn ban_community_members(community_id: String, npubs: Vec<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        let refs: Vec<&str> = npubs.iter().map(|s| s.as_str()).collect();
+        vector_core::VectorCore
+            .set_members_banned(&community_id, &refs, true)
+            .await
+            .map_err(|e| e.to_string())?;
+        vector_core::VectorCore::invalidate_raid_report(&community_id);
+        // The rotation moved every plane pseudonym; without this our live subscription
+        // stays pinned to the buried epoch until the next sync.
+        if vector_core::db::session_is_live() {
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// Rotate the Community's keys, keeping only `retain`. The containment that scales
+/// past the 500-npub banlist ceiling: a wave of thousands cannot be banned, but it can
+/// be locked out of the next epoch in a single publish. An empty `retain` rotates
+/// without removing anyone — the right move when a link leaked but the members are real.
+#[tauri::command]
+pub async fn refound_community(community_id: String, retain: Vec<String>) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let refs: Vec<&str> = retain.iter().map(|s| s.as_str()).collect();
+        let cid = community_id.clone();
+        // The sweep runs for as long as there are targets, so this counter is the only
+        // sign of life the panel has.
+        let progress = move |done: usize, total: usize| {
+            vector_core::emit_event(
+                "community_purge_progress",
+                &serde_json::json!({ "community_id": cid, "done": done, "total": total }),
+            );
+        };
+        let summary = vector_core::VectorCore
+            .purge_and_refound(&community_id, &refs, &progress)
+            .await
+            .map_err(|e| e.to_string())?;
+        vector_core::VectorCore::invalidate_raid_report(&community_id);
+        if vector_core::db::session_is_live() {
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        }
+        Ok(summary)
+    })
+    .await
+}
+
+/// Kick a set of members without touching the keys — roster hygiene on its own.
+#[tauri::command]
+pub async fn kick_community_members(community_id: String, npubs: Vec<String>) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let refs: Vec<&str> = npubs.iter().map(|s| s.as_str()).collect();
+        let cid = community_id.clone();
+        let progress = move |done: usize, total: usize| {
+            vector_core::emit_event(
+                "community_purge_progress",
+                &serde_json::json!({ "community_id": cid, "done": done, "total": total }),
+            );
+        };
+        let summary = vector_core::VectorCore
+            .kick_community_members(&community_id, &refs, &progress)
+            .await
+            .map_err(|e| e.to_string())?;
+        vector_core::VectorCore::invalidate_raid_report(&community_id);
+        Ok(summary)
+    })
+    .await
+}
+
+/// Retire every public invite link at once. Revoking them one at a time loses the race
+/// against a raid: the next wave walks in through whichever link is still live.
+/// Returns `{ revoked, failed }`.
+#[tauri::command]
+pub async fn revoke_all_public_invites(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let (revoked, failed) = vector_core::VectorCore
+            .revoke_all_public_invites(&community_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if vector_core::db::session_is_live() {
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        }
+        Ok(serde_json::json!({ "revoked": revoked, "failed": failed }))
+    })
+    .await
+}
+
+/// Whether this community currently reads as under a raid, for the alert badge on its
+/// header. Cheap after the first call: the verdict is memoised alongside the panel's.
+#[tauri::command]
+pub async fn check_community_raid(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.check_community_raid(&community_id).map_err(|e| e.to_string())
+    })
+    .await
+}

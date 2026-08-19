@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-moderation-intel"
+description = "Enables the get_moderation_intel command without any pre-configured scope."
+commands.allow = ["get_moderation_intel"]
+
+[[permission]]
+identifier = "deny-get-moderation-intel"
+description = "Denies the get_moderation_intel command without any pre-configured scope."
+commands.deny = ["get_moderation_intel"]
