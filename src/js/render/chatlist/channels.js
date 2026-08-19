@@ -224,8 +224,40 @@ function renderCommunityListHeader(communityId) {
     head.appendChild(caretBox);
 
     refreshCommunityMemberCount(communityId);
+    if (primary?.metadata?.custom_fields?.proto_version === '2') refreshCommunityRaidAlert(communityId, head);
     head.onclick = (e) => openCommunityMenu(primary, e);
     return head;
+}
+
+/// Last raid verdict per community, so the menu can escalate its Moderation entry
+/// without waiting on a round-trip while the user is already looking at the menu.
+const communityRaidAlerts = new Map();
+
+/// Forget a cached verdict. Every moderation action changes who is a member, and a
+/// stale entry leaves the menu quoting a count from before the action ran.
+function clearCommunityRaidAlert(communityId) {
+    communityRaidAlerts.delete(communityId);
+    for (const pip of document.querySelectorAll('.chatlist-community-head-alert')) pip.remove();
+}
+
+/**
+ * Paint the header's raid pip. Asynchronous by design: the assessment reads a window of
+ * message history, so it must never sit in front of the chat list rendering.
+ */
+async function refreshCommunityRaidAlert(communityId, head) {
+    let verdict = null;
+    try {
+        verdict = await invoke('check_community_raid', { communityId });
+    } catch (_) {
+        return;
+    }
+    communityRaidAlerts.set(communityId, verdict);
+    if (!verdict?.detected || !head.isConnected) return;
+    if (head.querySelector('.chatlist-community-head-alert')) return;
+    const pip = document.createElement('span');
+    pip.className = 'chatlist-community-head-alert';
+    pip.title = `${verdict.suspects} accounts flagged as a raid \u2014 open Moderation`;
+    head.insertBefore(pip, head.querySelector('.chatlist-community-head-caret'));
 }
 
 /**
@@ -233,7 +265,7 @@ function renderCommunityListHeader(communityId) {
  * Reuses the context-menu component, so it inherits its viewport clamping,
  * outside-click dismissal and styling rather than growing a second one.
  */
-function openCommunityMenu(chat, ev) {
+async function openCommunityMenu(chat, ev) {
     if (!chat) return;
     const cf = chat.metadata?.custom_fields || {};
     const rect = ev.currentTarget.getBoundingClientRect();
@@ -260,6 +292,23 @@ function openCommunityMenu(chat, ev) {
         icon: 'users-multi',
         onClick: () => openCommunityDetails(chat),
     });
+    // Batch containment (raid triage, invite revocation, key rotation). Needs BAN
+    // rather than KICK, and only v2 can rotate. Awaited before the menu is built —
+    // a late push lands in an array the component has already read.
+    if (cf.proto_version === '2' && cf.community_id) {
+        const caps = await invoke('get_community_capabilities', { communityId: cf.community_id }).catch(() => null);
+        if (caps?.ban) {
+            const raid = communityRaidAlerts.get(cf.community_id);
+            items.push({
+                label: 'Moderation',
+                // Under a raid the entry stops being one option among five.
+                hint: raid?.detected ? `${raid.suspects} flagged` : undefined,
+                icon: 'warning',
+                danger: !!raid?.detected,
+                onClick: () => openModerationPanel(cf.community_id),
+            });
+        }
+    }
     items.push({ divider: true });
     // Owner or member, the same entry point decides which flow it is — and both
     // ask before doing anything.

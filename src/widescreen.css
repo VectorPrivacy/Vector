@@ -565,6 +565,23 @@ body.ws .chatlist-community-head-members {
 /* Says the header is a menu, not a label. `position: relative` is load-bearing:
    .icon fills its nearest positioned ancestor, which would otherwise be the
    sticky header itself. These are mask icons, so they tint by background-color. */
+/* Raid pip on the community header. Sits before the caret so it reads as part of the
+   community's status, not as a second control. It pulses because a raid is the one
+   state in this app where noticing late costs you the community. */
+body.ws .chatlist-community-head-alert {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background-color: var(--danger-color);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger-color) 70%, transparent);
+  animation: community-raid-pulse 1.9s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.ws .chatlist-community-head-alert { animation: none; }
+}
+
 body.ws .chatlist-community-head-caret {
   position: relative;
   flex-shrink: 0;
@@ -682,6 +699,7 @@ body.ws #group-overview-status,
 body.ws #group-mute-btn,
 body.ws #group-invite-member-btn,
 body.ws #group-leave-btn,
+body.ws #group-moderate-btn,
 body.ws #group-migrate-row {
   display: none !important;
 }

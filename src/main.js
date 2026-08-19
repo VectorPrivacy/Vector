@@ -1045,6 +1045,7 @@ const domGroupOverviewMembers = document.getElementById('group-overview-members'
 const domGroupMemberSearchInput = document.getElementById('group-member-search-input');
 const domGroupInviteMemberBtn = document.getElementById('group-invite-member-btn');
 const domGroupLeaveBtn = document.getElementById('group-leave-btn');
+const domGroupModerateBtn = document.getElementById('group-moderate-btn');
 
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
@@ -10385,6 +10386,25 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         domGroupInviteMemberBtn.onclick = () => openCommunityInvitePanel(chat);
     } else {
         domGroupInviteMemberBtn.style.display = 'none';
+    }
+
+    // Moderation console — batch containment, so it needs BAN, not just KICK.
+    // v2 only: the rotation it drives is a v2 verb.
+    const isV2Community = chat.metadata?.custom_fields?.proto_version === '2';
+    if (caps.ban && isV2Community) {
+        domGroupModerateBtn.style.display = 'flex';
+        domGroupModerateBtn.onclick = () => openModerationPanel(communityId);
+        domGroupModerateBtn.classList.remove('raid-alert');
+        // The narrow layout has no community header to hang a pip on, so the button
+        // itself carries the alarm.
+        invoke('check_community_raid', { communityId }).then(v => {
+            if (!v?.detected) return;
+            if (domGroupOverview.getAttribute('data-group-id') !== communityId) return;
+            domGroupModerateBtn.classList.add('raid-alert');
+            domGroupModerateBtn.title = `${v.suspects} accounts flagged as a raid`;
+        }).catch(() => {});
+    } else {
+        domGroupModerateBtn.style.display = 'none';
     }
 
     // Leave / Delete Community. A member leaves (local drop). The OWNER can't meaningfully leave their own

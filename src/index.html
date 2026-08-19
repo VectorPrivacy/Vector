@@ -32,6 +32,7 @@
     <script src="/js/context-menu.js" defer></script>
     <script src="/js/updater.js" defer></script>
     <script src="/js/pins.js" defer></script>
+    <script src="/js/moderation.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
     <script src="/js/miniapps.js" defer></script>
@@ -910,10 +911,14 @@
       <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn cutoff" style="max-width: 90%; margin-left: auto; margin-right: auto;"></h3>
       <span id="group-overview-description" class="chat-contact-status" style="width: 90%; white-space: pre-line; overflow-y: auto; max-height: 225px; font-style: normal; margin-top: 10px;"></span>
       <div style="margin-top: 40px; width: 90%; margin-left: auto; margin-right: auto;">
-        <div style="display: flex; justify-content: center; margin-bottom: 10px;">
+        <div class="group-overview-actions">
           <button id="group-invite-member-btn" class="btn accept-btn btn-bounce" style="background-color: transparent; display: flex; align-items: center; gap: 6px;">
             <span class="icon icon-add-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--icon-color-primary);"></span>
             <span style="color: white;">Invite</span>
+          </button>
+          <button id="group-moderate-btn" class="btn accept-btn btn-bounce" style="background-color: transparent; display: none; align-items: center; gap: 6px;">
+            <span class="icon icon-warning" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--danger-color);"></span>
+            <span style="color: white;">Moderate</span>
           </button>
           <button id="group-leave-btn" class="btn cancel-btn btn-bounce" style="display: none; align-items: center; gap: 6px;">
             <span class="icon icon-x-user" style="width: 16px; height: 16px; flex-shrink: 0; position: relative; background-color: var(--danger-color);"></span>
@@ -1975,6 +1980,60 @@
       <div class="status-dialog-actions">
         <button id="status-clear" class="status-btn-clear">Clear Status</button>
         <button id="status-save" class="status-btn-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Community Moderation console: raid triage + the two containment verbs
+       (banlist edition, key rotation). Owner/BAN-holders only, Concord v2 only. -->
+  <div id="mod-overlay" class="mod-overlay">
+    <div class="mod-card">
+      <div class="mod-head">
+        <div class="mod-head-titles">
+          <span class="mod-label">Moderation</span>
+          <h3 id="mod-community-name" class="mod-title cutoff"></h3>
+        </div>
+        <span id="mod-epoch" class="mod-epoch"></span>
+        <button id="mod-close" class="mod-x" aria-label="Close">&#x2715;</button>
+      </div>
+
+      <div id="mod-alert" class="mod-alert" style="display: none;">
+        <span class="icon icon-warning mod-alert-icon"></span>
+        <div class="mod-alert-text">
+          <strong id="mod-alert-title"></strong>
+          <span id="mod-alert-body"></span>
+        </div>
+      </div>
+
+      <p class="mod-explain">Ticked members stay. Unticked members lose access when you rotate or ban.</p>
+
+      <div class="mod-toolbar">
+        <div class="mod-search">
+          <span class="icon icon-search mod-search-icon"></span>
+          <input id="mod-search-input" placeholder="Search members..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+        </div>
+        <div id="mod-filters" class="mod-filters"></div>
+      </div>
+
+      <div id="mod-list" class="mod-list"></div>
+
+      <div class="mod-foot">
+        <div class="mod-tally">
+          <span class="mod-tally-keep"><b id="mod-tally-keep">0</b> staying</span>
+          <span class="mod-tally-cut"><b id="mod-tally-cut">0</b> removing</span>
+          <span id="mod-banlist" class="mod-tally-ban"></span>
+        </div>
+        <div class="mod-actions">
+          <button id="mod-revoke-invites" class="mod-btn">
+            <span class="icon icon-locked"></span><span class="mod-btn-label">Revoke invites</span>
+          </button>
+          <button id="mod-rotate" class="mod-btn">
+            <span class="icon icon-refresh"></span><span class="mod-btn-label">Rotate keys</span>
+          </button>
+          <button id="mod-ban-rotate" class="mod-btn mod-btn-danger">
+            <span class="icon icon-x-user"></span><span class="mod-btn-label">Ban &amp; rotate</span>
+          </button>
+        </div>
       </div>
     </div>
   </div>
