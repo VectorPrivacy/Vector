@@ -1965,6 +1965,98 @@ pub async fn kick_member<T: Transport + ?Sized>(transport: &T, community: &Commu
     .await
 }
 
+/// What a [`kick_members`] sweep actually managed to do.
+#[derive(Debug, Default)]
+pub struct KickSweep {
+    pub kicked: Vec<PublicKey>,
+    /// Targets the caller has no standing over, with the reason. Collected rather than
+    /// returned as an error: one unkickable member must not sink the rest of the wave.
+    pub refused: Vec<(PublicKey, String)>,
+    /// Publishes that failed on the wire — transient, and safe to retry.
+    pub failed: Vec<PublicKey>,
+}
+
+/// Kick many members in one sweep.
+///
+/// A Kick is an individual directive, unlike a Banlist edition which names every npub in
+/// one document, so the wire cost here is inherently linear and there is nothing to
+/// batch. What this saves is everything around it: [`kick_member`] folds the whole
+/// control plane per call, so kicking a raid one at a time spends a paged network fetch
+/// per target. Authority, citation and the plane key are resolved once and reused.
+///
+/// `on_progress(done, total)` fires after every target, refusals included, so a caller
+/// can drive a counter through a sweep that takes minutes.
+pub async fn kick_members<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    targets: &[PublicKey],
+    on_progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<KickSweep, String> {
+    crate::db::scoped(async move {
+        assert_current_root(community)?;
+        let mut out = KickSweep::default();
+        if targets.is_empty() {
+            return Ok(out);
+        }
+        let signer = crate::signer::active_signer()?;
+        let my_pk = me_pk()?;
+        let my_hex = my_pk.to_hex();
+        let owner_hex = community.owner()?.to_hex();
+        // ONCE. This is the paged control-plane fetch that makes the per-member path
+        // unusable in bulk.
+        let authority = fetch_authority(transport, community).await;
+        let citation = required_authority_citation(community, &my_pk)?;
+        let gb_group =
+            super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+
+        let total = targets.len();
+        for (i, target) in targets.iter().enumerate() {
+            let target_hex = target.to_hex();
+            let outranks = |perm: u64| {
+                authority.roles.can_act_on_member(&my_hex, Some(&owner_hex), &target_hex, perm)
+            };
+            if !outranks(crate::community::roles::Permissions::KICK) {
+                out.refused.push((*target, "you do not outrank this member".to_string()));
+                on_progress(i + 1, total);
+                continue;
+            }
+            // CORD-04 §6: a Kick is Role Removal THEN the directive. Only a role-holder
+            // pays for the strip, so a wave of plain members never touches the control
+            // plane at all. A strip we attempt and lose skips the target rather than
+            // publishing a directive we know leaves rank behind.
+            let holds_roles =
+                authority.roles.grants.iter().any(|g| g.member == target_hex && !g.role_ids.is_empty());
+            if holds_roles && outranks(crate::community::roles::Permissions::MANAGE_ROLES) {
+                if let Err(e) = grant_roles(transport, community, target, Vec::new()).await {
+                    out.refused.push((*target, format!("could not strip roles before kicking: {e}")));
+                    on_progress(i + 1, total);
+                    continue;
+                }
+            }
+            let at_ms = now_ms();
+            let rumor = guestbook::build_kick_rumor(my_pk, *target, citation.as_ref(), at_ms);
+            match guestbook::seal_guestbook_rumor_signed(
+                &signer,
+                my_pk,
+                &rumor,
+                &gb_group,
+                Timestamp::from_secs(at_ms / 1000),
+            )
+            .await
+            {
+                Ok((wrap, _)) => match transport.publish(&wrap, &community.relays).await {
+                    Ok(_) => out.kicked.push(*target),
+                    Err(_) => out.failed.push(*target),
+                },
+                Err(_) => out.failed.push(*target),
+            }
+            on_progress(i + 1, total);
+        }
+        Ok(out)
+    })
+    .await
+}
+
 /// A community's folded, delegation-authorized authority — the on-demand read
 /// view (a paged control-plane fetch + fold, nothing persisted). `roles` is the
 /// owner-seeded authorized roster (shared algebra with v1); `banned` the

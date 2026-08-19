@@ -1311,6 +1311,20 @@ pub(crate) async fn register_v2_chats_inner(community: &crate::community::v2::co
     .await
 }
 
+/// How long a community's raid verdict stays warm. Long enough that opening the panel
+/// right after seeing its badge is instant, short enough that a wave arriving now shows
+/// up without the moderator reloading anything.
+const RAID_REPORT_TTL_SECS: u64 = 90;
+
+/// Per-account: the verdict is derived from this account's database and its roster.
+struct RaidReportCache;
+
+#[allow(clippy::type_complexity)]
+fn raid_report_cache(
+) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<crate::community::raid::RaidReport>)>>> {
+    crate::db::current_session().scoped::<RaidReportCache, _>()
+}
+
 impl VectorCore {
     /// Join a Community from a public invite URL (`vectorapp.io/invite#...`). Fetches the
     /// token-encrypted bundle, persists the member-view Community, and registers its channels
@@ -2814,6 +2828,332 @@ impl VectorCore {
             .into_iter()
             .map(|(npub, last_active)| serde_json::json!({ "npub": npub, "last_active": last_active }))
             .collect()
+    }
+
+    /// Everything the moderation panel needs about one Community, read once so the
+    /// parts agree with each other: every member scored against the raid evidence
+    /// ([`crate::community::raid`]), the duplicate-text cohorts behind those verdicts,
+    /// the live invite links, and what the caller may actually do about it.
+    ///
+    /// v2 only — the containment this feeds (batch ban, refounding) are v2 verbs.
+    pub fn community_moderation_intel(&self, community_id: &str) -> Result<serde_json::Value> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("moderation tools require a Concord v2 community".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let report = Self::raid_report(&cid_hex)?;
+        let invites = crate::db::community::list_public_invites(&cid_hex).unwrap_or_default();
+        let banlist = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+        let caps = self.community_capabilities(community_id).unwrap_or_else(|_| serde_json::json!({}));
+        let owner_b32 = community.owner().map_err(VectorError::Other)?.to_bech32().unwrap_or_default();
+
+        Ok(serde_json::json!({
+            "community_id": cid_hex,
+            "name": community.name,
+            "owner_npub": owner_b32,
+            "epoch": community.root_epoch.0,
+            "report": &*report,
+            "invites": invites.iter().map(|i| serde_json::json!({
+                "token": i.token,
+                "label": i.label,
+                "created_at": i.created_at,
+                "expires_at": i.expires_at,
+                "join_count": i.join_count,
+            })).collect::<Vec<_>>(),
+            "banlist_count": banlist.len(),
+            "banlist_max": crate::community::v2::roles::MAX_BANLIST,
+            "capabilities": caps,
+        }))
+    }
+
+    /// The raid verdict alone, for the badge on a community header. Same assessment as
+    /// the panel and served from the same cache, so surfacing the alert costs nothing
+    /// once and then nothing at all until it expires.
+    pub fn check_community_raid(&self, community_id: &str) -> Result<serde_json::Value> {
+        let Some(community) = Self::load_v2_if_v2(community_id)? else {
+            return Ok(serde_json::json!({ "detected": false }));
+        };
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let report = Self::raid_report(&cid_hex)?;
+        let biggest = report.cohorts.first();
+        Ok(serde_json::json!({
+            "detected": report.raid_detected,
+            "suspects": report.suspects,
+            "cohort": biggest.map(|c| c.size).unwrap_or(0),
+            "sample": biggest.map(|c| c.sample.chars().take(60).collect::<String>()).unwrap_or_default(),
+        }))
+    }
+
+    /// Assess a community, memoised for [`RAID_REPORT_TTL_SECS`]. The read decrypts a
+    /// four-thousand-message window, so a header badge asking on every render would be a
+    /// real cost; the panel opening moments later reuses the same answer.
+    fn raid_report(cid_hex: &str) -> Result<std::sync::Arc<crate::community::raid::RaidReport>> {
+        use crate::community::raid;
+        use crate::community::v2::guestbook::GuestbookEntry;
+        use nostr_sdk::prelude::PublicKey;
+        use std::collections::{HashMap, HashSet};
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        {
+            let cache = raid_report_cache();
+            let map = cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, report)) = map.get(cid_hex) {
+                if now_secs.saturating_sub(*at) < RAID_REPORT_TTL_SECS {
+                    return Ok(report.clone());
+                }
+            }
+        }
+        let community = crate::db::community::load_community_v2(&crate::community::CommunityId(
+            crate::simd::hex::hex_to_bytes_32(cid_hex),
+        ))
+        .map_err(VectorError::Other)?
+        .ok_or_else(|| VectorError::Other("moderation tools require a Concord v2 community".into()))?;
+        let owner_b32 = community.owner().map_err(VectorError::Other)?.to_bech32().unwrap_or_default();
+        let me_b32 = state::my_public_key().and_then(|p| p.to_bech32().ok()).unwrap_or_default();
+
+        // Anyone holding a live grant is staff, whatever the role is called.
+        let roster = crate::db::community::get_community_roles(cid_hex).unwrap_or_default();
+        let staff: HashSet<String> = roster
+            .grants
+            .iter()
+            .filter(|g| !g.role_ids.is_empty())
+            .filter_map(|g| PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok()))
+            .collect();
+
+        // The same fold the member list paints, so the panel can't disagree with it.
+        let members: Vec<String> = crate::community::v2::service::stored_memberlist(&community)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|pk| pk.to_bech32().ok())
+            .collect();
+
+        // Guestbook: authoritative joins, with the invite each one came through.
+        let (events, _cursor) = crate::db::community::get_guestbook(cid_hex).unwrap_or_default();
+        let mut joined_at: HashMap<String, u64> = HashMap::new();
+        let mut invite_label: HashMap<String, String> = HashMap::new();
+        for e in &events {
+            let GuestbookEntry::Join { member, invited_by, at_ms } = &e.entry else { continue };
+            let Ok(b32) = member.to_bech32();
+            // Earliest join wins: a rejoin must not erase real tenure.
+            let slot = joined_at.entry(b32.clone()).or_insert(*at_ms);
+            *slot = (*slot).min(*at_ms);
+            if let Some((_creator, label)) = invited_by {
+                invite_label.entry(b32).or_insert_with(|| label.clone());
+            }
+        }
+
+        let footprints: HashMap<String, crate::db::community::AuthorFootprint> =
+            crate::db::community::community_author_footprints(cid_hex)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|f| (f.npub.clone(), f))
+                .collect();
+
+        // Cohort evidence comes from the recent window only — a raid is by definition
+        // recent, and the whole history would cost a vault decrypt per row.
+        const TEXT_WINDOW: usize = 4_000;
+        let mut texts: HashMap<String, Vec<String>> = HashMap::new();
+        for (npub, _at, text) in crate::db::community::community_recent_texts(cid_hex, TEXT_WINDOW).unwrap_or_default() {
+            texts.entry(npub).or_default().push(text);
+        }
+
+        let signals: Vec<raid::MemberSignals> = members
+            .iter()
+            .map(|npub| {
+                let f = footprints.get(npub);
+                raid::MemberSignals {
+                    npub: npub.clone(),
+                    joined_at_ms: joined_at.get(npub).copied().unwrap_or(0),
+                    invite_label: invite_label.get(npub).cloned(),
+                    messages: f.map(|f| f.messages).unwrap_or(0),
+                    first_secs: f.map(|f| f.first_secs).unwrap_or(0),
+                    last_secs: f.map(|f| f.last_secs).unwrap_or(0),
+                    texts: texts.get(npub).cloned().unwrap_or_default(),
+                    is_owner: *npub == owner_b32,
+                    is_admin: staff.contains(npub),
+                    is_me: *npub == me_b32,
+                }
+            })
+            .collect();
+
+        let report = std::sync::Arc::new(raid::assess(&signals, now_secs, &raid::RaidParams::default()));
+        raid_report_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(cid_hex.to_string(), (now_secs, report.clone()));
+        Ok(report)
+    }
+
+    /// Drop a community's memoised verdict. Every moderation action changes who is a
+    /// member, so serving the pre-action answer would leave the badge accusing people
+    /// who are already gone.
+    pub fn invalidate_raid_report(community_id: &str) {
+        raid_report_cache().lock().unwrap_or_else(|e| e.into_inner()).remove(community_id);
+    }
+
+    /// Rotate the Community's keys with no banlist edit: mint a new root epoch that
+    /// only `retain` can follow. This is the containment that scales — a wave of
+    /// thousands cannot fit in a 500-entry banlist, but it can be locked out of the
+    /// next epoch in one publish. `retain` is a keep-list; everyone else is cut.
+    ///
+    /// Passing an empty `retain` rotates without removing anyone, which is what you
+    /// want when the invite link leaked but the members are all real.
+    pub async fn refound_community(&self, community_id: &str, retain: &[&str]) -> Result<()> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("re-founding requires a Concord v2 community".into()))?;
+        let removed = Self::members_to_remove(&community, retain)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        crate::community::v2::service::refound_community(&transport, &community, &removed)
+            .await
+            .map_err(VectorError::Other)?;
+        Ok(())
+    }
+
+    /// The members a `retain` keep-list would cut.
+    ///
+    /// Folded from the LOCAL store, and that is not an oversight. The network memberlist
+    /// is epoch-scoped — its Guestbook plane holds only the current epoch's snapshot, and
+    /// its channel reads only return what is decryptable now — so members stranded on a
+    /// buried epoch are already absent from it. Those are precisely the phantoms this
+    /// panel exists to clear: they survive ONLY in the local store, which accumulates
+    /// across epochs. Folding the network list here returns an empty removal set and the
+    /// sweep does nothing.
+    ///
+    /// The two lists answer different questions and must not be unified. "Who receives a
+    /// new key" is the rotation's own network fold, which it does for itself. "Who is a
+    /// phantom to evict" is this one, and being local-only is the definition of it.
+    ///
+    /// An empty `retain` removes nobody — a rotation for its own sake. You and the owner
+    /// are never in the result: a keep-list omitting either is a caller mistake, and
+    /// honouring it would lock the community's own staff out of an epoch they just minted.
+    fn members_to_remove(
+        community: &crate::community::v2::community::CommunityV2,
+        retain: &[&str],
+    ) -> Result<Vec<nostr_sdk::prelude::PublicKey>> {
+        use nostr_sdk::prelude::PublicKey;
+        let keep: std::collections::HashSet<PublicKey> =
+            retain.iter().filter_map(|n| PublicKey::parse(n).ok()).collect();
+        if keep.is_empty() {
+            return Ok(Vec::new());
+        }
+        let me = state::my_public_key();
+        let owner = community.owner().ok();
+        Ok(crate::community::v2::service::stored_memberlist(community)
+            .map_err(VectorError::Other)?
+            .into_iter()
+            .filter(|pk| !keep.contains(pk))
+            .filter(|pk| Some(*pk) != me && Some(*pk) != owner)
+            .collect())
+    }
+
+    /// Rotate the keys around the survivors, then kick the removed off the roster.
+    ///
+    /// The order is load-bearing, and it is ROTATE FIRST. A Guestbook plane is derived
+    /// per epoch, so kicks published before the rotation land on a plane the rotation
+    /// immediately buries: every reader then has to receive them in the window before it
+    /// follows the rekey, and whatever is still in flight is never folded by anyone.
+    /// Publishing onto the NEW epoch instead puts the departures on the plane every
+    /// survivor will read from now on, so a client that catches up an hour later still
+    /// folds them. It also closes the re-admission window — the removed hold no key at
+    /// the new epoch, so they cannot post their way back into the memberlist between
+    /// their own kick and the rotation.
+    ///
+    /// The rotation alone would not clear the roster: the guestbook store is keyed by
+    /// community and appended across epochs, and the memberlist re-admits observed
+    /// authors from local history regardless of epoch. The kicks are what evict them.
+    pub async fn purge_and_refound(
+        &self,
+        community_id: &str,
+        retain: &[&str],
+        on_progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<serde_json::Value> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("re-founding requires a Concord v2 community".into()))?;
+        let removed = Self::members_to_remove(&community, retain)?;
+        log_info!("[Moderation] purge: {} to remove, {} retained", removed.len(), retain.len());
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        crate::community::v2::service::refound_community(&transport, &community, &removed)
+            .await
+            .map_err(VectorError::Other)?;
+        // Re-load onto the epoch the rotation just minted: kicking against the stale
+        // struct would address the plane we just buried, which is the whole bug this
+        // ordering exists to avoid.
+        let fresh = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("community gone during the purge".into()))?;
+        let sweep = crate::community::v2::service::kick_members(&transport, &fresh, &removed, on_progress)
+            .await
+            .map_err(VectorError::Other)?;
+        // Fold our own directives back. Without this the local roster only shows what
+        // the live subscription happened to echo before the sweep finished.
+        let _ = crate::community::v2::service::sync_guestbook(&transport, &fresh).await;
+        log_info!(
+            "[Moderation] purge: rotated to epoch {}, kicked {}/{} ({} refused, {} failed)",
+            fresh.root_epoch.0,
+            sweep.kicked.len(),
+            removed.len(),
+            sweep.refused.len(),
+            sweep.failed.len()
+        );
+        Ok(serde_json::json!({
+            "kicked": sweep.kicked.len(),
+            "refused": sweep.refused.len(),
+            "failed": sweep.failed.len(),
+            "rotated": true,
+        }))
+    }
+
+    /// Kick many members without rotating. Exposed for callers that want the roster
+    /// cleaned but the keys left alone.
+    pub async fn kick_community_members(
+        &self,
+        community_id: &str,
+        npubs: &[&str],
+        on_progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<serde_json::Value> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("kicking requires a Concord v2 community".into()))?;
+        use nostr_sdk::prelude::PublicKey;
+        let targets: Vec<PublicKey> = npubs.iter().filter_map(|n| PublicKey::parse(n).ok()).collect();
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        let sweep = crate::community::v2::service::kick_members(&transport, &community, &targets, on_progress)
+            .await
+            .map_err(VectorError::Other)?;
+        let _ = crate::community::v2::service::sync_guestbook(&transport, &community).await;
+        log_info!(
+            "[Moderation] kick sweep: {}/{} kicked ({} refused, {} failed)",
+            sweep.kicked.len(),
+            targets.len(),
+            sweep.refused.len(),
+            sweep.failed.len()
+        );
+        Ok(serde_json::json!({
+            "kicked": sweep.kicked.len(),
+            "refused": sweep.refused.iter().map(|(_, why)| why.clone()).collect::<Vec<_>>(),
+            "failed": sweep.failed.len(),
+        }))
+    }
+
+    /// Retire every public invite link this Community holds. A raid arrives through a
+    /// link, and revoking them one at a time loses the race — the whole set has to go
+    /// in one pass before the rotation, or the next wave walks in through the survivor.
+    /// Returns `(revoked, failed)`.
+    pub async fn revoke_all_public_invites(&self, community_id: &str) -> Result<(usize, usize)> {
+        let tokens: Vec<String> = crate::db::community::list_public_invites(community_id)
+            .map_err(VectorError::Other)?
+            .into_iter()
+            .map(|i| i.token)
+            .collect();
+        let mut revoked = 0usize;
+        let mut failed = 0usize;
+        for token in &tokens {
+            match self.revoke_public_invite(community_id, token).await {
+                Ok(()) => revoked += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        Ok((revoked, failed))
     }
 
     /// One synchronous v2 follow pass — rekeys first (a base adopt moves the
