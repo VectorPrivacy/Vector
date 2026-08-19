@@ -184,7 +184,12 @@ impl IrohState {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        log_info!("[WEBXDC] Endpoint bound, relay ready");
+        let our_addr = endpoint.addr();
+        log_info!(
+            "[WEBXDC] Endpoint bound as {} — home relay: {}",
+            short_id(&our_addr.id),
+            relay_urls(&our_addr)
+        );
 
         // Create gossip with max message size of 128 KB
         let gossip = Gossip::builder()
@@ -340,6 +345,11 @@ impl IrohState {
                 let addr = peer_addr.clone();
                 let ep = self.endpoint.clone();
                 let g = self.gossip.clone();
+                log_info!(
+                    "[WEBXDC] Bootstrap dial {} via relay: {}",
+                    short_id(&addr.id),
+                    relay_urls(&addr)
+                );
                 vector_core::db::spawn_bound(async move {
                     match ep.connect(addr, GOSSIP_ALPN).await {
                         Ok(conn) => {
@@ -445,7 +455,11 @@ impl IrohState {
             }
         }
 
-        log_trace!("[WEBXDC] add_peer: Connecting to peer {}", peer_addr.id);
+        log_info!(
+            "[WEBXDC] add_peer: connecting to {} via relay: {}",
+            short_id(&peer_addr.id),
+            relay_urls(&peer_addr)
+        );
 
         // Connect and hand to gossip, then join_peers.
         // Topic subscription already exists (channel is in the map),
@@ -1093,6 +1107,28 @@ pub fn decode_node_addr(s: &str) -> Result<EndpointAddr> {
     let json = String::from_utf8(bytes)?;
     let addr: EndpointAddr = serde_json::from_str(&json)?;
     Ok(relay_only(addr))
+}
+
+/// A node id trimmed for logs. Full ids are 64 hex characters and every log
+/// line here carries one; the leading bytes are enough to follow a peer
+/// through a session.
+pub fn short_id(id: &PublicKey) -> String {
+    id.to_string().chars().take(16).collect()
+}
+
+/// The relay URLs an address carries, for logging. Empty reads as `none`,
+/// which is the interesting case: an address with no relay is undiallable,
+/// and ours having none means our advertisements are going out unreachable.
+pub fn relay_urls(addr: &EndpointAddr) -> String {
+    let urls: Vec<String> = addr
+        .addrs
+        .iter()
+        .filter_map(|ta| match ta {
+            TransportAddr::Relay(url) => Some(url.to_string()),
+            _ => None,
+        })
+        .collect();
+    if urls.is_empty() { "none".to_string() } else { urls.join(", ") }
 }
 
 /// An endpoint address with every non-relay transport removed.
