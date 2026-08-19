@@ -1050,12 +1050,23 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
         let my_pk = me_pk()?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let mut list = fetch_invite_list(transport, &community.relays).await?.ok_or("no invite list found to revoke from")?;
-        let entry = list
-            .entries
-            .iter()
-            .find(|e| e.token == token_hex && e.community_id == cid_hex)
-            .cloned()
-            .ok_or("no such link in the invite list")?;
+        let entry = list.entries.iter().find(|e| e.token == token_hex && e.community_id == cid_hex).cloned();
+        let Some(entry) = entry else {
+            // The list is OURS and was positively fetched; a token it neither vends is a
+            // husk — a local row kept past a revocation or privatize performed elsewhere
+            // (another device, Armada). The row carries no signer_sk, so no revocation
+            // can EVER be built from it: erroring here just leaves an entry the owner can
+            // neither use nor remove. Pruning the local record is the only completion.
+            // (Ok(None) above still errors — an unreadable list is not proof of absence.)
+            let tombstoned = list.tombstones.iter().any(|t| t.token == token_hex && t.community_id == cid_hex);
+            crate::log_warn!(
+                "[Invites] link {} is not in the fetched invite list ({}) — pruning the local record",
+                &token_hex[..token_hex.len().min(8)],
+                if tombstoned { "already tombstoned" } else { "retired elsewhere" }
+            );
+            let _ = crate::db::community::delete_public_invite(token_hex);
+            return Ok(());
+        };
         // Re-post the bundle coordinate as a revocation tombstone (creator-signed).
         let link_signer = Keys::parse(&entry.signer_sk).map_err(|_| "malformed link signer")?;
         let revocation = invite::build_revocation(&link_signer).map_err(|e| e.to_string())?;
@@ -9299,6 +9310,42 @@ mod tests {
         assert_eq!(adopted.root_epoch, Epoch(1));
         assert_eq!(adopted.control_pk, refounded.control_pk);
         assert_eq!(adopted.control_root, refounded.control_root, "staff crossing a rotation get the new secret in the blob");
+    }
+
+    #[tokio::test]
+    async fn revoking_a_husk_prunes_the_local_row_instead_of_erroring_forever() {
+        // The list is per-creator and cross-device: another device (or Armada) can
+        // retire a link this one still holds a row for. That row carries no signer_sk,
+        // so no revocation can ever be built from it — the old behaviour errored with
+        // "no such link in the invite list" BEFORE the local delete, leaving an entry
+        // the owner could neither use nor remove.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Husks", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let minted = mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+        assert_eq!(crate::db::community::list_public_invites(&cid_hex).unwrap().len(), 1);
+
+        // "Another device" retires the link: republish the invite list without it.
+        let signer = crate::signer::active_signer().unwrap();
+        let my_pk = me_pk().unwrap();
+        let mut list = fetch_invite_list(&relay, &community.relays).await.unwrap().unwrap();
+        list.entries.retain(|e| e.token != token_hex);
+        let ev = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.unwrap();
+        relay.publish(&ev, &community.relays).await.unwrap();
+
+        // This device's revoke now completes by pruning, not by erroring.
+        revoke_public_link(&relay, &community, &token_hex).await.unwrap();
+        assert!(
+            crate::db::community::list_public_invites(&cid_hex).unwrap().is_empty(),
+            "the husk row is gone — the panel can no longer show a link nobody can use or remove"
+        );
+
+        // An unreadable list is NOT proof of absence: only a fetched list may prune.
+        // (Guarded by the ok_or above the husk branch; a fresh row + an empty relay
+        // would hit "no invite list found", never the prune.)
     }
 
     #[tokio::test]
