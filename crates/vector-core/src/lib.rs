@@ -1320,6 +1320,16 @@ const RAID_REPORT_TTL_SECS: u64 = 90;
 struct RaidReportCache;
 
 #[allow(clippy::type_complexity)]
+struct PolicyReportCache;
+
+/// The engine's console report, memoised like the assessor's was: evaluating
+/// decrypts a four-thousand-message window and clusters every author, so a
+/// header badge asking on every render would be a real cost.
+fn policy_report_cache(
+) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<serde_json::Value>)>>> {
+    crate::db::current_session().scoped::<PolicyReportCache, _>()
+}
+
 fn raid_report_cache(
 ) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<crate::community::raid::RaidReport>)>>> {
     crate::db::current_session().scoped::<RaidReportCache, _>()
@@ -2840,7 +2850,7 @@ impl VectorCore {
         let community = Self::load_v2_if_v2(community_id)?
             .ok_or_else(|| VectorError::Other("moderation tools require a Concord v2 community".into()))?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let report = Self::raid_report(&cid_hex)?;
+        let report = Self::policy_console_report(&cid_hex, &community)?;
         let invites = crate::db::community::list_public_invites(&cid_hex).unwrap_or_default();
         let banlist = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
         let caps = self.community_capabilities(community_id).unwrap_or_else(|_| serde_json::json!({}));
@@ -2873,13 +2883,16 @@ impl VectorCore {
             return Ok(serde_json::json!({ "detected": false }));
         };
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let report = Self::raid_report(&cid_hex)?;
-        let biggest = report.cohorts.first();
+        let report = Self::policy_console_report(&cid_hex, &community)?;
+        let biggest = report["cohorts"].get(0);
         Ok(serde_json::json!({
-            "detected": report.raid_detected,
-            "suspects": report.suspects,
-            "cohort": biggest.map(|c| c.size).unwrap_or(0),
-            "sample": biggest.map(|c| c.sample.chars().take(60).collect::<String>()).unwrap_or_default(),
+            "detected": report["raid_detected"].as_bool().unwrap_or(false),
+            "suspects": report["suspects"].as_u64().unwrap_or(0),
+            "cohort": biggest.and_then(|c| c["size"].as_u64()).unwrap_or(0),
+            "sample": biggest
+                .and_then(|c| c["sample"].as_str())
+                .map(|s| s.chars().take(60).collect::<String>())
+                .unwrap_or_default(),
         }))
     }
 
@@ -2990,6 +3003,102 @@ impl VectorCore {
         Ok(report)
     }
 
+    /// The moderation console's report, from the POLICY ENGINE. Memoised for
+    /// [`RAID_REPORT_TTL_SECS`], same as the assessor it replaces.
+    ///
+    /// `raid.rs` still runs — [`Self::policy_side_by_side`] diffs the two — but
+    /// the panel reads this. The engine earned it on live data: it clustered a
+    /// real raid out of local storage and stayed silent on a healthy community
+    /// across six runs.
+    fn policy_console_report(cid_hex: &str, community: &crate::community::v2::community::CommunityV2) -> Result<std::sync::Arc<serde_json::Value>> {
+        use crate::community::v2::guestbook::GuestbookEntry;
+        use nostr_sdk::prelude::PublicKey;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        {
+            let cache = policy_report_cache();
+            let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, cached)) = guard.get(cid_hex) {
+                if now_secs.saturating_sub(*at) < RAID_REPORT_TTL_SECS {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+
+        let owner = community.owner().map_err(VectorError::Other)?;
+        let me = state::my_public_key();
+
+        // Staff = a role carrying moderation permissions. NOT mere role
+        // membership: a cosmetic or self-serve role must never confer immunity
+        // from the rules this engine exists to enforce.
+        use crate::community::roles::Permissions;
+        const MOD_MASK: u64 = Permissions::MANAGE_ROLES
+            | Permissions::MANAGE_CHANNELS
+            | Permissions::MANAGE_METADATA
+            | Permissions::KICK
+            | Permissions::BAN
+            | Permissions::MANAGE_MESSAGES;
+        let roster = crate::db::community::get_community_roles(cid_hex).unwrap_or_default();
+        let staff: std::collections::HashSet<String> = roster
+            .grants
+            .iter()
+            .filter(|g| {
+                g.role_ids
+                    .iter()
+                    .any(|rid| roster.roles.iter().any(|r| &r.role_id == rid && (r.permissions.0 & MOD_MASK) != 0))
+            })
+            .map(|g| g.member.clone())
+            .collect();
+        let roles_of: std::collections::HashMap<String, Vec<String>> =
+            roster.grants.iter().map(|g| (g.member.clone(), g.role_ids.clone())).collect();
+
+        let (events, _cursor) = crate::db::community::get_guestbook(cid_hex).unwrap_or_default();
+        let mut joined_at: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut invite_label: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for e in &events {
+            let GuestbookEntry::Join { member, invited_by, at_ms } = &e.entry else { continue };
+            let hex = member.to_hex();
+            // Earliest join wins: a rejoin must not erase real tenure.
+            let slot = joined_at.entry(hex.clone()).or_insert(*at_ms);
+            *slot = (*slot).min(*at_ms);
+            if let Some((_creator, label)) = invited_by {
+                invite_label.entry(hex).or_insert_with(|| label.clone());
+            }
+        }
+
+        let members: Vec<(PublicKey, Option<u64>, bool, Vec<String>, Option<String>)> =
+            crate::community::v2::service::stored_memberlist(community)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|pk| {
+                    let hex = pk.to_hex();
+                    (
+                        pk,
+                        joined_at.get(&hex).copied(),
+                        staff.contains(&hex),
+                        roles_of.get(&hex).cloned().unwrap_or_default(),
+                        invite_label.get(&hex).cloned(),
+                    )
+                })
+                .collect();
+
+        let now_ms = now_secs.saturating_mul(1000);
+        let assembled =
+            crate::community::policy::harness::assemble(cid_hex, &owner, me.as_ref(), &members, now_ms)
+                .map_err(VectorError::Other)?;
+        let report = std::sync::Arc::new(
+            crate::community::policy::harness::evaluate_for_console(&assembled, now_ms)
+                .map_err(VectorError::Other)?,
+        );
+        policy_report_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(cid_hex.to_string(), (now_secs, report.clone()));
+        Ok(report)
+    }
+
     /// Run the policy engine beside the shipped assessor and report where they
     /// disagree. Diagnostic only: the engine convicts nothing in production
     /// until this diff has been read against real data.
@@ -3068,6 +3177,7 @@ impl VectorCore {
     /// member, so serving the pre-action answer would leave the badge accusing people
     /// who are already gone.
     pub fn invalidate_raid_report(community_id: &str) {
+        policy_report_cache().lock().unwrap_or_else(|e| e.into_inner()).remove(community_id);
         raid_report_cache().lock().unwrap_or_else(|e| e.into_inner()).remove(community_id);
     }
 

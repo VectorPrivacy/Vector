@@ -8,8 +8,10 @@
 //! changes no membership.
 
 use super::document::*;
-use super::engine::{evaluate, LoadedPolicy, MemberSignal, MessageSignal, Signals};
+use super::engine::{evaluate, evaluate_as, LoadedPolicy, MemberSignal, MessageSignal, Signals};
 use super::types::*;
+use super::engine::EvalMode;
+use super::normalize::EmojiCodes;
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use std::collections::BTreeSet;
 
@@ -152,6 +154,290 @@ const SHORTENERS: &[&str] = &[
     "rebrand.ly", "shorturl.at", "rb.gy", "tiny.cc", "shorte.st", "bc.vc", "clck.ru", "soo.gd", "s2r.co",
     "tr.ee", "dub.sh", "e.vg", "paw.wf", "shm.to", "snl.ink", "surl.li", "url9.de", "waffl.link",
 ];
+
+/// Everything an evaluation needs, assembled from local state once: the engine
+/// inputs and the display facts the console shows beside each verdict. Both the
+/// console and the side-by-side diff read this, so they can never disagree
+/// about what they were looking at.
+pub struct Assembled {
+    pub signals: Signals,
+    pub facts: std::collections::BTreeMap<String, MemberFacts>,
+    pub corpus: usize,
+}
+
+#[allow(clippy::type_complexity)]
+pub fn assemble(
+    community_id_hex: &str,
+    owner: &PublicKey,
+    me: Option<&PublicKey>,
+    members: &[(PublicKey, Option<u64>, bool, Vec<String>, Option<String>)],
+    now_ms: u64,
+) -> Result<Assembled, String> {
+    let rows = crate::db::community::community_policy_messages(community_id_hex, caps::WINDOW_MAX_MESSAGES)?;
+    let corpus = rows.len();
+    let mut messages: Vec<MessageSignal> = Vec::with_capacity(rows.len());
+    for m in rows {
+        let (Some(id), Some(author), Some(channel)) = (
+            crate::simd::hex::hex_to_bytes_32_checked(&m.id),
+            subject_of(&m.npub),
+            crate::simd::hex::hex_to_bytes_32_checked(&m.channel_id),
+        ) else {
+            continue;
+        };
+        messages.push(MessageSignal {
+            id: MessageId(id),
+            author,
+            channel: Hash32(channel),
+            at_ms: m.at_ms,
+            text: m.text,
+            mentions: m.mentions,
+        });
+    }
+
+    let footprints: std::collections::HashMap<String, crate::db::community::AuthorFootprint> =
+        crate::db::community::community_author_footprints(community_id_hex)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| (f.npub.clone(), f))
+            .collect();
+    // Distinct shapes per author, over the window — how someone speaks now is
+    // what tells a person from a script.
+    let codes = EmojiCodes::from_policy(scam_links_policy().emoji_codes.iter());
+    let mut distinct: std::collections::HashMap<[u8; 32], BTreeSet<String>> = std::collections::HashMap::new();
+    for m in &messages {
+        let sk = super::normalize::skeleton(&m.text, &codes);
+        if !sk.is_empty() {
+            distinct.entry(m.author.0).or_default().insert(sk);
+        }
+    }
+
+    let channels: BTreeSet<[u8; 32]> = messages.iter().map(|m| m.channel.0).collect();
+    let mut member_signals = Vec::with_capacity(members.len());
+    let mut facts = std::collections::BTreeMap::new();
+    for (pk, joined, is_staff, roles, invite_label) in members {
+        let b32 = pk.to_bech32().unwrap_or_default();
+        let fp = footprints.get(&b32);
+        let first_post_ms = fp.map(|f| f.first_secs).filter(|s| *s > 0).map(|s| s.saturating_mul(1000));
+        member_signals.push(MemberSignal {
+            subject: SubjectId(pk.to_bytes()),
+            joined_at_ms: *joined,
+            roles: roles.iter().filter_map(|r| crate::simd::hex::hex_to_bytes_32_checked(r)).map(Hash32).collect(),
+            is_staff: *is_staff,
+            lifetime_messages: fp.map(|f| f.messages).unwrap_or(0),
+            first_post_ms,
+        });
+        // Tenure for DISPLAY uses the same oldest-trace rule the shield does.
+        let oldest = [*joined, first_post_ms].into_iter().flatten().min();
+        facts.insert(
+            b32,
+            MemberFacts {
+                joined_at_ms: joined.unwrap_or(0),
+                invite_label: invite_label.clone(),
+                messages: fp.map(|f| f.messages).unwrap_or(0),
+                distinct: distinct.get(&pk.to_bytes()).map(|d| d.len() as u64).unwrap_or(0),
+                tenure_secs: oldest.map(|o| now_ms.saturating_sub(o) / 1000).unwrap_or(0),
+                last_secs: fp.map(|f| f.last_secs).unwrap_or(0),
+                is_owner: pk == owner,
+                is_admin: *is_staff,
+                is_me: me == Some(pk),
+            },
+        );
+    }
+
+    Ok(Assembled {
+        signals: Signals {
+            owner: SubjectId(owner.to_bytes()),
+            members: member_signals,
+            messages,
+            channels: channels.into_iter().map(Hash32).collect(),
+            relays: vec![],
+            requested_from: 0,
+            requested_to: now_ms,
+            confirmed_from: u64::MAX,
+            confirmed_to: now_ms,
+            roster_version: Hash32([0; 32]),
+        },
+        facts,
+        corpus,
+    })
+}
+
+/// Evaluate the built-in policy and render the console's report.
+pub fn evaluate_for_console(assembled: &Assembled, now_ms: u64) -> Result<serde_json::Value, String> {
+    let policy = scam_links_policy();
+    let bytes = serde_json::to_vec(&policy).map_err(|e| e.to_string())?;
+    let lp = LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None };
+    let report = evaluate_as(&assembled.signals, &[lp], &[], now_ms, EvalMode::Admin);
+    Ok(console_report(&report, &assembled.facts, now_ms / 1000))
+}
+
+/// What the moderation console needs about one member beyond the verdict:
+/// the display facts a moderator reads before acting.
+#[derive(Debug, Clone, Default)]
+pub struct MemberFacts {
+    pub joined_at_ms: u64,
+    pub invite_label: Option<String>,
+    pub messages: u64,
+    pub distinct: u64,
+    pub tenure_secs: u64,
+    pub last_secs: u64,
+    pub is_owner: bool,
+    pub is_admin: bool,
+    pub is_me: bool,
+}
+
+/// Turn an engine report into the shape the moderation console already speaks,
+/// so the panel changes its SOURCE without changing its contract. `raid.rs`
+/// keeps running beside it (see [`run_side_by_side`]) until the two have agreed
+/// on live data for long enough to retire one.
+pub fn console_report(
+    report: &ModerationReport,
+    facts: &std::collections::BTreeMap<String, MemberFacts>,
+    now_secs: u64,
+) -> serde_json::Value {
+    let Some(pr) = report.policies.first() else {
+        return serde_json::json!({ "members": [], "cohorts": [], "suspects": 0, "trusted": 0, "protected": 0,
+                                   "raid_detected": false, "burst_size": 0, "burst_from_ms": 0, "burst_to_ms": 0 });
+    };
+    let by_subject: std::collections::BTreeMap<String, &SubjectReport> = pr
+        .subjects
+        .iter()
+        .filter_map(|s| PublicKey::from_slice(&s.subject.0).ok()?.to_bech32().ok().map(|b| (b, s)))
+        .collect();
+
+    let (mut suspects, mut trusted, mut protected) = (0usize, 0usize, 0usize);
+    let mut members: Vec<serde_json::Value> = Vec::with_capacity(facts.len());
+    for (npub, f) in facts {
+        let s = by_subject.get(npub);
+        let convictions: Vec<&Conviction> =
+            s.map(|s| s.convictions.iter().filter(|c| !c.suppressed).collect()).unwrap_or_default();
+        let shield = s.map(|s| s.shield).unwrap_or(Shield::None);
+        // The console's four verdicts, from the engine's own vocabulary.
+        let verdict = if shield == Shield::Protected {
+            protected += 1;
+            "protected"
+        } else if !convictions.is_empty() {
+            suspects += 1;
+            "suspect"
+        } else if shield == Shield::Trusted {
+            trusted += 1;
+            "trusted"
+        } else {
+            "neutral"
+        };
+        // Reasons in evidence, never in score — the panel shows WHY, and a
+        // moderator who disagrees can see exactly what they are disagreeing with.
+        let mut reasons: Vec<String> = Vec::new();
+        let mut cohort_peers = 0u32;
+        for c in &convictions {
+            for e in &c.evidence {
+                match e {
+                    Evidence::Cohort { size, sample, .. } => {
+                        cohort_peers = cohort_peers.max(size.saturating_sub(1));
+                        let quoted: String = sample.chars().take(48).collect();
+                        reasons.push(format!(
+                            "Posted the same message as {} other member{} — \"{}\"",
+                            size.saturating_sub(1),
+                            if *size == 2 { "" } else { "s" },
+                            quoted
+                        ));
+                    }
+                    Evidence::Burst { size, .. } => reasons.push(format!("Joined in a burst of {size}")),
+                    Evidence::Rate { count, window_secs, .. } => {
+                        reasons.push(format!("Sent {count} messages in {window_secs}s"))
+                    }
+                    _ => {}
+                }
+            }
+            if c.evidence.is_empty() {
+                reasons.push(match c.rule_id.as_str() {
+                    "fresh" => "Joined in the last 24h".to_string(),
+                    "quiet" => "Has barely posted".to_string(),
+                    "repeat" => format!("Repeated one message {} times", c.hits),
+                    "shorteners" => format!("Posted {} link(s) to a known shortener", c.hits),
+                    other => format!("Matched rule {other}"),
+                });
+            }
+        }
+        if verdict == "protected" {
+            reasons.push(if f.is_owner { "Community owner".into() } else { "Holds a role".into() });
+        } else if verdict == "trusted" && reasons.is_empty() {
+            reasons.push("Long-standing member".into());
+        }
+
+        members.push(serde_json::json!({
+            "npub": npub,
+            "verdict": verdict,
+            "score": s.map(|s| s.confidence).unwrap_or(0),
+            "proven": s.map(|s| s.proven).unwrap_or(0),
+            "reasons": reasons,
+            "joined_at_ms": f.joined_at_ms,
+            "invite_label": f.invite_label,
+            "messages": f.messages,
+            "distinct": f.distinct,
+            "cohort": cohort_peers,
+            "tenure_secs": f.tenure_secs,
+            "last_secs": f.last_secs,
+            "is_owner": f.is_owner,
+            "is_admin": f.is_admin,
+            "is_me": f.is_me,
+        }));
+    }
+    // Suspects first, then by score: the panel opens on what needs deciding.
+    members.sort_by(|a, b| {
+        let rank = |v: &serde_json::Value| match v["verdict"].as_str() {
+            Some("suspect") => 0,
+            Some("neutral") => 1,
+            Some("trusted") => 2,
+            _ => 3,
+        };
+        rank(a).cmp(&rank(b)).then_with(|| b["score"].as_u64().cmp(&a["score"].as_u64()))
+    });
+
+    // Cohort exhibits, largest first.
+    let mut cohorts: std::collections::BTreeMap<[u8; 32], (usize, String)> = std::collections::BTreeMap::new();
+    let mut burst = (0u32, 0u64, 0u64);
+    for s in &pr.subjects {
+        for c in s.convictions.iter().filter(|c| !c.suppressed) {
+            for e in &c.evidence {
+                match e {
+                    Evidence::Cohort { skeleton_hash, size, sample, .. } => {
+                        let slot = cohorts.entry(skeleton_hash.0).or_insert((0, sample.clone()));
+                        slot.0 = slot.0.max(*size as usize);
+                    }
+                    Evidence::Burst { size, from, to } => {
+                        if *size > burst.0 {
+                            burst = (*size, *from, *to);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut cohort_list: Vec<serde_json::Value> = cohorts
+        .into_values()
+        .map(|(size, sample)| serde_json::json!({ "size": size, "sample": sample, "members": [] }))
+        .collect();
+    cohort_list.sort_by(|a, b| b["size"].as_u64().cmp(&a["size"].as_u64()));
+
+    let _ = now_secs;
+    serde_json::json!({
+        "members": members,
+        "cohorts": cohort_list,
+        "suspects": suspects,
+        "trusted": trusted,
+        "protected": protected,
+        "raid_detected": !cohort_list_is_empty(&cohort_list) && suspects > 0,
+        "burst_size": burst.0,
+        "burst_from_ms": burst.1,
+        "burst_to_ms": burst.2,
+    })
+}
+
+fn cohort_list_is_empty(v: &[serde_json::Value]) -> bool {
+    v.is_empty()
+}
 
 /// One member's verdict from each side, for eyeballing where they differ.
 #[derive(Debug, Clone, serde::Serialize)]
