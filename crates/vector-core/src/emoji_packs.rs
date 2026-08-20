@@ -194,6 +194,23 @@ fn theme_emoji_tags() -> std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>
     crate::db::current_session().scoped::<ThemeEmojiTags, _>()
 }
 
+/// Every shortcode that renders as an image for this account. A `:code:` outside
+/// this set reaches the reader as literal text, so text analysis must keep it.
+pub fn known_shortcodes() -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(conn) = crate::db::get_db_connection_guard_static() {
+        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT shortcode FROM emoji_pack_items") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                out.extend(rows.flatten());
+            }
+        }
+    }
+    if let Ok(theme) = theme_emoji_tags().lock() {
+        out.extend(theme.iter().map(|(code, _)| code.clone()));
+    }
+    out
+}
+
 /// Register (or clear, with an empty vec) the active theme pack's emoji so the
 /// send resolver can tag them even though they aren't a DB subscription.
 pub fn set_theme_emoji_tags(tags: Vec<(String, String)>) {

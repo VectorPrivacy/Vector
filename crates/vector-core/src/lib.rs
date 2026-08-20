@@ -2978,7 +2978,11 @@ impl VectorCore {
             })
             .collect();
 
-        let report = std::sync::Arc::new(raid::assess(&signals, now_secs, &raid::RaidParams::default()));
+        let params = raid::RaidParams {
+            known_shortcodes: crate::emoji_packs::known_shortcodes(),
+            ..Default::default()
+        };
+        let report = std::sync::Arc::new(raid::assess(&signals, now_secs, &params));
         raid_report_cache()
             .lock()
             .unwrap_or_else(|e| e.into_inner())

@@ -21,20 +21,30 @@ const MIN_SKELETON_LEN: usize = 8;
 /// digit variation are all one line of attacker code to randomise, so none of them may
 /// carry weight.
 ///
-/// `:shortcode:` emoji are dropped rather than flattened to their name: three people
-/// answering with the same reaction is a community, not a cohort, and leaving the name
-/// in convicts them on a skeleton nobody typed.
+/// A `:shortcode:` that renders as an image is dropped rather than flattened to its name:
+/// three people answering with the same reaction is a community, not a cohort, and leaving
+/// the name in convicts them on a skeleton nobody typed. See [`skeleton_with`] for the
+/// resolution that decides which codes are images.
 pub fn skeleton(text: &str) -> String {
-    strip_shortcodes(text)
+    skeleton_with(text, &HashSet::new())
+}
+
+/// [`skeleton`] against a set of shortcodes that actually render as images. A `:code:`
+/// outside the set reaches the reader as literal text, so it stays in the skeleton —
+/// otherwise wrapping the payload in colons hides a cohort in plain sight.
+pub fn skeleton_with(text: &str, known: &HashSet<String>) -> String {
+    strip_shortcodes(text, known)
         .chars()
         .filter(|c| c.is_alphanumeric() && !c.is_numeric())
         .flat_map(|c| c.to_lowercase())
         .collect()
 }
 
-/// Remove `:name:` runs. A lone `:` or an unclosed code is left alone — only a
-/// complete, plausible shortcode is stripped.
-fn strip_shortcodes(text: &str) -> String {
+/// Remove `:name:` runs that stand in for an image: one this account can render, or a
+/// short name a unicode set plausibly carries. A long unresolved run is prose in a
+/// costume — `:buycheapcoinsnow:` renders as itself — so its text is kept. A lone `:`
+/// or an unclosed code is left alone.
+fn strip_shortcodes(text: &str, known: &HashSet<String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(open) = rest.find(':') {
@@ -44,7 +54,13 @@ fn strip_shortcodes(text: &str) -> String {
             *end > 0 && after[..*end].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '+')
         });
         match close {
-            Some(end) => rest = &after[end + 1..],
+            Some(end) => {
+                let name = &after[..end];
+                if !known.contains(name) && name.chars().count() >= MIN_SKELETON_LEN {
+                    out.push_str(name);
+                }
+                rest = &after[end + 1..];
+            }
             None => {
                 out.push(':');
                 rest = after;
@@ -77,6 +93,8 @@ pub struct RaidParams {
     pub burst_gap_secs: u64,
     /// Joins in one window before it reads as a burst rather than a busy afternoon.
     pub min_burst: usize,
+    /// Shortcodes that render as images here; anything else in colons is read as text.
+    pub known_shortcodes: HashSet<String>,
 }
 
 impl Default for RaidParams {
@@ -91,6 +109,7 @@ impl Default for RaidParams {
             short_text_factor: 3,
             burst_gap_secs: 10 * 60,
             min_burst: 5,
+            known_shortcodes: HashSet::new(),
         }
     }
 }
@@ -192,7 +211,7 @@ pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidR
     let mut sample_of: HashMap<String, String> = HashMap::new();
     for s in signals {
         for t in &s.texts {
-            let sk = skeleton(t);
+            let sk = skeleton_with(t, &p.known_shortcodes);
             if sk.is_empty() {
                 continue;
             }
@@ -278,7 +297,7 @@ pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidR
     let now_ms = now_secs.saturating_mul(1000);
     let mut members: Vec<MemberAssessment> = Vec::with_capacity(signals.len());
     for s in signals {
-        let distinct: u64 = s.texts.iter().map(|t| skeleton(t)).filter(|sk| !sk.is_empty()).collect::<HashSet<_>>().len() as u64;
+        let distinct: u64 = s.texts.iter().map(|t| skeleton_with(t, &p.known_shortcodes)).filter(|sk| !sk.is_empty()).collect::<HashSet<_>>().len() as u64;
         let cohort = cohort_of.get(&s.npub).copied().unwrap_or(0);
         let in_burst = burst.contains(s.npub.as_str());
         // Oldest trace wins: a member whose Join was lost still has their first post.
@@ -440,6 +459,30 @@ mod tests {
         assert_eq!(skeleton("Hello World!"), skeleton("hello,   world"));
         assert_eq!(skeleton("hello world 123"), skeleton("HELLO WORLD 4567"));
         assert_ne!(skeleton("hello world"), skeleton("goodbye world"));
+    }
+
+    #[test]
+    fn a_payload_wrapped_in_colons_still_has_a_skeleton() {
+        assert_eq!(skeleton(":buycheapcoinsnow:"), "buycheapcoinsnow");
+        // Short codes read as emoji even unresolved; a rendering pack silences the rest.
+        assert!(skeleton(":fire:").is_empty());
+        assert!(skeleton(":+1:").is_empty());
+        assert_eq!(skeleton("nice one :fire:"), skeleton("nice one"));
+        let known = HashSet::from(["buycheapcoinsnow".to_string()]);
+        assert!(skeleton_with(":buycheapcoinsnow:", &known).is_empty());
+    }
+
+    #[test]
+    fn a_cohort_hiding_behind_shortcode_colons_still_convicts() {
+        let mut signals: Vec<MemberSignals> = (0..40)
+            .map(|i| raider(&format!("npub_raider_{i}"), NOW - 60, ":freeairdropclaimnow:"))
+            .collect();
+        signals.push(regular("npub_owner", 400, 900, &["morning all", "shipping today", "nice one"]));
+        signals[40].is_owner = true;
+
+        let r = assess(&signals, NOW, &RaidParams::default());
+        assert!(r.raid_detected, "colons must not blind the cohort");
+        assert_eq!(r.suspects, 40);
     }
 
     #[test]
@@ -611,7 +654,8 @@ mod tests {
         let signals: Vec<MemberSignals> = (0..6)
             .map(|i| raider(&format!("npub_{i}"), NOW - 300 + i, ":vector_logo:"))
             .collect();
-        let r = assess(&signals, NOW, &RaidParams::default());
+        let p = RaidParams { known_shortcodes: HashSet::from(["vector_logo".to_string()]), ..Default::default() };
+        let r = assess(&signals, NOW, &p);
         assert_eq!(r.suspects, 0);
         assert!(r.cohorts.is_empty(), "an emoji-only message carries no convicting content");
     }
