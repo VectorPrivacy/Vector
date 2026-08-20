@@ -2181,8 +2181,13 @@ fn fold_members(
         citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
-    let coalesced = guestbook::coalesce(events, now_ms(), snapshot_authority, &can_kick);
-    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at);
+    let now = now_ms();
+    let coalesced = guestbook::coalesce(events, now, snapshot_authority, &can_kick);
+    // The live refound's guest list also gates the observed-forward path in
+    // complete_memberlist, so a raid spammer whose Kick was buried by the rotation
+    // isn't silently re-admitted by their old spam.
+    let refound = guestbook::live_refound(events, snapshot_authority, now);
+    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at, refound.as_ref());
     // The owner is a member by definition, independent of any fetched Join.
     if !banlist.contains(&owner) {
         members.insert(owner);
@@ -2439,19 +2444,34 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         // the rumor-id merge below dedups the re-fetched edge.
         let since = if full { 0 } else { cursor.saturating_sub(1) };
         let (fresh, newest, reached_end) = fetch_guestbook_events(transport, community, since).await?;
-        let known: std::collections::HashSet<[u8; 32]> = events.iter().map(|e| e.rumor_id).collect();
+        // Every event off this fetch came from the plane we hold the key to. The stamp is
+        // what lets the fold tell a Join carried over from a buried epoch apart from a
+        // live one; a row stored before stamping existed earns its stamp on re-read.
+        let live = Some(community.root_epoch.0);
+        let mut by_id: std::collections::HashMap<[u8; 32], usize> = events.iter().enumerate().map(|(i, e)| (e.rumor_id, i)).collect();
         let mut added = Vec::new();
-        for ev in fresh {
-            if !known.contains(&ev.rumor_id) {
-                events.push(ev.clone());
-                added.push(ev);
+        let mut restamped = false;
+        for mut ev in fresh {
+            ev.epoch = live;
+            match by_id.get(&ev.rumor_id) {
+                Some(&i) => {
+                    if events[i].epoch.is_none() {
+                        events[i].epoch = live;
+                        restamped = true;
+                    }
+                }
+                None => {
+                    by_id.insert(ev.rumor_id, events.len());
+                    events.push(ev.clone());
+                    added.push(ev);
+                }
             }
         }
         // Advance ONLY on a walk that ran out of plane. `newest` counts every wrap seen,
         // including ones skipped or that failed to open, so moving it after a truncated
         // walk is what buries the events that walk never reached.
         let advanced = if reached_end { newest.max(cursor) } else { cursor };
-        if !added.is_empty() || advanced > cursor {
+        if !added.is_empty() || advanced > cursor || restamped {
             crate::db::community::set_guestbook(&cid_hex, &events, advanced)?;
         }
         if full && reached_end {
@@ -2483,12 +2503,13 @@ fn mark_guestbook_walked(community_id: &str) {
 
 /// Fold ONE live guestbook event into the store (the realtime path — no fetch).
 /// Returns whether it was new.
-pub fn ingest_guestbook_event(community: &CommunityV2, ev: guestbook::GuestbookEvent, wrap_secs: u64) -> Result<bool, String> {
+pub fn ingest_guestbook_event(community: &CommunityV2, mut ev: guestbook::GuestbookEvent, wrap_secs: u64) -> Result<bool, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
     if events.iter().any(|e| e.rumor_id == ev.rumor_id) {
         return Ok(false);
     }
+    ev.epoch = Some(community.root_epoch.0);
     events.push(ev);
     crate::db::community::set_guestbook(&cid_hex, &events, cursor.max(wrap_secs))?;
     Ok(true)
@@ -9602,7 +9623,7 @@ mod tests {
         // A member the LOCAL store remembers (an old synced Join) but the WIRE has no
         // trace of: never posted, Join never published on the current plane.
         let quiet = Keys::generate().public_key();
-        let ev = guestbook::GuestbookEvent {
+        let ev = guestbook::GuestbookEvent { epoch: None,
             rumor_id: [7u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: quiet, invited_by: None, at_ms: 1_000 },
         };
@@ -14882,11 +14903,11 @@ mod tests {
         let community = create_community(&bed.relay, "Rejoin", bed.relays.clone(), None).await.unwrap();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let (o, m) = (owner.keys.public_key(), member.keys.public_key());
-        let join = |at: u64, id: u8| guestbook::GuestbookEvent {
+        let join = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Join { member: m, invited_by: None, at_ms: at },
         };
-        let kick = |at: u64, id: u8| guestbook::GuestbookEvent {
+        let kick = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Kick { actor: o, target: m, citation: None, at_ms: at },
         };
@@ -15012,7 +15033,7 @@ mod tests {
         crate::db::community::merge_community_ban_marks(&cid_hex, &[(member_pk.to_hex(), 1_000u64)].into_iter().collect()).unwrap();
 
         // Their Join lands 60s after the ban mark, while the banlist still says banned.
-        let join = guestbook::GuestbookEvent {
+        let join = guestbook::GuestbookEvent { epoch: None,
             rumor_id: [9u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_060_000 },
         };
@@ -15416,11 +15437,11 @@ mod tests {
         let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
         let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
 
-        let joined = guestbook::GuestbookEvent {
+        let joined = guestbook::GuestbookEvent { epoch: None,
             rumor_id: [1u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_000 },
         };
-        let kick = |citation, id: u8, at| guestbook::GuestbookEvent {
+        let kick = |citation, id: u8, at| guestbook::GuestbookEvent { epoch: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Kick { actor: admin.public_key(), target: member_pk, citation, at_ms: at },
         };
