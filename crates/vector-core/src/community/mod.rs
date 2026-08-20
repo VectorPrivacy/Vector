@@ -16,6 +16,7 @@ pub mod invite;
 pub mod invite_list;
 pub mod list;
 pub mod metadata;
+pub mod policy;
 pub mod moderation;
 pub mod edition;
 pub mod migration;

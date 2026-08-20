@@ -5937,6 +5937,7 @@ dependencies = [
  "tor-guardmgr",
  "tor-linkspec",
  "tor-rtcompat",
+ "unicode-normalization",
  "url",
  "zeroize",
 ]

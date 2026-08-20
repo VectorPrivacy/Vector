@@ -54,6 +54,7 @@ aes-gcm = "0.10.3"
 chacha20poly1305 = "0.10.1"
 argon2 = "0.5.3"
 sha2 = "0.10.9"
+unicode-normalization = "0.1"
 # HKDF-SHA256 for the Community protocol's frozen key-derivation convention
 # (GROUP_PROTOCOL.md §14). Audited RustCrypto crate rather than a hand-rolled
 # construction, since the derivation is wire-immutable.
