@@ -39,6 +39,16 @@ pub struct MemberSignal {
     pub roles: Vec<Hash32>,
     /// Holds a role carrying any moderation permission bit.
     pub is_staff: bool,
+    /// Everything they have ever said here, not just inside the window.
+    /// Standing is historical by nature: a regular of two years who had a quiet
+    /// week is still a regular, and a window-only count would make them re-earn
+    /// their standing every week. A declared input, so the engine stays pure.
+    pub lifetime_messages: u64,
+    /// Their FIRST post ever, ms. Tenure is the oldest trace of someone, and
+    /// the window can only see a few days of it — a member whose Join was lost
+    /// (or who joined long after they started posting) would otherwise have
+    /// their tenure capped at the window's width and read as a newcomer.
+    pub first_post_ms: Option<u64>,
 }
 
 /// Everything `evaluate` reads. The caller owns fetching, decryption and the
@@ -58,6 +68,16 @@ pub struct Signals {
     pub roster_version: Hash32,
 }
 
+/// Who is evaluating. A member's client runs only stateless rules — word and
+/// link filters over the message in front of it — because everything else needs
+/// history it may not hold and authority it does not have. Admins and
+/// moderation bots run everything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalMode {
+    Member,
+    Admin,
+}
+
 /// A policy plus the hash of the exact bytes it arrived as. The hash is never
 /// recomputed from a re-serialization — a client that re-encodes JSON has
 /// changed the policy.
@@ -72,7 +92,19 @@ pub struct LoadedPolicy {
 
 /// Evaluate every policy against the signals. Pure: same inputs, same bytes.
 pub fn evaluate(signals: &Signals, policies: &[LoadedPolicy], overrides: &[Override], now_ms: u64) -> ModerationReport {
-    let mut reports: Vec<PolicyReport> = policies.iter().map(|p| evaluate_one(signals, p, overrides, now_ms)).collect();
+    evaluate_as(signals, policies, overrides, now_ms, EvalMode::Admin)
+}
+
+/// [`evaluate`] with an explicit evaluator role.
+pub fn evaluate_as(
+    signals: &Signals,
+    policies: &[LoadedPolicy],
+    overrides: &[Override],
+    now_ms: u64,
+    mode: EvalMode,
+) -> ModerationReport {
+    let mut reports: Vec<PolicyReport> =
+        policies.iter().map(|p| evaluate_one(signals, p, overrides, now_ms, mode)).collect();
     reports.sort_by(|a, b| a.policy_hash.0.cmp(&b.policy_hash.0));
 
     // Report-level coverage spans the UNION of every evaluated policy's clamped
@@ -148,7 +180,13 @@ struct RuleOutcome {
     state: RuleState,
 }
 
-fn evaluate_one(signals: &Signals, lp: &LoadedPolicy, overrides: &[Override], now_ms: u64) -> PolicyReport {
+fn evaluate_one(
+    signals: &Signals,
+    lp: &LoadedPolicy,
+    overrides: &[Override],
+    now_ms: u64,
+    mode: EvalMode,
+) -> PolicyReport {
     // An INERT policy evaluated NOTHING, and says so: an empty subject list must
     // never read as "everyone is clean".
     if let Err(reason) = lp.policy.validate() {
@@ -184,7 +222,7 @@ fn evaluate_one(signals: &Signals, lp: &LoadedPolicy, overrides: &[Override], no
     let mut convicted_by_rule: BTreeMap<&str, BTreeSet<[u8; 32]>> = BTreeMap::new();
 
     for rule in &policy.rules {
-        let out = evaluate_rule(rule, policy, signals, &corpus, &codes, &exempt_channels, &shields, lp, now_ms);
+        let out = evaluate_rule(rule, policy, signals, &corpus, &codes, &exempt_channels, &shields, lp, now_ms, mode);
         let mut subjects: BTreeSet<[u8; 32]> = BTreeSet::new();
         for c in &out.convictions {
             subjects.insert(c.subject.0);
@@ -340,12 +378,12 @@ fn compute_shields(
             out.insert(b, Shield::Protected);
             continue;
         }
-        // Tenure = now minus the oldest trace (join, or first post if the Join
-        // was lost). Unknown only when BOTH are missing.
-        let oldest = match (member.joined_at_ms, first_post.get(&b).copied().filter(|v| *v != u64::MAX)) {
-            (None, None) => None,
-            (a, bb) => Some(a.unwrap_or(u64::MAX).min(bb.unwrap_or(u64::MAX))),
-        };
+        // Tenure = now minus the OLDEST trace of them: their Join, their first
+        // post ever, or the earliest thing they said inside the window —
+        // whichever reaches furthest back. Unknown only when nothing does.
+        let window_first = first_post.get(&b).copied().filter(|v| *v != u64::MAX);
+        let candidates = [member.joined_at_ms, member.first_post_ms, window_first];
+        let oldest = candidates.into_iter().flatten().min();
         let Some(oldest) = oldest else {
             out.insert(b, Shield::Indeterminate);
             continue;
@@ -356,9 +394,12 @@ fn compute_shields(
         // Three paths to standing (§5.3): a role the community granted, long
         // tenure with any activity, or tenure with volume and variety. Every
         // path carries a tenure floor, so none of them is farmable in a day.
+        // Volume is LIFETIME (standing is historical); variety is the window's
+        // (how someone speaks now is what tells a person from a script).
+        let lifetime = member.lifetime_messages.max(vol);
         let by_role = bar.roles_trust && !member.roles.is_empty();
-        let by_veteran = tenure >= bar.veteran_secs && vol >= 1;
-        let by_active = tenure >= bar.tenure_secs && vol >= bar.messages && var >= bar.distinct;
+        let by_veteran = tenure >= bar.veteran_secs && lifetime >= 1;
+        let by_active = tenure >= bar.tenure_secs && lifetime >= bar.messages && var >= bar.distinct;
         out.insert(b, if by_role || by_veteran || by_active { Shield::Trusted } else { Shield::None });
     }
     out
@@ -375,9 +416,17 @@ fn evaluate_rule(
     shields: &BTreeMap<[u8; 32], Shield>,
     lp: &LoadedPolicy,
     _now_ms: u64,
+    mode: EvalMode,
 ) -> RuleOutcome {
     let mut out =
         RuleOutcome { convictions: vec![], citations: vec![], unknown: vec![], state: RuleState::Evaluated };
+
+    // A member's client judges only what it can judge from one message. Saying
+    // so is the point: a silent skip would read as "clean".
+    if mode == EvalMode::Member && !rule.matcher.is_stateless() {
+        out.state = RuleState::RequiresHistory;
+        return out;
+    }
 
     // A declared-but-unimplemented normalizer is unevaluated, never approximated.
     if let Match::Keyword { normalize: n, .. } | Match::Regex { normalize: n, .. } | Match::Repeat { normalize: n } =
@@ -445,9 +494,12 @@ fn evaluate_rule(
                 }
             }
         }
-        // Phase 2: the heuristic planes keep running through `raid.rs` until the
-        // console swaps over, so they report unevaluated rather than pretending.
-        Match::Cohort { .. } | Match::JoinBurst { .. } | Match::Repeat { .. } | Match::Rate { .. } => {
+        Match::Repeat { .. } | Match::Rate { .. } => {
+            window_rule(rule, corpus, codes, &rule_exempt_channels, shields, lp, &subject_exempt, &mut out);
+        }
+        // The heuristic planes keep running through `raid.rs` until the console
+        // swaps over, so they report unevaluated rather than pretending.
+        Match::Cohort { .. } | Match::JoinBurst { .. } => {
             out.state = RuleState::UnknownType;
         }
     }
@@ -621,6 +673,118 @@ fn content_rule(
     }
 }
 
+/// Window-level rules: one conviction per subject, scope PerWindow.
+///
+///  * `repeat` — the most-repeated normalized text by that author; ties break by
+///    the normalized key ascending, so the citation set is reproducible. This is
+///    the copy-paste counter that catches one account spamming, where `cohort`
+///    catches many accounts sharing one line.
+///  * `rate` — the densest half-open `[t, t + per_secs)` span over the author's
+///    own message timestamps; ties take the EARLIEST span.
+#[allow(clippy::too_many_arguments)]
+fn window_rule(
+    rule: &Rule,
+    corpus: &[&MessageSignal],
+    codes: &EmojiCodes,
+    exempt_channels: &BTreeSet<[u8; 32]>,
+    shields: &BTreeMap<[u8; 32], Shield>,
+    lp: &LoadedPolicy,
+    subject_exempt: &dyn Fn(&SubjectId) -> bool,
+    out: &mut RuleOutcome,
+) {
+    let tiers = rule.tiers.as_ref().expect("validated: window rules carry tiers");
+    let rungs = &tiers.per_window;
+    if rungs.is_empty() {
+        return;
+    }
+    // Citable content only: exempt content still counts toward the corpus
+    // statistics every other rule reads, but it can never be cited here.
+    let mut by_author: BTreeMap<[u8; 32], Vec<&MessageSignal>> = BTreeMap::new();
+    for m in corpus {
+        if exempt_channels.contains(&m.channel.0) || subject_exempt(&m.author) {
+            continue;
+        }
+        by_author.entry(m.author.0).or_default().push(m);
+    }
+
+    for (subject_bytes, messages) in by_author {
+        let subject = SubjectId(subject_bytes);
+        let (hits, cited, evidence) = match &rule.matcher {
+            Match::Repeat { normalize: n } => {
+                let mut groups: BTreeMap<String, Vec<&MessageSignal>> = BTreeMap::new();
+                for m in &messages {
+                    let key = normalize::apply(&m.text, *n, codes);
+                    if key.is_empty() {
+                        continue;
+                    }
+                    groups.entry(key).or_default().push(m);
+                }
+                // Most repeated wins; ties by the normalized key ascending.
+                let Some((_key, winners)) = groups
+                    .into_iter()
+                    .max_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| b.0.cmp(&a.0)))
+                else {
+                    continue;
+                };
+                let n_hits = winners.len() as u32;
+                (n_hits, winners, vec![])
+            }
+            Match::Rate { per_secs } => {
+                let mut times: Vec<u64> = messages.iter().map(|m| m.at_ms).collect();
+                times.sort_unstable();
+                let span = per_secs.saturating_mul(1000);
+                let (mut best, mut best_from) = (0usize, 0u64);
+                for (i, &start) in times.iter().enumerate() {
+                    // Half-open [start, start + span); candidate starts are the
+                    // author's own timestamps, never every millisecond.
+                    let count = times[i..].iter().take_while(|&&t| t < start.saturating_add(span)).count();
+                    if count > best {
+                        best = count;
+                        best_from = start;
+                    }
+                }
+                let cited: Vec<&MessageSignal> = messages
+                    .iter()
+                    .copied()
+                    .filter(|m| m.at_ms >= best_from && m.at_ms < best_from.saturating_add(span))
+                    .collect();
+                (
+                    best as u32,
+                    cited,
+                    vec![Evidence::Rate { window_secs: *per_secs, count: best as u32, from: best_from }],
+                )
+            }
+            _ => continue,
+        };
+
+        let Some((idx, rung)) = rungs.iter().enumerate().filter(|(_, g)| hits >= g.hits).next_back() else {
+            continue;
+        };
+        if gated(shields, &subject, rule, usize::from(rung.pierces_trusted)) {
+            continue;
+        }
+        let citations: Vec<Citation> = cited
+            .iter()
+            .map(|m| {
+                let target = CitationTarget::Message { message_id: m.id };
+                Citation {
+                    id: citation_id(&lp.hash, &rule.id, Scope::PerWindow, &subject, &target, None),
+                    target,
+                    at: m.at_ms,
+                    span: None,
+                    detail: None,
+                    suppressed: false,
+                }
+            })
+            .collect();
+        let before = out.convictions.len();
+        push_tiered(rule, lp, subject, Scope::PerWindow, idx as u8, hits, rung, citations, out);
+        if let Some(c) = out.convictions.get_mut(before) {
+            c.evidence = evidence;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_tiered(
     rule: &Rule,
@@ -721,6 +885,8 @@ mod tests {
             joined_at_ms: joined_ago_h.map(|h| NOW - h * HOUR),
             roles: vec![],
             is_staff: false,
+            lifetime_messages: 0,
+            first_post_ms: None,
         }
     }
 
@@ -875,7 +1041,7 @@ mod tests {
             vec![
                 member(1, Some(24 * 30)), // long tenure, will be Trusted
                 member(2, None),          // no join, no posts elsewhere: Indeterminate
-                MemberSignal { subject: sid(3), joined_at_ms: Some(NOW - HOUR), roles: vec![], is_staff: true },
+                MemberSignal { subject: sid(3), joined_at_ms: Some(NOW - HOUR), roles: vec![], is_staff: true, lifetime_messages: 0, first_post_ms: None },
             ],
             vec![],
         );
@@ -921,7 +1087,7 @@ mod tests {
         // A role the community granted is a vouch: trusted, though NOT immune
         // (that is Protected, and it keys on moderation permissions).
         let with_role =
-            MemberSignal { subject: sid(1), joined_at_ms: Some(NOW - day), roles: vec![ch(0xaa)], is_staff: false };
+            MemberSignal { subject: sid(1), joined_at_ms: Some(NOW - day), roles: vec![ch(0xaa)], is_staff: false, lifetime_messages: 0, first_post_ms: None };
         let veteran = member(2, Some(24 * 40));
         let active = member(3, Some(24 * 8));
         let lurker = member(4, Some(24 * 8));
@@ -943,6 +1109,72 @@ mod tests {
         assert_eq!(shield(3), Some(Shield::Trusted), "tenure with volume and variety");
         assert_eq!(shield(4), None, "a silent week earns nothing");
         assert_eq!(shield(5), None, "and chatter cannot buy standing in a day");
+    }
+
+    /// A regular of months who had a quiet week keeps their standing: volume is
+    /// lifetime, not "what have you said for me lately".
+    #[test]
+    fn a_quiet_week_does_not_cost_a_regular_their_standing() {
+        let mut veteran = member(6, Some(24 * 10));
+        veteran.lifetime_messages = 900;
+        let mut newcomer = member(7, Some(2));
+        newcomer.lifetime_messages = 900; // history it could not possibly have
+        let mut s = signals(vec![veteran, newcomer], vec![]);
+        // Three distinct shapes this week is all the variety bar asks for.
+        for (i, w) in ["morning all", "shipping today", "nice one"].iter().enumerate() {
+            s.messages.push(msg(0x80 + i as u8, 6, NOW - (i as u64 + 1) * HOUR, w));
+            s.messages.push(msg(0x90 + i as u8, 7, NOW - (i as u64 + 1) * HOUR, w));
+        }
+        let r = evaluate(&s, &[loaded(policy_with(vec![link_rule()]))], &[], NOW);
+        let pr = only(&r);
+        assert_eq!(subject(pr, 6).map(|x| x.shield), Some(Shield::Trusted), "ten days and a long history");
+        assert_eq!(subject(pr, 7).map(|x| x.shield), None, "tenure still gates: two hours buys nothing");
+    }
+
+    /// The fifth member to join, very active early, then quiet for months.
+    /// Still trusted: standing is what you built, not what you said this week.
+    #[test]
+    fn an_early_member_who_lurks_for_months_keeps_their_standing() {
+        let mut lurker = member(8, Some(24 * 200));
+        lurker.lifetime_messages = 400; // all of it long ago
+        let s = signals(vec![lurker], vec![]); // nothing at all in the window
+        let r = evaluate(&s, &[loaded(policy_with(vec![link_rule()]))], &[], NOW);
+        assert_eq!(subject(only(&r), 8).map(|x| x.shield), Some(Shield::Trusted));
+    }
+
+    /// A member's client judges word and link filters on the message in front
+    /// of it, and nothing that needs history. It says which is which, because a
+    /// silent skip would read as "clean".
+    #[test]
+    fn a_member_evaluates_only_stateless_rules() {
+        let stateful = Rule {
+            id: "quiet".into(),
+            matcher: Match::MessagesLte { n: 2 },
+            tiers: None,
+            severity: Some(Severity::Notice),
+            weight: Some(10),
+            pierces_trusted: false,
+            family: None,
+            armed_by: None,
+            exempt: Exempt::default(),
+            enforcement: Enforcement::Advisory,
+        };
+        let s = signals(vec![member(1, Some(2))], vec![msg(0xb1, 1, NOW - HOUR, "bit.ly/a")]);
+        let policies = [loaded(policy_with(vec![link_rule(), stateful]))];
+
+        let as_member = evaluate_as(&s, &policies, &[], NOW, EvalMode::Member);
+        let pr = &as_member.policies[0];
+        let state = |id: &str| pr.rule_status.iter().find(|r| r.rule_id == id).map(|r| r.state);
+        assert_eq!(state("links"), Some(RuleState::Evaluated), "a link filter needs no history");
+        assert_eq!(state("quiet"), Some(RuleState::RequiresHistory), "counting a member's past does");
+        let sub = subject(pr, 1).unwrap();
+        assert_eq!(sub.convictions.len(), 1, "the link conviction stands on its own");
+
+        // The same evidence, evaluated by an admin, runs everything.
+        let as_admin = evaluate_as(&s, &policies, &[], NOW, EvalMode::Admin);
+        let pr = &as_admin.policies[0];
+        assert!(pr.rule_status.iter().all(|r| r.state == RuleState::Evaluated));
+        assert_eq!(subject(pr, 1).unwrap().convictions.len(), 2);
     }
 
     #[test]
@@ -1025,6 +1257,68 @@ mod tests {
         let sub = subject(only(&r), 7).unwrap();
         assert_eq!(sub.shield, Shield::Indeterminate, "no join, no posts: unknowable");
         assert_eq!(sub.confidence, 10, "and judged exactly as if unshielded");
+    }
+
+    fn window_rule_policy(m: Match, rungs: Vec<Rung>) -> Policy {
+        policy_with(vec![Rule {
+            id: "w".into(),
+            matcher: m,
+            tiers: Some(Tiers { per_message: vec![], per_window: rungs }),
+            severity: None,
+            weight: None,
+            pierces_trusted: false,
+            family: None,
+            armed_by: None,
+            exempt: Exempt::default(),
+            enforcement: Enforcement::Advisory,
+        }])
+    }
+
+    /// One account pasting the same line over and over — the counterpart to
+    /// `cohort`, which catches many accounts sharing one line.
+    #[test]
+    fn repeat_catches_one_account_pasting_the_same_thing() {
+        let mut messages: Vec<MessageSignal> = (0..5)
+            .map(|i| msg(0xa0 + i as u8, 1, NOW - (i + 1) * HOUR, "CLAIM YOUR FREE AIRDROP NOW"))
+            .collect();
+        // Variations a spammer reaches for first: case, punctuation, digits.
+        messages.push(msg(0xb0, 1, NOW - 6 * HOUR, "claim your free airdrop now!!!"));
+        messages.push(msg(0xb1, 1, NOW - 7 * HOUR, "hello everyone"));
+        let s = signals(vec![member(1, Some(2))], messages);
+        let p = window_rule_policy(
+            Match::Repeat { normalize: Normalize::Skeleton },
+            vec![Rung { hits: 3, severity: Severity::Major, weight: 50, pierces_trusted: false }],
+        );
+        let r = evaluate(&s, &[loaded(p)], &[], NOW);
+        let sub = subject(only(&r), 1).unwrap();
+        let c = &sub.convictions[0];
+        assert_eq!(c.scope, Scope::PerWindow);
+        assert_eq!(c.hits, 6, "case and punctuation are one line of attacker code, so they do not vary the shape");
+        assert_eq!(c.citation_count, 6, "every repetition is cited, not just the ones past the rung");
+        assert_eq!(sub.confidence, 50);
+    }
+
+    #[test]
+    fn rate_finds_the_densest_span_and_cites_only_it() {
+        // Five in a burst, then one much later: the burst is the evidence.
+        let mut messages: Vec<MessageSignal> =
+            (0..5).map(|i| msg(0xc0 + i as u8, 1, NOW - 60 * 60 * 1000 + i * 10_000, "spam")).collect();
+        messages.push(msg(0xcf, 1, NOW - 10 * 60 * 1000, "unrelated"));
+        let s = signals(vec![member(1, Some(2))], messages);
+        let p = window_rule_policy(
+            Match::Rate { per_secs: 60 },
+            vec![Rung { hits: 5, severity: Severity::Major, weight: 55, pierces_trusted: false }],
+        );
+        let r = evaluate(&s, &[loaded(p)], &[], NOW);
+        let sub = subject(only(&r), 1).unwrap();
+        let c = &sub.convictions[0];
+        assert_eq!(c.hits, 5, "five inside one minute");
+        assert_eq!(c.citation_count, 5, "the straggler is not part of the burst");
+        assert!(
+            matches!(c.evidence.first(), Some(Evidence::Rate { count: 5, window_secs: 60, .. })),
+            "the span is reported as evidence: {:?}",
+            c.evidence
+        );
     }
 
     #[test]

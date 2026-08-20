@@ -62,6 +62,26 @@ pub fn scam_links_policy() -> Policy {
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
+            // Copy-paste spam from ONE account. `cohort` (still with raid.rs)
+            // catches the other shape: many accounts sharing one line.
+            Rule {
+                id: "repeat".into(),
+                matcher: Match::Repeat { normalize: Normalize::Skeleton },
+                tiers: Some(Tiers {
+                    per_message: vec![],
+                    per_window: vec![
+                        Rung { hits: 4, severity: Severity::Major, weight: 50, pierces_trusted: false },
+                        Rung { hits: 8, severity: Severity::Severe, weight: 85, pierces_trusted: false },
+                    ],
+                }),
+                severity: None,
+                weight: None,
+                pierces_trusted: false,
+                family: None,
+                armed_by: None,
+                exempt: Exempt::default(),
+                enforcement: Enforcement::Advisory,
+            },
             // Aggravators, and ONLY aggravators: each fires only for a subject
             // the link rule already convicted. Unarmed, "has posted at most
             // twice" describes most of a healthy community — the first live run
@@ -140,6 +160,10 @@ pub struct DiffReport {
     /// Rule-level states — a rule that could not evaluate says so.
     pub rule_states: Vec<(String, String)>,
     pub coverage_complete: bool,
+    /// Wall-clock cost, split so a slow run says WHICH half is slow: reading
+    /// and decrypting local state, versus the pure evaluation.
+    pub signals_ms: u64,
+    pub evaluate_ms: u64,
 }
 
 /// Assemble signals from local state and evaluate. Reads only; the engine is
@@ -155,6 +179,7 @@ pub fn run_side_by_side(
     let bytes = serde_json::to_vec(&policy).map_err(|e| e.to_string())?;
     let lp = LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None };
 
+    let t0 = std::time::Instant::now();
     let rows = crate::db::community::community_policy_messages(community_id_hex, caps::WINDOW_MAX_MESSAGES)?;
     let corpus = rows.len();
     let messages: Vec<MessageSignal> = rows
@@ -172,6 +197,14 @@ pub fn run_side_by_side(
         .collect();
 
     let channels: BTreeSet<[u8; 32]> = messages.iter().map(|m| m.channel.0).collect();
+    // Lifetime footprints: standing is historical, so a quiet week must not
+    // cost a regular the standing they built over months.
+    let footprints: std::collections::HashMap<String, (u64, u64)> =
+        crate::db::community::community_author_footprints(community_id_hex)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|f| (f.npub, (f.messages, f.first_secs)))
+            .collect();
     let member_signals: Vec<MemberSignal> = members
         .iter()
         .map(|(pk, joined, is_staff, roles)| MemberSignal {
@@ -179,6 +212,13 @@ pub fn run_side_by_side(
             joined_at_ms: *joined,
             roles: roles.iter().filter_map(|r| crate::simd::hex::hex_to_bytes_32_checked(r)).map(Hash32).collect(),
             is_staff: *is_staff,
+            lifetime_messages: pk.to_bech32().ok().and_then(|b| footprints.get(&b).map(|f| f.0)).unwrap_or(0),
+            first_post_ms: pk
+                .to_bech32()
+                .ok()
+                .and_then(|b| footprints.get(&b).map(|f| f.1))
+                .filter(|s| *s > 0)
+                .map(|s| s.saturating_mul(1000)),
         })
         .collect();
 
@@ -197,7 +237,10 @@ pub fn run_side_by_side(
         roster_version: Hash32([0; 32]),
     };
 
+    let signals_ms = t0.elapsed().as_millis() as u64;
+    let t1 = std::time::Instant::now();
     let report = evaluate(&signals, &[lp], &[], now_ms);
+    let evaluate_ms = t1.elapsed().as_millis() as u64;
     let pr = report.policies.first().ok_or("no policy report")?;
 
     let verdict_of = |npub: &str| -> String {
@@ -274,6 +317,8 @@ pub fn run_side_by_side(
             .map(|r| (r.rule_id.clone(), format!("{:?}", r.state).to_lowercase()))
             .collect(),
         coverage_complete: pr.coverage_complete,
+        signals_ms,
+        evaluate_ms,
     })
 }
 

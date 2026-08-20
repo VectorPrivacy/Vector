@@ -209,6 +209,19 @@ impl Match {
         }
     }
 
+    /// Can this rule judge ONE message on its own, with no history and no view
+    /// of anyone else? Word filters and link blocks can; anything that counts
+    /// across a window, or compares members to each other, cannot.
+    ///
+    /// The split is what lets an ordinary member run moderation at all: their
+    /// client checks its own drafts and the messages in front of it, while
+    /// everything requiring historical state — repetition, rates, cohorts,
+    /// tenure — belongs to an admin or a moderation bot, which has both the
+    /// authority to act on it and the data to compute it honestly.
+    pub fn is_stateless(&self) -> bool {
+        matches!(self, Match::Keyword { .. } | Match::Regex { .. } | Match::Link { .. } | Match::Mentions {})
+    }
+
     /// Built-in immutable family tag — the fresh-account proxies fold together
     /// so correlated signals never OR into an inflated score.
     pub fn builtin_family(&self) -> Option<&'static str> {

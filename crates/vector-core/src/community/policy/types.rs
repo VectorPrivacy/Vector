@@ -129,6 +129,10 @@ pub enum RuleState {
     UnknownType,
     NoClassifier,
     Errored,
+    /// This evaluator does not run rules that need historical state. A member's
+    /// client says so rather than silently skipping, so the report can never be
+    /// read as "nothing was found" when the truth is "nobody looked".
+    RequiresHistory,
 }
 
 /// One profile field (preimage: one byte, `name=0 about=1 avatar=2 banner=3`).
