@@ -2859,7 +2859,7 @@ mod tests {
     fn guestbook_round_trips_events_and_cursor() {
         let (_tmp, _guard) = init_test_db();
         let member = nostr_sdk::prelude::Keys::generate();
-        let ev = crate::community::v2::guestbook::GuestbookEvent {
+        let ev = crate::community::v2::guestbook::GuestbookEvent { epoch: None,
             rumor_id: [7u8; 32],
             entry: crate::community::v2::guestbook::GuestbookEntry::Join {
                 member: member.public_key(),

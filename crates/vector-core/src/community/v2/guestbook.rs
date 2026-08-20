@@ -198,6 +198,11 @@ pub struct GuestbookEvent {
     /// The verified inner rumor id ([`OpenedStream::rumor_id`]).
     pub rumor_id: [u8; 32],
     pub entry: GuestbookEntry,
+    /// The root epoch this client held when it read the event — which plane it
+    /// came from. `None` for rows stored before stamping existed; the next
+    /// re-read stamps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
 }
 
 /// The typed guestbook entries (CORD-02 §5). Authors (`member` / `actor` /
@@ -338,7 +343,7 @@ pub fn parse_guestbook_event(opened: &OpenedStream) -> Result<GuestbookEvent, Gu
         k => return Err(GuestbookError::NotGuestbook(k)),
     };
 
-    Ok(GuestbookEvent { rumor_id: opened.rumor_id.to_bytes(), entry })
+    Ok(GuestbookEvent { epoch: None, rumor_id: opened.rumor_id.to_bytes(), entry })
 }
 
 // ── Coalesce fold (CORD-02 §5) ───────────────────────────────────────────────
@@ -349,6 +354,9 @@ pub enum Verdict {
     Joined,
     Left,
     Kicked,
+    /// Dropped by a Refounding: the epoch's minter published a snapshot that
+    /// does not list them, and nothing newer re-admits them.
+    Refounded,
 }
 
 /// Whether the winning entry was the member's own word or a refounder's
@@ -494,7 +502,80 @@ pub fn coalesce(
         }
     }
 
+    supersede_by_refounding(&mut fold, events, horizon, snapshot_authority);
     fold
+}
+
+/// A Refounding's guestbook replaces the old one. A local store appends across
+/// epochs, so without this a member whose Join predates a Refounding stays
+/// "Joined" forever on any client that never witnessed their Kick — and every
+/// client's count drifts by whatever it happened to miss.
+///
+/// The guest list is the union of every honored snapshot ON THE LIVE EPOCH
+/// (the minter's refound snapshot plus any addendum it publishes later — within
+/// one epoch, snapshots only ever add). Any `Joined` state won by an entry from
+/// an EARLIER epoch, and not in that list, becomes [`Verdict::Refounded`] at the
+/// refound's time. Entries that never got an epoch stamp are judged by time:
+/// older than the refounding means an earlier plane. Forward observation
+/// re-admits as usual — posting after the cut needs the new key.
+///
+/// Nothing happens without an epoch-stamped, honored snapshot: a store that
+/// only knows one plane, or one that has not synced since a rotation, is left
+/// exactly as it was.
+/// The live epoch's refounding, as a guest list plus the moment it took effect.
+/// The base is the union of every honored snapshot ON THE LIVE EPOCH (the refound
+/// snapshot plus any addendum — within one epoch snapshots only add); the cut is
+/// the earliest of them, the refound itself.
+pub(super) struct Refound {
+    pub cut: u64,
+    pub base: BTreeSet<PublicKey>,
+    pub rumor_id: [u8; 32],
+}
+
+pub(super) fn live_refound(
+    events: &[GuestbookEvent],
+    snapshot_authority: Option<&PublicKey>,
+    horizon: u64,
+) -> Option<Refound> {
+    let authority = snapshot_authority?;
+    let live = events.iter().filter_map(|e| e.epoch).max()?;
+    let mut base: BTreeSet<PublicKey> = BTreeSet::new();
+    let mut cut: Option<u64> = None;
+    let mut rumor_id: Option<[u8; 32]> = None;
+    for ev in events {
+        if let GuestbookEntry::Snapshot { refounder, members, at_ms, .. } = &ev.entry {
+            if ev.epoch == Some(live) && refounder == authority && *at_ms <= horizon {
+                base.extend(members.iter().copied());
+                cut = Some(cut.map_or(*at_ms, |c| c.min(*at_ms)));
+                rumor_id = Some(rumor_id.map_or(ev.rumor_id, |r| r.min(ev.rumor_id)));
+            }
+        }
+    }
+    Some(Refound { cut: cut?, base, rumor_id: rumor_id? })
+}
+
+fn supersede_by_refounding(
+    fold: &mut BTreeMap<PublicKey, MemberState>,
+    events: &[GuestbookEvent],
+    horizon: u64,
+    snapshot_authority: Option<&PublicKey>,
+) {
+    let Some(Refound { cut, base, rumor_id }) = live_refound(events, snapshot_authority, horizon) else { return };
+    // A Joined member the refound omitted is gone, whether their Join sits on an
+    // earlier plane (stamp) or simply predates the cut (a lost/legacy stamp, or a
+    // wedged client that posted a Join with a stale timestamp). Base membership is
+    // the authority; forward observation still re-admits (the observed path).
+    let live = events.iter().filter_map(|e| e.epoch).max();
+    let provenance: BTreeMap<[u8; 32], Option<u64>> = events.iter().map(|e| (e.rumor_id, e.epoch)).collect();
+    for (pk, st) in fold.iter_mut() {
+        if st.verdict != Verdict::Joined || base.contains(pk) {
+            continue;
+        }
+        let older_plane = matches!((provenance.get(&st.rumor_id).copied().flatten(), live), (Some(e), Some(l)) if e < l);
+        if st.at_ms < cut || older_plane {
+            *st = MemberState { verdict: Verdict::Refounded, at_ms: cut, source: Source::Snapshot, invited_by: None, rumor_id };
+        }
+    }
 }
 
 // ── Complete Memberlist (CORD-02 §5) ─────────────────────────────────────────
@@ -511,7 +592,20 @@ pub fn complete_memberlist(
     observed: &BTreeMap<PublicKey, u64>,
     banlist: &BTreeSet<PublicKey>,
     banned_at: &BTreeMap<PublicKey, u64>,
+    refound: Option<&Refound>,
 ) -> BTreeSet<PublicKey> {
+    // A Refounding's snapshot is the whole guest list. The observed-forward path
+    // (below) re-admits anyone seen publishing — including raid spammers whose Kick
+    // was buried by the rotation, which is how a client's count drifts above the
+    // real membership. So an observed author the refound omitted, whose activity is
+    // no newer than the cut, is suppressed exactly like a pre-ban ghost: only
+    // posting AFTER the refound (which needs the new key) re-admits them.
+    // `ms == 0` is the grantee sentinel (a role-holder present-via-Grant, not by
+    // activity time). A Grant outranks a snapshot omission — the CONSENSUS-COMPLETE
+    // backstop must survive a Refounding — so never suppress it here.
+    let stale_pre_refound = |pk: &PublicKey, ms: u64| {
+        ms != 0 && refound.is_some_and(|r| !r.base.contains(pk) && ms <= r.cut)
+    };
     // A Join or activity predating a member's most recent ban is STALE. A ban is a
     // departure the Guestbook never records (the removal happens on the Control Plane),
     // so without this an un-ban resurrects their old Join as a phantom member — listed
@@ -528,7 +622,7 @@ pub fn complete_memberlist(
         }
     }
     for (pk, seen_ms) in observed {
-        if banlist.contains(pk) || stale_pre_ban(pk, *seen_ms) {
+        if banlist.contains(pk) || stale_pre_ban(pk, *seen_ms) || stale_pre_refound(pk, *seen_ms) {
             continue;
         }
         match coalesced.get(pk) {
@@ -581,16 +675,21 @@ mod tests {
 
     // Direct coalesce-input constructors: `id` fills the rumor id, so tie
     // ordering is choosable per test.
+    fn at_epoch(mut ev: GuestbookEvent, epoch: u64) -> GuestbookEvent {
+        ev.epoch = Some(epoch);
+        ev
+    }
+
     fn join_ev(member: PublicKey, at_ms: u64, id: u8) -> GuestbookEvent {
-        GuestbookEvent { rumor_id: [id; 32], entry: GuestbookEntry::Join { member, invited_by: None, at_ms } }
+        GuestbookEvent { epoch: None, rumor_id: [id; 32], entry: GuestbookEntry::Join { member, invited_by: None, at_ms } }
     }
 
     fn leave_ev(member: PublicKey, at_ms: u64, id: u8) -> GuestbookEvent {
-        GuestbookEvent { rumor_id: [id; 32], entry: GuestbookEntry::Leave { member, at_ms } }
+        GuestbookEvent { epoch: None, rumor_id: [id; 32], entry: GuestbookEntry::Leave { member, at_ms } }
     }
 
     fn kick_ev(actor: PublicKey, target: PublicKey, at_ms: u64, id: u8) -> GuestbookEvent {
-        GuestbookEvent { rumor_id: [id; 32], entry: GuestbookEntry::Kick { actor, target, citation: None, at_ms } }
+        GuestbookEvent { epoch: None, rumor_id: [id; 32], entry: GuestbookEntry::Kick { actor, target, citation: None, at_ms } }
     }
 
     fn snap_ev(
@@ -601,7 +700,7 @@ mod tests {
         at_ms: u64,
         id: u8,
     ) -> GuestbookEvent {
-        GuestbookEvent {
+        GuestbookEvent { epoch: None,
             rumor_id: [id; 32],
             entry: GuestbookEntry::Snapshot { refounder, members, snapshot_id: [snap; 32], chunk, at_ms },
         }
@@ -824,6 +923,126 @@ mod tests {
     }
 
     #[test]
+    fn a_refounding_replaces_the_guestbook_it_supersedes() {
+        let refounder = pk();
+        let (kept, stale, wedged, unstamped_current, later) = (pk(), pk(), pk(), pk(), pk());
+        let events = [
+            // Pre-refound rows a store carried over (never stamped).
+            join_ev(kept, 1_000, 1),
+            join_ev(stale, 1_000, 2),
+            // A client still on the OLD plane posted this Join AFTER the refound;
+            // only the stamp can tell it apart from a real one.
+            at_epoch(join_ev(wedged, 9_000, 3), 6),
+            // Stored before stamping existed but dated after the refound: a
+            // current-plane row that was never re-read. Time keeps it.
+            join_ev(unstamped_current, 5_500, 4),
+            at_epoch(snap_ev(refounder, vec![kept], 0x01, (1, 1), 5_000, 5), 7),
+            at_epoch(join_ev(later, 6_000, 6), 7),
+        ];
+        let fold = coalesce(&events, NOW, Some(&refounder), &always);
+        assert_eq!(fold.get(&kept).unwrap().verdict, Verdict::Joined, "listed: stays");
+        assert_eq!(fold.get(&later).unwrap().verdict, Verdict::Joined, "joined on the new plane");
+        assert_eq!(fold.get(&unstamped_current).unwrap().verdict, Verdict::Joined, "unstamped but dated after the cut");
+        for (who, why) in [(&stale, "older plane by time"), (&wedged, "older plane by stamp, whatever its clock says")] {
+            let st = fold.get(who).unwrap();
+            assert_eq!(st.verdict, Verdict::Refounded, "{why}");
+            assert_eq!(st.at_ms, 5_000, "departed at the refound's time");
+        }
+
+        // The memberlist agrees, and forward observation still re-admits:
+        // posting after the cut needs the new key, so it is proof of membership.
+        let none = BTreeSet::new();
+        let list = complete_memberlist(&fold, &BTreeMap::new(), &none, &BTreeMap::new(), None);
+        assert!(list.contains(&kept) && list.contains(&later) && !list.contains(&stale));
+        let mut seen = BTreeMap::new();
+        seen.insert(stale, 4_000u64);
+        assert!(!complete_memberlist(&fold, &seen, &none, &BTreeMap::new(), None).contains(&stale), "old activity does not resurrect");
+        seen.insert(stale, 7_000u64);
+        assert!(complete_memberlist(&fold, &seen, &none, &BTreeMap::new(), None).contains(&stale), "activity after the cut re-admits");
+    }
+
+    #[test]
+    fn a_refound_suppresses_an_observed_spammer_the_snapshot_omits() {
+        // The bug behind the raid: a spammer's Kick was buried by the rotation, so
+        // their spam (observed activity) re-admits them via forward observation even
+        // though the refound snapshot never listed them. The refound must gate the
+        // observed path too. No guestbook Join for these — they exist only as authors.
+        let (kept, spammer, rejoiner) = (pk(), pk(), pk());
+        let refound = Refound { cut: 5_000, base: BTreeSet::from([kept]), rumor_id: [9u8; 32] };
+        let none = BTreeSet::new();
+        let mut observed = BTreeMap::new();
+        observed.insert(kept, 4_000u64);      // in base: kept regardless of when they last spoke
+        observed.insert(spammer, 4_000u64);   // omitted + pre-cut: suppressed
+        observed.insert(rejoiner, 7_000u64);  // omitted BUT posted after the refound: has the key
+        let list = complete_memberlist(&BTreeMap::new(), &observed, &none, &BTreeMap::new(), Some(&refound));
+        assert!(list.contains(&kept), "base member stays");
+        assert!(!list.contains(&spammer), "buried-kick spammer is not re-admitted by old spam");
+        assert!(list.contains(&rejoiner), "posting after the cut needs the new key, so it re-admits");
+        // Without the refound the old behavior stands (spammer re-admitted) — the gate
+        // only ever removes, never adds.
+        let ungated = complete_memberlist(&BTreeMap::new(), &observed, &none, &BTreeMap::new(), None);
+        assert!(ungated.contains(&spammer), "no refound, no gate");
+
+        // A grantee (present at the ts-0 sentinel) the snapshot omitted still survives:
+        // a Grant outranks a snapshot omission (the CONSENSUS-COMPLETE backstop).
+        let grantee = pk();
+        let mut with_grantee = observed.clone();
+        with_grantee.insert(grantee, 0);
+        let list = complete_memberlist(&BTreeMap::new(), &with_grantee, &none, &BTreeMap::new(), Some(&refound));
+        assert!(list.contains(&grantee), "a grantee survives the refound gate");
+    }
+
+    #[test]
+    fn within_one_epoch_snapshots_only_add() {
+        // A refound snapshot plus a later rescue ADDENDUM on the same epoch: the
+        // addendum names only the rescued, and must not read as the whole list.
+        let refounder = pk();
+        let (a, b, c) = (pk(), pk(), pk());
+        let events = [
+            join_ev(a, 1_000, 1),
+            join_ev(b, 1_000, 2),
+            join_ev(c, 1_000, 3),
+            at_epoch(snap_ev(refounder, vec![a], 0x01, (1, 1), 5_000, 4), 7),
+            at_epoch(snap_ev(refounder, vec![b], 0x02, (1, 1), 8_000, 5), 7),
+        ];
+        let fold = coalesce(&events, NOW, Some(&refounder), &always);
+        assert_eq!(fold.get(&a).unwrap().verdict, Verdict::Joined);
+        assert_eq!(fold.get(&b).unwrap().verdict, Verdict::Joined, "the addendum adds, it never evicts");
+        assert_eq!(fold.get(&c).unwrap().verdict, Verdict::Refounded);
+        assert_eq!(fold.get(&c).unwrap().at_ms, 5_000, "the cut is the refound, not the addendum");
+    }
+
+    #[test]
+    fn the_latest_refounding_is_the_one_that_counts() {
+        let refounder = pk();
+        let (a, b) = (pk(), pk());
+        // Epoch 3 listed both; epoch 7 listed only `a`. A store holding both
+        // snapshots must read like a client that only ever saw epoch 7.
+        let events = [
+            join_ev(a, 1_000, 1),
+            join_ev(b, 1_000, 2),
+            at_epoch(snap_ev(refounder, vec![a, b], 0x03, (1, 1), 3_000, 3), 3),
+            at_epoch(snap_ev(refounder, vec![a], 0x07, (1, 1), 7_000, 4), 7),
+        ];
+        let fold = coalesce(&events, NOW, Some(&refounder), &always);
+        assert_eq!(fold.get(&a).unwrap().verdict, Verdict::Joined);
+        assert_eq!(fold.get(&b).unwrap().verdict, Verdict::Refounded);
+        assert_eq!(fold.get(&b).unwrap().at_ms, 7_000);
+    }
+
+    #[test]
+    fn only_the_minters_stamped_snapshot_can_evict() {
+        let (refounder, impostor, m) = (pk(), pk(), pk());
+        let forged = [join_ev(m, 1_000, 1), at_epoch(snap_ev(impostor, vec![], 0x01, (1, 1), 5_000, 2), 7)];
+        assert_eq!(coalesce(&forged, NOW, Some(&refounder), &always).get(&m).unwrap().verdict, Verdict::Joined);
+        assert_eq!(coalesce(&forged, NOW, None, &always).get(&m).unwrap().verdict, Verdict::Joined);
+        // A genuine snapshot with no epoch stamp (a wire fold, or a store that has
+        // not synced since the rotation) replaces nothing either.
+        let unstamped = [join_ev(m, 1_000, 1), snap_ev(refounder, vec![], 0x01, (1, 1), 5_000, 2)];
+        assert_eq!(coalesce(&unstamped, NOW, Some(&refounder), &always).get(&m).unwrap().verdict, Verdict::Joined);
+    }
+
+    #[test]
     fn a_torn_snapshot_coalesces_order_independently() {
         // A maliciously (or buggily) torn snapshot — two chunks of one snap id
         // carrying DIFFERENT timestamps — must fold to the SAME member set
@@ -865,7 +1084,7 @@ mod tests {
         // Old activity (pre-Leave) never resurrects; silent observed authors
         // ARE members; the banlist subtracts unconditionally.
         let observed: BTreeMap<PublicKey, u64> = [(left, 4_000), (silent, 100), (banned_observed, 9_000)].into();
-        let list = complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new());
+        let list = complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new(), None);
         assert!(list.contains(&joined));
         assert!(list.contains(&silent), "an observed author with no guestbook state is present");
         assert!(!list.contains(&left), "activity OLDER than the leave does not resurrect");
@@ -874,11 +1093,11 @@ mod tests {
 
         // Activity strictly newer than the departure re-enters them.
         let observed: BTreeMap<PublicKey, u64> = [(left, 6_000)].into();
-        let list = complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new());
+        let list = complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new(), None);
         assert!(list.contains(&left));
         // Equal-to-departure is not "newer" — still out.
         let observed: BTreeMap<PublicKey, u64> = [(left, 5_000)].into();
-        assert!(!complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new()).contains(&left));
+        assert!(!complete_memberlist(&coalesced, &observed, &banlist, &BTreeMap::new(), None).contains(&left));
     }
 
     #[test]
@@ -893,24 +1112,24 @@ mod tests {
         let empty: BTreeSet<PublicKey> = BTreeSet::new();
 
         let observed: BTreeMap<PublicKey, u64> = [(chatty, 4_000)].into();
-        let list = complete_memberlist(&coalesced, &observed, &empty, &banned_at);
+        let list = complete_memberlist(&coalesced, &observed, &empty, &banned_at, None);
         assert!(!list.contains(&member), "a pre-ban Join must not survive the un-ban");
         assert!(!list.contains(&chatty), "pre-ban activity must not survive the un-ban either");
 
         // A genuine rejoin — anything strictly after the ban — brings them back.
         let observed: BTreeMap<PublicKey, u64> = [(chatty, 6_000)].into();
         assert!(
-            complete_memberlist(&coalesced, &observed, &empty, &banned_at).contains(&chatty),
+            complete_memberlist(&coalesced, &observed, &empty, &banned_at, None).contains(&chatty),
             "activity newer than the ban is a real rejoin"
         );
         let rejoined = coalesce(&[join_ev(member, 1_000, 1), join_ev(member, 6_000, 3)], NOW, None, &always);
         assert!(
-            complete_memberlist(&rejoined, &BTreeMap::new(), &empty, &banned_at).contains(&member),
+            complete_memberlist(&rejoined, &BTreeMap::new(), &empty, &banned_at, None).contains(&member),
             "a Join newer than the ban re-admits"
         );
         // Still banned (not yet un-banned) stays out regardless of the marks.
         let banlist: BTreeSet<PublicKey> = [member].into();
-        assert!(!complete_memberlist(&rejoined, &BTreeMap::new(), &banlist, &banned_at).contains(&member));
+        assert!(!complete_memberlist(&rejoined, &BTreeMap::new(), &banlist, &banned_at, None).contains(&member));
     }
 
     #[test]
