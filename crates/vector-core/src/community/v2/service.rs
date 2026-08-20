@@ -2282,6 +2282,203 @@ fn fold_members(
     Ok(members.into_iter().collect())
 }
 
+
+/// What a [`rescue_stranded_members`] pass published.
+#[derive(Debug, Default)]
+pub struct RescueReport {
+    /// Epoch hops that received catch-up blobs (1..=current, minus any with a missing root).
+    pub hops: usize,
+    /// Hops skipped because an archived root was missing — those members stay wedged there.
+    pub hops_skipped: usize,
+    pub chunks_published: usize,
+    pub targets: usize,
+}
+
+/// Re-vend the epoch chain to members a past rotation forgot.
+///
+/// DELIBERATELY not surfaced in any client: [`refound_community`]'s recipient union
+/// exists so this situation cannot arise from our own rotations. This stays as the
+/// operator/SDK primitive for strandings we don't control — another client's rotation
+/// folding a narrower memberlist, or a pre-union build. It re-keyed 39 live members
+/// once; prevention is the product, this is the fire axe.
+///
+/// A client follows rekeys hop by hop: from its held root it derives ONE plane —
+/// `base_rekey_group(held_root, cid, held_epoch + 1)` — and can never jump. A member
+/// excluded from the recipient set at hop N therefore wedges at N−1 forever; no later
+/// rotation can reach them because they cannot even derive where to look.
+///
+/// The rotator holds every archived root, so it can publish what should have existed:
+/// for each hop, additional blobs addressed to the stranded set, built with the SAME
+/// (rotator, scope, epoch, prev-commitment) as the original rotation. `collect_rotations`
+/// correlates on exactly that key, so the catch-up blobs merge into the rotation every
+/// client already validated — the stranded client's next follow simply finds its blob
+/// and walks the whole chain forward. No action needed on their side; works on any
+/// client version.
+///
+/// Intermediate blobs carry the CURRENT control pair (the historical pairs are not
+/// archived). A mid-walk client briefly holds a future control address, and the final
+/// hop — which every walk ends on — sets the same, correct pair.
+///
+/// A Guestbook snapshot addendum at the current epoch re-seeds the rescued members for
+/// outside readers (the invite page) and for clients whose fold lost them.
+pub async fn rescue_stranded_members<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    targets: &[PublicKey],
+) -> Result<RescueReport, String> {
+    crate::db::scoped(async move {
+        let mut report = RescueReport { targets: targets.len(), ..Default::default() };
+        if targets.is_empty() {
+            return Ok(report);
+        }
+        let signer = crate::signer::active_signer()?;
+        let my_pk = me_pk()?;
+        let cid = community.id();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+        let owner = community.owner()?;
+        let owner_hex = owner.to_hex();
+        // Key-granting is rotation-shaped authority: the receive side only honors blobs
+        // inside rotations whose rotator it admits, so an unauthorized caller could only
+        // publish noise — but fail loudly here rather than publish it.
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        if my_pk != owner && !roster.is_authorized(&my_pk.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::BAN) {
+            return Err("rescuing stranded members requires rotation authority (owner or BAN)".to_string());
+        }
+        let control_pk = community.control_pk.ok_or("rescue requires a split community (no control pk held)")?;
+        let citation = my_authority_citation(community, &my_pk);
+
+        // Every archived root, plus the live head (belt-and-suspenders: the head is
+        // archived at rotation time, but the union costs nothing).
+        let mut roots: std::collections::BTreeMap<u64, [u8; 32]> =
+            crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX)?
+                .into_iter()
+                .map(|(e, k)| (e.0, k))
+                .collect();
+        roots.insert(community.root_epoch.0, community.community_root);
+
+        let at_secs = now_ms() / 1000;
+        for e in 1..=community.root_epoch.0 {
+            let (Some(prev_root), Some(new_root)) = (roots.get(&(e - 1)).copied(), roots.get(&e).copied()) else {
+                crate::log_warn!("[Rescue] no archived root for hop {} -> {} — members wedged there stay wedged", e - 1, e);
+                report.hops_skipped += 1;
+                continue;
+            };
+            let group = super::derive::base_rekey_group_key(&prev_root, cid, Epoch(e));
+            let prev_commit = super::derive::epoch_key_commitment(Epoch(e - 1), &prev_root);
+            // The catch-up EXTENDS the original rotation's chunk set: same correlation
+            // key, indices past its highest slot. Re-claiming a slot is not an option —
+            // collect_rotations keeps the first chunk per index, and if ours won, the
+            // original recipients in the losing chunk would fold as removed.
+            let existing = fetch_rekey_chunks(transport, &community.relays, &group).await?;
+            let start_after = existing
+                .iter()
+                .filter(|c| {
+                    c.rotator == my_pk
+                        && c.scope == super::rekey::RekeyScope::Root
+                        && c.new_epoch == Epoch(e)
+                        && c.prev_commit == prev_commit
+                })
+                .map(|c| c.chunk.0.max(c.chunk.1))
+                .max()
+                .unwrap_or(0);
+            // The owner rides every catch-up chunk: an extension inherits the original
+            // chunks' owner blob, but a plane a relay withheld folds ours standalone,
+            // and a rotation without an owner blob is inadmissible by design.
+            let mut recipients: Vec<PublicKey> = targets.to_vec();
+            if !recipients.contains(&my_pk) {
+                recipients.push(my_pk);
+            }
+            let mut blobs = Vec::with_capacity(recipients.len());
+            for r in &recipients {
+                // Staff get the control secret exactly as a live rotation would give it.
+                let staff = *r == my_pk || roster.is_staff(&r.to_hex(), Some(&owner_hex));
+                let ctl_root = if staff { community.control_root.as_ref() } else { None };
+                blobs.push(
+                    super::rekey::build_base_blob(&signer, &my_pk.to_bytes(), r, Epoch(e), &new_root, &control_pk.to_bytes(), ctl_root)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            let chunks = super::rekey::build_rekey_chunk_extension(
+                &signer,
+                my_pk,
+                &group,
+                super::rekey::RekeyScope::Root,
+                Epoch(e),
+                Epoch(e - 1),
+                &prev_commit,
+                &blobs,
+                at_secs,
+                citation.as_ref(),
+                start_after,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            for c in &chunks {
+                transport.publish_durable(c, &community.relays).await?;
+                report.chunks_published += 1;
+            }
+            report.hops += 1;
+        }
+
+        // Re-seed them in the current epoch's Guestbook: snapshot chunks are
+        // independently useful (CORD-02 §5), so an addendum under a fresh snap id folds
+        // as Joined on every client and every outside reader. Best-effort, like a
+        // rotation's own snapshot.
+        let gb_group = super::derive::guestbook_group_key(&community.community_root, cid, community.root_epoch);
+        let snap_id = crate::community::random_32();
+        for rumor in guestbook::build_snapshot_rumors(my_pk, targets, snap_id, at_secs * 1000) {
+            if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
+                let _ = transport.publish(&wrap, &community.relays).await;
+            }
+        }
+
+        crate::log_info!(
+            "[Rescue] {} member(s): {} hop(s) re-vended ({} skipped), {} chunk(s) published, snapshot addendum at epoch {}",
+            targets.len(),
+            report.hops,
+            report.hops_skipped,
+            report.chunks_published,
+            community.root_epoch.0
+        );
+        Ok(report)
+    })
+    .await
+}
+
+/// Diagnostic: the memberlist as the WIRE alone tells it — the current epoch's
+/// guestbook plane fetched fresh and folded with no local observation and no roster
+/// backstop. This is what an outside reader (the invite page) computes, so the diff
+/// against [`stored_memberlist`] is exactly the set a rotation left behind: counted
+/// locally, absent from the snapshot, holding no current key.
+pub async fn wire_guestbook_members<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+) -> Result<Vec<PublicKey>, String> {
+    let (events, _newest, _reached_end) = fetch_guestbook_events(transport, community, 0).await?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let owner = community.owner()?;
+    let owner_hex = owner.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
+        let actor_hex = actor.to_hex();
+        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    };
+    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
+    let banlist: std::collections::BTreeSet<PublicKey> = crate::db::community::get_community_banlist(&cid_hex)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|h| PublicKey::from_hex(h).ok())
+        .collect();
+    Ok(coalesced
+        .iter()
+        .filter(|(pk, st)| st.verdict == guestbook::Verdict::Joined && !banlist.contains(pk))
+        .map(|(pk, _)| *pk)
+        .collect())
+}
+
 /// Did the AUTHORIZED Guestbook coalesce rule `member` KICKED, per the stored plane?
 ///
 /// This is the only sound basis for acting on a kick against ourselves. The
@@ -2709,9 +2906,18 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         }
 
         // Recipients: the current members minus `removed`, plus me (multi-device).
+        //
+        // UNION of the network fold and the LOCAL memberlist. The network fold only
+        // observes the recent window, so a quiet member whose Join lives on a buried
+        // epoch falls out of it — and out of the key set and snapshot — on every
+        // rotation. Five rotations in one evening shed 39 real members that way, each
+        // left wedged at the hop that first forgot them. Locally-known members are
+        // vended keys too; being forgotten is not a removal, only `removed` is.
         let members = memberlist(transport, community).await?;
         let removed_set: std::collections::HashSet<[u8; 32]> = removed.iter().map(|p| p.to_bytes()).collect();
-        let mut recipients: Vec<PublicKey> = members.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
+        let mut union: std::collections::BTreeSet<PublicKey> = members.into_iter().collect();
+        union.extend(stored_memberlist(community)?);
+        let mut recipients: Vec<PublicKey> = union.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
         if !recipients.iter().any(|p| *p == my_pk) {
             recipients.push(my_pk);
         }
@@ -9402,6 +9608,111 @@ mod tests {
         assert_eq!(adopted.root_epoch, Epoch(1));
         assert_eq!(adopted.control_pk, refounded.control_pk);
         assert_eq!(adopted.control_root, refounded.control_root, "staff crossing a rotation get the new secret in the blob");
+    }
+
+    #[tokio::test]
+    async fn a_rescue_lets_a_stranded_member_walk_every_missed_hop() {
+        // A member forgotten by two consecutive rotations is wedged at epoch 0: their
+        // client derives base_rekey_group(root_0, cid, 1), finds no blob, and can never
+        // even compute where epoch 2 lives. The rescue publishes the blobs that should
+        // have existed, correlated into the ORIGINAL rotations — then the walk just works.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Stranded", vec!["wss://r".into()], None).await.unwrap();
+        let stranded = Keys::generate();
+
+        // Two rotations that never vend to `stranded` (they are in no fold: never
+        // joined the wire, never posted, not in the local store).
+        let e1 = refound_community(&relay, &community, &[]).await.unwrap();
+        let e2 = refound_community(&relay, &e1, &[]).await.unwrap();
+        assert_eq!(e2.root_epoch, Epoch(2));
+
+        // Wedged: no blob for them at the only plane they can derive.
+        let hop1 = base_rekey_group_key(&community.community_root, community.id(), Epoch(1));
+        let chunks = fetch_rekey_chunks(&relay, &community.relays, &hop1).await.unwrap();
+        let r1 = &rekey::collect_rotations(&chunks)[0];
+        assert!(
+            rekey::find_my_blob(&r1.blobs, &r1.rotator.to_bytes(), &stranded.public_key().to_bytes(), r1.scope, r1.new_epoch).is_none(),
+            "genuinely stranded before the rescue"
+        );
+
+        let report = rescue_stranded_members(&relay, &e2, &[stranded.public_key()]).await.unwrap();
+        assert_eq!(report.hops, 2, "one catch-up per missed hop");
+        assert_eq!(report.hops_skipped, 0);
+
+        // Walk exactly as a client would: derive each hop's plane from the PREVIOUS
+        // root, find our blob inside the correlated rotation, open, adopt, repeat.
+        let signer = crate::signer::ActiveSigner::Keys(stranded.clone());
+        let mut held_root = community.community_root;
+        for e in 1..=2u64 {
+            let group = base_rekey_group_key(&held_root, community.id(), Epoch(e));
+            let chunks = fetch_rekey_chunks(&relay, &community.relays, &group).await.unwrap();
+            let rotations = rekey::collect_rotations(&chunks);
+            let rot = rotations
+                .iter()
+                .find(|r| {
+                    rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), &stranded.public_key().to_bytes(), r.scope, r.new_epoch).is_some()
+                })
+                .expect("a rotation now carries our blob");
+            let blob = rekey::find_my_blob(&rot.blobs, &rot.rotator.to_bytes(), &stranded.public_key().to_bytes(), rot.scope, rot.new_epoch).unwrap();
+            let delivery = rekey::open_base_blob(&signer, &rot.rotator, community.id(), Epoch(e), blob).await.unwrap();
+            held_root = delivery.new_root;
+        }
+        assert_eq!(held_root, e2.community_root, "the walk ends on the live root");
+
+        // Merge safety on DEPLOYED clients: the catch-up extended the original chunk
+        // set (disjoint indices), so everything folds as ONE complete rotation and no
+        // original recipient's blob was displaced — a slot collision would fold as
+        // their removal.
+        let chunks = fetch_rekey_chunks(&relay, &community.relays, &hop1).await.unwrap();
+        let rotations = rekey::collect_rotations(&chunks);
+        assert_eq!(rotations.len(), 1, "catch-up merged into the original rotation, not a fork");
+        assert!(rotations[0].is_complete(), "the extended set still reads complete");
+        let owner_pk = e2.owner().unwrap();
+        assert!(
+            rekey::find_my_blob(&rotations[0].blobs, &rotations[0].rotator.to_bytes(), &owner_pk.to_bytes(), rotations[0].scope, rotations[0].new_epoch).is_some(),
+            "the original recipient's blob survived the extension"
+        );
+
+        // And the outside world counts them again: the snapshot addendum seeded them
+        // onto the current epoch's guestbook plane.
+        let wire = wire_guestbook_members(&relay, &e2).await.unwrap();
+        assert!(wire.contains(&stranded.public_key()), "the invite page's fold now includes them");
+    }
+
+    #[tokio::test]
+    async fn a_refound_keeps_a_quiet_member_the_network_fold_forgot() {
+        // The network fold only sees the current guestbook + the recent posting window,
+        // so a quiet member whose Join lives on a buried epoch vanishes from it — and a
+        // rotation that trusts the fold alone silently sheds them. Being forgotten must
+        // not be a removal: only the explicit `removed` list is.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "QuietOnes", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // A member the LOCAL store remembers (an old synced Join) but the WIRE has no
+        // trace of: never posted, Join never published on the current plane.
+        let quiet = Keys::generate().public_key();
+        let ev = guestbook::GuestbookEvent {
+            rumor_id: [7u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: quiet, invited_by: None, at_ms: 1_000 },
+        };
+        crate::db::community::set_guestbook(&cid_hex, std::slice::from_ref(&ev), 1).unwrap();
+        assert!(stored_memberlist(&community).unwrap().contains(&quiet), "locally known");
+        assert!(!memberlist(&relay, &community).await.unwrap().contains(&quiet), "network fold has forgotten them");
+
+        let rotated = refound_community(&relay, &community, &[]).await.unwrap();
+
+        // They made the new epoch's snapshot — the wire now carries them, so an outside
+        // reader counts them and their client has a rekey blob to walk forward on.
+        let wire = wire_guestbook_members(&relay, &rotated).await.unwrap();
+        assert!(wire.contains(&quiet), "the quiet member survived the rotation onto the wire");
+
+        // The explicit removed list still removes, union or no union.
+        let rotated2 = refound_community(&relay, &rotated, &[quiet]).await.unwrap();
+        let wire2 = wire_guestbook_members(&relay, &rotated2).await.unwrap();
+        assert!(!wire2.contains(&quiet), "an explicit removal is honoured");
     }
 
     #[tokio::test]
