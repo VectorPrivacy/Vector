@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-policy-side-by-side"
+description = "Enables the policy_side_by_side command without any pre-configured scope."
+commands.allow = ["policy_side_by_side"]
+
+[[permission]]
+identifier = "deny-policy-side-by-side"
+description = "Denies the policy_side_by_side command without any pre-configured scope."
+commands.deny = ["policy_side_by_side"]

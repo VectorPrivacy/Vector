@@ -136,6 +136,7 @@
     "allow-debug-v2-memberlist-diff",
     "allow-kick-community-members",
     "allow-get-moderation-intel",
+    "allow-policy-side-by-side",
     "allow-refound-community",
     "allow-revoke-all-public-invites",
     "allow-unban-community-member",

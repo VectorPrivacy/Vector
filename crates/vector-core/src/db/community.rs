@@ -1494,6 +1494,98 @@ pub fn community_chat_row_ids(community_id: &str) -> Result<Vec<i64>, String> {
     Ok(channel_ids.iter().filter_map(|c| super::id_cache::get_chat_id_by_identifier(c).ok()).collect())
 }
 
+/// One message as the policy engine reads it: the identity, author, channel and
+/// text a rule needs to cite what it convicted on.
+#[derive(Debug, Clone)]
+pub struct PolicyMessage {
+    /// The inner rumor id, hex — a chunk-set wire event carries many messages,
+    /// so only this names one.
+    pub id: String,
+    pub npub: String,
+    /// Channel eid hex, so an exempt channel can be excluded by id.
+    pub channel_id: String,
+    /// Milliseconds: the engine clamps and orders on inner time.
+    pub at_ms: u64,
+    pub text: String,
+    /// p-tags on the message — the only thing that counts as a mention.
+    pub mentions: u32,
+}
+
+/// The evaluation corpus: the newest `limit` messages a Community's channels
+/// hold, with the identity and channel `community_recent_texts` discards.
+/// Ordered oldest-first so the caller can clamp from the front.
+pub fn community_policy_messages(community_id: &str, limit: usize) -> Result<Vec<PolicyMessage>, String> {
+    let channel_ids: Vec<String> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let mut stmt = conn
+            .prepare("SELECT channel_id FROM community_channels WHERE community_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![community_id], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    if channel_ids.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    // chat row id -> channel eid, so each message reports the channel it lives in.
+    let mut chat_to_channel: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    for c in &channel_ids {
+        if let Ok(row) = super::id_cache::get_chat_id_by_identifier(c) {
+            chat_to_channel.insert(row, c.clone());
+        }
+    }
+    if chat_to_channel.is_empty() {
+        return Ok(Vec::new());
+    }
+    let text = crate::stored_event::event_kind::PRIVATE_DIRECT_MESSAGE;
+    let chat_ints: Vec<i64> = chat_to_channel.keys().copied().collect();
+    let rows: Vec<(String, String, i64, i64, String, String)> = {
+        let conn = super::get_db_connection_guard_static()?;
+        let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, npub, chat_id, created_at, content, tags FROM events \
+             WHERE chat_id IN ({placeholders}) AND kind = {text} \
+               AND npub IS NOT NULL AND npub != '' \
+             ORDER BY created_at DESC LIMIT {limit}"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let mapped = stmt
+            .query_map(rusqlite::params_from_iter(chat_ints.iter()), |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5).unwrap_or_default(),
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+    let mut out: Vec<PolicyMessage> = rows
+        .into_iter()
+        .filter_map(|(id, npub, chat_id, created_at, content, tags)| {
+            let channel_id = chat_to_channel.get(&chat_id)?.clone();
+            let content = crate::crypto::maybe_decrypt_text(&content);
+            // A mention is a p-tag: inline "@name" is renderer-dependent and
+            // never counts.
+            let mentions = serde_json::from_str::<Vec<Vec<String>>>(&tags)
+                .map(|t| t.iter().filter(|tag| tag.first().is_some_and(|k| k == "p")).count() as u32)
+                .unwrap_or(0);
+            Some(PolicyMessage {
+                id,
+                npub,
+                channel_id,
+                at_ms: (created_at.max(0) as u64).saturating_mul(1000),
+                text: content,
+                mentions,
+            })
+        })
+        .collect();
+    out.reverse(); // oldest-first
+    Ok(out)
+}
+
 /// Per-author message aggregates across a Community's channels. Counts only what a
 /// person actually SAID — kinds 14/15 — so a reaction spammer doesn't read as a
 /// conversationalist and an edit doesn't double-count its original.

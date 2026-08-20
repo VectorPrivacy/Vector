@@ -17,6 +17,7 @@
 pub mod combine;
 pub mod document;
 pub mod engine;
+pub mod harness;
 pub mod matchers;
 pub mod normalize;
 pub mod types;

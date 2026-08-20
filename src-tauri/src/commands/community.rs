@@ -4653,6 +4653,16 @@ pub async fn get_moderation_intel(community_id: String) -> Result<serde_json::Va
     .await
 }
 
+/// Run the policy engine beside the shipped assessor and report where they
+/// disagree. Read-only: nothing is published, nobody is removed.
+#[tauri::command]
+pub async fn policy_side_by_side(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.policy_side_by_side(&community_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Ban a whole wave as ONE moderation unit: one banlist edition, one strip, one
 /// re-founding. Banning them one by one would mint a rotation per member and let
 /// racing editions erase each other.

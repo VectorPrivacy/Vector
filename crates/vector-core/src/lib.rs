@@ -2990,6 +2990,80 @@ impl VectorCore {
         Ok(report)
     }
 
+    /// Run the policy engine beside the shipped assessor and report where they
+    /// disagree. Diagnostic only: the engine convicts nothing in production
+    /// until this diff has been read against real data.
+    pub fn policy_side_by_side(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::v2::guestbook::GuestbookEntry;
+        use nostr_sdk::prelude::PublicKey;
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("moderation tools require a Concord v2 community".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().map_err(VectorError::Other)?;
+
+        // The moderation permission bits: holding one of these is staff. Mere
+        // role membership is NOT — a cosmetic role must not confer immunity.
+        use crate::community::roles::Permissions;
+        const MOD_MASK: u64 = Permissions::MANAGE_ROLES
+            | Permissions::MANAGE_CHANNELS
+            | Permissions::MANAGE_METADATA
+            | Permissions::KICK
+            | Permissions::BAN
+            | Permissions::MANAGE_MESSAGES;
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        let staff: std::collections::HashSet<String> = roster
+            .grants
+            .iter()
+            .filter(|g| {
+                g.role_ids.iter().any(|rid| {
+                    roster.roles.iter().any(|r| &r.role_id == rid && (r.permissions.0 & MOD_MASK) != 0)
+                })
+            })
+            .map(|g| g.member.clone())
+            .collect();
+        let roles_of: std::collections::HashMap<String, Vec<String>> =
+            roster.grants.iter().map(|g| (g.member.clone(), g.role_ids.clone())).collect();
+
+        let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+        let mut joined_at: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for e in &events {
+            let GuestbookEntry::Join { member, at_ms, .. } = &e.entry else { continue };
+            let hex = member.to_hex();
+            let slot = joined_at.entry(hex).or_insert(*at_ms);
+            *slot = (*slot).min(*at_ms);
+        }
+
+        let members: Vec<(PublicKey, Option<u64>, bool, Vec<String>)> =
+            crate::community::v2::service::stored_memberlist(&community)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|pk| {
+                    let hex = pk.to_hex();
+                    (pk, joined_at.get(&hex).copied(), staff.contains(&hex), roles_of.get(&hex).cloned().unwrap_or_default())
+                })
+                .collect();
+
+        // The assessor's own verdicts, for the diff.
+        let assessments: Vec<(String, String)> = Self::raid_report(&cid_hex)
+            .map(|r| {
+                r.members
+                    .iter()
+                    .map(|m| (m.npub.clone(), format!("{:?}", m.verdict).to_lowercase()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let diff = crate::community::policy::harness::run_side_by_side(
+            &cid_hex, &owner, &members, &assessments, now_ms,
+        )
+        .map_err(VectorError::Other)?;
+        serde_json::to_value(diff).map_err(|e| VectorError::Other(e.to_string()))
+    }
+
     /// Drop a community's memoised verdict. Every moderation action changes who is a
     /// member, so serving the pre-action answer would leave the badge accusing people
     /// who are already gone.
