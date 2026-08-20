@@ -4564,3 +4564,32 @@ pub async fn fetch_pinned_attachment(community_id: String, channel_id: String, m
         .await
         .map_err(|e| e.to_string())
 }
+
+/// Diagnostic: local memberlist vs the wire guestbook fold, with the diff named.
+/// `pruned` = counted locally but absent from the current epoch's plane — the set a
+/// rotation stranded without keys. `wire_only` = the inverse (joined since our last
+/// local fold caught up).
+#[tauri::command]
+pub async fn debug_v2_memberlist_diff(community_id: String) -> Result<serde_json::Value, String> {
+    use nostr_sdk::prelude::ToBech32;
+    vector_core::db::scoped(async move {
+        let id = CommunityId(hex_to_id32(&community_id)?);
+        let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+        let wire = vector_core::community::v2::service::wire_guestbook_members(&transport, &c).await?;
+        let local = vector_core::community::v2::service::stored_memberlist(&c)?;
+        let wire_set: std::collections::HashSet<_> = wire.iter().copied().collect();
+        let local_set: std::collections::HashSet<_> = local.iter().copied().collect();
+        let b32 = |pks: Vec<nostr_sdk::prelude::PublicKey>| -> Vec<String> {
+            pks.into_iter().filter_map(|p| p.to_bech32().ok()).collect()
+        };
+        Ok(serde_json::json!({
+            "epoch": c.root_epoch.0,
+            "wire": wire.len(),
+            "local": local.len(),
+            "pruned": b32(local.iter().filter(|p| !wire_set.contains(p)).copied().collect()),
+            "wire_only": b32(wire.iter().filter(|p| !local_set.contains(p)).copied().collect()),
+        }))
+    })
+    .await
+}

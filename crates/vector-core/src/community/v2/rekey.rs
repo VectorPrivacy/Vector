@@ -663,6 +663,45 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     Ok(out)
 }
 
+/// Extend an already-published rotation's chunk set with additional blobs — the
+/// catch-up path for members a rotation forgot.
+///
+/// Indices start at `start_after + 1` and the declared total covers them, so no
+/// reader ever sees two chunks claiming the same slot. That constraint is load-
+/// bearing on DEPLOYED clients: [`collect_rotations`] keeps the first chunk seen
+/// per index, so a colliding slot silently drops the loser's blobs — and for an
+/// original recipient that reads as their own removal. Disjoint indices merge as
+/// a pure union under every fetch order, and [`Rotation::is_complete`] only
+/// requires `1..=declared_first_seen`, which extras never break.
+pub async fn build_rekey_chunk_extension<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    rotator_pk: PublicKey,
+    rekey_group: &GroupKey,
+    scope: RekeyScope,
+    new_epoch: Epoch,
+    prev_epoch: Epoch,
+    prev_commit: &[u8; 32],
+    blobs: &[RekeyBlob],
+    at_secs: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+    start_after: u32,
+) -> Result<Vec<Event>, RekeyError> {
+    let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
+        vec![&[]]
+    } else {
+        blobs.chunks(MAX_REKEY_BLOBS_PER_EVENT).collect()
+    };
+    let n = start_after + groups.len() as u32;
+    let mut out = Vec::with_capacity(groups.len());
+    for (idx, group_blobs) in groups.iter().enumerate() {
+        let i = start_after + idx as u32 + 1;
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, i, n, at_secs, citation)?;
+        let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
+        out.push(wrap);
+    }
+    Ok(out)
+}
+
 /// Parse a 3303 chunk from a seal-verified stream open. Rejects a non-3303
 /// rumor, a plaintext seal (the rekey plane is encrypted-only), malformed or
 /// duplicate machinery tags, a bad chunk range, and an over-cap blob array.

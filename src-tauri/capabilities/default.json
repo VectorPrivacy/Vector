@@ -129,6 +129,7 @@
     "allow-get-community-members",
     "allow-get-chat-commands",
     "allow-ban-community-member",
+    "allow-debug-v2-memberlist-diff",
     "allow-unban-community-member",
     "allow-delete-community",
     "allow-migrate-community",
