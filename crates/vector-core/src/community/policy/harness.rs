@@ -62,6 +62,34 @@ pub fn scam_links_policy() -> Policy {
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
+            // The raid shape: many identities, one line each. Heuristic, so it
+            // flags for a human and never feeds `proven`.
+            Rule {
+                id: "cohort".into(),
+                matcher: Match::Cohort { min: 3, quiet_max: 2, short_factor: 3, thin_ratio: None },
+                tiers: None,
+                severity: Some(Severity::Severe),
+                weight: Some(85),
+                pierces_trusted: false,
+                family: None,
+                armed_by: None,
+                exempt: Exempt::default(),
+                enforcement: Enforcement::Advisory,
+            },
+            // A burst of joins is what a freshly-posted invite link looks like,
+            // so it stays silent until the cohort rule has already convicted.
+            Rule {
+                id: "burst".into(),
+                matcher: Match::JoinBurst { gap_secs: 600, min: 5 },
+                tiers: None,
+                severity: Some(Severity::Major),
+                weight: Some(40),
+                pierces_trusted: false,
+                family: None,
+                armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) }),
+                exempt: Exempt::default(),
+                enforcement: Enforcement::Advisory,
+            },
             // Copy-paste spam from ONE account. `cohort` (still with raid.rs)
             // catches the other shape: many accounts sharing one line.
             Rule {
@@ -96,7 +124,7 @@ pub fn scam_links_policy() -> Policy {
                 weight: Some(20),
                 pierces_trusted: false,
                 family: None,
-                armed_by: Some(ArmedBy { rule: "shorteners".into(), scope: ArmScope::Subject, min_subjects: None }),
+                armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: None }),
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
@@ -108,7 +136,7 @@ pub fn scam_links_policy() -> Policy {
                 weight: Some(10),
                 pierces_trusted: false,
                 family: None,
-                armed_by: Some(ArmedBy { rule: "shorteners".into(), scope: ArmScope::Subject, min_subjects: None }),
+                armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: None }),
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
@@ -332,16 +360,21 @@ mod tests {
     }
 
     /// The first live run convicted 147 of 155 members on "has posted at most
-    /// twice" alone. Aggravators must never speak by themselves.
+    /// twice" alone. A weak signal must never speak by itself — that includes
+    /// a join burst, which is exactly what a freshly-posted invite link looks
+    /// like.
     #[test]
-    fn every_aggravator_is_armed_by_a_real_conviction() {
+    fn every_weak_signal_is_armed_by_a_real_conviction() {
         let p = scam_links_policy();
         for rule in &p.rules {
-            let is_aggravator = matches!(rule.matcher, Match::TenureLt { .. } | Match::MessagesLte { .. });
+            let is_aggravator = matches!(
+                rule.matcher,
+                Match::TenureLt { .. } | Match::MessagesLte { .. } | Match::JoinBurst { .. }
+            );
             assert_eq!(
                 is_aggravator,
                 rule.armed_by.is_some(),
-                "rule {} must be armed if and only if it is an aggravator",
+                "rule {} must be armed if and only if it is a weak signal",
                 rule.id
             );
         }

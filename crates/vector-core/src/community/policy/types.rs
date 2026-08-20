@@ -30,6 +30,9 @@ pub mod caps {
     pub const MAX_RULE_ID_LEN: usize = 64;
     pub const MAX_POLICY_BYTES: usize = 64 * 1024;
     pub const MIN_SKELETON_LEN: usize = 8; // Unicode scalar values, never bytes
+    /// Peers named per cohort exhibit. A 500-strong cluster would otherwise put
+    /// tens of KB of ids through the IPC boundary for nothing.
+    pub const COHORT_SAMPLE_CAP: usize = 24;
     pub const WEIGHT_MIN: u32 = 1;
     pub const WEIGHT_MAX: u32 = 99; // 100 reserved: no unconditional-sentencing number exists
     pub const REFUSE_MIN_LITERAL_CHARS: usize = 4; // per alternation branch, minimum

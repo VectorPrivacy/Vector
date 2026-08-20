@@ -6,7 +6,7 @@
 //! sentences.
 
 use super::combine::run_pipeline;
-use super::document::{ArmScope, Enforcement, Exempt, ExemptPatterns, Match, Policy, Rule, Rung};
+use super::document::{ArmScope, Enforcement, Exempt, ExemptPatterns, Match, Policy, Ratio, Rule, Rung};
 use super::matchers::{cancel_exempt_hits, keyword_hits, link_hits};
 use super::normalize::{self, EmojiCodes};
 use super::types::*;
@@ -221,8 +221,17 @@ fn evaluate_one(
     // armed_by counts convictions BEFORE suppression, folding and top-N.
     let mut convicted_by_rule: BTreeMap<&str, BTreeSet<[u8; 32]>> = BTreeMap::new();
 
+    // Only the people who are HERE can be convicted, or arm anything. The
+    // corpus outlives membership — a banned raider's messages stay in local
+    // storage long after the rotation removed them — so without this the engine
+    // re-litigates people a moderator cannot act on, and last night's attack
+    // keeps arming rules against whoever is still here today. Scores are
+    // present tense; so is the evidence behind them.
+    let member_set: BTreeSet<[u8; 32]> = signals.members.iter().map(|m| m.subject.0).collect();
+
     for rule in &policy.rules {
-        let out = evaluate_rule(rule, policy, signals, &corpus, &codes, &exempt_channels, &shields, lp, now_ms, mode);
+        let mut out = evaluate_rule(rule, policy, signals, &corpus, &codes, &exempt_channels, &shields, lp, now_ms, mode);
+        out.convictions.retain(|c| member_set.contains(&c.subject.0));
         let mut subjects: BTreeSet<[u8; 32]> = BTreeSet::new();
         for c in &out.convictions {
             subjects.insert(c.subject.0);
@@ -497,10 +506,14 @@ fn evaluate_rule(
         Match::Repeat { .. } | Match::Rate { .. } => {
             window_rule(rule, corpus, codes, &rule_exempt_channels, shields, lp, &subject_exempt, &mut out);
         }
-        // The heuristic planes keep running through `raid.rs` until the console
-        // swaps over, so they report unevaluated rather than pretending.
-        Match::Cohort { .. } | Match::JoinBurst { .. } => {
-            out.state = RuleState::UnknownType;
+        Match::Cohort { min, quiet_max, short_factor, thin_ratio } => {
+            cohort_rule(
+                rule, corpus, codes, &rule_exempt_channels, shields, lp, &subject_exempt, signals,
+                *min, *quiet_max, *short_factor, thin_ratio.unwrap_or(Ratio { num: 1, denom: 2 }), &mut out,
+            );
+        }
+        Match::JoinBurst { gap_secs, min } => {
+            join_burst_rule(rule, signals, shields, lp, &subject_exempt, *gap_secs, *min, &mut out);
         }
     }
     out
@@ -513,6 +526,30 @@ fn gated(shields: &BTreeMap<[u8; 32], Shield>, subject: &SubjectId, rule: &Rule,
         // Trusted gates EXCEPT against a rung declaring pierces_trusted.
         Shield::Trusted => rung_pierces == 0 && !rule.pierces_trusted,
         Shield::None | Shield::Indeterminate => false,
+    }
+}
+
+fn push_direct_with(
+    rule: &Rule,
+    lp: &LoadedPolicy,
+    subject: SubjectId,
+    mut citations: Vec<Citation>,
+    out: &mut RuleOutcome,
+) {
+    citations.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    citations.dedup_by(|a, b| a.id == b.id);
+    let citation_count = citations.len() as u32;
+    let earliest = citations.iter().map(|c| c.at).min().unwrap_or(0);
+    let latest = citations.iter().map(|c| c.at).max().unwrap_or(0);
+    citations.truncate(caps::MAX_CITATIONS_PER_CONVICTION);
+    let ids: Vec<CitationId> = citations.iter().map(|c| c.id).collect();
+    out.citations.extend(citations);
+    push_direct(rule, lp, subject, out);
+    if let Some(c) = out.convictions.last_mut() {
+        c.citations = ids;
+        c.citation_count = citation_count;
+        c.earliest_citation_at = earliest;
+        c.latest_citation_at = latest;
     }
 }
 
@@ -669,6 +706,198 @@ fn content_rule(
                 _ => messages.iter().flat_map(|(_, c)| c.iter().cloned()).collect(),
             };
             push_tiered(rule, lp, subject, scope, idx as u8, hits, rung, citations, out);
+        }
+    }
+}
+
+/// Cross-account clustering: many identities posting one shape.
+///
+/// A cluster convicts on TWO counts, never one. Size alone would hang a
+/// community catchphrase on whoever repeats it, so the cluster must also be
+/// THIN — a script gives each identity a line or two, while regulars who share
+/// a greeting have hundreds of other messages between them. A short shape is
+/// cheap coincidence on top of that, so it clears a higher size bar.
+///
+/// Statistics read the FULL corpus: exempt members and channels still count
+/// toward cluster size and thinness (exemptions change who can be accused,
+/// never what the community looks like), they simply cannot be convicted.
+#[allow(clippy::too_many_arguments)]
+fn cohort_rule(
+    rule: &Rule,
+    corpus: &[&MessageSignal],
+    codes: &EmojiCodes,
+    exempt_channels: &BTreeSet<[u8; 32]>,
+    shields: &BTreeMap<[u8; 32], Shield>,
+    lp: &LoadedPolicy,
+    subject_exempt: &dyn Fn(&SubjectId) -> bool,
+    signals: &Signals,
+    min: u32,
+    quiet_max: u32,
+    short_factor: u32,
+    thin_ratio: Ratio,
+    out: &mut RuleOutcome,
+) {
+    // skeleton -> the distinct authors who posted it, plus their messages.
+    let mut clusters: BTreeMap<String, BTreeMap<[u8; 32], Vec<&MessageSignal>>> = BTreeMap::new();
+    for m in corpus {
+        let key = normalize::skeleton(&m.text, codes);
+        if key.is_empty() {
+            continue;
+        }
+        clusters.entry(key).or_default().entry(m.author.0).or_default().push(m);
+    }
+    // Window volume per author — the thinness input.
+    let mut volume: BTreeMap<[u8; 32], u32> = BTreeMap::new();
+    for m in corpus {
+        *volume.entry(m.author.0).or_insert(0) += 1;
+    }
+
+    // Each subject is convicted once (scope Whole) on the LARGEST cluster they
+    // belong to; ties break by clustering key ascending.
+    let mut best: BTreeMap<[u8; 32], (usize, String)> = BTreeMap::new();
+    for (key, authors) in &clusters {
+        let need = if key.chars().count() < caps::MIN_SKELETON_LEN {
+            min.saturating_mul(short_factor)
+        } else {
+            min
+        } as usize;
+        if authors.len() < need {
+            continue;
+        }
+        let thin = authors.keys().filter(|a| volume.get(*a).copied().unwrap_or(0) <= quiet_max).count();
+        if (thin as u64) * (thin_ratio.denom as u64) < (authors.len() as u64) * (thin_ratio.num as u64) {
+            continue;
+        }
+        for author in authors.keys() {
+            let slot = best.entry(*author).or_insert((0, String::new()));
+            if authors.len() > slot.0 {
+                *slot = (authors.len(), key.clone());
+            }
+        }
+    }
+
+    for (author_bytes, (size, key)) in best {
+        let subject = SubjectId(author_bytes);
+        if subject_exempt(&subject) || gated(shields, &subject, rule, usize::from(rule.pierces_trusted)) {
+            continue;
+        }
+        let messages = clusters.get(&key).and_then(|a| a.get(&author_bytes)).cloned().unwrap_or_default();
+        // Exempt content is barred from being cited even though it counted
+        // toward the cluster's shape.
+        let citable: Vec<&MessageSignal> =
+            messages.iter().copied().filter(|m| !exempt_channels.contains(&m.channel.0)).collect();
+        if citable.is_empty() {
+            continue;
+        }
+        let citations: Vec<Citation> = citable
+            .iter()
+            .map(|m| {
+                let target = CitationTarget::Message { message_id: m.id };
+                Citation {
+                    id: citation_id(&lp.hash, &rule.id, Scope::Whole, &subject, &target, None),
+                    target,
+                    at: m.at_ms,
+                    span: None,
+                    detail: None,
+                    suppressed: false,
+                }
+            })
+            .collect();
+        // The sample is the lowest inner message id in the cluster, excluding
+        // exempt members and channels: `peers` already omits them, and a sample
+        // would leak the same accusation the report may not make.
+        let sample = clusters
+            .get(&key)
+            .map(|authors| {
+                let mut candidates: Vec<&MessageSignal> = authors
+                    .iter()
+                    .filter(|(a, _)| !subject_exempt(&SubjectId(**a)))
+                    .flat_map(|(_, ms)| ms.iter().copied())
+                    .filter(|m| !exempt_channels.contains(&m.channel.0))
+                    .collect();
+                candidates.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+                candidates.first().map(|m| m.text.clone()).unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let mut peers: Vec<SubjectId> = clusters
+            .get(&key)
+            .map(|a| a.keys().filter(|k| **k != author_bytes).map(|k| SubjectId(*k)).collect())
+            .unwrap_or_default();
+        peers.sort_by(|a, b| a.0.cmp(&b.0));
+        peers.truncate(caps::COHORT_SAMPLE_CAP);
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::default();
+        hasher.update(key.as_bytes());
+        let evidence = vec![Evidence::Cohort {
+            skeleton_hash: Hash32(hasher.finalize().into()),
+            sample: sample.chars().take(caps::MAX_SAMPLE_LEN).collect(),
+            size: size as u32,
+            peers,
+        }];
+        let before = out.convictions.len();
+        push_direct_with(rule, lp, subject, citations, out);
+        if let Some(c) = out.convictions.get_mut(before) {
+            c.evidence = evidence;
+        }
+    }
+    let _ = signals;
+}
+
+/// The densest run of joins inside one window. Deliberately weak alone: a
+/// freshly-posted invite link is SUPPOSED to bring a burst of quiet newcomers,
+/// so this is normally `armed_by` a cohort rule and convicts nobody until
+/// something else already has.
+#[allow(clippy::too_many_arguments)]
+fn join_burst_rule(
+    rule: &Rule,
+    signals: &Signals,
+    shields: &BTreeMap<[u8; 32], Shield>,
+    lp: &LoadedPolicy,
+    subject_exempt: &dyn Fn(&SubjectId) -> bool,
+    gap_secs: u64,
+    min: u32,
+    out: &mut RuleOutcome,
+) {
+    // The owner is never part of a burst, and an unknown join is not evidence
+    // of one.
+    let mut joins: Vec<(u64, SubjectId)> = signals
+        .members
+        .iter()
+        .filter(|m| m.subject != signals.owner)
+        .filter_map(|m| m.joined_at_ms.map(|at| (at, m.subject)))
+        .collect();
+    joins.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    let gap_ms = gap_secs.saturating_mul(1000);
+    let (mut best_start, mut best_len) = (0usize, 0usize);
+    let mut start = 0usize;
+    for end in 0..joins.len() {
+        while joins[end].0.saturating_sub(joins[start].0) > gap_ms {
+            start += 1;
+        }
+        // Strictly greater: on a tie the EARLIEST window wins, which is where a
+        // raid starts.
+        if end + 1 - start > best_len {
+            best_len = end + 1 - start;
+            best_start = start;
+        }
+    }
+    if best_len < min as usize {
+        return;
+    }
+    let window = &joins[best_start..best_start + best_len];
+    let evidence = vec![Evidence::Burst {
+        from: window.first().map(|(at, _)| *at).unwrap_or(0),
+        to: window.last().map(|(at, _)| *at).unwrap_or(0),
+        size: best_len as u32,
+    }];
+    for (_, subject) in window {
+        if subject_exempt(subject) || gated(shields, subject, rule, usize::from(rule.pierces_trusted)) {
+            continue;
+        }
+        let before = out.convictions.len();
+        push_direct(rule, lp, *subject, out);
+        if let Some(c) = out.convictions.get_mut(before) {
+            c.evidence = evidence.clone();
         }
     }
 }
@@ -1145,6 +1374,203 @@ mod tests {
     /// A member's client judges word and link filters on the message in front
     /// of it, and nothing that needs history. It says which is which, because a
     /// silent skip would read as "clean".
+    fn cohort_rule_doc() -> Rule {
+        Rule {
+            id: "cohort".into(),
+            matcher: Match::Cohort { min: 3, quiet_max: 2, short_factor: 3, thin_ratio: None },
+            tiers: None,
+            severity: Some(Severity::Severe),
+            weight: Some(85),
+            pierces_trusted: false,
+            family: None,
+            armed_by: None,
+            exempt: Exempt::default(),
+            enforcement: Enforcement::Advisory,
+        }
+    }
+
+    /// The shape of the 2026-08-19 raid: a hundred fresh identities, one line
+    /// each. This is the test the whole engine exists to pass.
+    #[test]
+    fn a_hundred_fresh_accounts_saying_one_thing_is_a_raid() {
+        let mut members: Vec<MemberSignal> = (0..100).map(|i| member(i as u8 + 10, Some(1))).collect();
+        let mut messages: Vec<MessageSignal> =
+            (0..100).map(|i| msg(0x10 + i as u8, i as u8 + 10, NOW - HOUR, "hello world")).collect();
+        // A regular with real history, saying the same words in passing.
+        members.push(member(2, Some(24 * 60)));
+        members.last_mut().unwrap().lifetime_messages = 800;
+        messages.push(msg(0xf1, 2, NOW - 2 * HOUR, "hello world"));
+        for (i, w) in ["morning all", "shipping today", "nice one"].iter().enumerate() {
+            messages.push(msg(0xf2 + i as u8, 2, NOW - (i as u64 + 3) * HOUR, w));
+        }
+
+        let s = signals(members, messages);
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc()]))], &[], NOW);
+        let pr = only(&r);
+        let convicted: Vec<&SubjectReport> =
+            pr.subjects.iter().filter(|x| x.convictions.iter().any(|c| !c.suppressed)).collect();
+        assert_eq!(convicted.len(), 100, "every raider, and only the raiders");
+        assert!(convicted.iter().all(|x| x.confidence == 85 && x.band == Band::Alert));
+        // Heuristic evidence never reaches `proven`: a human still decides.
+        assert!(convicted.iter().all(|x| x.proven == 0), "a cohort is inference, not proof");
+        assert_eq!(subject(pr, 2).map(|x| x.shield), Some(Shield::Trusted), "the regular is shielded, not convicted");
+        assert!(subject(pr, 2).unwrap().convictions.is_empty());
+
+        let ev = &convicted[0].convictions[0].evidence;
+        assert!(
+            matches!(ev.first(), Some(Evidence::Cohort { size: 101, .. })),
+            "the exhibit names the true cluster size: {ev:?}"
+        );
+    }
+
+    /// The corpus outlives membership: a banned raider's messages sit in local
+    /// storage long after the rotation removed them.
+    #[test]
+    fn someone_already_removed_is_never_convicted_again() {
+        // Twenty identities posted one line each; only three are still members.
+        let members: Vec<MemberSignal> = (0..3).map(|i| member(i as u8 + 10, Some(1))).collect();
+        let messages: Vec<MessageSignal> =
+            (0..20).map(|i| msg(0x10 + i as u8, i as u8 + 10, NOW - HOUR, "free airdrop claim now")).collect();
+        let s = signals(members, messages);
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc()]))], &[], NOW);
+        let pr = only(&r);
+        assert_eq!(pr.subjects.len(), 3, "the seventeen who are gone are not re-litigated");
+        assert!(pr.subjects.iter().all(|x| !x.convictions.is_empty()), "the three still here are convicted");
+        // The cluster's true size still counts all twenty: exemption and
+        // absence change who can be accused, never what the community saw.
+        let ev = &pr.subjects[0].convictions[0].evidence;
+        assert!(matches!(ev.first(), Some(Evidence::Cohort { size: 20, .. })), "{ev:?}");
+    }
+
+    /// Arming asks whether a raid is happening HERE and NOW, not whether one
+    /// ever happened: a cohort of accounts that are all gone must not arm a
+    /// burst rule against whoever is still present.
+    #[test]
+    fn a_past_raid_does_not_arm_a_rule_against_the_living() {
+        let mut burst = Rule {
+            id: "burst".into(),
+            matcher: Match::JoinBurst { gap_secs: 600, min: 5 },
+            tiers: None,
+            severity: Some(Severity::Major),
+            weight: Some(40),
+            pierces_trusted: false,
+            family: None,
+            armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) }),
+            exempt: Exempt::default(),
+            enforcement: Enforcement::Advisory,
+        };
+        // Twenty raiders posted one line each and were removed; six ordinary
+        // members remain, all of whom joined in one burst.
+        let members: Vec<MemberSignal> = (0..6)
+            .map(|i| MemberSignal {
+                subject: sid(i as u8 + 40),
+                joined_at_ms: Some(NOW - HOUR + i * 30_000),
+                roles: vec![],
+                is_staff: false,
+                lifetime_messages: 0,
+                first_post_ms: None,
+            })
+            .collect();
+        let messages: Vec<MessageSignal> =
+            (0..20).map(|i| msg(0x10 + i as u8, i as u8 + 10, NOW - HOUR, "free airdrop claim now")).collect();
+        let s = signals(members, messages);
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc(), burst.clone()]))], &[], NOW);
+        assert_eq!(
+            only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count(),
+            0,
+            "the cohort is entirely gone, so it arms nothing against the living"
+        );
+
+        // The same burst DOES fire when the cohort is among the current members.
+        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) });
+        let mut members: Vec<MemberSignal> = (0..6)
+            .map(|i| MemberSignal {
+                subject: sid(i as u8 + 40),
+                joined_at_ms: Some(NOW - HOUR + i * 30_000),
+                roles: vec![],
+                is_staff: false,
+                lifetime_messages: 0,
+                first_post_ms: None,
+            })
+            .collect();
+        members.extend((0..20).map(|i| member(i as u8 + 10, Some(1))));
+        let messages: Vec<MessageSignal> =
+            (0..20).map(|i| msg(0x10 + i as u8, i as u8 + 10, NOW - HOUR, "free airdrop claim now")).collect();
+        let s = signals(members, messages);
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc(), burst]))], &[], NOW);
+        let convicted = only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count();
+        assert!(convicted >= 20, "a live cohort arms it: {convicted}");
+    }
+
+    /// Size alone must never convict: a catchphrase everyone repeats is a
+    /// community, and the thinness bar is what tells it from a script.
+    #[test]
+    fn a_community_catchphrase_is_not_a_cohort() {
+        let members: Vec<MemberSignal> = (0..20)
+            .map(|i| {
+                let mut m = member(i as u8 + 10, Some(24 * 60));
+                m.lifetime_messages = 500;
+                m
+            })
+            .collect();
+        let mut messages: Vec<MessageSignal> = Vec::new();
+        for i in 0..20u8 {
+            // Everyone says it — and everyone also says plenty else.
+            messages.push(msg(0x20 + i, i + 10, NOW - HOUR, "good morning everyone"));
+            for (j, w) in ["shipping today", "nice one", "agreed", "on it"].iter().enumerate() {
+                messages.push(msg(0x60 + i * 4 + j as u8, i + 10, NOW - (j as u64 + 2) * HOUR, w));
+            }
+        }
+        let s = signals(members, messages);
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc()]))], &[], NOW);
+        let convicted = only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count();
+        assert_eq!(convicted, 0, "twenty chatty regulars sharing a greeting are not a raid");
+    }
+
+    /// A burst of quiet newcomers is what a freshly-posted invite link LOOKS
+    /// like, so it convicts nobody until a cohort already has.
+    #[test]
+    fn an_invite_link_burst_convicts_nobody_on_its_own() {
+        let mut burst = Rule {
+            id: "burst".into(),
+            matcher: Match::JoinBurst { gap_secs: 600, min: 5 },
+            tiers: None,
+            severity: Some(Severity::Major),
+            weight: Some(40),
+            pierces_trusted: false,
+            family: None,
+            armed_by: None,
+            exempt: Exempt::default(),
+            enforcement: Enforcement::Advisory,
+        };
+        // Ten people joined within a few minutes and said nothing alike.
+        let members: Vec<MemberSignal> = (0..10)
+            .map(|i| MemberSignal {
+                subject: sid(i as u8 + 10),
+                joined_at_ms: Some(NOW - HOUR + i * 30_000),
+                roles: vec![],
+                is_staff: false,
+                lifetime_messages: 0,
+                first_post_ms: None,
+            })
+            .collect();
+        let s = signals(members, vec![]);
+
+        // Unarmed, the burst convicts them all — which is why the built-in
+        // policy never ships it that way.
+        let r = evaluate(&s, &[loaded(policy_with(vec![burst.clone()]))], &[], NOW);
+        assert_eq!(only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count(), 10);
+
+        // Armed by a cohort that never fired, it convicts nobody.
+        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) });
+        let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc(), burst]))], &[], NOW);
+        assert_eq!(
+            only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count(),
+            0,
+            "no cohort, no conviction: an invite link is not an attack"
+        );
+    }
+
     #[test]
     fn a_member_evaluates_only_stateless_rules() {
         let stateful = Rule {
