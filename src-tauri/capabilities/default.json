@@ -133,6 +133,7 @@
     "allow-ban-community-member",
     "allow-ban-community-members",
     "allow-check-community-raid",
+    "allow-debug-v2-memberlist-diff",
     "allow-kick-community-members",
     "allow-get-moderation-intel",
     "allow-refound-community",

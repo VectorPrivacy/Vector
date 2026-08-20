@@ -884,6 +884,7 @@ pub fn run() {
             commands::community::ban_community_member,
             commands::community::ban_community_members,
             commands::community::check_community_raid,
+            commands::community::debug_v2_memberlist_diff,
             commands::community::kick_community_members,
             commands::community::get_moderation_intel,
             commands::community::refound_community,
