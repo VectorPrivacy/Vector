@@ -35,8 +35,12 @@ pub fn scam_links_policy() -> Policy {
         requires: vec![],
         name: "scam-links".into(),
         emoji_codes: vec![],
+        // A WEEK, not a day. Shield inputs are measured over the declared
+        // window (that is what keeps them identical across clients), so a
+        // 24-hour window asks members to earn trust daily and almost nobody
+        // does: the first live run trusted 1 of 155.
         shields: Shields::default(),
-        window: Window { hours: 24, max_messages: 500 },
+        window: Window { hours: 168, max_messages: 4000 },
         exempt: Exempt::default(),
         rules: vec![
             Rule {
@@ -58,6 +62,12 @@ pub fn scam_links_policy() -> Policy {
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
+            // Aggravators, and ONLY aggravators: each fires only for a subject
+            // the link rule already convicted. Unarmed, "has posted at most
+            // twice" describes most of a healthy community — the first live run
+            // convicted 147 of 155 on it alone, which is exactly the
+            // weak-signal-convicts-nobody rule being violated by a policy the
+            // engine faithfully executed.
             Rule {
                 id: "fresh".into(),
                 matcher: Match::TenureLt { secs: 24 * 3600 },
@@ -66,7 +76,7 @@ pub fn scam_links_policy() -> Policy {
                 weight: Some(20),
                 pierces_trusted: false,
                 family: None,
-                armed_by: None,
+                armed_by: Some(ArmedBy { rule: "shorteners".into(), scope: ArmScope::Subject, min_subjects: None }),
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
@@ -78,7 +88,7 @@ pub fn scam_links_policy() -> Policy {
                 weight: Some(10),
                 pierces_trusted: false,
                 family: None,
-                armed_by: None,
+                armed_by: Some(ArmedBy { rule: "shorteners".into(), scope: ArmScope::Subject, min_subjects: None }),
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
@@ -274,6 +284,22 @@ mod tests {
     #[test]
     fn the_builtin_policy_validates() {
         assert!(scam_links_policy().validate().is_ok(), "a shipped policy that cannot validate is a shipped outage");
+    }
+
+    /// The first live run convicted 147 of 155 members on "has posted at most
+    /// twice" alone. Aggravators must never speak by themselves.
+    #[test]
+    fn every_aggravator_is_armed_by_a_real_conviction() {
+        let p = scam_links_policy();
+        for rule in &p.rules {
+            let is_aggravator = matches!(rule.matcher, Match::TenureLt { .. } | Match::MessagesLte { .. });
+            assert_eq!(
+                is_aggravator,
+                rule.armed_by.is_some(),
+                "rule {} must be armed if and only if it is an aggravator",
+                rule.id
+            );
+        }
     }
 
     #[test]

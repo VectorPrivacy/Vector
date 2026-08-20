@@ -294,20 +294,43 @@ pub struct Shields {
     pub trusted: TrustedBar,
 }
 
-/// Tenure AND volume AND variety — never volume alone, or five varied lines
-/// from a script buy immunity. All three compare with `>=`. Thresholds live in
-/// the POLICY (a locally-tunable shield would make two mods convict differently
-/// under identical hashes).
+/// Standing, earned three ways. Thresholds live in the POLICY (a locally
+/// tunable shield would make two mods convict differently under identical
+/// hashes), and every input is a shared fact — tenure from the guestbook, roles
+/// from the stamped roster, activity over the DECLARED window — so two clients
+/// compute the same standing.
+///
+/// A member is Trusted if ANY path clears:
+///  * **role** — the community granted them one. A cosmetic role is not
+///    immunity (that is `Protected`, and it keys on moderation permissions),
+///    but it is a vouch, so it earns the gate a regular gets.
+///  * **veteran** — long tenure plus any activity at all. Someone who has been
+///    here for months and still talks is not a raid.
+///  * **active** — tenure AND volume AND variety together, all `>=`. Never
+///    volume alone: five varied lines from a script must not buy immunity,
+///    which is why every path carries a tenure floor a fresh account cannot
+///    clear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedBar {
+    /// Tenure floor for the active path.
     pub tenure_secs: u64,
     pub messages: u64,
     pub distinct: u64,
+    /// Tenure that earns trust on its own, given any activity.
+    pub veteran_secs: u64,
+    /// Holding any role earns trust.
+    pub roles_trust: bool,
 }
 
 impl Default for TrustedBar {
     fn default() -> Self {
-        TrustedBar { tenure_secs: 7 * 24 * 3600, messages: 20, distinct: 8 }
+        TrustedBar {
+            tenure_secs: 7 * 24 * 3600,
+            messages: 5,
+            distinct: 3,
+            veteran_secs: 30 * 24 * 3600,
+            roles_trust: true,
+        }
     }
 }
 

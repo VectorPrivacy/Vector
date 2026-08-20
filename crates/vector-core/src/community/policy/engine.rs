@@ -353,9 +353,13 @@ fn compute_shields(
         let tenure = now_ms.saturating_sub(oldest) / 1000;
         let vol = volume.get(&b).copied().unwrap_or(0);
         let var = variety.get(&b).map(|s| s.len() as u64).unwrap_or(0);
-        // Tenure AND volume AND variety, all `>=`.
-        let trusted = tenure >= bar.tenure_secs && vol >= bar.messages && var >= bar.distinct;
-        out.insert(b, if trusted { Shield::Trusted } else { Shield::None });
+        // Three paths to standing (§5.3): a role the community granted, long
+        // tenure with any activity, or tenure with volume and variety. Every
+        // path carries a tenure floor, so none of them is farmable in a day.
+        let by_role = bar.roles_trust && !member.roles.is_empty();
+        let by_veteran = tenure >= bar.veteran_secs && vol >= 1;
+        let by_active = tenure >= bar.tenure_secs && vol >= bar.messages && var >= bar.distinct;
+        out.insert(b, if by_role || by_veteran || by_active { Shield::Trusted } else { Shield::None });
     }
     out
 }
@@ -908,6 +912,37 @@ mod tests {
         let r = evaluate(&s, &[loaded(policy_with(vec![piercing]))], &[], NOW);
         assert!(!subject(only(&r), 1).unwrap().convictions.is_empty(), "a piercing rung reaches Trusted");
         assert!(subject(only(&r), 3).unwrap().convictions.is_empty(), "but nothing pierces Protected");
+    }
+
+    /// Standing has three doors, and none of them opens in a day.
+    #[test]
+    fn trust_comes_from_roles_tenure_or_sustained_activity() {
+        let day = 24 * HOUR;
+        // A role the community granted is a vouch: trusted, though NOT immune
+        // (that is Protected, and it keys on moderation permissions).
+        let with_role =
+            MemberSignal { subject: sid(1), joined_at_ms: Some(NOW - day), roles: vec![ch(0xaa)], is_staff: false };
+        let veteran = member(2, Some(24 * 40));
+        let active = member(3, Some(24 * 8));
+        let lurker = member(4, Some(24 * 8));
+        let loud_newcomer = member(5, Some(1));
+
+        let mut s = signals(vec![with_role, veteran, active, lurker, loud_newcomer], vec![]);
+        s.messages.push(msg(0x50, 2, NOW - HOUR, "still here"));
+        const VARIED: [&str; 5] = ["morning all", "shipping today", "nice one", "agreed", "on it"];
+        for (i, w) in VARIED.iter().enumerate() {
+            s.messages.push(msg(0x60 + i as u8, 3, NOW - (i as u64 + 1) * HOUR, w));
+            s.messages.push(msg(0x70 + i as u8, 5, NOW - (i as u64 + 1) * HOUR, w));
+        }
+
+        let r = evaluate(&s, &[loaded(policy_with(vec![link_rule()]))], &[], NOW);
+        let pr = only(&r);
+        let shield = |b: u8| subject(pr, b).map(|x| x.shield);
+        assert_eq!(shield(1), Some(Shield::Trusted), "a granted role vouches");
+        assert_eq!(shield(2), Some(Shield::Trusted), "long tenure plus any activity");
+        assert_eq!(shield(3), Some(Shield::Trusted), "tenure with volume and variety");
+        assert_eq!(shield(4), None, "a silent week earns nothing");
+        assert_eq!(shield(5), None, "and chatter cannot buy standing in a day");
     }
 
     #[test]
