@@ -241,6 +241,8 @@ use nostr_sdk::prelude::{FromBech32 as _, ToBech32 as _};
 mod commands;
 pub use commands::{CommandBuilder, CommandCtx, DISCOVERY_RELAYS};
 
+pub mod policy;
+
 // ============================================================================
 // VectorBot
 // ============================================================================
@@ -1141,11 +1143,17 @@ impl IncomingMessage {
 /// *message* a channel within it, use a [`Channel`] (`bot.channel(channel_id)`).
 #[derive(Clone)]
 pub struct Community {
-    core: VectorCore,
+    pub(crate) core: VectorCore,
     id: String,
 }
 
 impl Community {
+    /// This community's rulebook: write policies, preview them against real
+    /// history, enable and retire them.
+    pub fn policies(&self) -> crate::policy::Policies<'_> {
+        crate::policy::Policies { community: self }
+    }
+
     /// The community id.
     pub fn id(&self) -> &str {
         &self.id
