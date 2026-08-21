@@ -934,8 +934,56 @@ mod xform_tests {
              CREATE TABLE community_message_keys (outer_event_id TEXT, ephemeral_secret BLOB, relays TEXT);
              CREATE TABLE pending_community_invites (community_id TEXT, bundle_json TEXT, inviter_npub TEXT);
              CREATE TABLE community_public_invites (token TEXT, url TEXT, label TEXT);
-             CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);",
+             CREATE TABLE community_invite_link_sets (creator TEXT, locators TEXT);
+             CREATE TABLE community_guestbook (community_id TEXT, events TEXT, cursor_secs INTEGER);
+             CREATE TABLE community_policies (community_id TEXT, policy_id TEXT, bytes TEXT, hash TEXT, enabled INTEGER, updated_at INTEGER);",
         ).unwrap();
+    }
+
+    /// Every encrypted store must survive a rekey. The guestbook was missed
+    /// when it landed: a PIN change left it under the old key, the read
+    /// swallowed the failure as an empty list, and every member count collapsed
+    /// until a full plane walk rebuilt it.
+    #[test]
+    fn guestbook_and_policies_survive_enable_rekey_disable() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrate_test_schema(&conn);
+        conn.execute(
+            "INSERT INTO community_guestbook (community_id, events, cursor_secs) VALUES (?1, ?2, 7)",
+            rusqlite::params!["aa".repeat(32), r#"[{"rumor_id":"x"}]"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO community_policies (community_id, policy_id, bytes, hash, enabled, updated_at)
+             VALUES (?1, 'p1', ?2, 'hh', 1, 0)",
+            rusqlite::params!["aa".repeat(32), r#"{"format":1,"name":"x"}"#],
+        )
+        .unwrap();
+        let read = |c: &rusqlite::Connection| -> (String, String) {
+            (
+                c.query_row("SELECT events FROM community_guestbook", [], |r| r.get(0)).unwrap(),
+                c.query_row("SELECT bytes FROM community_policies", [], |r| r.get(0)).unwrap(),
+            )
+        };
+        let before = read(&conn);
+        let k1 = [0x21u8; 32];
+        let k2 = [0x22u8; 32];
+        let step = |c: &mut rusqlite::Connection, enc: Option<&[u8; 32]>, dec: Option<&[u8; 32]>| {
+            let tx = c.transaction().unwrap();
+            migrate_community_in_tx(&tx, enc, dec).unwrap();
+            tx.commit().unwrap();
+        };
+        step(&mut conn, Some(&k1), None);
+        // The teeth: a table the sweep never touches stays PLAINTEXT, and a
+        // round-trip over it would pass trivially. Assert the enable actually
+        // wrapped both stores before checking they come back.
+        let enabled = read(&conn);
+        assert_ne!(enabled.0, before.0, "the guestbook must actually be encrypted by the sweep");
+        assert_ne!(enabled.1, before.1, "the policy bytes must actually be encrypted by the sweep");
+
+        step(&mut conn, Some(&k2), Some(&k1));
+        step(&mut conn, None, Some(&k2));
+        assert_eq!(read(&conn), before, "a rekey round-trip must return the plaintext it started with");
     }
 
     /// Sweep parity for the v2 columns: the owner commitment and the CORD-02 §2
@@ -1114,6 +1162,37 @@ fn migrate_community_in_tx(
         tx.execute("UPDATE pending_community_invites SET bundle_json=?1, inviter_npub=?2 WHERE community_id=?3",
             rusqlite::params![xform_text(&bundle, enc, dec)?, xform_text(&inviter, enc, dec)?, id])
             .map_err(|e| format!("update pending: {e}"))?;
+    }
+
+    // community_guestbook: the folded Join/Leave/Kick/Snapshot events. Missed
+    // since the store landed — a rekey left them under the old key, the read
+    // silently `unwrap_or_default()`s to empty, and every member count collapses
+    // until the next full plane walk rebuilds it.
+    let gbs: Vec<(String, String)> = {
+        let mut stmt = tx.prepare("SELECT community_id, events FROM community_guestbook")
+            .map_err(|e| format!("prepare guestbook: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| format!("query guestbook: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (id, events) in gbs {
+        tx.execute("UPDATE community_guestbook SET events=?1 WHERE community_id=?2",
+            rusqlite::params![xform_text(&events, enc, dec)?, id])
+            .map_err(|e| format!("update guestbook: {e}"))?;
+    }
+
+    // community_policies: the exact policy bytes a community declared.
+    let pols: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare("SELECT community_id, policy_id, bytes FROM community_policies")
+            .map_err(|e| format!("prepare policies: {e}"))?;
+        let mapped = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+            .map_err(|e| format!("query policies: {e}"))?;
+        mapped.filter_map(|r| r.ok()).collect()
+    };
+    for (cid, pid, bytes) in pols {
+        tx.execute("UPDATE community_policies SET bytes=?1 WHERE community_id=?2 AND policy_id=?3",
+            rusqlite::params![xform_text(&bytes, enc, dec)?, cid, pid])
+            .map_err(|e| format!("update policies: {e}"))?;
     }
 
     // community_public_invites: token + url + label (rowid-keyed — token is itself wrapped).
