@@ -74,6 +74,12 @@ function modDisplayName(npub) {
 async function openModerationPanel(communityId) {
     if (!communityId) return;
     modState = { communityId, intel: null, keep: new Set(), filter: 'all', query: '', busy: false };
+    modShowTab('members');
+    const tm = document.getElementById('mod-tab-members');
+    const tp = document.getElementById('mod-tab-policies');
+    if (tm) tm.onclick = () => modShowTab('members');
+    if (tp) tp.onclick = () => modShowTab('policies');
+
     domModSearch.value = '';
     domModName.textContent = '';
     domModEpoch.textContent = '';
@@ -95,6 +101,9 @@ async function openModerationPanel(communityId) {
         // A swap or a close while the read was in flight: don't paint over what
         // the user is looking at now.
         if (modState.communityId !== communityId) return;
+        // The designer's per-channel exemptions read from the same payload the
+        // console already has — one place to ask, one answer.
+        window.polChannels = (intel.channels || []).map(c => ({ id: c.id, name: c.name || 'channel' }));
         modState.intel = intel;
         modState.keep = new Set(
             intel.report.members.filter(m => m.verdict !== 'suspect').map(m => m.npub)
@@ -107,6 +116,25 @@ async function openModerationPanel(communityId) {
         p.textContent = String(err);
         domModList.appendChild(p);
     }
+}
+
+/// The two faces of the console: who is here, and what the rules are.
+function modShowTab(which) {
+    const members = which === 'members';
+    document.getElementById('mod-tab-members')?.classList.toggle('active', members);
+    document.getElementById('mod-tab-policies')?.classList.toggle('active', !members);
+    const pane = document.getElementById('mod-members-pane');
+    if (pane) pane.style.display = members ? '' : 'none';
+    const foot = document.getElementById('mod-foot');
+    // The removal actions belong to the member list; hiding them on the
+    // Policies tab keeps "edit a rule" and "remove people" from sharing a
+    // footer.
+    if (foot) foot.style.display = members ? '' : 'none';
+    const pol = document.getElementById('mod-policies-pane');
+    if (pol) pol.style.display = members ? 'none' : '';
+    const explain = document.querySelector('.mod-explain');
+    if (explain) explain.style.display = members ? '' : 'none';
+    if (!members && window.openPolicyDesigner) window.openPolicyDesigner(modState.communityId);
 }
 
 function closeModerationPanel() {

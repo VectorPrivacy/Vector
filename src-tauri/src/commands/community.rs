@@ -4653,6 +4653,22 @@ pub async fn get_moderation_intel(community_id: String) -> Result<serde_json::Va
     .await
 }
 
+/// The preset library a designer offers instead of a blank document.
+#[tauri::command]
+pub async fn policy_presets() -> Result<serde_json::Value, String> {
+    vector_core::VectorCore.policy_presets().map_err(|e| e.to_string())
+}
+
+/// What a candidate policy WOULD do against real history. Read-only: stores
+/// nothing, publishes nothing, removes nobody.
+#[tauri::command]
+pub async fn preview_community_policy(community_id: String, bytes: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.preview_community_policy(&community_id, &bytes).map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// A community's stored policies, with the validator's verdict on each.
 #[tauri::command]
 pub async fn list_community_policies(community_id: String) -> Result<serde_json::Value, String> {

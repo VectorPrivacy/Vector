@@ -2872,6 +2872,12 @@ impl VectorCore {
             "banlist_count": banlist.len(),
             "banlist_max": crate::community::v2::roles::MAX_BANLIST,
             "capabilities": caps,
+            // The designer offers per-channel exemptions, and this is the
+            // console's own data source — one place to ask, one answer.
+            "channels": community.channels.iter().map(|c| serde_json::json!({
+                "id": crate::simd::hex::bytes_to_hex_32(&c.id.0),
+                "name": c.name,
+            })).collect::<Vec<_>>(),
         }))
     }
 
@@ -3001,6 +3007,97 @@ impl VectorCore {
             .unwrap_or_else(|e| e.into_inner())
             .insert(cid_hex.to_string(), (now_secs, report.clone()));
         Ok(report)
+    }
+
+    /// The preset library: what a designer offers instead of a blank document.
+    pub fn policy_presets(&self) -> Result<serde_json::Value> {
+        let presets: Vec<serde_json::Value> = crate::community::policy::presets::all()
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.id,
+                    "name": p.name,
+                    "description": p.description,
+                    "example": p.example,
+                    "caveat": p.caveat,
+                    "dials": p.dials,
+                    "bytes": serde_json::to_string(&p.policy).unwrap_or_default(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "presets": presets }))
+    }
+
+    /// What a candidate policy WOULD do, against real history. Stores nothing,
+    /// publishes nothing, removes nobody — the designer never enables a policy
+    /// from a form alone, only from a preview that named who it would catch.
+    pub fn preview_community_policy(&self, community_id: &str, bytes: &str) -> Result<serde_json::Value> {
+        use crate::community::v2::guestbook::GuestbookEntry;
+        use nostr_sdk::prelude::PublicKey;
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("policies require a Concord v2 community".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().map_err(VectorError::Other)?;
+        let me = state::my_public_key();
+
+        use crate::community::roles::Permissions;
+        const MOD_MASK: u64 = Permissions::MANAGE_ROLES
+            | Permissions::MANAGE_CHANNELS
+            | Permissions::MANAGE_METADATA
+            | Permissions::KICK
+            | Permissions::BAN
+            | Permissions::MANAGE_MESSAGES;
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        let staff: std::collections::HashSet<String> = roster
+            .grants
+            .iter()
+            .filter(|g| {
+                g.role_ids
+                    .iter()
+                    .any(|rid| roster.roles.iter().any(|r| &r.role_id == rid && (r.permissions.0 & MOD_MASK) != 0))
+            })
+            .map(|g| g.member.clone())
+            .collect();
+        let roles_of: std::collections::HashMap<String, Vec<String>> =
+            roster.grants.iter().map(|g| (g.member.clone(), g.role_ids.clone())).collect();
+
+        let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+        let mut joined_at: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        let mut invite_label: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for e in &events {
+            let GuestbookEntry::Join { member, invited_by, at_ms } = &e.entry else { continue };
+            let hex = member.to_hex();
+            let slot = joined_at.entry(hex.clone()).or_insert(*at_ms);
+            *slot = (*slot).min(*at_ms);
+            if let Some((_c, label)) = invited_by {
+                invite_label.entry(hex).or_insert_with(|| label.clone());
+            }
+        }
+        let members: Vec<(PublicKey, Option<u64>, bool, Vec<String>, Option<String>)> =
+            crate::community::v2::service::stored_memberlist(&community)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|pk| {
+                    let hex = pk.to_hex();
+                    (
+                        pk,
+                        joined_at.get(&hex).copied(),
+                        staff.contains(&hex),
+                        roles_of.get(&hex).cloned().unwrap_or_default(),
+                        invite_label.get(&hex).cloned(),
+                    )
+                })
+                .collect();
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let assembled =
+            crate::community::policy::harness::assemble(&cid_hex, &owner, me.as_ref(), &members, now_ms)
+                .map_err(VectorError::Other)?;
+        let preview = crate::community::policy::harness::preview_policy(&assembled, bytes, now_ms);
+        serde_json::to_value(preview).map_err(|e| VectorError::Other(e.to_string()))
     }
 
     /// A community's policies, as stored. Returns the exact bytes, so an editor

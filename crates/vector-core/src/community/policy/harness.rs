@@ -262,6 +262,177 @@ pub fn assemble(
     })
 }
 
+/// What a policy WOULD do, without storing it or touching anyone.
+///
+/// This is the safety rail the designer is built around: a policy is never
+/// enabled from a form alone, it is enabled from a preview that named the
+/// members it would catch. An over-broad rule announces itself by catching
+/// regulars, and the fix is a button rather than a number.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PolicyPreview {
+    pub valid: bool,
+    pub error: Option<String>,
+    /// Members this policy would flag, worst first.
+    pub flagged: Vec<PreviewRow>,
+    /// Members whose messages ALSO matched, and who were spared only because
+    /// they have standing. This is the number that tells an admin a rule
+    /// catches ordinary conversation: the flagged list can look small and
+    /// harmless while every regular in the room tripped the same wire.
+    pub shielded_matches: Vec<PreviewRow>,
+    pub messages_cited: usize,
+    pub corpus: usize,
+    /// Rules that could not run here, so a silent zero never reads as "clean".
+    pub unevaluated: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PreviewRow {
+    pub npub: String,
+    pub score: u32,
+    pub proven: u32,
+    pub band: String,
+    pub shield: String,
+    pub reasons: Vec<String>,
+    pub tenure_days: u64,
+    pub messages: u64,
+}
+
+/// Evaluate a candidate policy against local history. Stores nothing, publishes
+/// nothing, removes nobody.
+pub fn preview_policy(assembled: &Assembled, bytes: &str, now_ms: u64) -> PolicyPreview {
+    let doc: Policy = match serde_json::from_str(bytes) {
+        Ok(d) => d,
+        Err(e) => {
+            return PolicyPreview {
+                valid: false,
+                error: Some(format!("not valid JSON: {e}")),
+                flagged: vec![],
+                shielded_matches: vec![],
+                messages_cited: 0,
+                corpus: assembled.corpus,
+                unevaluated: vec![],
+            }
+        }
+    };
+    if let Err(reason) = doc.validate() {
+        return PolicyPreview {
+            valid: false,
+            error: Some(format!("{reason:?}")),
+            flagged: vec![],
+            shielded_matches: vec![],
+            messages_cited: 0,
+            corpus: assembled.corpus,
+            unevaluated: vec![],
+        };
+    }
+
+    let lp = LoadedPolicy { hash: hash_policy_bytes(bytes.as_bytes()), policy: doc, activated_at: None };
+    let report = evaluate_as(&assembled.signals, std::slice::from_ref(&lp), &[], now_ms, EvalMode::Admin);
+    let Some(pr) = report.policies.first() else {
+        return PolicyPreview {
+            valid: true,
+            error: None,
+            flagged: vec![],
+            shielded_matches: vec![],
+            messages_cited: 0,
+            corpus: assembled.corpus,
+            unevaluated: vec![],
+        };
+    };
+
+    let console = console_report(&report, &assembled.facts, now_ms / 1000);
+    let rows_by_npub: std::collections::BTreeMap<String, serde_json::Value> = console["members"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m["npub"].as_str().map(|n| (n.to_string(), m.clone())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut flagged: Vec<PreviewRow> = Vec::new();
+    for s in &pr.subjects {
+        if s.convictions.iter().all(|c| c.suppressed) {
+            continue;
+        }
+        let Some(npub) = PublicKey::from_slice(&s.subject.0).ok().and_then(|p| p.to_bech32().ok()) else {
+            continue;
+        };
+        let m = rows_by_npub.get(&npub);
+        let facts = assembled.facts.get(&npub);
+        let row = PreviewRow {
+            npub: npub.clone(),
+            score: s.confidence,
+            proven: s.proven,
+            band: format!("{:?}", s.band).to_lowercase(),
+            shield: format!("{:?}", s.shield).to_lowercase(),
+            reasons: m
+                .and_then(|m| m["reasons"].as_array().cloned())
+                .map(|a| a.iter().filter_map(|r| r.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            tenure_days: facts.map(|f| f.tenure_secs / 86_400).unwrap_or(0),
+            messages: facts.map(|f| f.messages).unwrap_or(0),
+        };
+        flagged.push(row);
+    }
+    flagged.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.npub.cmp(&b.npub)));
+
+    // Now the question the flagged list cannot answer: who ELSE matched, and
+    // was spared only by their standing? Re-evaluate with the trust bar raised
+    // out of reach — staff stay Protected, since a rule that needs to reach
+    // them is a different conversation — and take the difference.
+    let mut bare = lp.policy.clone();
+    bare.shields.trusted.tenure_secs = u64::MAX;
+    bare.shields.trusted.veteran_secs = u64::MAX;
+    bare.shields.trusted.roles_trust = false;
+    let bare_lp = LoadedPolicy { hash: lp.hash, policy: bare, activated_at: None };
+    let bare_report = evaluate_as(&assembled.signals, &[bare_lp], &[], now_ms, EvalMode::Admin);
+    let already: std::collections::BTreeSet<[u8; 32]> = pr
+        .subjects
+        .iter()
+        .filter(|s| s.convictions.iter().any(|c| !c.suppressed))
+        .map(|s| s.subject.0)
+        .collect();
+    let mut shielded_matches: Vec<PreviewRow> = Vec::new();
+    if let Some(bpr) = bare_report.policies.first() {
+        for s in &bpr.subjects {
+            if already.contains(&s.subject.0) || s.convictions.iter().all(|c| c.suppressed) {
+                continue;
+            }
+            let Some(npub) = PublicKey::from_slice(&s.subject.0).ok().and_then(|p| p.to_bech32().ok()) else {
+                continue;
+            };
+            let facts = assembled.facts.get(&npub);
+            shielded_matches.push(PreviewRow {
+                npub,
+                score: s.confidence,
+                proven: s.proven,
+                band: format!("{:?}", s.band).to_lowercase(),
+                shield: "trusted".into(),
+                reasons: vec![],
+                tenure_days: facts.map(|f| f.tenure_secs / 86_400).unwrap_or(0),
+                messages: facts.map(|f| f.messages).unwrap_or(0),
+            });
+        }
+    }
+    shielded_matches.sort_by(|a, b| b.messages.cmp(&a.messages).then_with(|| a.npub.cmp(&b.npub)));
+
+    PolicyPreview {
+        valid: true,
+        error: None,
+        messages_cited: pr.citations.len(),
+        corpus: assembled.corpus,
+        unevaluated: pr
+            .rule_status
+            .iter()
+            .filter(|r| r.state != RuleState::Evaluated)
+            .map(|r| format!("{} ({:?})", r.rule_id, r.state))
+            .collect(),
+        flagged,
+        shielded_matches,
+    }
+}
+
 /// The policies a community actually runs: everything it has stored and
 /// enabled, or the built-in default when it has declared none.
 ///
@@ -338,6 +509,15 @@ pub fn console_report(
     }
     let inert = report.policies.iter().filter(|p| p.inert.is_some()).count();
 
+    // What each citation actually matched, so a conviction can say the word
+    // rather than the rule id.
+    let detail_of: std::collections::BTreeMap<[u8; 32], String> = report
+        .policies
+        .iter()
+        .flat_map(|p| p.citations.iter())
+        .filter_map(|c| c.detail.clone().map(|d| (c.id.0, d)))
+        .collect();
+
     let (mut suspects, mut trusted, mut protected) = (0usize, 0usize, 0usize);
     let mut members: Vec<serde_json::Value> = Vec::with_capacity(facts.len());
     for (npub, f) in facts {
@@ -396,11 +576,31 @@ pub fn console_report(
                 }
             }
             if c.evidence.is_empty() {
+                // Quote what matched when we can: "used 'darn' 3 times" tells a
+                // moderator in one glance what "matched rule words" never could.
+                let quoted: Vec<String> = c
+                    .citations
+                    .iter()
+                    .filter_map(|id| detail_of.get(&id.0).cloned())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .take(3)
+                    .collect();
                 reasons.push(match c.rule_id.as_str() {
                     "fresh" => "Joined in the last 24h".to_string(),
                     "quiet" => "Has barely posted".to_string(),
                     "repeat" => format!("Repeated one message {} times", c.hits),
-                    "shorteners" => format!("Posted {} link(s) to a known shortener", c.hits),
+                    "shorteners" | "links" => {
+                        let which = quoted.join(", ");
+                        if which.is_empty() {
+                            format!("Posted {} flagged link(s)", c.hits)
+                        } else {
+                            format!("Posted {} flagged link(s): {which}", c.hits)
+                        }
+                    }
+                    _ if !quoted.is_empty() => {
+                        format!("Used {} ({} time{})", quoted.iter().map(|q| format!("\"{q}\"")).collect::<Vec<_>>().join(", "), c.hits, if c.hits == 1 { "" } else { "s" })
+                    }
                     other => format!("Matched rule {other}"),
                 });
             }

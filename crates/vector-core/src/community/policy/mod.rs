@@ -20,6 +20,7 @@ pub mod engine;
 pub mod harness;
 pub mod matchers;
 pub mod normalize;
+pub mod presets;
 pub mod types;
 
 pub use types::*;

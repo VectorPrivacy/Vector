@@ -888,6 +888,8 @@ pub fn run() {
             commands::community::kick_community_members,
             commands::community::get_moderation_intel,
             commands::community::policy_side_by_side,
+            commands::community::policy_presets,
+            commands::community::preview_community_policy,
             commands::community::list_community_policies,
             commands::community::set_community_policy,
             commands::community::delete_community_policy,

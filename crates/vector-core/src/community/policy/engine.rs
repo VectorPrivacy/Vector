@@ -615,12 +615,21 @@ fn content_rule(
                     .iter()
                     .map(|h| {
                         let target = CitationTarget::Message { message_id: m.id };
+                        // Carry WHAT matched. A moderator reading "matched rule
+                        // words" learns nothing; reading the word itself can
+                        // judge in a second whether the rule is right.
+                        let matched: String = text
+                            .get(h.start..h.end)
+                            .unwrap_or_default()
+                            .chars()
+                            .take(caps::MAX_DETAIL_LEN)
+                            .collect();
                         Citation {
                             id: citation_id(&lp.hash, &rule.id, Scope::PerMessage, &m.author, &target, Some(h.span())),
                             target,
                             at: m.at_ms,
                             span: Some(h.span()),
-                            detail: None,
+                            detail: (!matched.is_empty()).then_some(matched),
                             suppressed: false,
                         }
                     })

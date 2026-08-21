@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-policy-presets"
+description = "Enables the policy_presets command without any pre-configured scope."
+commands.allow = ["policy_presets"]
+
+[[permission]]
+identifier = "deny-policy-presets"
+description = "Denies the policy_presets command without any pre-configured scope."
+commands.deny = ["policy_presets"]

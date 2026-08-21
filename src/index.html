@@ -32,6 +32,7 @@
     <script src="/js/context-menu.js" defer></script>
     <script src="/js/updater.js" defer></script>
     <script src="/js/pins.js" defer></script>
+    <script src="/js/policy-designer.js" defer></script>
     <script src="/js/moderation.js" defer></script>
     <script src="/js/previewer.js" defer></script>
     <script src="/js/file-preview.js" defer></script>
@@ -2007,6 +2008,39 @@
 
       <p class="mod-explain">Ticked members stay. Unticked members lose access when you rotate or ban.</p>
 
+      <div class="mod-tabs" role="tablist">
+        <button id="mod-tab-members" class="mod-tab active" role="tab">Members</button>
+        <button id="mod-tab-policies" class="mod-tab" role="tab">Policies</button>
+      </div>
+
+      <div id="mod-policies-pane" class="mod-policies" style="display: none;">
+        <div id="pol-list" class="pol-list"></div>
+
+        <div id="pol-gallery" class="pol-gallery"></div>
+
+        <div id="pol-editor" class="pol-editor" style="display: none;">
+          <div class="pol-editor-head">
+            <button id="pol-back" class="pol-back">&#8592; Back</button>
+            <h4 id="pol-editor-title" class="pol-editor-title"></h4>
+          </div>
+          <p id="pol-editor-caveat" class="pol-caveat"></p>
+          <div id="pol-dials" class="pol-dials"></div>
+
+          <div class="pol-preview-bar">
+            <button id="pol-preview" class="mod-btn"><span class="mod-btn-label">Preview on real history</span></button>
+            <span id="pol-preview-hint" class="pol-hint">Nothing is saved or changed until you preview.</span>
+          </div>
+          <div id="pol-preview-out" class="pol-preview-out" style="display: none;"></div>
+
+          <div class="pol-editor-foot">
+            <button id="pol-save" class="mod-btn mod-btn-primary" disabled>
+              <span class="mod-btn-label">Enable this policy</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div id="mod-members-pane">
       <div class="mod-toolbar">
         <div class="mod-search">
           <span class="icon icon-search mod-search-icon"></span>
@@ -2016,8 +2050,9 @@
       </div>
 
       <div id="mod-list" class="mod-list"></div>
+      </div>
 
-      <div class="mod-foot">
+      <div id="mod-foot" class="mod-foot">
         <div class="mod-tally">
           <span class="mod-tally-keep"><b id="mod-tally-keep">0</b> staying</span>
           <span class="mod-tally-cut"><b id="mod-tally-cut">0</b> removing</span>
