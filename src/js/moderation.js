@@ -104,6 +104,8 @@ async function openModerationPanel(communityId) {
         // The designer's per-channel exemptions read from the same payload the
         // console already has — one place to ask, one answer.
         window.polChannels = (intel.channels || []).map(c => ({ id: c.id, name: c.name || 'channel' }));
+        window.polChannelsLoaded = true;
+        window.polChannelsReady?.();
         modState.intel = intel;
         modState.keep = new Set(
             intel.report.members.filter(m => m.verdict !== 'suspect').map(m => m.npub)
@@ -228,6 +230,26 @@ function modVisible() {
     });
 }
 
+/// What the panel says before you read a single row. A moderator opening this
+/// mid-raid needs one glance to know whether anything is wrong.
+function modRenderStats() {
+    const el = document.getElementById('mod-stats');
+    if (!el || !modState.intel) return;
+    const r = modState.intel.report;
+    const flagged = r.members.filter(m => m.verdict === 'suspect').length;
+    const cells = [
+        { n: r.members.length, label: 'members' },
+        { n: r.trusted || 0, label: 'trusted', tone: 'good' },
+        { n: r.protected || 0, label: 'staff', tone: 'staff' },
+        { n: flagged, label: 'flagged', tone: flagged ? 'bad' : 'quiet' },
+    ];
+    el.innerHTML = cells.map(c =>
+        `<div class="mod-stat mod-stat-${c.tone || 'quiet'}">
+            <span class="mod-stat-n">${c.n}</span>
+            <span class="mod-stat-l">${c.label}</span>
+         </div>`).join('');
+}
+
 function modRenderList() {
     const rows = modVisible();
     domModList.innerHTML = '';
@@ -242,6 +264,7 @@ function modRenderList() {
     const frag = document.createDocumentFragment();
     for (const m of rows) frag.appendChild(modBuildRow(m));
     domModList.appendChild(frag);
+    modRenderStats();
     modUpdateTallies();
 }
 
@@ -250,7 +273,12 @@ function modBuildRow(m) {
     const locked = m.verdict === 'protected';
 
     const row = document.createElement('div');
-    row.className = 'mod-row' + (kept ? '' : ' cutting') + (locked ? ' locked' : '');
+    // The rail encodes standing at a glance; the badge only appears where a
+    // word adds something the colour cannot.
+    const standing = m.verdict === 'protected' ? 'staff'
+        : m.verdict === 'suspect' ? 'flagged'
+        : m.verdict === 'trusted' ? 'trusted' : 'plain';
+    row.className = `mod-row mod-standing-${standing}` + (kept ? '' : ' cutting') + (locked ? ' locked' : '');
     row.dataset.npub = m.npub;
 
     const box = document.createElement('div');
@@ -280,21 +308,28 @@ function modBuildRow(m) {
 
     const meta = document.createElement('div');
     meta.className = 'mod-meta cutoff';
-    const bits = [];
     // Tenure, not the raw Guestbook join: a migration re-seeds every Join at the same
     // moment, so the join date would tell 600 members they arrived on the same day.
-    bits.push(m.tenure_secs ? `here ${modAgo(m.tenure_secs)}` : 'age unknown');
-    bits.push(`${m.messages} msg${m.messages === 1 ? '' : 's'}`);
-    if (m.distinct > 0) bits.push(`${m.distinct} distinct`);
-    if (m.invite_label) bits.push(`via ${m.invite_label}`);
-    meta.textContent = bits.join(' · ');
+    // Numbers are wrapped so they can sit in tabular figures and line up down the
+    // column — the difference between reading a list and scanning one.
+    const num = (v) => `<span class="mod-num">${v}</span>`;
+    const bits = [];
+    bits.push(m.tenure_secs ? `here ${num(modAgo(m.tenure_secs))}` : '<span class="mod-unknown">age unknown</span>');
+    bits.push(`${num(m.messages)} msg${m.messages === 1 ? '' : 's'}`);
+    if (m.distinct > 0) bits.push(`${num(m.distinct)} distinct`);
+    if (m.invite_label) bits.push(`via ${modEscapeText(m.invite_label)}`);
+    meta.innerHTML = bits.join('<span class="mod-dot">·</span>');
     body.appendChild(meta);
 
-    if (m.reasons.length) {
-        const why = document.createElement('div');
-        why.className = 'mod-why cutoff';
-        why.textContent = m.reasons.join(' · ');
-        body.appendChild(why);
+    // A reason that only restates the badge is a third copy of the same fact —
+    // the badge names the standing and the tenure above it is the evidence.
+    // Cite the line only when it says something neither of those does.
+    const why = m.reasons.filter(r => !MOD_RESTATES_BADGE.has(r));
+    if (why.length) {
+        const el = document.createElement('div');
+        el.className = 'mod-why cutoff';
+        el.textContent = why.join(' · ');
+        body.appendChild(el);
     }
     row.appendChild(body);
 
@@ -306,6 +341,8 @@ function modBuildRow(m) {
     }
     return row;
 }
+
+const MOD_RESTATES_BADGE = new Set(['Long-standing member', 'Holds a role', 'Community owner']);
 
 /** A badge only where it adds something: standing you can't infer from the group. */
 function modBadge(m) {
@@ -337,6 +374,9 @@ function modToggle(npub) {
 function modSetTallies(keep, cut) {
     domModTallyKeep.textContent = keep;
     domModTallyCut.textContent = cut;
+    // A red "0 removing" reads as a standing alarm. It only belongs there once
+    // the admin has actually unticked someone.
+    domModTallyCut.parentElement.hidden = cut === 0;
 }
 
 function modUpdateTallies() {
@@ -351,7 +391,7 @@ function modUpdateTallies() {
     domModRotate.disabled = false;
     domModBanRotate.disabled = cut.length === 0 || overCap;
     domModBanRotate.title = overCap
-        ? `The banlist holds ${modState.intel.banlist_max}; only ${room} slots are free. Rotate instead — it has no ceiling.`
+        ? `The banlist holds ${modState.intel.banlist_max}; only ${room} slots are free. Rotate instead: it has no ceiling.`
         : '';
     domModRotate.querySelector('.mod-btn-label').textContent =
         cut.length ? `Remove ${cut.length} & rotate` : 'Rotate keys';
@@ -373,7 +413,7 @@ function modSetBusy(busy, label) {
     domModClose.disabled = busy;
     if (busy && label) {
         domModAlertTitle.textContent = label;
-        domModAlertBody.textContent = ' Publishing — leave this open until it finishes.';
+        domModAlertBody.textContent = ' Publishing. Leave this open until it finishes.';
         domModAlert.style.display = '';
         domModAlert.classList.add('working');
     } else {
@@ -481,3 +521,9 @@ domModBanRotate.onclick = async () => {
         await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
 };
+
+/// Member-supplied text (an invite label) never reaches innerHTML unescaped.
+function modEscapeText(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}

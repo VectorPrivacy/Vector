@@ -20077,7 +20077,7 @@ body.profile-switcher-editing .profile-switcher-add {
   border-radius: 10px;
   cursor: pointer;
   white-space: nowrap;
-  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+  transition: background-color 0.12s ease, border-color 0.12s ease, opacity 0.12s ease, filter 0.12s ease;
 }
 
 .mod-btn .icon {
@@ -20168,8 +20168,8 @@ body.profile-switcher-editing .profile-switcher-add {
 
 .pol-row-main { flex: 1; min-width: 0; }
 .pol-row-name { font-weight: 600; font-size: 14px; }
-.pol-row-sub { font-size: 12px; color: var(--text-muted, #8b8b8b); margin-top: 2px; }
-.pol-row-invalid { color: #ff6b6b; }
+.pol-row-sub { font-size: 12px; color: var(--text-muted, #8b8b8b); }
+.pol-row-invalid { color: var(--danger-color); }
 
 .pol-toggle {
     position: relative;
@@ -20207,7 +20207,7 @@ body.profile-switcher-editing .profile-switcher-add {
     border-radius: 6px;
     flex-shrink: 0;
 }
-.pol-delete:hover { color: #ff6b6b; background: rgba(255, 107, 107, 0.1); }
+.pol-delete:hover { color: var(--danger-color); background: color-mix(in srgb, var(--danger-color) 10%, transparent); }
 
 /* Preset gallery */
 .pol-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
@@ -20231,24 +20231,38 @@ body.profile-switcher-editing .profile-switcher-add {
 
 /* Editor */
 .pol-editor { display: flex; flex-direction: column; gap: 14px; }
-.pol-editor-head { display: flex; align-items: center; gap: 10px; }
+.pol-editor-head { display: flex; align-items: center; gap: 8px; margin-left: -4px; }
 .pol-editor-title { margin: 0; font-size: 16px; }
 
+/* The app's own back glyph rather than a literal "←": the text arrow renders
+   at a different weight and baseline in every font it lands in, which is what
+   made it read as pasted on. Icon-only and round, the way every other back
+   control in Vector is. */
 .pol-back {
+    position: relative;
+    flex-shrink: 0;
+    width: 30px;
+    height: 30px;
+    padding: 0;
     background: none;
     border: none;
-    color: var(--text-muted, #8b8b8b);
+    border-radius: 50%;
     cursor: pointer;
-    font-size: 13px;
-    padding: 4px 8px;
-    border-radius: 6px;
+    transition: background-color 0.12s ease;
 }
-.pol-back:hover { color: var(--text-color, #fff); background: rgba(255, 255, 255, 0.06); }
+
+.pol-back .icon {
+    background-color: rgba(255, 255, 255, 0.5);
+    transition: background-color 0.12s ease;
+}
+
+.pol-back:hover { background-color: rgba(255, 255, 255, 0.07); }
+.pol-back:hover .icon { background-color: #fff; }
 
 .pol-caveat {
     margin: 0;
     padding: 10px 12px;
-    border-radius: 8px;
+    border-radius: 0 8px 8px 0;
     background: rgba(255, 193, 7, 0.08);
     border-left: 3px solid rgba(255, 193, 7, 0.6);
     font-size: 12.5px;
@@ -20326,12 +20340,15 @@ body.profile-switcher-editing .profile-switcher-add {
 .pol-preview-head { font-weight: 600; margin-bottom: 8px; }
 .pol-preview-num { color: var(--accent-color, #59fcb3); font-weight: 700; }
 
+/* Square the left corners so the accent reads as a flat rule rather than a
+   sliver of a rounded box, and take the colour from the theme — danger is red
+   or pink depending on which one is selected, never a hardcoded hex. */
 .pol-warn {
     margin-top: 10px;
     padding: 10px 12px;
-    border-radius: 8px;
-    background: rgba(255, 107, 107, 0.1);
-    border-left: 3px solid #ff6b6b;
+    border-radius: 0 8px 8px 0;
+    background: color-mix(in srgb, var(--danger-color) 10%, transparent);
+    border-left: 3px solid var(--danger-color);
     font-size: 12.5px;
 }
 
@@ -20353,5 +20370,612 @@ body.profile-switcher-editing .profile-switcher-add {
 
 .pol-editor-foot { display: flex; justify-content: flex-end; gap: 10px; }
 .mod-btn-primary { background: var(--accent-color, #59fcb3); color: #05261a; border-color: transparent; }
+/* Dim, never the ghost-gray fill: .mod-btn's generic hover paints translucent
+   white over the accent and all but erases the button. Same fix .cmt-cta uses. */
+.mod-btn-primary:hover:not(:disabled) {
+  background: var(--accent-color, #59fcb3);
+  border-color: transparent;
+  filter: brightness(0.9);
+}
 .mod-btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .pol-empty { padding: 18px; text-align: center; color: var(--text-muted, #8b8b8b); font-size: 13px; }
+
+/* ── Moderation panel: instrument, not checklist ──────────────────────────────
+   A healthy community means every row is ticked, which makes the tick the
+   loudest thing on screen and the least informative. Signal moves to standing
+   and evidence: a rail you can scan, numerals that line up, and a summary that
+   answers "is anything wrong" before a single row is read. */
+
+.mod-stats {
+    display: flex;
+    gap: 0;
+    margin: 14px 18px 0;
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.028);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.mod-stat {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 4px;
+    padding: 12px 14px;
+    position: relative;
+}
+
+.mod-stat + .mod-stat::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 22%;
+    bottom: 22%;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.mod-stat-n {
+    font-size: 21px;
+    font-weight: 650;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: rgba(255, 255, 255, 0.92);
+}
+
+.mod-stat-l {
+    font-size: 10.5px;
+    /* Inheriting the body's 24px leading put ~7px of empty line box under a
+       10.5px all-caps label while the number above it sat tight, which read as
+       the whole block being nudged upward inside its own padding. */
+    line-height: 1.1;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+/* Colour means something or it is not used. */
+.mod-stat-good .mod-stat-n { color: var(--accent-color, #59fcb3); }
+.mod-stat-staff .mod-stat-n { color: #FCE459; }
+.mod-stat-bad .mod-stat-n { color: var(--danger-red, #FC595C); }
+
+/* A row carries its standing on a rail — scannable down a list of 155 without
+   putting a badge on every line. */
+.mod-row {
+    position: relative;
+    padding-left: 14px;
+}
+
+.mod-row::before {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    border-radius: 2px;
+    background: transparent;
+    transition: background-color 0.14s ease;
+}
+
+.mod-standing-staff::before { background: #FCE459; }
+.mod-standing-trusted::before { background: color-mix(in srgb, var(--accent-color, #59fcb3) 55%, transparent); }
+.mod-standing-flagged::before { background: var(--danger-red, #FC595C); }
+
+/* Numerals in tabular figures: "9 msgs" and "10 msgs" line up, so the column
+   can be compared rather than merely read. */
+.mod-num {
+    font-variant-numeric: tabular-nums;
+    color: rgba(255, 255, 255, 0.62);
+}
+
+.mod-dot {
+    margin: 0 6px;
+    color: rgba(255, 255, 255, 0.22);
+}
+
+.mod-unknown {
+    color: rgba(255, 255, 255, 0.34);
+    font-style: italic;
+}
+
+/* When everyone is kept, the ticks are wallpaper. Let them recede, and let the
+   CUT rows — the rare, consequential ones — be what the eye catches. */
+.mod-check.on {
+    background-color: color-mix(in srgb, var(--accent-color, #59fcb3) 42%, transparent);
+    border-color: transparent;
+}
+
+.mod-check.on .icon { background-color: rgba(6, 18, 13, 0.82); }
+
+.mod-row:hover .mod-check.on {
+    background-color: var(--accent-color, #59fcb3);
+}
+
+.mod-row.cutting {
+    background: color-mix(in srgb, var(--danger-red, #FC595C) 7%, transparent);
+}
+
+.mod-row.cutting::before { background: var(--danger-red, #FC595C); }
+
+.mod-row.cutting .mod-check {
+    border-color: color-mix(in srgb, var(--danger-red, #FC595C) 55%, transparent);
+}
+
+/* The actions must stay reachable at any window height: a moderator should
+   never have to scroll to find the thing that ends a raid. */
+/* Solid, not a fade: a semi-transparent footer let member rows show through the
+   tally and the action buttons, which are the two things that must never be
+   misread. The fade lives above it instead, so the list still dissolves rather
+   than hitting a hard edge. */
+.mod-foot {
+    position: sticky;
+    bottom: 0;
+    background: #101010;
+    padding-top: 13px;
+    margin-top: 4px;
+}
+
+.mod-foot::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 100%;
+    height: 26px;
+    background: linear-gradient(to top, #101010, transparent);
+    pointer-events: none;
+}
+
+.mod-explain {
+    margin: 12px 18px 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.44);
+}
+
+/* Policies pane: the gallery is a choice, so give it a line of framing rather
+   than dropping four cards into empty space. */
+.pol-gallery::before {
+    content: "Start from a template";
+    grid-column: 1 / -1;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.38);
+    margin-bottom: -2px;
+}
+
+.pol-empty {
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.028);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* The last row scrolls under the sticky footer; a little slack stops it landing
+   exactly on the seam. */
+.mod-list {
+    padding-bottom: 10px;
+}
+
+.mod-tally b {
+    font-variant-numeric: tabular-nums;
+    font-size: 13.5px;
+    font-weight: 650;
+}
+
+.mod-tally-ban {
+    margin-left: auto;
+    padding-right: 6px;
+    color: rgba(255, 255, 255, 0.3);
+}
+
+/* ── Console layout: the frame holds still, the list moves ───────────────
+   The card used to be the scroller, so paging through 155 members took the
+   search box, the filters and the standing counts off screen with it — you
+   could no longer see what you were filtering by while you filtered. Now the
+   card is a fixed frame and #mod-list is the only thing that scrolls. */
+.mod-card {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.mod-card > .mod-head,
+.mod-card > .mod-alert,
+.mod-card > .mod-tabs,
+.mod-card > .mod-foot {
+    flex-shrink: 0;
+}
+
+#mod-members-pane {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+#mod-members-pane > .mod-stats,
+#mod-members-pane > .mod-explain,
+#mod-members-pane > .mod-toolbar {
+    flex-shrink: 0;
+}
+
+.mod-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.mod-policies {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+/* No longer sticky — it is the frame's last row, so it cannot be scrolled past. */
+.mod-foot {
+    position: static;
+    margin-top: 0;
+    border-top: 1px solid rgba(57, 57, 57, 0.5);
+}
+
+.mod-foot::before {
+    display: none;
+}
+
+/* The built-in rules are not editable, so the row carries a tag where a custom
+   policy carries its switch — same shape, obviously not the same controls. */
+.pol-row-builtin {
+    background: rgba(89, 252, 179, 0.045);
+    border-color: rgba(89, 252, 179, 0.16);
+}
+
+.pol-locked {
+    font-size: 10px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    font-weight: 650;
+    color: rgba(89, 252, 179, 0.72);
+    border: 1px solid rgba(89, 252, 179, 0.24);
+    border-radius: 999px;
+    padding: 3px 9px;
+    white-space: nowrap;
+}
+
+/* Grid stretch was centring each card's text against its own height, so four
+   titles in a row sat at four different heights. */
+.pol-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+.pol-gallery { padding-bottom: 4px; }
+
+/* Members needs the full height for 155 rows; Policies is four cards and a
+   status line, and stretching it to match left half the modal empty. The frame
+   takes the height its tab actually needs. */
+.mod-card {
+    height: auto;
+    max-height: 100%;
+    min-height: 300px;
+}
+
+/* A dimmed accent still reads as the obvious next action. While the policy has
+   not been previewed, the button has to look like what it is: not yet available. */
+.mod-btn-primary:disabled {
+    opacity: 1;
+    background: transparent;
+    color: rgba(255, 255, 255, 0.32);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    cursor: not-allowed;
+}
+
+/* Preview and Enable are two steps of one act, so they share a row: the gate
+   and the key, side by side, with the sequence readable left to right. */
+.pol-editor-foot {
+    border-top: 1px solid rgba(57, 57, 57, 0.5);
+    padding-top: 13px;
+    padding-bottom: 13px;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/* Both labels reserve the width of their longest state, so neither button
+   resizes as it changes what it says. */
+.pol-editor-foot .mod-btn-primary {
+    justify-content: center;
+    min-width: 196px;
+}
+
+/* ── Tabs ─────────────────────────────────────────────────────────────────
+   A flat underline and nothing else. The global button style rounds every
+   corner, which turned a tab strip into two floating pills. */
+.mod-tabs {
+    gap: 0;
+    padding: 0 18px;
+    margin-bottom: 0;
+}
+
+.mod-tab {
+    border-radius: 0;
+    background: none;
+    padding: 11px 2px;
+    margin-right: 22px;
+    /* Overlap the strip's own hairline so the active underline replaces it
+       rather than stacking a second line beneath. */
+    margin-bottom: -1px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: rgba(255, 255, 255, 0.42);
+    backdrop-filter: none;
+}
+
+.mod-tab:last-child { margin-right: 0; }
+
+.mod-tab:hover { color: rgba(255, 255, 255, 0.72); }
+
+.mod-tab.active {
+    color: #fff;
+    border-bottom-color: var(--accent-color, #59fcb3);
+}
+
+/* Same 18px gutter the Members pane uses — the two tabs are one panel and
+   should not shift their content sideways when you switch. */
+/* No bottom padding: WebKit drops a scroll container's trailing padding once
+   its content overflows, so the last row ends up hard against the edge. The
+   space lives on the last child of each view instead, where it is honoured. */
+.mod-policies {
+    padding: 14px 18px 0;
+}
+
+/* ── Inspecting and building ──────────────────────────────────────────────
+   The shipped defaults are not a black box: the row opens the same editor a
+   template does, with every rule and every blocked domain already in it. */
+.pol-inspect {
+    background: none;
+    border: 1px solid rgba(89, 252, 179, 0.28);
+    color: rgba(89, 252, 179, 0.85);
+    border-radius: 999px;
+    padding: 6px 13px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.pol-inspect:hover {
+    background: rgba(89, 252, 179, 0.1);
+    border-color: rgba(89, 252, 179, 0.5);
+}
+
+/* Forked: the defaults are NOT running, and the row must not imply they are. */
+.pol-row-forked {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(255, 255, 255, 0.07);
+}
+
+.pol-row-forked .pol-row-sub { color: rgba(255, 255, 255, 0.4); }
+
+.pol-card-defaults {
+    background: rgba(89, 252, 179, 0.045);
+    border-color: rgba(89, 252, 179, 0.16);
+}
+
+/* Start from scratch is a different kind of answer from the templates, so it
+   sits on its own line rather than posing as a fifth ready-made one. */
+.pol-scratch { margin-top: 2px; margin-bottom: 18px; }
+
+.pol-scratch-btn {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    text-align: left;
+    padding: 13px 14px;
+    border-radius: 12px;
+    background: none;
+    border: 1px dashed rgba(255, 255, 255, 0.14);
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.pol-scratch-btn:hover {
+    border-color: rgba(89, 252, 179, 0.45);
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.pol-scratch-plus {
+    font-size: 19px;
+    line-height: 1;
+    color: rgba(89, 252, 179, 0.8);
+    width: 22px;
+    text-align: center;
+}
+
+.pol-scratch-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pol-scratch-name { font-weight: 600; font-size: 14px; }
+.pol-scratch-desc { font-size: 12px; color: var(--text-muted, #8b8b8b); }
+
+.pol-text {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: #fff;
+    font: inherit;
+    font-size: 13px;
+}
+
+.pol-text:focus { outline: none; border-color: rgba(255, 255, 255, 0.22); }
+
+.pol-rules { display: flex; flex-direction: column; gap: 10px; }
+
+.pol-rule {
+    padding: 12px 13px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.pol-rule-head { display: flex; align-items: center; gap: 10px; }
+.pol-rule-name { font-weight: 600; font-size: 13.5px; flex: 1; min-width: 0; }
+
+.pol-rule-x {
+    background: none;
+    border: none;
+    color: rgba(255, 255, 255, 0.35);
+    font-size: 13px;
+    padding: 2px 4px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.pol-rule-x:hover { color: var(--danger-red, #FC595C); }
+
+.pol-rule-desc {
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.44);
+    margin-top: 3px;
+}
+
+.pol-rule-hint {
+    font-size: 11.5px;
+    color: rgba(255, 255, 255, 0.36);
+    margin: 9px 0 5px;
+}
+
+.pol-rule textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+}
+
+.pol-rule-add { display: flex; flex-wrap: wrap; gap: 7px; }
+
+.pol-rule-add-btn {
+    background: none;
+    border: 1px dashed rgba(255, 255, 255, 0.16);
+    border-radius: 8px;
+    color: rgba(255, 255, 255, 0.6);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 11px;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.pol-rule-add-btn:hover {
+    border-color: rgba(89, 252, 179, 0.45);
+    color: #fff;
+}
+
+/* The rule read-out: what a policy actually does, before you change anything. */
+.pol-summary { display: flex; flex-direction: column; gap: 1px; }
+
+.pol-sum {
+    padding: 9px 12px;
+    background: rgba(255, 255, 255, 0.03);
+    border-left: 2px solid rgba(89, 252, 179, 0.45);
+}
+
+.pol-sum:first-child { border-radius: 0 8px 0 0; }
+.pol-sum:last-child { border-radius: 0 0 8px 0; }
+
+/* An aggravator is not cover on its own, and the rail says so before the words do. */
+.pol-sum-armed { border-left-color: rgba(255, 255, 255, 0.14); }
+
+.pol-sum-name {
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    flex-wrap: wrap;
+}
+
+.pol-sum-tag {
+    font-size: 10.5px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.34);
+    letter-spacing: 0.01em;
+}
+
+.pol-sum-detail {
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgba(255, 255, 255, 0.46);
+}
+
+/* ── Preview button: spinner, result, then back to the offer ──────────────
+   Fixed width across both labels so the button does not resize under the
+   cursor as it changes what it says. */
+.pol-preview-btn {
+    justify-content: center;
+    min-width: 232px;
+}
+
+.pol-spin {
+    display: none;
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    border: 2px solid rgba(255, 255, 255, 0.14);
+    border-top-color: rgba(255, 255, 255, 0.75);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+.pol-preview-btn.is-busy .pol-spin { display: inline-block; }
+
+.pol-preview-btn.is-busy {
+    opacity: 1;
+    color: rgba(255, 255, 255, 0.62);
+    cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .pol-spin { animation: none; }
+}
+
+/* Label and its hint are one unit; the label's own line box was holding them
+   two lines apart. */
+.pol-dial-label { margin-bottom: -5px; }
+
+.pol-info {
+    position: relative;
+    display: inline-block;
+    width: 15px;
+    height: 15px;
+    margin-left: 6px;
+    vertical-align: -2px;
+    background-color: rgba(255, 255, 255, 0.4);
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+}
+
+.pol-info:hover { background-color: #fff; }
+
+/* Names what the CURRENT choice does, so the three words above it stop being
+   a guess. */
+.pol-seg-says {
+    margin-top: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.42);
+}

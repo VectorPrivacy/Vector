@@ -3021,11 +3021,32 @@ impl VectorCore {
                     "example": p.example,
                     "caveat": p.caveat,
                     "dials": p.dials,
+                    // Every rule in plain language: a template whose behaviour
+                    // you can only infer from its name is the same black box
+                    // the shipped defaults used to be.
+                    "rules": crate::community::policy::presets::describe(&p.policy),
                     "bytes": serde_json::to_string(&p.policy).unwrap_or_default(),
                 })
             })
             .collect();
-        Ok(serde_json::json!({ "presets": presets }))
+        // The from-scratch builder's catalogue rides along: it is fetched at the
+        // same moment, and its numbers must come from the same place the
+        // presets' do.
+        let rule_kinds: Vec<serde_json::Value> = crate::community::policy::presets::rule_kinds()
+            .into_iter()
+            .map(|k| {
+                serde_json::json!({
+                    "id": k.id,
+                    "label": k.label,
+                    "description": k.description,
+                    "input": k.input,
+                    "input_label": k.input_label,
+                    "input_hint": k.input_hint,
+                    "rule": k.rule,
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "presets": presets, "rule_kinds": rule_kinds }))
     }
 
     /// What a candidate policy WOULD do, against real history. Stores nothing,
@@ -3130,9 +3151,13 @@ impl VectorCore {
         Ok(serde_json::json!({
             "community_id": cid_hex,
             "policies": rows,
-            // With none stored, the engine runs the built-in default — say so,
-            // or an empty list reads as "no moderation".
-            "using_builtin": stored.iter().all(|p| !p.enabled),
+            // Must agree with `select_policies`, which is the thing that
+            // actually decides: the shipped defaults run unless the community
+            // has forked them. A flag derived any other way tells a moderator
+            // their cover is on while the engine has stood it down.
+            "using_builtin": !stored
+                .iter()
+                .any(|p| p.policy_id == crate::community::policy::harness::DEFAULTS_POLICY_ID),
         }))
     }
 
@@ -3175,7 +3200,7 @@ impl VectorCore {
     /// The built-in policy, as editable bytes — the starting point an editor
     /// offers instead of a blank document.
     pub fn builtin_policy_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(&crate::community::policy::harness::scam_links_policy())
+        serde_json::to_string_pretty(&crate::community::policy::harness::default_policy())
             .map_err(|e| VectorError::Other(e.to_string()))
     }
 

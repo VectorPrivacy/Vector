@@ -94,8 +94,218 @@ pub const SHORTENERS: &[&str] = &[
     "tr.ee", "dub.sh", "e.vg", "paw.wf", "shm.to", "snl.ink", "surl.li", "url9.de", "waffl.link",
 ];
 
+/// One rule, in the words an admin would use.
+///
+/// The engine's own vocabulary — matcher variants, rungs, weights — is exactly
+/// what makes a shipped policy read as a black box. This is the only place
+/// that translation lives, so a console, a bot and a CLI all describe the same
+/// rule the same way.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuleSummary {
+    pub label: String,
+    pub detail: String,
+    /// True when the rule stays silent until another rule has already
+    /// convicted. Unmarked, an aggravator reads as cover it does not provide.
+    pub armed: bool,
+}
+
+fn plural(n: u32, one: &str, many: &str) -> String {
+    if n == 1 { format!("{n} {one}") } else { format!("{n} {many}") }
+}
+
+fn describe_thresholds(r: &Rule) -> String {
+    // A burst-bounded repeat already named its span, so "in the window" would
+    // point at a different stretch of time than the sentence before it.
+    let window_scoped = !matches!(r.matcher, Match::Repeat { within_secs: Some(_), .. });
+    if let Some(t) = &r.tiers {
+        let mut parts: Vec<String> = Vec::new();
+        for rung in &t.per_message {
+            parts.push(format!("{} in one message", plural(rung.hits, "hit", "hits")));
+        }
+        for rung in &t.per_window {
+            parts.push(if window_scoped {
+                format!("{} in the window", plural(rung.hits, "hit", "hits"))
+            } else {
+                plural(rung.hits, "hit", "hits")
+            });
+        }
+        if !parts.is_empty() {
+            return format!("Trips at {}.", parts.join(", then "));
+        }
+    }
+    String::new()
+}
+
+/// Describe every rule in a policy, in order.
+pub fn describe(policy: &Policy) -> Vec<RuleSummary> {
+    policy.rules.iter().map(describe_rule).collect()
+}
+
+pub fn describe_rule(r: &Rule) -> RuleSummary {
+    let (label, mut detail) = match &r.matcher {
+        Match::Keyword { patterns, .. } => (
+            "Words".to_string(),
+            format!(
+                "{} on the list, matched as whole words unless you wrap them in *.",
+                plural(patterns.len() as u32, "word", "words")
+            ),
+        ),
+        Match::Regex { patterns, .. } => (
+            "Patterns".to_string(),
+            plural(patterns.len() as u32, "expression", "expressions") + " matched against each message.",
+        ),
+        Match::Link { patterns } => (
+            "Link domains".to_string(),
+            format!(
+                "{} blocked, subdomains included.",
+                plural(patterns.len() as u32, "domain", "domains")
+            ),
+        ),
+        Match::Repeat { within_secs, .. } => (
+            "Same message repeated".to_string(),
+            match within_secs {
+                Some(secs) => format!(
+                    "One account posting the same thing over and over inside {} minutes. Case, punctuation and digits are ignored, so changing them does not help.",
+                    secs / 60
+                ),
+                None => "One account posting the same thing over and over. Case, punctuation and digits are ignored, so changing them does not help.".to_string(),
+            },
+        ),
+        Match::Rate { per_secs } => (
+            "Posting rate".to_string(),
+            format!("Messages counted over any {} seconds.", per_secs),
+        ),
+        Match::Mentions {} => (
+            "Mentions".to_string(),
+            "How many people one message tags.".to_string(),
+        ),
+        Match::Cohort { min, .. } => (
+            "Many accounts, one line".to_string(),
+            format!(
+                "{} or more separate accounts posting the same line at the same time. The shape of a raid.",
+                min
+            ),
+        ),
+        Match::JoinBurst { gap_secs, min } => (
+            "Join flood".to_string(),
+            format!("{} or more joins within {} minutes.", min, gap_secs / 60),
+        ),
+        Match::TenureLt { secs } => (
+            "New account".to_string(),
+            format!("Joined less than {} hours ago.", secs / 3600),
+        ),
+        Match::MessagesLte { n } => (
+            "Barely posted".to_string(),
+            format!("Has posted at most {}.", plural(*n, "message", "messages")),
+        ),
+    };
+    let t = describe_thresholds(r);
+    if !t.is_empty() {
+        detail.push(' ');
+        detail.push_str(&t);
+    }
+    RuleSummary { label, detail, armed: r.armed_by.is_some() }
+}
+
+/// One rule a from-scratch policy may add: what it catches, what the author has
+/// to supply, and the starting numbers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuleKind {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Plain-language: what trips it.
+    pub description: &'static str,
+    /// What the author supplies: "wordlist" | "domainlist" | "none".
+    pub input: &'static str,
+    pub input_label: &'static str,
+    pub input_hint: &'static str,
+    /// The starting rule, weights and rungs included, so a builder never has to
+    /// invent numbers the engine would then have to honour.
+    pub rule: Rule,
+}
+
+/// The rule kinds a from-scratch policy may add.
+///
+/// Deliberately NOT the whole `Match` set. `TenureLt` and `MessagesLte`
+/// describe most of a healthy community on their own, so they exist only as
+/// aggravators armed behind a real conviction and the builder never offers
+/// them loose. Every kind here can stand as the only rule in a policy and
+/// still convict the right person.
+pub fn rule_kinds() -> Vec<RuleKind> {
+    vec![
+        RuleKind {
+            id: "keyword",
+            label: "Words",
+            description: "Someone posts a word from your list.",
+            input: "wordlist",
+            input_label: "Words to catch",
+            input_hint: "One per line. Use *word* to match inside longer words.",
+            rule: rule(
+                "words",
+                Match::Keyword { patterns: vec![], normalize: Normalize::Fold },
+                tiers(vec![rung(1, Severity::Minor, 10)], vec![rung(10, Severity::Major, 45)]),
+            ),
+        },
+        RuleKind {
+            id: "link",
+            label: "Link domains",
+            description: "Someone posts a link to a domain on your list.",
+            input: "domainlist",
+            input_label: "Domains to block",
+            input_hint: "One per line. Matches the domain and its subdomains.",
+            rule: rule(
+                "links",
+                Match::Link { patterns: vec![] },
+                tiers(vec![rung(1, Severity::Severe, 70)], vec![rung(3, Severity::Severe, 90)]),
+            ),
+        },
+        RuleKind {
+            id: "repeat",
+            label: "Same message repeated",
+            description: "One account posting the same thing over and over inside half an hour. Case, punctuation and digits are ignored, so changing them does not help.",
+            input: "none",
+            input_label: "",
+            input_hint: "",
+            rule: rule(
+                "repeat",
+                Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(super::harness::REPEAT_BURST_SECS) },
+                tiers(vec![], vec![rung(4, Severity::Major, 50), rung(8, Severity::Severe, 85)]),
+            ),
+        },
+        RuleKind {
+            id: "cohort",
+            label: "Many accounts, one line",
+            description: "Separate accounts posting the same line at the same time. The shape of a raid.",
+            input: "none",
+            input_label: "",
+            input_hint: "",
+            rule: single(
+                "cohort",
+                Match::Cohort { min: 3, quiet_max: 2, short_factor: 3, thin_ratio: None },
+                Severity::Severe,
+                85,
+                None,
+            ),
+        },
+    ]
+}
+
 pub fn all() -> Vec<Preset> {
     vec![
+        Preset {
+            id: super::harness::DEFAULTS_POLICY_ID,
+            name: "Vector's Defaults",
+            description: "Raid detection, running here already. Open it to read every rule, or save your own version.",
+            example: "a swarm of fresh accounts posting one line",
+            caveat: "A Built-In Anti-Raid Policy: detects raids proactively and alerts you with a list of suspects for quick handling.",
+            dials: vec![
+                Dial { key: "summary", label: "What these rules do", kind: "summary",
+                       hint: "Every rule that runs here, in order." },
+                Dial { key: "strictness", label: "Sensitivity", kind: "strictness",
+                       hint: "How much it takes to trip a rule, and how confident the result is." },
+            ],
+            policy: super::harness::default_policy(),
+        },
         Preset {
             id: "scam_links",
             name: "Scam Links",
@@ -119,63 +329,23 @@ pub fn all() -> Vec<Preset> {
             ),
         },
         Preset {
-            id: "raid_shield",
-            name: "Raid Shield",
-            description: "Spots waves of fresh accounts posting the same thing.",
-            example: "400 new members all saying \"hello world\"",
-            caveat: "Raid Shield finds patterns, not proof — it flags for you and never removes anyone on its own.",
-            dials: vec![Dial {
-                key: "strictness",
-                label: "How eager should it be?",
-                kind: "strictness",
-                hint: "Relaxed catches less, not softer.",
-            }],
-            policy: base(
-                "Raid Shield",
-                vec![
-                    single(
-                        "cohort",
-                        Match::Cohort { min: 3, quiet_max: 2, short_factor: 3, thin_ratio: None },
-                        Severity::Severe,
-                        85,
-                        None,
-                    ),
-                    single(
-                        "burst",
-                        Match::JoinBurst { gap_secs: 600, min: 5 },
-                        Severity::Major,
-                        40,
-                        Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) }),
-                    ),
-                    single(
-                        "fresh",
-                        Match::TenureLt { secs: 24 * 3600 },
-                        Severity::Notice,
-                        20,
-                        Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: None }),
-                    ),
-                ],
-                168,
-            ),
-        },
-        Preset {
             id: "no_spam",
             name: "No Spam",
             description: "The same message over and over, from one account or many.",
-            example: "someone pasting the same pitch twelve times",
+            example: "the same pitch, twelve times",
             caveat: "Counts shapes, not words: changing case, punctuation or digits does not help a spammer.",
             dials: vec![Dial {
                 key: "strictness",
-                label: "How eager should it be?",
+                label: "Sensitivity",
                 kind: "strictness",
-                hint: "Relaxed catches less, not softer.",
+                hint: "How much it takes to trip a rule, and how confident the result is.",
             }],
             policy: base(
                 "No Spam",
                 vec![
                     rule(
                         "repeat",
-                        Match::Repeat { normalize: Normalize::Skeleton },
+                        Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(super::harness::REPEAT_BURST_SECS) },
                         tiers(vec![], vec![rung(4, Severity::Major, 50), rung(8, Severity::Severe, 85)]),
                     ),
                     single(
@@ -190,11 +360,11 @@ pub fn all() -> Vec<Preset> {
             ),
         },
         Preset {
-            id: "language_filter",
-            name: "Language Filter",
-            description: "Your word list, with per-channel exceptions.",
-            example: "words you would rather nobody used here",
-            caveat: "Whole words by default, so \"class\" never trips on \"ass\".",
+            id: "word_filter",
+            name: "Word Filter",
+            description: "Any list of words you choose, with per-channel exceptions.",
+            example: "spoilers, slurs, or a scam phrase",
+            caveat: "Whole words by default, so filtering \"art\" leaves \"start\" alone.",
             dials: vec![
                 Dial { key: "words", label: "Words to catch", kind: "wordlist",
                        hint: "One per line. Use *word* to match inside longer words." },
@@ -202,7 +372,7 @@ pub fn all() -> Vec<Preset> {
                        hint: "The filter ignores these channels entirely." },
             ],
             policy: base(
-                "Language Filter",
+                "Word Filter",
                 vec![rule(
                     "words",
                     Match::Keyword { patterns: vec![], normalize: Normalize::Fold },
@@ -210,6 +380,22 @@ pub fn all() -> Vec<Preset> {
                 )],
                 168,
             ),
+        },
+        Preset {
+            id: "blank",
+            name: "Start from scratch",
+            description: "An empty policy. Name it, add the rules you want, preview before anything runs.",
+            example: "whatever this community actually needs",
+            caveat: "A policy with no rules catches nothing, and the preview will tell you so.",
+            dials: vec![
+                Dial { key: "name", label: "Policy name", kind: "text",
+                       hint: "What you will see in the list." },
+                Dial { key: "rules", label: "Rules", kind: "rules",
+                       hint: "Add as many as you like. Any one of them can convict on its own." },
+                Dial { key: "exempt_channels", label: "Allowed in these channels", kind: "channels",
+                       hint: "These channels are ignored entirely." },
+            ],
+            policy: base("New policy", vec![], 168),
         },
     ]
 }
@@ -255,5 +441,28 @@ mod tests {
             assert!(!p.example.is_empty(), "preset {} needs a concrete example", p.id);
             assert!(!p.dials.is_empty(), "preset {} needs at least one dial", p.id);
         }
+    }
+
+    /// A description that skips a rule is worse than none: it reads as a
+    /// complete account of what runs.
+    #[test]
+    fn every_rule_of_every_preset_is_described() {
+        for p in all() {
+            let described = describe(&p.policy);
+            assert_eq!(described.len(), p.policy.rules.len(), "{} left rules undescribed", p.id);
+            for (d, r) in described.iter().zip(p.policy.rules.iter()) {
+                assert!(!d.label.is_empty() && !d.detail.is_empty(), "{} rule {} has no words", p.id, r.id);
+                assert_eq!(d.armed, r.armed_by.is_some(), "{} rule {} misreports arming", p.id, r.id);
+            }
+        }
+    }
+
+    /// Aggravators only mean anything behind a conviction, so a summary that
+    /// does not mark them promises cover the engine will not give.
+    #[test]
+    fn the_shipped_defaults_mark_their_aggravators() {
+        let d = describe(&super::super::harness::default_policy());
+        assert!(d.iter().any(|x| x.armed), "the defaults carry aggravators and none was marked");
+        assert!(d.iter().any(|x| !x.armed), "every rule marked armed would leave nothing that can convict");
     }
 }

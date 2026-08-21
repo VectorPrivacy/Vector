@@ -29,6 +29,7 @@ use vector_core::community::policy::document::{
     ArmScope, ArmedBy, Enforcement, Exempt, ExemptKind, ExemptPatterns, Match, Normalize, Policy as PolicyDoc,
     Rule, Rung, Tiers, FORMAT,
 };
+use vector_core::community::policy::harness::REPEAT_BURST_SECS;
 use vector_core::community::policy::presets as core_presets;
 use vector_core::community::policy::types::Severity;
 
@@ -36,19 +37,20 @@ use vector_core::community::policy::types::Severity;
 /// evaluates — picking one and hand-writing JSON produce the same artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preset {
+    /// Everything already running in a community that has not written its own.
+    VectorDefaults,
     ScamLinks,
-    RaidShield,
     NoSpam,
-    LanguageFilter,
+    WordFilter,
 }
 
 impl Preset {
     fn id(self) -> &'static str {
         match self {
+            Preset::VectorDefaults => "vector_defaults",
             Preset::ScamLinks => "scam_links",
-            Preset::RaidShield => "raid_shield",
             Preset::NoSpam => "no_spam",
-            Preset::LanguageFilter => "language_filter",
+            Preset::WordFilter => "word_filter",
         }
     }
 }
@@ -226,7 +228,7 @@ impl PolicyRule {
 
     /// The same message over and over from one account.
     pub fn repetition(id: &str) -> Self {
-        tiered(id, Match::Repeat { normalize: Normalize::Skeleton }, Severity::Major, false)
+        tiered(id, Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(REPEAT_BURST_SECS) }, Severity::Major, false)
     }
 
     /// Too many messages too fast.
@@ -426,7 +428,7 @@ mod tests {
 
     #[test]
     fn a_preset_builds_and_validates() {
-        for p in [Preset::ScamLinks, Preset::RaidShield, Preset::NoSpam, Preset::LanguageFilter] {
+        for p in [Preset::VectorDefaults, Preset::ScamLinks, Preset::NoSpam, Preset::WordFilter] {
             assert!(Policy::preset(p).unwrap().build().is_ok(), "{p:?} must build");
         }
     }

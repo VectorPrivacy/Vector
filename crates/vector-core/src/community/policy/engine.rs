@@ -438,7 +438,7 @@ fn evaluate_rule(
     }
 
     // A declared-but-unimplemented normalizer is unevaluated, never approximated.
-    if let Match::Keyword { normalize: n, .. } | Match::Regex { normalize: n, .. } | Match::Repeat { normalize: n } =
+    if let Match::Keyword { normalize: n, .. } | Match::Regex { normalize: n, .. } | Match::Repeat { normalize: n, .. } =
         &rule.matcher
     {
         if !normalize::is_available(*n) {
@@ -597,6 +597,16 @@ fn content_rule(
     out: &mut RuleOutcome,
 ) {
     let tiers = rule.tiers.as_ref().expect("validated: content rules carry tiers");
+    // The needle has to live in the same space as the haystack. Message text is
+    // normalized below; a pattern that is not gets compared against text it can
+    // never equal, so "Vector" silently matched nothing while "vector" matched.
+    // Hoisted out of the corpus loop: this does not vary per message.
+    let folded_patterns: Vec<String> = match &rule.matcher {
+        Match::Keyword { patterns, normalize: n } => {
+            patterns.iter().map(|p| normalize::apply(p, *n, codes)).collect()
+        }
+        _ => Vec::new(),
+    };
     // (subject, message) -> hits, plus the citations each produced.
     let mut per_message: BTreeMap<([u8; 32], [u8; 32]), (u32, u64, Vec<Citation>)> = BTreeMap::new();
 
@@ -608,9 +618,9 @@ fn content_rule(
             continue;
         }
         let (hits, citations) = match &rule.matcher {
-            Match::Keyword { patterns, normalize: n } => {
+            Match::Keyword { normalize: n, .. } => {
                 let text = normalize::apply(&m.text, *n, codes);
-                let hits = cancel_exempt_hits(&text, keyword_hits(&text, patterns), exempts);
+                let hits = cancel_exempt_hits(&text, keyword_hits(&text, &folded_patterns), exempts);
                 let cits = hits
                     .iter()
                     .map(|h| {
@@ -948,7 +958,7 @@ fn window_rule(
     for (subject_bytes, messages) in by_author {
         let subject = SubjectId(subject_bytes);
         let (hits, cited, evidence) = match &rule.matcher {
-            Match::Repeat { normalize: n } => {
+            Match::Repeat { normalize: n, within_secs } => {
                 let mut groups: BTreeMap<String, Vec<&MessageSignal>> = BTreeMap::new();
                 for m in &messages {
                     let key = normalize::apply(&m.text, *n, codes);
@@ -957,14 +967,45 @@ fn window_rule(
                     }
                     groups.entry(key).or_default().push(m);
                 }
-                // Most repeated wins; ties by the normalized key ascending.
-                let Some((_key, winners)) = groups
+                // With a span, each group counts only its densest run inside it,
+                // and the winner is the tightest burst rather than the biggest
+                // pile. "gm" once a morning is seven hits across a week and one
+                // hit in any half hour, which is the difference between a
+                // regular and a spammer.
+                let scored: Vec<(String, u32, Vec<&MessageSignal>)> = groups
                     .into_iter()
-                    .max_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| b.0.cmp(&a.0)))
+                    .map(|(key, mut ms)| {
+                        let Some(secs) = within_secs else {
+                            let n = ms.len() as u32;
+                            return (key, n, ms);
+                        };
+                        ms.sort_by_key(|m| m.at_ms);
+                        let span = secs.saturating_mul(1000);
+                        let (mut best, mut from) = (0usize, 0u64);
+                        for (i, m) in ms.iter().enumerate() {
+                            // Half-open [start, start + span), starts taken from
+                            // the author's own timestamps — same walk as `Rate`.
+                            let start = m.at_ms;
+                            let count =
+                                ms[i..].iter().take_while(|x| x.at_ms < start.saturating_add(span)).count();
+                            if count > best {
+                                best = count;
+                                from = start;
+                            }
+                        }
+                        let cited: Vec<&MessageSignal> = ms
+                            .into_iter()
+                            .filter(|m| m.at_ms >= from && m.at_ms < from.saturating_add(span))
+                            .collect();
+                        (key, best as u32, cited)
+                    })
+                    .collect();
+                // Most repeated wins; ties by the normalized key ascending.
+                let Some((_key, n_hits, winners)) =
+                    scored.into_iter().max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
                 else {
                     continue;
                 };
-                let n_hits = winners.len() as u32;
                 (n_hits, winners, vec![])
             }
             Match::Rate { per_secs } => {
@@ -1721,7 +1762,7 @@ mod tests {
         messages.push(msg(0xb1, 1, NOW - 7 * HOUR, "hello everyone"));
         let s = signals(vec![member(1, Some(2))], messages);
         let p = window_rule_policy(
-            Match::Repeat { normalize: Normalize::Skeleton },
+            Match::Repeat { normalize: Normalize::Skeleton, within_secs: None },
             vec![Rung { hits: 3, severity: Severity::Major, weight: 50, pierces_trusted: false }],
         );
         let r = evaluate(&s, &[loaded(p)], &[], NOW);
@@ -1839,5 +1880,98 @@ mod tests {
         );
         let r = evaluate(&s, &[loaded(p)], &[], NOW);
         assert_eq!(only(&r).citations.len(), 2, "newest two inside the window; the older two never enter the corpus");
+    }
+
+    fn word_rule(pattern: &str) -> Rule {
+        Rule {
+            id: "words".into(),
+            matcher: Match::Keyword { patterns: vec![pattern.into()], normalize: Normalize::Fold },
+            tiers: Some(Tiers {
+                per_message: vec![Rung { hits: 1, severity: Severity::Minor, weight: 10, pierces_trusted: false }],
+                per_window: vec![],
+            }),
+            severity: None,
+            weight: None,
+            pierces_trusted: false,
+            family: None,
+            armed_by: None,
+            exempt: Exempt::default(),
+            enforcement: Enforcement::Advisory,
+        }
+    }
+
+    fn hits_for(pattern: &str, text: &str) -> usize {
+        let s = signals(vec![member(1, Some(2))], vec![msg(0xd1, 1, NOW - HOUR, text)]);
+        let r = evaluate(&s, &[loaded(policy_with(vec![word_rule(pattern)]))], &[], NOW);
+        only(&r).subjects.len()
+    }
+
+    /// A capitalised word matched nothing at all: the corpus was casefolded and
+    /// the pattern was not, so the two could never meet. Silent, and the filter
+    /// looked like it was simply finding nothing in a clean community.
+    #[test]
+    fn a_pattern_matches_in_the_same_case_space_as_the_text() {
+        for pattern in ["Vector", "VECTOR", "vector", "VeCtOr"] {
+            assert_eq!(hits_for(pattern, "we should ship vector today"), 1, "pattern {pattern:?} caught nothing");
+        }
+    }
+
+    /// Casefolding the pattern must not quietly turn a whole-word rule into a
+    /// substring one: token anchoring is the whole reason folding is safe.
+    #[test]
+    fn folding_a_pattern_keeps_its_word_anchoring() {
+        assert_eq!(hits_for("Art", "we should start today"), 0, "\"Art\" must not match inside \"start\"");
+        assert_eq!(hits_for("*Art*", "we should start today"), 1, "an explicit wildcard still matches inside");
+    }
+
+    fn repeat_policy(within_secs: Option<u64>) -> Policy {
+        let mut p = window_rule_policy(
+            Match::Repeat { normalize: Normalize::Skeleton, within_secs },
+            vec![
+                Rung { hits: 4, severity: Severity::Major, weight: 50, pierces_trusted: false },
+                Rung { hits: 8, severity: Severity::Severe, weight: 85, pierces_trusted: false },
+            ],
+        );
+        // The shipped window: the point is that a WEEK of history is in scope
+        // and the burst span is what narrows it.
+        p.window = Window { hours: 168, max_messages: 4000 };
+        p
+    }
+
+    fn repeat_hits(within_secs: Option<u64>, at_hours: &[u64]) -> usize {
+        let msgs: Vec<MessageSignal> = at_hours
+            .iter()
+            .enumerate()
+            .map(|(i, h)| msg(0xe0 + i as u8, 1, NOW - h * HOUR, "gm"))
+            .collect();
+        // No shield: a brand-new member is exactly who this must not misjudge.
+        let s = signals(vec![member(1, Some(1))], msgs);
+        let r = evaluate(&s, &[loaded(repeat_policy(within_secs))], &[], NOW);
+        only(&r).subjects.len()
+    }
+
+    /// A regular saying "gm" once a morning is not a spammer, and counting
+    /// across the whole seven-day window could not tell the two apart: eight
+    /// mornings read exactly like eight messages in a minute.
+    #[test]
+    fn a_daily_greeting_is_not_a_repeat_burst() {
+        let mornings: Vec<u64> = (0..8).map(|d| d * 24 + 1).collect();
+        assert_eq!(repeat_hits(None, &mornings), 1, "the unbounded rule convicts a regular");
+        assert_eq!(
+            repeat_hits(Some(super::super::harness::REPEAT_BURST_SECS), &mornings),
+            0,
+            "a burst-bounded rule must leave a daily greeting alone"
+        );
+    }
+
+    /// The thing it is actually for: the same line over and over inside minutes.
+    #[test]
+    fn a_burst_of_the_same_line_still_convicts() {
+        let burst: Vec<u64> = vec![1, 1, 1, 1, 1, 1, 1, 1];
+        assert_eq!(
+            repeat_hits(Some(super::super::harness::REPEAT_BURST_SECS), &burst),
+            1,
+            "eight identical messages in one span must still be caught"
+        );
     }
 }

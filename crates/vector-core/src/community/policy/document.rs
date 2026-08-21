@@ -148,7 +148,18 @@ pub enum Match {
     },
     /// Window-only. Hits = occurrences of the most-repeated normalized text by
     /// that author; ties by the normalized key ascending.
-    Repeat { normalize: Normalize },
+    ///
+    /// `within_secs` bounds the count to the densest run inside that span, so
+    /// the rule measures a burst rather than a habit. Without it a daily "gm"
+    /// over a seven-day window counts as seven repeats, which is a regular, not
+    /// a spammer. A policy that sets it MUST declare `requires: ["repeat_within"]`
+    /// or an older engine ignores the field and convicts where a newer one
+    /// would not — the same policy_hash, two different verdicts.
+    Repeat {
+        normalize: Normalize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        within_secs: Option<u64>,
+    },
     /// Window-only. Half-open sliding window; candidate starts are the author's
     /// own message timestamps.
     Rate { per_secs: u64 },
@@ -246,7 +257,7 @@ impl Match {
 
     fn normalize(&self) -> Option<Normalize> {
         match self {
-            Match::Keyword { normalize, .. } | Match::Regex { normalize, .. } | Match::Repeat { normalize } => {
+            Match::Keyword { normalize, .. } | Match::Regex { normalize, .. } | Match::Repeat { normalize, .. } => {
                 Some(*normalize)
             }
             _ => None,
@@ -378,7 +389,7 @@ pub struct Policy {
 pub const FORMAT: u32 = 1;
 
 /// Keys this engine understands in `requires`.
-const KNOWN_REQUIRED: &[&str] = &["emoji_codes", "shields", "window", "exempt"];
+const KNOWN_REQUIRED: &[&str] = &["emoji_codes", "shields", "window", "exempt", "repeat_within"];
 
 impl Policy {
     /// Validate against the frozen caps and semantics. Returns the FIRST
@@ -728,7 +739,7 @@ mod tests {
     fn scope_and_form_admissibility() {
         // repeat is window-level: per_message would double-count one fact.
         let mut r = keyword_rule();
-        r.matcher = Match::Repeat { normalize: Normalize::Fold };
+        r.matcher = Match::Repeat { normalize: Normalize::Fold, within_secs: None };
         let p = base(vec![r]);
         assert_eq!(err_code(&p), code::SCOPE_NOT_ADMISSIBLE);
 

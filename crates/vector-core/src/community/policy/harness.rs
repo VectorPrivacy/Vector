@@ -28,14 +28,30 @@ fn subject_of(npub_or_hex: &str) -> Option<SubjectId> {
     PublicKey::parse(npub_or_hex).ok().map(|p| SubjectId(p.to_bytes()))
 }
 
-/// The Phase-1 built-in policy: the deterministic rules that counter the live
-/// attack shapes (scam shortlinks and copy-paste spam), plus the fresh-account
-/// aggravators. The heuristic planes stay with `raid.rs` until they are wired.
-pub fn scam_links_policy() -> Policy {
+/// The reserved id a community's fork of the shipped defaults is stored under.
+/// Writing this id is the only way to stand the defaults down.
+pub const DEFAULTS_POLICY_ID: &str = "vector_defaults";
+
+/// The span a repeat rule counts inside. Malicious repetition is a burst;
+/// saying "gm" every morning is not, and a seven-day count cannot tell them
+/// apart.
+pub const REPEAT_BURST_SECS: u64 = 30 * 60;
+
+/// What every community gets without asking: raid detection, and nothing else.
+///
+/// Deliberately NOT a link blocker. Which domains a community will not host is
+/// its own call, and a list baked into the client makes that call for everyone
+/// while looking like a law of the protocol. The bundled shortener list lives
+/// in the Scam Links template instead, where turning it on is a choice someone
+/// made. What is left here is the one thing no community can be expected to
+/// hand-configure before it is attacked: the shape of a swarm.
+pub fn default_policy() -> Policy {
     Policy {
         format: FORMAT,
-        requires: vec![],
-        name: "scam-links".into(),
+        // `repeat` bounds its count to a burst; an engine that does not know
+        // the field must go inert rather than count across the whole week.
+        requires: vec!["repeat_within".into()],
+        name: "raid-detection".into(),
         emoji_codes: vec![],
         // A WEEK, not a day. Shield inputs are measured over the declared
         // window (that is what keeps them identical across clients), so a
@@ -45,25 +61,6 @@ pub fn scam_links_policy() -> Policy {
         window: Window { hours: 168, max_messages: 4000 },
         exempt: Exempt::default(),
         rules: vec![
-            Rule {
-                id: "shorteners".into(),
-                matcher: Match::Link {
-                    // The shipped shortener/scam list, as a denylist so ordinary
-                    // links stay ordinary.
-                    patterns: SHORTENERS.iter().map(|s| s.to_string()).collect(),
-                },
-                tiers: Some(Tiers {
-                    per_message: vec![Rung { hits: 1, severity: Severity::Severe, weight: 70, pierces_trusted: false }],
-                    per_window: vec![Rung { hits: 3, severity: Severity::Severe, weight: 90, pierces_trusted: false }],
-                }),
-                severity: None,
-                weight: None,
-                pierces_trusted: false,
-                family: None,
-                armed_by: None,
-                exempt: Exempt::default(),
-                enforcement: Enforcement::Advisory,
-            },
             // The raid shape: many identities, one line each. Heuristic, so it
             // flags for a human and never feeds `proven`.
             Rule {
@@ -96,7 +93,7 @@ pub fn scam_links_policy() -> Policy {
             // catches the other shape: many accounts sharing one line.
             Rule {
                 id: "repeat".into(),
-                matcher: Match::Repeat { normalize: Normalize::Skeleton },
+                matcher: Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(REPEAT_BURST_SECS) },
                 tiers: Some(Tiers {
                     per_message: vec![],
                     per_window: vec![
@@ -202,7 +199,7 @@ pub fn assemble(
             .collect();
     // Distinct shapes per author, over the window — how someone speaks now is
     // what tells a person from a script.
-    let codes = EmojiCodes::from_policy(scam_links_policy().emoji_codes.iter());
+    let codes = EmojiCodes::from_policy(default_policy().emoji_codes.iter());
     let mut distinct: std::collections::HashMap<[u8; 32], BTreeSet<String>> = std::collections::HashMap::new();
     for m in &messages {
         let sk = super::normalize::skeleton(&m.text, &codes);
@@ -440,8 +437,19 @@ pub fn preview_policy(assembled: &Assembled, bytes: &str, now_ms: u64) -> Policy
 /// INERT by the engine — silently dropping it would tell a moderator their
 /// rules are running when they are not.
 pub fn load_policies(community_id_hex: &str) -> Vec<LoadedPolicy> {
-    let stored = crate::db::community::get_community_policies(community_id_hex).unwrap_or_default();
-    let loaded: Vec<LoadedPolicy> = stored
+    select_policies(crate::db::community::get_community_policies(community_id_hex).unwrap_or_default())
+}
+
+/// Which policies actually run, given everything the community has stored.
+///
+/// A row under [`DEFAULTS_POLICY_ID`] is the community's own copy of the
+/// shipped defaults, and its PRESENCE is what stands them down — enabled or
+/// not, because a disabled fork means the admin turned raid and scam cover off
+/// on purpose. Everything else runs ALONGSIDE the defaults rather than instead
+/// of them: a word filter for spoilers must not silently drop scam-link cover.
+pub fn select_policies(stored: Vec<crate::db::community::StoredPolicy>) -> Vec<LoadedPolicy> {
+    let replaced = stored.iter().any(|p| p.policy_id == DEFAULTS_POLICY_ID);
+    let mut loaded: Vec<LoadedPolicy> = stored
         .into_iter()
         .filter(|p| p.enabled)
         .filter_map(|p| {
@@ -449,12 +457,12 @@ pub fn load_policies(community_id_hex: &str) -> Vec<LoadedPolicy> {
             Some(LoadedPolicy { hash: hash_policy_bytes(p.bytes.as_bytes()), policy, activated_at: None })
         })
         .collect();
-    if !loaded.is_empty() {
-        return loaded;
+    if !replaced {
+        let policy = default_policy();
+        let bytes = serde_json::to_vec(&policy).unwrap_or_default();
+        loaded.push(LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None });
     }
-    let policy = scam_links_policy();
-    let bytes = serde_json::to_vec(&policy).unwrap_or_default();
-    vec![LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None }]
+    loaded
 }
 
 /// Evaluate a community's policies and render the console's report.
@@ -629,15 +637,21 @@ pub fn console_report(
             "is_me": f.is_me,
         }));
     }
-    // Suspects first, then by score: the panel opens on what needs deciding.
+    // Suspects first — the panel opens on what needs deciding — then the people
+    // who hold this place together, and the unremarkable majority last. Sorting
+    // neutral above trusted buried every regular below a hundred rows of nobody
+    // in particular.
     members.sort_by(|a, b| {
         let rank = |v: &serde_json::Value| match v["verdict"].as_str() {
             Some("suspect") => 0,
-            Some("neutral") => 1,
+            Some("protected") => 1,
             Some("trusted") => 2,
             _ => 3,
         };
-        rank(a).cmp(&rank(b)).then_with(|| b["score"].as_u64().cmp(&a["score"].as_u64()))
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| b["score"].as_u64().cmp(&a["score"].as_u64()))
+            .then_with(|| b["messages"].as_u64().cmp(&a["messages"].as_u64()))
     });
 
     // Cohort exhibits, largest first.
@@ -736,7 +750,7 @@ pub fn run_side_by_side(
     assessments: &[(String, String)],
     now_ms: u64,
 ) -> Result<DiffReport, String> {
-    let policy = scam_links_policy();
+    let policy = default_policy();
     let bytes = serde_json::to_vec(&policy).map_err(|e| e.to_string())?;
     let lp = LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None };
 
@@ -889,7 +903,138 @@ mod tests {
 
     #[test]
     fn the_builtin_policy_validates() {
-        assert!(scam_links_policy().validate().is_ok(), "a shipped policy that cannot validate is a shipped outage");
+        assert!(default_policy().validate().is_ok(), "a shipped policy that cannot validate is a shipped outage");
+    }
+
+    fn stored(policy_id: &str, name: &str, enabled: bool) -> crate::db::community::StoredPolicy {
+        let mut p = crate::community::policy::presets::all()
+            .into_iter()
+            .find(|x| x.id == "word_filter")
+            .expect("word_filter preset")
+            .policy;
+        p.name = name.into();
+        let bytes = serde_json::to_string(&p).unwrap();
+        crate::db::community::StoredPolicy {
+            policy_id: policy_id.into(),
+            hash: crate::simd::hex::bytes_to_hex_32(&hash_policy_bytes(bytes.as_bytes()).0),
+            bytes,
+            enabled,
+            updated_at: 0,
+        }
+    }
+
+    fn names(loaded: &[LoadedPolicy]) -> Vec<String> {
+        loaded.iter().map(|l| l.policy.name.to_string()).collect()
+    }
+
+    /// The bug this replaced: any stored policy returned early, so enabling a
+    /// word filter for spoilers silently switched scam-link and raid cover off
+    /// while the console still said "always on".
+    #[test]
+    fn a_custom_policy_runs_beside_the_defaults_not_instead_of_them() {
+        let loaded = select_policies(vec![stored("word_filter", "Spoilers", true)]);
+        let got = names(&loaded);
+        assert!(got.contains(&"Spoilers".to_string()), "the community's own policy must run: {got:?}");
+        assert!(
+            got.contains(&default_policy().name.to_string()),
+            "the shipped defaults must still run alongside it: {got:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_stored_still_runs_the_defaults() {
+        assert_eq!(names(&select_policies(vec![])), vec![default_policy().name.to_string()]);
+    }
+
+    /// Forking is the ONLY way to change the defaults, so the fork has to be
+    /// what runs — two copies of the same rules would double every weight.
+    #[test]
+    fn a_fork_replaces_the_defaults_rather_than_stacking_on_them() {
+        let loaded = select_policies(vec![stored(DEFAULTS_POLICY_ID, "My defaults", true)]);
+        assert_eq!(names(&loaded), vec!["My defaults".to_string()]);
+    }
+
+    /// Turning the fork off is a deliberate act, and it has to stick: silently
+    /// restoring the shipped defaults would make the switch a lie.
+    #[test]
+    fn a_disabled_fork_leaves_the_community_with_no_defaults() {
+        let loaded = select_policies(vec![
+            stored(DEFAULTS_POLICY_ID, "My defaults", false),
+            stored("word_filter", "Spoilers", true),
+        ]);
+        assert_eq!(names(&loaded), vec!["Spoilers".to_string()]);
+    }
+
+    /// The shipped defaults must never decide what a community may say or link
+    /// to. A denylist baked into the client makes that call for every community
+    /// at once while looking like a rule of the protocol; the bundled shortener
+    /// list belongs to the Scam Links template, where switching it on is
+    /// somebody's decision.
+    #[test]
+    fn the_defaults_block_no_links_and_no_words() {
+        for r in &default_policy().rules {
+            match &r.matcher {
+                Match::Link { .. } => panic!("the defaults ship a link blocker: rule {}", r.id),
+                Match::Keyword { .. } | Match::Regex { .. } => {
+                    panic!("the defaults ship a word filter: rule {}", r.id)
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whatever else changes, the swarm shape is the thing a community cannot
+    /// hand-configure before it is attacked, so it stays in the defaults.
+    #[test]
+    fn the_defaults_still_detect_a_raid() {
+        let p = default_policy();
+        assert!(
+            p.rules.iter().any(|r| matches!(r.matcher, Match::Cohort { .. }) && r.armed_by.is_none()),
+            "raid detection has to be able to convict on its own"
+        );
+        assert!(
+            p.rules.iter().any(|r| matches!(r.matcher, Match::JoinBurst { .. })),
+            "the join-flood signal went missing"
+        );
+    }
+
+    /// The console's "always on" badge and the engine's loader must never
+    /// disagree: one flag says cover is running, the other decides whether it
+    /// actually does.
+    #[test]
+    fn the_builtin_badge_agrees_with_what_the_engine_loads() {
+        let cases = vec![
+            vec![],
+            vec![stored("word_filter", "Spoilers", true)],
+            vec![stored(DEFAULTS_POLICY_ID, "Mine", true)],
+            vec![stored(DEFAULTS_POLICY_ID, "Mine", false)],
+        ];
+        for stored_rows in cases {
+            let badge = !stored_rows.iter().any(|p| p.policy_id == DEFAULTS_POLICY_ID);
+            let engine_runs_defaults = select_policies(stored_rows.clone())
+                .iter()
+                .any(|l| l.policy.name == default_policy().name);
+            assert_eq!(badge, engine_runs_defaults, "badge and loader disagree for {stored_rows:?}");
+        }
+    }
+
+    /// Every kind the from-scratch builder offers has to survive validation on
+    /// its own, and none may be a weak signal that needs arming.
+    #[test]
+    fn every_buildable_rule_kind_stands_alone() {
+        for k in crate::community::policy::presets::rule_kinds() {
+            assert!(k.rule.armed_by.is_none(), "{} is an aggravator, not a rule you can build with", k.id);
+            let mut p = base_for_test();
+            p.rules = vec![k.rule.clone()];
+            assert!(p.validate().is_ok(), "rule kind {} does not validate alone", k.id);
+            assert!(!k.description.is_empty(), "rule kind {} needs a plain-language description", k.id);
+        }
+    }
+
+    fn base_for_test() -> Policy {
+        let mut p = default_policy();
+        p.rules = vec![];
+        p
     }
 
     /// The first live run convicted 147 of 155 members on "has posted at most
@@ -898,7 +1043,7 @@ mod tests {
     /// like.
     #[test]
     fn every_weak_signal_is_armed_by_a_real_conviction() {
-        let p = scam_links_policy();
+        let p = default_policy();
         for rule in &p.rules {
             let is_aggravator = matches!(
                 rule.matcher,
@@ -918,7 +1063,7 @@ mod tests {
     /// carries to every device.
     #[test]
     fn stored_bytes_are_what_the_engine_hashes() {
-        let p = scam_links_policy();
+        let p = default_policy();
         let bytes = serde_json::to_string(&p).unwrap();
         let hash = hash_policy_bytes(bytes.as_bytes());
         // Parse and re-hash the ORIGINAL bytes, not the re-serialization —
@@ -933,7 +1078,7 @@ mod tests {
 
     #[test]
     fn the_policy_hash_is_over_the_bytes_it_arrived_as() {
-        let p = scam_links_policy();
+        let p = default_policy();
         let a = serde_json::to_vec(&p).unwrap();
         // Same bytes, same hash; different bytes (even semantically equal
         // JSON), different hash — which is exactly why the wire hashes bytes

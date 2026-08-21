@@ -2006,7 +2006,6 @@
         </div>
       </div>
 
-      <p class="mod-explain">Ticked members stay. Unticked members lose access when you rotate or ban.</p>
 
       <div class="mod-tabs" role="tablist">
         <button id="mod-tab-members" class="mod-tab active" role="tab">Members</button>
@@ -2018,29 +2017,35 @@
 
         <div id="pol-gallery" class="pol-gallery"></div>
 
+        <div id="pol-scratch" class="pol-scratch"></div>
+
         <div id="pol-editor" class="pol-editor" style="display: none;">
           <div class="pol-editor-head">
-            <button id="pol-back" class="pol-back">&#8592; Back</button>
+            <button id="pol-back" class="pol-back" aria-label="Back">
+              <span class="icon icon-chevron-double-left"></span>
+            </button>
             <h4 id="pol-editor-title" class="pol-editor-title"></h4>
           </div>
           <p id="pol-editor-caveat" class="pol-caveat"></p>
           <div id="pol-dials" class="pol-dials"></div>
 
-          <div class="pol-preview-bar">
-            <button id="pol-preview" class="mod-btn"><span class="mod-btn-label">Preview on real history</span></button>
-            <span id="pol-preview-hint" class="pol-hint">Nothing is saved or changed until you preview.</span>
-          </div>
           <div id="pol-preview-out" class="pol-preview-out" style="display: none;"></div>
 
           <div class="pol-editor-foot">
+            <button id="pol-preview" class="mod-btn pol-preview-btn">
+              <span class="pol-spin" aria-hidden="true"></span>
+              <span class="mod-btn-label">Preview on real history</span>
+            </button>
             <button id="pol-save" class="mod-btn mod-btn-primary" disabled>
-              <span class="mod-btn-label">Enable this policy</span>
+              <span class="mod-btn-label">Preview before Enabling</span>
             </button>
           </div>
         </div>
       </div>
 
       <div id="mod-members-pane">
+      <div id="mod-stats" class="mod-stats"></div>
+      <p class="mod-explain">Everyone is kept by default. Untick someone to cut them off at the next rotation.</p>
       <div class="mod-toolbar">
         <div class="mod-search">
           <span class="icon icon-search mod-search-icon"></span>
