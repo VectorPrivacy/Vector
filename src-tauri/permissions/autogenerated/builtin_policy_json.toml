@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-builtin-policy-json"
+description = "Enables the builtin_policy_json command without any pre-configured scope."
+commands.allow = ["builtin_policy_json"]
+
+[[permission]]
+identifier = "deny-builtin-policy-json"
+description = "Denies the builtin_policy_json command without any pre-configured scope."
+commands.deny = ["builtin_policy_json"]

@@ -1494,6 +1494,76 @@ pub fn community_chat_row_ids(community_id: &str) -> Result<Vec<i64>, String> {
     Ok(channel_ids.iter().filter_map(|c| super::id_cache::get_chat_id_by_identifier(c).ok()).collect())
 }
 
+/// A stored policy: the exact bytes a community declared, plus what the engine
+/// needs to use them.
+#[derive(Debug, Clone)]
+pub struct StoredPolicy {
+    /// Stable local id. Once policies ride the control plane this becomes the
+    /// edition's entity id.
+    pub policy_id: String,
+    /// The EXACT bytes, never a re-serialization — `policy_hash` is over these,
+    /// and re-encoding them would change the only identity the wire has.
+    pub bytes: String,
+    pub hash: String,
+    pub enabled: bool,
+    pub updated_at: u64,
+}
+
+/// Every policy a community holds, enabled or not, ordered by id so two clients
+/// read them in the same order.
+pub fn get_community_policies(community_id: &str) -> Result<Vec<StoredPolicy>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT policy_id, bytes, hash, enabled, updated_at FROM community_policies \
+             WHERE community_id = ?1 ORDER BY policy_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |r| {
+            Ok(StoredPolicy {
+                policy_id: r.get::<_, String>(0)?,
+                bytes: dec_txt(&r.get::<_, String>(1)?),
+                hash: r.get::<_, String>(2)?,
+                enabled: r.get::<_, i64>(3)? != 0,
+                updated_at: r.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Store one policy verbatim. The caller validates BEFORE calling: an invalid
+/// policy is a rejected edit, not a stored one that evaluates to nothing.
+pub fn set_community_policy(
+    community_id: &str,
+    policy_id: &str,
+    bytes: &str,
+    hash: &str,
+    enabled: bool,
+    updated_at: u64,
+) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "INSERT INTO community_policies (community_id, policy_id, bytes, hash, enabled, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(community_id, policy_id) DO UPDATE SET bytes=?3, hash=?4, enabled=?5, updated_at=?6",
+        params![community_id, policy_id, enc_txt(bytes)?, hash, enabled as i64, updated_at as i64],
+    )
+    .map_err(|e| format!("save policy: {e}"))?;
+    Ok(())
+}
+
+pub fn delete_community_policy(community_id: &str, policy_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM community_policies WHERE community_id = ?1 AND policy_id = ?2",
+        params![community_id, policy_id],
+    )
+    .map_err(|e| format!("delete policy: {e}"))?;
+    Ok(())
+}
+
 /// One message as the policy engine reads it: the identity, author, channel and
 /// text a rule needs to cite what it convicted on.
 #[derive(Debug, Clone)]

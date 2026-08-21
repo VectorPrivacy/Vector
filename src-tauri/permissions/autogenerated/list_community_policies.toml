@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-list-community-policies"
+description = "Enables the list_community_policies command without any pre-configured scope."
+commands.allow = ["list_community_policies"]
+
+[[permission]]
+identifier = "deny-list-community-policies"
+description = "Denies the list_community_policies command without any pre-configured scope."
+commands.deny = ["list_community_policies"]

@@ -4653,6 +4653,47 @@ pub async fn get_moderation_intel(community_id: String) -> Result<serde_json::Va
     .await
 }
 
+/// A community's stored policies, with the validator's verdict on each.
+#[tauri::command]
+pub async fn list_community_policies(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.list_community_policies(&community_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Store a policy. Validated before it is written: an invalid policy is a
+/// rejected edit, never a stored one that quietly evaluates to nothing.
+#[tauri::command]
+pub async fn set_community_policy(
+    community_id: String,
+    policy_id: String,
+    bytes: String,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .set_community_policy(&community_id, &policy_id, &bytes, enabled)
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn delete_community_policy(community_id: String, policy_id: String) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.delete_community_policy(&community_id, &policy_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// The built-in policy as editable JSON — what an editor opens instead of a
+/// blank document.
+#[tauri::command]
+pub async fn builtin_policy_json() -> Result<String, String> {
+    vector_core::VectorCore.builtin_policy_json().map_err(|e| e.to_string())
+}
+
 /// Run the policy engine beside the shipped assessor and report where they
 /// disagree. Read-only: nothing is published, nobody is removed.
 #[tauri::command]

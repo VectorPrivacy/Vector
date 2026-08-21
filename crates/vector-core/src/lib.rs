@@ -3003,6 +3003,85 @@ impl VectorCore {
         Ok(report)
     }
 
+    /// A community's policies, as stored. Returns the exact bytes, so an editor
+    /// round-trips what was written rather than a re-serialization of it.
+    pub fn list_community_policies(&self, community_id: &str) -> Result<serde_json::Value> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("policies require a Concord v2 community".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let stored = crate::db::community::get_community_policies(&cid_hex).map_err(VectorError::Other)?;
+        let rows: Vec<serde_json::Value> = stored
+            .iter()
+            .map(|p| {
+                // Report what the validator says NOW: a policy stored under an
+                // older engine can stop validating, and a moderator must see
+                // that rather than assume their rules are running.
+                let verdict = serde_json::from_str::<crate::community::policy::document::Policy>(&p.bytes)
+                    .map_err(|e| e.to_string())
+                    .and_then(|doc| doc.validate().map_err(|r| format!("{r:?}")));
+                serde_json::json!({
+                    "policy_id": p.policy_id,
+                    "hash": p.hash,
+                    "enabled": p.enabled,
+                    "updated_at": p.updated_at,
+                    "bytes": p.bytes,
+                    "valid": verdict.is_ok(),
+                    "error": verdict.err(),
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "community_id": cid_hex,
+            "policies": rows,
+            // With none stored, the engine runs the built-in default — say so,
+            // or an empty list reads as "no moderation".
+            "using_builtin": stored.iter().all(|p| !p.enabled),
+        }))
+    }
+
+    /// Store a policy, validating FIRST. An invalid policy is a rejected edit,
+    /// never a stored one that quietly evaluates to nothing.
+    pub fn set_community_policy(&self, community_id: &str, policy_id: &str, bytes: &str, enabled: bool) -> Result<serde_json::Value> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("policies require a Concord v2 community".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        if bytes.len() > crate::community::policy::types::caps::MAX_POLICY_BYTES {
+            return Err(VectorError::Other("policy exceeds the maximum document size".into()));
+        }
+        let doc: crate::community::policy::document::Policy =
+            serde_json::from_str(bytes).map_err(|e| VectorError::Other(format!("policy is not valid JSON: {e}")))?;
+        doc.validate().map_err(|r| VectorError::Other(format!("policy rejected: {r:?}")))?;
+
+        let hash = crate::community::policy::harness::hash_policy_bytes(bytes.as_bytes());
+        let hash_hex = crate::simd::hex::bytes_to_hex_32(&hash.0);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        crate::db::community::set_community_policy(&cid_hex, policy_id, bytes, &hash_hex, enabled, now_secs)
+            .map_err(VectorError::Other)?;
+        // The console must not keep serving verdicts from the rules that were
+        // in force a minute ago.
+        Self::invalidate_raid_report(&cid_hex);
+        Ok(serde_json::json!({ "policy_id": policy_id, "hash": hash_hex, "enabled": enabled }))
+    }
+
+    pub fn delete_community_policy(&self, community_id: &str, policy_id: &str) -> Result<()> {
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("policies require a Concord v2 community".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        crate::db::community::delete_community_policy(&cid_hex, policy_id).map_err(VectorError::Other)?;
+        Self::invalidate_raid_report(&cid_hex);
+        Ok(())
+    }
+
+    /// The built-in policy, as editable bytes — the starting point an editor
+    /// offers instead of a blank document.
+    pub fn builtin_policy_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(&crate::community::policy::harness::scam_links_policy())
+            .map_err(|e| VectorError::Other(e.to_string()))
+    }
+
     /// The moderation console's report, from the POLICY ENGINE. Memoised for
     /// [`RAID_REPORT_TTL_SECS`], same as the assessor it replaces.
     ///
@@ -3089,7 +3168,7 @@ impl VectorCore {
             crate::community::policy::harness::assemble(cid_hex, &owner, me.as_ref(), &members, now_ms)
                 .map_err(VectorError::Other)?;
         let report = std::sync::Arc::new(
-            crate::community::policy::harness::evaluate_for_console(&assembled, now_ms)
+            crate::community::policy::harness::evaluate_for_console(cid_hex, &assembled, now_ms)
                 .map_err(VectorError::Other)?,
         );
         policy_report_cache()

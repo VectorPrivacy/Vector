@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 88;
+pub const HIGHEST_MIGRATION_ID: u32 = 89;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1294,6 +1294,28 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("migration 88: {}", e))?;
+        Ok(())
+    })?;
+
+    // Migration 89: the policy store. Bytes, not columns — a policy is hashed
+    // over the EXACT bytes it arrived as, and one day those same bytes ride a
+    // control-plane edition to every device and client. Normalising it into
+    // columns would mean re-serialising to evaluate, which changes the hash and
+    // breaks the only identity the wire has.
+    run_atomic_migration(conn, 89, "Community policy store", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_policies (
+                community_id TEXT NOT NULL,
+                policy_id    TEXT NOT NULL,
+                bytes        TEXT NOT NULL,
+                hash         TEXT NOT NULL,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                updated_at   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (community_id, policy_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("create community_policies: {e}"))?;
         Ok(())
     })?;
 

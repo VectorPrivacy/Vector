@@ -262,12 +262,38 @@ pub fn assemble(
     })
 }
 
-/// Evaluate the built-in policy and render the console's report.
-pub fn evaluate_for_console(assembled: &Assembled, now_ms: u64) -> Result<serde_json::Value, String> {
+/// The policies a community actually runs: everything it has stored and
+/// enabled, or the built-in default when it has declared none.
+///
+/// A stored policy that no longer validates is loaded anyway and reported
+/// INERT by the engine — silently dropping it would tell a moderator their
+/// rules are running when they are not.
+pub fn load_policies(community_id_hex: &str) -> Vec<LoadedPolicy> {
+    let stored = crate::db::community::get_community_policies(community_id_hex).unwrap_or_default();
+    let loaded: Vec<LoadedPolicy> = stored
+        .into_iter()
+        .filter(|p| p.enabled)
+        .filter_map(|p| {
+            let policy: Policy = serde_json::from_str(&p.bytes).ok()?;
+            Some(LoadedPolicy { hash: hash_policy_bytes(p.bytes.as_bytes()), policy, activated_at: None })
+        })
+        .collect();
+    if !loaded.is_empty() {
+        return loaded;
+    }
     let policy = scam_links_policy();
-    let bytes = serde_json::to_vec(&policy).map_err(|e| e.to_string())?;
-    let lp = LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None };
-    let report = evaluate_as(&assembled.signals, &[lp], &[], now_ms, EvalMode::Admin);
+    let bytes = serde_json::to_vec(&policy).unwrap_or_default();
+    vec![LoadedPolicy { hash: hash_policy_bytes(&bytes), policy, activated_at: None }]
+}
+
+/// Evaluate a community's policies and render the console's report.
+pub fn evaluate_for_console(
+    community_id_hex: &str,
+    assembled: &Assembled,
+    now_ms: u64,
+) -> Result<serde_json::Value, String> {
+    let policies = load_policies(community_id_hex);
+    let report = evaluate_as(&assembled.signals, &policies, &[], now_ms, EvalMode::Admin);
     Ok(console_report(&report, &assembled.facts, now_ms / 1000))
 }
 
@@ -295,23 +321,43 @@ pub fn console_report(
     facts: &std::collections::BTreeMap<String, MemberFacts>,
     now_secs: u64,
 ) -> serde_json::Value {
-    let Some(pr) = report.policies.first() else {
+    if report.policies.is_empty() {
         return serde_json::json!({ "members": [], "cohorts": [], "suspects": 0, "trusted": 0, "protected": 0,
-                                   "raid_detected": false, "burst_size": 0, "burst_from_ms": 0, "burst_to_ms": 0 });
-    };
-    let by_subject: std::collections::BTreeMap<String, &SubjectReport> = pr
-        .subjects
-        .iter()
-        .filter_map(|s| PublicKey::from_slice(&s.subject.0).ok()?.to_bech32().ok().map(|b| (b, s)))
-        .collect();
+                                   "raid_detected": false, "burst_size": 0, "burst_from_ms": 0, "burst_to_ms": 0,
+                                   "inert_policies": 0 });
+    }
+    // Every law is scored independently, so the console folds ACROSS policies:
+    // a member's worst standing and every conviction any policy reached.
+    let mut by_subject: std::collections::BTreeMap<String, Vec<&SubjectReport>> = std::collections::BTreeMap::new();
+    for pr in &report.policies {
+        for s in &pr.subjects {
+            if let Some(b32) = PublicKey::from_slice(&s.subject.0).ok().and_then(|p| p.to_bech32().ok()) {
+                by_subject.entry(b32).or_default().push(s);
+            }
+        }
+    }
+    let inert = report.policies.iter().filter(|p| p.inert.is_some()).count();
 
     let (mut suspects, mut trusted, mut protected) = (0usize, 0usize, 0usize);
     let mut members: Vec<serde_json::Value> = Vec::with_capacity(facts.len());
     for (npub, f) in facts {
-        let s = by_subject.get(npub);
+        let reports = by_subject.get(npub).cloned().unwrap_or_default();
         let convictions: Vec<&Conviction> =
-            s.map(|s| s.convictions.iter().filter(|c| !c.suppressed).collect()).unwrap_or_default();
-        let shield = s.map(|s| s.shield).unwrap_or(Shield::None);
+            reports.iter().flat_map(|s| s.convictions.iter()).filter(|c| !c.suppressed).collect();
+        // Shields are a property of the member, not of one law; every policy
+        // computes the same one, so the strongest answer is the answer.
+        let shield = reports
+            .iter()
+            .map(|s| s.shield)
+            .max_by_key(|s| match s {
+                Shield::Protected => 3,
+                Shield::Trusted => 2,
+                Shield::Indeterminate => 1,
+                Shield::None => 0,
+            })
+            .unwrap_or(Shield::None);
+        let score = reports.iter().map(|s| s.confidence).max().unwrap_or(0);
+        let proven_score = reports.iter().map(|s| s.proven).max().unwrap_or(0);
         // The console's four verdicts, from the engine's own vocabulary.
         let verdict = if shield == Shield::Protected {
             protected += 1;
@@ -368,8 +414,8 @@ pub fn console_report(
         members.push(serde_json::json!({
             "npub": npub,
             "verdict": verdict,
-            "score": s.map(|s| s.confidence).unwrap_or(0),
-            "proven": s.map(|s| s.proven).unwrap_or(0),
+            "score": score,
+            "proven": proven_score,
             "reasons": reasons,
             "joined_at_ms": f.joined_at_ms,
             "invite_label": f.invite_label,
@@ -397,7 +443,7 @@ pub fn console_report(
     // Cohort exhibits, largest first.
     let mut cohorts: std::collections::BTreeMap<[u8; 32], (usize, String)> = std::collections::BTreeMap::new();
     let mut burst = (0u32, 0u64, 0u64);
-    for s in &pr.subjects {
+    for s in report.policies.iter().flat_map(|p| p.subjects.iter()) {
         for c in s.convictions.iter().filter(|c| !c.suppressed) {
             for e in &c.evidence {
                 match e {
@@ -432,6 +478,7 @@ pub fn console_report(
         "burst_size": burst.0,
         "burst_from_ms": burst.1,
         "burst_to_ms": burst.2,
+        "inert_policies": inert,
     })
 }
 
@@ -664,6 +711,24 @@ mod tests {
                 rule.id
             );
         }
+    }
+
+    /// Round-tripping the bytes must not change them: the hash is over exactly
+    /// what was stored, and one day exactly what a control-plane edition
+    /// carries to every device.
+    #[test]
+    fn stored_bytes_are_what_the_engine_hashes() {
+        let p = scam_links_policy();
+        let bytes = serde_json::to_string(&p).unwrap();
+        let hash = hash_policy_bytes(bytes.as_bytes());
+        // Parse and re-hash the ORIGINAL bytes, not the re-serialization —
+        // reserialising is exactly the mistake the wire cannot tolerate.
+        let parsed: Policy = serde_json::from_str(&bytes).unwrap();
+        assert_eq!(parsed, p, "a policy survives its own round trip");
+        assert_eq!(hash_policy_bytes(bytes.as_bytes()), hash);
+        // Pretty-printing is semantically identical and hashes DIFFERENTLY.
+        let pretty = serde_json::to_string_pretty(&p).unwrap();
+        assert_ne!(hash_policy_bytes(pretty.as_bytes()), hash, "identity is the bytes, not the meaning");
     }
 
     #[test]
