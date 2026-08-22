@@ -47,6 +47,13 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
     false
 }
 
+/// The exact `reqwest` these clients are built from.
+///
+/// Re-exported because [`build_http_client`] hands back a `reqwest::Client`: a
+/// consumer that names its own `reqwest` version gets a different type with the
+/// same name, and the error says nothing useful about why.
+pub use reqwest;
+
 /// Build an HTTP client with the given timeout.
 ///
 /// Honors the Tor failsafe: when the user has Tor enabled, every connection

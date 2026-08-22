@@ -11183,7 +11183,7 @@ dependencies = [
 
 [[package]]
 name = "vector-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm",
