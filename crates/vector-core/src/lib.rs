@@ -2918,6 +2918,58 @@ impl VectorCore {
         }))
     }
 
+    /// Screen ONE message immediately, without waiting for a sweep.
+    ///
+    /// Runs only the stateless rules — words, links, regex, mentions — because
+    /// those are the only ones a single message can answer. Rate, repetition
+    /// and cohorts describe a window and stay with the periodic evaluation.
+    ///
+    /// Costs no corpus read and no cache: the whole point is that a word filter
+    /// should answer in milliseconds, not on the next 90-second tick.
+    pub fn screen_community_message(
+        &self,
+        channel_id: &str,
+        author_npub: &str,
+        text: &str,
+    ) -> Result<serde_json::Value> {
+        use nostr_sdk::prelude::PublicKey;
+        let Some(id) = self.v2_community_for_channel(channel_id)? else {
+            return Ok(serde_json::json!({ "findings": [] }));
+        };
+        let community = crate::db::community::load_community_v2(&id)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().map_err(VectorError::Other)?;
+        let author = PublicKey::parse(author_npub).map_err(|_| VectorError::Other("unreadable author".into()))?;
+
+        // Same staff definition the console uses: a role carrying a moderation
+        // permission bit, never mere role membership.
+        use crate::community::roles::Permissions;
+        const MOD_MASK: u64 = Permissions::MANAGE_ROLES
+            | Permissions::MANAGE_CHANNELS
+            | Permissions::MANAGE_METADATA
+            | Permissions::KICK
+            | Permissions::BAN
+            | Permissions::MANAGE_MESSAGES;
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        let hex = author.to_hex();
+        let roles: Vec<String> =
+            roster.grants.iter().find(|g| g.member == hex).map(|g| g.role_ids.clone()).unwrap_or_default();
+        let is_staff = roles
+            .iter()
+            .any(|rid| roster.roles.iter().any(|r| &r.role_id == rid && (r.permissions.0 & MOD_MASK) != 0));
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let findings = crate::community::policy::harness::screen_message(
+            &cid_hex, &owner, &author, &roles, is_staff, channel_id, text, now_ms,
+        );
+        Ok(serde_json::json!({ "findings": findings }))
+    }
+
     /// The raid verdict alone, for the badge on a community header. Same assessment as
     /// the panel and served from the same cache, so surfacing the alert costs nothing
     /// once and then nothing at all until it expires.

@@ -824,6 +824,22 @@ impl Community {
         Ok(self.watch_policies_every(std::time::Duration::from_secs(30)))
     }
 
+    /// Screen one message the instant it arrives, without waiting for a sweep.
+    ///
+    /// Only stateless rules answer here — words, links, regex, mentions — since
+    /// those are the only ones a single message can settle. Rate, repetition,
+    /// cohorts and join bursts describe a WINDOW: they are absent from this
+    /// result rather than clean in it, and the periodic evaluation is where
+    /// they live.
+    ///
+    /// The same engine, the same policies, the same verdict a later sweep would
+    /// reach over the same text — just without the corpus read.
+    pub async fn screen(&self, msg: &crate::IncomingMessage) -> Result<Vec<Finding>> {
+        let Some(author) = msg.author() else { return Ok(vec![]) };
+        let v = self.core.screen_community_message(&msg.chat_id, &author, msg.text())?;
+        Ok(v["findings"].as_array().map(|a| a.iter().map(finding_of).collect()).unwrap_or_default())
+    }
+
     /// Evaluate now and return every member's standing.
     pub async fn verdicts(&self) -> Result<Verdicts> {
         let v = self.core.community_moderation_intel(self.id())?;

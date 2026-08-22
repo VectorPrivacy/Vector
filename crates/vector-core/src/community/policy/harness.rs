@@ -489,6 +489,86 @@ pub fn evaluate_for_console(
     Ok(console)
 }
 
+/// Screen ONE message, right now, against the community's stored policies.
+///
+/// Only stateless rules run — words, links, regex, mentions — because those are
+/// the only ones a single message can answer. Rate, repetition, cohorts and
+/// join bursts are statements about a window, and there is nothing for them to
+/// measure here; they belong to the periodic sweep and are silently absent
+/// rather than wrongly clean.
+///
+/// This is `EvalMode::Member`, the same path a sending client uses, so a
+/// verdict reached here is the verdict the console reaches later over the same
+/// text. Shields still gate: the owner and staff are not screened.
+pub fn screen_message(
+    community_id_hex: &str,
+    owner: &PublicKey,
+    author: &PublicKey,
+    author_roles: &[String],
+    author_is_staff: bool,
+    channel_id_hex: &str,
+    text: &str,
+    now_ms: u64,
+) -> Vec<serde_json::Value> {
+    let policies = load_policies(community_id_hex);
+    if policies.is_empty() {
+        return vec![];
+    }
+    let subject = SubjectId(author.to_bytes());
+    let signals = Signals {
+        owner: SubjectId(owner.to_bytes()),
+        members: vec![MemberSignal {
+            subject,
+            // Tenure and volume are unknowable from one message, and no
+            // stateless rule reads them. Left unknown rather than invented.
+            joined_at_ms: None,
+            roles: author_roles.iter().filter_map(|r| crate::simd::hex::hex_to_bytes_32_checked(r)).map(Hash32).collect(),
+            is_staff: author_is_staff,
+            lifetime_messages: 0,
+            first_post_ms: None,
+        }],
+        messages: vec![MessageSignal {
+            // A screen happens before the message has an id of its own.
+            id: MessageId([0; 32]),
+            author: subject,
+            channel: Hash32(crate::simd::hex::hex_to_bytes_32(channel_id_hex)),
+            at_ms: now_ms,
+            text: text.to_string(),
+            mentions: super::matchers::count_mentions(text),
+        }],
+        channels: vec![Hash32(crate::simd::hex::hex_to_bytes_32(channel_id_hex))],
+        relays: vec![],
+        requested_from: now_ms,
+        requested_to: now_ms,
+        confirmed_from: now_ms,
+        confirmed_to: now_ms,
+        roster_version: Hash32([0; 32]),
+    };
+    let report = evaluate_as(&signals, &policies, &[], now_ms, EvalMode::Member);
+    let mut out = Vec::new();
+    for pr in &report.policies {
+        let detail_of: std::collections::BTreeMap<[u8; 32], String> =
+            pr.citations.iter().filter_map(|c| c.detail.clone().map(|d| (c.id.0, d))).collect();
+        for s in &pr.subjects {
+            for c in s.convictions.iter().filter(|c| !c.suppressed) {
+                let detail: std::collections::BTreeSet<String> =
+                    c.citations.iter().filter_map(|id| detail_of.get(&id.0).cloned()).collect();
+                out.push(serde_json::json!({
+                    "policy_hash": crate::simd::hex::bytes_to_hex_32(&pr.policy_hash.0),
+                    "rule_id": c.rule_id,
+                    "scope": wire(c.scope),
+                    "basis": wire(c.basis),
+                    "severity": wire(c.severity),
+                    "hits": c.hits,
+                    "weight": c.tier_weight,
+                    "detail": detail.into_iter().collect::<Vec<_>>(),
+                }));
+            }
+        }
+    }
+    out
+}
+
 /// What the moderation console needs about one member beyond the verdict:
 /// the display facts a moderator reads before acting.
 #[derive(Debug, Clone, Default)]
@@ -1233,6 +1313,39 @@ mod tests {
 
         let clean_row = rows.iter().find(|m| m["npub"].as_str() == Some(clean_npub.as_str())).unwrap();
         assert!(clean_row["findings"].is_null(), "a member nothing convicted carries no findings key at all");
+    }
+
+    /// A word filter answering on the next 90-second tick is not a word
+    /// filter. The stateless rules settle per message; the windowed ones are
+    /// ABSENT here rather than wrongly clean.
+    #[test]
+    fn screening_answers_the_stateless_rules_and_stays_quiet_about_the_rest() {
+        use nostr_sdk::prelude::Keys;
+        let owner = Keys::generate();
+        let member = Keys::generate();
+        let cid = "aa".repeat(32);
+        let chan = "bb".repeat(32);
+
+        // No stored policy: nothing to screen against, and no panic either.
+        let none = screen_message(&cid, &owner.public_key(), &member.public_key(), &[], false, &chan, "hello", 0);
+        assert!(none.is_empty(), "a community with no policies screens to nothing");
+
+        // The stateless matchers are exactly the ones a single message can settle.
+        for m in [
+            Match::Keyword { patterns: vec!["x".into()], normalize: Normalize::Fold },
+            Match::Link { patterns: vec!["bit.ly".into()] },
+            Match::Mentions {},
+        ] {
+            assert!(m.is_stateless(), "{m:?} must answer per message");
+        }
+        for m in [
+            Match::Rate { per_secs: 60 },
+            Match::Repeat { normalize: Normalize::Skeleton, within_secs: None },
+            Match::Cohort { min: 3, quiet_max: 2, short_factor: 3, thin_ratio: None },
+            Match::JoinBurst { gap_secs: 300, min: 5 },
+        ] {
+            assert!(!m.is_stateless(), "{m:?} describes a window and must not answer from one message");
+        }
     }
 
     #[test]
