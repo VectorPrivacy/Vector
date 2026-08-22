@@ -641,6 +641,11 @@ pub struct Finding {
     /// notice · minor · major · severe. The POLICY AUTHOR's gravity, never a
     /// score the engine computed.
     pub severity: String,
+    /// Could a single message have settled this? Only content rules
+    /// (words/links/regex/mentions) convict at `per_message` scope. A bot that
+    /// screens live AND sweeps periodically must not answer one offense twice:
+    /// the screen owns the stateless findings, the sweep owns the rest.
+    pub stateless: bool,
     pub rung: u8,
     pub hits: u32,
     /// The declared rung weight, not a marginal effect on the total.
@@ -670,6 +675,7 @@ fn finding_of(f: &serde_json::Value) -> Finding {
         scope: s("scope"),
         basis: s("basis"),
         severity: s("severity"),
+        stateless: f["stateless"].as_bool().unwrap_or(false),
         rung: f["rung"].as_u64().unwrap_or(0) as u8,
         hits: f["hits"].as_u64().unwrap_or(0) as u32,
         weight: f["weight"].as_u64().unwrap_or(0) as u32,

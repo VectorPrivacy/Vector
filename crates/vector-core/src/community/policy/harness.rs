@@ -577,6 +577,7 @@ pub fn screen_message(
                     "scope": wire(c.scope),
                     "basis": wire(c.basis),
                     "severity": wire(c.severity),
+                    "stateless": true,
                     "hits": c.hits,
                     "weight": c.tier_weight,
                     "detail": detail.into_iter().collect::<Vec<_>>(),
@@ -786,6 +787,12 @@ pub fn console_report(
                     "scope": wire(c.scope),
                     "basis": wire(c.basis),
                     "severity": wire(c.severity),
+                    // Could one message have settled this? Only content rules
+                    // admit PerMessage, so the scope already answers it — and a
+                    // consumer that screens live AND sweeps needs to know which
+                    // findings the other clock has already answered, or one
+                    // offense is counted twice.
+                    "stateless": c.scope == Scope::PerMessage,
                     "rung": c.rung,
                     "hits": c.hits,
                     "weight": c.tier_weight,
