@@ -529,6 +529,7 @@ mod tests {
     #[test]
     fn inference_is_never_actionable_alone() {
         let vs = Verdicts {
+            coverage: Coverage::default(),
             members: vec![
                 verdict(0, "alert", "none"),   // a raid cohort: suspected
                 verdict(85, "alert", "none"),  // a hash match: provable
@@ -567,11 +568,52 @@ mod tests {
 
 // ── Watching and acting ─────────────────────────────────────────────────────
 
+/// How much history a verdict was reached over.
+///
+/// Policy evaluation is local: it reads the messages this client actually
+/// holds, and no more. An empty suspect list over four days of a three-year-old
+/// community is not the same claim as an empty list over the full window, and
+/// nothing else in the report distinguishes them.
+#[derive(Debug, Clone, Default)]
+pub struct Coverage {
+    /// Messages judged.
+    pub corpus: usize,
+    /// The ceiling. `corpus == corpus_max` means the window is saturated and
+    /// older history was not read at all.
+    pub corpus_max: usize,
+    pub channels: usize,
+    /// Oldest and newest message actually seen (ms). Both 0 when nothing was.
+    pub observed_from: u64,
+    pub observed_to: u64,
+    /// The declared window is fully covered by confirmed history.
+    pub complete: bool,
+}
+
+impl Coverage {
+    /// Nothing to judge. Any verdict over this says only that nobody looked.
+    pub fn is_empty(&self) -> bool {
+        self.corpus == 0
+    }
+
+    /// The window filled up, so history older than `observed_from` was never
+    /// read. A verdict is still valid over what it saw; it is not a statement
+    /// about the community's whole life.
+    pub fn is_saturated(&self) -> bool {
+        self.corpus_max > 0 && self.corpus >= self.corpus_max
+    }
+
+    /// How far back the judged history reaches, in whole hours.
+    pub fn span_hours(&self) -> u64 {
+        self.observed_to.saturating_sub(self.observed_from) / 3_600_000
+    }
+}
+
 /// What the engine convicted, in the terms a bot acts on.
 #[derive(Debug, Clone)]
 pub struct Verdicts {
     pub(crate) members: Vec<Verdict>,
     pub(crate) raid_detected: bool,
+    pub(crate) coverage: Coverage,
 }
 
 /// One rule that convicted, in machine-readable form.
@@ -743,6 +785,12 @@ impl Verdicts {
     pub fn raid_detected(&self) -> bool {
         self.raid_detected
     }
+
+    /// How much history this verdict was reached over. Read it before trusting
+    /// a quiet result: a clean report over an empty corpus says nothing.
+    pub fn coverage(&self) -> &Coverage {
+        &self.coverage
+    }
 }
 
 /// A polling watch over a community's verdicts.
@@ -805,7 +853,19 @@ impl Community {
                 tenure_secs: m["tenure_secs"].as_u64().unwrap_or(0),
             })
             .collect();
-        Ok(Verdicts { members, raid_detected: report["raid_detected"].as_bool().unwrap_or(false) })
+        let c = &report["coverage"];
+        Ok(Verdicts {
+            members,
+            raid_detected: report["raid_detected"].as_bool().unwrap_or(false),
+            coverage: Coverage {
+                corpus: c["corpus"].as_u64().unwrap_or(0) as usize,
+                corpus_max: c["corpus_max"].as_u64().unwrap_or(0) as usize,
+                channels: c["channels"].as_u64().unwrap_or(0) as usize,
+                observed_from: c["observed_from"].as_u64().unwrap_or(0),
+                observed_to: c["observed_to"].as_u64().unwrap_or(0),
+                complete: c["complete"].as_bool().unwrap_or(false),
+            },
+        })
     }
 }
 

@@ -472,7 +472,21 @@ pub fn evaluate_for_console(
 ) -> Result<serde_json::Value, String> {
     let policies = load_policies(community_id_hex);
     let report = evaluate_as(&assembled.signals, &policies, &[], now_ms, EvalMode::Admin);
-    Ok(console_report(&report, &assembled.facts, now_ms / 1000))
+    let mut console = console_report(&report, &assembled.facts, now_ms / 1000);
+    // How much history this verdict was reached over. Without it an empty
+    // suspect list reads as "this community is clean" when the truth may be
+    // "four days of it were looked at" — a distinction that decides whether a
+    // verdict means anything at all.
+    let w = &report.window;
+    console["coverage"] = serde_json::json!({
+        "corpus": assembled.corpus,
+        "corpus_max": caps::WINDOW_MAX_MESSAGES,
+        "channels": w.channels.len(),
+        "observed_from": w.observed_from,
+        "observed_to": w.observed_to,
+        "complete": w.complete,
+    });
+    Ok(console)
 }
 
 /// What the moderation console needs about one member beyond the verdict:
