@@ -29,7 +29,7 @@
      all 7 themes get a coherent rail/list without per-theme overrides. */
   --ws-rail-bg: rgba(255, 255, 255, 0.024);
   --ws-list-bg: rgba(255, 255, 255, 0.012);
-  --ws-seam: rgba(255, 255, 255, 0.055);
+  --ws-seam: #393b3c;
   --ws-hover: rgba(255, 255, 255, 0.045);
   /* Selection is a brighter step of the same neutral, not the accent: the accent
      is the app's "this is live/yours" signal, and spending it on every selected
@@ -211,10 +211,19 @@ body.ws #chat {
   min-height: 0;
 }
 
+/* The message list's top fade shares z-index 100 with the header and paints
+   after it, washing the header's own seam roughly halfway to black — which is
+   why this one line read fainter than every other seam in the app. The header
+   is nearly opaque and hides what scrolls under it anyway, so it belongs above
+   the fade. */
+body.ws #chat > .chat-header {
+  z-index: 101;
+}
+
 body.ws #chat > .chat-header {
   position: relative;
   backdrop-filter: none;
-  background-color: rgba(22, 22, 22, 0.96);
+  background-color: #0c0c0c;
   border-bottom: 1px solid var(--ws-seam);
 }
 
@@ -321,7 +330,7 @@ body.ws.ws-details .pins-drawer {
 body.ws #group-overview > .chat-header {
   position: relative;
   backdrop-filter: none;
-  background-color: rgba(22, 22, 22, 0.96);
+  background-color: #0c0c0c;
   border-bottom: 1px solid var(--ws-seam);
   flex-shrink: 0;
 }
@@ -511,7 +520,7 @@ body.ws .chatlist-community-head {
      itself floated to the middle, which is what read as the icon "offsetting" it. */
   text-align: left;
   padding: 10px var(--ws-pane-gutter);
-  background-color: #0d0d0d;
+  background-color: #171717;
   border-bottom: 1px solid var(--ws-seam);
   transition: background-color 0.12s ease;
   /* Level with the conversation header beside it: `.chat-header`'s 60px plus the
@@ -557,9 +566,24 @@ body.ws .chatlist-community-head-name {
 }
 
 body.ws .chatlist-community-head-members {
+  display: flex;
+  align-items: center;
+  gap: 2.5px;
   font-size: 12px;
   line-height: 14px;
   color: rgba(255, 255, 255, 0.42);
+}
+
+body.ws .chatlist-community-head-members-icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  /* `.icon` ships `margin: auto` to centre itself inside its absolute inset.
+     As a flex item that instead absorbs the free space and floats the glyph to
+     the middle of the row, so it has to be zeroed here. */
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.42);
 }
 
 /* Says the header is a menu, not a label. `position: relative` is load-bearing:
@@ -585,8 +609,8 @@ body.ws .chatlist-community-head-alert {
 body.ws .chatlist-community-head-caret {
   position: relative;
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+  width: 30px;
+  height: 30px;
 }
 
 body.ws .chatlist-community-head-caret .icon {
@@ -610,27 +634,148 @@ body.ws .chatlist-channels-pane {
   border-left: none;
 }
 
+/* The sections name themselves now, so a blanket "CHANNELS" heading over them
+   labelled a list that already has labels. */
 body.ws .chatlist-channels-pane::before {
-  content: 'Channels';
-  display: block;
-  text-align: left;          /* the pane's inherited centring reaches here too */
-  padding: 14px var(--ws-pane-gutter) 6px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.36);
+  content: none;
 }
 
 /* Same horizontal box as the header above them — no margin, padding on the
    gutter — so the glyphs and the community's icon share one edge no matter what
    fractional width the resizer leaves the pane at. An inset pill would have to
    subtract its own margin back out, and lands a subpixel off. */
+/* Floating rows, like the rail's: an inset pill rather than a band that runs
+   wall to wall, so the selection reads as an object you picked. */
 body.ws .chatlist-channels-pane .chatlist-channel {
-  height: 32px;
+  height: 34px;
+  margin: 0 8px;
+  padding: 0 8px;
+  gap: 8px;
+  border-radius: 4px;
+  font-size: 15px;
+}
+
+/* ── Sections ──────────────────────────────────────────────────────────── */
+
+body.ws .chatlist-channel-section + .chatlist-channel-section {
+  margin-top: 14px;
+}
+
+body.ws .chatlist-channel-section-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 12px 4px;
+}
+
+body.ws .chatlist-channel-section-toggle {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  border-radius: 6px;
+  opacity: 1;
+}
+
+body.ws .chatlist-channel-section-label {
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.38);
+  transition: color 0.12s ease;
+}
+
+body.ws .chatlist-channel-section-toggle:hover .chatlist-channel-section-label {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+body.ws .chatlist-channel-section-caret {
+  position: relative;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+}
+
+body.ws .chatlist-channel-section-caret .icon {
+  background-color: rgba(255, 255, 255, 0.38);
+  transition: background-color 0.12s ease, transform 0.15s ease;
+}
+
+body.ws .chatlist-channel-section-toggle:hover .chatlist-channel-section-caret .icon {
+  background-color: rgba(255, 255, 255, 0.7);
+}
+
+/* Closed points the way it will go, not the way it came from. */
+body.ws .chatlist-channel-section.is-closed .chatlist-channel-section-caret .icon {
+  transform: rotate(-90deg);
+}
+
+body.ws .chatlist-channel-section.is-closed .chatlist-channel-section-body {
+  display: none;
+}
+
+body.ws .chatlist-channel-section-add {
+  position: relative;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  opacity: 1;
+  transition: background-color 0.12s ease;
+}
+
+body.ws .chatlist-channel-section-add .icon {
+  background-color: rgba(255, 255, 255, 0.38);
+  transition: background-color 0.12s ease;
+}
+
+body.ws .chatlist-channel-section-add:hover {
+  background-color: var(--ws-hover);
+}
+
+body.ws .chatlist-channel-section-add:hover .icon {
+  background-color: #fff;
+}
+
+/* ── Row tiers ─────────────────────────────────────────────────────────── */
+
+body.ws .chatlist-channels-pane .chatlist-channel-hash {
+  position: relative;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  font-size: 0;
+  opacity: 1;
+}
+
+/* `.icon` draws at 65% of its box to leave room inside a button. This glyph IS
+   the box, so it fills it — at 65% an 18px slot rendered an 11px hash. */
+body.ws .chatlist-channels-pane .chatlist-channel-hash .icon {
+  width: 100%;
+  height: 100%;
   margin: 0;
-  padding: 0 var(--ws-pane-gutter);
-  border-radius: 0;
+  background-color: currentColor;
+}
+
+body.ws .chatlist-channels-pane .chatlist-channel.has-unread {
+  color: #fff;
+  font-weight: 500;
+}
+
+body.ws .chatlist-channels-pane .chatlist-channel.is-read {
+  color: rgba(255, 255, 255, 0.55);
+  font-weight: 400;
+}
+
+body.ws .chatlist-channels-pane .chatlist-channel.is-muted {
+  color: rgba(255, 255, 255, 0.3);
+  font-weight: 400;
+}
+
+body.ws .chatlist-channels-pane .chatlist-channel:hover,
+body.ws .chatlist-channels-pane .chatlist-channel.active {
+  color: #fff;
 }
 
 /* New Chat and Group Chat both start DMs; over a community's channels they are
@@ -784,6 +929,58 @@ body.ws #group-overview .group-overview-body > div > div:first-child {
 /* The pane is unmistakably one community's member list: the channel list already
    names the community above it, and the roster names itself. A truncated title
    here was the third copy. */
+/* ---- A channel's own header ----------------------------------------------
+   Inside a community the header names the CHANNEL. The community's icon and
+   member count already sit at the top of the channel pane one column left, so
+   repeating them here spends the widest row in the app on what the eye just
+   read. Name and hash, flush left, and nothing else. */
+/* The header centres its own contents; a channel's name belongs at the start of
+   the row, level with the messages under it. */
+body.ws.ws-community-pane #chat > .chat-header {
+  justify-content: flex-start;
+}
+
+body.ws.ws-community-pane #chat > .chat-header .profile-header-info {
+  text-align: left;
+  padding-left: 20px;
+}
+
+body.ws.ws-community-pane #chat > .chat-header .profile-header-name-row {
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+body.ws.ws-community-pane #chat > .chat-header #chat-header-avatar-container,
+body.ws.ws-community-pane #chat > .chat-header #chat-contact-status {
+  display: none;
+}
+
+/* The hash is drawn here rather than inserted, so no render path has to know
+   about it and nothing can rebuild the header without it. */
+body.ws.ws-community-pane #chat > .chat-header #chat-contact {
+  position: relative;
+  padding-left: 27px;
+}
+
+/* Centred on the title's own box rather than sat on its baseline: a 19px glyph
+   and an 18.7px face on a 24px line never agree by baseline maths, which is
+   what left the hash riding a little high. Out of flow, so `.cutoff` still
+   ellipsises the name. */
+body.ws.ws-community-pane #chat > .chat-header #chat-contact::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 19px;
+  height: 19px;
+  background-color: rgba(255, 255, 255, 0.45);
+  mask-image: url("./icons/channel-hash.svg");
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+}
+
 body.ws #group-overview > .chat-header .profile-header-info {
   display: none;
 }
@@ -906,32 +1103,146 @@ body.ws #ws-rail-head {
 body.ws #ws-rail-shortcuts {
   display: flex;
   flex-direction: column;
-  /* Grows to its content but yields first when the rail runs short, scrolling
-     internally so the nav tabs and account footer are never pushed off. */
-  flex: 0 1 auto;
+  /* Takes the room between the head and the nav tabs and hands it to the
+     community list, which is the only part that scrolls. */
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 2px 0 6px;
+}
+
+/* New Messages holds its size: at most three rows, and it must not be the thing
+   that gives way when the rail runs short. */
+body.ws #ws-rail-dms {
+  flex-shrink: 0;
+}
+
+/* Communities takes what's left, and scrolls inside it. */
+body.ws #ws-rail-spaces {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+body.ws #ws-rail-spaces .ws-rail-rows {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 2px 0 6px;
   /* Same bottom fade as the chat list, but as a MASK rather than a gradient
      overlay: the rail's surface is a translucent tint over whatever the theme's
      root colour is, so there's no single colour to fade into. Its depth tracks the
      scroll that's LEFT (js/render/rail.js), because a fixed ramp dims the last row
      permanently once you've reached it. */
   --ws-rail-fade: 24px;
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--ws-rail-fade)), transparent);
+  --ws-rail-fade-top: 0px;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--ws-rail-fade-top),
+    #000 calc(100% - var(--ws-rail-fade)),
+    transparent 100%
+  );
 }
 
 /* The chat list's chunky 10px thumb is too much furniture inside a 232px rail. */
-body.ws #ws-rail-shortcuts::-webkit-scrollbar {
+body.ws #ws-rail-spaces .ws-rail-rows::-webkit-scrollbar {
   width: 6px;
 }
 
-/* Hairline rule between the two groups, only when both actually have rows. */
-body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--ws-seam);
+/* ---- Group headings ----------------------------------------------------
+   The label carries its own rule, so a hidden group takes its heading and its
+   hairline with it — one box to hide rather than three siblings to keep in
+   step. `hidden` is set by js/render/rail.js when a group has no rows. */
+body.ws .ws-rail-group[hidden] {
+  display: none;
+}
+
+body.ws .ws-rail-group + .ws-rail-group {
+  margin-top: 10px;
+}
+
+body.ws .ws-rail-group-label {
+  /* The rail is the mobile tab bar restyled, and that centres its text. */
+  text-align: left;
+  margin: 0 16px;
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  font-weight: 400;
+  color: rgba(255, 255, 255, 0.38);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* One rule between the two groups, not one under each label. It belongs to the
+   seam BETWEEN them, so it only exists while both sides do — `hidden` on the
+   DM group takes it with them. */
+body.ws #ws-rail-dms:not([hidden]) + #ws-rail-spaces::before {
+  content: "";
+  flex-shrink: 0;
+  height: 1px;
+  margin: 6px 16px 16px;
+  background: var(--ws-seam);
+}
+
+/* Collapsed: the words go, the divider between the groups carries the rhythm. */
+body.ws.ws-rail-collapsed .ws-rail-group-label {
+  display: none;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-dms:not([hidden]) + #ws-rail-spaces::before {
+  margin: 6px 12px 12px;
+}
+
+/* The seam between the shortcut strip and the nav tabs below it. */
+body.ws #ws-rail-shortcuts {
+  border-bottom: 1px solid var(--ws-seam);
+  margin-bottom: 8px;
+}
+
+/* ---- Mail: the second door to the DM page ---- */
+body.ws #ws-rail-mail {
+  position: relative;
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  transition: background-color 0.12s ease;
+}
+
+body.ws #ws-rail-mail .icon {
+  background-color: rgba(255, 255, 255, 0.55);
+  transition: background-color 0.12s ease;
+}
+
+body.ws #ws-rail-mail:hover {
+  background-color: var(--ws-hover);
+}
+
+body.ws #ws-rail-mail:hover .icon {
+  background-color: #fff;
+}
+
+/* Collapsed the rail has no room beside the mark, so mail steps out of the
+   head row and the lockup keeps the door on its own. */
+body.ws.ws-rail-collapsed #ws-rail-mail {
+  display: none;
+}
+
+/* The rows' badge is a pill at the end of a flex line; in a 30px square it just
+   covers the icon. On the button it becomes a corner mark instead. */
+body.ws #ws-rail-mail-badge {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  min-width: 0;
+  padding: 0 4px;
+  height: 14px;
+  line-height: 14px;
+  font-size: 9.5px;
+  border-radius: 7px;
+  pointer-events: none;
 }
 
 .ws-rail-item {
@@ -939,10 +1250,21 @@ body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
   align-items: center;
   gap: 10px;
   margin: 0 8px;
-  padding: 4px 8px;
+  padding: 2.5px 8px;
   border-radius: 10px;
   min-width: 0;
   transition: background-color 0.12s ease;
+}
+
+/* Rail rows carry `btn` for the cursor, which also drags in its blanket
+   `opacity: .75` on hover. These rows answer hover with a surface and a
+   brighter name, so the fade is a second, contradictory signal — invisible on a
+   photo avatar and obvious on a flat placeholder glyph. */
+.ws-rail-item:hover,
+body.ws #ws-rail-head:hover,
+body.ws #ws-rail-mail:hover,
+body.ws .chatlist-community-head:hover {
+  opacity: 1;
 }
 
 .ws-rail-item:hover {
@@ -968,12 +1290,15 @@ body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
   border-radius: 8px !important;
 }
 
+/* White is the resting state: every row in this strip has something waiting in
+   it, and `is-quiet` below is the one case that does not. */
 .ws-rail-item-name {
   flex: 1;
   min-width: 0;
   font-size: 14px;
+  font-weight: 400;
   text-align: left;
-  color: rgba(255, 255, 255, 0.72);
+  color: #fff;
 }
 
 .ws-rail-item:hover .ws-rail-item-name,
@@ -992,6 +1317,32 @@ body.ws #ws-rail-dms.has-rows + #ws-rail-spaces.has-rows {
   font-weight: 600;
   line-height: 19px;
   text-align: center;
+}
+
+/* Unread with nobody calling your name: a dot says the room is awake without
+   asking you to act. It sits where the count would, so a room that starts
+   pinging swaps the mark in place rather than shifting the row. */
+.ws-rail-item-badge.is-dot {
+  min-width: 7px;
+  width: 7px;
+  height: 7px;
+  padding: 0;
+  border-radius: 50%;
+  background-color: rgba(255, 255, 255, 0.32);
+  margin-right: 6px;
+}
+
+/* A community nobody has posted in since you last looked recedes: the rail is
+   scanned for what changed, and 36 equally bright rows hide the two that did. */
+.ws-rail-item.is-quiet .ws-rail-item-name {
+  color: #b2b2b2;
+}
+
+/* Avatars never fade: standing is the name's job alone, and dimming the picture
+   said the same thing twice while making the room look switched off. */
+.ws-rail-item.is-quiet:hover .ws-rail-item-name,
+.ws-rail-item.is-quiet.active .ws-rail-item-name {
+  color: #fff;
 }
 
 /* Muted rooms still count, they just stop shouting. */
@@ -1102,10 +1453,10 @@ body.ws #navbar .navbar-btn .update-notification-dot {
   margin-top: -4px;
 }
 
+/* Collapse is just another setting, so it sits with them rather than exiled to
+   the bottom. The spacer stops pushing; the account chip anchors itself. */
 body.ws #ws-rail-spacer {
-  display: block;
-  flex: 1;
-  min-height: 8px;
+  display: none;
 }
 
 body.ws #ws-rail-collapse {
@@ -1113,7 +1464,7 @@ body.ws #ws-rail-collapse {
   flex-direction: row;
   align-items: center;
   gap: 11px;
-  margin: 0 8px 6px;
+  margin: 0 8px;
   padding: 6px 10px;
   border-radius: 10px;
   flex-shrink: 0;
@@ -1138,11 +1489,14 @@ body.ws.ws-rail-collapsed #ws-rail-collapse .navbar-icon {
   transform: rotate(180deg);
 }
 
+/* No seam above the account chip: the nav tabs and your own row are the same
+   band of controls, and a line between them split one thing into two. */
 body.ws #ws-rail-account {
   display: block;
   flex-shrink: 0;
+  /* Holds the floor now that the spacer is gone. */
+  margin-top: auto;
   padding: 8px;
-  border-top: 1px solid var(--ws-seam);
 }
 
 /* The re-parented #account block: left-aligned name over status, full width.
@@ -1462,4 +1816,198 @@ body.ws .chatlist-contact.ws-active {
 /* Mobile taps a row and leaves; a desktop pointer lives over the list. */
 body.ws .chatlist-contact {
   cursor: pointer;
+}
+
+/* ── Member list ──────────────────────────────────────────────────────────
+   The details header carries the search: its title and status are hidden in
+   this column (the community is named one column left), so without it the bar
+   is height spent on nothing. */
+body.ws #group-overview > .chat-header .ws-member-search {
+  flex: 1;
+  min-width: 0;
+  margin: 0 14px;
+  padding: 0 !important;
+}
+
+body.ws .ws-member-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 9px 14px 9px 38px !important;
+  border-radius: 9px;
+  border: 1px solid var(--ws-seam) !important;
+}
+
+body.ws .ws-member-search .emoji-search-icon {
+  left: 12px;
+}
+
+/* Sections: same language as the channel pane's, so one idea reads one way. */
+body.ws .member-section + .member-section {
+  margin-top: 12px;
+}
+
+body.ws .member-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px 4px;
+  border-radius: 6px;
+  opacity: 1;
+}
+
+body.ws .member-section-label {
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.38);
+  transition: color 0.12s ease;
+}
+
+body.ws .member-section-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.24);
+}
+
+body.ws .member-section-head:hover .member-section-label {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+body.ws .member-section-caret {
+  position: relative;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+}
+
+body.ws .member-section-caret .icon {
+  background-color: rgba(255, 255, 255, 0.32);
+  transition: transform 0.15s ease, background-color 0.12s ease;
+}
+
+body.ws .member-section.is-closed .member-section-caret .icon {
+  transform: rotate(-90deg);
+}
+
+body.ws .member-section.is-closed .member-section-body {
+  display: none;
+}
+
+/* Rank marks sit with the name. Colours are the roles' own, not the theme's:
+   a crown that changed hue per theme would stop meaning "owner". */
+.member-rank-mark {
+  position: relative;
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin: 0 0 0 5px;
+}
+
+.member-rank-owner { background-color: #fce459; }
+.member-rank-admin { background-color: #ef6a60; }
+
+/* A bot is a fact about the account, not a rank — it recedes. */
+.member-pick-bot {
+  background-color: #5b6060 !important;
+}
+
+/* The admin's rank is the shield beside their name; the gutter crown is the
+   DEMOTE control, so it only needs to exist under the pointer. Left always-on it
+   said "admin" a second time, in a second colour, in a second place. */
+body.ws #group-overview .member-pick-admin.active {
+  opacity: 0;
+}
+
+body.ws #group-overview .member-pick-row:hover .member-pick-admin.active,
+body.ws #group-overview .member-pick-row.is-acting .member-pick-admin.active {
+  opacity: 1;
+}
+
+/* The details column's collapse chevron shares the header with the search. */
+body.ws #group-overview > .chat-header .ws-member-search {
+  margin-left: 54px;
+}
+
+/* ── Member rows: a person, two lines ─────────────────────────────────────
+   Name and rank on top, status beneath. The row grows to carry it rather than
+   squeezing the status into the gap. */
+body.ws #group-overview .member-pick-identity {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+}
+
+body.ws #group-overview .member-pick-nameline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+body.ws #group-overview .member-pick-status {
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.38);
+  max-width: 100%;
+}
+
+/* The avatar carries the taller row rather than floating in it. */
+body.ws #group-overview .member-pick-avatar {
+  width: 29px !important;
+  height: 29px !important;
+}
+
+body.ws #group-overview .compact-member-name {
+  font-size: 15px;
+}
+
+/* ── Search: a slim pill, not a boxed field ───────────────────────────── */
+body.ws .ws-member-search input {
+  padding: 7px 14px 7px 36px !important;
+  font-size: 13px;
+  border-radius: 999px;
+}
+
+/* The icon carried a hardcoded `top` measured against the taller boxed field it
+   used to live in; in a 34px pill that put it 10px below centre. `!important`
+   because the undocked rule further up sets `left: 22px !important` for the
+   search in its original home, and that offset is wrong inside the pill. */
+body.ws #group-overview > .chat-header .ws-member-search .emoji-search-icon {
+  left: 12px !important;
+  top: 50% !important;
+  transform: translateY(-50%) scale(0.8);
+}
+
+/* An emoji in a status is inline text, not a picture: unconstrained it renders
+   at its natural size and stretches the row around it. */
+body.ws #group-overview .member-pick-status .emoji,
+body.ws #group-overview .member-pick-nameline .emoji {
+  width: 14px !important;
+  height: 14px !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  display: inline-block;
+  vertical-align: -2px;
+  border-radius: 0;
+  object-fit: contain;
+}
+
+/* The status is one line: a long one ellipsises rather than wrapping the row
+   into a paragraph. */
+body.ws #group-overview .member-pick-status {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Slightly tighter than the two lines need, so the roster stays a list. */
+/* One height for every row, status or not: a roster whose rhythm changes per
+   person reads as broken alignment rather than as extra information. A member
+   with nothing to say simply centres in the same box. */
+body.ws #group-overview .member-pick-row {
+  padding: 3px 10px;
+  gap: 0;
+  min-height: 46px;
+  box-sizing: border-box;
 }

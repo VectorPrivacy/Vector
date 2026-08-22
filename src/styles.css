@@ -36,6 +36,14 @@
   mask-image: url("./icons/add-user.svg");
 }
 
+.icon-shield-filled {
+  mask-image: url("./icons/shield-filled.svg");
+}
+
+.icon-channel-hash {
+  mask-image: url("./icons/channel-hash.svg");
+}
+
 .icon-users-multi {
   mask-image: url("./icons/users-multi.svg");
 }
@@ -50,6 +58,10 @@
 
 .icon-chats {
   mask-image: url("./icons/chats.svg");
+}
+
+.icon-mail {
+  mask-image: url("./icons/mail.svg");
 }
 
 .icon-crown {
@@ -20378,7 +20390,6 @@ body.profile-switcher-editing .profile-switcher-add {
   filter: brightness(0.9);
 }
 .mod-btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
-.pol-empty { padding: 18px; text-align: center; color: var(--text-muted, #8b8b8b); font-size: 13px; }
 
 /* ── Moderation panel: instrument, not checklist ──────────────────────────────
    A healthy community means every row is ticked, which makes the tick the
@@ -20547,12 +20558,6 @@ body.profile-switcher-editing .profile-switcher-add {
     text-transform: uppercase;
     color: rgba(255, 255, 255, 0.38);
     margin-bottom: -2px;
-}
-
-.pol-empty {
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.028);
-    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 /* The last row scrolls under the sticky footer; a little slack stops it landing
@@ -20978,4 +20983,17 @@ body.profile-switcher-editing .profile-switcher-add {
     font-size: 12px;
     line-height: 1.5;
     color: rgba(255, 255, 255, 0.42);
+}
+
+/* ── Names in Rubik ───────────────────────────────────────────────────────
+   People and communities are named in Rubik; everything around them stays on
+   the body face. Rubik ships here as a variable font (100–900), so this costs
+   no extra asset — only a face the name renders in. */
+.ws-rail-item-name,
+.chatlist-contact-header h4,
+.chatlist-community-head-name,
+.dmsg-author,
+#chat-contact,
+.chat-contact {
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
 }

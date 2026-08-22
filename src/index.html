@@ -1768,11 +1768,21 @@
             <path fill="#fff" d="M67.3896,1.7375h-7.8867c-.5799,0-1.05.47-1.05,1.05v6.3233c0,.2789.1109.5463.3083.7432.1969.1965.4636.3068.7417.3068h.0024l5.1917-.0117c.2777-.0006.5438-.1112.7401-.3076l2.695-2.6949c.1969-.1969.3075-.4639.3075-.7424v-3.6167c0-.58-.4701-1.05-1.05-1.05ZM66.3396,5.9692l-2.0809,2.0809-3.7058.0082V3.8374h5.7868v2.1318Z"/>
             <path fill="#fff" d="M80.0595,1.4924h-3.4416c-.2785,0-.5456.1105-.7425.3076l-.9025.9026v-.1625c0-.58-.4701-1.05-1.05-1.05s-1.05.47-1.05,1.05v7.1166c0,.58.4701,1.05,1.05,1.05s1.05-.47,1.05-1.05v-3.9843l2.08-2.08h1.9566v.8984c0,.58.4701,1.05,1.05,1.05s1.05-.47,1.05-1.05v-1.9484c0-.58-.4701-1.05-1.05-1.05Z"/>
           </svg>
+          <div id="ws-rail-mail" class="btn" title="Messages">
+            <span class="icon icon-mail"></span>
+          </div>
         </div>
-        <!-- Recent DMs over recent communities; filled by js/render/rail.js. -->
+        <!-- Unread DMs over communities; filled by js/render/rail.js. Each group
+             owns its own label, so hiding the group takes its heading with it. -->
         <div id="ws-rail-shortcuts">
-          <div id="ws-rail-dms"></div>
-          <div id="ws-rail-spaces"></div>
+          <div id="ws-rail-dms" class="ws-rail-group">
+            <div class="ws-rail-group-label">New Messages</div>
+            <div class="ws-rail-rows"></div>
+          </div>
+          <div id="ws-rail-spaces" class="ws-rail-group">
+            <div class="ws-rail-group-label">Communities</div>
+            <div class="ws-rail-rows"></div>
+          </div>
         </div>
         <div id="profile-btn" class="btn navbar-btn navbar-btn-inactive">
           <span class="icon icon-user-circle navbar-icon"></span>

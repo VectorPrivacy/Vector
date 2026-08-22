@@ -30,7 +30,9 @@ function loadCommunityChannels() {
         .then(list => {
             for (const community of list || []) {
                 communityChannelsCache.set(community.community_id,
-                    (community.channels || []).map(c => ({ id: c.channel_id, name: c.name })));
+                    (community.channels || []).map(c => ({
+                        id: c.channel_id, name: c.name, private: !!c.private, readable: c.readable !== false,
+                    })));
             }
             renderChatlist();
         })
@@ -41,7 +43,9 @@ function loadCommunityChannels() {
 /** Adopt a channel set straight off a `get_community` summary the caller already fetched. */
 function setCommunityChannels(communityId, channels) {
     if (!communityId || !Array.isArray(channels)) return;
-    communityChannelsCache.set(communityId, channels.map(c => ({ id: c.channel_id, name: c.name })));
+    communityChannelsCache.set(communityId, channels.map(c => ({
+        id: c.channel_id, name: c.name, private: !!c.private, readable: c.readable !== false,
+    })));
 }
 
 /** Channels for a community, or null before the first load lands. */
@@ -161,6 +165,106 @@ function communityIsV2(communityId) {
  * Rows for a community's channels, or null when there's nothing worth showing.
  * Rendered directly after the community's own row in the list.
  */
+/* ── Sections ──────────────────────────────────────────────────────────────
+ * A section is `{ id, label, channels, canAdd }` and nothing more, so the day
+ * the backend grows user-defined sections this file only has to change where
+ * the list is BUILT — every renderer below already speaks the shape. Today the
+ * only grouping the protocol knows is public vs private.
+ */
+
+/** Collapsed sections, per community, kept across restarts. */
+const CHANNEL_SECTION_KEY = 'ws_channel_sections_closed';
+
+function loadClosedSections() {
+    try {
+        return new Set(JSON.parse(localStorage.getItem(CHANNEL_SECTION_KEY) || '[]'));
+    } catch {
+        return new Set();
+    }
+}
+
+let closedChannelSections = loadClosedSections();
+
+function sectionKey(communityId, sectionId) {
+    return `${communityId}:${sectionId}`;
+}
+
+function channelSectionClosed(communityId, sectionId) {
+    return closedChannelSections.has(sectionKey(communityId, sectionId));
+}
+
+/**
+ * Flip the section in place rather than asking for a re-render: `renderChatlist`
+ * is gated on a hash of CHAT state, which a collapsed section is not part of, so
+ * a render request here is a no-op and the section could never reopen.
+ */
+function toggleChannelSection(communityId, sectionId, wrap) {
+    const key = sectionKey(communityId, sectionId);
+    const closing = !closedChannelSections.has(key);
+    if (closing) closedChannelSections.add(key);
+    else closedChannelSections.delete(key);
+    try {
+        localStorage.setItem(CHANNEL_SECTION_KEY, JSON.stringify([...closedChannelSections]));
+    } catch { /* a full quota must not break navigation */ }
+    wrap?.classList.toggle('is-closed', closing);
+}
+
+/**
+ * Group a community's channels into sections. A section with no channels is not
+ * rendered at all, so a community with nothing private never sees the word.
+ */
+function buildChannelSections(channels, canManage) {
+    const out = [];
+    const open = channels.filter(c => !c.private);
+    const shut = channels.filter(c => c.private);
+    if (open.length) out.push({ id: 'public', label: 'Public', channels: open, canAdd: canManage });
+    if (shut.length) out.push({ id: 'private', label: 'Private', channels: shut, canAdd: canManage });
+    // Nothing at all yet: still offer the one section you can add into.
+    if (!out.length && canManage) out.push({ id: 'public', label: 'Public', channels: [], canAdd: true });
+    return out;
+}
+
+function renderChannelSection(communityId, section) {
+    const wrap = document.createElement('div');
+    wrap.className = 'chatlist-channel-section';
+    const closed = channelSectionClosed(communityId, section.id);
+    if (closed) wrap.classList.add('is-closed');
+
+    const head = document.createElement('div');
+    head.className = 'chatlist-channel-section-head';
+
+    const toggle = document.createElement('div');
+    toggle.className = 'chatlist-channel-section-toggle btn';
+    const label = document.createElement('span');
+    label.className = 'chatlist-channel-section-label';
+    label.textContent = section.label;
+    toggle.appendChild(label);
+    const caret = document.createElement('span');
+    caret.className = 'chatlist-channel-section-caret';
+    caret.innerHTML = '<span class="icon icon-chevron-down"></span>';
+    toggle.appendChild(caret);
+    toggle.onclick = () => toggleChannelSection(communityId, section.id, wrap);
+    head.appendChild(toggle);
+
+    if (section.canAdd) {
+        const add = document.createElement('div');
+        add.className = 'chatlist-channel-section-add btn';
+        add.title = `Add a ${section.label.toLowerCase()} channel`;
+        add.innerHTML = '<span class="icon icon-plus"></span>';
+        add.onclick = (e) => { e.stopPropagation(); promptCreateChannel(communityId, section.id === 'private'); };
+        head.appendChild(add);
+    }
+    wrap.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'chatlist-channel-section-body';
+    for (const channel of section.channels) {
+        body.appendChild(renderChannelRow(communityId, channel, section.canAdd));
+    }
+    wrap.appendChild(body);
+    return wrap;
+}
+
 function renderCommunityChannels(communityId, { pane = false } = {}) {
     const channels = getCommunityChannels(communityId);
     if (!channels) return null;
@@ -171,10 +275,18 @@ function renderCommunityChannels(communityId, { pane = false } = {}) {
     if (!pane && (!communityChannelsShown(communityId) || (channels.length < 2 && !canManage))) return null;
     const wrap = document.createElement('div');
     wrap.className = pane ? 'chatlist-channels chatlist-channels-pane' : 'chatlist-channels';
-    for (const channel of channels) {
-        wrap.appendChild(renderChannelRow(communityId, channel, canManage));
+    // Nested under a community row the list is a quick disclosure, so it stays a
+    // flat set; the pane is the navigation and gets the sections.
+    if (!pane) {
+        for (const channel of channels) {
+            wrap.appendChild(renderChannelRow(communityId, channel, canManage));
+        }
+        if (canManage) wrap.appendChild(renderAddChannelRow(communityId));
+        return wrap;
     }
-    if (canManage) wrap.appendChild(renderAddChannelRow(communityId));
+    for (const section of buildChannelSections(channels, canManage)) {
+        wrap.appendChild(renderChannelSection(communityId, section));
+    }
     return wrap;
 }
 
@@ -208,8 +320,15 @@ function renderCommunityListHeader(communityId) {
 
     const members = document.createElement('span');
     members.className = 'chatlist-community-head-members';
+    // The glyph says "people" before the number is read, and holds the line's
+    // height while the count is still empty.
+    const membersIcon = document.createElement('span');
+    membersIcon.className = 'icon icon-users-multi chatlist-community-head-members-icon';
+    members.appendChild(membersIcon);
+    const membersText = document.createElement('span');
     // Empty until the count lands; the fetch refreshes the header when it does.
-    members.textContent = communityMemberSubtext(communityId);
+    membersText.textContent = communityMemberSubtext(communityId);
+    members.appendChild(membersText);
     meta.appendChild(members);
     head.appendChild(meta);
 
@@ -334,12 +453,15 @@ function renderAddChannelRow(communityId) {
     return row;
 }
 
-async function promptCreateChannel(communityId) {
-    const name = await popupConfirm('New channel',
-        'Everyone in the community can read and post in it.', false, 'channel name');
+async function promptCreateChannel(communityId, isPrivate = false) {
+    const name = await popupConfirm(isPrivate ? 'New private channel' : 'New channel',
+        isPrivate
+            ? 'Only members you grant access to can read it.'
+            : 'Everyone in the community can read and post in it.',
+        false, 'channel name');
     if (!name || !String(name).trim()) return;
     try {
-        const channelId = await invoke('create_community_channel', { communityId, name, private: false });
+        const channelId = await invoke('create_community_channel', { communityId, name, private: isPrivate });
         refreshCommunityChannels();
         expandedCommunities.add(communityId);
         openCommunityChannel(communityId, { id: channelId, name });
@@ -370,7 +492,7 @@ function renderChannelRow(communityId, channel, canManage) {
 
     const hash = document.createElement('span');
     hash.className = 'chatlist-channel-hash';
-    hash.textContent = '#';
+    hash.innerHTML = '<span class="icon icon-channel-hash"></span>';
     row.appendChild(hash);
 
     const name = document.createElement('span');
@@ -378,13 +500,21 @@ function renderChannelRow(communityId, channel, canManage) {
     name.textContent = channel.name;
     row.appendChild(name);
 
+    // Three tiers, loudest first: something to read, nothing to read, and a room
+    // you asked to be quiet. Muted wins outright — it is a standing instruction,
+    // not a state that unread can override.
     const chat = arrChats.find(c => c.id === channel.id);
-    const unread = chat ? computeRowBadgeCount(chat) : 0;
-    if (unread) {
-        row.classList.add('has-unread');
+    if (chat?.muted) row.classList.add('is-muted');
+    else if (chat && computeRowBadgeCount(chat) > 0) row.classList.add('has-unread');
+    else row.classList.add('is-read');
+
+    // A NUMBER only for someone calling your name. Ordinary unread is carried by
+    // the row's own weight, so the list stays scannable at a glance.
+    const pings = chat ? countPingMessages(chat) : 0;
+    if (pings) {
         const badge = document.createElement('span');
         badge.className = 'chatlist-channel-badge';
-        badge.textContent = unread > 99 ? '99+' : String(unread);
+        badge.textContent = pings > 99 ? '99+' : String(pings);
         row.appendChild(badge);
     }
 
@@ -437,9 +567,10 @@ function communityChatTitle(chat) {
     const cf = chat?.metadata?.custom_fields || {};
     const name = cf.name || '';
     // Widescreen names the community at the top of its own channel pane, so the
-    // header only has to say which channel you're in.
+    // header only has to say which channel you're in. Bare, with no '#': there
+    // the hash is drawn as a glyph beside it, and a literal one would double it.
     if (typeof wsActive === 'function' && wsActive() && communityIdOfChat(chat)) {
-        return cf.channel_name ? `#${cf.channel_name}` : name;
+        return cf.channel_name || name;
     }
     if (isPrimaryChannelChat(chat) || !cf.channel_name) return name;
     return `${name} › #${cf.channel_name}`;

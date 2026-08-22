@@ -418,6 +418,13 @@ pub async fn revoke_community_admin(community_id: String, npub: String) -> Resul
     .await
 }
 
+/// Every role a community defines, with its position and colour, plus who holds
+/// which — what the member list groups on.
+#[tauri::command]
+pub fn get_community_role_graph(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore.community_role_graph(&community_id).map_err(|e| e.to_string())
+}
+
 /// The npubs (bech32) of members holding a MANAGEMENT role — the admin set, for the member-list
 /// crown. (A member holding only a non-management/social role is not an admin.)
 #[tauri::command]

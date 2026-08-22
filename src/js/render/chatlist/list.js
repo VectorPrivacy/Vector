@@ -510,6 +510,25 @@ function computeListRowBadgeCount(chat) {
     return total;
 }
 
+/**
+ * A community's pings across every channel it owns — the same fan-out
+ * `computeListRowBadgeCount` does for unread, because a ping in a collapsed
+ * channel is still someone calling your name.
+ */
+function computeCommunityPingCount(chat) {
+    const communityId = chatIsGroup(chat) && isPrimaryChannelChat(chat)
+        ? chat.metadata?.custom_fields?.community_id
+        : null;
+    if (!communityId) return countPingMessages(chat);
+    let total = 0;
+    for (const c of arrChats) {
+        if (c.chat_type !== 'Community') continue;
+        if (c.metadata?.custom_fields?.community_id !== communityId) continue;
+        total += countPingMessages(c);
+    }
+    return total;
+}
+
 function countPingMessages(chat) {
     if (!chat.messages || !chat.messages.length) return 0;
     const isGroup = chatIsGroup(chat);

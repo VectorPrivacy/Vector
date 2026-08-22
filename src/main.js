@@ -2216,22 +2216,120 @@ function createAvatarImg(src, size, isGroup = false) {
  * @param {boolean} twemoji - Whether `display` is a real name that may carry emoji.
  * @returns {{cell: HTMLDivElement, nameEl: HTMLDivElement}}
  */
-function buildMemberNameCell(display, profile, twemoji) {
+/* ── Member sections ───────────────────────────────────────────────────────
+ * The same shape the channel pane uses: `{ id, label }` plus its rows, a head
+ * that collapses it, and the closed set kept across restarts. Grouping is
+ * decided by the caller, so the day roles arrive nothing here changes.
+ */
+
+const MEMBER_SECTION_KEY = 'ws_member_sections_closed';
+
+function loadClosedMemberSections() {
+    try {
+        return new Set(JSON.parse(localStorage.getItem(MEMBER_SECTION_KEY) || '[]'));
+    } catch {
+        return new Set();
+    }
+}
+
+let closedMemberSections = loadClosedMemberSections();
+
+function memberSectionClosed(communityId, sectionId) {
+    return closedMemberSections.has(`${communityId}:${sectionId}`);
+}
+
+function buildMemberSection(communityId, section, rows, forceOpen = false) {
+    const wrap = document.createElement('div');
+    wrap.className = 'member-section';
+    if (!forceOpen && memberSectionClosed(communityId, section.id)) wrap.classList.add('is-closed');
+
+    const head = document.createElement('div');
+    head.className = 'member-section-head btn';
+    const label = document.createElement('span');
+    label.className = 'member-section-label';
+    label.textContent = section.label;
+    head.appendChild(label);
+    const count = document.createElement('span');
+    count.className = 'member-section-count';
+    count.textContent = String(rows.length);
+    head.appendChild(count);
+    const caret = document.createElement('span');
+    caret.className = 'member-section-caret';
+    caret.innerHTML = '<span class="icon icon-chevron-down"></span>';
+    head.appendChild(caret);
+    // Flipped in place: the member list is rebuilt from a fetch, and asking for a
+    // re-render to show a collapse would throw away scroll position for nothing.
+    head.onclick = () => {
+        const key = `${communityId}:${section.id}`;
+        const closing = !closedMemberSections.has(key);
+        if (closing) closedMemberSections.add(key);
+        else closedMemberSections.delete(key);
+        try {
+            localStorage.setItem(MEMBER_SECTION_KEY, JSON.stringify([...closedMemberSections]));
+        } catch { /* a full quota must not break the roster */ }
+        wrap.classList.toggle('is-closed', closing);
+    };
+    wrap.appendChild(head);
+
+    const body = document.createElement('div');
+    body.className = 'member-section-body';
+    for (const row of rows) body.appendChild(row);
+    wrap.appendChild(body);
+    return wrap;
+}
+
+function buildMemberNameCell(display, profile, twemoji, rank = null, rankLabel = null) {
     const cell = document.createElement('div');
     cell.className = 'member-pick-identity';
+
+    // Name and its marks share one line; the status sits under them, so a row is
+    // a person rather than a name with decorations trailing off the end.
+    const line = document.createElement('div');
+    line.className = 'member-pick-nameline';
+    cell.appendChild(line);
 
     const nameEl = document.createElement('div');
     nameEl.className = 'compact-member-name';
     nameEl.textContent = display;
     if (twemoji) twemojify(nameEl);
-    cell.appendChild(nameEl);
+    line.appendChild(nameEl);
+
+    // Rank rides beside the NAME rather than out in a left gutter: it is a fact
+    // about the person, and a gutter slot spends a column on the rows that have
+    // nothing to say.
+    if (rank === 'owner' || rank === 'admin') {
+        const mark = document.createElement('span');
+        const isOwner = rank === 'owner';
+        mark.className = 'icon member-rank-mark '
+            + (isOwner ? 'icon-crown member-rank-owner' : 'icon-shield-filled member-rank-admin');
+        // Name the role they actually hold. The shield is raised by PERMISSION
+        // (any role carrying management bits), so calling every one of them
+        // "Admin" mislabels a Moderator who simply has the same powers.
+        const word = isOwner ? 'Owner' : (rankLabel || 'Admin');
+        mark.addEventListener('mouseenter', () => showGlobalTooltip(word, mark));
+        mark.addEventListener('mouseleave', hideGlobalTooltip);
+        line.appendChild(mark);
+    }
 
     if (profile?.bot) {
         const botIcon = document.createElement('span');
         botIcon.className = 'icon icon-bot member-pick-bot';
         botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
         botIcon.addEventListener('mouseleave', hideGlobalTooltip);
-        cell.appendChild(botIcon);
+        line.appendChild(botIcon);
+    }
+
+    const status = profile?.status?.title || '';
+    if (status) {
+        const statusEl = document.createElement('div');
+        statusEl.className = 'member-pick-status cutoff';
+        // textContent: a status is attacker-controlled NIP-38 data, never HTML.
+        statusEl.textContent = status;
+        twemojify(statusEl);
+        // A status carries its own emoji tags; without this pass a community's
+        // custom :shortcodes: read as literal text.
+        renderCustomEmojiShortcodes(statusEl, profile.status.emoji_tags || []);
+        cell.appendChild(statusEl);
     }
 
     return { cell, nameEl };
@@ -2915,6 +3013,8 @@ const communityMemberCounts = new Map();
 // Full roster per community id ([{npub, last_active}]) — the @mention pool reads this
 // synchronously, so anyone the Member List shows is taggable (not just RAM-loaded senders).
 const communityMembersCache = new Map();
+/** A community's role graph (roles + grants), cached so the roster paints grouped on reopen. */
+const communityRoleGraphCache = new Map();
 const _communityCountLastFetch = new Map();
 const _communityCountInFlight = new Set();
 
@@ -2954,7 +3054,11 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     // hash-gated on chat state, which a member count is not part of, so left to that
     // render the count sat empty until something unrelated moved.
     if (typeof wsListCommunityId === 'function' && wsListCommunityId() === communityId) {
-        const domHeadMembers = document.querySelector('#chatlist-community-head .chatlist-community-head-members');
+        // Write the TEXT span, not the row: the row also holds the people glyph,
+        // and textContent on it would take the icon with the old count.
+        const domHeadMembers = document.querySelector(
+            '#chatlist-community-head .chatlist-community-head-members > span:not(.icon)'
+        );
         if (domHeadMembers) domHeadMembers.textContent = communityMemberSubtext(communityId);
     }
     if (domGroupOverview.getAttribute('data-group-id') === communityId) {
@@ -10034,6 +10138,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // same session cache the in-chat tags read.
         let adminNpubs = (chat.metadata?.admins || []).slice();
         let bannedList = [];
+        // The role hierarchy, once it lands. Sections fall back to Admin/Members
+        // until then, so a slow fetch never leaves the roster unrendered.
+        let roleGraph = communityRoleGraphCache.get(communityId) || null;
         if (!hadCache) {
             membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
         }
@@ -10067,6 +10174,44 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             const ordered = [...memberList].sort((a, b) =>
                 (tierOf(a.npub) - tierOf(b.npub)) ||
                 displayOf(a).toLowerCase().localeCompare(displayOf(b).toLowerCase()));
+
+            // Sections, in hierarchy order. Today the only ranks the frontend can
+            // see are owner, admin and bot — CORD's positioned roles live in core
+            // but no command surfaces them yet. `groupOf` is the single seam: when
+            // one does, it returns the member's highest-position role and the rest
+            // of this renderer needs no changes.
+            // Sections are ROLES, ordered by the hierarchy's own positions (lower =
+            // higher authority). A bot is an account type, not a rank — it sits in
+            // whatever role it holds, wearing its icon.
+            const roleById = new Map((roleGraph?.roles || []).map(r => [r.role_id, r]));
+            const heldBy = new Map();
+            for (const g of roleGraph?.grants || []) {
+                // A member's section is their HIGHEST role: the one that outranks
+                // the rest, which is the lowest position number.
+                let best = null;
+                for (const id of g.role_ids || []) {
+                    const role = roleById.get(id);
+                    if (role && (!best || role.position < best.position)) best = role;
+                }
+                if (best) heldBy.set(g.npub, best);
+            }
+            const groupOf = (npub) => heldBy.get(npub)?.role_id
+                || (npub === ownerNpub || adminSet.has(npub) ? 'admin' : 'members');
+
+            const SECTION_ORDER = [];
+            const seen = new Set();
+            for (const role of [...(roleGraph?.roles || [])].sort((a, b) => a.position - b.position)) {
+                SECTION_ORDER.push({ id: role.role_id, label: role.name });
+                seen.add(role.role_id);
+            }
+            // The fallback pair only appears when nothing else claims those people.
+            if (!seen.size) SECTION_ORDER.push({ id: 'admin', label: 'Admin' });
+            SECTION_ORDER.push({ id: 'members', label: 'Members' });
+            const buckets = new Map(SECTION_ORDER.map(x => [x.id, []]));
+            // A role a member holds that the graph no longer defines must not
+            // silently drop them off the roster.
+            const bucketFor = (npub) => buckets.get(groupOf(npub)) || buckets.get('members');
+
             for (const m of ordered) {
                 const isCommunityOwner = m.npub === ownerNpub;
                 const profile = profileById.get(m.npub) || null;
@@ -10100,12 +10245,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     return c;
                 };
                 if (isCommunityOwner) {
-                    const crown = buildCrown(true, false);
-                    crown.classList.add('owner-crown'); // gold; admins stay green
-                    crown.title = 'Owner';
-                    crown.style.cursor = 'default';
-                    crownSlot.appendChild(crown);
-                } else if (isAdminMember || caps.manage_admin_role) {
+                    // Nothing to add: the crown beside the name already says it, and
+                    // ownership is not something anyone can toggle from here.
+                } else if (caps.manage_admin_role) {
                     // Admin → green (someone who can manage the @admin role can click to demote). Plain
                     // member → faint hover-crown they can click to promote. (manage_admin_role is the
                     // position rule: outrank the @admin role; owner-only in the MVP, but not hardcoded.)
@@ -10165,11 +10307,17 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     }
                     crownSlot.appendChild(crown);
                 }
-                row.appendChild(crownSlot);
+                // The left gutter only exists to hold a control: without one, the row
+                // starts at its avatar like every other list in the app.
+                if (crownSlot.childElementCount) row.appendChild(crownSlot);
                 const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
                 avatar.className = 'member-pick-avatar';
                 row.appendChild(avatar);
-                row.appendChild(buildMemberNameCell(display, profile, !!name).cell);
+                row.appendChild(buildMemberNameCell(
+                    display, profile, !!name,
+                    isCommunityOwner ? 'owner' : (isAdminMember ? 'admin' : null),
+                    heldBy.get(m.npub)?.name || null,
+                ).cell);
                 // Role-engine moderation: shown to anyone who holds KICK/BAN AND outranks this member
                 // (the owner outranks all; an admin outranks non-admins — never the owner, never self).
                 // Two tiers (§7 escalation ladder): KICK is cooperative + soft (they self-remove, can
@@ -10262,8 +10410,20 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 // outside-click handler that would instantly dismiss the just-opened popup.
                 row.style.cursor = 'pointer';
                 row.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(m.npub, avatar); });
-                frag.appendChild(row);
+                bucketFor(m.npub).push(row);
                 shown++;
+            }
+
+            // Filtering keeps the headings: a section survives as long as anyone
+            // in it matches, so results stay anchored to a rank rather than
+            // collapsing into one undifferentiated list. Empty sections drop out
+            // on their own.
+            for (const section of SECTION_ORDER) {
+                const rows = buckets.get(section.id);
+                if (!rows.length) continue;
+                // A match inside a collapsed section would otherwise be invisible,
+                // so a search opens every section it found someone in.
+                frag.appendChild(buildMemberSection(communityId, section, rows, !!f));
             }
             membersEl.innerHTML = '';
             if (!shown) {
@@ -10338,6 +10498,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             memberList.map(m => m.npub).sort(),
             [...adminNpubs].sort(),
             [...bannedList].sort(),
+            // The sections are part of what's on screen, so a role rename or a
+            // re-grant has to count as a change or the roster keeps the old shape.
+            roleGraph,
         ]);
         const cachedPrint = rosterPrint();
         try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
@@ -10350,6 +10513,12 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
         // the UI just exposes the toggle to the owner for now.
         try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
+        // The hierarchy the member list groups on. Best-effort: without it the
+        // sections fall back to Admin/Members rather than the roster failing.
+        try {
+            roleGraph = await invoke('get_community_role_graph', { communityId });
+            communityRoleGraphCache.set(communityId, roleGraph);
+        } catch (_) {}
         // Cache admins onto this community's channel chats so message rendering can chip @everyone
         // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
         applyCommunityAdmins(communityId, adminNpubs);

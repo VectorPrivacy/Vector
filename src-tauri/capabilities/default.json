@@ -104,6 +104,7 @@
     "allow-grant-community-admin",
     "allow-revoke-community-admin",
     "allow-get-community-admins",
+    "allow-get-community-role-graph",
     "allow-can-manage-community-roles",
     "allow-get-community-capabilities",
     "allow-pin-community-message",

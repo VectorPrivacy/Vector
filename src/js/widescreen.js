@@ -218,6 +218,7 @@ function wsUpdate() {
 
     document.body.classList.toggle('ws', want);
     wsMoveAccountRow(want);
+    wsDockMemberSearch();
     wsSyncPaneMode();
     if (want) {
         // adjustSize() leaves an inline max-height sized against the viewport;
@@ -256,9 +257,38 @@ function wsInitDetailsPane() {
     if (!pane) return;
     const sync = () => {
         document.body.classList.toggle('ws-details', pane.style.display !== 'none');
+        wsDockMemberSearch();
     };
     new MutationObserver(sync).observe(pane, { attributes: true, attributeFilter: ['style'] });
     sync();
+}
+
+/** Where the search box came from, so leaving widescreen puts it back. */
+let wsMemberSearchHome = null;
+
+/**
+ * Lift the member search into the details column's header, or return it.
+ *
+ * The header is otherwise an empty bar in this column — its title and status are
+ * hidden here, because the community is already named one column left. Putting
+ * the search there buys back a row of the roster and makes the header earn its
+ * height.
+ */
+function wsDockMemberSearch() {
+    const search = document.querySelector('#group-overview .emoji-search-container');
+    const header = document.querySelector('#group-overview > .chat-header');
+    if (!search || !header) return;
+    if (wsActive()) {
+        if (search.parentElement === header) return;
+        wsMemberSearchHome = wsMemberSearchHome || { parent: search.parentElement, next: search.nextSibling };
+        search.classList.add('ws-member-search');
+        header.appendChild(search);
+        return;
+    }
+    if (!wsMemberSearchHome || search.parentElement !== header) return;
+    search.classList.remove('ws-member-search');
+    wsMemberSearchHome.parent.insertBefore(search, wsMemberSearchHome.next);
+    wsMemberSearchHome = null;
 }
 
 /**
@@ -362,13 +392,19 @@ function wsInitResizer() {
 }
 
 function wsInitRail() {
-    // The mark at the top of the rail is the DM home button.
+    // Two doors, one handler: the lockup keeps the muscle memory, the mail button
+    // is the one you can find without knowing it was ever there.
     const head = document.getElementById('ws-rail-head');
     if (head) {
         head.classList.add('btn');
         head.title = 'Direct Messages';
         head.addEventListener('click', () => wsOpenDmHome());
     }
+    document.getElementById('ws-rail-mail')?.addEventListener('click', (e) => {
+        // The button sits inside the head, whose own handler would fire second.
+        e.stopPropagation();
+        wsOpenDmHome();
+    });
 
     const toggle = document.getElementById('ws-rail-collapse');
     if (!toggle) return;

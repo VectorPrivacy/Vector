@@ -4022,6 +4022,42 @@ impl VectorCore {
 
     /// The community's owner npub + the admin npubs (role overview). A local read,
     /// like [`Self::community_capabilities`].
+    /// The whole role graph: every role with its position and colour, and who
+    /// holds what.
+    ///
+    /// `community_roles` above answers only "who is an admin", which is all the
+    /// crown ever needed. A member list that groups people by rank needs the
+    /// hierarchy itself, and npubs rather than hex so it can match a roster it
+    /// already holds.
+    pub fn community_role_graph(&self, community_id: &str) -> Result<serde_json::Value> {
+        use nostr_sdk::prelude::{PublicKey, ToBech32};
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        // A banned member is gone from every read (§4), roles included.
+        let banned = crate::db::community::get_community_banlist(community_id).unwrap_or_default();
+        let roles: Vec<serde_json::Value> = roster
+            .roles
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "role_id": r.role_id,
+                    "name": r.name,
+                    "position": r.position,
+                    "color": r.color,
+                })
+            })
+            .collect();
+        let grants: Vec<serde_json::Value> = roster
+            .grants
+            .iter()
+            .filter(|g| !banned.contains(&g.member))
+            .filter_map(|g| {
+                let npub = PublicKey::from_hex(&g.member).ok().and_then(|pk| pk.to_bech32().ok())?;
+                Some(serde_json::json!({ "npub": npub, "role_ids": g.role_ids }))
+            })
+            .collect();
+        Ok(serde_json::json!({ "roles": roles, "grants": grants }))
+    }
+
     pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {

@@ -945,6 +945,7 @@ pub fn run() {
             commands::community::grant_community_admin,
             commands::community::revoke_community_admin,
             commands::community::get_community_admins,
+            commands::community::get_community_role_graph,
             commands::community::can_manage_community_roles,
             commands::community::get_community_capabilities,
             commands::community::pin_community_message,
