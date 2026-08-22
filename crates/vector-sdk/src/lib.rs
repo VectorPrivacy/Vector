@@ -1089,6 +1089,20 @@ impl Channel {
         }
     }
 
+    /// The [`Community`] this channel belongs to — `None` for a DM, or a
+    /// channel this bot has no membership for.
+    ///
+    /// Events carry a `channel_id` and nothing else ([`BotEvent::MemberJoin`],
+    /// [`BotEvent::MemberLeave`]), so this is how a handler gets from one to
+    /// the community it has to act in.
+    pub fn community(&self) -> Option<Community> {
+        if !matches!(self.kind, ChannelKind::Community) {
+            return None;
+        }
+        let id = vector_core::db::community::community_id_for_channel(&self.id).ok().flatten()?;
+        Some(Community { core: VectorCore, id })
+    }
+
     /// Moderation-hide someone ELSE's message. Community channels only, and
     /// requires `MANAGE_MESSAGES`.
     ///

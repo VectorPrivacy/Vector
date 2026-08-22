@@ -824,6 +824,19 @@ impl Community {
         Ok(self.watch_policies_every(std::time::Duration::from_secs(30)))
     }
 
+    /// Drop this community's memoised verdict so the next [`verdicts`] call
+    /// re-evaluates from scratch.
+    ///
+    /// The report is cached for 90 seconds, which is right for a background
+    /// sweep and far too slow for a wave in progress. A bot watching the live
+    /// stream can see a raid START in a second or two; this is how it turns
+    /// that suspicion into a real evaluation without waiting out the cache.
+    ///
+    /// [`verdicts`]: Self::verdicts
+    pub fn invalidate(&self) {
+        vector_core::VectorCore::invalidate_raid_report(self.id());
+    }
+
     /// Screen one message the instant it arrives, without waiting for a sweep.
     ///
     /// Only stateless rules answer here — words, links, regex, mentions — since
