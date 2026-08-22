@@ -123,7 +123,14 @@ impl Policy {
 
     /// Validate and render. Errors name the rule and the reason, so a bot
     /// author learns what is wrong rather than that something is.
-    pub fn build(self) -> Result<String> {
+    pub fn build(mut self) -> Result<String> {
+        // Declared here rather than asked of the caller: forgetting it means an
+        // older engine silently ignores the alternatives under an identical hash.
+        if self.doc.rules.iter().any(|r| r.armed_by.as_ref().is_some_and(|a| !a.also.is_empty()))
+            && !self.doc.requires.iter().any(|k| k == "armed_by_any")
+        {
+            self.doc.requires.push("armed_by_any".into());
+        }
         self.doc
             .validate()
             .map_err(|r| crate::Error::Other(format!("policy rejected: {r:?}")))?;
@@ -227,6 +234,18 @@ impl PolicyRule {
     }
 
     /// The same message over and over from one account.
+    /// One message naming a crowd. Counts DISTINCT people, so twenty pings at
+    /// one person is one person.
+    pub fn mass_tagging(id: &str) -> Self {
+        tiered(id, Match::Mentions {}, Severity::Major, true)
+    }
+
+    /// One account posting faster than a person reasonably types, whatever they
+    /// are saying.
+    pub fn rate_limit(id: &str, per_secs: u64) -> Self {
+        tiered(id, Match::Rate { per_secs }, Severity::Major, false)
+    }
+
     pub fn repetition(id: &str) -> Self {
         tiered(id, Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(REPEAT_BURST_SECS) }, Severity::Major, false)
     }
@@ -250,12 +269,23 @@ impl PolicyRule {
 
     /// Fires only once another rule has convicted. The guard that keeps weak
     /// signals from convicting anyone by themselves.
+    ///
+    /// Call it more than once to accept ALTERNATIVES: the rule then fires if any
+    /// named detector convicted. Hanging an aggravator off a single rule means a
+    /// raid that rule cannot see silences the aggravator too, so a policy with
+    /// two detectors should arm on both.
     pub fn only_after(mut self, rule_id: &str, min_subjects: Option<u32>) -> Self {
-        self.0.armed_by = Some(ArmedBy {
-            rule: rule_id.into(),
-            scope: if min_subjects.is_some() { ArmScope::Community } else { ArmScope::Subject },
-            min_subjects,
-        });
+        match self.0.armed_by.as_mut() {
+            Some(arm) => arm.also.push(rule_id.into()),
+            None => {
+                self.0.armed_by = Some(ArmedBy {
+                    rule: rule_id.into(),
+                    scope: if min_subjects.is_some() { ArmScope::Community } else { ArmScope::Subject },
+                    min_subjects,
+                    also: Vec::new(),
+                });
+            }
+        }
         self
     }
 

@@ -246,13 +246,17 @@ fn evaluate_one(
     all_convictions.retain(|c| {
         let Some(rule) = policy.rules.iter().find(|r| r.id == c.rule_id) else { return true };
         let Some(arm) = &rule.armed_by else { return true };
-        match convicted_by_rule.get(arm.rule.as_str()) {
-            Some(s) => match arm.scope {
-                ArmScope::Subject => s.contains(&c.subject.0),
-                ArmScope::Community => s.len() as u32 >= arm.min_subjects.unwrap_or(1),
-            },
-            None => false,
-        }
+        // Any one of the named rules arms it: an aggravator that hangs off a
+        // single detector goes silent for every raid that detector cannot see.
+        std::iter::once(&arm.rule).chain(arm.also.iter()).any(|id| {
+            match convicted_by_rule.get(id.as_str()) {
+                Some(s) => match arm.scope {
+                    ArmScope::Subject => s.contains(&c.subject.0),
+                    ArmScope::Community => s.len() as u32 >= arm.min_subjects.unwrap_or(1),
+                },
+                None => false,
+            }
+        })
     });
 
     // Pardons: reported, never combined, and their citations are suppressed too
@@ -1505,7 +1509,7 @@ mod tests {
             weight: Some(40),
             pierces_trusted: false,
             family: None,
-            armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) }),
+            armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3), also: vec![] }),
             exempt: Exempt::default(),
             enforcement: Enforcement::Advisory,
         };
@@ -1532,7 +1536,7 @@ mod tests {
         );
 
         // The same burst DOES fire when the cohort is among the current members.
-        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) });
+        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3), also: vec![] });
         let mut members: Vec<MemberSignal> = (0..6)
             .map(|i| MemberSignal {
                 subject: sid(i as u8 + 40),
@@ -1612,7 +1616,7 @@ mod tests {
         assert_eq!(only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count(), 10);
 
         // Armed by a cohort that never fired, it convicts nobody.
-        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) });
+        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3), also: vec![] });
         let r = evaluate(&s, &[loaded(policy_with(vec![cohort_rule_doc(), burst]))], &[], NOW);
         assert_eq!(
             only(&r).subjects.iter().filter(|x| !x.convictions.is_empty()).count(),
@@ -1973,5 +1977,67 @@ mod tests {
             1,
             "eight identical messages in one span must still be caught"
         );
+    }
+
+    /// The engine convicts on EVIDENCE, and one anomaly is not evidence.
+    ///
+    /// A join flood alone asks for a look; a join flood that is also one script
+    /// across many accounts is two independent sources and convicts. The gap
+    /// between them is what keeps a popular invite link from being staged for
+    /// removal, so it is pinned here rather than left to the weights.
+    #[test]
+    fn one_anomaly_asks_for_a_look_and_two_convict() {
+        const MIN: u64 = 60 * 1000;
+        const VARIED: [&str; 12] = [
+            "hey everyone", "glad to be here", "what is this place",
+            "found you through a podcast", "nice community", "hello all",
+            "just looking around", "someone linked me here", "good morning",
+            "how does this work", "reading the pins now", "thanks for the invite",
+        ];
+        // `n` strangers arriving across `span` minutes, brand new and silent but
+        // for one message each.
+        let wave = |n: u64, span: u64, same_text: bool| -> (usize, u32) {
+            let members: Vec<MemberSignal> = (1..=n)
+                .map(|i| {
+                    let mut m = member(i as u8, Some(1));
+                    m.joined_at_ms = Some(NOW - (span * MIN) + (i * span * MIN / n));
+                    m.first_post_ms = None;
+                    m.lifetime_messages = 0;
+                    m
+                })
+                .collect();
+            let msgs: Vec<MessageSignal> = (1..=n)
+                .map(|i| {
+                    let text = if same_text {
+                        "join our airdrop".to_string()
+                    } else {
+                        VARIED[(i as usize - 1) % VARIED.len()].to_string()
+                    };
+                    msg(0xa0 + i as u8, i as u8, NOW - 2 * MIN, &text)
+                })
+                .collect();
+            let s = signals(members, msgs);
+            let r = evaluate(&s, &[loaded(crate::community::policy::harness::default_policy())], &[], NOW);
+            let p = only(&r);
+            (p.subjects.len(), p.subjects.first().map(|x| x.confidence).unwrap_or(0))
+        };
+
+        // A good afternoon on an invite link: no anomaly at all.
+        assert_eq!(wave(5, 10, false), (0, 0), "an ordinary invite wave must convict nobody");
+
+        // One anomaly — they arrived fast, but they are saying different things.
+        let (caught, conf) = wave(12, 5, false);
+        assert_eq!(caught, 12);
+        assert!((25..50).contains(&conf), "a lone join flood reached {conf}; it must stay a look, not a verdict");
+
+        // Two anomalies — arrived fast AND reading from one script.
+        let (caught, conf) = wave(12, 5, true);
+        assert_eq!(caught, 12);
+        assert!(conf >= 75, "a scripted flood only reached {conf}; two sources must convict");
+
+        // One anomaly again, the other way round: one script, arriving slowly.
+        let (caught, conf) = wave(20, 60, true);
+        assert_eq!(caught, 20);
+        assert!(conf >= 75, "a scripted wave only reached {conf}");
     }
 }

@@ -275,6 +275,22 @@ function polRenderDials() {
             box.appendChild(inp);
         } else if (d.kind === 'rules') {
             box.appendChild(polBuildRuleList());
+        } else if (d.kind === 'seconds') {
+            const wrap = document.createElement('div');
+            wrap.className = 'pol-seconds';
+            const inp = document.createElement('input');
+            inp.type = 'number';
+            inp.min = '1';
+            inp.max = '3600';
+            inp.className = 'pol-text pol-seconds-input';
+            inp.value = polDraft.values[d.key] || polSecondsDefault();
+            inp.oninput = () => { polDraft.values[d.key] = inp.value; polDirty(); };
+            wrap.appendChild(inp);
+            const unit = document.createElement('span');
+            unit.className = 'pol-seconds-unit';
+            unit.textContent = 'seconds';
+            wrap.appendChild(unit);
+            box.appendChild(wrap);
         } else if (d.kind === 'channels') {
             const chips = document.createElement('div');
             chips.className = 'pol-chips';
@@ -325,16 +341,34 @@ function polBuildRuleList() {
             </div>
             <div class="pol-rule-desc">${polEscape(kind.description)}</div>`;
         if (kind.input !== 'none') {
-            const ta = document.createElement('textarea');
-            ta.rows = 3;
-            ta.value = r.value || '';
-            ta.placeholder = kind.input === 'wordlist' ? 'one word per line' : 'example.com';
-            ta.oninput = () => { r.value = ta.value; polDirty(); };
             const lab = document.createElement('div');
             lab.className = 'pol-rule-hint';
             lab.textContent = kind.input_hint;
             row.appendChild(lab);
-            row.appendChild(ta);
+            if (kind.input === 'seconds') {
+                const wrap = document.createElement('div');
+                wrap.className = 'pol-seconds';
+                const inp = document.createElement('input');
+                inp.type = 'number';
+                inp.min = '1';
+                inp.max = '3600';
+                inp.className = 'pol-text pol-seconds-input';
+                inp.value = r.value || String(kind.rule?.match?.per_secs || 10);
+                inp.oninput = () => { r.value = inp.value; polDirty(); };
+                wrap.appendChild(inp);
+                const unit = document.createElement('span');
+                unit.className = 'pol-seconds-unit';
+                unit.textContent = 'seconds';
+                wrap.appendChild(unit);
+                row.appendChild(wrap);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.rows = 3;
+                ta.value = r.value || '';
+                ta.placeholder = kind.input === 'wordlist' ? 'one word per line' : 'example.com';
+                ta.oninput = () => { r.value = ta.value; polDirty(); };
+                row.appendChild(ta);
+            }
         }
         row.querySelector('.pol-rule-x').onclick = () => {
             rules.splice(i, 1);
@@ -383,6 +417,20 @@ function polPreviewState(state) {
     if (!busy) polRefreshPreviewGate();
 }
 
+/// Clamp a span to the range the validator accepts, falling back to whatever the
+/// rule shipped with rather than to zero — an empty box must not mean "instantly".
+function polSeconds(value, fallback) {
+    const n = parseInt(value, 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(1, Math.min(3600, n));
+}
+
+/// The span a fresh `seconds` dial starts on: the shipped rule's own value.
+function polSecondsDefault() {
+    const rule = (polDraft?.policy?.rules || []).find(r => r.match?.type === 'rate');
+    return String(rule?.match?.per_secs || 10);
+}
+
 /// Any edit invalidates the preview: you cannot preview one policy and enable
 /// a different one.
 function polDirty() {
@@ -413,6 +461,15 @@ function polCompose() {
 
     if (polDraft.values.name) doc.name = polDraft.values.name.slice(0, 64);
 
+    // A template's span dial writes onto whichever rule counts within one.
+    if (polDraft.values.per_secs) {
+        for (const rule of doc.rules) {
+            if (rule.match?.type === 'rate') {
+                rule.match.per_secs = polSeconds(polDraft.values.per_secs, rule.match.per_secs);
+            }
+        }
+    }
+
     // From-scratch policies carry no rules until the author adds them. The
     // template rule comes from core so the weights and rungs are the same
     // numbers the presets ship, never a set the UI invented.
@@ -427,8 +484,8 @@ function polCompose() {
             while (seen.has(id)) id = `${built.id}-${i}`;
             seen.add(id);
             built.id = id;
-            const values = split(r.value);
-            if (kind.input !== 'none') built.match.patterns = values;
+            if (kind.input === 'seconds') built.match.per_secs = polSeconds(r.value, built.match.per_secs);
+            else if (kind.input !== 'none') built.match.patterns = split(r.value);
             return built;
         }).filter(Boolean);
     }

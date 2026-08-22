@@ -39,6 +39,10 @@ pub const REPEAT_BURST_SECS: u64 = 30 * 60;
 
 /// What every community gets without asking: raid detection, and nothing else.
 ///
+/// Not spam, not mass-tagging, not words. Those are a community's taste and it
+/// can switch them on from a template; a swarm is the one thing nobody can be
+/// expected to hand-configure before it arrives.
+///
 /// Deliberately NOT a link blocker. Which domains a community will not host is
 /// its own call, and a list baked into the client makes that call for everyone
 /// while looking like a law of the protocol. The bundled shortener list lives
@@ -50,7 +54,7 @@ pub fn default_policy() -> Policy {
         format: FORMAT,
         // `repeat` bounds its count to a burst; an engine that does not know
         // the field must go inert rather than count across the whole week.
-        requires: vec!["repeat_within".into()],
+        requires: vec!["armed_by_any".into()],
         name: "raid-detection".into(),
         emoji_codes: vec![],
         // A WEEK, not a day. Shield inputs are measured over the declared
@@ -75,34 +79,22 @@ pub fn default_policy() -> Policy {
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
-            // A burst of joins is what a freshly-posted invite link looks like,
-            // so it stays silent until the cohort rule has already convicted.
+            // The SECOND conviction path, for a raid whose accounts each say
+            // something different and never form a cohort cluster.
+            //
+            // A join flood is also what a popular invite link looks like, and the
+            // fresh-account aggravator does NOT tell them apart — it fires on
+            // anyone under a day old, talking or not (`quiet` folds into it at
+            // max, so posting changes nothing). The only thing separating the two
+            // is RATE, so the threshold carries that weight alone: twelve joins
+            // inside five minutes is a join every twenty-five seconds sustained,
+            // which is a script rather than a good afternoon.
             Rule {
                 id: "burst".into(),
-                matcher: Match::JoinBurst { gap_secs: 600, min: 5 },
+                matcher: Match::JoinBurst { gap_secs: 300, min: 12 },
                 tiers: None,
                 severity: Some(Severity::Major),
                 weight: Some(40),
-                pierces_trusted: false,
-                family: None,
-                armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) }),
-                exempt: Exempt::default(),
-                enforcement: Enforcement::Advisory,
-            },
-            // Copy-paste spam from ONE account. `cohort` (still with raid.rs)
-            // catches the other shape: many accounts sharing one line.
-            Rule {
-                id: "repeat".into(),
-                matcher: Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(REPEAT_BURST_SECS) },
-                tiers: Some(Tiers {
-                    per_message: vec![],
-                    per_window: vec![
-                        Rung { hits: 4, severity: Severity::Major, weight: 50, pierces_trusted: false },
-                        Rung { hits: 8, severity: Severity::Severe, weight: 85, pierces_trusted: false },
-                    ],
-                }),
-                severity: None,
-                weight: None,
                 pierces_trusted: false,
                 family: None,
                 armed_by: None,
@@ -120,10 +112,21 @@ pub fn default_policy() -> Policy {
                 matcher: Match::TenureLt { secs: 24 * 3600 },
                 tiers: None,
                 severity: Some(Severity::Notice),
-                weight: Some(20),
+                // Twelve, not twenty: an aggravator must AGGRAVATE, never carry a
+                // lone detector across a band on its own. At 20 a bare join flood
+                // reached 52 and the console staged a whole invite wave for
+                // removal; at 12 the same pair lands at 47 — a look, not a verdict
+                // — while a real raid, which trips a second INDEPENDENT detector,
+                // still stacks to the same 92 it always did.
+                weight: Some(12),
                 pierces_trusted: false,
                 family: None,
-                armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: None }),
+                armed_by: Some(ArmedBy {
+                    rule: "cohort".into(),
+                    scope: ArmScope::Subject,
+                    min_subjects: None,
+                    also: vec!["burst".into()],
+                }),
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
@@ -135,7 +138,12 @@ pub fn default_policy() -> Policy {
                 weight: Some(10),
                 pierces_trusted: false,
                 family: None,
-                armed_by: Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: None }),
+                armed_by: Some(ArmedBy {
+                    rule: "cohort".into(),
+                    scope: ArmScope::Subject,
+                    min_subjects: None,
+                    also: vec!["burst".into()],
+                }),
                 exempt: Exempt::default(),
                 enforcement: Enforcement::Advisory,
             },
@@ -983,6 +991,20 @@ mod tests {
         }
     }
 
+    /// Spam, mass-tagging and word lists are a community's taste, switched on
+    /// from a template when it wants them. Shipping any of them on by default
+    /// decides that taste for every community at once.
+    #[test]
+    fn the_defaults_judge_nothing_but_the_swarm() {
+        for r in &default_policy().rules {
+            let allowed = matches!(
+                r.matcher,
+                Match::Cohort { .. } | Match::JoinBurst { .. } | Match::TenureLt { .. } | Match::MessagesLte { .. }
+            );
+            assert!(allowed, "the defaults ship a non-raid rule: {} ({})", r.id, r.matcher.type_name());
+        }
+    }
+
     /// Whatever else changes, the swarm shape is the thing a community cannot
     /// hand-configure before it is attacked, so it stays in the defaults.
     #[test]
@@ -1045,17 +1067,59 @@ mod tests {
     fn every_weak_signal_is_armed_by_a_real_conviction() {
         let p = default_policy();
         for rule in &p.rules {
-            let is_aggravator = matches!(
-                rule.matcher,
-                Match::TenureLt { .. } | Match::MessagesLte { .. } | Match::JoinBurst { .. }
-            );
-            assert_eq!(
-                is_aggravator,
-                rule.armed_by.is_some(),
-                "rule {} must be armed if and only if it is a weak signal",
-                rule.id
+            // "Joined recently" and "has barely posted" describe most of a
+            // healthy community — the first live run convicted 147 of 155 on the
+            // second one alone. These are only ever true ABOUT someone a real
+            // detector already caught.
+            let describes_the_innocent =
+                matches!(rule.matcher, Match::TenureLt { .. } | Match::MessagesLte { .. });
+            if describes_the_innocent {
+                assert!(rule.armed_by.is_some(), "rule {} must never speak alone", rule.id);
+            }
+        }
+    }
+
+    /// The reason the second path exists: a raid whose accounts each say
+    /// something DIFFERENT never forms a cohort cluster, and before this every
+    /// downstream signal was armed by that one rule and stayed silent with it.
+    #[test]
+    fn the_aggravators_answer_to_either_detector() {
+        let p = default_policy();
+        for rule in &p.rules {
+            if !matches!(rule.matcher, Match::TenureLt { .. } | Match::MessagesLte { .. }) {
+                continue;
+            }
+            let arm = rule.armed_by.as_ref().expect("aggravators are armed");
+            let names: Vec<&str> =
+                std::iter::once(arm.rule.as_str()).chain(arm.also.iter().map(|s| s.as_str())).collect();
+            assert!(
+                names.contains(&"cohort") && names.contains(&"burst"),
+                "aggravator {} hangs off {:?} — one detector is one point of failure",
+                rule.id,
+                names
             );
         }
+    }
+
+    /// A join flood is now a conviction path of its own, so that it can catch a
+    /// raid whose accounts vary their text and `cohort` never clusters. The price
+    /// is that a freshly posted invite link looks the same, so the rule must stay
+    /// too weak to act on by itself: it takes an aggravator to lift it, and a
+    /// wave of real people who then TALK never supplies one.
+    #[test]
+    fn a_join_flood_alone_asks_for_a_look_never_for_an_action() {
+        let burst = default_policy()
+            .rules
+            .iter()
+            .find(|r| matches!(r.matcher, Match::JoinBurst { .. }))
+            .cloned()
+            .expect("the defaults carry a join-flood rule");
+        let weight = burst.weight.expect("an unarmed join flood needs a weight");
+        let band = super::super::combine::band(super::super::combine::conf_pm(&[weight]));
+        assert!(
+            matches!(band, Band::Clear | Band::Noted | Band::Watch),
+            "a join flood alone reached {band:?} — an invite link would be actioned as a raid"
+        );
     }
 
     /// Round-tripping the bytes must not change them: the hash is over exactly

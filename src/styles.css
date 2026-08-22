@@ -20239,7 +20239,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .pol-card:hover { border-color: var(--accent-color, #59fcb3); transform: translateY(-1px); }
 .pol-card-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
 .pol-card-desc { font-size: 12px; color: var(--text-muted, #8b8b8b); line-height: 1.45; }
-.pol-card-eg { font-size: 11px; color: var(--text-muted, #8b8b8b); font-style: italic; margin-top: 6px; opacity: 0.85; }
+.pol-card-eg { font-size: 11px; line-height: 1.2; color: var(--text-muted, #8b8b8b); font-style: italic; margin-top: 6px; opacity: 0.85; }
 
 /* Editor */
 .pol-editor { display: flex; flex-direction: column; gap: 14px; }
@@ -20996,4 +20996,21 @@ body.profile-switcher-editing .profile-switcher-add {
 #chat-contact,
 .chat-contact {
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+}
+
+/* A span is a number with a unit, not a free-text field. */
+.pol-seconds {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pol-seconds-input {
+    width: 96px;
+    flex: 0 0 auto;
+}
+
+.pol-seconds-unit {
+    font-size: 12.5px;
+    color: rgba(255, 255, 255, 0.42);
 }

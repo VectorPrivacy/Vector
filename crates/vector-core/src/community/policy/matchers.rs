@@ -227,6 +227,54 @@ pub fn link_hits(text: &str, patterns: &[String], exempts: &[&ExemptPatterns]) -
         .collect()
 }
 
+/// How many distinct people a message named.
+///
+/// Vector has no mention TAG: a mention is an npub written in the body, which the
+/// renderer turns into a pill. The only `p` tags a community message carries are
+/// its reply parent and reaction target, so counting those scored 1 on an
+/// ordinary reply and 0 on a message that named fifteen people.
+///
+/// Grammar comes from [`crate::types::extract_mentions`] — the same scanner the
+/// rest of the app already trusts, rather than a second opinion on what an npub
+/// looks like. Distinct people, not occurrences: naming someone three times is
+/// still one person called, and a rule about mass-pinging cares how many were
+/// pulled in.
+pub fn count_mentions(text: &str) -> u32 {
+    let mut seen: Vec<&str> = Vec::new();
+    for npub in crate::types::extract_mentions(text) {
+        if seen.contains(&npub) {
+            continue;
+        }
+        // One npub can appear twice: linked once and called once. Being linked
+        // anywhere does not cancel being called somewhere else.
+        if text.match_indices(npub).any(|(at, _)| !is_linked(text, at)) {
+            seen.push(npub);
+        }
+    }
+    seen.len() as u32
+}
+
+/// Whether the npub at `at` is part of a URL rather than someone being called.
+///
+/// `extract_mentions` rejects only an ALPHANUMERIC neighbour, which leaves
+/// `…/profile/npub1…` looking like a mention. Linking to a profile is not
+/// pinging its owner, so the policy engine applies the frontend's wider guard
+/// here rather than tightening a shared helper other callers rely on.
+fn is_linked(text: &str, at: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut lead = at;
+    if lead >= 1 && bytes[lead - 1] == b'@' {
+        lead -= 1;
+    } else if lead >= 6 && text.get(lead - 6..lead).is_some_and(|p| p.eq_ignore_ascii_case("nostr:")) {
+        lead -= 6;
+    }
+    if lead == 0 {
+        return false;
+    }
+    let prev = text[..lead].chars().next_back().unwrap_or(' ');
+    matches!(prev, '/' | '=' | '?' | '&' | '#' | '%' | '.' | '-' | '_')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +361,57 @@ mod tests {
         let deny = pats(&["bit.ly", "tr.ee"]);
         assert_eq!(link_hits("see bit.ly/x", &deny, &[]), vec!["bit.ly"]);
         assert!(link_hits("see github.com/x", &deny, &[]).is_empty());
+    }
+
+    /// Built, not typed: a hand-counted 58-char literal is a test that fails for
+    /// the wrong reason.
+    fn npub_of(c: char) -> String {
+        format!("npub1{}", std::iter::repeat(c).take(58).collect::<String>())
+    }
+
+    #[test]
+    fn a_mention_is_an_npub_in_the_body_however_it_is_written() {
+        let a = npub_of('q');
+        assert_eq!(count_mentions(&format!("hey @{a} look")), 1);
+        assert_eq!(count_mentions(&format!("hey nostr:{a} look")), 1);
+        assert_eq!(count_mentions(&format!("hey {a} look")), 1);
+    }
+
+    #[test]
+    fn naming_one_person_twice_is_still_one_person() {
+        let a = npub_of('q');
+        let b = npub_of('z');
+        assert_eq!(count_mentions(&format!("@{a} and again @{a}")), 1);
+        assert_eq!(count_mentions(&format!("@{a} and @{b}")), 2);
+    }
+
+    /// The shape the rule exists for.
+    #[test]
+    fn a_mass_ping_counts_everyone_it_named() {
+        let a = npub_of('q');
+        let b = npub_of('z');
+        assert_eq!(count_mentions(&format!("@{a} @{b} @{a} ping")), 2);
+    }
+
+    /// A profile URL is not someone calling your name, and neither is an npub
+    /// welded to a word.
+    #[test]
+    fn an_npub_inside_a_url_or_a_word_is_not_a_mention() {
+        let a = npub_of('q');
+        assert_eq!(count_mentions(&format!("https://vectorapp.io/profile/{a}")), 0);
+        assert_eq!(count_mentions(&format!("x{a}")), 0);
+        assert_eq!(count_mentions(&format!("?p={a}")), 0);
+    }
+
+    #[test]
+    fn a_malformed_npub_is_not_a_mention() {
+        assert_eq!(count_mentions("npub1short"), 0);
+        // 59 data chars: a longer string that merely starts like an npub.
+        assert_eq!(count_mentions(&format!("{}q", npub_of('q'))), 0);
+    }
+
+    #[test]
+    fn plain_text_names_nobody() {
+        assert_eq!(count_mentions("just a normal message @everyone"), 0);
     }
 }

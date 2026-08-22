@@ -1608,11 +1608,11 @@ pub fn community_policy_messages(community_id: &str, limit: usize) -> Result<Vec
     }
     let text = crate::stored_event::event_kind::PRIVATE_DIRECT_MESSAGE;
     let chat_ints: Vec<i64> = chat_to_channel.keys().copied().collect();
-    let rows: Vec<(String, String, i64, i64, String, String)> = {
+    let rows: Vec<(String, String, i64, i64, String)> = {
         let conn = super::get_db_connection_guard_static()?;
         let placeholders = chat_ints.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT id, npub, chat_id, created_at, content, tags FROM events \
+            "SELECT id, npub, chat_id, created_at, content FROM events \
              WHERE chat_id IN ({placeholders}) AND kind = {text} \
                AND npub IS NOT NULL AND npub != '' \
              ORDER BY created_at DESC LIMIT {limit}"
@@ -1626,7 +1626,6 @@ pub fn community_policy_messages(community_id: &str, limit: usize) -> Result<Vec
                     r.get::<_, i64>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, String>(4)?,
-                    r.get::<_, String>(5).unwrap_or_default(),
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -1634,14 +1633,14 @@ pub fn community_policy_messages(community_id: &str, limit: usize) -> Result<Vec
     };
     let mut out: Vec<PolicyMessage> = rows
         .into_iter()
-        .filter_map(|(id, npub, chat_id, created_at, content, tags)| {
+        .filter_map(|(id, npub, chat_id, created_at, content)| {
             let channel_id = chat_to_channel.get(&chat_id)?.clone();
             let content = crate::crypto::maybe_decrypt_text(&content);
-            // A mention is a p-tag: inline "@name" is renderer-dependent and
-            // never counts.
-            let mentions = serde_json::from_str::<Vec<Vec<String>>>(&tags)
-                .map(|t| t.iter().filter(|tag| tag.first().is_some_and(|k| k == "p")).count() as u32)
-                .unwrap_or(0);
+            // Vector has no mention tag: a mention is an npub in the body, which
+            // the renderer turns into a pill. Counting `p` tags counted the reply
+            // parent and the reaction target instead — 1 on an ordinary reply, 0
+            // on a message that named fifteen people.
+            let mentions = crate::community::policy::matchers::count_mentions(&content);
             Some(PolicyMessage {
                 id,
                 npub,

@@ -14,7 +14,7 @@ use super::types::Severity;
 pub struct Dial {
     pub key: &'static str,
     pub label: &'static str,
-    pub kind: &'static str, // "strictness" | "wordlist" | "domainlist" | "channels" | "toggle"
+    pub kind: &'static str, // "strictness" | "wordlist" | "domainlist" | "channels" | "summary" | "text" | "rules" | "seconds"
     pub hint: &'static str,
 }
 
@@ -172,12 +172,15 @@ pub fn describe_rule(r: &Rule) -> RuleSummary {
             },
         ),
         Match::Rate { per_secs } => (
-            "Posting rate".to_string(),
-            format!("Messages counted over any {} seconds.", per_secs),
+            "Posting too fast".to_string(),
+            format!(
+                "One account's messages counted over any {} seconds, whatever they say.",
+                per_secs
+            ),
         ),
         Match::Mentions {} => (
-            "Mentions".to_string(),
-            "How many people one message tags.".to_string(),
+            "Mass tagging".to_string(),
+            "How many DISTINCT people one message names. Tagging the same person repeatedly counts once.".to_string(),
         ),
         Match::Cohort { min, .. } => (
             "Many accounts, one line".to_string(),
@@ -270,6 +273,32 @@ pub fn rule_kinds() -> Vec<RuleKind> {
                 "repeat",
                 Match::Repeat { normalize: Normalize::Skeleton, within_secs: Some(super::harness::REPEAT_BURST_SECS) },
                 tiers(vec![], vec![rung(4, Severity::Major, 50), rung(8, Severity::Severe, 85)]),
+            ),
+        },
+        RuleKind {
+            id: "mentions",
+            label: "Mass tagging",
+            description: "One message naming a crowd. Counts distinct people, so twenty pings at one person is one person — annoying, but not a raid.",
+            input: "none",
+            input_label: "",
+            input_hint: "",
+            rule: rule(
+                "mentions",
+                Match::Mentions {},
+                tiers(vec![rung(6, Severity::Major, 50), rung(12, Severity::Severe, 85)], vec![]),
+            ),
+        },
+        RuleKind {
+            id: "rate",
+            label: "Posting too fast",
+            description: "One account posting faster than a person reasonably types, whatever they are saying. Catches a spammer who varies their text just enough to look different every time.",
+            input: "seconds",
+            input_label: "Over how many seconds",
+            input_hint: "The span it counts within. 10 catches a burst; 60 catches a sustained flood.",
+            rule: rule(
+                "rate",
+                Match::Rate { per_secs: 10 },
+                tiers(vec![], vec![rung(6, Severity::Major, 50), rung(12, Severity::Severe, 85)]),
             ),
         },
         RuleKind {
@@ -382,6 +411,50 @@ pub fn all() -> Vec<Preset> {
             ),
         },
         Preset {
+            id: "mass_tagging",
+            name: "Mass Tagging",
+            description: "One message that names a crowd, rather than a person.",
+            example: "a post tagging twelve people at once",
+            caveat: "Counts distinct people per message: pinging one person twenty times reads as one, because it is.",
+            dials: vec![
+                Dial { key: "strictness", label: "Sensitivity", kind: "strictness",
+                       hint: "How much it takes to trip a rule, and how confident the result is." },
+                Dial { key: "exempt_channels", label: "Allowed in these channels", kind: "channels",
+                       hint: "Announcement channels where tagging everyone is the point." },
+            ],
+            policy: base(
+                "Mass Tagging",
+                vec![rule(
+                    "mentions",
+                    Match::Mentions {},
+                    tiers(vec![rung(6, Severity::Major, 50), rung(12, Severity::Severe, 85)], vec![]),
+                )],
+                168,
+            ),
+        },
+        Preset {
+            id: "rate_limit",
+            name: "Rate Limit",
+            description: "Too many messages too quickly from one account, whatever they say.",
+            example: "twelve messages in ten seconds",
+            caveat: "Counts messages, not content: a fast typer in a lively channel can trip it, so preview before enabling.",
+            dials: vec![
+                Dial { key: "per_secs", label: "Over how many seconds", kind: "seconds",
+                       hint: "The span it counts within. 10 catches a burst; 60 catches a sustained flood." },
+                Dial { key: "strictness", label: "Sensitivity", kind: "strictness",
+                       hint: "How much it takes to trip a rule, and how confident the result is." },
+            ],
+            policy: base(
+                "Rate Limit",
+                vec![rule(
+                    "rate",
+                    Match::Rate { per_secs: 10 },
+                    tiers(vec![], vec![rung(6, Severity::Major, 50), rung(12, Severity::Severe, 85)]),
+                )],
+                168,
+            ),
+        },
+        Preset {
             id: "blank",
             name: "Start from scratch",
             description: "An empty policy. Name it, add the rules you want, preview before anything runs.",
@@ -423,11 +496,15 @@ mod tests {
     fn no_preset_lets_a_weak_signal_convict_alone() {
         for p in all() {
             for r in &p.policy.rules {
-                let weak = matches!(
-                    r.matcher,
-                    Match::TenureLt { .. } | Match::MessagesLte { .. } | Match::JoinBurst { .. }
-                );
-                assert_eq!(weak, r.armed_by.is_some(), "preset {} rule {} armed iff weak", p.id, r.id);
+                // A join flood may stand alone (it is a raid path in its own
+                // right, kept below the acting bands); "joined recently" and
+                // "barely posted" describe most of a healthy community and never
+                // may.
+                let describes_the_innocent =
+                    matches!(r.matcher, Match::TenureLt { .. } | Match::MessagesLte { .. });
+                if describes_the_innocent {
+                    assert!(r.armed_by.is_some(), "preset {} rule {} must never speak alone", p.id, r.id);
+                }
             }
         }
     }

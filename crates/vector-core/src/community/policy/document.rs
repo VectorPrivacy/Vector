@@ -115,6 +115,15 @@ pub struct ArmedBy {
     pub scope: ArmScope,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_subjects: Option<u32>,
+    /// Alternatives: the rule is armed if `rule` OR any of these fired.
+    ///
+    /// One detector is one point of failure. Without this an aggravator hangs off
+    /// a single rule, so a raid that rule cannot see silences every downstream
+    /// signal too. A policy that sets it MUST declare `requires: ["armed_by_any"]`
+    /// — an older engine would ignore the alternatives and convict less under an
+    /// identical policy_hash.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,7 +398,7 @@ pub struct Policy {
 pub const FORMAT: u32 = 1;
 
 /// Keys this engine understands in `requires`.
-const KNOWN_REQUIRED: &[&str] = &["emoji_codes", "shields", "window", "exempt", "repeat_within"];
+const KNOWN_REQUIRED: &[&str] = &["emoji_codes", "shields", "window", "exempt", "repeat_within", "armed_by_any"];
 
 impl Policy {
     /// Validate against the frozen caps and semantics. Returns the FIRST
@@ -435,11 +444,16 @@ impl Policy {
         // armed_by resolves within this policy, one level only.
         for r in &self.rules {
             let Some(a) = &r.armed_by else { continue };
-            let Some(target) = self.rules.iter().find(|t| t.id == a.rule) else {
-                return Err(code::ARMED_BY_UNKNOWN_RULE);
-            };
-            if target.armed_by.is_some() {
-                return Err(code::ARMED_BY_NESTED);
+            // Every alternative is held to the same bar as the primary: a named
+            // rule that does not exist, or one that is itself armed, is a chain
+            // this engine refuses to resolve.
+            for id in std::iter::once(&a.rule).chain(a.also.iter()) {
+                let Some(target) = self.rules.iter().find(|t| &t.id == id) else {
+                    return Err(code::ARMED_BY_UNKNOWN_RULE);
+                };
+                if target.armed_by.is_some() {
+                    return Err(code::ARMED_BY_NESTED);
+                }
             }
             if a.scope == ArmScope::Subject && a.min_subjects.is_some() {
                 return Err(code::ARMED_BY_MIN_SUBJECTS_WITH_SUBJECT_SCOPE);
@@ -831,20 +845,20 @@ mod tests {
             weight: Some(40),
             pierces_trusted: false,
             family: None,
-            armed_by: Some(ArmedBy { rule: "nope".into(), scope: ArmScope::Community, min_subjects: Some(3) }),
+            armed_by: Some(ArmedBy { rule: "nope".into(), scope: ArmScope::Community, min_subjects: Some(3), also: vec![] }),
             exempt: Exempt::default(),
             enforcement: Enforcement::Advisory,
         };
         assert_eq!(err_code(&base(vec![cohort_rule(), burst.clone()])), code::ARMED_BY_UNKNOWN_RULE);
 
-        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: Some(3) });
+        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Subject, min_subjects: Some(3), also: vec![] });
         assert_eq!(
             err_code(&base(vec![cohort_rule(), burst.clone()])),
             code::ARMED_BY_MIN_SUBJECTS_WITH_SUBJECT_SCOPE,
             "a subject-scoped arm has no count to threshold"
         );
 
-        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3) });
+        burst.armed_by = Some(ArmedBy { rule: "cohort".into(), scope: ArmScope::Community, min_subjects: Some(3), also: vec![] });
         assert!(base(vec![cohort_rule(), burst]).validate().is_ok());
     }
 
