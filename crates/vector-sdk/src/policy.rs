@@ -6,6 +6,28 @@
 //! the difference between a bot that flags and a bot that removes people is one
 //! forgotten default.
 //!
+//! # The whole model, in four questions
+//!
+//! | you ask | you read |
+//! |---|---|
+//! | did something happen? | a [`Finding`] on the [`Verdict`] |
+//! | how bad did this community call it? | `finding.severity` |
+//! | may I act on it alone? | `finding.is_proven()` / [`Verdicts::proven`] |
+//! | am I allowed to touch this person? | `verdict.is_shielded()` |
+//!
+//! **Proven vs unproven is the axis everything turns on**, and it is not a
+//! confidence level. A raid cohort reads confidence 90 and proven 0: the engine
+//! is certain something is happening and nobody else could replay it. Proven
+//! evidence is byte-checkable by any client holding the same policy and
+//! history; unproven evidence is a judgement about a pattern, true only of the
+//! window it was measured over.
+//!
+//! Inference may not sentence. Who the second judge is — a person, a model,
+//! your own ruleset — is entirely yours to choose.
+//!
+//! The numbers behind all of this (`confidence`, `proven`, weights, bands) are
+//! there to read and never required: nothing above asks you to pick one.
+//!
 //! ```no_run
 //! # use vector_sdk::{VectorBot, policy::*};
 //! # async fn demo(bot: &VectorBot) -> vector_sdk::Result<()> {
@@ -495,6 +517,7 @@ mod tests {
             band: band.into(),
             shield: shield.into(),
             reasons: vec![],
+            findings: vec![],
             messages: 0,
             tenure_secs: 0,
         }
@@ -513,8 +536,8 @@ mod tests {
             ],
             raid_detected: true,
         };
-        assert_eq!(vs.actionable().count(), 1, "only the provable, unshielded one");
-        assert_eq!(vs.needs_human().count(), 1, "the cohort goes to a person");
+        assert_eq!(vs.actionable().count(), 1, "only the proven, unshielded one");
+        assert_eq!(vs.unproven().count(), 1, "the cohort goes to a second judge");
     }
 
     /// A bot that removes people must say so. The default cannot be the
@@ -551,6 +574,78 @@ pub struct Verdicts {
     pub(crate) raid_detected: bool,
 }
 
+/// One rule that convicted, in machine-readable form.
+///
+/// `reasons` on the [`Verdict`] is what a PERSON reads. This is what a program
+/// acts on: a bot ramping its response — a warning for a swear, a ban for a
+/// scam link — has to know which rule fired, and no amount of parsing English
+/// gets there safely.
+#[derive(Debug, Clone)]
+pub struct Finding {
+    /// Stable per (policy, rule, scope, rung, subject) and deliberately NOT per
+    /// hit: dedup on this across polls, since a verdict re-reports the same
+    /// conviction every time. Escalating a rung mints a new id, which is the
+    /// right moment to act again.
+    pub conviction_id: String,
+    /// The law it was reached under. Map it to your own id via
+    /// [`Policies::list`].
+    pub policy_hash: String,
+    pub rule_id: String,
+    /// per_message · per_window · whole
+    pub scope: String,
+    /// deterministic · heuristic. Only deterministic feeds `proven`, so only
+    /// deterministic is safe to act on unattended.
+    pub basis: String,
+    /// notice · minor · major · severe. The POLICY AUTHOR's gravity, never a
+    /// score the engine computed.
+    pub severity: String,
+    pub rung: u8,
+    pub hits: u32,
+    /// The declared rung weight, not a marginal effect on the total.
+    pub weight: u32,
+    /// What actually matched: the words, the domains. Empty for rules that cite
+    /// no fragment (rate, mentions, repeat).
+    pub detail: Vec<String>,
+    /// The messages this cited, resolvable with [`crate::VectorBot::message`]
+    /// and hideable with [`crate::Channel::hide`]. May be shorter than
+    /// `citation_count`, and empty for citation-less rules (tenure, join burst).
+    pub messages: Vec<String>,
+    /// True count before truncation, so a trimmed exhibit list never reads as
+    /// fewer offenses.
+    pub citation_count: u32,
+}
+
+fn strs(v: &serde_json::Value) -> Vec<String> {
+    v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+fn finding_of(f: &serde_json::Value) -> Finding {
+    let s = |k: &str| f[k].as_str().unwrap_or_default().to_string();
+    Finding {
+        conviction_id: s("conviction_id"),
+        policy_hash: s("policy_hash"),
+        rule_id: s("rule_id"),
+        scope: s("scope"),
+        basis: s("basis"),
+        severity: s("severity"),
+        rung: f["rung"].as_u64().unwrap_or(0) as u8,
+        hits: f["hits"].as_u64().unwrap_or(0) as u32,
+        weight: f["weight"].as_u64().unwrap_or(0) as u32,
+        detail: strs(&f["detail"]),
+        messages: strs(&f["messages"]),
+        citation_count: f["citation_count"].as_u64().unwrap_or(0) as u32,
+    }
+}
+
+impl Finding {
+    /// This rule's evidence is replayable by anyone holding the same policy and
+    /// history, so it counts toward the member's `proven` score. Inference does
+    /// not: it is loud enough to route somewhere, never enough to sentence.
+    pub fn is_proven(&self) -> bool {
+        self.basis == "deterministic"
+    }
+}
+
 /// One member's standing right now.
 #[derive(Debug, Clone)]
 pub struct Verdict {
@@ -567,6 +662,9 @@ pub struct Verdict {
     pub shield: String,
     /// Evidence in words: "Posted the same message as 87 other members".
     pub reasons: Vec<String>,
+    /// The same evidence a program can branch on. One entry per unsuppressed
+    /// conviction; empty for a member nothing convicted.
+    pub findings: Vec<Finding>,
     pub messages: u64,
     pub tenure_secs: u64,
 }
@@ -589,29 +687,53 @@ impl Verdict {
         self.confidence
     }
 
-    /// Safe to act on unattended: something REPLAYABLE convicted them, not an
-    /// inference. A cohort reads 85 confidence and 0 proven — strong enough to
-    /// show a human, never strong enough to remove someone on its own.
-    pub fn is_provable(&self) -> bool {
+    /// Enough REPLAYABLE evidence to act on alone. A cohort reads 85 confidence
+    /// and 0 proven: the engine is convinced, and nobody else could check it.
+    pub fn is_proven(&self) -> bool {
         self.proven >= 50
     }
 
+    #[deprecated(since = "0.10.0", note = "renamed to `is_proven` — the question is whether it IS proven, not whether it could be")]
+    pub fn is_provable(&self) -> bool {
+        self.is_proven()
+    }
+
     /// The community granted them standing; leave them to a human.
+    ///
+    /// `indeterminate` is NOT standing: it means tenure could not be
+    /// established, and such a subject is judged exactly as if unshielded.
     pub fn is_shielded(&self) -> bool {
-        self.shield != "none"
+        matches!(self.shield.as_str(), "trusted" | "protected")
     }
 }
 
 impl Verdicts {
-    /// Members with provable convictions in the acting band — what a bot may
-    /// handle by itself.
-    pub fn actionable(&self) -> impl Iterator<Item = &Verdict> {
-        self.members.iter().filter(|m| m.is_provable() && m.band == "alert" && !m.is_shielded())
+    /// Convicted on replayable evidence. Safe to act on alone.
+    pub fn proven(&self) -> impl Iterator<Item = &Verdict> {
+        self.members.iter().filter(|m| m.is_proven() && !m.is_shielded())
     }
 
-    /// Strong patterns without proof: the raid case. Show a human.
+    /// Convicted on inference: the engine is convinced and nobody else could
+    /// check it. A raid cohort is the standard case.
+    ///
+    /// Route these to whatever judgement you have — a person, a model, your own
+    /// ruleset. The engine's rule is that INFERENCE MAY NOT SENTENCE; it says
+    /// nothing about who the second judge has to be.
+    pub fn unproven(&self) -> impl Iterator<Item = &Verdict> {
+        self.members.iter().filter(|m| !m.is_proven() && (m.band == "alert" || m.band == "flagged"))
+    }
+
+    #[deprecated(since = "0.10.0", note = "renamed to `unproven` — it names the EVIDENCE, not who has to look at it")]
     pub fn needs_human(&self) -> impl Iterator<Item = &Verdict> {
-        self.members.iter().filter(|m| !m.is_provable() && (m.band == "alert" || m.band == "flagged"))
+        self.unproven()
+    }
+
+    /// The opinionated default: proven, unshielded, and grave enough to act on
+    /// without asking. A composition of [`proven`](Self::proven) and a band
+    /// floor, not a primitive — a bot with its own thresholds should build them
+    /// from `proven()` and [`Verdict::findings`] instead.
+    pub fn actionable(&self) -> impl Iterator<Item = &Verdict> {
+        self.members.iter().filter(|m| m.is_proven() && m.band == "alert" && !m.is_shielded())
     }
 
     pub fn all(&self) -> impl Iterator<Item = &Verdict> {
@@ -669,18 +791,16 @@ impl Community {
                 confidence: m["score"].as_u64().unwrap_or(0) as u32,
                 proven: m["proven"].as_u64().unwrap_or(0) as u32,
                 band: m["band"].as_str().unwrap_or("clear").to_string(),
-                shield: if m["is_owner"].as_bool().unwrap_or(false) || m["is_admin"].as_bool().unwrap_or(false) {
-                    "protected".into()
-                } else {
-                    match m["verdict"].as_str() {
-                        Some("trusted") => "trusted".to_string(),
-                        _ => "none".to_string(),
-                    }
-                },
+                // The engine's own shield, not an inference from the console's
+                // word: "suspect" is what to SHOW, and a Trusted member can carry
+                // a conviction, so reading the word would strip their standing at
+                // exactly the moment it matters.
+                shield: m["shield"].as_str().unwrap_or("none").to_string(),
                 reasons: m["reasons"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|r| r.as_str().map(String::from)).collect())
                     .unwrap_or_default(),
+                findings: m["findings"].as_array().map(|a| a.iter().map(finding_of).collect()).unwrap_or_default(),
                 messages: m["messages"].as_u64().unwrap_or(0),
                 tenure_secs: m["tenure_secs"].as_u64().unwrap_or(0),
             })

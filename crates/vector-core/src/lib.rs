@@ -999,6 +999,43 @@ impl VectorCore {
         }
     }
 
+    /// One message by id, with the chat it was said in. Reads STATE first, then
+    /// the store for a row that has paged out of the loaded window.
+    ///
+    /// This is what a moderation citation needs: it names a message id and
+    /// nothing else, so the room has to come back with it. `None` is an
+    /// ordinary answer — a citation outlives its message (a delete, a hide, an
+    /// expiry, history never synced), and callers must read absence as absence
+    /// rather than as a fault.
+    pub async fn get_message(&self, message_id: &str) -> Option<(String, Message)> {
+        {
+            let state = state::STATE.lock().await;
+            if let Some((chat, msg)) = state.find_message(message_id) {
+                return Some((chat.id.clone(), msg));
+            }
+        }
+        db::events::get_message_by_id(message_id).await.ok().flatten()
+    }
+
+    /// Every message carrying an attachment with this content hash, newest
+    /// first. `Attachment.id` IS that hash, and so is a citation's
+    /// `content_hash`, so a classifier verdict about a blob resolves straight
+    /// back to what carried it.
+    ///
+    /// A list, not one answer: one blob rides many messages — a forward, a
+    /// re-post, or forty accounts posting the same image, which is exactly the
+    /// case worth being able to see whole.
+    pub async fn get_messages_with_attachment(&self, content_hash: &str) -> Vec<(String, Message)> {
+        let Ok(ids) = db::attachments::events_with_attachment_hash(content_hash) else { return Vec::new() };
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(found) = self.get_message(&id).await {
+                out.push(found);
+            }
+        }
+        out
+    }
+
     /// Cursor-paged local read: up to `limit` messages strictly before the
     /// `(at_ms, id)` cursor, chronological. `None` returns the newest `limit`.
     ///

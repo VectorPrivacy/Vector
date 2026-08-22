@@ -1375,6 +1375,36 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
 ///
 /// Returns ASC by `created_at` (oldest first), composed with reactions/edits/
 /// attachments. Errs if the anchor id isn't in the DB so the caller can fall back.
+/// One message by its id, composed exactly as the pagers compose theirs —
+/// attachments, reactions, edits and reply context — with the chat it was said
+/// in. A citation names a message, never the room, so the room comes back too.
+///
+/// `None` is an ordinary answer: a citation outlives its message (a delete, a
+/// moderation hide, an expiry, or simply history this account never synced),
+/// and a resolver that errored on absence would make every one of those a fault.
+pub async fn get_message_by_id(message_id: &str) -> Result<Option<(String, Message)>, String> {
+    let kinds = [event_kind::CHAT_MESSAGE, event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT]
+        .map(|k| k.to_string())
+        .join(",");
+    let found = {
+        let conn = super::get_db_connection_guard_static()?;
+        // Column order matches `parse_event_row`; the chat identifier rides along at 15.
+        let sql = format!(
+            "SELECT e.id, e.kind, e.chat_id, e.user_id, e.content, e.tags, e.reference_id, \
+             e.created_at, e.received_at, e.mine, e.pending, e.failed, e.wrapper_event_id, e.npub, \
+             e.preview_metadata, c.chat_identifier \
+             FROM events e JOIN chats c ON c.id = e.chat_id \
+             WHERE e.id = ?1 AND e.kind IN ({kinds})"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare get_message_by_id: {e}"))?;
+        stmt.query_row(rusqlite::params![message_id], |r| Ok((parse_event_row(r)?, r.get::<_, String>(15)?)))
+            .optional()
+            .map_err(|e| format!("query get_message_by_id: {e}"))?
+    };
+    let Some((event, chat_identifier)) = found else { return Ok(None) };
+    Ok(compose_message_views(vec![event]).await?.pop().map(|m| (chat_identifier, m)))
+}
+
 pub async fn get_messages_around(
     chat_id: i64,
     anchor_id: &str,
@@ -1917,6 +1947,84 @@ mod tests {
         assert_eq!(reply.replied_to_npub.as_deref(), Some(author.as_str()), "and its parent's author");
         assert!(plain.replied_to_content.is_none(), "a non-reply is untouched");
         assert!(orphan.replied_to_content.is_none(), "an unresolvable parent leaves the quote empty");
+    }
+
+    /// A moderation citation names a message id and nothing else, so the room
+    /// has to come back with it.
+    #[tokio::test]
+    async fn a_message_resolves_by_id_with_the_chat_it_was_said_in() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_resolve_by_id";
+        let author = make_test_npub(91_001);
+
+        let mut msg = Message::default();
+        msg.id = "cited_evt".to_string();
+        msg.content = "the line a rule matched".to_string();
+        msg.npub = Some(author.clone());
+        msg.at = now_secs();
+        save_message(chat, &msg).await.unwrap();
+
+        let (found_chat, found) = get_message_by_id("cited_evt").await.unwrap().expect("stored message resolves");
+        assert_eq!(found_chat, chat, "the citation gets the room back, not just the message");
+        assert_eq!(found.content, "the line a rule matched", "and the text, so a mod log can quote it");
+        assert_eq!(found.npub.as_deref(), Some(author.as_str()));
+    }
+
+    /// A citation outlives its message: deletes, moderation hides, expiry, or
+    /// history this device never synced. Absence is an answer, not a fault — a
+    /// resolver that errored would turn every one of those into a failure.
+    #[tokio::test]
+    async fn a_missing_message_resolves_to_none_rather_than_erroring() {
+        let (_tmp, _guard) = init_test_db();
+        assert!(get_message_by_id("never_stored_evt").await.unwrap().is_none());
+    }
+
+    /// One blob rides many messages — a forward, a re-post, or forty accounts
+    /// posting the same image, which is the case most worth seeing whole.
+    #[tokio::test]
+    async fn an_attachment_hash_finds_every_message_that_carried_it() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_same_blob";
+        let hash = "cc".repeat(32);
+
+        // `Message.at` is MILLISECONDS: seconds-apart values collapse to one
+        // created_at and leave the order to chance.
+        let now_ms = now_secs() * 1000;
+        for (id, at) in [("blob_older", now_ms - 500_000), ("blob_newer", now_ms)] {
+            let mut msg = Message::default();
+            msg.id = id.to_string();
+            msg.npub = Some(make_test_npub(92_001));
+            msg.at = at;
+            msg.attachments = vec![crate::types::Attachment {
+                id: hash.clone(),
+                extension: "png".into(),
+                name: "poster.png".into(),
+                ..Default::default()
+            }];
+            save_message(chat, &msg).await.unwrap();
+        }
+
+        let carriers = crate::db::attachments::events_with_attachment_hash(&hash).unwrap();
+        assert_eq!(carriers, vec!["blob_newer", "blob_older"], "every carrier, newest first");
+
+        // Same instant, which is what a raid looks like: the order must still be
+        // total rather than whatever the join happens to yield.
+        for id in ["tie_a", "tie_b"] {
+            let mut msg = Message::default();
+            msg.id = id.to_string();
+            msg.npub = Some(make_test_npub(92_002));
+            msg.at = now_ms;
+            msg.attachments = vec![crate::types::Attachment { id: hash.clone(), ..Default::default() }];
+            save_message(chat, &msg).await.unwrap();
+        }
+        let a = crate::db::attachments::events_with_attachment_hash(&hash).unwrap();
+        let b = crate::db::attachments::events_with_attachment_hash(&hash).unwrap();
+        assert_eq!(a, b, "a same-instant cluster orders the same way every read");
+        assert_eq!(a.len(), 4, "and every carrier is still listed");
+        assert!(
+            crate::db::attachments::events_with_attachment_hash(&"ab".repeat(32)).unwrap().is_empty(),
+            "a hash nobody posted finds nothing"
+        );
     }
 
     /// An empty page (or one with no replies at all) must not query or error — the sync path

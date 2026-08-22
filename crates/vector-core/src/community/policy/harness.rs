@@ -151,15 +151,6 @@ pub fn default_policy() -> Policy {
     }
 }
 
-/// Link shorteners and redirectors a scam campaign hides behind. Bundled with
-/// the build (a moderation feature must not phone home), so it is only as fresh
-/// as the release.
-const SHORTENERS: &[&str] = &[
-    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "adf.ly", "bit.do", "cutt.ly",
-    "rebrand.ly", "shorturl.at", "rb.gy", "tiny.cc", "shorte.st", "bc.vc", "clck.ru", "soo.gd", "s2r.co",
-    "tr.ee", "dub.sh", "e.vg", "paw.wf", "shm.to", "snl.ink", "surl.li", "url9.de", "waffl.link",
-];
-
 /// Everything an evaluation needs, assembled from local state once: the engine
 /// inputs and the display facts the console shows beside each verdict. Both the
 /// console and the side-by-side diff read this, so they can never disagree
@@ -499,6 +490,13 @@ pub struct MemberFacts {
     pub is_me: bool,
 }
 
+/// A wire-frozen enum as the console's string. Serde, never `Debug`: the wire
+/// vocabulary is snake_case, and `format!("{:?}")` renders `PerMessage` as
+/// "permessage" — a consumer matching on it would silently never match.
+fn wire(v: impl serde::Serialize) -> String {
+    serde_json::to_value(v).ok().and_then(|j| j.as_str().map(String::from)).unwrap_or_default()
+}
+
 /// Turn an engine report into the shape the moderation console already speaks,
 /// so the panel changes its SOURCE without changing its contract. `raid.rs`
 /// keeps running beside it (see [`run_side_by_side`]) until the two have agreed
@@ -515,11 +513,14 @@ pub fn console_report(
     }
     // Every law is scored independently, so the console folds ACROSS policies:
     // a member's worst standing and every conviction any policy reached.
-    let mut by_subject: std::collections::BTreeMap<String, Vec<&SubjectReport>> = std::collections::BTreeMap::new();
+    // Paired with its law: a conviction has to name the policy it came from, and
+    // the hash lives on the PolicyReport rather than the subject.
+    let mut by_subject: std::collections::BTreeMap<String, Vec<(&Hash32, &SubjectReport)>> =
+        std::collections::BTreeMap::new();
     for pr in &report.policies {
         for s in &pr.subjects {
             if let Some(b32) = PublicKey::from_slice(&s.subject.0).ok().and_then(|p| p.to_bech32().ok()) {
-                by_subject.entry(b32).or_default().push(s);
+                by_subject.entry(b32).or_default().push((&pr.policy_hash, s));
             }
         }
     }
@@ -534,17 +535,37 @@ pub fn console_report(
         .filter_map(|c| c.detail.clone().map(|d| (c.id.0, d)))
         .collect();
 
+    // Which message each citation points at. Message targets only: a profile
+    // field or an attachment is cited too, and neither is something to hide.
+    let message_of: std::collections::BTreeMap<[u8; 32], String> = report
+        .policies
+        .iter()
+        .flat_map(|p| p.citations.iter())
+        .filter_map(|c| match &c.target {
+            CitationTarget::Message { message_id } => {
+                Some((c.id.0, crate::simd::hex::bytes_to_hex_32(&message_id.0)))
+            }
+            _ => None,
+        })
+        .collect();
+
     let (mut suspects, mut trusted, mut protected) = (0usize, 0usize, 0usize);
     let mut members: Vec<serde_json::Value> = Vec::with_capacity(facts.len());
     for (npub, f) in facts {
         let reports = by_subject.get(npub).cloned().unwrap_or_default();
-        let convictions: Vec<&Conviction> =
-            reports.iter().flat_map(|s| s.convictions.iter()).filter(|c| !c.suppressed).collect();
+        // (law, conviction) pairs: the prose below needs the conviction, the
+        // machine-readable findings need the law it was reached under.
+        let judged: Vec<(&Hash32, &Conviction)> = reports
+            .iter()
+            .flat_map(|(h, s)| s.convictions.iter().map(move |c| (*h, c)))
+            .filter(|(_, c)| !c.suppressed)
+            .collect();
+        let convictions: Vec<&Conviction> = judged.iter().map(|(_, c)| *c).collect();
         // Shields are a property of the member, not of one law; every policy
         // computes the same one, so the strongest answer is the answer.
         let shield = reports
             .iter()
-            .map(|s| s.shield)
+            .map(|(_, s)| s.shield)
             .max_by_key(|s| match s {
                 Shield::Protected => 3,
                 Shield::Trusted => 2,
@@ -552,8 +573,12 @@ pub fn console_report(
                 Shield::None => 0,
             })
             .unwrap_or(Shield::None);
-        let score = reports.iter().map(|s| s.confidence).max().unwrap_or(0);
-        let proven_score = reports.iter().map(|s| s.proven).max().unwrap_or(0);
+        // Band travels with the confidence that earned it: taking each
+        // separately across laws can report a band the score never reached.
+        let worst = reports.iter().max_by_key(|(_, s)| s.confidence);
+        let score = worst.map(|(_, s)| s.confidence).unwrap_or(0);
+        let band = worst.map(|(_, s)| s.band).unwrap_or(Band::Clear);
+        let proven_score = reports.iter().map(|(_, s)| s.proven).max().unwrap_or(0);
         // The console's four verdicts, from the engine's own vocabulary.
         let verdict = if shield == Shield::Protected {
             protected += 1;
@@ -627,10 +652,47 @@ pub fn console_report(
             reasons.push("Long-standing member".into());
         }
 
-        members.push(serde_json::json!({
+        // The machine-readable spine beside the prose. `reasons` says what a
+        // person reads; this says what a program acts on — which rule, how
+        // grave its author called it, and which messages it cited. A consumer
+        // that has to parse English cannot tell a swear from a scam link.
+        let findings: Vec<serde_json::Value> = judged
+            .iter()
+            .map(|(policy_hash, c)| {
+                let messages: Vec<String> =
+                    c.citations.iter().filter_map(|id| message_of.get(&id.0).cloned()).collect();
+                let detail: std::collections::BTreeSet<String> =
+                    c.citations.iter().filter_map(|id| detail_of.get(&id.0).cloned()).collect();
+                serde_json::json!({
+                    // Stable per (policy, rule, scope, rung, subject) and
+                    // deliberately NOT per hit, so a consumer can dedup across
+                    // polls; escalating a rung mints a new one, which is the
+                    // right moment to act again.
+                    "conviction_id": crate::simd::hex::bytes_to_hex_32(&c.id.0),
+                    "policy_hash": crate::simd::hex::bytes_to_hex_32(&policy_hash.0),
+                    "rule_id": c.rule_id,
+                    "scope": wire(c.scope),
+                    "basis": wire(c.basis),
+                    "severity": wire(c.severity),
+                    "rung": c.rung,
+                    "hits": c.hits,
+                    "weight": c.tier_weight,
+                    "detail": detail.into_iter().collect::<Vec<_>>(),
+                    "messages": messages,
+                    "citation_count": c.citation_count,
+                })
+            })
+            .collect();
+
+        let mut row = serde_json::json!({
             "npub": npub,
             "verdict": verdict,
+            // The standing itself, beside the console's word for it: a Trusted
+            // member pierced by a grave rule reads "suspect", which answers what
+            // to show and loses what may be done to them.
+            "shield": wire(shield),
             "score": score,
+            "band": wire(band),
             "proven": proven_score,
             "reasons": reasons,
             "joined_at_ms": f.joined_at_ms,
@@ -643,7 +705,13 @@ pub fn console_report(
             "is_owner": f.is_owner,
             "is_admin": f.is_admin,
             "is_me": f.is_me,
-        }));
+        });
+        // Absent rather than empty for the clean majority: 512 members may each
+        // hold 16 convictions, and this crosses an IPC boundary Android feels.
+        if !findings.is_empty() {
+            row["findings"] = serde_json::Value::Array(findings);
+        }
+        members.push(row);
     }
     // Suspects first — the panel opens on what needs deciding — then the people
     // who hold this place together, and the unremarkable majority last. Sorting
@@ -908,6 +976,250 @@ pub fn run_side_by_side(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The console builds each member by hand, and it left `band` out. Every
+    /// consumer that gates on it — the SDK's `actionable()`, `needs_human()`
+    /// and the whole autopilot — read the default "clear" and acted on nobody,
+    /// which looks exactly like a community where nothing happened.
+    #[test]
+    fn every_member_carries_the_band_its_confidence_earned() {
+        use nostr_sdk::prelude::Keys;
+
+        fn one(subjects: Vec<(u32, Band)>) -> serde_json::Value {
+            let keys = Keys::generate();
+            let npub = keys.public_key().to_bech32().expect("npub");
+            let policies = subjects
+                .into_iter()
+                .map(|(confidence, band)| PolicyReport {
+                    policy_hash: Hash32([1; 32]),
+                    inert: None,
+                    activated_at: None,
+                    coverage_complete: true,
+                    rule_status: vec![],
+                    subjects: vec![SubjectReport {
+                        subject: SubjectId(keys.public_key().to_bytes()),
+                        shield: Shield::None,
+                        confidence,
+                        proven: confidence,
+                        band,
+                        convictions: vec![],
+                    }],
+                    subjects_truncated: 0,
+                    citations: vec![],
+                })
+                .collect();
+            let report = ModerationReport {
+                engine_version: caps::ENGINE_VERSION,
+                bundle_version: caps::BUNDLE_VERSION,
+                roster_version: Hash32([0; 32]),
+                override_hash: Hash32([0; 32]),
+                evaluated_at: 0,
+                window: WindowCoverage::default(),
+                policies,
+            };
+            let facts = std::collections::BTreeMap::from([(npub, MemberFacts::default())]);
+            console_report(&report, &facts, 0)["members"][0].clone()
+        }
+
+        for (confidence, band) in [(90u32, Band::Alert), (60, Band::Flagged), (30, Band::Watch), (0, Band::Clear)] {
+            let row = one(vec![(confidence, band)]);
+            let expected = format!("{band:?}").to_lowercase();
+            assert_eq!(row["score"].as_u64(), Some(confidence as u64));
+            assert_eq!(
+                row["band"].as_str(),
+                Some(expected.as_str()),
+                "a member at confidence {confidence} must carry the band it earned, not a default"
+            );
+        }
+
+        // Laws are scored independently and the console folds across them, so
+        // the band has to travel with the confidence it belongs to.
+        let row = one(vec![(30, Band::Watch), (90, Band::Alert)]);
+        assert_eq!(row["score"].as_u64(), Some(90), "the worst law decides the score");
+        assert_eq!(row["band"].as_str(), Some("alert"), "and the same law decides the band");
+    }
+
+    /// A Trusted member CAN carry a conviction: `pierces_trusted` exists exactly
+    /// so a grave rule reaches them. The console then calls them "suspect",
+    /// which answers what to SHOW and says nothing about what may be done —
+    /// so their standing has to travel as its own field. A consumer inferring
+    /// the shield from the word strips it at the one moment it matters.
+    #[test]
+    fn a_pierced_trusted_member_keeps_their_standing_in_the_report() {
+        use nostr_sdk::prelude::Keys;
+
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().expect("npub");
+        let subject = SubjectId(keys.public_key().to_bytes());
+        let conviction = Conviction {
+            id: conviction_id(&Hash32([1; 32]), "slurs", Scope::PerMessage, 0, &subject),
+            subject,
+            rule_id: "slurs".into(),
+            scope: Scope::PerMessage,
+            rung: 0,
+            hits: 1,
+            severity: Severity::Severe,
+            basis: Basis::Deterministic,
+            tier_weight: 85,
+            retroactive: Retroactive::Unknown,
+            suppressed: false,
+            folded: false,
+            folded_into: None,
+            combined: true,
+            proven_combined: true,
+            citations: vec![],
+            citation_count: 0,
+            earliest_citation_at: 0,
+            latest_citation_at: 0,
+            family: None,
+            evidence: vec![],
+        };
+        let report = ModerationReport {
+            engine_version: caps::ENGINE_VERSION,
+            bundle_version: caps::BUNDLE_VERSION,
+            roster_version: Hash32([0; 32]),
+            override_hash: Hash32([0; 32]),
+            evaluated_at: 0,
+            window: WindowCoverage::default(),
+            policies: vec![PolicyReport {
+                policy_hash: Hash32([1; 32]),
+                inert: None,
+                activated_at: None,
+                coverage_complete: true,
+                rule_status: vec![],
+                subjects: vec![SubjectReport {
+                    subject,
+                    shield: Shield::Trusted,
+                    confidence: 85,
+                    proven: 85,
+                    band: Band::Alert,
+                    convictions: vec![conviction],
+                }],
+                subjects_truncated: 0,
+                citations: vec![],
+            }],
+        };
+        let facts = std::collections::BTreeMap::from([(npub, MemberFacts::default())]);
+        let row = &console_report(&report, &facts, 0)["members"][0];
+
+        assert_eq!(row["verdict"].as_str(), Some("suspect"), "the panel opens on what needs deciding");
+        assert_eq!(row["shield"].as_str(), Some("trusted"), "and their standing survives the projection");
+    }
+
+    /// `reasons` is prose for a person. A bot ramping its response — a warning
+    /// for a swear, a ban for a scam link — has to branch on the RULE, and it
+    /// must never do that by parsing English.
+    #[test]
+    fn a_conviction_reaches_a_bot_as_rule_identity_and_the_messages_it_cited() {
+        use nostr_sdk::prelude::Keys;
+
+        let keys = Keys::generate();
+        let npub = keys.public_key().to_bech32().expect("npub");
+        let subject = SubjectId(keys.public_key().to_bytes());
+        let policy_hash = Hash32([7; 32]);
+        let message = MessageId([0xb1; 32]);
+        let target = CitationTarget::Message { message_id: message };
+        let cid = citation_id(&policy_hash, "links", Scope::PerMessage, &subject, &target, None);
+
+        let conviction = Conviction {
+            id: conviction_id(&policy_hash, "links", Scope::PerMessage, 0, &subject),
+            subject,
+            rule_id: "links".into(),
+            scope: Scope::PerMessage,
+            rung: 0,
+            hits: 2,
+            severity: Severity::Severe,
+            basis: Basis::Deterministic,
+            tier_weight: 85,
+            retroactive: Retroactive::Unknown,
+            suppressed: false,
+            folded: false,
+            folded_into: None,
+            combined: true,
+            proven_combined: true,
+            citations: vec![cid],
+            citation_count: 2,
+            earliest_citation_at: 10,
+            latest_citation_at: 20,
+            family: None,
+            evidence: vec![],
+        };
+        let clean = Keys::generate();
+        let clean_npub = clean.public_key().to_bech32().expect("npub");
+        let report = ModerationReport {
+            engine_version: caps::ENGINE_VERSION,
+            bundle_version: caps::BUNDLE_VERSION,
+            roster_version: Hash32([0; 32]),
+            override_hash: Hash32([0; 32]),
+            evaluated_at: 0,
+            window: WindowCoverage::default(),
+            policies: vec![PolicyReport {
+                policy_hash,
+                inert: None,
+                activated_at: None,
+                coverage_complete: true,
+                rule_status: vec![],
+                subjects: vec![
+                    SubjectReport {
+                        subject,
+                        shield: Shield::None,
+                        confidence: 85,
+                        proven: 85,
+                        band: Band::Alert,
+                        convictions: vec![conviction],
+                    },
+                    SubjectReport {
+                        subject: SubjectId(clean.public_key().to_bytes()),
+                        shield: Shield::None,
+                        confidence: 0,
+                        proven: 0,
+                        band: Band::Clear,
+                        convictions: vec![],
+                    },
+                ],
+                subjects_truncated: 0,
+                citations: vec![Citation {
+                    id: cid,
+                    target,
+                    at: 20,
+                    span: None,
+                    detail: Some("bit.ly".into()),
+                    suppressed: false,
+                }],
+            }],
+        };
+        let facts = std::collections::BTreeMap::from([
+            (npub.clone(), MemberFacts::default()),
+            (clean_npub.clone(), MemberFacts::default()),
+        ]);
+        let console = console_report(&report, &facts, 0);
+        let rows = console["members"].as_array().expect("members");
+        let row = rows.iter().find(|m| m["npub"].as_str() == Some(npub.as_str())).expect("the convicted member");
+
+        let f = &row["findings"][0];
+        assert_eq!(f["rule_id"].as_str(), Some("links"), "the rule, so a bot can ramp on it");
+        assert_eq!(f["severity"].as_str(), Some("severe"), "the author's gravity, snake_case like the wire");
+        assert_eq!(f["basis"].as_str(), Some("deterministic"), "provable, so it may be acted on unattended");
+        assert_eq!(f["scope"].as_str(), Some("per_message"));
+        assert_eq!(f["hits"].as_u64(), Some(2));
+        assert_eq!(f["weight"].as_u64(), Some(85));
+        assert_eq!(f["policy_hash"].as_str(), Some(crate::simd::hex::bytes_to_hex_32(&policy_hash.0).as_str()));
+        assert_eq!(f["detail"][0].as_str(), Some("bit.ly"), "what actually matched");
+        assert_eq!(
+            f["messages"][0].as_str(),
+            Some(crate::simd::hex::bytes_to_hex_32(&message.0).as_str()),
+            "the message to hide, resolved from the citation"
+        );
+        assert_eq!(
+            f["conviction_id"].as_str(),
+            Some(crate::simd::hex::bytes_to_hex_32(&conviction_id(&policy_hash, "links", Scope::PerMessage, 0, &subject).0).as_str()),
+            "the dedup key, stable across polls"
+        );
+        assert!(!row["reasons"].as_array().unwrap().is_empty(), "and the prose the panel reads is untouched");
+
+        let clean_row = rows.iter().find(|m| m["npub"].as_str() == Some(clean_npub.as_str())).unwrap();
+        assert!(clean_row["findings"].is_null(), "a member nothing convicted carries no findings key at all");
+    }
 
     #[test]
     fn the_builtin_policy_validates() {

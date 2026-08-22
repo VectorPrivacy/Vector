@@ -443,6 +443,50 @@ impl VectorBot {
     /// }).await?;
     /// # Ok(()) }
     /// ```
+    /// Resolve a message by its id, as though it had just arrived.
+    ///
+    /// Returns the same [`IncomingMessage`] an [`on_message`](Self::on_message)
+    /// handler receives, so everything works on it unchanged: `.text()`,
+    /// `.member()`, `.community()`, `.channel()`, `.hide()`, and
+    /// `.message.attachments` for [`download_attachment`](Self::download_attachment).
+    ///
+    /// This is the resolver a moderation citation needs — a citation names a
+    /// message id and nothing else. `None` means it is not here: deleted,
+    /// hidden, expired, or in history this bot never synced. Ordinary, not an
+    /// error, and a moderation bot that hides a message invalidates its own
+    /// evidence, so quote before acting rather than after.
+    pub async fn message(&self, message_id: &str) -> Option<IncomingMessage> {
+        let (chat_id, message) = self.core.get_message(message_id).await?;
+        Some(Self::resolved(chat_id, message))
+    }
+
+    /// Every message carrying an attachment with this content hash, newest
+    /// first. `Attachment.id` IS that hash, and so is a moderation citation's
+    /// `content_hash`.
+    ///
+    /// A list, not one answer: one blob rides many messages — a forward, a
+    /// re-post, or forty accounts posting the same image, which is the case
+    /// most worth seeing whole.
+    pub async fn messages_with_attachment(&self, content_hash: &str) -> Vec<IncomingMessage> {
+        self.core
+            .get_messages_with_attachment(content_hash)
+            .await
+            .into_iter()
+            .map(|(chat_id, m)| Self::resolved(chat_id, m))
+            .collect()
+    }
+
+    /// Rebuild the delivered shape from a stored row. A community channel is one
+    /// the channel->community index knows; anything else is a DM.
+    fn resolved(chat_id: String, message: Message) -> IncomingMessage {
+        let is_group = vector_core::db::community::community_id_for_channel(&chat_id)
+            .ok()
+            .flatten()
+            .is_some();
+        let is_file = !message.attachments.is_empty();
+        IncomingMessage { chat_id, is_group, is_file, message }
+    }
+
     pub async fn on_message<F, Fut>(&self, handler: F) -> Result<()>
     where
         F: Fn(VectorBot, IncomingMessage) -> Fut + Send + Sync + 'static,
@@ -1045,6 +1089,36 @@ impl Channel {
         }
     }
 
+    /// Moderation-hide someone ELSE's message. Community channels only, and
+    /// requires `MANAGE_MESSAGES`.
+    ///
+    /// Distinct from [`delete`](Self::delete), which publishes the cooperative
+    /// tombstone an AUTHOR uses on their own message. This one re-derives the
+    /// actor's authority from the signed inner against the folded Roster, so
+    /// peers verify the claim rather than treating it as one client's local
+    /// suppression.
+    ///
+    /// The permission is checked HERE, before anything is published. The
+    /// protocol re-verifies it anyway, but a bot that only learns it lacks the
+    /// role from a silent drop retry-loops a publish every reader discards.
+    pub async fn hide(&self, message_id: &str) -> Result<()> {
+        if !matches!(self.kind, ChannelKind::Community) {
+            return Err(Error::Other("moderation-hide applies to community channels, not DMs".into()));
+        }
+        let community_id = vector_core::db::community::community_id_for_channel(&self.id)
+            .ok()
+            .flatten()
+            .ok_or_else(|| Error::Other("unknown community channel".into()))?;
+        let caps = self.core.community_capabilities(&community_id)?;
+        if !caps["manage_messages"].as_bool().unwrap_or(false) {
+            return Err(Error::Other(format!(
+                "cannot hide messages in {}: this account holds no role carrying MANAGE_MESSAGES",
+                &community_id[..community_id.len().min(12)]
+            )));
+        }
+        self.core.hide_community_message(&self.id, message_id).await
+    }
+
     /// Send a file from disk as an encrypted attachment — works for DMs and Community channels.
     pub async fn send_file(&self, path: impl AsRef<std::path::Path>) -> Result<String> {
         let path = path.as_ref().to_string_lossy().into_owned();
@@ -1103,6 +1177,12 @@ impl IncomingMessage {
         self.channel().react(&self.message.id, emoji).await
     }
 
+    /// Moderation-hide *this* message (see [`Channel::hide`]). Requires
+    /// `MANAGE_MESSAGES`; use [`Channel::delete`] for the bot's own messages.
+    pub async fn hide(&self) -> Result<()> {
+        self.channel().hide(&self.message.id).await
+    }
+
     /// The [`Community`] this message belongs to — `None` for DMs. Use it for community-level
     /// management (invites, roles, metadata).
     pub fn community(&self) -> Option<Community> {
@@ -1119,8 +1199,29 @@ impl IncomingMessage {
     /// Act on them directly: `msg.member()?.kick().await`, `.ban()`, `.grant_admin()`, etc.
     pub fn member(&self) -> Option<Member> {
         let community = self.community()?;
-        let npub = self.message.npub.clone()?;
+        let npub = self.author()?;
         Some(Member { core: VectorCore, community_id: community.id, npub })
+    }
+
+    /// Who wrote this, whatever kind of chat it arrived in.
+    ///
+    /// A Community message stamps its real author, so the group can attribute
+    /// it. A DM stamps NONE — it is 1:1, so the author is implied by the chat
+    /// rather than repeated on every message — which means reading
+    /// `message.npub` directly returns `None` for every DM ever received. This
+    /// resolves all three cases: the stamped author, the counterparty on a
+    /// received DM, and this bot on one it sent.
+    pub fn author(&self) -> Option<String> {
+        if let Some(npub) = &self.message.npub {
+            return Some(npub.clone());
+        }
+        if self.is_group {
+            return None;
+        }
+        if self.message.mine {
+            return VectorCore.my_npub();
+        }
+        Some(self.chat_id.clone())
     }
 
     /// The message text.
@@ -1900,6 +2001,39 @@ mod tests {
         assert!(locked.is_private() && !locked.is_readable(), "a keyless private channel is enumerable but locked");
         assert_eq!(locked.name(), "vault", "and still nameable, so it can be reported");
         assert_eq!(locked.id(), "cc".repeat(32), "and addressable, so access can be requested for it");
+    }
+
+    /// A DM stamps no author (it is 1:1, so the chat implies it), which makes
+    /// `message.npub` `None` on every DM ever received. `author()` is the one
+    /// question a bot actually asks, so it resolves all three cases.
+    #[test]
+    fn author_resolves_for_a_dm_as_well_as_a_channel() {
+        fn msg(chat_id: &str, is_group: bool, npub: Option<&str>, mine: bool) -> IncomingMessage {
+            let mut m = Message::default();
+            m.npub = npub.map(String::from);
+            m.mine = mine;
+            IncomingMessage { chat_id: chat_id.into(), is_group, is_file: false, message: m }
+        }
+
+        let channel = msg(&"aa".repeat(32), true, Some("npub1author"), false);
+        assert_eq!(channel.author().as_deref(), Some("npub1author"), "a channel message stamps its author");
+
+        let dm = msg("npub1counterparty", false, None, false);
+        assert_eq!(
+            dm.author().as_deref(),
+            Some("npub1counterparty"),
+            "a received DM's author is the chat it arrived in, not the missing stamp"
+        );
+        assert_eq!(dm.message.npub, None, "and reading the raw field would have answered nothing");
+    }
+
+    /// Hiding is a moderator's act on someone ELSE's message, and a DM has no
+    /// moderator. Refusing here keeps `hide` from reading as a second `delete`.
+    #[tokio::test]
+    async fn a_dm_cannot_be_moderation_hidden() {
+        let dm = Channel { core: VectorCore, id: "npub1example".into(), kind: ChannelKind::Dm };
+        let err = dm.hide("aa".repeat(32).as_str()).await.expect_err("a DM has no moderator");
+        assert!(err.to_string().contains("not DMs"), "the error must say why: {err}");
     }
 
     #[test]

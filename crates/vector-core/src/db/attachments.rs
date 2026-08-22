@@ -112,6 +112,29 @@ pub fn get_attachments_for_event(event_id: &str) -> Result<Vec<Attachment>, Stri
     Ok(map.into_values().next().unwrap_or_default())
 }
 
+/// The message carrying an attachment with this content hash, newest first.
+///
+/// One blob can ride many messages (a forward, a re-post, forty accounts in a
+/// raid posting the same image), so this answers "where did I see this?" rather
+/// than "which message is it". `Attachment.id` IS the content hash, so a
+/// citation's `content_hash` and an attachment's id are the same key.
+pub fn events_with_attachment_hash(hash: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            // rowid completes the order: forty accounts posting one image inside
+            // a second is exactly this query's interesting case, and created_at
+            // alone leaves that cluster in whatever order SQLite fancies.
+            "SELECT a.event_id FROM attachments a JOIN events e ON e.id = a.event_id \
+             WHERE a.hash = ?1 ORDER BY e.created_at DESC, e.received_at DESC, e.rowid DESC",
+        )
+        .map_err(|e| format!("prepare events_with_attachment_hash: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![hash], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query events_with_attachment_hash: {e}"))?;
+    Ok(rows.flatten().collect())
+}
+
 /// Flip one attachment's downloaded state — a single-row UPDATE keyed by (event_id, content hash),
 /// replacing the old read-modify-write of the whole tags blob.
 pub fn set_attachment_downloaded(event_id: &str, hash: &str, downloaded: bool, path: &str) -> Result<(), String> {

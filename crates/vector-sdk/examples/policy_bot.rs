@@ -73,9 +73,9 @@ async fn main() -> vector_sdk::Result<()> {
             println!("skipped {}: {}", &npub[..12], why);
         }
 
-        // Strong patterns without proof — a raid looks exactly like this — go
-        // to a person, never to the bot.
-        for v in verdicts.needs_human() {
+        // Convicted on inference — a raid looks exactly like this. The engine is
+        // convinced and nobody could replay it, so it goes to a second judge.
+        for v in verdicts.unproven() {
             println!("for review: {} — {} (confidence {}, proven {})", v.name(), v.why(), v.confidence(), v.proven);
         }
         if verdicts.raid_detected() {
