@@ -335,7 +335,12 @@ function wsSyncMembersPane() {
     if (!wsActive()) return;
     const chat = arrChats.find(c => c.id === strOpenChat);
     const inCommunity = !!communityIdOfChat(chat);
-    const shown = document.body.classList.contains('ws-details');
+    // The pane itself, not the body class: `ws-details` is written by a
+    // MutationObserver, so it still reads "open" during the same tick that
+    // openChat hid the pane. Reading it here made the sync believe the panel was
+    // already up and decline to restore it, so every channel click closed the
+    // member list for good — which then looked like a per-community memory.
+    const shown = domGroupOverview.style.display !== 'none';
     if (inCommunity && wsMembersOpen && !shown) openGroupOverview(chat);
     else if (shown && (!inCommunity || !wsMembersOpen)) wsCloseDetails();
 }
