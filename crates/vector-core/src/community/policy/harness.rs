@@ -214,16 +214,17 @@ pub fn assemble(
         let b32 = pk.to_bech32().unwrap_or_default();
         let fp = footprints.get(&b32);
         let first_post_ms = fp.map(|f| f.first_secs).filter(|s| *s > 0).map(|s| s.saturating_mul(1000));
+        let arrived_at_ms = arrival(*joined, first_post_ms);
         member_signals.push(MemberSignal {
             subject: SubjectId(pk.to_bytes()),
-            joined_at_ms: *joined,
+            joined_at_ms: arrived_at_ms,
             roles: roles.iter().filter_map(|r| crate::simd::hex::hex_to_bytes_32_checked(r)).map(Hash32).collect(),
             is_staff: *is_staff,
             lifetime_messages: fp.map(|f| f.messages).unwrap_or(0),
             first_post_ms,
         });
         // Tenure for DISPLAY uses the same oldest-trace rule the shield does.
-        let oldest = [*joined, first_post_ms].into_iter().flatten().min();
+        let oldest = arrived_at_ms;
         facts.insert(
             b32,
             MemberFacts {
@@ -487,6 +488,23 @@ pub fn evaluate_for_console(
         "complete": w.complete,
     });
     Ok(console)
+}
+
+/// When a member turned up, by any route.
+///
+/// Arrival, not paperwork. The Guestbook is ONE witness that somebody appeared;
+/// a member folded in from their first post (CORD-02 §5, "observed authors")
+/// arrived just as much as one who filed a Join.
+///
+/// Those two definitions disagreeing is a hole, not a nuance. Anyone holding a
+/// community's keys can post straight into it without ever publishing a Join,
+/// and `stored_memberlist` counts them as a member — so a join-flood rule
+/// reading only Guestbook entries sees a thousand such accounts as zero
+/// arrivals. Taking the earliest evidence closes that, and restores tenure for
+/// members whose Join was genuinely lost (a v1 migration, a pruned Guestbook)
+/// who would otherwise read as having never arrived at all.
+pub fn arrival(joined_at_ms: Option<u64>, first_post_ms: Option<u64>) -> Option<u64> {
+    [joined_at_ms, first_post_ms].into_iter().flatten().min()
 }
 
 /// Screen ONE message, right now, against the community's stored policies.
@@ -1346,6 +1364,23 @@ mod tests {
         ] {
             assert!(!m.is_stateless(), "{m:?} describes a window and must not answer from one message");
         }
+    }
+
+    /// A wave that posts straight into a community without ever filing a Join
+    /// is a member by `stored_memberlist` and used to be zero arrivals to a
+    /// join-flood rule. Both routes count now.
+    #[test]
+    fn arrival_counts_every_way_in_not_just_the_paperwork() {
+        // The ordinary member: a Join, and posts after it.
+        assert_eq!(arrival(Some(1_000), Some(5_000)), Some(1_000));
+        // The cheat: no Join at all, straight to posting. Used to be None,
+        // which the burst rule reads as "not evidence of a join".
+        assert_eq!(arrival(None, Some(5_000)), Some(5_000), "posting IS arriving");
+        // A member whose Join was lost but who was already talking: the earlier
+        // trace wins, so they keep the tenure they earned.
+        assert_eq!(arrival(Some(9_000), Some(2_000)), Some(2_000));
+        // Nothing at all is still unknowable, and unknown is never a conviction.
+        assert_eq!(arrival(None, None), None);
     }
 
     #[test]
