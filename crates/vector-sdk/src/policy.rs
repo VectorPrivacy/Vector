@@ -331,6 +331,26 @@ impl PolicyRule {
         self
     }
 
+    /// How many hits convict.
+    ///
+    /// The rung ladder is 1 / 3 / 10 by default, and a first rung of ONE is
+    /// wrong for anything that counts a rate or a repeat: `rate_limit(60)`
+    /// convicts a member for their first message in a minute, and `repetition`
+    /// convicts a message for repeating itself once. Scaling keeps the ladder's
+    /// shape — `at_least(10)` is 10 / 30 / 100.
+    ///
+    /// No effect on rules whose hits are not a count (`cohort`, `join_burst`,
+    /// which carry their own minimums).
+    pub fn at_least(mut self, hits: u32) -> Self {
+        let hits = hits.max(1);
+        if let Some(t) = self.0.tiers.as_mut() {
+            for r in t.per_message.iter_mut().chain(t.per_window.iter_mut()) {
+                r.hits = r.hits.saturating_mul(hits);
+            }
+        }
+        self
+    }
+
     /// Reach members who have earned standing. Only ever appropriate for the
     /// gravest rules, and the validator enforces that.
     pub fn even_for_trusted(mut self) -> Self {
@@ -862,7 +882,18 @@ impl Community {
     /// Evaluate now and return every member's standing.
     pub async fn verdicts(&self) -> Result<Verdicts> {
         let v = self.core.community_moderation_intel(self.id())?;
-        let report = &v["report"];
+        Ok(Verdicts::from_console_report(&v["report"]))
+    }
+}
+
+impl Verdicts {
+    /// Read a console report — `community_moderation_intel`'s `report`, or
+    /// `vector_core::community::policy::harness::console_report` directly.
+    ///
+    /// Public so a bot can drive its own sentencing from a synthesised report
+    /// and test it without a network, against the same conversion the live
+    /// path uses rather than a copy of it that drifts.
+    pub fn from_console_report(report: &serde_json::Value) -> Verdicts {
         let members = report["members"]
             .as_array()
             .cloned()
@@ -889,7 +920,7 @@ impl Community {
             })
             .collect();
         let c = &report["coverage"];
-        Ok(Verdicts {
+        Verdicts {
             members,
             raid_detected: report["raid_detected"].as_bool().unwrap_or(false),
             coverage: Coverage {
@@ -900,7 +931,7 @@ impl Community {
                 observed_to: c["observed_to"].as_u64().unwrap_or(0),
                 complete: c["complete"].as_bool().unwrap_or(false),
             },
-        })
+        }
     }
 }
 

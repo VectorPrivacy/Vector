@@ -518,6 +518,16 @@ pub fn arrival(joined_at_ms: Option<u64>, first_post_ms: Option<u64>) -> Option<
 /// This is `EvalMode::Member`, the same path a sending client uses, so a
 /// verdict reached here is the verdict the console reaches later over the same
 /// text. Shields still gate: the owner and staff are not screened.
+/// The instant a screen evaluates at: a moment AFTER the message it is about.
+///
+/// `clamp_corpus` keeps `at_ms < now_ms` strictly — a message stamped at the
+/// evaluation instant is not yet history and no rule can see it. Screening a
+/// message at its own timestamp therefore judged an empty corpus and convicted
+/// nobody, ever.
+fn screen_at(message_at_ms: u64) -> u64 {
+    message_at_ms.saturating_add(1)
+}
+
 pub fn screen_message(
     community_id_hex: &str,
     owner: &PublicKey,
@@ -562,7 +572,7 @@ pub fn screen_message(
         confirmed_to: now_ms,
         roster_version: Hash32([0; 32]),
     };
-    let report = evaluate_as(&signals, &policies, &[], now_ms, EvalMode::Member);
+    let report = evaluate_as(&signals, &policies, &[], screen_at(now_ms), EvalMode::Member);
     let mut out = Vec::new();
     for pr in &report.policies {
         let detail_of: std::collections::BTreeMap<[u8; 32], String> =
@@ -1095,6 +1105,82 @@ pub fn run_side_by_side(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A screened message sits at `now_ms`, and `clamp_corpus` keeps
+    /// `at_ms < now_ms` STRICTLY — so the one message being screened fell
+    /// outside its own corpus and the live text lane convicted nobody, ever.
+    #[test]
+    fn the_message_being_screened_is_inside_its_own_corpus() {
+        use nostr_sdk::prelude::Keys;
+
+        let owner = Keys::generate();
+        let author = Keys::generate();
+        let now = 1_700_000_000_000u64;
+
+        let policy = Policy {
+            format: FORMAT,
+            requires: vec![],
+            name: "screen-test".into(),
+            emoji_codes: vec![],
+            shields: Shields::default(),
+            window: Window { hours: 168, max_messages: 4000 },
+            exempt: Exempt::default(),
+            rules: vec![Rule {
+                id: "words".into(),
+                matcher: Match::Keyword { patterns: vec!["badword".into()], normalize: Normalize::Fold },
+                tiers: Some(Tiers {
+                    per_message: vec![Rung {
+                        hits: 1,
+                        severity: Severity::Severe,
+                        weight: 70,
+                        pierces_trusted: false,
+                    }],
+                    per_window: vec![],
+                }),
+                severity: None,
+                weight: None,
+                pierces_trusted: false,
+                family: None,
+                armed_by: None,
+                exempt: Exempt::default(),
+                enforcement: Enforcement::Advisory,
+            }],
+        };
+        let loaded = vec![LoadedPolicy { hash: Hash32([9u8; 32]), policy, activated_at: None }];
+
+        // Exactly the shape `screen_message` builds.
+        let subject = SubjectId(author.public_key().to_bytes());
+        let signals = Signals {
+            owner: SubjectId(owner.public_key().to_bytes()),
+            members: vec![MemberSignal {
+                subject,
+                joined_at_ms: None,
+                roles: vec![],
+                is_staff: false,
+                lifetime_messages: 0,
+                first_post_ms: None,
+            }],
+            messages: vec![MessageSignal {
+                id: MessageId([0; 32]),
+                author: subject,
+                channel: Hash32([1u8; 32]),
+                at_ms: now,
+                text: "this has badword in it".into(),
+                mentions: 0,
+            }],
+            channels: vec![Hash32([1u8; 32])],
+            relays: vec![],
+            requested_from: now,
+            requested_to: now,
+            confirmed_from: now,
+            confirmed_to: now,
+            roster_version: Hash32([0; 32]),
+        };
+
+        let report = evaluate_as(&signals, &loaded, &[], screen_at(now), EvalMode::Member);
+        let convictions: usize = report.policies.iter().flat_map(|p| &p.subjects).map(|s| s.convictions.len()).sum();
+        assert!(convictions > 0, "the screened message must be judged, not clamped out of its own corpus");
+    }
 
     /// The console builds each member by hand, and it left `band` out. Every
     /// consumer that gates on it — the SDK's `actionable()`, `needs_human()`

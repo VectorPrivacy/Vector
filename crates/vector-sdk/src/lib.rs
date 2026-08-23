@@ -1274,6 +1274,21 @@ impl Community {
         &self.id
     }
 
+    /// This community's display name.
+    ///
+    /// Falls back to a short id, so a caller always has something to put in
+    /// front of a person — a member told a rule matched needs to know WHERE.
+    pub async fn name(&self) -> String {
+        self.core
+            .list_communities()
+            .await
+            .into_iter()
+            .find(|v| v.get("community_id").and_then(|i| i.as_str()) == Some(self.id.as_str()))
+            .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| self.id.chars().take(12).collect())
+    }
+
     /// A handle to a member of this community by npub — act on them directly.
     pub fn member(&self, npub: impl Into<String>) -> Member {
         Member { core: self.core, community_id: self.id.clone(), npub: npub.into() }
@@ -1612,15 +1627,26 @@ impl Member {
     }
 
     /// Whether this member is an admin (the owner counts as admin).
+    ///
+    /// A roles read that FAILS answers `false`, which is indistinguishable from
+    /// "not an admin". Use [`try_is_admin`](Self::try_is_admin) wherever the
+    /// difference decides something — treating a moderator as ordinary because
+    /// a local read errored is the wrong direction for most callers.
     pub fn is_admin(&self) -> bool {
-        let Ok(roles) = self.core.community_roles(&self.community_id) else { return false };
+        self.try_is_admin().unwrap_or(false)
+    }
+
+    /// Whether this member is an admin, with a failed roles read reported
+    /// rather than folded into `false`.
+    pub fn try_is_admin(&self) -> Result<bool> {
+        let roles = self.core.community_roles(&self.community_id)?;
         let owner = roles.get("owner").and_then(|o| o.as_str()) == Some(self.npub.as_str());
         let admin = roles
             .get("admins")
             .and_then(|a| a.as_array())
             .map(|arr| arr.iter().any(|n| n.as_str() == Some(self.npub.as_str())))
             .unwrap_or(false);
-        owner || admin
+        Ok(owner || admin)
     }
 }
 

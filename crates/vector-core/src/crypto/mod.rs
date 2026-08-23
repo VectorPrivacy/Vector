@@ -565,6 +565,26 @@ pub fn mime_from_extension_safe(extension: &str, image_only: bool) -> Result<Str
 /// Detect MIME type from file magic bytes.
 /// Supports PNG, JPEG, GIF, WebP, TIFF, ICO, and SVG.
 /// Returns "application/octet-stream" for unrecognized formats.
+/// Every type [`mime_from_magic_bytes`] can name.
+///
+/// A consumer that judges media by its bytes needs to know what it can hope to
+/// recognise: a mime absent from this list is a type it will fetch, fail to
+/// identify, and be unable to answer for.
+pub const RECOGNISED_MIMES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/tiff",
+    "image/x-icon",
+    "image/svg+xml",
+    "image/bmp",
+    "video/webm",
+    "video/x-matroska",
+    "video/quicktime",
+    "video/mp4",
+];
+
 pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
     if bytes.len() < 4 {
         return "application/octet-stream";
@@ -578,6 +598,20 @@ pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
         0x4D if bytes[1..4] == [0x4D, 0x00, 0x2A] => "image/tiff",
         0x00 if bytes[1..4] == [0x00, 0x01, 0x00] => "image/x-icon",
         b'<' if bytes.starts_with(b"<?xml") || bytes.starts_with(b"<svg") => "image/svg+xml",
+        b'B' if bytes[1] == b'M' => "image/bmp",
+        // EBML: WebM and Matroska share it, so the DocType decides.
+        0x1A if bytes[1..4] == [0x45, 0xDF, 0xA3] => {
+            if bytes.len() >= 64 && bytes[..64].windows(4).any(|w| w == b"webm") {
+                "video/webm"
+            } else {
+                "video/x-matroska"
+            }
+        }
+        // ISO base media: the brand sits at offset 4, after a size field.
+        _ if bytes.len() >= 12 && bytes[4..8] == *b"ftyp" => match &bytes[8..12] {
+            b"qt  " => "video/quicktime",
+            _ => "video/mp4",
+        },
         _ => "application/octet-stream",
     }
 }
@@ -1003,6 +1037,86 @@ pub fn generate_image_metadata(file_bytes: &[u8]) -> Option<crate::types::ImageM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A consumer that judges media by its BYTES needs the bytes to be
+    /// readable. Video returning octet-stream meant every video was downloaded,
+    /// decrypted and then discarded as an unknown type.
+    #[test]
+    fn magic_bytes_name_video_and_bitmaps() {
+        let mut mp4 = vec![0u8, 0, 0, 0x20];
+        mp4.extend_from_slice(b"ftypisom");
+        assert_eq!(mime_from_magic_bytes(&mp4), "video/mp4");
+
+        let mut mov = vec![0u8, 0, 0, 0x14];
+        mov.extend_from_slice(b"ftypqt  ");
+        assert_eq!(mime_from_magic_bytes(&mov), "video/quicktime");
+
+        let mut webm = vec![0x1A, 0x45, 0xDF, 0xA3];
+        webm.extend_from_slice(&[0u8; 20]);
+        webm.extend_from_slice(b"webm");
+        webm.extend_from_slice(&[0u8; 40]);
+        assert_eq!(mime_from_magic_bytes(&webm), "video/webm");
+
+        let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+        mkv.extend_from_slice(&[0u8; 64]);
+        assert_eq!(mime_from_magic_bytes(&mkv), "video/x-matroska");
+
+        let mut bmp = b"BM".to_vec();
+        bmp.extend_from_slice(&[0u8; 20]);
+        assert_eq!(mime_from_magic_bytes(&bmp), "image/bmp");
+    }
+
+    /// The list and the function must not drift: every entry has to be
+    /// reachable, or a consumer trusts a type it will never be handed.
+    #[test]
+    fn every_recognised_mime_is_reachable_from_some_bytes() {
+        let mut webm = vec![0x1A, 0x45, 0xDF, 0xA3];
+        webm.extend_from_slice(&[0u8; 20]);
+        webm.extend_from_slice(b"webm");
+        webm.resize(80, 0);
+        let mut mkv = vec![0x1A, 0x45, 0xDF, 0xA3];
+        mkv.resize(80, 0);
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0u8; 4]);
+        webp.extend_from_slice(b"WEBP____");
+
+        let samples: Vec<Vec<u8>> = vec![
+            vec![0x89, b'P', b'N', b'G'],
+            vec![0xFF, 0xD8, 0xFF, 0xE0],
+            b"GIF89a__".to_vec(),
+            webp,
+            vec![0x49, 0x49, 0x2A, 0x00],
+            vec![0x00, 0x00, 0x01, 0x00],
+            b"<svg xmlns".to_vec(),
+            b"BM______".to_vec(),
+            webm,
+            mkv,
+            b"\0\0\0\x14ftypqt  ".to_vec(),
+            b"\0\0\0\x20ftypisom".to_vec(),
+        ];
+        let reachable: std::collections::HashSet<&str> =
+            samples.iter().map(|b| mime_from_magic_bytes(b)).collect();
+        for m in RECOGNISED_MIMES {
+            assert!(reachable.contains(m), "{m} is listed but no bytes produce it");
+        }
+        assert_eq!(reachable.len(), RECOGNISED_MIMES.len(), "and nothing is produced that is not listed");
+    }
+
+    /// The still-image answers must not have moved.
+    #[test]
+    fn magic_bytes_still_name_the_image_types() {
+        assert_eq!(mime_from_magic_bytes(&[0x89, b'P', b'N', b'G']), "image/png");
+        assert_eq!(mime_from_magic_bytes(&[0xFF, 0xD8, 0xFF, 0xE0]), "image/jpeg");
+        assert_eq!(mime_from_magic_bytes(b"GIF89a__"), "image/gif");
+        let mut webp = b"RIFF".to_vec();
+        webp.extend_from_slice(&[0u8; 4]);
+        webp.extend_from_slice(b"WEBP____");
+        assert_eq!(mime_from_magic_bytes(&webp), "image/webp");
+        assert_eq!(mime_from_magic_bytes(b"<svg xmlns"), "image/svg+xml");
+        assert_eq!(mime_from_magic_bytes(&[0xDE, 0xAD, 0xBE, 0xEF]), "application/octet-stream");
+        assert_eq!(mime_from_magic_bytes(&[]), "application/octet-stream", "a short read is not a type");
+        assert_eq!(mime_from_magic_bytes(b"Bm"), "application/octet-stream", "and BMP is case-sensitive");
+    }
 
     // ========================================================================
     // encrypt_with_key / decrypt_with_key roundtrip tests
