@@ -70,7 +70,7 @@ Powered by Passion, Built on [Nostr](https://nostr.com/).
 # Compiling
 
 > [!NOTE]
-> For any additional help or questions, visit the [Vector Community Discord](https://discord.gg/ar2pnE9Huy).
+> For any additional help or questions, visit the official [GitBook](https://docs.vectorapp.io) or join the [Vector Community on Vector](https://chat.vectorapp.io) or [Vector Community Discord](https://discord.gg/ar2pnE9Huy).
 
 ### Build Guides
 
