@@ -677,8 +677,17 @@ function initCommandSelector(textarea, io, anchorEl) {
             parts.push({ arg: a, el, autoSize });
         }
         textarea.value = '';
+        // `before` rather than `parentElement.insertBefore(bar, textarea)`:
+        // the composer is a Proxy wearing the textarea's face, not a Node, so
+        // it cannot BE insertBefore's reference argument — that threw, and
+        // because the throw landed after the input was hidden and before
+        // `composing` was set, `exitComposer`'s `if (!composing) return` left
+        // the composer invisible with no way back.
+        //
+        // Mounted first, hidden second, for the same reason: never take away
+        // what the user is typing into until its replacement is really there.
+        textarea.before(bar);
         textarea.style.display = 'none';
-        textarea.parentElement.insertBefore(bar, textarea);
         // Size the fields once mounted (scrollHeight needs layout): a fresh
         // rows=1 textarea is otherwise UA-default tall, floating its text high.
         for (const p of parts) p.autoSize();

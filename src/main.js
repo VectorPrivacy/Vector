@@ -1879,7 +1879,7 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
         const domMsg = document.getElementById(oldId);
         if (domMsg) {
             const profile = getProfile(chatId);
-            domMsg.replaceWith(renderMessage(msg, profile, oldId));
+            replaceMessageRow(domMsg, renderMessage(msg, profile, oldId));
         }
         strLastMsgID = eventId;
         softChatScroll();
@@ -4071,7 +4071,7 @@ async function setupRustListeners() {
                             }
                             setTimeout(() => {
                                 const newEl = renderMessage(memMsg, profile, msgId);
-                                domMsg.replaceWith(newEl);
+                                replaceMessageRow(domMsg, newEl);
                                 // Grow + fade in the new icon
                                 const icon = newEl.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
                                 if (icon) {
@@ -4083,7 +4083,7 @@ async function setupRustListeners() {
                                 softChatScroll();
                             }, 200);
                         } else {
-                            domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                            replaceMessageRow(domMsg, renderMessage(memMsg, profile, msgId));
                         }
                     }
                 }
@@ -4118,7 +4118,7 @@ async function setupRustListeners() {
                     const domMsg = document.getElementById(msgId);
                     const memMsg = cChat.messages.find(m => m.id === msgId);
                     if (domMsg && memMsg) {
-                        domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                        replaceMessageRow(domMsg, renderMessage(memMsg, profile, msgId));
                     }
                 }
             }
@@ -13263,7 +13263,13 @@ function _upgradeCommandRows(chatId) {
         if (msg.addressed_bots && msg.addressed_bots.length) continue;
         if (!/^\s*\/[a-z0-9_-]{1,32}\s+\S/.test(msg.content || '')) continue;
         const domMsg = document.getElementById(msg.id);
-        if (domMsg) domMsg.replaceWith(renderMessage(msg, profile, msg.id));
+        if (!domMsg) continue;
+        // Already an action line: re-rendering it produces the same row, and
+        // `replaceWith` above the viewport costs the reader their scroll
+        // position for nothing. This runs on every command-set load, so
+        // without the check a row churns every time.
+        if (domMsg.querySelector('.dmsg-command-line')) continue;
+        replaceMessageRow(domMsg, renderMessage(msg, profile, msg.id));
     }
 }
 
@@ -13290,21 +13296,15 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
                 domChatMessageInputVoice.style.display = 'none';
                 domChatMessageInputSend.style.display = '';
                 domChatMessageInputSend.classList.add('active');
-                // The command composer grows the input area as it slides in;
-                // keep a bottom-pinned user glued to the live tail frame-by-frame
-                // for the transition, exactly as the reply bar does.
-                if (chatPinnedToBottom && (!CHAT_WINDOW_ENABLED || isAtDataBottom())) {
-                    const start = performance.now();
-                    const followPin = () => {
-                        beginProgrammaticScroll();
-                        domChatMessages.scrollTop = domChatMessages.scrollHeight;
-                        if (performance.now() - start < 280) requestAnimationFrame(followPin);
-                    };
-                    requestAnimationFrame(followPin);
-                }
             } else {
                 resetSendMicButtons();
             }
+            // BOTH directions. The command composer grows the input area as it
+            // slides in and shrinks it as it slides out, and a bottom-pinned
+            // reader has to stay glued to the live tail through either — the
+            // reply bar does the same. Only the growth was followed, so sending
+            // a command left the view hanging above the bottom afterwards.
+            followPinThroughComposerResize();
         },
         // The command manifest loads async, often after the timeline painted;
         // upgrade any untagged `/cmd args` rows once it is known (DM invocations).
@@ -13312,6 +13312,22 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
     },
     document.getElementById('chat-box')
 ) : null;
+
+/** Glue a bottom-pinned reader to the live tail across a composer resize.
+ *
+ *  Frame by frame rather than once: the input area animates, so a single
+ *  scroll-to-bottom lands on the height it had at that instant and the rest of
+ *  the transition slides out from under the reader. */
+function followPinThroughComposerResize() {
+    if (!chatPinnedToBottom || (CHAT_WINDOW_ENABLED && !isAtDataBottom())) return;
+    const start = performance.now();
+    const followPin = () => {
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop = domChatMessages.scrollHeight;
+        if (performance.now() - start < 280) requestAnimationFrame(followPin);
+    };
+    requestAnimationFrame(followPin);
+}
 
 /**
  * Immediately reset send/mic buttons to mic state (no animation)
@@ -14101,6 +14117,22 @@ let lastScrollTop = 0;
 // told apart from the user moving away from the bottom.
 let _lastPinEvalHeight = 0;
 let _userScrolledAway = false;
+/** Swap a rendered message row without moving the reader.
+ *
+ *  `replaceWith` removes before it inserts, so the list is briefly shorter and
+ *  the engine clamps `scrollTop` down by the row's height. Put it back, and mark
+ *  the move as ours: a re-render is never the reader leaving the page. */
+function replaceMessageRow(domMsg, fresh) {
+    const s = domChatMessages;
+    const top = s ? s.scrollTop : 0;
+    beginProgrammaticScroll();
+    domMsg.replaceWith(fresh);
+    if (s && s.scrollTop !== top) {
+        s.scrollTop = top;
+        beginProgrammaticScroll();
+    }
+}
+
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
  *  user). Call immediately before any programmatic scrollTop change so a drop-top
