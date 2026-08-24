@@ -1402,18 +1402,19 @@ async fn accept_bundle<T: Transport + ?Sized>(
                 && v.community_id == community.id().0
                 && v.community_root == community.community_root
         });
-        let (community, join_heads, join_banlist, join_pins, join_banlist_content) = match handoff {
-            Some(v) => {
-                let mut c = v.folded;
-                // The preview holds no acquisition time — stamp the JOIN's.
-                c.created_at_ms = at_ms;
-                (c, v.heads, v.banned, v.pins, v.banlist_persist)
-            }
-            None => {
-                let vj = verify_owner_root_and_reconcile(transport, community).await?;
-                (vj.community, vj.heads, vj.banned, vj.pins, vj.banlist_persist)
-            }
-        };
+        let (community, join_heads, join_banlist, join_pins, join_banlist_content, join_roles, join_authority_heads) =
+            match handoff {
+                Some(v) => {
+                    let mut c = v.folded;
+                    // The preview holds no acquisition time — stamp the JOIN's.
+                    c.created_at_ms = at_ms;
+                    (c, v.heads, v.banned, v.pins, v.banlist_persist, v.roles, v.authority_heads)
+                }
+                None => {
+                    let vj = verify_owner_root_and_reconcile(transport, community).await?;
+                    (vj.community, vj.heads, vj.banned, vj.pins, vj.banlist_persist, vj.roles, vj.authority_heads)
+                }
+            };
 
         // A dissolved community is a grave (CORD-02 §9): refuse to join it.
         if is_dissolved(transport, &community).await {
@@ -1436,7 +1437,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // state outrunning its floor); the first post-join follow then can't persist a
         // state below what this join already showed.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        for h in &join_heads {
+        for h in join_heads.iter().chain(join_authority_heads.iter()) {
             crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
         }
         crate::db::community::save_community_v2(&community)?;
@@ -1457,6 +1458,14 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // follow — a join backfills state, it doesn't announce edits.
         if let Some((banned_list, version)) = &join_banlist_content {
             let _ = crate::db::community::set_community_banlist(&cid_hex, banned_list, *version as i64);
+        }
+        // The ROSTER, same rule as the banlist and pins above: the walk already
+        // paid for it. Persisted BEFORE the channels register, because the first
+        // history ingest reads it to honor moderation hides — an empty roster
+        // authorizes nobody, so every admin-hidden message would render to the
+        // fresh member until the follow worker's queued re-walk landed.
+        if let Some((roles, at)) = &join_roles {
+            let _ = crate::db::community::set_community_roles(&cid_hex, roles, *at);
         }
         for (channel_hex, content, version, _author, _at) in &join_pins {
             if matches!(
@@ -1543,6 +1552,18 @@ struct VerifiedJoin {
     pins: Vec<(String, String, u64, String, u64)>,
     /// The authorized banlist head's content + version, for local persistence.
     banlist_persist: Option<(Vec<String>, u64)>,
+    /// The FULL authorized roster (admins included) from the same walk, with the
+    /// newest roster edition's `created_at`. `None` when the fold saw a gap.
+    ///
+    /// This is the one authority artifact the join used to throw away — and a
+    /// fresh member whose roster is empty until the follow worker's re-walk
+    /// renders every moderator-hidden message in the meantime: the hide gate
+    /// reads the stored roster, and an empty roster authorizes nobody.
+    roles: Option<(crate::community::roles::CommunityRoles, i64)>,
+    /// Role/Grant/Banlist heads folded under the full authority, so an
+    /// ADMIN-signed grant seeds the same refuse-downgrade floor an owner-signed
+    /// one does.
+    authority_heads: Vec<FoldedHead>,
 }
 
 async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
@@ -1705,12 +1726,26 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // roster). Only the pins are taken from this pass — the DOCUMENT adoption above
     // stays owner-only, its stricter envelope unchanged.
     let pins = apply_control_fold(&community, &all_editions, &empty_floors, &authority_full).pins_persist;
+    // The newest roster edition's stamp, exactly as follow_control computes it, so
+    // the follow's own freshness gate composes with a join-seeded roster.
+    let newest_roster_at = all_editions
+        .iter()
+        .filter(|e| e.vsk == vsk::ROLE || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST)
+        .map(|e| e.created_at as i64)
+        .max()
+        .unwrap_or(0);
+    // An anchored walk read the plane back to genesis, so the window is complete
+    // by construction; `gapped` still gates the persist for the same reason
+    // follow_control's does — a withheld edition must not fold into a baseline.
+    let roles = (!authority_full.gapped).then(|| (authority_full.roles.clone(), newest_roster_at));
     Ok(VerifiedJoin {
         community: fold.updated.unwrap_or(community),
         heads: fold.heads,
         banned: authority_full.banned,
         pins,
         banlist_persist: authority_full.banlist_persist,
+        roles,
+        authority_heads: authority_full.heads,
     })
 }
 
@@ -1843,6 +1878,8 @@ struct VerifiedPreview {
     /// persists them exactly like a direct join.
     pins: Vec<(String, String, u64, String, u64)>,
     banlist_persist: Option<(Vec<String>, u64)>,
+    roles: Option<(crate::community::roles::CommunityRoles, i64)>,
+    authority_heads: Vec<FoldedHead>,
 }
 static VERIFIED_PREVIEW: std::sync::Mutex<Option<VerifiedPreview>> = std::sync::Mutex::new(None);
 const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1877,6 +1914,8 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
                 banned: vj.banned,
                 pins: vj.pins,
                 banlist_persist: vj.banlist_persist,
+                roles: vj.roles,
+                authority_heads: vj.authority_heads,
             });
             Ok(folded)
         }
@@ -10659,6 +10698,48 @@ mod tests {
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert_eq!(reloaded.channels.len(), channels_after_first, "the DB holds one clean channel set");
         assert_eq!(crate::db::community::list_community_ids().unwrap().iter().filter(|id| id.0 == community.id().0).count(), 1, "exactly one community row");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_joiner_can_authorize_a_moderators_hide_before_any_follow() {
+        // The join walk reads the control plane to genesis anyway, and it already
+        // folds the full roster for the ban gate. Throwing that roster away left
+        // the fresh member's stored roles EMPTY until the follow worker's queued
+        // re-walk — and the hide gate reads the stored roster, so every message a
+        // moderator had hidden rendered to exactly the person who should never
+        // see it: someone who just walked in.
+        let (bed, owner, member) = TestBed::new();
+        let admin = Keys::generate();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Moderated", bed.relays.clone(), None).await.unwrap();
+        grant_admin(&bed.relay, &community, &admin.public_key()).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        // A FRESH account accepts. No follow_control runs in this test — what the
+        // join itself persisted is all the joiner has.
+        bed.swap_to(&member);
+        let invite = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(!roster.grants.is_empty(), "the join persisted the roster it already folded");
+        let owner_hex = joined.owner().unwrap().to_hex();
+        let victim = Keys::generate().public_key().to_hex();
+        assert!(
+            crate::community::moderation::can_hide(Some(&owner_hex), &roster, &admin.public_key().to_hex(), &victim),
+            "the admin's hides are honorable on the FIRST history ingest, not after a follow"
+        );
+        // And the grant's refuse-downgrade floor is seeded, so the citation gate
+        // (`actor_authority_pinned`) can resolve the same grant.
+        let grant_hex = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::grant_locator(
+            joined.id(),
+            &admin.public_key().to_bytes(),
+        ));
+        assert!(
+            crate::db::community::get_edition_head(&cid_hex, &grant_hex).unwrap().is_some(),
+            "the admin-signed grant head survived the join"
+        );
     }
 
     #[tokio::test]
