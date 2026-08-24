@@ -208,7 +208,7 @@ Follow the channels below for the latest on development, releases, and community
 
 Vector is free, open-source, and funded entirely by donations. No ads, no tokens, no venture capital.
 
-| Currency / Network | Address |
+| Currency | Address |
 |----------|---------|
 | Monero (XMR) | `47ENi8rwDxqNYNoCnGhGGGLaE2YbA6B9DVXgUbiewyM1F6G4fFGGGK31Am9RqTz2WddDKoeNwaZSufR9seT7knQ44UPjHF8` |
 | Bitcoin (BTC) | `bc1q70zhkfuej2cl9nhrxwqcnvrzpwm9kqtrth3tmc` |
