@@ -1027,6 +1027,7 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
                 label: minted.label.clone(),
                 created_at: now_ms() / 1000,
                 expires_at: minted.expires_at_ms,
+                epoch: Some(community.root_epoch.0),
                 extra: Default::default(),
             });
         }
@@ -1153,6 +1154,123 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     .await
 }
 
+// ── Severing containment (CORD-06 Severing Refounding) ──────────────────────
+
+/// Persisted sever marks for a community: `root_epoch -> rotation at_secs`.
+/// A mark means "epoch E was a containment": link severance retries against it
+/// on every follow pass, and a rescue extension of that hop re-stamps the tag.
+pub(crate) fn sever_marks(cid_hex: &str) -> std::collections::BTreeMap<u64, u64> {
+    crate::db::settings::get_sql_setting(format!("v2_sever:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Record a severed rotation. Idempotent; marks only accumulate — the row is a
+/// few bytes and clearing one would let a failed severance read as done (B4).
+pub(crate) fn add_sever_mark(cid_hex: &str, epoch: u64, at_secs: u64) {
+    let mut marks = sever_marks(cid_hex);
+    marks.insert(epoch, at_secs);
+    if let Ok(v) = serde_json::to_string(&marks) {
+        let _ = crate::db::settings::set_sql_setting(format!("v2_sever:{cid_hex}"), v);
+    }
+}
+
+/// Sever MY OWN condemned public links: revoke (not refresh) every live link of
+/// mine for this community whose minted-at epoch sits below the highest severed
+/// epoch. The epoch is the discriminator — deterministic on every device, so a
+/// second device adopting the containment late can never eat the fresh link the
+/// owner minted to re-open (it carries the post-raid epoch), while a link minted
+/// mid-raid by a not-yet-adopted device carries the raid-era epoch and dies.
+/// Batched: every tombstone publishes, then ONE 13303 republish and ONE registry
+/// edition for the whole set. Deliberately WITHOUT `revoke_public_link`'s
+/// last-link refound escalation: every caller here sits inside a rotation
+/// (refound or follow), where that escalation self-deadlocks on `follow_lock` —
+/// and the severed rotation IS the read-cut the escalation exists to provide.
+/// Returns the number revoked; `Ok(0)` when there is nothing of mine to sever.
+async fn sever_own_links<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+) -> Result<usize, String> {
+    crate::db::scoped(async move {
+        let session = crate::db::current_session();
+        let signer = crate::signer::active_signer()?;
+        let my_pk = me_pk()?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let Some(condemn_below) = sever_marks(&cid_hex).keys().copied().max() else {
+            return Ok(0); // no containment on record — nothing is condemned.
+        };
+        // Local fast-path: the folded Registry names every creator with a live
+        // link, and my own mints also leave local rows. Neither names me → no
+        // 13303 fetch; a plain member pays nothing here.
+        let maybe_mine = crate::db::community::invite_link_set_creators(&cid_hex)
+            .map(|cs| cs.contains(&my_pk.to_hex()))
+            .unwrap_or(true)
+            || !crate::db::community::list_public_invites(&cid_hex).unwrap_or_default().is_empty();
+        if !maybe_mine {
+            return Ok(0);
+        }
+        let Some(mut list) = fetch_invite_list(transport, &community.relays).await? else {
+            return Ok(0); // no list ever published — nothing of mine exists.
+        };
+        let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+        let victims: Vec<invite::InviteEntry> = list
+            .entries
+            .iter()
+            .filter(|e| e.community_id == cid_hex && !dead.contains(e.token.as_str()) && e.epoch.unwrap_or(0) < condemn_below)
+            .cloned()
+            .collect();
+        if victims.is_empty() {
+            return Ok(0);
+        }
+        let mut revoked_tokens: Vec<String> = Vec::with_capacity(victims.len());
+        for entry in &victims {
+            // One corrupt entry must not wedge the batch (and with it the
+            // community's Public/Private reading) forever: tombstone the husk —
+            // no revocation can ever be built from it anyway.
+            match Keys::parse(&entry.signer_sk) {
+                Ok(link_signer) => {
+                    let revocation = invite::build_revocation(&link_signer).map_err(|e| e.to_string())?;
+                    transport.publish_durable(&revocation, &community.relays).await?;
+                }
+                Err(_) => crate::log_warn!("[Sever] link {} carries a malformed signer — tombstoning the husk", &entry.token[..entry.token.len().min(8)]),
+            }
+            list.tombstones.push(invite::InviteTombstone {
+                token: entry.token.clone(),
+                community_id: cid_hex.clone(),
+                extra: Default::default(),
+            });
+            revoked_tokens.push(entry.token.clone());
+        }
+        list.entries.retain(|e| !revoked_tokens.contains(&e.token));
+        let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
+        transport.publish(&event, &community.relays).await?;
+        let signers = live_signers_for(&list, &cid_hex, now_ms());
+        publish_invite_registry(transport, community, &session, &signers).await?;
+        for token in &revoked_tokens {
+            let _ = crate::db::community::delete_public_invite(token);
+        }
+        crate::log_info!("[Sever] revoked {} own public link(s) (containment)", revoked_tokens.len());
+        Ok(revoked_tokens.len())
+    })
+    .await
+}
+
+/// The follow-pass severance retry (B4): while a sever mark exists and I still
+/// hold live links at-or-below its line, re-attempt. A miss here is load-bearing
+/// — a stale registry keeps the community reading Public, which silently skips
+/// every future ban's refound — so this runs on every follow until it drains.
+pub(crate) async fn retry_pending_severance<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if sever_marks(&cid_hex).is_empty() {
+        return;
+    }
+    if let Err(e) = sever_own_links(transport, community).await {
+        crate::log_warn!("[Sever] pending link severance retry failed (will retry next follow): {e}");
+    }
+}
+
 /// Refresh every live public link's bundle behind its stable URL (CORD-05 §2) — e.g.
 /// after a Rekey/Refounding rolled the keys — by re-posting the bundle at the same
 /// coordinate with the CURRENT community state, so a link shared once keeps working
@@ -1189,8 +1307,16 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
         let creator = my_pk;
         let now = now_ms();
         let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+        // A containment condemns every link below its epoch. Refreshing one would
+        // RE-ARM the exact door the severing rotation closed (with the new root,
+        // no less) — and once re-armed, no retry could tell it from a legitimate
+        // link. Skip here; the severance retry owns their burial.
+        let condemn_below = sever_marks(&cid_hex).keys().copied().max().unwrap_or(0);
         for entry in &list.entries {
             if entry.community_id != cid_hex || dead.contains(entry.token.as_str()) || entry.token.len() != 2 * super::derive::TOKEN_LEN {
+                continue;
+            }
+            if entry.epoch.unwrap_or(0) < condemn_below {
                 continue;
             }
             // An expired link can't be joined, so refreshing it just re-states a
@@ -2443,6 +2569,13 @@ pub async fn rescue_stranded_members<T: Transport + ?Sized>(
                         .map_err(|e| e.to_string())?,
                 );
             }
+            // A rescue extension can fold STANDALONE on a withheld plane, so it
+            // must re-state the hop's sever itself: from the fetched siblings, or
+            // from the persisted mark when the plane withheld even those.
+            let severed_hop = existing
+                .iter()
+                .any(|c| c.scope == super::rekey::RekeyScope::Root && c.new_epoch == Epoch(e) && c.severed)
+                || sever_marks(&cid_hex).contains_key(&e);
             let chunks = super::rekey::build_rekey_chunk_extension(
                 &signer,
                 my_pk,
@@ -2454,6 +2587,7 @@ pub async fn rescue_stranded_members<T: Transport + ?Sized>(
                 &blobs,
                 at_secs,
                 citation.as_ref(),
+                severed_hop,
                 start_after,
             )
             .await
@@ -2795,6 +2929,19 @@ pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &Comm
 /// publish, and a head we can't fetch ABORTS with ZERO published state — so a
 /// transient miss never strands a published rekey with a half-anchored plane.
 pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, false).await
+}
+
+/// A SEVERING Refounding (CORD-06 Severing): the rotation carries the `sever`
+/// marker, and every adopter — this client included — revokes its own public
+/// invite links instead of refreshing them into the new epoch. The read-cut is
+/// real even while the community was Public: the door closes with the rotation,
+/// and only a deliberate fresh mint re-opens it.
+pub async fn refound_community_severing<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, true).await
+}
+
+async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], sever: bool) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         let cid = community.id();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
@@ -3023,7 +3170,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         }
         let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
         let base_chunks =
-            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), sever)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -3061,7 +3208,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
                 );
             }
             let ch_group = super::derive::channel_rekey_group_key(&community.community_root, &ch.id, ch_new_epoch);
-            let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+            let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
                 .await
                 .map_err(|e| e.to_string())?;
             channel_updates.push((ch.id, ch_new_key, ch_new_epoch));
@@ -3126,18 +3273,34 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         if let Some(client) = crate::state::nostr_client() {
             super::realtime::refresh_subscription(&client).await;
         }
-        // Refresh any live public links so their bundles carry the NEW root behind the
-        // same URL (a link shared once survives the rotation, CORD-05 §2). Idempotent,
-        // so retry a transient failure — a stranded link lands a new joiner on the dead
-        // pre-refound epoch, and there's no other trigger to heal it before the next
-        // refounding. A persistent failure is logged (refound already succeeded).
-        for attempt in 0..3u8 {
-            match refresh_public_links(transport, &updated).await {
-                Ok(()) => break,
-                Err(e) if attempt == 2 => {
-                    crate::log_warn!("v2: post-refounding public-link refresh failed after retries ({e}); live links may serve the prior root until the next refresh");
+        if sever {
+            // Severing: the mark persists FIRST (a crash between it and the revoke
+            // must retry, not forget — B4), then my own links are tombstoned. Other
+            // creators' links die when their clients adopt the marked rotation.
+            add_sever_mark(&cid_hex, new_epoch.0, at_secs);
+            for attempt in 0..3u8 {
+                match sever_own_links(transport, &updated).await {
+                    Ok(_) => break,
+                    Err(e) if attempt == 2 => {
+                        crate::log_warn!("v2: post-severing link revocation failed after retries ({e}); the sever mark retries it on the next follow");
+                    }
+                    Err(_) => continue,
                 }
-                Err(_) => continue,
+            }
+        } else {
+            // Refresh any live public links so their bundles carry the NEW root behind the
+            // same URL (a link shared once survives the rotation, CORD-05 §2). Idempotent,
+            // so retry a transient failure — a stranded link lands a new joiner on the dead
+            // pre-refound epoch, and there's no other trigger to heal it before the next
+            // refounding. A persistent failure is logged (refound already succeeded).
+            for attempt in 0..3u8 {
+                match refresh_public_links(transport, &updated).await {
+                    Ok(()) => break,
+                    Err(e) if attempt == 2 => {
+                        crate::log_warn!("v2: post-refounding public-link refresh failed after retries ({e}); live links may serve the prior root until the next refresh");
+                    }
+                    Err(_) => continue,
+                }
             }
         }
         Ok(updated)
@@ -3273,7 +3436,7 @@ pub async fn refound_at_birth<T: Transport + ?Sized>(
         ];
         let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
         let base_chunks =
-            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -4860,6 +5023,185 @@ async fn run_moderation_batch<T: Transport + ?Sized>(
     my_verdict
 }
 
+// ── Raid containment (CORD-06 Severing Refounding) ──────────────────────────
+
+/// What a containment actually accomplished. Every field is an honest count —
+/// a caller (Sentinel, a moderation console) reports these to a human, so a
+/// half-done containment must never read as a closed door.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ContainmentReport {
+    /// Raiders added to the Banlist.
+    pub banned: usize,
+    /// Members cut for joining inside the raid window without being convicted.
+    pub window_cut: usize,
+    /// Root epoch before and after. Equal = the refound did NOT land.
+    pub epoch_before: u64,
+    pub epoch_after: u64,
+    /// True only if the severing refound published.
+    pub refound_ok: bool,
+    /// My own public links revoked here. Other creators' links die as their
+    /// clients adopt the severed rotation.
+    pub own_links_revoked: usize,
+    /// Creators whose links are still live pending their client's adoption.
+    pub foreign_link_creators: Vec<String>,
+    /// Non-fatal problems worth showing a human.
+    pub warnings: Vec<String>,
+}
+
+/// Contain a raid: ban the raiders, cut everyone who walked in through the door
+/// during the raid window, then perform a SEVERING Refounding — the rotation
+/// that revokes the invite links instead of carrying them into the new epoch.
+///
+/// This is the raid lane, not a general ban. An ordinary ban (even in a Public
+/// community) keeps its shipped behaviour — [`set_members_banned`] decides
+/// internally, and a public one deliberately does NOT roll the root. Here the
+/// door itself is the vector, so it closes with the rotation.
+///
+/// `window_start_secs` is the raid's opening edge: unconvicted members who
+/// joined at-or-after it are cut from the new epoch (NOT banned — an innocent
+/// caught in the window rejoins through the owner's next link). Members already
+/// present before the window are never cut, however quiet.
+pub async fn contain_raid<T: Transport + ?Sized>(
+    transport: &T,
+    community_id: &crate::community::CommunityId,
+    raiders: &[PublicKey],
+    window_start_secs: u64,
+    cut_also: &[PublicKey],
+) -> Result<ContainmentReport, String> {
+    crate::db::scoped(async move {
+        let mut report = ContainmentReport::default();
+        let community = crate::db::community::load_community_v2(community_id)?
+            .ok_or_else(|| "v2 community not found".to_string())?;
+        report.epoch_before = community.root_epoch.0;
+        report.epoch_after = community.root_epoch.0;
+        let owner = community.owner()?;
+        let my_pk = me_pk()?;
+
+        // 1. Ban the convicted. Goes through the coalescer: the banlist edition is
+        //    a read-modify-write, and a concurrent single ban would otherwise
+        //    rebuild from a stale list and erase this one. A FAILED ban (most
+        //    plausibly the 500-entry banlist ceiling under a mega-raid) must not
+        //    abort the containment: the refound below cuts the raiders
+        //    cryptographically whether or not the list could name them.
+        if !raiders.is_empty() {
+            match set_members_banned(transport, community_id, raiders, true).await {
+                Ok(()) => report.banned = raiders.len(),
+                Err(e) => report.warnings.push(format!("banlist did not land ({e}) — the refound still cuts every named raider")),
+            }
+        }
+
+        // Re-read: the ban published a Banlist edition and stripped grants.
+        let community = crate::db::community::load_community_v2(community_id)?
+            .ok_or_else(|| "v2 community not found".to_string())?;
+
+        // 2. The window cut. A raid arrives THROUGH the link, so everyone who
+        //    walked in during it is part of the wave for containment purposes —
+        //    conviction only ever names the ones who spoke. Never the owner, never
+        //    staff, never anyone whose earliest trace predates the window.
+        //
+        //    `cut_also` first: Join timestamps are AUTHOR-claimed, so a quiet
+        //    raider who backdated their Join slides under any window this fold
+        //    can compute. A caller watching arrivals on its own clock (Sentinel's
+        //    receive log) names them here and they are cut regardless.
+        let mut cut: Vec<PublicKey> = raiders.to_vec();
+        for pk in cut_also {
+            if !cut.contains(pk) {
+                cut.push(*pk);
+                report.window_cut += 1;
+            }
+        }
+        if window_start_secs > 0 {
+            let roster = crate::db::community::get_community_roles(
+                &crate::simd::hex::bytes_to_hex_32(&community.id().0),
+            )
+            .unwrap_or_default();
+            let owner_hex = owner.to_hex();
+            match fetch_guestbook_events(transport, &community, 0).await {
+                Ok((events, _, _)) => {
+                    // EARLIEST trace per member: a re-announced Join must never make
+                    // an established member read as a window joiner.
+                    let mut first_seen: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+                    for ev in &events {
+                        if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
+                            let secs = at_ms / 1000;
+                            first_seen
+                                .entry(*member)
+                                .and_modify(|e| *e = (*e).min(secs))
+                                .or_insert(secs);
+                        }
+                    }
+                    for (pk, joined) in first_seen {
+                        if joined < window_start_secs || pk == owner || pk == my_pk || cut.contains(&pk) {
+                            continue;
+                        }
+                        // Staff are never cut by a window: a moderator who joined
+                        // moments before a raid is still a moderator.
+                        if roster.is_staff(&pk.to_hex(), Some(&owner_hex)) {
+                            continue;
+                        }
+                        cut.push(pk);
+                        report.window_cut += 1;
+                    }
+                }
+                Err(e) => report
+                    .warnings
+                    .push(format!("guestbook unreadable — no window cut applied, only convicted raiders are severed ({e})")),
+            }
+        }
+
+        // 3. The severing refound. Private channels are deliberately NOT rotated
+        //    separately: the root roll re-keys every plane, and link-borne raiders
+        //    were never entitled to a private channel in the first place.
+        //
+        //    Under the MODERATION lock, exactly as `run_moderation_batch` holds it
+        //    across ITS refound: an ordinary ban racing this rotation would publish
+        //    a banlist edition the compaction fetch below has already read past,
+        //    and the new epoch would carry it away — a ban silently erased at the
+        //    moment bans matter most. Lock order (moderation → follow) matches the
+        //    shipped path. Retried: the refound's coverage gate fails closed under
+        //    exactly the relay lag a mid-raid flood produces.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let links_before = crate::db::community::list_public_invites(&cid_hex).map(|l| l.len()).unwrap_or(0);
+        let unit = moderation_lock(community_id);
+        let _guard = unit.lock().await;
+        let mut refound = Err("severing refound never attempted".to_string());
+        for attempt in 0..3u8 {
+            refound = refound_community_severing(transport, &community, &cut).await;
+            if refound.is_ok() {
+                break;
+            }
+            if attempt < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1))).await;
+            }
+        }
+        match refound {
+            Ok(updated) => {
+                report.refound_ok = true;
+                report.epoch_after = updated.root_epoch.0;
+                let links_after = crate::db::community::list_public_invites(&cid_hex).map(|l| l.len()).unwrap_or(0);
+                report.own_links_revoked = links_before.saturating_sub(links_after);
+                if links_after > 0 {
+                    report.warnings.push(format!(
+                        "{links_after} of my own link(s) survived the sever — the mark retries them on the next follow"
+                    ));
+                }
+                report.foreign_link_creators = crate::db::community::invite_link_set_creators(&cid_hex)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| *c != my_pk.to_hex())
+                    .collect();
+            }
+            Err(e) => {
+                // The banlist landed and silences the named raiders at every honest
+                // reader, but the DOOR IS STILL OPEN. Never dress this as success.
+                report.warnings.push(format!("SEVERING REFOUND FAILED — the invite door may still be open: {e}"));
+            }
+        }
+        Ok(report)
+    })
+    .await
+}
+
 /// Edit the community metadata (vsk 0, CORD-02 §6). Gated on the reader side by
 /// `MANAGE_METADATA`.
 pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, meta: &control::CommunityMetadata) -> Result<(), String> {
@@ -5168,7 +5510,7 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
         }
         let group = channel_rekey_group_key(&community.community_root, &channel_id, epoch);
         let at_secs = now_ms() / 1000;
-        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
             .await
             .map_err(|e| e.to_string())?;
         for c in &chunks {
@@ -5621,7 +5963,7 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
         }
         let group = channel_rekey_group_key(&community.community_root, channel_id, new_epoch);
         let at_secs = now_ms() / 1000;
-        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(*channel_id), new_epoch, ch.epoch, &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(*channel_id), new_epoch, ch.epoch, &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
             .await
             .map_err(|e| e.to_string())?;
         for c in &chunks {
@@ -7073,6 +7415,9 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // finite chain terminates naturally; the cap defends against a relay feeding a
         // pathological set.
         const MAX_STEPS: usize = 128;
+        // Containment hops adopted in this walk (B2: any one of them condemns —
+        // a later ordinary hop in the same walk must not relaunder links open).
+        let mut severed_hops: Vec<u64> = Vec::new();
         for _ in 0..MAX_STEPS {
             let mut advanced = false;
 
@@ -7218,7 +7563,14 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                     true
                 };
                 match advance_scope(&batches, RekeyScope::Root, cur.id(), &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
-                    Advance::Adopt { new_key, control_pk, control_root } => {
+                    Advance::Adopt { new_key, control_pk, control_root, severed } => {
+                        // Record the HOP that was severed, not the walk's final head:
+                        // the mark drives both the link condemnation line and the
+                        // rescue re-stamp, and a multi-step walk would otherwise
+                        // present the containment at the wrong epoch.
+                        if severed {
+                            severed_hops.push(next.0);
+                        }
                         cur.community_root = new_key;
                         cur.root_epoch = next;
                         // The control pair is the blob's, never inherited: the
@@ -7281,6 +7633,11 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             );
         }
         if !changed {
+            // A pending severance whose revoke was interrupted must heal on QUIET
+            // passes too — waiting for the next rotation means a one-shot transport
+            // blip leaves the community reading Public (and every future ban
+            // refound-less) until someone happens to rotate again.
+            retry_pending_severance(transport, &cur).await;
             return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged });
         }
         // A leave/delete raced this follow: saving would resurrect the community row
@@ -7289,14 +7646,32 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged });
         }
         crate::db::community::save_community_v2(&cur)?;
-        // Carry my own live links across the rotation someone ELSE performed
+        // Mark every containment hop FIRST: the marks are what condemn links, and
+        // both the severance below and the refresh consult them — so the order of
+        // those two stops mattering (a condemned link is skipped by the refresh
+        // and buried by the severance, in either order, on any pass).
+        for hop in &severed_hops {
+            add_sever_mark(&cid_hex, *hop, now_ms() / 1000);
+        }
+        if !severed_hops.is_empty() {
+            // Someone ELSE ran a Severing Refounding: my links minted below the
+            // severed epoch are the raid's door — bury them instead of carrying
+            // them forward. A fresh link minted at-or-after it survives every
+            // device's adopt, however late (the epoch is the same on all of them).
+            if let Err(e) = sever_own_links(transport, &cur).await {
+                crate::log_warn!("[Sever] own-link revocation on adopt failed (retries next follow): {e}");
+            }
+        }
+        // Carry my SURVIVING links across the rotation someone ELSE performed
         // (CORD-05 §2). The refounder refreshes only the bundles they can reach —
         // their own — so without this every other creator's links keep vending the
         // superseded root and drop new joiners onto a dead epoch, which is exactly
-        // the stranding the stable-URL refresh exists to prevent. Best-effort and
-        // idempotent: a creator with no links for this community returns early, and
-        // a failure only delays the heal until the next adoption or refound.
+        // the stranding the stable-URL refresh exists to prevent. Condemned links
+        // are skipped inside (see the guard there). Best-effort and idempotent.
         let _ = refresh_public_links(transport, &cur).await;
+        // A pending sever mark (mine or adopted) whose revoke never completed
+        // keeps retrying while condemned links remain (B4).
+        retry_pending_severance(transport, &cur).await;
         Ok(RekeyFollow { updated: Some(cur), self_removed: false, dissolved: false, wedged })
     })
     .await
@@ -7311,7 +7686,7 @@ enum Advance {
     /// pair is the BLOB's, never inherited: a legacy 72-byte blob carries
     /// neither (that epoch's Control folds at the legacy address), and channel
     /// rotations never carry any.
-    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]> },
+    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool },
     /// A complete owner rotation at `next_epoch` dropped my blob — I'm removed.
     Removed,
     /// No owner rotation extends my held epoch (yet) — keep the current key.
@@ -7408,6 +7783,10 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     next_epoch: Epoch,
 ) -> Advance {
     let mut winners: Vec<rekey::BaseKeyDelivery> = Vec::new();
+    // Parallel to `winners`: whether each delivery's rotation is a containment
+    // (Root scope only). Selected by the same lowest-key index, so a same-epoch
+    // fork adopts the winner's flag and never a loser's.
+    let mut winner_severed: Vec<bool> = Vec::new();
     let mut saw_complete_candidate = false;
     let mut saw_outranking_candidate = false;
     let mut my_blob_unopenable = false;
@@ -7442,7 +7821,10 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
                         .map(|k| rekey::BaseKeyDelivery { new_root: k, control_pk: None, control_root: None }),
                 };
                 match opened {
-                    Ok(d) => winners.push(d),
+                    Ok(d) => {
+                        winners.push(d);
+                        winner_severed.push(scope.id32() == RekeyScope::Root.id32() && r.severed);
+                    }
                     // A blob AT my locator that won't open is not an exclusion
                     // (CORD-06 §2: removal = NO blob across all chunks). It must
                     // never conclude Removed below — that is exactly how a
@@ -7465,7 +7847,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
         let keys: Vec<[u8; 32]> = winners.iter().map(|d| d.new_root).collect();
         let idx = rekey::lowest_key_winner(&keys).expect("winners is non-empty");
         let w = &winners[idx];
-        return Advance::Adopt { new_key: w.new_root, control_pk: w.control_pk, control_root: w.control_root };
+        return Advance::Adopt { new_key: w.new_root, control_pk: w.control_pk, control_root: w.control_root, severed: winner_severed[idx] };
     }
     if saw_complete_candidate && !my_blob_unopenable && (!keyed || saw_outranking_candidate) {
         Advance::Removed
@@ -9942,7 +10324,7 @@ mod tests {
         .await
         .unwrap();
         let base_group = base_rekey_group_key(&community.community_root, community.id(), new_epoch);
-        let chunks = rekey::build_rekey_chunks_local(&owner.keys, &base_group, RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[garbled, own], 2_000, None).unwrap();
+        let chunks = rekey::build_rekey_chunks_local(&owner.keys, &base_group, RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[garbled, own], 2_000, None, false).unwrap();
         for c in &chunks {
             bed.relay.publish(c, &community.relays).await.unwrap();
         }
@@ -11015,6 +11397,268 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adopting_a_severing_rotation_revokes_my_own_links_instead_of_refreshing_them() {
+        // The inverse of the sibling test: a SEVERING refound flips the stable-URL
+        // contract. A raid arrives through the door, so every creator's client
+        // buries its own links on adopt rather than carrying them into the new
+        // epoch — which is the only way the OWNER's link dies when a bot admin ran
+        // the containment (only the creator holds a link's signer secret).
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "SeverHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "b1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "my link is live before the raid");
+
+        // The owner runs a SEVERING refound (the raid lane).
+        let new_root = [0xD5; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated
+            .expect("the owner's severing Refounding is adopted");
+        assert_eq!(updated.root_epoch, Epoch(1), "I still advance to the new epoch");
+
+        let err = fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err();
+        assert!(err.contains("revoked"), "my link must be a grave, not a refreshed door: {err}");
+        assert!(
+            crate::db::community::list_public_invites(&crate::simd::hex::bytes_to_hex_32(&updated.id().0)).unwrap().is_empty(),
+            "and the local record goes with it",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_severing_adopt_never_deadlocks_the_last_link_creator() {
+        // The severance runs INSIDE the follow, which holds `follow_lock` for the
+        // whole call. `revoke_public_link`'s last-live-link escalation re-founds —
+        // taking that same non-reentrant lock — so routing severance through it
+        // would wedge this community's follow forever, for the very client whose
+        // revocation empties the registry (typically the owner). The escalation-free
+        // path is the fix; this test is its guard.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoDeadlock", bed.relays.clone(), None).await.unwrap();
+        let rid = "b2".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        // My link is the ONLY one in the registry — revoking it empties the
+        // aggregate, which is exactly the escalation's trigger condition.
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok());
+
+        let new_root = [0xD6; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+
+        let followed = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            follow_rekeys(&bed.relay, &joined, &crate::db::current_session()),
+        )
+        .await
+        .expect("the severing follow must not deadlock on follow_lock")
+        .unwrap();
+        assert_eq!(followed.updated.expect("adopted").root_epoch, Epoch(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_severing_adopt_spares_a_link_minted_after_the_raid() {
+        // Severance is bounded by the rotation's own wire stamp, not "now". A
+        // second device that adopts late must not eat the fresh link the owner
+        // minted to re-open the community after the raid was over.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "FreshDoor", bed.relays.clone(), None).await.unwrap();
+        let rid = "b3".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let raid_era = mint_public_link(&bed.relay, &joined, "https://old", None, None).await.unwrap();
+
+        let new_root = [0xD7; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated.expect("adopted");
+        assert!(
+            fetch_public_bundle(&bed.relay, &raid_era.url).await.unwrap_err().contains("revoked"),
+            "the raid-era link is buried",
+        );
+
+        // The raid is over and the owner deliberately re-opens the community. The
+        // pending-severance retry runs on every follow, so a door minted after the
+        // containment must survive them all — otherwise no one could ever re-open.
+        let fresh = mint_public_link(&bed.relay, &updated, "https://new", None, None).await.unwrap();
+        let _ = follow_rekeys(&bed.relay, &updated, &crate::db::current_session()).await.unwrap();
+        assert!(
+            fetch_public_bundle(&bed.relay, &fresh.url).await.is_ok(),
+            "a link minted after the containment survives later follow passes",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unauthorized_severing_rotation_never_touches_my_links() {
+        // The sever tag grants no authority of its own: it rides a rotation the
+        // adopt gate has already verified. A plain member's forged severing
+        // rotation is refused whole, so the tag is never even read.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoForge", bed.relays.clone(), None).await.unwrap();
+        let rid = "b4".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+
+        // A stranger with no BAN mints a severing rotation.
+        let stranger = Keys::generate();
+        publish_severing_base_rotation(&bed.relay, &joined, &stranger, &[me.keys.public_key(), owner.keys.public_key()], &[0xD8; 32], &joined.community_root).await;
+
+        let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pending_severance_heals_on_a_quiet_follow_pass() {
+        // The retry must run on passes that adopt NOTHING. A one-shot transport
+        // blip during the original severance otherwise has no healing trigger
+        // until some future rotation happens to be adopted — and until then the
+        // community reads Public, which silently strips the refound from every
+        // ordinary ban.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "QuietHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "b5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+
+        // A containment was adopted but its revoke was interrupted: the mark is
+        // down, the epoch-0 link still stands.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        add_sever_mark(&cid_hex, 1, 5_000);
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok());
+
+        // A QUIET follow — no rotation anywhere — must finish the burial.
+        let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(followed.updated.is_none(), "nothing to adopt");
+        assert!(
+            fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
+            "the interrupted severance healed with no rotation to carry it",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sever_survives_a_later_ordinary_rotation_in_the_same_walk() {
+        // Sticky severance: a client catching up walks EVERY missed rotation in
+        // one pass. If the containment hop is followed by an ordinary one,
+        // last-hop-wins semantics would refresh the links right back open — the
+        // door the raid came through, re-armed with the newest root.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "StickySever", bed.relays.clone(), None).await.unwrap();
+        let rid = "b6".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+
+        // Hop 1: the containment. Hop 2: an ordinary rotation on top of it.
+        let root1 = [0xE1; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &root1, &joined.community_root).await;
+        let mut stepped = joined.clone();
+        stepped.community_root = root1;
+        stepped.root_epoch = Epoch(1);
+        let root2 = [0xE2; 32];
+        publish_base_rotation(&bed.relay, &stepped, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &root2, &root1).await;
+
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated.expect("both hops adopt");
+        assert_eq!(updated.root_epoch, Epoch(2), "the walk reached the ordinary head");
+        assert!(
+            fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
+            "the containment's burial survived the ordinary hop behind it",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contain_raid_bans_cuts_and_severs_end_to_end() {
+        let (bed, owner, _other) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Containment", bed.relays.clone(), None).await.unwrap();
+        let minted = mint_public_link(&bed.relay, &community, "https://x", None, None).await.unwrap();
+
+        // Three arrivals: an established member (before the window), a convicted
+        // raider and a quiet lurker (both inside it).
+        let established = Keys::generate();
+        let raider = Keys::generate();
+        let lurker = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        for (who, at_ms) in [(&established, 2_000_000u64), (&raider, 9_000_000), (&lurker, 9_500_000)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        let report = contain_raid(&bed.relay, community.id(), &[raider.public_key()], 5_000, &[]).await.unwrap();
+        assert_eq!(report.banned, 1, "the convicted raider is banned");
+        assert_eq!(report.window_cut, 1, "the lurker who joined inside the window is cut");
+        assert!(report.refound_ok, "the severing refound landed: {:?}", report.warnings);
+        assert_eq!((report.epoch_before, report.epoch_after), (0, 1), "the root rolled");
+        assert_eq!(report.own_links_revoked, 1, "the door closed with it");
+
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let banlist = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert!(banlist.contains(&raider.public_key().to_hex()), "raider on the banlist");
+        assert!(!banlist.contains(&lurker.public_key().to_hex()), "the lurker is cut, never banned — they can rejoin through a fresh link");
+        assert!(!banlist.contains(&established.public_key().to_hex()));
+        assert!(
+            fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
+            "the invite URL the raid used is a grave",
+        );
+
+        // The rotation's recipient set is the severance line: the established
+        // member rides into the new epoch, the raider and the lurker do not.
+        let updated = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(updated.root_epoch, Epoch(1));
+        let members = memberlist(&bed.relay, &updated).await.unwrap();
+        assert!(members.contains(&established.public_key()), "established member survives");
+        assert!(!members.contains(&raider.public_key()), "raider gone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn adopting_someone_elses_rotation_refreshes_my_own_live_links() {
         // CORD-05 §2: a link shared once keeps working across rotations, because
         // its bundle is re-posted behind the same URL. The Refounder can only
@@ -13638,7 +14282,30 @@ mod tests {
             .iter()
             .map(|r| rekey::build_blob_local(rotator.secret_key(), &rotator.public_key().to_bytes(), r, RekeyScope::Root, new_epoch, new_root).unwrap())
             .collect();
-        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref()).unwrap();
+        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref(), false).unwrap();
+        for e in &events {
+            relay.publish(e, &community.relays).await.unwrap();
+        }
+    }
+
+    /// A base rotation that carries the containment marker (CORD-06 Severing).
+    async fn publish_severing_base_rotation(
+        relay: &MemoryRelay,
+        community: &CommunityV2,
+        rotator: &Keys,
+        recipients: &[PublicKey],
+        new_root: &[u8; 32],
+        prev_key: &[u8; 32],
+    ) {
+        let new_epoch = Epoch(community.root_epoch.0 + 1);
+        let prev_epoch = community.root_epoch;
+        let prev_commit = super::super::derive::epoch_key_commitment(prev_epoch, prev_key);
+        let group = base_rekey_group_key(&community.community_root, community.id(), new_epoch);
+        let blobs: Vec<_> = recipients
+            .iter()
+            .map(|r| rekey::build_blob_local(rotator.secret_key(), &rotator.public_key().to_bytes(), r, RekeyScope::Root, new_epoch, new_root).unwrap())
+            .collect();
+        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref(), true).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -13693,7 +14360,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &[0x44; 32]);
         let group = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &new_key).unwrap();
-        let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None).unwrap();
+        let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None, false).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -13749,7 +14416,7 @@ mod tests {
         // Chunk 1 of a declared 2, carrying someone else's blob (not mine).
         let other = Keys::generate();
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &other.public_key(), RekeyScope::Root, new_epoch, &[0xB3; 32]).unwrap();
-        let rumor = rekey::build_rekey_rumor(owner.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 2, 2_000, None).unwrap();
+        let rumor = rekey::build_rekey_rumor(owner.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 2, 2_000, None, false).unwrap();
         let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &owner, Timestamp::from_secs(2_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
 
@@ -13806,7 +14473,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let group = channel_rekey_group_key(&root0, &priv_id, Epoch(2));
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -13845,7 +14512,7 @@ mod tests {
         let pc1 = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
         let g1 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
         let b1 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &key1).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         // Epoch 2: a later rotation includes ME (e.g. a removal-forced re-mint whose
@@ -13854,7 +14521,7 @@ mod tests {
         let pc2 = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let b2 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -13895,7 +14562,7 @@ mod tests {
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
         let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &admin.public_key()).as_ref()).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &admin.public_key()).as_ref(), false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         let session = crate::db::current_session();
@@ -13908,7 +14575,7 @@ mod tests {
         let pc3 = super::super::derive::epoch_key_commitment(Epoch(2), &key2);
         let g3 = channel_rekey_group_key(&updated.community_root, &priv_id, Epoch(3));
         let rb = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(3), &key3).unwrap();
-        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100, None, false).unwrap() {
             relay.publish(&e, &updated.relays).await.unwrap();
         }
         let follow = follow_rekeys(&relay, &updated, &session).await.unwrap();
@@ -13950,7 +14617,7 @@ mod tests {
         let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&held.community_root, &priv_id, Epoch(2));
         let pb = rekey::build_blob_local(peer.secret_key(), &peer.public_key().to_bytes(), &peer.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, my_authority_citation(&held, &peer.public_key()).as_ref()).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, my_authority_citation(&held, &peer.public_key()).as_ref(), false).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let session = crate::db::current_session();
@@ -13963,7 +14630,7 @@ mod tests {
         let key3 = [0xA3; 32];
         let stranger = Keys::generate();
         let ob = rekey::build_blob_local(owner.keys.secret_key(), &owner.keys.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key3).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100, None, false).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
@@ -14174,7 +14841,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
         for i in 0..260u64 {
             let blob = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &rogue.public_key(), RekeyScope::Root, new_epoch, &[0xEE; 32]).unwrap();
-            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i, None).unwrap();
+            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i, None, false).unwrap();
             let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &rogue, Timestamp::from_secs(3_000 + i)).unwrap();
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
@@ -14241,7 +14908,7 @@ mod tests {
         let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
         let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
         // Authorized admin, correct continuity, my blob present — but NO citation.
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -14253,7 +14920,7 @@ mod tests {
         let cited = my_authority_citation(&community, &admin.public_key());
         assert!(cited.is_some(), "the seeded head yields a citation");
         let blob2 = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob2], 2_100, cited.as_ref()).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob2], 2_100, cited.as_ref(), false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         let out = follow_rekeys(&relay, &community, &crate::db::current_session()).await.unwrap();
@@ -14295,7 +14962,7 @@ mod tests {
         let key_b = [0xFB; 32]; // higher — a's must win regardless of publish order
         for (signer, k) in [(&a, &key_a), (&b, &key_b)] {
             let blob = rekey::build_blob_local(signer.secret_key(), &signer.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), k).unwrap();
-            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &signer.public_key()).as_ref()).unwrap() {
+            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &signer.public_key()).as_ref(), false).unwrap() {
                 relay.publish(&e, &community.relays).await.unwrap();
             }
         }

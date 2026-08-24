@@ -2178,6 +2178,22 @@ pub struct InviteLinkSetRow {
     pub locators: Vec<String>,
 }
 
+/// The creators the folded invite Registry currently lists for this community —
+/// the cheap local answer to "might I hold a live public link here?".
+pub fn invite_link_set_creators(community_id: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT creator FROM community_invite_link_sets WHERE community_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .map(|stored| dec_txt(&stored))
+        .collect();
+    Ok(rows)
+}
+
 /// Replace ALL of a Community's per-creator invite-link sets with the freshly-folded set (latest-wins).
 /// Replacing wholesale (not upserting) drops a creator who has revoked every link, so the per-creator
 /// view stays in lockstep with the flat registry computed in the same fold.

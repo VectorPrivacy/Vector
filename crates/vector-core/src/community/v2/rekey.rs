@@ -69,6 +69,11 @@ const TAG_NEW_EPOCH: &str = "newepoch";
 const TAG_PREV_EPOCH: &str = "prevepoch";
 const TAG_PREV_COMMIT: &str = "prevcommit";
 const TAG_CHUNK: &str = "chunk";
+/// Root-scope containment marker (CORD-06 Severing Refounding): an adopter
+/// revokes its own public invite links instead of refreshing them into the new
+/// epoch. Grants no authority of its own — it rides a rotation the adopt gate
+/// has already verified.
+const TAG_SEVER: &str = "sever";
 
 /// What a rekey rotates (CORD-06 §1). The 32-byte scope id is stamped into every
 /// blob's plaintext so a blob can't be spliced onto another coordinate.
@@ -506,6 +511,8 @@ pub struct RekeyChunk {
     /// The rotator's `vac` (CORD-06 §Authority: "a rotation cites the Grant it
     /// acts under like any authority action"). `None` when the owner rotates.
     pub citation: Option<crate::community::edition::AuthorityCitation>,
+    /// Severing containment marker ([`TAG_SEVER`], root scope only).
+    pub severed: bool,
 }
 
 /// The key that groups chunks of ONE rotation: `(rotator, scope_id, new_epoch,
@@ -534,6 +541,7 @@ pub fn build_rekey_rumor(
     chunk_n: u32,
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
 ) -> Result<UnsignedEvent, RekeyError> {
     if new_epoch.0 <= prev_epoch.0 {
         return Err(RekeyError::NonMonotonicEpoch);
@@ -557,6 +565,9 @@ pub fn build_rekey_rumor(
     // never honored by a lagging client." The owner cites nothing.
     if let Some(c) = citation {
         tags.push(c.to_tag());
+    }
+    if severed {
+        tags.push(Tag::custom(TAG_SEVER, ["1"]));
     }
     // Rekeys fold by their tags, not time; still stamp created_at for the wire.
     Ok(stream::build_rumor_secs(super::kind::REKEY, rotator, &content, tags, at_secs))
@@ -605,6 +616,7 @@ pub fn build_rekey_chunks_local(
     blobs: &[RekeyBlob],
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
@@ -625,6 +637,7 @@ pub fn build_rekey_chunks_local(
             n,
             at_secs,
             citation,
+            severed,
         )?;
         let (wrap, _) = seal_rekey_chunk(&rumor, rekey_group, rotator_keys, Timestamp::from_secs(at_secs))?;
         out.push(wrap);
@@ -647,6 +660,7 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     blobs: &[RekeyBlob],
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
@@ -656,7 +670,7 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     let n = groups.len() as u32;
     let mut out = Vec::with_capacity(groups.len());
     for (idx, group_blobs) in groups.iter().enumerate() {
-        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs, citation)?;
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs, citation, severed)?;
         let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
         out.push(wrap);
     }
@@ -684,6 +698,7 @@ pub async fn build_rekey_chunk_extension<S: crate::signer::VectorSigner + ?Sized
     blobs: &[RekeyBlob],
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
     start_after: u32,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
@@ -695,7 +710,7 @@ pub async fn build_rekey_chunk_extension<S: crate::signer::VectorSigner + ?Sized
     let mut out = Vec::with_capacity(groups.len());
     for (idx, group_blobs) in groups.iter().enumerate() {
         let i = start_after + idx as u32 + 1;
-        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, i, n, at_secs, citation)?;
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, i, n, at_secs, citation, severed)?;
         let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
         out.push(wrap);
     }
@@ -734,6 +749,13 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
 
+    // Spec-shaped: present means exactly "1" (CORD-01 §5 strictness), absent means false.
+    let severed = match unique_tag(rumor, TAG_SEVER)?.as_deref() {
+        None => false,
+        Some("1") => true,
+        Some(_) => return Err(RekeyError::BadTag(TAG_SEVER)),
+    };
+
     Ok(RekeyChunk {
         rotator: opened.author,
         scope,
@@ -743,6 +765,7 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         chunk: (chunk_i, chunk_n),
         blobs,
         citation: crate::community::edition::AuthorityCitation::from_tags(&rumor.tags),
+        severed,
     })
 }
 
@@ -798,6 +821,9 @@ pub struct Rotation {
     /// The rotator's `vac`, taken from the first chunk seen (every chunk of one
     /// rotation carries the same citation — they share a signer and an action).
     pub citation: Option<crate::community::edition::AuthorityCitation>,
+    /// OR across chunks: any severed chunk marks the whole rotation severed, so
+    /// an extension (rescue) can never launder the flag away.
+    pub severed: bool,
 }
 
 impl Rotation {
@@ -844,7 +870,9 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
             declared_chunks: c.chunk.1,
             held_chunks: std::collections::BTreeSet::new(),
             citation: c.citation.clone(),
+            severed: c.severed,
         });
+        entry.severed |= c.severed;
         if entry.held_chunks.insert(c.chunk.0) {
             entry.blobs.extend(c.blobs.iter().cloned());
         }
@@ -1116,7 +1144,7 @@ mod tests {
         let key = [0xABu8; 32];
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &key).unwrap();
         let commit = epoch_key_commitment(Epoch(0), &[0xEEu8; 32]);
-        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &commit, &[blob.clone()], 1, 1, 100, None).unwrap();
+        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &commit, &[blob.clone()], 1, 1, 100, None, false).unwrap();
         let (wrap, _) = seal_rekey_chunk(&rumor, &group, &rotator, Timestamp::from_secs(100)).unwrap();
 
         // The wrap is signed by the group key, not the rotator (no identity on the wire).
@@ -1146,7 +1174,7 @@ mod tests {
         let group = base_rekey_group(&prior_root, &community, Epoch(1));
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &new_root).unwrap();
         let commit = epoch_key_commitment(Epoch(0), &prior_root);
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &commit, &[blob], 100, None).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &commit, &[blob], 100, None, false).unwrap();
         assert_eq!(chunks.len(), 1);
 
         let opened = stream::open_wrap(&chunks[0], &group).unwrap();
@@ -1173,7 +1201,7 @@ mod tests {
                 build_blob_local(rotator.secret_key(), &xonly(&rotator), &r.public_key(), RekeyScope::Root, Epoch(1), &[0xCDu8; 32]).unwrap()
             })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None, false).unwrap();
         assert_eq!(chunks.len(), 1, "a full send chunk is exactly one event");
         assert!(chunks[0].as_json().len() <= 65_536, "a full chunk must fit a 64KB relay event");
     }
@@ -1186,7 +1214,7 @@ mod tests {
         let blobs: Vec<RekeyBlob> = (0..MAX_REKEY_BLOBS_PER_EVENT + 1)
             .map(|_| RekeyBlob { locator: "aa".repeat(32), wrapped: "x".into() })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100, None).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100, None, false).unwrap();
         assert_eq!(chunks.len(), 2);
         let parsed: Vec<RekeyChunk> = chunks.iter().map(|w| parse_rekey_chunk(&stream::open_wrap(w, &group).unwrap()).unwrap()).collect();
         assert_eq!(parsed[0].chunk, (1, 2));
@@ -1199,7 +1227,7 @@ mod tests {
     fn plaintext_sealed_rekey_is_rejected() {
         let rotator = keys(1);
         let group = channel_rekey_group(&root(), &CHAN, Epoch(1));
-        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &[0u8; 32], &[], 1, 1, 100, None).unwrap();
+        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &[0u8; 32], &[], 1, 1, 100, None, false).unwrap();
         let seal = stream::build_seal(&rumor, SealForm::Plaintext, &group, &rotator).unwrap();
         let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, Timestamp::from_secs(1)).unwrap();
         let opened = stream::open_wrap(&wrap, &group).unwrap();
@@ -1210,7 +1238,7 @@ mod tests {
     fn non_monotonic_epoch_is_refused_at_mint_and_on_parse() {
         let rotator = keys(1);
         assert!(matches!(
-            build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(1), &[0u8; 32], &[], 1, 1, 100, None),
+            build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(1), &[0u8; 32], &[], 1, 1, 100, None, false),
             Err(RekeyError::NonMonotonicEpoch)
         ));
     }
@@ -1220,7 +1248,7 @@ mod tests {
         let rotator = keys(1);
         for (i, n) in [(0u32, 1u32), (2, 1), (1, 0)] {
             assert!(
-                matches!(build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &[], i, n, 100, None), Err(RekeyError::BadChunkIndex)),
+                matches!(build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &[], i, n, 100, None, false), Err(RekeyError::BadChunkIndex)),
                 "chunk ({i},{n}) must be rejected"
             );
         }
@@ -1238,6 +1266,7 @@ mod tests {
             chunk: (i, n),
             blobs,
             citation: None,
+            severed: false,
         }
     }
 
