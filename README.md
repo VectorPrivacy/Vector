@@ -21,8 +21,15 @@
 
 ---
 
+<p align="center">
+  <img width="48%" alt="Vector-Screenshot1" src="./assets/screenshot_1.png"/>
+  <img width="48%" alt="Vector-Screenshot2" src="./assets/screenshot_2.png"/>
+</p>
+
+---
+
 <p align="justify">
-  Vector Messenger is a free, open-source, decentralized, and censorship-resistant chat communication platform that doesn't require any form of KYC, prevents metadata tracking, and will never allow for any form of advertisements to depreciate the user experience. The application is optimally designed to be lightweight, energy efficient, and requires minimum computing resources allowing for Vector Messenger to be run on virtually any device (<200mb RAM).
+  Vector is a free, open-source messenger built for private communication without compromise. There's no phone number, no email, and no account to create, just download it and start talking. Your messages, files, and communities are end-to-end encrypted, and no company or server sits in the middle able to read them, sell your data, or shut you down. Vector is designed to be light and efficient, running on under 200MB of RAM, so it works well on virtually any device, including older phones and low-powered hardware. Lastly, zero advertisements.
 
 ---
 <img align="left" src="./assets/vector_check.png" width="150">
@@ -37,7 +44,7 @@ Vector Privacy is a free messenger application that was designed for anyone arou
 
 ### No Compromise Encryption
 
-Vector utilizes a decentralized relay network (Nostr) as the base infrastructure to communicate information and transmit data, which means it is not stored on a centralized server. The chosen standard, NIP-17, provides a secure and private way for users to communicate directly with each other on the Nostr network. It achieves this by using a combination of [NIP-44 encryption](https://github.com/nostr-protocol/nips/blob/master/44.md), [NIP-59 seals](https://github.com/nostr-protocol/nips/blob/master/59.md), and [gift wraps](https://github.com/nostr-protocol/nips/blob/master/59.md).
+Vector utilizes a decentralized relay network (Nostr) as the base infrastructure to communicate information and transmit data, which means it is not stored on a centralized server. The chosen standard, NIP-17, provides a secure and private way for users to communicate directly with each other on the Nostr network. It achieves this by using a combination of [NIP-44 encryption](https://github.com/nostr-protocol/nips/blob/master/44.md), [NIP-59 seals](https://github.com/nostr-protocol/nips/blob/master/59.md), and [gift wraps](https://github.com/nostr-protocol/nips/blob/master/59.md). Learn more about [Vector's Encryption](https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/intro/encryption)
 
 ---
 
