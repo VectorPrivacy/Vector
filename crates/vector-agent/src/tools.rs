@@ -598,7 +598,16 @@ impl VectorAgent {
     #[tool(description = "Sync every Community from relays: refresh the joined list and walk each one's key rotations (re-foundings), adopting any this account missed. Run it when a Community's state looks stale — a channel that stopped reading, a member list that disagrees with another client, or after a moderation action elsewhere rotated the keys. Per-channel message fetching stays with sync_community_channel.")]
     async fn sync_communities(&self) -> Result<CallToolResult, McpError> {
         match self.core.sync_communities().await {
-            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Communities synced (list refreshed, key rotations followed)")])),
+            Ok(warnings) => {
+                let mut msg = String::from("Communities synced (list refreshed, key rotations followed)");
+                if !warnings.is_empty() {
+                    msg.push_str("\n⚠ warnings:");
+                    for w in &warnings {
+                        msg.push_str(&format!("\n  - {w}"));
+                    }
+                }
+                Ok(CallToolResult::success(vec![Content::text(msg)]))
+            }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         }
     }

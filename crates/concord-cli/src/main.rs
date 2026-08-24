@@ -250,9 +250,68 @@ async fn print_relay(c: &vector_core::community::Community) {
     }
     let cur_base = c.server_root_epoch.0;
 
+    // ── v2 base rekeys (CORD-06) ───────────────────────────────────────────────
+    // A v2 rotation is a GIFT-WRAPPED stream event (kind 1059) authored by the rekey
+    // group's derived pubkey — NOT the v1 (COMMUNITY_REKEY + z-tag) shape the block
+    // below probes. Reading only the v1 shape against a v2 community reports "none
+    // found" for a rotation sitting right there, which is the opposite of the truth.
+    if matches!(
+        vector_core::db::community::community_protocol(&c.id).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        println!("    v2 BASE rekeys (kind 1059 at the rekey group address):");
+        let mut any = false;
+        for (pe, prior) in &roots {
+            let target = vector_core::community::Epoch(pe.0 + 1);
+            let group = vector_core::community::v2::derive::base_rekey_group_key(prior, &c.id, target);
+            let q = Query {
+                kinds: vec![1059],
+                authors: vec![group.pk_hex()],
+                limit: Some(50),
+                ..Default::default()
+            };
+            let evs = tx.fetch(&q, &c.relays).await.unwrap_or_default();
+            if evs.is_empty() {
+                continue;
+            }
+            any = true;
+            println!(
+                "      epoch {}→{}: {} wrap(s) at {}…",
+                pe.0,
+                target.0,
+                evs.len(),
+                &group.pk_hex()[..12]
+            );
+            // Open what we can: proves the plane is not just occupied but READABLE,
+            // and says whether THIS account is a recipient of the rotation.
+            for ev in &evs {
+                match vector_core::community::v2::stream::open_wrap(ev, &group) {
+                    Ok(opened) => match vector_core::community::v2::rekey::parse_rekey_chunk(&opened) {
+                        Ok(ch) => println!(
+                            "         chunk {}/{}  scope {}  e{}→{}  rotator {}  blobs {}{}",
+                            ch.chunk.0,
+                            ch.chunk.1,
+                            if matches!(ch.scope, vector_core::community::v2::rekey::RekeyScope::Root) { "root" } else { "chan" },
+                            ch.prev_epoch.0,
+                            ch.new_epoch.0,
+                            hexpref(&ch.rotator.to_bytes()),
+                            ch.blobs.len(),
+                            if ch.severed { "  [SEVER]" } else { "" },
+                        ),
+                        Err(e) => println!("         (opened, but not a rekey chunk: {e:?})"),
+                    },
+                    Err(e) => println!("         (wrap did not open under this group: {e:?})"),
+                }
+            }
+        }
+        if !any {
+            println!("      (no v2 base rekeys on relays under any held root)");
+        }
+    }
+
     // BASE re-foundings: a base rekey to epoch e is addressed under the PRIOR root (e-1), so try each held
     // root as a prior. ≥2 distinct delivered roots at one epoch = a re-founding fork (B2).
-    println!("    BASE (fork = ≥2 roots at one epoch):");
+    println!("    v1 BASE (fork = ≥2 roots at one epoch):");
     let mut base: BTreeMap<u64, Vec<([u8; 32], Option<[u8; 32]>)>> = BTreeMap::new();
     for (pe, prior) in &roots {
         let target = pe.0 + 1;
