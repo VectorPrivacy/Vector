@@ -798,7 +798,16 @@ pub async fn fetch_messages<R: Runtime>(
         // the sweep windows itself (3 in flight) and emits message_new as pages land. init_finished was
         // already emitted above, so the frontend holds the Community chat rows before any page arrives.
         // std::sync::Arc<crate::db::Session> captured before the spawn boundary (swap-safe); the sweep re-captures internally.
+        crate::services::subscription_handler::reset_subs_gate();
         vector_core::db::spawn_bound(async move {
+            // The LIVE pipe first. The sweep is ~107 channels of REQ pressure and
+            // held the relays for ~52s while the subscriptions lost the race —
+            // every event published in that window reached nobody: too new for
+            // the sweep's snapshot, too old for a sub that wasn't up. Capped, so
+            // a wedged subscribe delays history rather than denying it.
+            let waited = std::time::Instant::now();
+            crate::services::subscription_handler::await_subs_committed(std::time::Duration::from_secs(10)).await;
+            println!("[Boot] sweep held for live subs: {:?}", waited.elapsed());
             let _ = crate::commands::community::sync_communities_boot().await;
         });
 
