@@ -2474,6 +2474,11 @@ async function surfaceCommunitySummary(summary) {
         chat.metadata.custom_fields.name = summary.name;
         chat.metadata.custom_fields.description = summary.description || '';
         chat.metadata.custom_fields.community_id = summary.community_id;
+        // Same stamps the backend persists, or the in-memory graft disagrees with the
+        // DB until the next reboot: without `primary_channel`, EVERY channel row
+        // passes the render fallback and the community appears once per channel.
+        chat.metadata.custom_fields.channel_name = ch.name || '';
+        if (summary.primary_channel) chat.metadata.custom_fields.primary_channel = summary.primary_channel;
         chat.metadata.custom_fields.is_owner = summary.is_owner ? 'true' : 'false';
         chat.metadata.custom_fields.dissolved = summary.dissolved ? 'true' : 'false';
         // Protocol stack (1 = v1, 2 = v2) gates v2-only affordances (e.g. the
@@ -4695,6 +4700,18 @@ async function setupRustListeners() {
                 // the row is about to vanish and the toolbar would otherwise
                 // stay at its last position pointing at nothing.
                 if (_dmsgToolbarTarget === domMsg) hideMessageToolbar();
+
+                // One fewer thing to scroll down to. Measured BEFORE the fade
+                // collapses the row, and only for rows actually below the fold:
+                // the badge counts arrivals the reader has not reached, so a
+                // moderator clearing six posts otherwise leaves "6+ new
+                // messages" pointing at rows that no longer exist.
+                if (unreadBelowCount > 0
+                    && domMsg.offsetTop >= domChatMessages.scrollTop + domChatMessages.clientHeight) {
+                    setUnreadBelow(unreadBelowCount - 1);
+                    // Nothing unread left below means the divider marks nothing.
+                    if (unreadBelowCount === 0) clearUnreadDivider();
+                }
 
                 // Remember the row that follows ours so we can re-evaluate its
                 // streak attribute after removal (it may flip first ↔ continuation).
@@ -13166,7 +13183,12 @@ async function sendMessage(messageText) {
 // --- Mention Selector ---
 // Shared by the @mention selector AND the command composer's User params —
 // one source for "who is taggable in the open chat".
-const getMentionCandidates = () => {
+/** The taggable pool for the open chat.
+ *
+ *  `includeSelf` because the two callers want different pools: an @mention of
+ *  yourself pings nobody, while a command's user parameter is often ABOUT you —
+ *  `/why` and `/pardon` on your own npub were unreachable from the UI. */
+const getMentionCandidates = (includeSelf = false) => {
         const chat = arrChats.find(c => c.id === strOpenChat);
         if (!chat) return [];
         const isCommunity = chat.chat_type === 'Community';
@@ -13184,6 +13206,9 @@ const getMentionCandidates = () => {
         // Member List already shows; observed senders cover anyone the roster fetch hasn't
         // caught up with yet (it refreshes throttled while the chat is open).
         const npubs = new Set(chat.participants || []);
+        // Not always a participant of the chat it is in, and never an observed
+        // sender in one nobody has spoken in yet.
+        if (includeSelf && strPubkey) npubs.add(strPubkey);
         if (isCommunity) {
             for (const np of Object.keys(lastActive)) npubs.add(np);
             const communityId = chat.metadata?.custom_fields?.community_id;
@@ -13195,12 +13220,14 @@ const getMentionCandidates = () => {
             }
         }
         const candidates = [...npubs]
-            .filter(npub => npub && npub !== strPubkey && npub.startsWith('npub1'))
+            .filter(npub => npub && (includeSelf || npub !== strPubkey) && npub.startsWith('npub1'))
             .map(npub => {
                 const p = getProfile(npub);
                 return {
                     npub,
-                    name: getName(npub),
+                    // Marked, because a moderator picking a subject from a list
+                    // of names should not have to recognise their own.
+                    name: npub === strPubkey ? getName(npub) + ' (you)' : getName(npub),
                     avatarSrc: p ? getProfileAvatarSrc(p) : null,
                     lastActive: lastActive[npub] || 0
                 };
@@ -13286,7 +13313,10 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
         },
         // User params: the same taggable-member pool the @mention selector
         // uses ('everyone' excluded — a User arg is one real npub).
-        mentionCandidates: () => getMentionCandidates().filter(c => c.npub.startsWith('npub1')),
+        // Self included: `/why` and `/pardon` are most often asked about the
+        // person asking. `@everyone` is dropped by the npub filter, which is
+        // right — it is a ping, not somebody a command can name.
+        mentionCandidates: () => getMentionCandidates(true).filter(c => c.npub.startsWith('npub1')),
         // The structured composer assembles the final "/cmd args" text and
         // hands it to the ordinary send pipeline (validation + bot tag ride
         // routeForSend inside sendMessage).
