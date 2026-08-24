@@ -127,7 +127,7 @@ pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<
         return (rekeys, "community gone".into(), "-".into());
     };
     let control = match super::service::follow_control(&transport, &c).await {
-        Ok(v) => format!("Ok(changed={})", v.is_some()),
+        Ok(v) => format!("Ok(changed={} authority={})", v.updated.is_some(), v.authority_changed),
         Err(e) => format!("ERR: {e}"),
     };
     let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
@@ -575,17 +575,25 @@ pub fn enqueue_follow(id: &CommunityId) {
     if !pending.insert(id.0) {
         return; // already queued or processing — coalesce.
     }
-    match V2_FOLLOW_TX.lock().unwrap().as_ref() {
-        Some(tx) if tx.send(*id).is_ok() => {}
-        _ => {
-            // No worker yet — PARK the id in the pending set instead of
-            // dropping it; spawn_follow_worker drains parked ids into its
-            // fresh queue. The boot sweep's enqueues race notifs' worker
-            // spawn (they fire the moment init completes), so a pre-worker
-            // enqueue must defer, never silently vanish — a dropped boot
-            // refold leaves an offline-rotated community wedged at its old
-            // epoch until some live event happens to trigger a dispatch.
+    let closed = {
+        let tx = V2_FOLLOW_TX.lock().unwrap_or_else(|e| e.into_inner());
+        match tx.as_ref() {
+            Some(tx) if tx.send(*id).is_ok() => false,
+            // A worker that EXISTED and died leaves a closed sender. Parking
+            // against it is a permanent swallow: the id stays in `pending`, so
+            // every later enqueue coalesces into it and the unconditional call
+            // sites — including the live rotation dispatch — become no-ops for
+            // the rest of the session. Un-park instead, so the guarded callers
+            // fall back to the inline follow.
+            Some(tx) => tx.is_closed(),
+            // No worker YET — park. The boot sweep races the worker spawn, and
+            // spawn_follow_worker drains parked ids into its fresh queue; a
+            // dropped boot refold leaves an offline-rotated community wedged.
+            None => false,
         }
+    };
+    if closed {
+        pending.remove(&id.0);
     }
 }
 
@@ -600,19 +608,29 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     // Entries stay in the set — the worker removes each as it starts
     // processing, preserving the coalescing invariant.
     {
-        let pending = V2_FOLLOW_PENDING.lock().unwrap();
+        let pending = V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner());
         for id in pending.iter() {
             let _ = tx.send(CommunityId(*id));
         }
     }
-    *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
+    *V2_FOLLOW_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     let session = crate::db::current_session();
     crate::db::spawn_bound(async move {
         while let Some(id) = rx.recv().await {
             // Remove from pending BEFORE running, so a trigger arriving DURING the
             // follow re-enqueues (and is processed after) rather than being lost.
-            V2_FOLLOW_PENDING.lock().unwrap().remove(&id.0);
-            follow_community(&session, &id, &*handler).await;
+            V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+            // One community's panic must not take the worker down with it: a dead
+            // worker leaves a closed sender, and every live rotation dispatch after
+            // that is a silent no-op for the rest of the session — the whole client
+            // goes deaf to rotations, which reads to everyone else as a fork.
+            let one = std::panic::AssertUnwindSafe(follow_community(&session, &id, &*handler));
+            if futures_util::FutureExt::catch_unwind(one).await.is_err() {
+                crate::log_warn!(
+                    "[v2:follow {}] worker caught a panic; the queue stays alive",
+                    &crate::simd::hex::bytes_to_hex_32(&id.0)[..8]
+                );
+            }
         }
     });
 }
@@ -663,8 +681,13 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 // Surfaced, not swallowed: with EOSE-verified fetches an AUTH-gated
                 // or dead rekey plane now reports here instead of masquerading as
                 // "no rotation" — the exact signature of an epoch wedge.
-                crate::log_warn!("[v2:follow {}] rekey follow failed (will retry on next trigger): {}", &community_id[..8.min(community_id.len())], e);
-                return;
+                //
+                // Fall THROUGH to the control pass rather than returning. Control is
+                // the authority fold; it depends on the root (unchanged by this
+                // failure), not on the rekey walk. Returning here meant a base-plane
+                // blip also skipped the roster refresh, so the next walk re-refused
+                // for lack of authority — the strand loop in a different dress.
+                crate::log_warn!("[v2:follow {}] rekey follow failed (control pass still runs): {}", &community_id[..8.min(community_id.len())], e);
             }
         }
 
@@ -672,10 +695,36 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return;
         };
-        let control_changed = matches!(
-            super::service::follow_control(&transport, &current).await,
-            Ok(Some(_))
-        );
+        let control = match super::service::follow_control(&transport, &current).await {
+            Ok(c) => c,
+            Err(e) => {
+                // Never swallowed: a control failure stops the roster and the floors
+                // advancing, which is exactly what freezes authority and strands this
+                // client on a dead epoch. It used to vanish into a `matches!`.
+                crate::log_warn!("[v2:follow {}] control follow failed: {}", &community_id[..8.min(community_id.len())], e);
+                super::service::ControlFollow::default()
+            }
+        };
+        let control_changed = control.updated.is_some();
+        // The authority half is what the rekey walk gates on, and the walk ran BEFORE
+        // this fold. Re-walk once, in-process, on the freshly-written state — a queue
+        // re-enqueue would be both slower and, on a coalesced queue, droppable.
+        if control.moved() {
+            if let Ok(Some(latest)) = crate::db::community::load_community_v2(id) {
+                match super::service::follow_rekeys(&transport, &latest, session).await {
+                    Ok(f) if f.self_removed || f.dissolved => {}
+                    Ok(f) if f.updated.is_some() => {
+                        refresh_subscription(&client).await;
+                        handler.on_community_refreshed(&community_id);
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::log_warn!(
+                        "[v2:follow {}] post-authority rekey re-walk failed: {}",
+                        &community_id[..8.min(community_id.len())], e
+                    ),
+                }
+            }
+        }
         // Re-judge parked key vends on EVERY pass, not only when the fold moved. A
         // vend that lands AFTER its Grant folded has nothing left to change the
         // control plane, so gating this on `changed` strands it until some unrelated

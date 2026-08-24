@@ -6054,10 +6054,32 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
 ///
 /// Returns the updated community iff something changed (so the caller can skip a
 /// redundant re-subscribe + refresh notification).
+/// What a control fold moved. `updated` is the community DOCUMENT (metadata,
+/// channels, adopted control root); `authority_changed` is the roster/banlist/
+/// registry — which live in their own columns and so are invisible in `updated`.
+///
+/// The distinction is load-bearing: the rekey walk's authority gates read exactly
+/// the state `authority_changed` covers, so a caller that keys its retry off
+/// `updated` alone will refuse a rotation on pass 1, silently fix the roster on
+/// pass 2, and never look again. That is a permanent strand — and a strand is a
+/// fork to everyone else.
+#[derive(Debug, Default)]
+pub struct ControlFollow {
+    pub updated: Option<CommunityV2>,
+    pub authority_changed: bool,
+}
+
+impl ControlFollow {
+    /// Did anything at all move? Either half warrants another rekey walk.
+    pub fn moved(&self) -> bool {
+        self.updated.is_some() || self.authority_changed
+    }
+}
+
 pub async fn follow_control<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
-) -> Result<Option<CommunityV2>, String> {
+) -> Result<ControlFollow, String> {
     crate::db::scoped(async move {
         community.owner()?; // fail fast if the community is somehow unproven.
         let control = control::ControlPlane::of(community);
@@ -6148,7 +6170,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // A leave/delete raced this follow: writing now would resurrect the community
         // row and orphan floor rows past delete_community's wipe.
         if crate::db::community::community_protocol(community.id())?.is_none() {
-            return Ok(None);
+            return Ok(ControlFollow::default());
         }
         // Persist advanced floors BEFORE the state save (a failed floor write must not
         // let saved state outrun its floor), stamping the epoch this fold ran under —
@@ -6305,9 +6327,9 @@ pub async fn follow_control<T: Transport + ?Sized>(
         match updated {
             Some(u) => {
                 crate::db::community::save_community_v2(&u)?;
-                Ok(Some(u))
+                Ok(ControlFollow { updated: Some(u), authority_changed })
             }
-            None => Ok(None),
+            None => Ok(ControlFollow { updated: None, authority_changed }),
         }
     })
     .await
@@ -10540,7 +10562,7 @@ mod tests {
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &a, vec![rid.clone()], 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &b, vec![rid.clone()], 1).await;
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         assert!(crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&a.to_hex()), "seeded");
 
         // relay2 serves A's grant but NOT the role (aged out of the window): the fold
@@ -10548,7 +10570,7 @@ mod tests {
         // stored roster rather than persist the lossy one.
         let relay2 = MemoryRelay::new();
         publish_grant(&relay2, &community, &owner.keys, &a, vec![rid.clone()], 1).await;
-        follow_control(&relay2, &community).await.unwrap();
+        follow_control(&relay2, &community).await.unwrap().updated;
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(roster.is_admin(&a.to_hex()) && roster.is_admin(&b.to_hex()), "a floored-but-unfetched role retains the stored roster");
     }
@@ -10587,7 +10609,7 @@ mod tests {
         let (ban_wrap, _) = control::seal_control_edition(&ban_rumor, &group, &admin, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&ban_wrap, &community.relays).await.unwrap();
 
-        let updated = follow_control(&relay, &community).await.unwrap();
+        let updated = follow_control(&relay, &community).await.unwrap().updated;
         assert!(
             updated.as_ref().is_none_or(|c| c.name != "Uncited Rename"),
             "an uncited metadata edit must not be honored",
@@ -10616,12 +10638,12 @@ mod tests {
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
         publish_community_meta(&relay, &community, &admin, "Admin Rename", 2).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("admin edit authorized");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("admin edit authorized");
         assert_eq!(updated.name, "Admin Rename", "an admin with MANAGE_METADATA renames");
 
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![], 2).await; // revoke
         publish_community_meta(&relay, &community, &admin, "Demoted Rename", 3).await;
-        let _ = follow_control(&relay, &community).await.unwrap();
+        let _ = follow_control(&relay, &community).await.unwrap().updated;
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert_eq!(held.name, "Admin Rename", "a demoted admin's edit is dropped; the name holds");
     }
@@ -10634,7 +10656,7 @@ mod tests {
         let stranger = Keys::generate();
         publish_community_meta(&relay, &community, &stranger, "Hijacked", 2).await;
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a roleless member's metadata edit never folds"
         );
     }
@@ -10653,7 +10675,7 @@ mod tests {
         publish_grant(&relay, &community, &rogue, &rogue.public_key(), vec![rid.clone()], 1).await;
         publish_community_meta(&relay, &community, &rogue, "Seized", 2).await;
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a self-signed grant confers no authority"
         );
     }
@@ -10695,7 +10717,7 @@ mod tests {
         publish_community_meta(&relay, &community, &admin, "Banned Rename", 2).await;
 
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a banned admin's edit is dropped even with an unstripped grant"
         );
         let authority = fold_authority(&community, &fetch_control(&relay, &community).await, &load_floors(&community));
@@ -10740,7 +10762,7 @@ mod tests {
         let community = create_community(&relay, "NoUnban", vec!["wss://r".into()], None).await.unwrap();
         let target = "cc".repeat(32);
         publish_banlist(&relay, &community, &owner, &[target.clone()], 1).await;
-        follow_control(&relay, &community).await.unwrap(); // persists the ban
+        follow_control(&relay, &community).await.unwrap().updated; // persists the ban
 
         let rogue = Keys::generate();
         publish_banlist(&relay, &community, &rogue, &[], 2).await; // unauthorized higher, empty
@@ -11215,7 +11237,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Withheld", vec!["wss://good".into()], None).await.unwrap();
         publish_banlist(&relay, &community, &owner, &["cc".repeat(32)], 1).await;
-        follow_control(&relay, &community).await.unwrap(); // seed the banlist floor
+        follow_control(&relay, &community).await.unwrap().updated; // seed the banlist floor
 
         // Re-point the held community to an EMPTY relay + save, so the Refounding (which
         // reloads fresh state) fetches none of the committed heads.
@@ -11468,6 +11490,36 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_promote_is_reported_as_an_authority_change() {
+        // The single line whose absence was the fork. A promote moves the ROSTER,
+        // which lives in its own column and never appears in the returned document —
+        // so a caller keying its retry off `updated` alone sees "nothing happened",
+        // skips the re-walk, and leaves the rekey pass that just refused this admin's
+        // rotation to never reconsider it. Asserted at the unit level deliberately:
+        // an integration drill can pass for the wrong reason (a roster cached on some
+        // earlier pass), and this codebase has been bitten by exactly that before.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "PromoteReports", bed.relays.clone(), None).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap(); // settle the baseline
+
+        let rid = "e1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.keys.public_key(), vec![rid], 1).await;
+
+        let control = follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            control.authority_changed,
+            "a promote MUST report an authority change — this is what re-runs the rekey walk",
+        );
+        assert!(control.moved(), "and therefore counts as movement");
+        assert!(
+            control.updated.is_none(),
+            "while moving no document at all — which is precisely why `updated` alone was blind",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_seeded_roster_never_vetoes_a_coherent_control_fold() {
         // `merge_local_roster` seeds an optimistic roster at `roles_at = 0` so a
         // just-created role works before its edition folds. That seed names entities
@@ -11496,7 +11548,7 @@ mod tests {
         // A floor for the ghost is what turns `stored_complete` false.
         crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
 
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
 
         let folded = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(
@@ -11837,7 +11889,7 @@ mod tests {
         let meta = control::CommunityMetadata { name: "Fanout".into(), relays: many, ..Default::default() };
         edit_community_metadata(&relay, &community, &meta).await.unwrap();
 
-        let updated = follow_control(&relay, &community).await.unwrap()
+        let updated = follow_control(&relay, &community).await.unwrap().updated
             .expect("the metadata edition is folded");
         assert_eq!(
             updated.relays.len(),
@@ -11848,7 +11900,7 @@ mod tests {
         // …and the fold must SETTLE: comparing an oversize edition against the
         // capped working set would never be equal, so every later fold would
         // report a change and re-save forever.
-        let again = follow_control(&relay, &updated).await.unwrap();
+        let again = follow_control(&relay, &updated).await.unwrap().updated;
         assert!(again.is_none(), "re-folding the same oversize edition must be a no-op");
     }
 
@@ -12087,7 +12139,7 @@ mod tests {
 
         // Owner follows: the admin's rename folds (authorized).
         bed.swap_to(&owner);
-        let updated = follow_control(&bed.relay, &community).await.unwrap().expect("the admin edit folds");
+        let updated = follow_control(&bed.relay, &community).await.unwrap().updated.expect("the admin edit folds");
         assert_eq!(updated.name, "Lifecycle Renamed", "an authorized admin's metadata edit is honored");
 
         // Ban the member (the three-removal composition, in order).
@@ -12136,7 +12188,7 @@ mod tests {
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid.clone()], 1).await;
         // Owner folds → the authorized role/grant heads are floored.
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         assert!(fetch_authority(&bed.relay, &community).await.roles.is_admin(&member.keys.public_key().to_hex()), "member is admin pre-attack");
 
         // The attacker (a non-owner) forges v2 of the admin role, chaining onto v1.
@@ -12237,7 +12289,7 @@ mod tests {
         assert!(texts_in(&bed.relay, &b_view, &priv_id).await.contains(&"A: mods-only channel".to_string()), "B reads the PRIVATE channel with the bundle key");
         // B folds the control plane (persisting the roster) — the live worker does
         // this right after any join; B's admin standing gates B's channel ops below.
-        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap() {
+        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap().updated {
             b_view = fresh;
         }
         println!("[follow] B folded control (roster persisted: B is @admin)");
@@ -12271,7 +12323,7 @@ mod tests {
         let bugs = create_public_channel(&bed.relay, &b_view, "bug-reports").await.unwrap();
         println!("[channel] B(admin) +public #bug-reports {}", crate::simd::hex::bytes_to_hex_32(&bugs.0));
         bed.swap_to(&a);
-        if let Some(updated) = follow_control(&bed.relay, &community).await.unwrap() {
+        if let Some(updated) = follow_control(&bed.relay, &community).await.unwrap().updated {
             community = updated;
         }
         assert!(community.channels.iter().any(|c| c.id.0 == bugs.0), "A folds in B's authorized new channel");
@@ -12288,7 +12340,7 @@ mod tests {
         println!("[channel] +private #vault {} (B is unentitled — no delivery)", crate::simd::hex::bytes_to_hex_32(&vault.0));
         bed.swap_to(&b);
         let session_b2 = crate::db::current_session();
-        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap() {
+        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap().updated {
             b_view = fresh;
         }
         let ch = b_view.channel(&vault).expect("B recorded the announced private channel");
@@ -12476,7 +12528,7 @@ mod tests {
         become_acct(&b);
         let session_b = crate::db::current_session();
         let mut b_view = crate::db::community::load_community_v2(b_view.id()).unwrap().unwrap();
-        if let Some(fresh) = follow_control(&transport, &b_view).await.expect("B control follow") {
+        if let Some(fresh) = follow_control(&transport, &b_view).await.expect("B control follow").updated {
             b_view = fresh;
         }
         if let Some(fresh) = follow_rekeys(&transport, &b_view, &session_b).await.expect("B rekey follow").updated {
@@ -12592,7 +12644,7 @@ mod tests {
             let rk = follow_rekeys(&bed.relay, &cur, &session).await.unwrap();
             assert!(!rk.self_removed);
             let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
-            let ctl = follow_control(&bed.relay, &cur).await.unwrap();
+            let ctl = follow_control(&bed.relay, &cur).await.unwrap().updated;
             if rk.updated.is_none() && ctl.is_none() {
                 break;
             }
@@ -12677,7 +12729,7 @@ mod tests {
             let rekeyed = follow_rekeys(&bed.relay, &cur, &session).await.unwrap();
             assert!(!rekeyed.self_removed, "the member was never removed");
             let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
-            let controlled = follow_control(&bed.relay, &cur).await.unwrap();
+            let controlled = follow_control(&bed.relay, &cur).await.unwrap().updated;
             if rekeyed.updated.is_none() && controlled.is_none() {
                 break;
             }
@@ -12849,9 +12901,9 @@ mod tests {
         let rid = "d4".repeat(32);
         publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::MANAGE_METADATA), 1).await;
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
-        follow_control(&relay, &community).await.unwrap(); // seed floors incl. the grant at v1
+        follow_control(&relay, &community).await.unwrap().updated; // seed floors incl. the grant at v1
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![], 2).await; // revoke → grant floor v2
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
 
         // A stale relay serves only the grant prefix (v1, the live grant).
         inject_stale_prefix(&relay, &community, 1, "wss://stale").await;
@@ -12896,7 +12948,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Fresh", vec!["wss://r".into()], None).await.unwrap();
         // Only the genesis editions exist; folding them reproduces the held view.
-        assert!(follow_control(&relay, &community).await.unwrap().is_none());
+        assert!(follow_control(&relay, &community).await.unwrap().updated.is_none());
     }
 
     #[tokio::test]
@@ -12907,7 +12959,7 @@ mod tests {
         let new_id = ChannelId([0x5a; 32]);
         publish_channel_edition(&relay, &community, &owner, &new_id, "announcements", false, 1, false).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("a new channel changed the view");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("a new channel changed the view");
         assert_eq!(updated.channels.len(), 2);
         let added = updated.channel(&new_id).expect("the new channel folded in");
         assert_eq!(added.name, "announcements");
@@ -12934,7 +12986,7 @@ mod tests {
         publish_community_meta(&relay, &community, &owner, "New Name", 2).await;
         publish_channel_edition(&relay, &community, &owner, &general, "lobby", false, 2, false).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().unwrap();
+        let updated = follow_control(&relay, &community).await.unwrap().updated.unwrap();
         assert_eq!(updated.name, "New Name");
         assert_eq!(updated.channel(&general).unwrap().name, "lobby");
         assert_eq!(updated.channels.len(), 1, "a rename doesn't add a channel");
@@ -12949,12 +13001,12 @@ mod tests {
 
         // The channel is first added and folded into the held view.
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
-        let with_extra = follow_control(&relay, &community).await.unwrap().expect("added");
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.expect("added");
         assert!(with_extra.channel(&extra).is_some());
 
         // Then it's tombstoned — the delete (higher version) folds the held one back out.
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
-        let updated = follow_control(&relay, &with_extra).await.unwrap().expect("removed");
+        let updated = follow_control(&relay, &with_extra).await.unwrap().updated.expect("removed");
         assert!(updated.channel(&extra).is_none(), "a deleted channel folds out");
         assert_eq!(updated.channels.len(), 1, "only #general remains");
     }
@@ -12984,7 +13036,7 @@ mod tests {
         let community = create_community(&relay, "Original", vec!["wss://good".into()], None).await.unwrap();
         publish_community_meta(&relay, &community, &owner, "Renamed", 2).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("rename adopted");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("rename adopted");
         assert_eq!(updated.name, "Renamed");
 
         // The stale relay holds only the genesis prefix; point the follow at it.
@@ -12992,7 +13044,7 @@ mod tests {
         let mut stale_view = updated.clone();
         stale_view.relays = vec!["wss://stale".into()];
         assert!(
-            follow_control(&relay, &stale_view).await.unwrap().is_none(),
+            follow_control(&relay, &stale_view).await.unwrap().updated.is_none(),
             "a stale-only relay must not change the held view"
         );
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -13009,12 +13061,12 @@ mod tests {
         // A same-content metadata edit: no visible change (None), but the floor must
         // still advance to v2 (so the genesis metadata can't re-present below).
         publish_community_meta(&relay, &community, &owner, "Prune2", 2).await;
-        assert!(follow_control(&relay, &community).await.unwrap().is_none());
+        assert!(follow_control(&relay, &community).await.unwrap().updated.is_none());
 
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
-        let with_extra = follow_control(&relay, &community).await.unwrap().expect("added");
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.expect("added");
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
-        let pruned = follow_control(&relay, &with_extra).await.unwrap().expect("removed");
+        let pruned = follow_control(&relay, &with_extra).await.unwrap().updated.expect("removed");
         assert!(pruned.channel(&extra).is_none());
 
         // The stale relay serves the add (v1) but withholds the delete (v2).
@@ -13022,7 +13074,7 @@ mod tests {
         let mut stale_view = pruned.clone();
         stale_view.relays = vec!["wss://stale".into()];
         assert!(
-            follow_control(&relay, &stale_view).await.unwrap().is_none(),
+            follow_control(&relay, &stale_view).await.unwrap().updated.is_none(),
             "the withheld delete must not resurrect the channel"
         );
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -13038,7 +13090,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Before", vec!["wss://good".into()], None).await.unwrap();
         publish_community_meta(&relay, &community, &owner, "Edited", 2).await;
-        let updated = follow_control(&relay, &community).await.unwrap().expect("edit adopted");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("edit adopted");
         assert_eq!(updated.name, "Edited");
 
         // Refounding lands (epoch bump saved by the rekey path); the compacted head
@@ -13047,7 +13099,7 @@ mod tests {
         crate::db::community::save_community_v2(&refounded).unwrap();
         publish_community_meta(&relay, &refounded, &owner, "Compacted", 5).await;
 
-        let adopted = follow_control(&relay, &refounded).await.unwrap().expect("compacted head adopted");
+        let adopted = follow_control(&relay, &refounded).await.unwrap().updated.expect("compacted head adopted");
         assert_eq!(adopted.name, "Compacted", "a fresh epoch bootstraps despite the dangling prev");
         // The persisted floor is stamped with the epoch the FOLD ran under.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -13071,7 +13123,7 @@ mod tests {
         let genesis_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
 
         publish_community_meta(&relay, &community, &owner, "Ours", 2).await;
-        let ours = follow_control(&relay, &community).await.unwrap().expect("ours adopted");
+        let ours = follow_control(&relay, &community).await.unwrap().updated.expect("ours adopted");
         assert_eq!(ours.name, "Ours");
 
         // Our committed v2 edition's tiebreak id.
@@ -13104,7 +13156,7 @@ mod tests {
         };
         relay.publish(&fork_wrap, &community.relays).await.unwrap();
 
-        let converged = follow_control(&relay, &ours).await.unwrap().expect("fork winner adopted");
+        let converged = follow_control(&relay, &ours).await.unwrap().updated.expect("fork winner adopted");
         assert_eq!(converged.name, "Theirs", "the floor converges to the lower-inner-id winner");
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let held = crate::db::community::get_edition_head_inner_id(&cid_hex, &cid_hex).unwrap();
@@ -13134,11 +13186,11 @@ mod tests {
         let (w4, _) = control::seal_control_edition(&r4, &group, &owner, Timestamp::from_secs(4_000)).unwrap();
         relay.publish(&w4, &community.relays).await.unwrap();
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("the verified prefix applies");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("the verified prefix applies");
         assert_eq!(updated.name, "Two", "the anchored prefix lands; the detached v4 does not");
 
         relay.publish(&w3, &community.relays).await.unwrap();
-        let healed = follow_control(&relay, &updated).await.unwrap().expect("the chain heals");
+        let healed = follow_control(&relay, &updated).await.unwrap().updated.expect("the chain heals");
         assert_eq!(healed.name, "Four", "once the link arrives, the head advances past the prefix");
     }
 
@@ -13153,7 +13205,7 @@ mod tests {
         let group = control::ControlPlane::of(&community).write_group().unwrap();
 
         publish_community_meta(&relay, &community, &owner, "Two", 2).await;
-        let base = follow_control(&relay, &community).await.unwrap().expect("floor at v2");
+        let base = follow_control(&relay, &community).await.unwrap().updated.expect("floor at v2");
         publish_community_meta(&relay, &base, &owner, "Three", 3).await; // ts 1_000 (old)
         let v3_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
 
@@ -13172,7 +13224,7 @@ mod tests {
         let (w4, _) = control::seal_control_edition(&r4, &group, &owner, Timestamp::from_secs(10_000)).unwrap();
         relay.publish(&w4, &community.relays).await.unwrap();
 
-        let healed = follow_control(&relay, &base).await.unwrap().expect("paging recovered the chain");
+        let healed = follow_control(&relay, &base).await.unwrap().updated.expect("paging recovered the chain");
         assert_eq!(healed.name, "Four", "the gap paged past the flood to the floor link");
     }
 
@@ -13188,7 +13240,7 @@ mod tests {
         crate::db::community::delete_community(&cid_hex).unwrap();
 
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a follow racing a delete is a no-op"
         );
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "the community stays deleted");
@@ -13257,7 +13309,7 @@ mod tests {
         let genesis_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
 
         publish_community_meta(&relay, &community, &owner, "Ours", 2).await;
-        let ours = follow_control(&relay, &community).await.unwrap().expect("ours adopted");
+        let ours = follow_control(&relay, &community).await.unwrap().updated.expect("ours adopted");
         assert_eq!(ours.name, "Ours");
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let held_before = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().unwrap();
@@ -13281,7 +13333,7 @@ mod tests {
         stale_view.relays = vec!["wss://stale".into()];
 
         assert!(
-            follow_control(&relay, &stale_view).await.unwrap().is_none(),
+            follow_control(&relay, &stale_view).await.unwrap().updated.is_none(),
             "a losing fork served without our floor edition changes nothing"
         );
         let held_after = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().unwrap();
@@ -13303,7 +13355,7 @@ mod tests {
         publish_channel_edition(&relay, &community, &rogue, &rogue_id, "backdoor", false, 1, false).await;
 
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a non-owner control edition is not folded"
         );
     }
@@ -13322,6 +13374,7 @@ mod tests {
         let updated = follow_control(&relay, &community)
             .await
             .unwrap()
+            .updated
             .expect("the keyless record is a change");
         let ch = updated.channel(&priv_id).expect("the private channel is recorded");
         assert!(ch.private && ch.key.is_none(), "recorded keyless");
@@ -15137,7 +15190,7 @@ mod tests {
         poisoned.channels[0].key = Some([0x66; 32]);
         crate::db::community::save_community_v2(&poisoned).unwrap();
 
-        let healed = follow_control(&relay, &poisoned).await.unwrap().expect("healed");
+        let healed = follow_control(&relay, &poisoned).await.unwrap().updated.expect("healed");
         let ch = healed.channel(&general).unwrap();
         assert!(!ch.private, "the owner's public declaration overrides the bundle");
         assert_eq!(ch.key, None, "a healed public channel derives from the root");
@@ -15152,10 +15205,10 @@ mod tests {
         let community = create_community(&relay, "Prune", vec!["wss://r".into()], None).await.unwrap();
         let extra = ChannelId([0x77; 32]);
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
-        let with_extra = follow_control(&relay, &community).await.unwrap().unwrap();
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.unwrap();
         assert!(with_extra.channel(&extra).is_some());
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
-        let after = follow_control(&relay, &with_extra).await.unwrap().unwrap();
+        let after = follow_control(&relay, &with_extra).await.unwrap().updated.unwrap();
         assert!(after.channel(&extra).is_none());
 
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -16344,7 +16397,7 @@ mod tests {
         grant_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
 
         // The passive follow folds + persists; the read is then LOCAL (v1 parity).
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(roster.is_admin(&member_hex), "the persisted roster reads back without a fetch");
 
@@ -16357,7 +16410,7 @@ mod tests {
 
         // A real revocation (a NEWER grant edition) does replace it.
         revoke_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(!roster.is_admin(&member_hex), "the revoke folds + persists");
     }
@@ -16457,7 +16510,7 @@ mod tests {
 
         let eid = crate::community::v2::derive::pins_locator(community.id(), &general);
         publish_control_edition(&relay, &community, vsk::PINS, &eid, &content).await.unwrap();
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
 
         let read = read_channel_pins(&community, &general).unwrap();
         assert!(!read.sealed);
@@ -16527,7 +16580,7 @@ mod tests {
         let (wrap, _) = control::seal_control_edition(&rumor, &group, &rogue, Timestamp::from_secs(2_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
 
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
         let read = read_channel_pins(&community, &general).unwrap();
         assert_eq!(read.version, 0, "an unauthorized edition never persists a head");
         assert!(read.pins.is_empty());
@@ -16553,10 +16606,10 @@ mod tests {
             color: 0,
         };
         publish_role(&relay, &community, &owner, &legacy, 1).await;
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
 
         assert!(upgrade_admin_role_pin_bit(&relay, &community).await.unwrap(), "the widening publishes");
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
         let roles = crate::db::community::get_community_roles(&cid_hex).unwrap();
         let widened = roles.roles.iter().find(|r| r.role_id == rid).expect("same entity");
         assert!(widened.permissions.contains(Permissions::PIN_MESSAGES), "bit 11 landed");
@@ -16764,7 +16817,7 @@ mod tests {
         );
 
         // The wire agrees: a real fold confirms rather than regresses.
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
         let folded = crate::db::community::get_community_banlist(&cid_hex).unwrap();
         assert!(folded.contains(&spammer_a) && folded.contains(&spammer_b));
     }
