@@ -6305,9 +6305,28 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // no stored roster) folding under a plane a member has inflated past the pager.
         // `stored_complete` is trivially true with nothing stored, so without this the
         // first sync would cache a partial authority as its own baseline.
-        if !truncated && !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
+        let stored_at = crate::db::community::get_community_roles_at(&cid_hex)?;
+        // `stored_at == 0` is a roster with NO plane provenance: the optimistic local
+        // merge every creator writes (`merge_local_roster`) so a just-made role works
+        // before its edition folds. It is a guess about the plane, not evidence about
+        // it, so it must never out-vote a coherent fold — and it was: the seed names
+        // entities the plane no longer heads, `stored_complete` goes false forever, and
+        // the roster can never be replaced. A community's OWNER is the likeliest holder
+        // of such a seed, so the wedge lands on exactly the account whose rotations
+        // everyone else is waiting to adopt.
+        let seed_only = stored_at == 0;
+        if !truncated && !authority.gapped && (stored_complete || seed_only) && newest_roster_at >= stored_at {
             authority_changed |= stored != authority.roles;
             crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
+        } else {
+            // Loud, because the failure mode is silent and total: the roster is what
+            // authorizes every rotation, so a client that can never re-cache it is
+            // permanently deaf to that admin's re-foundings — and the only symptom is
+            // an epoch that never advances.
+            crate::log_warn!(
+                "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — this client keeps its old roster and will refuse rotations it cannot authorize",
+                &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, stored_complete, newest_roster_at, stored_at
+            );
         }
         // Cache the folded invite Registry so Public/Private stays a sync LOCAL read
         // (v1 parity — `invite_registry` is the column every caller reads). Gated like
@@ -11538,6 +11557,49 @@ mod tests {
         let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
         assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_seeded_roster_never_vetoes_a_coherent_control_fold() {
+        // `merge_local_roster` seeds an optimistic roster at `roles_at = 0` so a
+        // just-created role works before its edition folds. That seed names entities
+        // the plane may never head, which made `stored_complete` false FOREVER — the
+        // roster could never be replaced, and a roster that never updates cannot
+        // authorize anyone, so the client silently refused every rotation that admin
+        // published. It landed on owners, who seed the most.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "SeedVeto", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let rid = "c1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.keys.public_key(), vec![rid], 1).await;
+
+        // A seed naming an entity the plane will never head, with NO provenance —
+        // exactly what creating a private channel leaves behind.
+        let ghost = "d4".repeat(32);
+        let mut seeded = crate::community::roles::CommunityRoles::default();
+        seeded.roles.push(admin_role(&ghost, Permissions::MANAGE_CHANNELS));
+        seeded.grants.push(crate::community::roles::MemberGrant {
+            member: owner.keys.public_key().to_hex(),
+            role_ids: vec![ghost.clone()],
+        });
+        crate::db::community::set_community_roles(&cid_hex, &seeded, 0).unwrap();
+        // A floor for the ghost is what turns `stored_complete` false.
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        let folded = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            folded.grants.iter().any(|g| g.member == admin.keys.public_key().to_hex()),
+            "a coherent fold must replace a provenance-less seed, or the client is deaf to this admin forever",
+        );
+        assert_ne!(
+            crate::db::community::get_community_roles_at(&cid_hex).unwrap(),
+            0,
+            "and the replacement carries the plane's provenance",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
