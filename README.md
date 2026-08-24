@@ -56,6 +56,13 @@ Vector doesn’t store your personal data in a centralized cloud service or on c
 
 ---
 
+| | | |
+|---|---|---|
+| <img src="./assets/app_1.png" width="100%"/> | <img src="./assets/app_2.png" width="100%"/> | <img src="./assets/app_3.png" width="100%"/> |
+| <img src="./assets/app_4.png" width="100%"/> | <img src="./assets/app_5.png" width="100%"/> | <img src="./assets/app_6.png" width="100%"/> |
+
+---
+
 # Purpose
 
 Vector was born out of a feeling of, for the lack of a better word; "necessity".
