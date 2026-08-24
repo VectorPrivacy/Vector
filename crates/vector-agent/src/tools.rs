@@ -595,6 +595,14 @@ impl VectorAgent {
         }
     }
 
+    #[tool(description = "Sync every Community from relays: refresh the joined list and walk each one's key rotations (re-foundings), adopting any this account missed. Run it when a Community's state looks stale — a channel that stopped reading, a member list that disagrees with another client, or after a moderation action elsewhere rotated the keys. Per-channel message fetching stays with sync_community_channel.")]
+    async fn sync_communities(&self) -> Result<CallToolResult, McpError> {
+        match self.core.sync_communities().await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text("Communities synced (list refreshed, key rotations followed)")])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "Fetch the latest page of a Community channel from relays (messages, reactions, edits, deletes, presence). Returns the count of new messages. Then use get_messages to read them.")]
     async fn sync_community_channel(&self, Parameters(req): Parameters<SyncCommunityChannelRequest>) -> Result<CallToolResult, McpError> {
         match self.core.sync_community_channel(&req.channel_id, req.limit).await {
