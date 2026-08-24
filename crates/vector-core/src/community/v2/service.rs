@@ -7170,13 +7170,20 @@ pub(crate) fn channel_rekey_addressing_roots(cur_root: [u8; 32], cid_hex: &str) 
 /// §2: "a convergence check, not a secrecy mechanism") — authority is its
 /// boundary; its epoch is the scan cursor, advancing past complete rotations
 /// that exclude us so the walk converges on the channel's current epoch.
-/// Diagnostic: run the base-rotation fetch+parse pipeline for a wedged community
-/// and report, per rotation found at the next-epoch base plane, WHY
-/// `follow_rekeys` did or didn't adopt it — the exact `advance_scope` gate that
-/// tripped. Read-only. Every rotator/owner is a PUBLIC key; no secret material
-/// is returned.
-#[cfg(debug_assertions)]
-pub async fn debug_explain_base_rekey<T: Transport + ?Sized>(
+/// Explain this client's epoch state: what we hold, what the next-epoch base plane
+/// offers, and — per rotation found there — exactly which `advance_scope` gate
+/// decided we did or did not adopt it.
+///
+/// **Ships in release builds deliberately.** A strand is silent by construction: a
+/// client parked on a dead epoch is subscribed at its own addresses and simply sees
+/// nothing, which is indistinguishable from a quiet community. Answering "why is
+/// this client stuck" without this meant reading sqlite by hand. It is also the
+/// instrument for comparing two clients' views of one community — the local half
+/// (`held`) is what diverges first.
+///
+/// Read-only, and safe to surface: every rotator/owner is a PUBLIC key, and no key
+/// material, blob plaintext or roster secret is returned.
+pub async fn explain_epoch_state<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
 ) -> Result<serde_json::Value, String> {
@@ -7243,13 +7250,48 @@ pub async fn debug_explain_base_rekey<T: Transport + ?Sized>(
                 "my_blob_present": has_my_blob,
                 "owner_kept": owner_kept,
                 "blob_count": r.blobs.len(),
+                "severing": r.severed,
                 "verdict": verdict,
             })
         })
         .collect();
 
+    // The LOCAL half. Two clients on one community diverge here first, and every
+    // field is a thing that has silently frozen a client in the field: the roster
+    // is what authorizes a rotator, its provenance is what the freeze-guard reads,
+    // and the invite registry is what Public/Private hangs off.
+    let roster_at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
+    let admin_count = roster.grants.iter().filter(|g| roster.is_admin(&g.member)).count();
+    let held = serde_json::json!({
+        "root_epoch": held_epoch.0,
+        "roster_roles": roster.roles.len(),
+        "roster_grants": roster.grants.len(),
+        "roster_admins": admin_count,
+        // 0 = a locally-seeded roster that never folded from the plane. A client
+        // whose roster never gains provenance can never authorize a non-owner
+        // admin, so it refuses their rotations forever.
+        "roster_provenance_at": roster_at,
+        "banlist_entries": banned.len(),
+        "sever_marks": sever_marks(&cid_hex).keys().copied().collect::<Vec<_>>(),
+        "control_plane_split": community.control_pk.is_some(),
+        "private_channels": community.channels.iter().filter(|c| c.private).count(),
+        "channels_awaiting_key": community.channels.iter().filter(|c| c.private && c.key.is_none()).count(),
+    });
+
+    // The one-line answer. `probing_next_epoch` existing at all proves the community
+    // moved without us; what we did about it is the `rotations` verdicts.
+    let summary = if rotations.is_empty() {
+        "UP TO DATE (or the plane is unreachable): no rotation offered at held+1"
+    } else if reports.iter().any(|r| r["verdict"].as_str().is_some_and(|v| v.starts_with("ADOPT"))) {
+        "BEHIND: an adoptable rotation is waiting — run a sync"
+    } else {
+        "WEDGED: a rotation exists at held+1 and every one was refused (see verdicts)"
+    };
+
     Ok(serde_json::json!({
+        "summary": summary,
         "recorded_owner": owner.to_hex(),
+        "held": held,
         "held_root_epoch": held_epoch.0,
         "probing_next_epoch": next.0,
         "base_plane_pk": group.pk_hex(),
