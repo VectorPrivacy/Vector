@@ -35,6 +35,10 @@ async fn main() {
     let relay = args.iter().any(|a| a == "--relay");
     let editions = args.iter().any(|a| a == "--editions");
     let invites = args.iter().any(|a| a == "--invites");
+    // `--follow` RUNS a real sync (rekey + control fold) instead of only reporting
+    // state, so "why won't this account adopt?" is answered by watching the follow
+    // itself rather than inferring it from the rows it left behind.
+    let follow = args.iter().any(|a| a == "--follow");
     // `--from <hex|npub>` narrows the invite probe to one sender; `--since-hours N` widens the window
     // (gift wraps backdate their outer timestamp up to ~2 days, so default generously).
     let from = arg_value(&args, "--from");
@@ -96,6 +100,21 @@ async fn main() {
     if invites {
         probe_invites(since_hours, from.as_deref()).await;
         std::process::exit(0);
+    }
+
+    if follow {
+        println!("── running a real community sync (rekey + control fold) ──");
+        match core.sync_communities().await {
+            Ok(warnings) if warnings.is_empty() => println!("   sync ok, no warnings"),
+            Ok(warnings) => {
+                println!("   sync ok, {} warning(s):", warnings.len());
+                for w in &warnings {
+                    println!("     - {w}");
+                }
+            }
+            Err(e) => println!("   sync FAILED: {e}"),
+        }
+        println!();
     }
 
     let ids = cdb::list_community_ids().unwrap_or_default();
