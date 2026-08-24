@@ -1034,6 +1034,26 @@ impl Channel {
         }
     }
 
+    /// Send a message that deletes itself after `secs`.
+    ///
+    /// A NIP-40 expiry on the message itself, so relays drop it and every
+    /// member's client purges it on schedule. Useful for anything that is worth
+    /// saying once and not worth keeping: a bot's public moderation notice is
+    /// seen by the room, then stops being a permanent monument to somebody's
+    /// worst day.
+    ///
+    /// Community channels only, and v2 only — a DM or an older Community has no
+    /// per-message expiry, and both refuse rather than quietly posting something
+    /// permanent where a vanishing message was asked for.
+    pub async fn send_expiring(&self, text: &str, secs: u64) -> Result<String> {
+        match self.kind {
+            ChannelKind::Dm => Err(Error::Other("DMs have no per-message expiry".into())),
+            ChannelKind::Community => {
+                self.core.send_community_message_expiring(&self.id, text, None, Some(secs)).await
+            }
+        }
+    }
+
     /// Send a text message as a **threaded reply** to `replied_to` (an existing message's id).
     /// Works for DMs and Community channels. Returns the new message's event id.
     pub async fn reply(&self, replied_to: &str, text: &str) -> Result<String> {
@@ -1465,6 +1485,14 @@ impl Community {
             .collect()
     }
 
+    /// The npubs this Community has banned.
+    ///
+    /// Read from local state: it reflects the last banlist edition this client
+    /// folded, not a fresh fetch. Sync the community first if that matters.
+    pub fn banned(&self) -> Vec<String> {
+        self.core.get_community_banned(&self.id)
+    }
+
     /// Invite an npub via a gift-wrapped private invite (requires the create-invite permission).
     pub async fn invite(&self, npub: &str) -> Result<()> {
         self.core.invite_to_community(&self.id, npub).await.map(|_| ())
@@ -1594,6 +1622,15 @@ impl Member {
     /// [`Community::ban_many`]: one rotation for the whole batch.
     pub async fn ban(&self) -> Result<()> {
         self.core.set_member_banned(&self.community_id, &self.npub, true).await
+    }
+
+    /// Are they banned here?
+    ///
+    /// Worth checking BEFORE [`Self::unban`]: lifting a ban succeeds whether or
+    /// not one was in place, so an unban alone tells you nothing about what it
+    /// changed, and reporting "lifted the ban" after it is a claim nobody made.
+    pub fn is_banned(&self) -> bool {
+        self.core.get_community_banned(&self.community_id).iter().any(|n| n == &self.npub)
     }
 
     /// Lift a ban.

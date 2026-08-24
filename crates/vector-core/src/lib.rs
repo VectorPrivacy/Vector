@@ -1283,6 +1283,11 @@ impl VectorCore {
             "name": community.name,
             "description": community.description,
             "is_owner": is_owner,
+            // The primary channel id, so the frontend can stamp every grafted chat row
+            // the way `register_v2_chats` stamps the persisted ones. Without it each
+            // channel claimed primary via the render fallback and a multi-channel
+            // community drew one list row per channel until the next full reload.
+            "primary_channel": community.primary_channel().map(|c| crate::simd::hex::bytes_to_hex_32(&c.id.0)),
             "channels": community.channels.iter()
                 .map(|c| serde_json::json!({ "channel_id": crate::simd::hex::bytes_to_hex_32(&c.id.0), "name": c.name, "private": c.private }))
                 .collect::<Vec<_>>(),
@@ -1976,6 +1981,27 @@ impl VectorCore {
         content: &str,
         replied_to: Option<&str>,
     ) -> Result<String> {
+        self.send_community_message_expiring(channel_id, content, replied_to, None).await
+    }
+
+    /// Post a message that deletes itself after `expires_in_secs`.
+    ///
+    /// A NIP-40 `expiration` tag on the rumor, which is what relays drop on and
+    /// every member's client purges against — the same mechanism as the
+    /// per-channel Self-Destruct Timer, decided per message instead of per
+    /// channel. For a bot posting a public moderation notice: the warning is
+    /// seen, then it stops being a permanent monument to somebody's worst day.
+    ///
+    /// v2 only. A v1 community has no expiry, and posting a permanent message
+    /// where a vanishing one was asked for is the kind of surprise that ends up
+    /// in a screenshot, so it refuses rather than silently keeping it forever.
+    pub async fn send_community_message_expiring(
+        &self,
+        channel_id: &str,
+        content: &str,
+        replied_to: Option<&str>,
+        expires_in_secs: Option<u64>,
+    ) -> Result<String> {
         use crate::community::{envelope, inbound, service, transport::LiveTransport};
         // Dual-stack: route by the owning community's stored protocol.
         if let Some(id) = self.v2_community_for_channel(channel_id)? {
@@ -2004,9 +2030,23 @@ impl VectorCore {
             // carries `["emoji", ...]` pairs — parity with the v1 inner event.
             let emoji_owned = crate::emoji_packs::resolve_outbound_emoji_tags(content);
             let emoji_pairs: Vec<(&str, &str)> = emoji_owned.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-            return crate::community::v2::service::send_chat_message(&transport, &community, &ch, content, reply_ref, &emoji_pairs, vec![])
+            let mut extra_tags = Vec::new();
+            if let Some(secs) = expires_in_secs.filter(|s| *s > 0) {
+                let at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+                    .saturating_add(secs);
+                extra_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(at)));
+            }
+            return crate::community::v2::service::send_chat_message(&transport, &community, &ch, content, reply_ref, &emoji_pairs, extra_tags)
                 .await
                 .map_err(VectorError::Other);
+        }
+        if expires_in_secs.is_some_and(|s| s > 0) {
+            return Err(VectorError::Other(
+                "this Community predates self-destructing messages; the message was not sent".into(),
+            ));
         }
         let (community, channel) = self.resolve_channel(channel_id)?;
         Self::ensure_v1_writable(&community)?;
@@ -2874,6 +2914,31 @@ impl VectorCore {
             .unwrap_or_default()
             .into_iter()
             .map(|(npub, last_active)| serde_json::json!({ "npub": npub, "last_active": last_active }))
+            .collect()
+    }
+
+    /// A Community's banlist, as npubs.
+    ///
+    /// The counterpart to [`Self::set_member_banned`], which had none: setting a
+    /// ban succeeds identically whether or not one was already in place, so a
+    /// caller lifting a ban could not tell whether it changed anything, and
+    /// anything reporting on it was guessing.
+    ///
+    /// Read from local state, so it reflects the last banlist edition this
+    /// client folded rather than a fresh fetch.
+    pub fn get_community_banned(&self, community_id: &str) -> Vec<String> {
+        use nostr_sdk::prelude::{PublicKey, ToBech32};
+        // Resolve the id the same way the moderation panel does: a caller may
+        // hold a logical id that is not the row key.
+        let cid_hex = match Self::load_v2_if_v2(community_id) {
+            Ok(Some(c)) => crate::simd::hex::bytes_to_hex_32(&c.id().0),
+            _ => community_id.to_string(),
+        };
+        crate::db::community::get_community_banlist(&cid_hex)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|hex| PublicKey::parse(hex).ok())
+            .filter_map(|pk| pk.to_bech32().ok())
             .collect()
     }
 
