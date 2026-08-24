@@ -3205,6 +3205,17 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             channel_count,
             boot_start.elapsed()
         );
+        // Re-assert the live subscriptions now that the flood is over. A relay
+        // under the sweep's load can drop or refuse the boot-time subs, and
+        // nothing else re-asks until a reconnect happens to fire — which is
+        // exactly the "dead until it all arrives at once" window. Both calls
+        // are idempotent refreshes.
+        if let Some(client) = vector_core::state::nostr_client() {
+            vector_core::community::realtime::refresh_subscription(&client).await;
+            vector_core::community::v2::realtime::refresh_subscription(&client).await;
+            println!("[Boot] live subs re-asserted after sweep");
+            crate::services::subscription_handler::reassert_dm_sub().await;
+        }
         drop(_claim);
         Ok(())
     })

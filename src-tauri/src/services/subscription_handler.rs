@@ -322,7 +322,102 @@ fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
 ///
 /// Uses vector-core's `subscribe_dms()` for the GiftWrap subscription,
 /// then layers on the Community (kind-3300) subscription.
+/// The boot sweep waits on this gate so the LIVE pipe wins the relay race.
+///
+/// At boot three things once hit the relays at the same moment: the community
+/// sweep (~107 channels x ~4 REQs), DM negentropy, and the live subscriptions —
+/// and the subscriptions routinely lost. Events published while they were losing
+/// belonged to nobody: too new for the sweep's snapshot, too old for a sub that
+/// wasn't up yet. The observable result was minutes of a booted, synced app
+/// receiving nothing, then everything at once when the reconnect path fired.
+static SUBS_COMMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SUBS_NOTIFY: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+
+fn subs_notify() -> &'static tokio::sync::Notify {
+    SUBS_NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// A fresh login's sweep must wait on THIS login's subscriptions, not the last
+/// account's. Called at boot-init before the sweep is spawned.
+pub(crate) fn reset_subs_gate() {
+    SUBS_COMMITTED.store(false, std::sync::atomic::Ordering::Release);
+}
+
+/// Wait until the live subscriptions have committed, or the cap elapses. The cap
+/// exists so a wedged subscribe can never hold the whole boot sync hostage —
+/// late history beats no history.
+pub(crate) async fn await_subs_committed(cap: std::time::Duration) {
+    if SUBS_COMMITTED.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let _ = tokio::time::timeout(cap, async {
+        loop {
+            let notified = subs_notify().notified();
+            if SUBS_COMMITTED.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await;
+}
+
+/// The live DM (gift-wrap) subscription's current id, so it can be REPLACED.
+///
+/// Routing no longer keys on this id (DM wraps route by kind + p-tag below), so
+/// re-subscribing under a fresh id after the boot flood is safe — this exists
+/// only to unsubscribe the old one instead of stacking duplicates.
+static DM_SUB_ID: std::sync::Mutex<Option<nostr_sdk::prelude::SubscriptionId>> = std::sync::Mutex::new(None);
+
+/// Drop and re-create the gift-wrap subscription. A relay under the boot
+/// sweep's load can drop the boot-time sub, and DMs then stay dead until a
+/// lucky reconnect: community subs had a post-flood re-assert, DMs had none.
+/// Subscribe to gift wraps, SAYING which relays accepted. `client.subscribe`
+/// reports per-relay success/failure and `subscribe_dms` discards it — which is
+/// how a DM sub that every gated relay CLOSEd (the REQ racing the NIP-42
+/// handshake) could look identical to one that worked.
+async fn subscribe_dms_verbose(label: &str) -> Result<nostr_sdk::prelude::SubscriptionId, String> {
+    use nostr_sdk::prelude::*;
+    let client = nostr_client().ok_or("no client")?;
+    let me = vector_core::state::my_public_key().ok_or("not logged in")?;
+    let filter = Filter::new().pubkey(me).kind(Kind::GiftWrap).limit(0);
+    let output = client.subscribe(filter).await.map_err(|e| e.to_string())?;
+    println!(
+        "[dm-sub] {label}: id {} — ok on {:?}, failed on {:?}",
+        *output,
+        output.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+        output.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
+    );
+    Ok(output.value)
+}
+
+pub(crate) async fn reassert_dm_sub() {
+    let Some(client) = nostr_client() else { return };
+    let old = DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(id) = old {
+        let _ = client.unsubscribe(&id).await;
+    }
+    match subscribe_dms_verbose("post-sweep").await {
+        Ok(id) => {
+            *DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
+            println!("[Boot] DM sub re-asserted after sweep");
+        }
+        Err(e) => eprintln!("[Boot] DM sub re-assert failed: {e}"),
+    }
+}
+
 pub(crate) async fn start_subscriptions() -> Result<bool, String> {
+    // Stage timing, INFO on purpose: the live pipe going up is the moment the
+    // app stops being deaf, and a stage stalling here reads from the outside as
+    // "everything synced but nothing arrives" with no line saying why.
+    let t0 = std::time::Instant::now();
+    macro_rules! stage {
+        ($name:expr) => {
+            // println!, not log_info!: the default runtime level is WARN, so an
+            // info line here is invisible in exactly the situation it exists for.
+            println!("[subs] {} at +{}ms", $name, t0.elapsed().as_millis())
+        };
+    }
     let client = nostr_client().ok_or("Nostr client not initialized")?;
     // Session captured at subscription start; every notification short-
     // circuits on swap so account A's inbound events don't persist into
@@ -348,18 +443,31 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
 
     // GiftWrap subscription via vector-core (DMs, files)
     let core = vector_core::VectorCore;
-    let gift_sub_id = core.subscribe_dms().await.map_err(|e| e.to_string())?;
+    stage!("dm subscribe: begin");
+    let gift_sub_id = subscribe_dms_verbose("boot").await?;
+    let _ = &core;
+    *DM_SUB_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(gift_sub_id.clone());
+    stage!("dm subscribe: LIVE");
 
     // Community (kind-3300) subscription — scoped to our channels' epoch pseudonyms.
     refresh_community_subscription().await;
+    stage!("v1 community sub: LIVE");
 
     // v2 plane subscription (authors-addressed wraps) + boot catch-up: enqueue a
     // refold per held v2 community so anything missed offline (rotations, control
     // edits, messages) folds in — coalesced, drained by the worker off this path.
     vector_core::community::v2::realtime::refresh_subscription(&client).await;
+    stage!("v2 plane sub: LIVE");
     for c in vector_core::community::v2::realtime::load_held_v2() {
         vector_core::community::v2::realtime::enqueue_follow(c.id());
     }
+
+    // The three delivery subscriptions are up: open the gate HERE, before the
+    // self-sync sub and prefs hydration below — those are their own slow network
+    // and the sweep must not wait on them.
+    SUBS_COMMITTED.store(true, std::sync::atomic::Ordering::Release);
+    subs_notify().notify_waiters();
+    stage!("live pipe COMMITTED");
 
     // Self-sync subscription — our own replaceable settings lists (Community List + emoji list). Covers
     // boot, reconnect, AND instant cross-device in one open subscription.
@@ -401,15 +509,54 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
     // Community messages through the Community handler.
     // 0.45 removed `handle_notifications`; drive the stream directly. It ends when
     // the client shuts down, and the session check still breaks out on a swap.
+    // DMs get their OWN consumer. `notifications()` is a broadcast, so each
+    // receiver sees every event — and the main loop below awaits community
+    // handling INLINE, which at boot means hundreds of fold/DB awaits queued in
+    // front of whatever arrives next. Gift wraps sat in that queue for minutes
+    // (measured: published-to-relay vs reaching the loop, 20s-2min, in pulses;
+    // handled in ~3ms once dequeued). A DM's handler is fast, so a dedicated
+    // lane makes DM latency independent of community-event handling entirely.
+    {
+        let mut dm_notifications = client.notifications();
+        vector_core::db::spawn_bound(async move {
+            while let Some(n) = dm_notifications.next().await {
+                if let ClientNotification::Event { event, .. } = n {
+                    let is_dm = event.kind.as_u16() == 1059
+                        && vector_core::state::my_public_key()
+                            .is_some_and(|me| event.tags.public_keys().any(|pk| pk == me));
+                    if is_dm {
+                        super::handle_event(*event, true).await;
+                    }
+                }
+            }
+        });
+    }
+
     let mut notifications = client.notifications();
     while let Some(notification) = notifications.next().await {
         {
             match notification {
                 ClientNotification::Event { event, subscription_id, .. } => {
+                    let _ = &subscription_id;
                     let k = event.kind.as_u16();
-                    if subscription_id == gift_sub_id {
-                        // DMs/files/reactions/edits (via tauri_commit_prepared_event)
-                        super::handle_event(*event, true).await;
+                    // DM gift wraps route by KIND + the p-tag addressing us — the
+                    // same lesson the community branch below already carries.
+                    // Keyed on the boot-time sub id, the DM path was welded to
+                    // one subscription: if a relay dropped it under the boot
+                    // flood, a replacement sub's events fell through to the v2
+                    // route, which discards DM wraps as NotOurs — DMs stayed
+                    // dead until a restart. v2 plane wraps are group-addressed
+                    // (no p-tag to us), so the tag is the discriminator, and
+                    // the wrapper ledger dedups a wrap that arrives on several
+                    // subscriptions at once.
+                    let dm_wrap = (k == 1059)
+                        && vector_core::state::my_public_key()
+                            .is_some_and(|me| event.tags.public_keys().any(|pk| pk == me));
+                    if dm_wrap {
+                        // The dedicated DM lane above handles these; handling
+                        // here too would race it to the dedup ledger for every
+                        // wrap. This loop's job is everything else.
+                        continue;
                     } else if (3300..=3311).contains(&k) {
                         // Route Community events by KIND, not by subscription id: an event can arrive on the
                         // live community sub OR on a fetch/sync/reconcile sub, so matching only the live sub
