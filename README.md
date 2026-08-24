@@ -204,6 +204,24 @@ Follow the channels below for the latest on development, releases, and community
 
 ---
 
+# Donate
+
+Vector is free, open-source, and funded entirely by donations. No ads, no tokens, no venture capital.
+
+| Currency / Network | Address |
+|----------|---------|
+| Monero (XMR) | `47ENi8rwDxqNYNoCnGhGGGLaE2YbA6B9DVXgUbiewyM1F6G4fFGGGK31Am9RqTz2WddDKoeNwaZSufR9seT7knQ44UPjHF8` |
+| Bitcoin (BTC) | `bc1q70zhkfuej2cl9nhrxwqcnvrzpwm9kqtrth3tmc` |
+| Ethereum (ETH) | `0x20CF19c23fC747C6E88Fee9Adb2d7F5C0Dc59892` |
+
+<sub>*The ETH wallet supports all EVM-compatible chains and tokens.*</sub>
+
+If you're interested in donating in a way that isn't listed above, see our [Donations page](https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations).
+
+<sub>⚠️ Always verify donation addresses against the [official Donations page](https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations) before sending.</sub>
+
+---
+
 ## Attributions
 
 Vector uses third-party assets and resources. For a complete list of attributions and licenses, please see our [Attributions](docs/attributions.md) document.
