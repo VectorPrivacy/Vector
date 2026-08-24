@@ -44,7 +44,7 @@ Vector Privacy is a free messenger application that was designed for anyone arou
 
 ### No Compromise Encryption
 
-Vector utilizes a decentralized relay network (Nostr) as the base infrastructure to communicate information and transmit data, which means it is not stored on a centralized server. The chosen standard, NIP-17, provides a secure and private way for users to communicate directly with each other on the Nostr network. It achieves this by using a combination of [NIP-44 encryption](https://github.com/nostr-protocol/nips/blob/master/44.md), [NIP-59 seals](https://github.com/nostr-protocol/nips/blob/master/59.md), and [gift wraps](https://github.com/nostr-protocol/nips/blob/master/59.md).
+Vector utilizes a decentralized relay network (Nostr) as the base infrastructure to communicate information and transmit data, which means it is not stored on a centralized server. The chosen standard, NIP-17, provides a secure and private way for users to communicate directly with each other on the Nostr network. It achieves this by using a combination of [NIP-44 encryption](https://github.com/nostr-protocol/nips/blob/master/44.md), [NIP-59 seals](https://github.com/nostr-protocol/nips/blob/master/59.md), and [gift wraps](https://github.com/nostr-protocol/nips/blob/master/59.md). Learn more about [Vector's Encryption](https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/intro/encryption)
 
 ---
 
