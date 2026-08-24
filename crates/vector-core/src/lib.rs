@@ -3732,15 +3732,22 @@ impl VectorCore {
             }
             if let Ok(Some(fresh)) = crate::db::community::load_community_v2(id) {
                 match crate::community::v2::service::follow_control(&transport, &fresh).await {
-                    // A control change can reveal rekey work that predates it (a
-                    // just-announced private channel's key crate already sits on its
-                    // rekey plane), so walk the rekeys once more on the fresh state.
-                    Ok(Some(changed)) => {
-                        if let Err(e) = crate::community::v2::service::follow_rekeys(&transport, &changed, &session).await {
-                            warnings.push(format!("v2 rekey follow failed: {e}"));
+                    // Walk the rekeys once more whenever the control fold moved ANYTHING.
+                    // The document half reveals rekey work that predates it (a just-announced
+                    // private channel's key crate already sits on its rekey plane). The
+                    // AUTHORITY half is the one that strands: the walk above gates every
+                    // rotation on the roster and citation heads this fold just wrote, so a
+                    // promote-then-rotate is refused on pass 1 and, without this, never
+                    // reconsidered. Re-read from the DB — the authority half moves columns
+                    // the returned document does not carry.
+                    Ok(control) if control.moved() => {
+                        if let Ok(Some(latest)) = crate::db::community::load_community_v2(id) {
+                            if let Err(e) = crate::community::v2::service::follow_rekeys(&transport, &latest, &session).await {
+                                warnings.push(format!("v2 rekey follow failed: {e}"));
+                            }
                         }
                     }
-                    Ok(None) => {}
+                    Ok(_) => {}
                     Err(e) => warnings.push(format!("v2 control follow failed: {e}")),
                 }
             }
