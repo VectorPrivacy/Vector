@@ -4048,7 +4048,12 @@ impl VectorCore {
     /// non-blocking. State-only (no handler replay of history). Called at `listen()`
     /// start and on reconnect; safe to call manually — the v2 enqueue is a no-op if
     /// no `listen()` worker is running.
-    pub async fn sync_communities(&self) -> Result<()> {
+    /// Returns each community's non-fatal follow warnings (rekey/control catch-up
+    /// failures), prefixed with the id. A caller that discards them is blind to
+    /// "the sync ran, but this account never adopted the rotation" — which reads
+    /// exactly like a healthy quiet sync while the account sits on a dead epoch.
+    pub async fn sync_communities(&self) -> Result<Vec<String>> {
+        let mut all_warnings: Vec<String> = Vec::new();
         // Discover + rehydrate memberships from the Community List across devices (CORD-02 §8),
         // bootstrapping from the client's connected relays so even a fresh device that
         // holds no community yet can find them. Best-effort.
@@ -4067,7 +4072,10 @@ impl VectorCore {
                     if community::v2::realtime::follow_worker_running() {
                         community::v2::realtime::enqueue_follow(c.id());
                     } else {
-                        let _ = Self::v2_inline_follow(c.id()).await;
+                        let cid_hex = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+                        all_warnings.extend(
+                            Self::v2_inline_follow(c.id()).await.into_iter().map(|w| format!("{}: {w}", &cid_hex[..8])),
+                        );
                     }
                 }
                 if !joined.is_empty() {
@@ -4086,7 +4094,10 @@ impl VectorCore {
                 if community::v2::realtime::follow_worker_running() {
                     community::v2::realtime::enqueue_follow(&id);
                 } else {
-                    let _ = Self::v2_inline_follow(&id).await;
+                    let cid_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+                    all_warnings.extend(
+                        Self::v2_inline_follow(&id).await.into_iter().map(|w| format!("{}: {w}", &cid_hex[..8])),
+                    );
                 }
                 // Back-fill each channel's chat, exactly as the v1 arm below does.
                 // Without this a headless client only ever sees messages that arrive
@@ -4111,7 +4122,7 @@ impl VectorCore {
                 }
             }
         }
-        Ok(())
+        Ok(all_warnings)
     }
 
 

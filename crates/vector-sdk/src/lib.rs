@@ -516,7 +516,7 @@ impl VectorBot {
     /// metadata) and fetch recent messages into local state. Runs automatically inside
     /// [`on_message`](Self::on_message)/`listen` on connect and periodically for outage resilience;
     /// exposed for manual use (e.g. right after a known reconnect).
-    pub async fn sync_communities(&self) -> Result<()> {
+    pub async fn sync_communities(&self) -> Result<Vec<String>> {
         self.core.sync_communities().await
     }
 
