@@ -4397,6 +4397,30 @@ impl VectorCore {
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
     }
 
+    /// Explain this account's epoch state for a v2 community: what it holds, what
+    /// the next-epoch rekey plane offers, and why each rotation there was or was not
+    /// adopted.
+    ///
+    /// This is the answer to "is this client stranded, and why" — a question that is
+    /// otherwise unanswerable, because a stranded client sees only silence and
+    /// silence looks exactly like a quiet community. Run it from two clients on one
+    /// community to compare their views; the `held` block is where they diverge
+    /// first. Read-only; returns public keys and verdicts, never key material.
+    pub async fn explain_epoch_state(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("not a held Concord v2 community".into()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        crate::community::v2::service::explain_epoch_state(&transport, &community)
+            .await
+            .map_err(VectorError::Other)
+    }
+
     /// Contain a raid (v2 only): ban the named raiders, cut everyone who joined
     /// through the door during the raid window, and perform a SEVERING Refounding
     /// — the rotation that REVOKES the public invite links instead of carrying

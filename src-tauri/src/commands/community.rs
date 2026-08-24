@@ -2342,17 +2342,17 @@ pub async fn debug_v2_follow_trace(community_id: String) -> Result<serde_json::V
     }))
 }
 
-/// Explain WHY a wedged v2 community isn't adopting its next base rotation:
-/// runs the real fetch+parse+authority+continuity pipeline and reports the gate
-/// each rotation trips. Read-only (public keys only).
-#[cfg(debug_assertions)]
+/// Explain this client's epoch state and WHY it is or isn't adopting the next base
+/// rotation: runs the real fetch+parse+authority+continuity pipeline and reports the
+/// gate each rotation trips, alongside the local state two clients diverge on.
+/// Read-only (public keys only). Ships in release — a strand is silent otherwise.
 #[tauri::command]
 pub async fn debug_v2_explain_base_rekey(community_id: String) -> Result<serde_json::Value, String> {
     use vector_core::community::transport::LiveTransport;
     let id = CommunityId(hex_to_id32(&community_id)?);
     let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::v2::service::debug_explain_base_rekey(&transport, &c).await
+    vector_core::community::v2::service::explain_epoch_state(&transport, &c).await
 }
 
 /// Wire-level probe for a v2 community's rotation planes. For each candidate

@@ -595,6 +595,14 @@ impl VectorAgent {
         }
     }
 
+    #[tool(description = "Explain this account's epoch state for a Concord v2 Community: the epoch and roster it holds, what the next-epoch rekey plane offers, and why each rotation there was or was not adopted. Use it to answer 'am I stranded on an old epoch, and why' — a stranded client otherwise just sees silence, which looks identical to a quiet community. Run it from two different accounts on the same Community to compare their views. Read-only.")]
+    async fn explain_epoch_state(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.explain_epoch_state(&req.community_id).await {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "Sync every Community from relays: refresh the joined list and walk each one's key rotations (re-foundings), adopting any this account missed. Run it when a Community's state looks stale — a channel that stopped reading, a member list that disagrees with another client, or after a moderation action elsewhere rotated the keys. Per-channel message fetching stays with sync_community_channel.")]
     async fn sync_communities(&self) -> Result<CallToolResult, McpError> {
         match self.core.sync_communities().await {
