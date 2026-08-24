@@ -3471,6 +3471,63 @@ impl VectorCore {
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
     }
 
+    /// Contain a raid (v2 only): ban the named raiders, cut everyone who joined
+    /// through the door during the raid window, and perform a SEVERING Refounding
+    /// — the rotation that REVOKES the public invite links instead of carrying
+    /// them into the new epoch.
+    ///
+    /// This is the raid lane. An ordinary ban keeps its shipped behaviour, where a
+    /// Public community deliberately does not roll the root (the stable-URL refresh
+    /// would undo it). Here the link IS the attack surface, so it closes.
+    ///
+    /// `window_start_secs` is the raid's opening edge (unix seconds); pass 0 to cut
+    /// only the convicted. Returns an honest report — a failed refound is reported,
+    /// never dressed up as a closed door.
+    pub async fn contain_raid(
+        &self,
+        community_id: &str,
+        npubs: &[&str],
+        window_start_secs: u64,
+        cut_also: &[&str],
+    ) -> Result<crate::community::v2::service::ContainmentReport> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let mut pks: Vec<nostr_sdk::prelude::PublicKey> = Vec::with_capacity(npubs.len());
+        for n in npubs {
+            let pk = nostr_sdk::prelude::PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !pks.contains(&pk) {
+                pks.push(pk);
+            }
+        }
+        let mut extra: Vec<nostr_sdk::prelude::PublicKey> = Vec::with_capacity(cut_also.len());
+        for n in cut_also {
+            let pk = nostr_sdk::prelude::PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !extra.contains(&pk) {
+                extra.push(pk);
+            }
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        match crate::db::community::community_protocol(&cid).map_err(VectorError::Other)? {
+            Some(crate::community::ConcordProtocol::V2) => {}
+            // v1 has no severing rotation and no per-creator link custody; routing a
+            // containment there would silently do something else entirely.
+            _ => return Err(VectorError::Other("raid containment requires a Concord v2 community".into())),
+        }
+        // Unbound caller (SDK/command): a swap mid-containment would ban in one
+        // account and rotate in another.
+        let session = crate::db::current_session();
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        let report = crate::community::v2::service::contain_raid(&transport, &cid, &pks, window_start_secs, &extra)
+            .await
+            .map_err(VectorError::Other)?;
+        if !session.is_live() {
+            return Err(VectorError::Other("account changed during raid containment".into()));
+        }
+        Ok(report)
+    }
+
     /// Owner dissolution / "Delete Community": publish the terminal GroupDissolved tombstone (and
     /// retire the owner's own invite links, no rekey), sealing the community permanently. Owner-only
     /// (re-verified cryptographically in `service::dissolve_community`); irreversible.

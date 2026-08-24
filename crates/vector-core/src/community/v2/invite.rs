@@ -468,6 +468,14 @@ pub struct InviteEntry {
     pub created_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
+    /// The root epoch this link was minted at. The severance discriminator: a
+    /// containment condemns every entry below its epoch, deterministically on
+    /// every device — no clock comparison can disagree with itself the way two
+    /// devices' clocks can. `None` (a pre-field or old-client mint) reads as 0,
+    /// so an unstamped link is condemned by any containment: fail toward the
+    /// closed door.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -1124,6 +1132,7 @@ mod tests {
             label: None,
             created_at: 1000,
             expires_at: None,
+            epoch: None,
             extra: Default::default(),
         }
     }
