@@ -1386,15 +1386,18 @@ async fn fetch_control_plane_whole<T: Transport + ?Sized>(transport: &T, communi
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
     for page in 0..COMPACT_MAX_PAGES {
-        // Quorum, DECLARED (the until→Full transport floor is gone): these
-        // control reads tolerate a partial union — their fold semantics are
-        // fail-safe on gaps (seeded banlists, withheld roster cache).
+        // Full, not Quorum: `None` here means "could not be read whole", and a
+        // majority that simply lacks another creator's Registry answers as fast as
+        // one that has it — so a Quorum read returns Some(empty) and the plane reads
+        // link-free. The ban path turns that into a Refounding of a PUBLIC community,
+        // which CORD-05 §5 forbids: the link refresh re-posts the bundle behind the
+        // same URL, so the rotation severs nothing and buries foreign-link joiners.
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![control.pk_hex()],
             until,
             limit: Some(FOLLOW_PAGE),
-            evidence: crate::community::transport::Evidence::Quorum,
+            evidence: crate::community::transport::Evidence::Full,
             ..Default::default()
         };
         let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return None };
@@ -11468,6 +11471,29 @@ mod tests {
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.0.publish_durable(e, r).await
         }
+    }
+
+    #[tokio::test]
+    async fn a_live_link_a_quorum_cannot_see_still_reads_public() {
+        // The ban path asks this to decide whether to refound. CORD-05 §5 forbids
+        // refounding a Public community — the link refresh re-posts the bundle behind
+        // the same URL, so the rotation severs nothing and strands foreign-link joiners
+        // on a buried epoch. A Quorum read that misses another creator's Registry makes
+        // a Public community read Private, which takes exactly that forbidden branch.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "QuorumBlind", vec!["wss://r".into()], None).await.unwrap();
+        mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        assert!(community_is_public(&relay, &community).await, "the link is live on the plane");
+
+        // u64::MAX: nothing is newer, so the Quorum read is blinded entirely. The
+        // link is minted with the real clock, so a small cutoff filters nothing.
+        let slow = SlowMajority(&relay, u64::MAX);
+        assert!(
+            community_is_public(&slow, &community).await,
+            "a live link only a minority relay serves must still read Public — reading \
+             Private here refounds a Public community on ban, severing nothing",
+        );
     }
 
     #[tokio::test]
