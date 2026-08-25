@@ -7156,7 +7156,11 @@ fn select_authorized(
                         }
                     }
                     if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
-                        note(&mut why, "role: citation unresolvable");
+                        note(&mut why, if c.citation.is_none() {
+                            "role: UNCITED (no vac tag at all)"
+                        } else {
+                            "role: cited a grant we cannot resolve"
+                        });
                         continue;
                     }
                     admissible.insert(c.head.self_hash);
@@ -7229,7 +7233,11 @@ fn select_authorized(
                     continue;
                 }
                 if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
-                    note(&mut why, "grant: citation unresolvable");
+                    note(&mut why, if c.citation.is_none() {
+                        "grant: UNCITED (no vac tag at all)"
+                    } else {
+                        "grant: cited a grant we cannot resolve"
+                    });
                     continue;
                 }
                 if positions.iter().all(|p| accepted.can_act_on_position(&ah, owner_hex, *p, Permissions::MANAGE_ROLES))
