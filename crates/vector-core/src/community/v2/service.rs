@@ -6450,7 +6450,14 @@ pub async fn follow_control<T: Transport + ?Sized>(
                         format!(
                             "{}[{kind}]:{}ed/v{}/by{}{}{}",
                             &eid[..8], n, v, author,
-                            if head_now.contains(eid.as_str()) { "/HEAD" } else { "/dropped" },
+                            if head_now.contains(eid.as_str()) {
+                                "/HEAD".to_string()
+                            } else {
+                                AUTHORITY_REFUSALS
+                                    .with(|c| c.borrow().get(eid.as_str()).copied())
+                                    .map(|r| format!("/DROPPED({r})"))
+                                    .unwrap_or_else(|| "/dropped(no candidate survived the fold)".into())
+                            },
                             floors.get(eid).map(|f| format!("/floor@v{}", f.0)).unwrap_or_default(),
                         )
                     })
@@ -6908,7 +6915,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
-    let (prelim, prelim_heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty);
+    let (prelim, prelim_heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty, None);
 
     // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
     // both closed:
@@ -6984,7 +6991,9 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // Final roster (CORD-04 §4: a banned npub vanishes — every edition it authored is
     // dropped, and a grant TO a banned member carries no rank). Re-run selection with
     // the banned set excluded so a banned admin loses authority.
-    let (mut authorized, mut heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &banned);
+    let mut refusals: std::collections::BTreeMap<String, &'static str> = Default::default();
+    let (mut authorized, mut heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &banned, Some(&mut refusals));
+    AUTHORITY_REFUSALS.with(|c| *c.borrow_mut() = refusals);
     if let Some(bh) = banlist_head {
         heads.push(bh);
     }
@@ -7057,12 +7066,23 @@ fn citation_ok_in_fold(
 /// signer's own position) keeps the fixpoint monotone, so it converges. Returns the
 /// authorized roster plus the per-entity heads of the SELECTED editions (the floor
 /// advances only to authorized heads — an unauthorized forgery never poisons it).
+thread_local! {
+    /// Refusal reasons from the most recent authority fold on this thread — read by
+    /// the roster diagnostic. Diagnostic only; nothing branches on it.
+    static AUTHORITY_REFUSALS: std::cell::RefCell<std::collections::BTreeMap<String, &'static str>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 fn select_authorized(
     cid: &crate::community::CommunityId,
     role_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
     grant_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
     owner_hex: Option<&str>,
     excluded: &std::collections::BTreeSet<String>,
+    // Why each entity was refused, for diagnosis. A rejection here is invisible by
+    // construction — every gate is a bare `continue` — so a roster that silently
+    // collapses gives a reader nothing to go on.
+    mut why: Option<&mut std::collections::BTreeMap<String, &'static str>>,
 ) -> (crate::community::roles::CommunityRoles, Vec<FoldedHead>) {
     use crate::community::roles::{CommunityRoles, Permissions};
     let mut accepted = CommunityRoles::default();
@@ -7102,18 +7122,27 @@ fn select_authorized(
                 for c in cands[i..hi].iter().rev() {
                     let Some(role) = &c.role else { continue };
                     let ah = c.author.to_hex();
+                    let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
+                        if let Some(m) = w.as_mut() {
+                            m.insert(c.head.entity_hex.clone(), r);
+                        }
+                    };
                     if excluded.contains(&ah) || role.position == 0 {
+                        note(&mut why, "role: author banned or position 0");
                         continue;
                     }
                     if !accepted.can_act_on_position(&ah, owner_hex, role.position, Permissions::MANAGE_ROLES) {
+                        note(&mut why, "role: author lacks MANAGE_ROLES over this position");
                         continue;
                     }
                     if let Some(prev) = standing {
                         if !accepted.can_act_on_position(&ah, owner_hex, prev, Permissions::MANAGE_ROLES) {
+                            note(&mut why, "role: author cannot outrank the position it replaces");
                             continue;
                         }
                     }
                     if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
+                        note(&mut why, "role: citation unresolvable");
                         continue;
                     }
                     admissible.insert(c.head.self_hash);
@@ -7135,14 +7164,24 @@ fn select_authorized(
             for c in cands {
                 let Some(grant) = &c.grant else { continue };
                 let ah = c.author.to_hex();
+                let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
+                    if let Some(m) = w.as_mut() {
+                        m.insert(c.head.entity_hex.clone(), r);
+                    }
+                };
                 if excluded.contains(&ah) || excluded.contains(&grant.member) {
+                    note(&mut why, "grant: author or member banned");
                     continue;
                 }
                 // The granter must outrank every granted role (resolved against the
                 // accepted roster) AND the member — the escalation defense (CORD-04 §2).
                 let positions: Option<Vec<u32>> = grant.role_ids.iter().map(|rid| accepted.role(rid).map(|r| r.position)).collect();
-                let Some(positions) = positions else { continue };
+                let Some(positions) = positions else {
+                    note(&mut why, "grant: references a role not in the accepted roster");
+                    continue;
+                };
                 if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
+                    note(&mut why, "grant: citation unresolvable");
                     continue;
                 }
                 if positions.iter().all(|p| accepted.can_act_on_position(&ah, owner_hex, *p, Permissions::MANAGE_ROLES))
