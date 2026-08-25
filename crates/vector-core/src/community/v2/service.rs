@@ -6245,6 +6245,75 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // of such a seed, so the wedge lands on exactly the account whose rotations
         // everyone else is waiting to adopt.
         let seed_only = stored_at == 0;
+        // A floor that can NEVER be satisfied must not veto the roster forever.
+        //
+        // `stored_complete` retains the cache when a stored entity is floored but
+        // folded no head, because a withholding relay looks exactly like that. The
+        // trouble is that an entity can legitimately stop producing a head for good:
+        // its author was demoted, so `select_authorized` drops their editions; or the
+        // entity was compacted away. The veto then holds forever, the roster can never
+        // be replaced, and a client with a stale roster refuses every rotation from an
+        // admin promoted since — which is a fork, arrived at silently.
+        //
+        // So when the read was COHERENT — the whole plane paged, nothing gapped, and
+        // the fetch itself is quorum-backed — an entity that produced no head is
+        // genuinely not there as far as the reachable relay set can tell. Forget its
+        // floor and let the roster move. A read that was truncated or gapped proves
+        // nothing and still retains, which is the withholding case the guard exists
+        // for. My OWN grant is never pruned: losing my own standing on a bad read is
+        // the one mistake with no path back.
+        // Two independent guards, because withholding takes two shapes.
+        //
+        // `authority.gapped` catches the case where the window REFERENCES the missing
+        // entity — a served grant naming an unserved role gaps the fold, and that is a
+        // relay serving partial history, not an entity that is gone.
+        //
+        // It does NOT catch an entity nothing references any more, which folds absent
+        // and raises no gap. That is the shape a demoted author's role leaves, and the
+        // one that froze rosters in the field. For it the discriminator is whether the
+        // plane is demonstrably AHEAD of what we hold: a plane serving roster editions
+        // newer than our own is live and current, so an entity absent from it really
+        // has stopped being served. A relay set that is not ahead teaches us nothing we
+        // did not already know, so it may not evict anything.
+        let plane_is_ahead = newest_roster_at > stored_at;
+        let coherent = !truncated && !authority.gapped && !fold.gapped && plane_is_ahead;
+        // My OWN grant is never pruned: losing my own standing on a bad read is the
+        // one mistake with no path back, so if it is what blocks, we stay blocked.
+        let mut unprunable_blocker = false;
+        if !stored_complete && !seed_only && coherent {
+            let me_grant_eid = crate::my_public_key().map(|me| {
+                crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &me.to_bytes()))
+            });
+            let mut pruned = 0usize;
+            for r in &stored.roles {
+                if floors.contains_key(&r.role_id) && !head_ents.contains(r.role_id.as_str()) {
+                    let _ = crate::db::community::delete_edition_head(&cid_hex, &r.role_id);
+                    pruned += 1;
+                }
+            }
+            for g in &stored.grants {
+                let Some(m) = crate::simd::hex::hex_to_bytes_32_checked(&g.member) else { continue };
+                let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                if !floors.contains_key(&eid) || head_ents.contains(eid.as_str()) {
+                    continue;
+                }
+                if me_grant_eid.as_deref() == Some(eid.as_str()) {
+                    unprunable_blocker = true;
+                    continue;
+                }
+                let _ = crate::db::community::delete_edition_head(&cid_hex, &eid);
+                pruned += 1;
+            }
+            if pruned > 0 {
+                crate::log_warn!(
+                    "[v2:control {}] pruned {pruned} unsatisfiable floor(s) — entities a coherent quorum read no longer serves; the roster cache can advance again",
+                    &cid_hex[..8.min(cid_hex.len())]
+                );
+            }
+        }
+        // The prune removed exactly what was blocking, so completeness now holds
+        // unless my own grant was the blocker.
+        let stored_complete = stored_complete || (coherent && !seed_only && !unprunable_blocker);
         if !truncated && !authority.gapped && (stored_complete || seed_only) && newest_roster_at >= stored_at {
             authority_changed |= stored != authority.roles;
             crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
@@ -10741,6 +10810,55 @@ mod tests {
         let down = FetchErrors(MemoryRelay::new());
         let view = fetch_authority(&down, &community).await;
         assert!(view.banned.contains(&victim_hex), "a transport error retains the persisted banlist");
+    }
+
+    #[tokio::test]
+    async fn a_dead_floor_stops_vetoing_the_roster_once_the_plane_moves_on() {
+        // The freeze: an entity can stop producing a head FOREVER — its author was
+        // demoted so their editions no longer count, or it was compacted away. The
+        // completeness guard then retains the stored roster on every pass, so the
+        // cache can never be replaced, so an admin promoted afterwards is invisible,
+        // so their rotations are refused. A silent fork, from a guard doing its job.
+        //
+        // The escape is that the plane must be demonstrably AHEAD of what we hold: a
+        // live plane serving newer authority than ours, which nonetheless does not
+        // serve this entity, is real evidence the entity is gone. (A relay set that
+        // merely lacks history is not ahead, and evicts nothing — that is the
+        // sibling test above.)
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "DeadFloor", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let ghost_role = crate::simd::hex::bytes_to_hex_32(&[0x9d; 32]);
+
+        // A stored roster naming an entity the plane will never head, with a floor
+        // behind it — the shape a demoted author's role leaves.
+        let mut seeded = crate::community::roles::CommunityRoles::default();
+        seeded.roles.push(admin_role(&ghost_role, Permissions::MANAGE_CHANNELS));
+        // Stamped OLDER than the editions the plane will serve, so the plane is
+        // demonstrably ahead — the discriminator that separates "this entity is gone"
+        // from "this relay set never had it".
+        crate::db::community::set_community_roles(&cid_hex, &seeded, 500).unwrap();
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost_role, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
+
+        // The plane moves on: a NEW admin is promoted, strictly newer than what we hold.
+        let newcomer = Keys::generate();
+        let rid = "b8".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &newcomer.public_key(), vec![rid], 1).await;
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            roster.grants.iter().any(|g| g.member == newcomer.public_key().to_hex()),
+            "the roster MUST advance — a dead floor that vetoes forever is how a client goes \
+             permanently deaf to every admin promoted after it",
+        );
+        assert!(
+            !roster.roles.iter().any(|r| r.role_id == ghost_role),
+            "and the entity nothing serves is gone from the cache",
+        );
     }
 
     #[tokio::test]
