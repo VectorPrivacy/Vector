@@ -6173,7 +6173,14 @@ pub async fn follow_control<T: Transport + ?Sized>(
             // Fail toward reading MORE.
             let all_accounted = match crate::db::community::get_community_roles(&cid_hex) {
                 Ok(known) => {
-                    known.roles.iter().all(|r| heads_now.contains(r.role_id.as_str()))
+                    // A roster we have not built yet accounts for nothing, so
+                    // "everything I track is present" is vacuously TRUE and stops a
+                    // COLD device at the first page — caching whatever the newest
+                    // window happened to hold as its whole baseline, and losing every
+                    // grant older than one page. The early break is an optimisation
+                    // for a client that already knows what it is looking for.
+                    (!known.roles.is_empty() || !known.grants.is_empty())
+                        && known.roles.iter().all(|r| heads_now.contains(r.role_id.as_str()))
                         && known.grants.iter().all(|g| {
                             crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
                                 let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
@@ -7790,6 +7797,9 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // finite chain terminates naturally; the cap defends against a relay feeding a
         // pathological set.
         const MAX_STEPS: usize = 128;
+        // Wide enough to collapse a large community's channel fan into one wave,
+        // narrow enough that a catch-up does not present as a burst to every relay.
+        const CHANNEL_FAN_CONCURRENCY: usize = 8;
         // Containment hops adopted in this walk (B2: any one of them condemns —
         // a later ordinary hop in the same walk must not relaunder links open).
         let mut severed_hops: Vec<u64> = Vec::new();
@@ -7805,20 +7815,52 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             // Private channels first: a removal-forced channel rekey rides the PRIOR
             // root (CORD-06 D2), so read channels before a base adopt moves it.
             let channel_ids: Vec<ChannelId> = cur.channels.iter().filter(|c| c.private).map(|c| c.id).collect();
-            for cid in channel_ids {
-                let (held_key, held_epoch) = match cur.channel(&cid) {
-                    Some(ch) => (ch.key, ch.epoch),
-                    None => continue,
-                };
-                let next = Epoch(held_epoch.0.saturating_add(1));
-                let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
-                let mut batches: Vec<(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)> = Vec::new();
+            // One concurrent wave per hop, not one round-trip per (channel, root).
+            // Serially this was `private channels x addressing roots` fetches before a
+            // single hop could be decided — around a hundred for a large community, and
+            // a week's absence walks dozens of hops. The decisions below still run
+            // serially and in the same order; only the reads overlap.
+            let fan: Vec<(ChannelId, Option<[u8; 32]>, Epoch, Epoch)> = channel_ids
+                .iter()
+                .filter_map(|cid| {
+                    cur.channel(cid).map(|ch| {
+                        (*cid, ch.key, ch.epoch, Epoch(ch.epoch.0.saturating_add(1)))
+                    })
+                })
+                .collect();
+            let mut prefetched: std::collections::HashMap<([u8; 32], usize), Vec<rekey::RekeyChunk>> =
+                std::collections::HashMap::new();
+            {
+                use futures_util::stream::StreamExt;
                 // root #0 = current, #1.. = archived priors (indices only — root
                 // bytes are key material and must never reach a log).
-                for (ri, root) in addressing_roots.iter().enumerate() {
-                    let group = channel_rekey_group_key(root, &cid, next);
-                    let chunks = match fetch_rekey_chunks(transport, &cur.relays, &group).await {
-                        Ok(c) => c,
+                let jobs: Vec<(ChannelId, usize, GroupKey, Epoch)> = fan
+                    .iter()
+                    .flat_map(|(cid, _, _, next)| {
+                        addressing_roots.iter().enumerate().map(move |(ri, root)| {
+                            (*cid, ri, channel_rekey_group_key(root, cid, *next), *next)
+                        })
+                    })
+                    .collect();
+                let relays = &cur.relays;
+                let mut results = futures_util::stream::iter(jobs)
+                    .map(|(cid, ri, group, next)| async move {
+                        (cid, ri, next, fetch_rekey_chunks(transport, relays, &group).await)
+                    })
+                    .buffer_unordered(CHANNEL_FAN_CONCURRENCY);
+                while let Some((cid, ri, next, out)) = results.next().await {
+                    let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+                    match out {
+                        Ok(chunks) => {
+                            if chunks.is_empty() {
+                                continue;
+                            }
+                            crate::log_debug!(
+                                "[v2:follow {}] ch {} next e{} root#{}/{}: {} rekey chunk(s)",
+                                &cid_hex[..8], &ch_hex[..8], next.0, ri, addressing_roots.len(), chunks.len()
+                            );
+                            prefetched.insert((cid.0, ri), chunks);
+                        }
                         Err(e) => {
                             crate::log_warn!(
                                 "[v2:follow {}] ch {} next e{} root#{}/{}: rekey plane fetch failed: {}",
@@ -7826,15 +7868,17 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                             );
                             return Err(e);
                         }
-                    };
-                    if chunks.is_empty() {
-                        continue;
                     }
-                    crate::log_debug!(
-                        "[v2:follow {}] ch {} next e{} root#{}/{}: {} rekey chunk(s)",
-                        &cid_hex[..8], &ch_hex[..8], next.0, ri, addressing_roots.len(), chunks.len()
-                    );
-                    batches.push((chunks, held_key.map(|k| (held_epoch, k))));
+                }
+            }
+
+            for (cid, held_key, held_epoch, next) in fan {
+                let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+                let mut batches: Vec<(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)> = Vec::new();
+                for ri in 0..addressing_roots.len() {
+                    if let Some(chunks) = prefetched.remove(&(cid.0, ri)) {
+                        batches.push((chunks, held_key.map(|k| (held_epoch, k))));
+                    }
                 }
                 // Keyless-adopt residual (documented, deferred hardening): a malicious
                 // AUTHORIZED admin can fork a keyless member onto an orphan low-key
@@ -10307,13 +10351,21 @@ mod tests {
 
     /// Publish a Role edition (vsk 1) signed by `signer`, chained to the current head.
     async fn publish_role(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64) {
+        publish_role_at(relay, community, signer, role, version, 1_000).await
+    }
+
+    /// `publish_role` with an explicit wall clock. Every other helper stamps 1_000, so a
+    /// test needing more than one page of history must spread its editions out — a page
+    /// that is entirely one second wide is a wall `until` cannot step past, and the
+    /// pager correctly refuses rather than paging forever.
+    async fn publish_role_at(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64, ts: u64) {
         let group = control::ControlPlane::of(&community).write_group().unwrap();
         let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).unwrap();
         let prev = head_hash_on_relay(relay, community, &role_id).await;
         let content = crate::community::v2::roles::role_content_json(role).unwrap();
         let cite = cite_on_relay(relay, community, signer).await;
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, 1_000, cite.as_ref());
-        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, ts, cite.as_ref());
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
 
@@ -11157,6 +11209,138 @@ mod tests {
         assert!(
             roster.is_admin(&admin.public_key().to_hex()),
             "the rest of the roster survives it",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cold_device_pages_past_the_first_window_to_find_an_older_grant() {
+        // The early break stops paging once every entity we track has a head. On a
+        // COLD device we track NOTHING, so that condition is vacuously true and the
+        // walk stops at page one — the roster is then whatever the newest window
+        // happened to hold, and an admin granted before it silently is not one.
+        // That is the roster collapse, arrived at by an optimisation.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "ColdPage", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // The grant that matters goes down FIRST, so a full newest-first page buries it.
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
+
+        // Then bury it under a full page of newer editions.
+        for v in 2..(FOLLOW_PAGE as u64 + 2) {
+            publish_role_at(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v, 1_000 + v).await;
+        }
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "a cold device must page PAST the first window — stopping there caches a \
+             partial authority as its own baseline and drops every older grant",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_cold_fold_banks_nothing_at_all() {
+        // A page that is entirely one second wide is a wall `until` cannot step past,
+        // so the plane below it is unreachable and the fold is TRUNCATED. Refusing to
+        // show that partial roster is not enough — it must not be BANKED either. A
+        // stored baseline carries a provenance stamp that the next, complete fold has
+        // to beat, and names entities that a complete fold may not head, so banking a
+        // partial window is how a client talks itself into a permanent wedge.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Wall", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
+        // A full page of editions sharing ONE second, burying the grant behind the wall.
+        for v in 2..(FOLLOW_PAGE as u64 + 2) {
+            publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v).await;
+        }
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert_eq!(
+            crate::db::community::get_community_roles_at(&cid_hex).unwrap(),
+            0,
+            "a truncated fold must bank NO baseline — a stored partial roster outranks \
+             the complete fold that follows it and can never be replaced",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_window_never_overwrites_a_newer_cached_roster() {
+        // The roster cache carries the provenance timestamp of the fold that wrote it.
+        // A later fold reading an OLDER window (a lagging relay, a short page) must not
+        // replace it — that is a downgrade with no gap and no truncation to catch it.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Monotone", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()));
+
+        // Stamp the cached roster far in the future: any real fold now reads older.
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        crate::db::community::set_community_roles(&cid_hex, &roster, i64::MAX).unwrap();
+
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "an older window must not overwrite a newer cached roster",
+        );
+        assert_eq!(
+            crate::db::community::get_community_roles_at(&cid_hex).unwrap(),
+            i64::MAX,
+            "and the newer provenance stamp survives — otherwise the next fold downgrades freely",
+        );
+    }
+
+    #[tokio::test]
+    async fn one_gapped_entity_does_not_freeze_the_rest_of_the_roster() {
+        // `authority.gapped` is a global OR across every entity, but the spec makes a
+        // gap fail closed FOR THAT ENTITY — suspend it, refetch it — not for the whole
+        // community. Treating it as a veto froze live rosters that were otherwise
+        // folding perfectly, and permanently once the plane is exhausted and no further
+        // paging can resolve the hole.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "OneGap", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // A healthy admin the plane fully describes.
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+
+        // And a second role the plane DOES serve, floored at a hash nothing chains to:
+        // its editions are present but unanchored, which is the withholding shape that
+        // fails closed and raises the gap. A floor on an entity absent from the window
+        // would not — the fold only visits entities it sees.
+        let rid2 = "c7".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid2, Permissions::BAN), 5).await;
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &rid2, 3, &[9u8; 32], &[9u8; 32], community.root_epoch.0).unwrap();
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "a hole in ONE entity must not withhold every other entity's authority — that is \
+             how a community that folds correctly still shows an empty roster",
         );
     }
 
@@ -15528,6 +15712,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_whole_channel_fan_rotates_in_one_hop_without_crossing_keys() {
+        // The fan is fetched concurrently and keyed by (channel, addressing root). A
+        // mis-keyed prefetch cannot hand channel A's key to channel B — the blob's
+        // scope is authenticated, so a wrong batch is refused rather than adopted — but
+        // it CAN starve a channel of the chunks that are sitting on the plane for it,
+        // which reads as "that channel never rotates" and strands its members.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "FanRot", vec!["wss://r".into()], None).await.unwrap();
+
+        // Distinct held key AND distinct fresh key per channel — a swap between any
+        // two is then visible as an equality failure rather than a silent pass.
+        let fan: Vec<(ChannelId, [u8; 32], [u8; 32])> = (0u8..12)
+            .map(|i| (ChannelId([0x30 + i; 32]), [0x40 + i; 32], [0x80 + i; 32]))
+            .collect();
+        for (id, held, _) in &fan {
+            add_private_channel(&mut community, *id, *held, Epoch(0));
+        }
+
+        for (id, held, fresh) in &fan {
+            let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), held);
+            let group = channel_rekey_group_key(&community.community_root, id, Epoch(1));
+            let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(*id), Epoch(1), fresh).unwrap();
+            let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(*id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None, false).unwrap();
+            for e in &events {
+                relay.publish(e, &community.relays).await.unwrap();
+            }
+        }
+
+        let session = crate::db::current_session();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("adopted");
+        for (id, _, fresh) in &fan {
+            let ch = updated.channel(id).expect("channel survived the fan");
+            assert_eq!(ch.epoch, Epoch(1), "every channel in the fan advanced");
+            assert_eq!(ch.key, Some(*fresh), "each channel adopted ITS OWN key, not a neighbour's");
+        }
+    }
+
+    #[tokio::test]
     async fn follow_rekeys_ignores_a_non_owner_rotation() {
         // A member holds the community_root, so they can derive the rekey group key
         // and mint a rotation — but they aren't the owner, so it's not adopted.
@@ -17019,7 +17242,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_uncited_edition_folds_on_RANK_alone_and_never_escalates() {
+    async fn an_uncited_edition_folds_on_rank_alone_and_never_escalates() {
         // CORD-04 §5 calls the `vac` a SYNC FLOOR, not the verdict: a verifier waits
         // until it has synced the cited Grant, then resolves rank against its CURRENT
         // roster. Refusing an edition that cites NOTHING promoted that sync aid into an
