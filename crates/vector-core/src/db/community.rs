@@ -1770,6 +1770,24 @@ pub fn is_author_banned(community_id: &str, author: &PublicKey) -> bool {
 pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
     let json = enc_txt(&serde_json::to_string(banned_hex).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
+    // MONOTONIC in the edition version. Un-banning is the fail-OPEN direction — the
+    // un-banned party's rotations and messages start being honored again — so an
+    // older edition must never overwrite a newer one, however it reached us. The
+    // fold's floors already refuse a downgrade; this makes the storage layer refuse
+    // it too, so no future folding change can reintroduce the hole. Checked before
+    // writing so a refused downgrade touches neither the row nor the hot cache.
+    let current_at: Option<i64> = conn
+        .query_row("SELECT banlist_at FROM communities WHERE community_id = ?1", params![community_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("read banlist_at: {e}"))?
+        .flatten();
+    if current_at.is_some_and(|have| have > at) {
+        crate::log_warn!(
+            "[Banlist] refused a stale edition (v{at} behind held v{}) — un-banning is the fail-open direction",
+            current_at.unwrap_or(0)
+        );
+        return Ok(());
+    }
     conn.execute(
         "UPDATE communities SET banlist = ?1, banlist_at = ?2 WHERE community_id = ?3",
         params![json, at, community_id],

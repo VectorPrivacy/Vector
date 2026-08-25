@@ -11770,6 +11770,144 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_older_banlist_edition_can_never_un_ban() {
+        // Un-banning is the fail-open direction: the un-banned party's rotations and
+        // messages start being honored again. So a stale edition arriving late — a
+        // slow relay, a replay, a re-fold under a narrowed window — must never
+        // overwrite a newer list. Enforced at the storage layer so no future folding
+        // change can reintroduce it.
+        let (bed, owner, _me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "BanMonotonic", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let villain_keys = Keys::generate();
+        let villain = villain_keys.public_key().to_hex();
+
+        crate::db::community::set_community_banlist(&cid_hex, &[villain.clone()], 5).unwrap();
+        assert!(crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain));
+
+        // An OLDER edition (version 3) tries to replace it with an empty list.
+        crate::db::community::set_community_banlist(&cid_hex, &[], 3).unwrap();
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain),
+            "a lower-versioned edition must not un-ban",
+        );
+        assert!(
+            crate::db::community::is_author_banned(&cid_hex, &villain_keys.public_key()),
+            "and the hot cache must not hold the list we declined to persist",
+        );
+
+        // A NEWER edition legitimately un-bans.
+        crate::db::community::set_community_banlist(&cid_hex, &[], 6).unwrap();
+        assert!(
+            !crate::db::community::is_author_banned(&cid_hex, &villain_keys.public_key()),
+            "a newer edition still lifts a ban — monotonic, not frozen",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_withholding_relay_cannot_wipe_the_banlist_or_the_roster() {
+        // Absence is not evidence. A relay that serves NO control editions folds an
+        // empty aggregate, and an empty fold raises no gap flag — nothing is missing
+        // from a window that contains nothing. Persisting that would un-ban every
+        // banned member and strip every admin, locally, on one bad fetch. Un-banning
+        // is the fail-OPEN direction: the un-banned party's rotations start being
+        // honored again, which is how one client ends up on a branch minted by
+        // someone everyone else has evicted.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        let relay = AdversarialRelay::new();
+        let (bed, owner, _me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "WitholdWipe", bed.relays.clone(), None).await.unwrap();
+        let rid = "c4".repeat(32);
+        let admin = Keys::generate();
+        publish_role(relay.relay(), &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(relay.relay(), &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+        let villain = Keys::generate();
+        set_banlist(relay.relay(), &community, &[villain.public_key().to_hex()]).await.unwrap();
+        let _ = follow_control(&relay, &community).await;
+
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain.public_key().to_hex()),
+            "the ban folded",
+        );
+        let roster_before = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(!roster_before.grants.is_empty(), "the admin's grant folded");
+
+        // Now the control plane serves nothing at all.
+        let control_pk = control::ControlPlane::of(&community).pk_hex();
+        relay.on(Match::author(&control_pk), Fault::Empty);
+        let _ = follow_control(&relay, &community).await;
+
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain.public_key().to_hex()),
+            "an empty control window must NEVER un-ban — that is the fail-open direction",
+        );
+        let roster_after = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert_eq!(
+            roster_after.grants.len(), roster_before.grants.len(),
+            "and must never strip standing: an empty fold is absence, not a demotion",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_banned_rotators_refounding_is_never_honored() {
+        // Holding a key is never authority (CORD-06 §Authority). A member banned
+        // moments ago still holds the current root, so they can mint a perfectly
+        // shaped Refounding — right prev_commit, right epoch, real blobs. If a
+        // client honors it, the banned party has just re-keyed the community around
+        // itself and split every member who folded the ban from every member who
+        // did not. The banlist has to be consulted at ADOPT time, not only at send.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "BannedRotator", bed.relays.clone(), None).await.unwrap();
+        let rid = "a9".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        let rogue = Keys::generate();
+        publish_grant(&bed.relay, &community, &owner.keys, &rogue.public_key(), vec![rid], 1).await;
+        let _ = follow_control(&bed.relay, &community).await;
+
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The rogue admin is banned, and we fold that ban.
+        bed.swap_to(&owner);
+        set_banlist(&bed.relay, &community, &[rogue.public_key().to_hex()]).await.unwrap();
+        bed.swap_to(&me);
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&rogue.public_key().to_hex()),
+            "the ban folded before the rotation arrives",
+        );
+
+        // Still holding the root, the banned admin mints a Refounding anyway.
+        bed.swap_to(&owner);
+        publish_base_rotation(
+            &bed.relay, &joined, &rogue,
+            &[owner.keys.public_key(), me.keys.public_key(), rogue.public_key()],
+            &[0xBA; 32], &joined.community_root,
+        ).await;
+
+        bed.swap_to(&me);
+        let held_before = joined.root_epoch;
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(!follow.self_removed, "a banned rotator can never remove anyone");
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            after.root_epoch, held_before,
+            "a banned member's rotation must not move the epoch — honoring it hands the community to the party just evicted",
+        );
+        assert_eq!(after.community_root, joined.community_root, "and must not move the root");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_rekey_exclusion_keeps_my_epoch_keys() {
         // Being removed must not cost me the ability to scrub my own history. The
         // epoch keys open no FUTURE epoch — post-removal keys are never delivered —
