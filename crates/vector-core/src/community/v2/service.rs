@@ -7898,6 +7898,8 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     // fork adopts the winner's flag and never a loser's.
     let mut winner_severed: Vec<bool> = Vec::new();
     let mut saw_complete_candidate = false;
+    // Did any qualifying rotation actually carry recipients? See the removal gate.
+    let mut saw_nonempty_candidate = false;
     let mut saw_outranking_candidate = false;
     let mut my_blob_unopenable = false;
     let keyed = batches.iter().any(|(_, held)| held.is_some());
@@ -7921,6 +7923,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
                 continue;
             }
             saw_complete_candidate = true;
+            saw_nonempty_candidate |= !r.blobs.is_empty();
             saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
             if let Some(blob) = rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch) {
                 let opened = match scope {
@@ -7958,6 +7961,15 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
         let idx = rekey::lowest_key_winner(&keys).expect("winners is non-empty");
         let w = &winners[idx];
         return Advance::Adopt { new_key: w.new_root, control_pk: w.control_pk, control_root: w.control_root, severed: winner_severed[idx] };
+    }
+    // A rotation that delivered NO blob to anyone removed nobody. Read literally it
+    // is "complete, authorized, and contains no blob for me" — which is the removal
+    // shape — but removal DELETES the community locally, so one empty rotation from
+    // an authorized rotator would evict the entire membership at once, irreversibly.
+    // An empty recipient set is a malformed or aborted rotation, never a verdict
+    // about any individual. Nobody is removed by a rotation that removed everybody.
+    if saw_complete_candidate && !saw_nonempty_candidate {
+        return Advance::Stay;
     }
     if saw_complete_candidate && !my_blob_unopenable && (!keyed || saw_outranking_candidate) {
         Advance::Removed
@@ -11648,6 +11660,42 @@ mod tests {
         let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
         assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_rotation_is_never_a_mass_removal() {
+        // `is_complete` is satisfied by a single chunk declaring n=1 — including one
+        // carrying ZERO blobs, which the builders emit verbatim for an empty
+        // recipient set. Read literally that is "a complete, authorized rotation
+        // containing no blob for me", i.e. removal — and the removal path DELETES the
+        // community locally, keys and all. From the owner, one such rotation would
+        // evict every member of the community at once, irreversibly.
+        //
+        // Nobody can be removed by a rotation that removed everybody.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "EmptyRotation", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The owner publishes a complete rotation with no recipients at all.
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &[], &[0xB0; 32], &joined.community_root).await;
+
+        bed.swap_to(&me);
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(
+            !follow.self_removed,
+            "an all-empty rotation must NEVER read as my removal — that path deletes the community",
+        );
+        assert!(
+            crate::db::community::load_community_v2(joined.id()).unwrap().is_some(),
+            "and the community must still be held",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

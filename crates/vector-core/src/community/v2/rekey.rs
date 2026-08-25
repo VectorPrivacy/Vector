@@ -1271,6 +1271,35 @@ mod tests {
     }
 
     #[test]
+    fn a_severed_rotation_cannot_be_laundered_by_an_unmarked_chunk() {
+        // The containment marker rides EVERY chunk of a rotation, but a rotation's
+        // chunk set can be extended later (the catch-up path for members a rotation
+        // forgot). An extension built without the marker would, under first-seen
+        // semantics, present a severed epoch as an ordinary one — and an adopter
+        // reading it that way refreshes the very invite links the containment meant
+        // to bury, re-opening the door the raid came through. The fold is therefore
+        // an OR across chunks, in either arrival order.
+        let rotator = keys(1);
+        let prev = [0x44u8; 32];
+        let mut marked = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![], 1, 2);
+        marked.severed = true;
+        let unmarked = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![], 2, 2);
+
+        for (order, chunks) in [
+            ("marked first", vec![marked.clone(), unmarked.clone()]),
+            ("unmarked first", vec![unmarked.clone(), marked.clone()]),
+        ] {
+            let rotations = collect_rotations(&chunks);
+            assert_eq!(rotations.len(), 1, "{order}: one correlation key, one rotation");
+            assert!(
+                rotations[0].severed,
+                "{order}: an unmarked sibling must never launder the containment away",
+            );
+            assert!(rotations[0].is_complete(), "{order}: both chunks held");
+        }
+    }
+
+    #[test]
     fn continuity_extends_gaps_and_forks() {
         let rotator = keys(1);
         let held = [0x33u8; 32];
