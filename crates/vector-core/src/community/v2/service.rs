@@ -7002,6 +7002,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // Final roster (CORD-04 §4: a banned npub vanishes — every edition it authored is
     // dropped, and a grant TO a banned member carries no rank). Re-run selection with
     // the banned set excluded so a banned admin loses authority.
+    UNCITED_ACCEPTED.with(|n| *n.borrow_mut() = 0);
     let mut refusals: std::collections::BTreeMap<String, &'static str> = Default::default();
     let (mut authorized, mut heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &banned, Some(&mut refusals));
     AUTHORITY_REFUSALS.with(|c| *c.borrow_mut() = refusals);
@@ -7069,15 +7070,10 @@ fn citation_ok_in_fold(
     crate::community::roster::authority_citation_satisfied(&as_entity, owner_hex, &actor_hex, &grant_hex, citation)
 }
 
-/// The owner-seeded delegation fixpoint (CORD-04 §1/§2), author-AWARE: per entity it
-/// takes the highest-version candidate whose author is authorized to author it under
-/// the roster resolved SO FAR, dropping unauthorized higher versions rather than
-/// vanishing the entity. Authority resolves outward from the owner (proven by
-/// `community_id`, never a Role), and the strict-outrank rule (no edition at/above its
-/// signer's own position) keeps the fixpoint monotone, so it converges. Returns the
-/// authorized roster plus the per-entity heads of the SELECTED editions (the floor
-/// advances only to authorized heads — an unauthorized forgery never poisons it).
 thread_local! {
+    /// How many uncited editions the last fold admitted on rank alone — pre-citation
+    /// clients' output. Visibility only; the rank gates decide.
+    static UNCITED_ACCEPTED: std::cell::RefCell<u32> = const { std::cell::RefCell::new(0) };
     /// For a grant refused on a missing role reference: which role ids were absent.
     static MISSING_ROLE_REFS: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
@@ -7087,6 +7083,14 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
+/// The owner-seeded delegation fixpoint (CORD-04 §1/§2), author-AWARE: per entity it
+/// takes the highest-version candidate whose author is authorized to author it under
+/// the roster resolved SO FAR, dropping unauthorized higher versions rather than
+/// vanishing the entity. Authority resolves outward from the owner (proven by
+/// `community_id`, never a Role), and the strict-outrank rule (no edition at/above its
+/// signer's own position) keeps the fixpoint monotone, so it converges. Returns the
+/// authorized roster plus the per-entity heads of the SELECTED editions (the floor
+/// advances only to authorized heads — an unauthorized forgery never poisons it).
 fn select_authorized(
     cid: &crate::community::CommunityId,
     role_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
@@ -7155,13 +7159,23 @@ fn select_authorized(
                             continue;
                         }
                     }
+                    // A `vac` is a SYNC FLOOR, not the verdict (CORD-04 §5): a verifier
+                    // waits until it has synced the cited Grant, then resolves rank
+                    // against its CURRENT roster. So a citation we cannot resolve still
+                    // parks — that is a real sync gap. But an edition carrying NO
+                    // citation declared no floor to wait for, and refusing it converts a
+                    // sync aid into an authority requirement the spec says it is not.
+                    //
+                    // This cannot escalate: every rank gate above has already passed —
+                    // the author is authorized under the roster resolved so far and
+                    // strictly outranks both this position and the one it replaces. The
+                    // citation never granted authority; it only decided when to look.
                     if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
-                        note(&mut why, if c.citation.is_none() {
-                            "role: UNCITED (no vac tag at all)"
-                        } else {
-                            "role: cited a grant we cannot resolve"
-                        });
-                        continue;
+                        if c.citation.is_some() {
+                            note(&mut why, "role: cited a grant we cannot resolve");
+                            continue;
+                        }
+                        UNCITED_ACCEPTED.with(|n| *n.borrow_mut() += 1);
                     }
                     admissible.insert(c.head.self_hash);
                     standing = Some(role.position);
@@ -7232,13 +7246,26 @@ fn select_authorized(
                     }
                     continue;
                 }
+                // An unresolvable citation parks; an absent one is tolerated ONLY when
+                // the edition grants something. The rank gate below is what stops
+                // escalation, and it needs a position to check: a REVOCATION carries no
+                // role ids, so `positions.iter().all(..)` is vacuously true and the
+                // citation is the only thing standing there. Without this an
+                // unauthorized stranger strips any member's roles with a forged empty
+                // grant — proven by `a_non_owner_cannot_strip_a_members_grant_by_forging_a_higher_version`.
+                //
+                // So: an uncited edition may ADD authority (fully rank-checked) but
+                // never REMOVE it.
                 if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
-                    note(&mut why, if c.citation.is_none() {
-                        "grant: UNCITED (no vac tag at all)"
-                    } else {
-                        "grant: cited a grant we cannot resolve"
-                    });
-                    continue;
+                    if c.citation.is_some() {
+                        note(&mut why, "grant: cited a grant we cannot resolve");
+                        continue;
+                    }
+                    if resolved.is_empty() {
+                        note(&mut why, "grant: UNCITED revocation — a strip must cite its authority");
+                        continue;
+                    }
+                    UNCITED_ACCEPTED.with(|n| *n.borrow_mut() += 1);
                 }
                 if positions.iter().all(|p| accepted.can_act_on_position(&ah, owner_hex, *p, Permissions::MANAGE_ROLES))
                     && accepted.can_act_on_member(&ah, owner_hex, &grant.member, Permissions::MANAGE_ROLES)
@@ -17014,51 +17041,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_uncited_admin_edition_is_not_folded_but_a_cited_one_is() {
-        // CORD-04 §5 on the CONTROL PLANE: "a verifier won't act on the edition
-        // until it has synced at least that Grant". The citation resolves against
-        // the heads THIS fold accepted — an external floor would refuse every
-        // non-owner edition on a bootstrap and the roster could never fold.
+    async fn an_uncited_edition_folds_on_RANK_alone_and_never_escalates() {
+        // CORD-04 §5 calls the `vac` a SYNC FLOOR, not the verdict: a verifier waits
+        // until it has synced the cited Grant, then resolves rank against its CURRENT
+        // roster. Refusing an edition that cites NOTHING promoted that sync aid into an
+        // authority requirement — and pre-citation clients emitted no `vac` at all, so
+        // whole live rosters folded to nothing while a lenient implementation read the
+        // same plane fine.
+        //
+        // What actually prevents escalation is rank, and rank is unchanged. This pins
+        // both halves: a genuine in-rank edition folds without a citation, and an
+        // out-of-rank one does not, cited or otherwise.
         let (bed, owner, admin) = TestBed::new();
         bed.swap_to(&owner);
-        let community = create_community(&bed.relay, "Cited", bed.relays.clone(), None).await.unwrap();
+        let community = create_community(&bed.relay, "Uncited", bed.relays.clone(), None).await.unwrap();
         let admin_pk = admin.keys.public_key();
         let rid = "c3".repeat(32);
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::admin().0), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![rid.clone()], 1).await;
 
-        // The admin grants a bystander, citing NOTHING.
-        // A LOWER role (position 5) — an admin at position 1 may grant beneath
-        // themselves but never at their own rank (equal cannot act on equal).
+        // A role BENEATH the admin (they sit at position 1).
         let low_rid = "c4".repeat(32);
         let mut low = admin_role(&low_rid, Permissions::admin().0);
         low.position = 5;
         publish_role(&bed.relay, &community, &owner.keys, &low, 1).await;
 
+        // 1. GENUINE and in-rank, citing nothing → folds.
         let bystander = Keys::generate().public_key();
         publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![low_rid.clone()], 1, None).await;
         let view = fetch_authority(&bed.relay, &community).await;
         assert!(
-            !view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
-            "an uncited non-owner edition is not folded"
+            view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "an uncited edition from an author the roster DOES authorize, acting beneath \
+             their own rank, is genuine and must fold",
         );
-        // The owner's own editions still fold — supreme cites nothing.
-        assert!(view.roles.is_admin(&admin_pk.to_hex()), "the owner-authored grant folds");
+        assert!(view.roles.is_admin(&admin_pk.to_hex()), "the owner-authored grant still folds");
 
-        // Same edition, now citing the admin's real grant: honored. (follow_control
-        // is what PERSISTS the folded heads a citation is built from.)
-        let _ = follow_control(&bed.relay, &community).await;
-        let entity_id = crate::community::v2::derive::grant_locator(community.id(), &admin_pk.to_bytes());
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity_id);
-        let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
-        let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
-        publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![low_rid], 2, Some(&cite)).await;
+        // 2. ESCALATION, uncited: a stranger the roster authorizes for nothing.
+        let stranger = Keys::generate();
+        let victim = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &stranger, &victim, vec![low_rid.clone()], 1, None).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == victim.to_hex()),
+            "an uncited edition from an UNAUTHORIZED author must never fold — dropping the \
+             citation requirement must not become a way in",
+        );
 
+        // 3. ESCALATION, uncited, by a real admin acting AT their own rank: equal
+        //    cannot act on equal, citation or not.
+        let peer = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &peer, vec![rid.clone()], 1, None).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == peer.to_hex()),
+            "an authorized author still cannot grant AT their own rank — rank is what \
+             stops escalation, and it is untouched",
+        );
+
+        // 4. ESCALATION, uncited REVOCATION — the case that makes the citation
+        //    load-bearing. A strip names no roles, so the rank gate has no position to
+        //    check and passes vacuously; the citation is the only thing standing there.
+        //    An uncited edition may ADD authority, never remove it.
+        publish_grant_citing(&bed.relay, &community, &stranger, &bystander, vec![], 9, None).await;
         let view = fetch_authority(&bed.relay, &community).await;
         assert!(
             view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
-            "the same edition WITH its synced citation folds"
+            "an uncited empty grant must NOT strip a member — a revocation's rank check is \
+             vacuous, so tolerating it uncited hands any stranger a demotion primitive",
         );
     }
 
