@@ -6584,6 +6584,9 @@ async fn adopt_my_control_wrap(community: &CommunityV2, editions: &[ParsedEditio
 /// when paging further is what's wanted. The old ceiling of 4 (~2k editions) sat
 /// under a plane that 100 roles + 400 grants already outgrows before counting
 /// superseded versions, which accumulate until a compaction retires them.
+/// One walk's hop bound. A backlog deeper than this converges across passes,
+/// because every adopted hop is checkpointed before the next is attempted.
+const MAX_WALK_STEPS: usize = 128;
 const FOLLOW_MAX_PAGES: usize = 32;
 const FOLLOW_PAGE: usize = 500;
 /// Page ceiling for a COMPACTION read (CORD-06 §3: a Refounder that cannot fold
@@ -7832,7 +7835,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
         // Bound the catch-up: each real step consumes a valid authorized rotation, so a
         // finite chain terminates naturally; the cap defends against a relay feeding a
         // pathological set.
-        const MAX_STEPS: usize = 128;
+        const MAX_STEPS: usize = MAX_WALK_STEPS;
         // Wide enough to collapse a large community's channel fan into one wave,
         // narrow enough that a catch-up does not present as a burst to every relay.
         const CHANNEL_FAN_CONCURRENCY: usize = 8;
@@ -14121,6 +14124,57 @@ mod tests {
                 assert!(paged.iter().any(|t| t.contains(&format!("epoch{epoch}"))), "channel {id_hex} pages back to epoch-{epoch} history");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_backlog_deeper_than_max_steps_still_converges() {
+        // MAX_STEPS bounds ONE walk, not the catch-up. A member who slept through more
+        // rotations than the bound must still land on the head — silently stopping at
+        // the bound leaves them on a dead epoch reading nothing, which is
+        // indistinguishable from a quiet community.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let mut community = create_community(&bed.relay, "DeepSleeper", bed.relays.clone(), None).await.unwrap();
+        let bundle_json = serde_json::to_string(&bundle_of(&community, BundleAudience::Member(member.keys.public_key()), Some(owner.keys.public_key()), None, None)).unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert_eq!(joined.root_epoch, Epoch(0));
+
+        // Past the bound, deliberately.
+        bed.swap_to(&owner);
+        let depth = MAX_WALK_STEPS + 3;
+        for _ in 0..depth {
+            community = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        }
+        assert_eq!(community.root_epoch, Epoch(depth as u64));
+
+        // The member follows repeatedly, exactly as a client does on each sync. Every
+        // pass must make forward progress and none may lose ground.
+        bed.swap_to(&member);
+        let mut last = 0u64;
+        for pass in 1..=8 {
+            // Reload from the DB each pass, exactly as a client does: this is what
+            // proves every hop was CHECKPOINTED, not merely held in the walk's memory.
+            let view = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+            let session = crate::db::current_session();
+            let _ = follow_rekeys(&bed.relay, &view, &session).await.unwrap();
+            let view = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+            assert!(
+                view.root_epoch.0 >= last,
+                "pass {pass} lost ground: {} -> {}",
+                last, view.root_epoch.0
+            );
+            last = view.root_epoch.0;
+            if last == depth as u64 {
+                break;
+            }
+        }
+        let view = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(
+            view.root_epoch, Epoch(depth as u64),
+            "a backlog deeper than one walk's step bound must still converge across passes",
+        );
     }
 
     #[tokio::test]
