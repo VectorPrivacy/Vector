@@ -185,6 +185,24 @@ pub async fn control_probe_coordinates() -> (Vec<String>, HashMap<String, String
 /// (Re)build the Community subscription: rebuild the route maps, then open TWO subscriptions over the
 /// same filter — a targeted `subscribe_to` (streams on desktop) and a pool-wide `subscribe` (streams on
 /// Android). `process_incoming` dedups by outer-event id, so overlap folds exactly once.
+/// Re-subscribe unconditionally — see the v2 twin for why.
+///
+/// The idempotent path below keeps an existing sub when the pseudonym set has not
+/// moved, trusting the pool to re-apply it across reconnects. A relay that sheds a
+/// REQ under the boot sweep's flood never reconnects, so nothing re-applies it and
+/// our own state still claims it is live. Forgetting the id first is what makes the
+/// post-sweep re-assert actually assert.
+pub async fn force_refresh_subscription(client: &Client) {
+    {
+        let mut sub_guard = COMMUNITY_SUB_ID.lock().await;
+        if let Some(old) = sub_guard.take() {
+            let _ = client.unsubscribe(&old).await;
+        }
+        COMMUNITY_SUB_SET.lock().await.clear();
+    }
+    refresh_subscription(client).await;
+}
+
 pub async fn refresh_subscription(client: &Client) {
     let (pseudonyms, relays) = rebuild_routes().await;
 
