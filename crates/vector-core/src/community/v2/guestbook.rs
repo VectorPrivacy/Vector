@@ -203,6 +203,14 @@ pub struct GuestbookEvent {
     /// re-read stamps them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u64>,
+    /// Unix seconds when THIS client first stored the event — an arrival time the
+    /// author cannot write. `at_ms` inside a Join is author-claimed, so a raider can
+    /// backdate it under any window; what we watched arrive, they cannot. Only
+    /// meaningful against a community whose guestbook we were already following
+    /// (see `guestbook_observed_since`) — on a fresh client every event is "new".
+    /// `None` for rows stored before stamping existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<u64>,
 }
 
 /// The typed guestbook entries (CORD-02 §5). Authors (`member` / `actor` /
@@ -343,7 +351,7 @@ pub fn parse_guestbook_event(opened: &OpenedStream) -> Result<GuestbookEvent, Gu
         k => return Err(GuestbookError::NotGuestbook(k)),
     };
 
-    Ok(GuestbookEvent { epoch: None, rumor_id: opened.rumor_id.to_bytes(), entry })
+    Ok(GuestbookEvent { epoch: None, observed_at: None, rumor_id: opened.rumor_id.to_bytes(), entry })
 }
 
 // ── Coalesce fold (CORD-02 §5) ───────────────────────────────────────────────
@@ -681,15 +689,15 @@ mod tests {
     }
 
     fn join_ev(member: PublicKey, at_ms: u64, id: u8) -> GuestbookEvent {
-        GuestbookEvent { epoch: None, rumor_id: [id; 32], entry: GuestbookEntry::Join { member, invited_by: None, at_ms } }
+        GuestbookEvent { epoch: None, observed_at: None, rumor_id: [id; 32], entry: GuestbookEntry::Join { member, invited_by: None, at_ms } }
     }
 
     fn leave_ev(member: PublicKey, at_ms: u64, id: u8) -> GuestbookEvent {
-        GuestbookEvent { epoch: None, rumor_id: [id; 32], entry: GuestbookEntry::Leave { member, at_ms } }
+        GuestbookEvent { epoch: None, observed_at: None, rumor_id: [id; 32], entry: GuestbookEntry::Leave { member, at_ms } }
     }
 
     fn kick_ev(actor: PublicKey, target: PublicKey, at_ms: u64, id: u8) -> GuestbookEvent {
-        GuestbookEvent { epoch: None, rumor_id: [id; 32], entry: GuestbookEntry::Kick { actor, target, citation: None, at_ms } }
+        GuestbookEvent { epoch: None, observed_at: None, rumor_id: [id; 32], entry: GuestbookEntry::Kick { actor, target, citation: None, at_ms } }
     }
 
     fn snap_ev(
@@ -700,7 +708,7 @@ mod tests {
         at_ms: u64,
         id: u8,
     ) -> GuestbookEvent {
-        GuestbookEvent { epoch: None,
+        GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: GuestbookEntry::Snapshot { refounder, members, snapshot_id: [snap; 32], chunk, at_ms },
         }
