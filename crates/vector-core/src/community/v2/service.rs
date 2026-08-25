@@ -6368,7 +6368,12 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // has stopped being served. A relay set that is not ahead teaches us nothing we
         // did not already know, so it may not evict anything.
         let plane_is_ahead = newest_roster_at > stored_at;
-        let coherent = !truncated && !authority.gapped && !fold.gapped && plane_is_ahead;
+        // Deliberately NOT gated on `fold.gapped`: that reports the metadata/channel
+        // DOCUMENT fold, and a community with one unreachable channel doc would then
+        // freeze its authority forever — the very shape this is removing. The roster
+        // decision rests on roster evidence: `authority.gapped` for a window that
+        // references what is missing, `plane_is_ahead` for one that does not.
+        let coherent = !truncated && !authority.gapped && plane_is_ahead;
         // My OWN grant is never pruned: losing my own standing on a bad read is the
         // one mistake with no path back, so if it is what blocks, we stay blocked.
         let mut unprunable_blocker = false;
@@ -6444,8 +6449,8 @@ pub async fn follow_control<T: Transport + ?Sized>(
             // permanently deaf to that admin's re-foundings — and the only symptom is
             // an epoch that never advances.
             crate::log_warn!(
-                "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — this client keeps its old roster and will refuse rotations it cannot authorize",
-                &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, stored_complete, newest_roster_at, stored_at
+                "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} doc_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — this client keeps its old roster and will refuse rotations it cannot authorize",
+                &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, fold.gapped, stored_complete, newest_roster_at, stored_at
             );
         }
         // Cache the folded invite Registry so Public/Private stays a sync LOCAL read
