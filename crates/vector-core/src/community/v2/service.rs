@@ -2932,7 +2932,7 @@ pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &Comm
 /// publish, and a head we can't fetch ABORTS with ZERO published state — so a
 /// transient miss never strands a published rekey with a half-anchored plane.
 pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
-    refound_community_with(transport, community, removed, false).await
+    refound_community_with(transport, community, removed, false, 0).await
 }
 
 /// A SEVERING Refounding (CORD-06 Severing): the rotation carries the `sever`
@@ -2940,11 +2940,16 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
 /// invite links instead of refreshing them into the new epoch. The read-cut is
 /// real even while the community was Public: the door closes with the rotation,
 /// and only a deliberate fresh mint re-opens it.
-pub async fn refound_community_severing<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
-    refound_community_with(transport, community, removed, true).await
+pub async fn refound_community_severing<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], joined_after_cut: u64) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, true, joined_after_cut).await
 }
 
-async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], sever: bool) -> Result<CommunityV2, String> {
+/// `joined_after_cut`: seconds. A member whose EARLIEST Join is at or after this is
+/// vended no key. 0 disables it. The test is positive evidence only — a member with no
+/// Join on the reachable guestbook (buried epoch, aged-out window) is NOT excluded, and
+/// an unreadable guestbook excludes nobody. Absence must never evict: five rotations
+/// once shed 39 real members that way.
+async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], sever: bool, joined_after_cut: u64) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         let cid = community.id();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
@@ -3154,6 +3159,54 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             }
         }
         let owner_hex_for_channels = community.owner().ok().map(|o| o.to_hex());
+
+        // Containment: vend no key to anyone who walked in DURING the raid.
+        //
+        // `removed` is a list computed at one instant; the recipient set above is a
+        // LIVE fetch taken later, and re-taken on every retry. A bot joining in that
+        // gap lands in the memberlist, misses the list, and is handed a working key
+        // for the epoch meant to evict it. Testing the join TIME instead of matching a
+        // frozen list is immune to when the fetch happens: a later read only surfaces
+        // more late joiners, and each one fails the same test.
+        //
+        // Positive evidence only. No Join on the reachable guestbook means OLD (or
+        // buried), never "new" — and an unreadable guestbook filters nobody, because
+        // failing closed here would evict the whole community on one bad read.
+        if joined_after_cut > 0 {
+            match fetch_guestbook_events(transport, community, 0).await {
+                Ok((events, _, _)) => {
+                    let mut first_seen: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+                    for ev in &events {
+                        if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
+                            let secs = at_ms / 1000;
+                            first_seen.entry(*member).and_modify(|e| *e = (*e).min(secs)).or_insert(secs);
+                        }
+                    }
+                    let before = recipients.len();
+                    recipients.retain(|r| {
+                        if *r == my_pk || Some(r.to_hex()) == owner_hex_for_channels {
+                            return true;
+                        }
+                        // A moderator who joined moments before a raid is still a moderator.
+                        if roster_for_channels.is_staff(&r.to_hex(), owner_hex_for_channels.as_deref()) {
+                            return true;
+                        }
+                        first_seen.get(r).is_none_or(|joined| *joined < joined_after_cut)
+                    });
+                    let dropped = before.saturating_sub(recipients.len());
+                    if dropped > 0 {
+                        crate::log_info!(
+                            "[Refound {}] containment: {} raid-window joiner(s) vended no key",
+                            &cid_hex[..8.min(cid_hex.len())], dropped
+                        );
+                    }
+                }
+                Err(e) => crate::log_warn!(
+                    "[Refound {}] guestbook unreadable — raid-window joiners NOT filtered, only the named cut is severed ({e})",
+                    &cid_hex[..8.min(cid_hex.len())]
+                ),
+            }
+        }
 
         // Base rekey blobs, sealed under the PRIOR root: every member's carries the
         // new root + control_pk (104 bytes); a STAFF recipient's (CORD-04 §3)
@@ -5169,7 +5222,7 @@ pub async fn contain_raid<T: Transport + ?Sized>(
         let _guard = unit.lock().await;
         let mut refound = Err("severing refound never attempted".to_string());
         for attempt in 0..3u8 {
-            refound = refound_community_severing(transport, &community, &cut).await;
+            refound = refound_community_severing(transport, &community, &cut, window_start_secs).await;
             if refound.is_ok() {
                 break;
             }
@@ -13179,6 +13232,83 @@ mod tests {
         assert!(
             fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
             "the containment's burial survived the ordinary hop behind it",
+        );
+    }
+
+    /// Did the severing refound vend `who` a key? Opens the base rotation and looks
+    /// for a blob at their locator.
+    async fn vended_to(bed: &TestBed, before: &CommunityV2, who: &Keys) -> bool {
+        let next = Epoch(before.root_epoch.0 + 1);
+        let group = base_rekey_group_key(&before.community_root, before.id(), next);
+        let chunks = fetch_rekey_chunks(&bed.relay, &before.relays, &group).await.unwrap();
+        rekey::collect_rotations(&chunks).iter().any(|r| {
+            rekey::find_my_blobs(
+                &r.blobs,
+                &r.rotator.to_bytes(),
+                &who.public_key().to_bytes(),
+                RekeyScope::Root,
+                next,
+            )
+            .next()
+            .is_some()
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_raid_window_joiner_is_vended_no_key_even_if_nobody_named_them() {
+        // The recipient set is a LIVE fetch taken AFTER the cut was computed, and
+        // re-taken on every retry. A bot arriving in that gap is in the memberlist and
+        // absent from the cut — and was handed a working key for the very epoch meant
+        // to evict it. Testing join TIME catches it with nobody naming it.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "RaceCut", bed.relays.clone(), None).await.unwrap();
+        let established = Keys::generate();
+        let late = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        for (who, at_ms) in [(&established, 2_000_000u64), (&late, 9_000_000)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        // Window opens at 5_000s. `late` is named by NOBODY — the cut is empty.
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            !vended_to(&bed, &community, &late).await,
+            "a raid-window joiner must be vended NO key, even when nobody named them",
+        );
+        assert!(
+            vended_to(&bed, &community, &established).await,
+            "and the member who was already here keeps theirs",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_whose_join_is_not_on_the_plane_is_never_read_as_a_late_joiner() {
+        // THE regression that matters. A quiet member's Join lives on a buried epoch,
+        // so the reachable guestbook has no trace of them at all. Absence must read as
+        // OLD, never as new — reading it the other way shed 39 real members across five
+        // rotations. Here the Join exists ONLY locally, exactly as a buried one does.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Buried", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let quiet = Keys::generate();
+        let local_join = guestbook::GuestbookEvent {
+            rumor_id: [7u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: quiet.public_key(), invited_by: None, at_ms: 9_900_000 },
+            epoch: Some(community.root_epoch.0),
+        };
+        crate::db::community::set_guestbook(&cid_hex, &[local_join], 0).unwrap();
+
+        // Even stamped INSIDE the window, a Join the plane does not serve must not evict.
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            vended_to(&bed, &community, &quiet).await,
+            "no Join on the reachable plane means OLD — absence of evidence must never evict",
         );
     }
 
