@@ -6335,35 +6335,43 @@ pub async fn follow_control<T: Transport + ?Sized>(
             // authored. Guessing between those three cost a day.
             {
                 use std::collections::BTreeMap;
-                let mut fate: BTreeMap<String, (u64, u64, String)> = BTreeMap::new();
+                let mut fate: BTreeMap<String, (u64, u64, String, &str)> = BTreeMap::new();
                 for e in &editions {
                     if e.vsk != vsk::ROLE && e.vsk != vsk::GRANT {
                         continue;
                     }
+                    let kind = if e.vsk == vsk::ROLE { "role" } else { "grant" };
                     let eid = crate::simd::hex::bytes_to_hex_32(&e.entity_id);
-                    let slot = fate.entry(eid).or_insert((0, 0, String::new()));
+                    let slot = fate.entry(eid).or_insert((0, 0, String::new(), kind));
                     slot.0 += 1;
                     if e.version > slot.1 {
                         slot.1 = e.version;
                         slot.2 = e.author.to_hex()[..8].to_string();
+                        slot.3 = kind;
                     }
                 }
                 let head_now: std::collections::HashSet<&str> =
                     authority.heads.iter().map(|h| h.entity_hex.as_str()).collect();
                 let rows: Vec<String> = fate
                     .iter()
-                    .map(|(eid, (n, v, author))| {
+                    .map(|(eid, (n, v, author, kind))| {
                         format!(
-                            "{}:{}ed/v{}/by{}{}{}",
+                            "{}[{kind}]:{}ed/v{}/by{}{}{}",
                             &eid[..8], n, v, author,
                             if head_now.contains(eid.as_str()) { "/HEAD" } else { "/dropped" },
                             floors.get(eid).map(|f| format!("/floor@v{}", f.0)).unwrap_or_default(),
                         )
                     })
                     .collect();
+                // The OWNER is the root of all authority: every other author needs a
+                // grant that traces back to them. If no edition here is owner-authored
+                // the chain cannot bootstrap at all, and that is a different bug from
+                // any individual entity being rejected.
                 crate::log_warn!(
-                    "[v2:control {}] roster editions in window: [{}]",
-                    &cid_hex[..8.min(cid_hex.len())], rows.join(" ")
+                    "[v2:control {}] owner={} — roster editions in window: [{}]",
+                    &cid_hex[..8.min(cid_hex.len())],
+                    community.owner().map(|o| o.to_hex()[..8].to_string()).unwrap_or_else(|_| "UNPROVEN".into()),
+                    rows.join(" ")
                 );
             }
             crate::log_warn!(
