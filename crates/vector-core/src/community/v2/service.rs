@@ -7098,8 +7098,27 @@ fn select_authorized(
                 }
                 // The granter must outrank every granted role (resolved against the
                 // accepted roster) AND the member — the escalation defense (CORD-04 §2).
-                let positions: Option<Vec<u32>> = grant.role_ids.iter().map(|rid| accepted.role(rid).map(|r| r.position)).collect();
-                let Some(positions) = positions else {
+                //
+                // Resolve the roles that CAN be resolved rather than discarding the
+                // grant whole. All-or-nothing deadlocks a community that grew the
+                // ordinary way: an admin creates a role, the owner grants that role to
+                // them, and now the grant needs the role accepted while the role needs
+                // the grant. Neither can go first, the fixpoint lands empty, and the
+                // entire roster — the owner's own grants included — collapses. Seen on
+                // two live communities; the cached roster was all that hid it.
+                //
+                // Partial resolution is strictly fail-closed: it can only ever grant
+                // FEWER roles than the edition names, every retained role is still
+                // rank-checked below, and the unresolved ones fold in on a later
+                // iteration once their own authority settles. Nothing is granted that
+                // the author did not write.
+                let resolved: Vec<(String, u32)> = grant
+                    .role_ids
+                    .iter()
+                    .filter_map(|rid| accepted.role(rid).map(|r| (rid.clone(), r.position)))
+                    .collect();
+                let positions: Vec<u32> = resolved.iter().map(|(_, p)| *p).collect();
+                if resolved.is_empty() && !grant.role_ids.is_empty() {
                     // Record WHICH role is missing — a grant refused for pointing at
                     // an unaccepted role is the head of a dependency chain, and the
                     // chain is unreadable without naming its next link.
@@ -7116,7 +7135,7 @@ fn select_authorized(
                         m.insert(c2.head.entity_hex.clone(), "grant: references a role not in the accepted roster");
                     }
                     continue;
-                };
+                }
                 if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
                     note(&mut why, "grant: citation unresolvable");
                     continue;
@@ -7128,8 +7147,12 @@ fn select_authorized(
                     // advance a completeness check must see), but don't carry the husk
                     // into the roster.
                     next_heads.push(c.head.clone());
-                    if !grant.role_ids.is_empty() {
-                        next.grants.push(grant.clone());
+                    if !resolved.is_empty() {
+                        // Carry only the resolved subset; the rest arrive on a later
+                        // iteration, or never, if they were never legitimate.
+                        let mut g = grant.clone();
+                        g.role_ids = resolved.iter().map(|(rid, _)| rid.clone()).collect();
+                        next.grants.push(g);
                     }
                     break;
                 }
@@ -11014,6 +11037,78 @@ mod tests {
         assert!(
             crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
             "and the admin survives",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_naming_a_role_its_own_holder_created_still_folds() {
+        // The deadlock that emptied two live communities' rosters.
+        //
+        // A community grows the ordinary way: the owner promotes an admin, the admin
+        // creates a role of their own, and the owner then grants that role onward. Now
+        // the grant references a role whose AUTHOR draws authority from a grant — and
+        // under all-or-nothing resolution neither can go first. The fixpoint lands
+        // empty, and every grant in the community dies with it, the owner's included.
+        //
+        // Resolving the roles a grant CAN resolve breaks the cycle without granting
+        // anything the author did not write: the retained roles are still rank-checked,
+        // and the rest fold in on a later iteration.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "GrantCycle", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let admin = Keys::generate();
+        let member = Keys::generate();
+
+        // 1. The owner's own role, and a grant of it to the admin.
+        let owner_role = "aa".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&owner_role, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![owner_role.clone()], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "the admin is promoted",
+        );
+
+        // 2. The ADMIN creates a role of their own, beneath theirs.
+        let admin_made = "bb".repeat(32);
+        let mut made = admin_role(&admin_made, Permissions::BAN);
+        made.position = 5;
+        publish_role(&bed.relay, &community, &admin, &made, 1).await;
+
+        follow_control(&bed.relay, &community).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            roster.role(&admin_made).is_some(),
+            "an admin-authored role folds while its author's grant is resolvable",
+        );
+        assert!(
+            roster.is_admin(&admin.public_key().to_hex()),
+            "and the admin keeps their own standing — a cycle here empties the roster",
+        );
+
+        // 3. The owner grants the ADMIN-MADE role to a member, alongside a role that
+        //    is not resolvable at all. Under all-or-nothing the whole grant dies and
+        //    takes the roster with it; resolved partially, the member gets what the
+        //    owner actually granted.
+        publish_grant(
+            &bed.relay, &community, &owner.keys, &member.public_key(),
+            vec![admin_made.clone(), "cc".repeat(32)], 1,
+        ).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let mg = roster.grants.iter().find(|g| g.member == member.public_key().to_hex());
+        assert!(
+            mg.is_some_and(|g| g.role_ids.contains(&admin_made)),
+            "the resolvable half of the grant is honored",
+        );
+        assert!(
+            mg.is_some_and(|g| !g.role_ids.iter().any(|r| r == &"cc".repeat(32))),
+            "and the unresolvable half is NOT — partial resolution only ever grants less",
+        );
+        assert!(
+            roster.is_admin(&admin.public_key().to_hex()),
+            "the rest of the roster survives it",
         );
     }
 
