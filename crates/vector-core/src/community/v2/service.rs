@@ -7402,6 +7402,127 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             !banned.contains(&rh) && roster.can_act_on_member(&rh, Some(&owner_hex), &me_hex, crate::community::roles::Permissions::BAN)
         };
 
+                // A non-owner Refounding may only remove members the rotator strictly
+        // OUTRANKS. The protected set is the owner plus every grant-holder the
+        // rotator can't act on with BAN (a peer or superior) — excluding one is
+        // an authority-escalation takeover, so its rotation is inadmissible.
+        // Plain members hold no grant and are always outranked by a BAN-holder,
+        // so removing them is legitimate and needs no memberlist.
+        let base_admissible = |r: &rekey::Rotation| -> bool {
+            if r.rotator == owner {
+                return true; // the owner is supreme.
+            }
+            // Uncited (or citing a Grant we haven't synced) → skip entirely:
+            // neither adopt nor conclude a removal, exactly like an
+            // unauthorized rotation. It parks and heals on the next follow.
+            if !cited_ok(r) {
+                return false;
+            }
+            let rotator_hex = r.rotator.to_hex();
+            let has_blob = |xonly: &[u8; 32]| {
+                rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), xonly, r.scope, r.new_epoch).is_some()
+            };
+            // The owner is never a valid removed target.
+            if !has_blob(&owner.to_bytes()) {
+                return false;
+            }
+            for g in &roster.grants {
+                if g.member == rotator_hex || g.member == owner_hex || banned.contains(&g.member) {
+                    continue; // self, owner (checked), or an already-authorized removal.
+                }
+                // A grant-holder the rotator can't act on is a peer/superior.
+                if !roster.can_act_on_member(&rotator_hex, Some(&owner_hex), &g.member, crate::community::roles::Permissions::BAN) {
+                    if let Ok(pk) = PublicKey::from_hex(&g.member) {
+                        if !has_blob(&pk.to_bytes()) {
+                            return false; // a peer/superior was excluded.
+                        }
+                    }
+                }
+            }
+            true
+        };
+
+        // ── Same-epoch convergence, BEFORE walking forward (CORD-06 §3) ─────────
+        //
+        // Two authorized rotators can mint the same epoch concurrently. The spec's
+        // tiebreak is deterministic — the lexicographically lowest new base key wins
+        // — but it was only ever applied among rotations seen in ONE fetch. A client
+        // that saw only the higher sibling adopted it and then looked exclusively
+        // for its successor, so the lower sibling became permanently unreachable:
+        // two halves of a community, both at the same epoch number, different keys,
+        // unable to read each other, forever. Nobody was misbehaving.
+        //
+        // So re-check the epoch we ALREADY hold on every follow, and step sideways
+        // onto a strictly lower sibling. Down-only, exactly as the spec requires: a
+        // held epoch converges only downward, so a flaky fetch that returns just the
+        // higher sibling can never re-fork a settled epoch, and the walk terminates
+        // because each convergence strictly decreases the held key.
+        //
+        // The losing branch's key is simply dropped. Messages already ingested from
+        // it stay readable — they are stored decrypted under the account vault, not
+        // re-derived from the epoch key — so converging costs only the fork-window
+        // messages this client never fetched, which live on a branch nobody reads.
+        if cur.root_epoch.0 > 0 {
+            let prior = crate::db::community::held_epoch_key(
+                &cid_hex,
+                crate::community::SERVER_ROOT_SCOPE_HEX,
+                cur.root_epoch.0 - 1,
+            )
+            .ok()
+            .flatten();
+            if let Some(prior_root) = prior {
+                let group = base_rekey_group_key(&prior_root, cur.id(), cur.root_epoch);
+                match fetch_rekey_chunks(transport, &cur.relays, &group).await {
+                    Ok(siblings) if !siblings.is_empty() => {
+                        let held_before = cur.community_root;
+                        match advance_scope(
+                            &[(siblings, Some((Epoch(cur.root_epoch.0 - 1), prior_root)))],
+                            RekeyScope::Root,
+                            cur.id(),
+                            &base_rotator_ok,
+                            &base_rotator_outranks_me,
+                            &base_admissible,
+                            &signer,
+                            &my_xonly,
+                            cur.root_epoch,
+                        )
+                        .await
+                        {
+                            // Strictly lower only. Equal = the branch we already hold.
+                            Advance::Adopt { new_key, control_pk, control_root, .. } if new_key < held_before => {
+                                crate::log_warn!(
+                                    "[v2:follow {}] same-epoch fork at epoch {} — converging DOWN onto the canonical sibling",
+                                    &cid_hex[..8.min(cid_hex.len())], cur.root_epoch.0
+                                );
+                                cur.community_root = new_key;
+                                cur.control_pk = control_pk.and_then(|pk| PublicKey::from_slice(&pk).ok());
+                                cur.control_root = control_root;
+                                if let Err(e) = crate::db::community::store_epoch_key(
+                                    &cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, cur.root_epoch.0, &new_key,
+                                ) {
+                                    crate::log_warn!("v2: converged epoch-key archive failed: {e}");
+                                }
+                                if matches!(crate::db::community::community_protocol(community.id()), Ok(Some(_))) {
+                                    let _ = crate::db::community::save_community_v2(&cur);
+                                }
+                                changed = true;
+                            }
+                            // A sibling we cannot open is NOT a removal: refusing to
+                            // converge parks us on a branch that still works, where
+                            // concluding removal here would delete the community over
+                            // a fork we merely could not read.
+                            _ => {}
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::log_warn!(
+                        "[v2:follow {}] same-epoch fork check failed (will retry): {}",
+                        &cid_hex[..8.min(cid_hex.len())], e
+                    ),
+                }
+            }
+        }
+
         // Bound the catch-up: each real step consumes a valid authorized rotation, so a
         // finite chain terminates naturally; the cap defends against a relay feeding a
         // pathological set.
@@ -7514,45 +7635,6 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                 let group = base_rekey_group_key(&cur.community_root, cur.id(), next);
                 let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
                 let batches = vec![(chunks, Some((held_epoch, held_key)))];
-                // A non-owner Refounding may only remove members the rotator strictly
-                // OUTRANKS. The protected set is the owner plus every grant-holder the
-                // rotator can't act on with BAN (a peer or superior) — excluding one is
-                // an authority-escalation takeover, so its rotation is inadmissible.
-                // Plain members hold no grant and are always outranked by a BAN-holder,
-                // so removing them is legitimate and needs no memberlist.
-                let base_admissible = |r: &rekey::Rotation| -> bool {
-                    if r.rotator == owner {
-                        return true; // the owner is supreme.
-                    }
-                    // Uncited (or citing a Grant we haven't synced) → skip entirely:
-                    // neither adopt nor conclude a removal, exactly like an
-                    // unauthorized rotation. It parks and heals on the next follow.
-                    if !cited_ok(r) {
-                        return false;
-                    }
-                    let rotator_hex = r.rotator.to_hex();
-                    let has_blob = |xonly: &[u8; 32]| {
-                        rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), xonly, r.scope, r.new_epoch).is_some()
-                    };
-                    // The owner is never a valid removed target.
-                    if !has_blob(&owner.to_bytes()) {
-                        return false;
-                    }
-                    for g in &roster.grants {
-                        if g.member == rotator_hex || g.member == owner_hex || banned.contains(&g.member) {
-                            continue; // self, owner (checked), or an already-authorized removal.
-                        }
-                        // A grant-holder the rotator can't act on is a peer/superior.
-                        if !roster.can_act_on_member(&rotator_hex, Some(&owner_hex), &g.member, crate::community::roles::Permissions::BAN) {
-                            if let Ok(pk) = PublicKey::from_hex(&g.member) {
-                                if !has_blob(&pk.to_bytes()) {
-                                    return false; // a peer/superior was excluded.
-                                }
-                            }
-                        }
-                    }
-                    true
-                };
                 match advance_scope(&batches, RekeyScope::Root, cur.id(), &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
                     Advance::Adopt { new_key, control_pk, control_root, severed } => {
                         // Record the HOP that was severed, not the walk's final head:
@@ -11593,6 +11675,79 @@ mod tests {
         let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
         assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_adopted_the_losing_fork_converges_down_onto_the_canonical_one() {
+        // Two authorized rotators mint the same epoch concurrently. The tiebreak is
+        // deterministic — lowest new base key wins — but it only ever ran across
+        // rotations seen in ONE fetch. A client that saw only the higher sibling
+        // adopted it and then looked exclusively for its successor, so the canonical
+        // branch became permanently unreachable: two halves of a community at the
+        // same epoch number, different keys, unable to read each other, with nobody
+        // misbehaving. Convergence has to be re-checked, not decided once.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "ForkHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "f1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // TWO rotators, which is what a real fork requires: rotations correlate on
+        // (rotator, scope, epoch, prevcommit), so one rotator minting twice would
+        // merge into a single rotation rather than fork — and `mint_or_reuse` stops
+        // an honest rotator doing that anyway. A second BAN-holder is the genuine
+        // concurrent-refound case. Low wins the spec's tiebreak.
+        let rival = Keys::generate();
+        bed.swap_to(&owner);
+        publish_grant(&bed.relay, &community, &owner.keys, &rival.public_key(), vec!["f1".repeat(32)], 1).await;
+        // The owner's client must fold the grant before minting the rival's rotation:
+        // a non-owner rotation carries a `vac` citing the Grant it acts under, and an
+        // uncited one is inadmissible by design.
+        let _ = follow_control(&bed.relay, &community).await;
+        bed.swap_to(&me);
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        let low = [0x11u8; 32];
+        let high = [0xF1u8; 32];
+        let recipients = [owner.keys.public_key(), me.keys.public_key(), rival.public_key()];
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &recipients, &high, &joined.community_root).await;
+
+        // We see ONLY the high sibling first and adopt it — the fork is now set.
+        bed.swap_to(&me);
+        let session = crate::db::current_session();
+        let _ = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
+        let forked = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(forked.root_epoch, Epoch(1), "adopted the sibling we could see");
+        assert_eq!(forked.community_root, high, "and it is the LOSING branch");
+
+        // The rival BAN-holder's sibling surfaces afterwards — a separate rotation,
+        // and the one the deterministic tiebreak says everyone must land on.
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &rival, &recipients, &low, &joined.community_root).await;
+
+        bed.swap_to(&me);
+        let _ = follow_rekeys(&bed.relay, &forked, &session).await.unwrap();
+        let healed = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            healed.community_root, low,
+            "a settled epoch MUST converge down onto the canonical sibling, or the community stays split",
+        );
+        assert_eq!(healed.root_epoch, Epoch(1), "same epoch — this is a sideways step, not an advance");
+
+        // Down-only: re-running must not bounce back up to the higher sibling, or two
+        // clients seeing the pair in different orders would oscillate forever.
+        let _ = follow_rekeys(&bed.relay, &healed, &session).await.unwrap();
+        let settled = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(settled.community_root, low, "convergence is down-only and stable");
     }
 
     #[tokio::test(flavor = "multi_thread")]
