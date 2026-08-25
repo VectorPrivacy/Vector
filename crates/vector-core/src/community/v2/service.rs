@@ -6354,95 +6354,15 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // nothing and still retains, which is the withholding case the guard exists
         // for. My OWN grant is never pruned: losing my own standing on a bad read is
         // the one mistake with no path back.
-        // Two independent guards, because withholding takes two shapes.
-        //
-        // `authority.gapped` catches the case where the window REFERENCES the missing
-        // entity — a served grant naming an unserved role gaps the fold, and that is a
-        // relay serving partial history, not an entity that is gone.
-        //
-        // It does NOT catch an entity nothing references any more, which folds absent
-        // and raises no gap. That is the shape a demoted author's role leaves, and the
-        // one that froze rosters in the field. For it the discriminator is whether the
-        // plane is demonstrably AHEAD of what we hold: a plane serving roster editions
-        // newer than our own is live and current, so an entity absent from it really
-        // has stopped being served. A relay set that is not ahead teaches us nothing we
-        // did not already know, so it may not evict anything.
-        let plane_is_ahead = newest_roster_at > stored_at;
-        // Deliberately NOT gated on `fold.gapped`: that reports the metadata/channel
-        // DOCUMENT fold, and a community with one unreachable channel doc would then
-        // freeze its authority forever — the very shape this is removing. The roster
-        // decision rests on roster evidence: `authority.gapped` for a window that
-        // references what is missing, `plane_is_ahead` for one that does not.
-        let coherent = !truncated && !authority.gapped && plane_is_ahead;
-        // My OWN grant is never pruned: losing my own standing on a bad read is the
-        // one mistake with no path back, so if it is what blocks, we stay blocked.
-        let mut unprunable_blocker = false;
-        if !stored_complete && !seed_only && coherent {
-            let me_grant_eid = crate::my_public_key().map(|me| {
-                crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &me.to_bytes()))
-            });
-            let mut pruned = 0usize;
-            for r in &stored.roles {
-                if floors.contains_key(&r.role_id) && !head_ents.contains(r.role_id.as_str()) {
-                    let _ = crate::db::community::delete_edition_head(&cid_hex, &r.role_id);
-                    pruned += 1;
-                }
-            }
-            for g in &stored.grants {
-                let Some(m) = crate::simd::hex::hex_to_bytes_32_checked(&g.member) else { continue };
-                let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
-                if !floors.contains_key(&eid) || head_ents.contains(eid.as_str()) {
-                    continue;
-                }
-                if me_grant_eid.as_deref() == Some(eid.as_str()) {
-                    unprunable_blocker = true;
-                    continue;
-                }
-                let _ = crate::db::community::delete_edition_head(&cid_hex, &eid);
-                pruned += 1;
-            }
-            if pruned > 0 {
-                crate::log_warn!(
-                    "[v2:control {}] pruned {pruned} unsatisfiable floor(s) — entities a coherent quorum read no longer serves; the roster cache can advance again",
-                    &cid_hex[..8.min(cid_hex.len())]
-                );
-            }
-        }
-        // The prune removed exactly what was blocking. My own grant is never pruned,
-        // so if IT was a blocker the veto would still stand — and that turned the
-        // self-protection into the freeze it was meant to survive. Cache the fold
-        // anyway and CARRY MY OWN standing across it instead: a bounded, self-limited
-        // exception that cannot keep anyone ELSE authorized, since rotations are
-        // judged on the ROTATOR's entry and mine only ever speaks for me.
-        let stored_complete = stored_complete || (coherent && !seed_only);
-        let carry_my_grant = coherent && !seed_only && unprunable_blocker;
+        // NO FLOOR PRUNING. An attempt at it evicted thirteen real admins from a live
+        // community: their grant editions were merely outside the fetched window, and
+        // "the plane is serving newer editions than mine" is not evidence that a
+        // specific entity is gone. A frozen roster is a fork risk; a WRONG roster is a
+        // fork plus silent loss of everyone's standing, which is strictly worse. Until
+        // there is per-entity proof of absence, absence stays unproven.
         if !truncated && !authority.gapped && (stored_complete || seed_only) && newest_roster_at >= stored_at {
-            let mut to_store = authority.roles.clone();
-            if carry_my_grant {
-                if let Some(me) = crate::my_public_key() {
-                    let me_hex = me.to_hex();
-                    if let Some(mine) = stored.grants.iter().find(|g| g.member == me_hex) {
-                        if !to_store.grants.iter().any(|g| g.member == me_hex) {
-                            // The roles it names have to come with it, or the grant
-                            // points at nothing and confers no rank.
-                            for rid in &mine.role_ids {
-                                if !to_store.roles.iter().any(|r| r.role_id == *rid) {
-                                    if let Some(role) = stored.roles.iter().find(|r| r.role_id == *rid) {
-                                        to_store.roles.push(role.clone());
-                                    }
-                                }
-                            }
-                            to_store.grants.push(mine.clone());
-                            crate::log_warn!(
-                                "[v2:control {}] carried my own grant across a fold that no longer serves it — the roster advances without self-demoting",
-                                &cid_hex[..8.min(cid_hex.len())]
-                            );
-                        }
-                    }
-                }
-            }
-            authority_changed |= stored != to_store;
-            crate::db::community::set_community_roles(&cid_hex, &to_store, newest_roster_at)?;
+            authority_changed |= stored != authority.roles;
+            crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
         } else {
             // Loud, because the failure mode is silent and total: the roster is what
             // authorizes every rotation, so a client that can never re-cache it is
@@ -10936,105 +10856,6 @@ mod tests {
         let down = FetchErrors(MemoryRelay::new());
         let view = fetch_authority(&down, &community).await;
         assert!(view.banned.contains(&victim_hex), "a transport error retains the persisted banlist");
-    }
-
-    #[tokio::test]
-    async fn my_own_unservable_grant_does_not_freeze_the_whole_roster() {
-        // Refusing to prune my own grant is right — losing my own standing on a bad
-        // read has no path back. But making that refusal veto the ENTIRE roster turned
-        // the self-protection into the freeze it existed to survive: the cache could
-        // never advance, so admins promoted later stayed invisible and their rotations
-        // were refused. Observed in the field as "pruned 13 floors" immediately
-        // followed by "roster NOT cached".
-        //
-        // So the roster advances, and my own standing is carried across it. That is
-        // bounded: my entry only ever speaks for me, and rotations are judged on the
-        // ROTATOR's entry, so carrying mine can never keep anyone else authorized.
-        let (bed, owner, _m) = TestBed::new();
-        bed.swap_to(&owner);
-        let community = create_community(&bed.relay, "SelfGrant", bed.relays.clone(), None).await.unwrap();
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let my_role = crate::simd::hex::bytes_to_hex_32(&[0x6e; 32]);
-
-        // A stored roster granting ME a role the plane will never serve, floored.
-        let mut seeded = crate::community::roles::CommunityRoles::default();
-        seeded.roles.push(admin_role(&my_role, Permissions::BAN));
-        seeded.grants.push(crate::community::roles::MemberGrant {
-            member: owner.keys.public_key().to_hex(),
-            role_ids: vec![my_role.clone()],
-        });
-        crate::db::community::set_community_roles(&cid_hex, &seeded, 500).unwrap();
-        let my_grant_eid = crate::simd::hex::bytes_to_hex_32(
-            &crate::community::v2::derive::grant_locator(community.id(), &owner.keys.public_key().to_bytes()),
-        );
-        crate::db::community::set_edition_head_at_epoch(&cid_hex, &my_grant_eid, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
-
-        // The plane moves on with a DIFFERENT admin.
-        let newcomer = Keys::generate();
-        let rid = "d3".repeat(32);
-        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
-        publish_grant(&bed.relay, &community, &owner.keys, &newcomer.public_key(), vec![rid], 1).await;
-
-        follow_control(&bed.relay, &community).await.unwrap();
-
-        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
-        assert!(
-            roster.grants.iter().any(|g| g.member == newcomer.public_key().to_hex()),
-            "the roster MUST advance — my own unservable grant may not hold everyone else hostage",
-        );
-        assert!(
-            roster.grants.iter().any(|g| g.member == owner.keys.public_key().to_hex()),
-            "and my own standing is carried across, never silently demoted by a read that could not see it",
-        );
-    }
-
-    #[tokio::test]
-    async fn a_dead_floor_stops_vetoing_the_roster_once_the_plane_moves_on() {
-        // The freeze: an entity can stop producing a head FOREVER — its author was
-        // demoted so their editions no longer count, or it was compacted away. The
-        // completeness guard then retains the stored roster on every pass, so the
-        // cache can never be replaced, so an admin promoted afterwards is invisible,
-        // so their rotations are refused. A silent fork, from a guard doing its job.
-        //
-        // The escape is that the plane must be demonstrably AHEAD of what we hold: a
-        // live plane serving newer authority than ours, which nonetheless does not
-        // serve this entity, is real evidence the entity is gone. (A relay set that
-        // merely lacks history is not ahead, and evicts nothing — that is the
-        // sibling test above.)
-        let (bed, owner, _m) = TestBed::new();
-        bed.swap_to(&owner);
-        let community = create_community(&bed.relay, "DeadFloor", bed.relays.clone(), None).await.unwrap();
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let ghost_role = crate::simd::hex::bytes_to_hex_32(&[0x9d; 32]);
-
-        // A stored roster naming an entity the plane will never head, with a floor
-        // behind it — the shape a demoted author's role leaves.
-        let mut seeded = crate::community::roles::CommunityRoles::default();
-        seeded.roles.push(admin_role(&ghost_role, Permissions::MANAGE_CHANNELS));
-        // Stamped OLDER than the editions the plane will serve, so the plane is
-        // demonstrably ahead — the discriminator that separates "this entity is gone"
-        // from "this relay set never had it".
-        crate::db::community::set_community_roles(&cid_hex, &seeded, 500).unwrap();
-        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost_role, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
-
-        // The plane moves on: a NEW admin is promoted, strictly newer than what we hold.
-        let newcomer = Keys::generate();
-        let rid = "b8".repeat(32);
-        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
-        publish_grant(&bed.relay, &community, &owner.keys, &newcomer.public_key(), vec![rid], 1).await;
-
-        follow_control(&bed.relay, &community).await.unwrap();
-
-        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
-        assert!(
-            roster.grants.iter().any(|g| g.member == newcomer.public_key().to_hex()),
-            "the roster MUST advance — a dead floor that vetoes forever is how a client goes \
-             permanently deaf to every admin promoted after it",
-        );
-        assert!(
-            !roster.roles.iter().any(|r| r.role_id == ghost_role),
-            "and the entity nothing serves is gone from the cache",
-        );
     }
 
     #[tokio::test]
