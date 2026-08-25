@@ -11678,6 +11678,49 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_rekey_exclusion_keeps_my_epoch_keys() {
+        // Being removed must not cost me the ability to scrub my own history. The
+        // epoch keys open no FUTURE epoch — post-removal keys are never delivered —
+        // so retaining them leaks nothing; they are only what lets me author a 3305
+        // self-delete of messages I already sent, each sealed under the epoch it was
+        // sent at. Every other self-removal path retains them. The rekey-exclusion
+        // path silently did not, so an eviction (or a false positive) destroyed that.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "ExclusionKeys", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(
+            !crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap().is_empty(),
+            "the joiner archived its epoch key",
+        );
+
+        // The owner rotates and leaves me out — a genuine, authorized removal.
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key()], &[0xD1; 32], &joined.community_root).await;
+
+        bed.swap_to(&me);
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(follow.self_removed, "an authorized rotation that excluded me IS a removal");
+
+        // The teardown the caller performs on self_removed.
+        crate::db::community::delete_community_retain_keys(&cid_hex).unwrap();
+        assert!(
+            crate::db::community::load_community_v2(joined.id()).unwrap().is_none(),
+            "the community is gone",
+        );
+        assert!(
+            !crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap().is_empty(),
+            "but my epoch keys survive, so I can still self-delete what I wrote",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_client_that_adopted_the_losing_fork_converges_down_onto_the_canonical_one() {
         // Two authorized rotators mint the same epoch concurrently. The tiebreak is
         // deterministic — lowest new base key wins — but it only ever ran across

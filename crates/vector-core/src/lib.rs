@@ -2840,8 +2840,14 @@ impl VectorCore {
                 // A tombstone surfaced during catch-up — sealed read-only; stop here.
                 Ok(f) if f.dissolved => return warnings,
                 Ok(f) if f.self_removed => {
-                    // An authorized rotation that excluded us IS a removal — but the
-                    let _ = crate::db::community::delete_community(&cid_hex);
+                    // An authorized rotation that excluded us IS a removal — but keep the
+                    // epoch keys, exactly as every other self-removal path does. They grant
+                    // no future read (post-removal keys are never delivered); dropping them
+                    // only destroys the ability to author a 3305 self-delete of our OWN past
+                    // messages, each sealed under the epoch it was sent at. That is the one
+                    // thing a removed member should still be able to do — and doubly so if
+                    // the removal turns out to have been a false positive.
+                    let _ = crate::db::community::delete_community_retain_keys(&cid_hex);
                     return warnings;
                 }
                 Ok(_) => {}
@@ -2874,7 +2880,7 @@ impl VectorCore {
             // banned headless client running against a community that already dropped it.
             if let Some(me) = crate::my_public_key() {
                 if crate::db::community::is_author_banned(&cid_hex, &me) {
-                    let _ = crate::db::community::delete_community(&cid_hex);
+                    let _ = crate::db::community::delete_community_retain_keys(&cid_hex);
                 }
             }
             warnings
