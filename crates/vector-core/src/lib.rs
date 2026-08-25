@@ -3615,9 +3615,17 @@ impl VectorCore {
         let community = Self::load_v2_if_v2(community_id)?
             .ok_or_else(|| VectorError::Other("re-founding requires a Concord v2 community".into()))?;
         let removed = Self::members_to_remove(&community, retain)?;
-        log_info!("[Moderation] purge: {} to remove, {} retained", removed.len(), retain.len());
+        // The operator's list IS the recipient set. `removed` is derived from the
+        // memberlist at THIS instant and only drives the kick sweep below; the refound
+        // fetches its own, later. Passing removal alone let an account that appeared in
+        // between be vended a key by default — implicitly retained by the purge.
+        let keep: Vec<nostr_sdk::prelude::PublicKey> = retain
+            .iter()
+            .filter_map(|n| nostr_sdk::prelude::PublicKey::parse(n).ok())
+            .collect();
+        log_info!("[Moderation] purge: {} to remove, {} retained", removed.len(), keep.len());
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
-        crate::community::v2::service::refound_community(&transport, &community, &removed)
+        crate::community::v2::service::refound_community_retaining(&transport, &community, &removed, &keep)
             .await
             .map_err(VectorError::Other)?;
         // Re-load onto the epoch the rotation just minted: kicking against the stale

@@ -2932,7 +2932,7 @@ pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &Comm
 /// publish, and a head we can't fetch ABORTS with ZERO published state — so a
 /// transient miss never strands a published rekey with a half-anchored plane.
 pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
-    refound_community_with(transport, community, removed, false, 0).await
+    refound_community_with(transport, community, removed, false, 0, None).await
 }
 
 /// A SEVERING Refounding (CORD-06 Severing): the rotation carries the `sever`
@@ -2941,7 +2941,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
 /// real even while the community was Public: the door closes with the rotation,
 /// and only a deliberate fresh mint re-opens it.
 pub async fn refound_community_severing<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], joined_after_cut: u64) -> Result<CommunityV2, String> {
-    refound_community_with(transport, community, removed, true, joined_after_cut).await
+    refound_community_with(transport, community, removed, true, joined_after_cut, None).await
 }
 
 /// `joined_after_cut`: seconds. A member whose EARLIEST Join is at or after this is
@@ -2949,7 +2949,24 @@ pub async fn refound_community_severing<T: Transport + ?Sized>(transport: &T, co
 /// Join on the reachable guestbook (buried epoch, aged-out window) is NOT excluded, and
 /// an unreadable guestbook excludes nobody. Absence must never evict: five rotations
 /// once shed 39 real members that way.
-async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], sever: bool, joined_after_cut: u64) -> Result<CommunityV2, String> {
+/// Re-found vending keys to `retain` ONLY (plus the owner and this device).
+///
+/// An operator picked a list; anyone not on it gets nothing, whenever they arrived.
+/// The removal-list form cannot express that: it is computed from the memberlist at
+/// one instant while the refound fetches its own later, so an account that appears in
+/// between is on neither list and is vended a key by default — implicitly RETAINED by
+/// the very purge meant to be exhaustive. An allow-list has no such gap, and unlike a
+/// join-time cut it is immune to a backdated (author-claimed) Join.
+pub async fn refound_community_retaining<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    removed: &[PublicKey],
+    retain: &[PublicKey],
+) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, false, 0, Some(retain)).await
+}
+
+async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], sever: bool, joined_after_cut: u64, allow_only: Option<&[PublicKey]>) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         let cid = community.id();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
@@ -3159,6 +3176,30 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             }
         }
         let owner_hex_for_channels = community.owner().ok().map(|o| o.to_hex());
+
+        // Operator purge: vend ONLY to the chosen list.
+        //
+        // Not a time test — a hard allow-list, so an account that arrived between the
+        // operator's selection and this fetch is excluded by NOT BEING ON IT, with no
+        // window to slip through and nothing to backdate. Owner and this device are
+        // always kept: a purge must not orphan the community or lock out the operator
+        // running it.
+        if let Some(allow) = allow_only {
+            let allowed: std::collections::HashSet<[u8; 32]> = allow.iter().map(|p| p.to_bytes()).collect();
+            let before = recipients.len();
+            recipients.retain(|r| {
+                *r == my_pk
+                    || Some(r.to_hex()) == owner_hex_for_channels
+                    || allowed.contains(&r.to_bytes())
+            });
+            let dropped = before.saturating_sub(recipients.len());
+            if dropped > 0 {
+                crate::log_info!(
+                    "[Refound {}] purge: {} member(s) not on the retain list vended no key",
+                    &cid_hex[..8.min(cid_hex.len())], dropped
+                );
+            }
+        }
 
         // Containment: vend no key to anyone who walked in DURING the raid.
         //
@@ -13252,6 +13293,40 @@ mod tests {
             .next()
             .is_some()
         })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_purge_vends_only_to_the_retain_list_however_late_a_stranger_arrives() {
+        // The Admin Terminal hands over a RETAIN list. Internally that used to become a
+        // removal list computed from the memberlist at one instant, while the refound
+        // fetched its own later — so an account appearing in between was on neither
+        // list and got a key by DEFAULT, implicitly retained by the purge meant to be
+        // exhaustive. An allow-list closes it with no window and nothing to backdate.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Purge", bed.relays.clone(), None).await.unwrap();
+        let kept = Keys::generate();
+        let stranger = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        // The stranger even BACKDATES their Join — an allow-list does not care.
+        for (who, at_ms) in [(&kept, 2_000_000u64), (&stranger, 1_000u64)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        // The operator selected exactly one member. Nobody named the stranger.
+        refound_community_retaining(&bed.relay, &community, &[], &[kept.public_key()]).await.unwrap();
+
+        assert!(
+            vended_to(&bed, &community, &kept).await,
+            "the selected member keeps their key",
+        );
+        assert!(
+            !vended_to(&bed, &community, &stranger).await,
+            "an account not on the retain list is vended NO key, no matter when it \
+             appeared or what Join time it claims",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
