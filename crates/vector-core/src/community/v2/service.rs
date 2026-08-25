@@ -678,7 +678,7 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                     ..Default::default()
                 };
                 if let Ok(evs) = transport.fetch_plane(plane.keys(), &q, &community.relays).await {
-                    for e in evs {
+                    for e in evs.events {
                         if wrap_ids.insert(e.id) {
                             wraps.push(e);
                         }
@@ -7920,7 +7920,13 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
         // shared user-authed client's REQ for a plane's events is CLOSED, so an
         // offline rotation catch-up would return nothing and wedge at the old
         // epoch. `fetch_plane` rides a connection authed as the plane itself.
-        let wraps = transport.fetch_plane(group.keys(), &query, relays).await?;
+        let page = transport.fetch_plane(group.keys(), &query, relays).await?;
+        // A page nobody fully answered must not read as "the plane ends here": the
+        // short-page break below is a completeness verdict, and drawing it from a
+        // degraded read is how a client concludes a rotation is absent when it is
+        // merely unreachable.
+        let page_complete = page.is_complete();
+        let wraps = page.events;
         let mut fresh = 0usize;
         for w in &wraps {
             if !seen.insert(w.id) {
@@ -7939,7 +7945,7 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
         }
         // Drained, or a same-second wall the pager can't step past (second-granular
         // until) — either way stop; the accumulated set is what advance_scope folds.
-        if fresh == 0 || wraps.len() < REKEY_PAGE {
+        if fresh == 0 || (wraps.len() < REKEY_PAGE && page_complete) {
             break;
         }
         match oldest {
@@ -8658,7 +8664,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Transport for SwapMidFetch<'_> {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.inner.publish(e, r).await
         }
@@ -8682,7 +8688,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for SwapMidPublish {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.inner.publish(e, r).await
         }
@@ -8705,7 +8711,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for FixedFetch {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
             Ok(())
         }
@@ -10800,7 +10806,7 @@ mod tests {
     struct FetchErrors(MemoryRelay);
     #[async_trait::async_trait]
     impl crate::community::transport::Transport for FetchErrors {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.0.publish(e, r).await
         }
@@ -11233,7 +11239,7 @@ mod tests {
             }
             self.0.fetch(query, relays).await
         }
-        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             self.0.fetch_plane(plane, query, relays).await
         }
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
@@ -11767,6 +11773,53 @@ mod tests {
         let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
         assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_degraded_plane_read_is_not_evidence_of_absence() {
+        // One honest relay is enough to RUN Concord — a sealed, signed rotation is
+        // proof on its own. What one relay's silence is NOT enough for is concluding
+        // a rotation does not exist. Those two cases used to be the same empty list,
+        // so a client that could not reach anyone decided the community had simply
+        // stopped rotating, and parked. Coverage is what separates them, and it is
+        // measured against the REACHABLE set, so a single-relay community still gets
+        // definitive answers.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        let relay = AdversarialRelay::new();
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "Coverage", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(relay.relay(), &bundle_json, None).await.unwrap();
+        let _ = follow_control(relay.relay(), &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        bed.swap_to(&owner);
+        publish_base_rotation(relay.relay(), &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &[0xE9; 32], &joined.community_root).await;
+        bed.swap_to(&me);
+
+        // The plane cannot be reached at all: an Err, not an empty answer.
+        let plane = base_rekey_group_key(&joined.community_root, joined.id(), Epoch(1));
+        relay.on(Match::author(&plane.pk_hex()), Fault::FailFetch("relay down".into()));
+        let _ = follow_rekeys(&relay, &joined, &crate::db::current_session()).await;
+        let during = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            during.root_epoch, joined.root_epoch,
+            "an unreachable plane must not advance anything — but it must also not be \
+             mistaken for a community that stopped rotating",
+        );
+
+        // The relay comes back. The rotation was there the whole time.
+        relay.heal();
+        let _ = follow_rekeys(&relay, &during, &crate::db::current_session()).await;
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            after.root_epoch, Epoch(1),
+            "once a relay answers, the rotation it was holding is adopted — the earlier \
+             silence was never evidence",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -15512,7 +15565,7 @@ mod tests {
         struct FetchErrors;
         #[async_trait::async_trait]
         impl Transport for FetchErrors {
-            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
             async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
                 panic!("republish must NOT publish when the remote fetch failed");
             }
@@ -16005,7 +16058,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for CappedRelay {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
             Ok(())
         }
@@ -16714,7 +16767,7 @@ mod tests {
             tokio::task::yield_now().await;
             self.0.fetch(query, relays).await
         }
-        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             tokio::task::yield_now().await;
             self.0.fetch_plane(plane, query, relays).await
         }
@@ -16910,7 +16963,7 @@ mod tests {
             tokio::task::yield_now().await;
             self.0.fetch(query, relays).await
         }
-        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             tokio::task::yield_now().await;
             self.0.fetch_plane(plane, query, relays).await
         }
