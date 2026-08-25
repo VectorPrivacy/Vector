@@ -6473,6 +6473,11 @@ pub async fn follow_control<T: Transport + ?Sized>(
                 // the chain cannot bootstrap at all, and that is a different bug from
                 // any individual entity being rejected.
                 crate::log_warn!(
+                    "[v2:control {}] fold accepted roles: [{}]",
+                    &cid_hex[..8.min(cid_hex.len())],
+                    authority.roles.roles.iter().map(|r| format!("{}@pos{}", &r.role_id[..8.min(r.role_id.len())], r.position)).collect::<Vec<_>>().join(" ")
+                );
+                crate::log_warn!(
                     "[v2:control {}] owner={} — roster editions in window: [{}]",
                     &cid_hex[..8.min(cid_hex.len())],
                     community.owner().map(|o| o.to_hex()[..8].to_string()).unwrap_or_else(|_| "UNPROVEN".into()),
