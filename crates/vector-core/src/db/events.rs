@@ -818,6 +818,37 @@ fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
     })
 }
 
+/// The community this chat's channel belongs to, or `None` for a DM.
+///
+/// Resolved once per query rather than joined per row: the ban predicate then
+/// seeks `community_bans`' primary key instead of walking chats -> channels for
+/// every candidate event.
+fn community_of_chat(conn: &rusqlite::Connection, chat_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT cc.community_id FROM community_channels cc \
+         JOIN chats c ON c.chat_identifier = cc.channel_id WHERE c.id = ?1",
+        rusqlite::params![chat_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Excludes a banned author's events BEFORE `LIMIT`.
+///
+/// A ban has to hide what they already posted, not just stop the next message —
+/// and it has to do it here, in SQL. Filtering the page after it is fetched
+/// returns fewer rows than asked for, which reads to the caller as "end of
+/// history": backscroll stops early, and a wall of banned events hides
+/// everything older than itself. `?{n}` is NULL for a DM, where the whole
+/// predicate short-circuits.
+fn ban_filter_sql(param: usize) -> String {
+    format!(
+        " AND (?{param} IS NULL OR events.npub IS NULL OR NOT EXISTS ( \
+            SELECT 1 FROM community_bans b \
+            WHERE b.community_id = ?{param} AND b.npub = events.npub))"
+    )
+}
+
 /// Get events for a chat with pagination, optionally filtered by kind.
 /// Message/edit content is decrypted via maybe_decrypt.
 pub async fn get_events(
@@ -828,6 +859,7 @@ pub async fn get_events(
 ) -> Result<Vec<StoredEvent>, String> {
     let events: Vec<StoredEvent> = {
         let conn = super::get_db_connection_guard_static()?;
+        let community = community_of_chat(&conn, chat_id);
 
         if let Some(k) = kinds {
             let kind_placeholders: String = (0..k.len())
@@ -836,14 +868,15 @@ pub async fn get_events(
                 .join(",");
             let limit_param = k.len() + 2;
             let offset_param = k.len() + 3;
+            let community_param = k.len() + 4;
 
             let sql = format!(
                 "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
                  created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
-                 FROM events WHERE chat_id = ?1 AND kind IN ({}) \
+                 FROM events WHERE chat_id = ?1 AND kind IN ({}){} \
                  ORDER BY created_at DESC, received_at DESC \
                  LIMIT ?{} OFFSET ?{}",
-                kind_placeholders, limit_param, offset_param
+                kind_placeholders, ban_filter_sql(community_param), limit_param, offset_param
             );
 
             let mut stmt = conn.prepare(&sql)
@@ -852,21 +885,21 @@ pub async fn get_events(
             match k.len() {
                 1 => {
                     let rows = stmt.query_map(
-                        rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64],
+                        rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64, community],
                         parse_event_row
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
                 },
                 2 => {
                     let rows = stmt.query_map(
-                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, limit as i64, offset as i64],
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, limit as i64, offset as i64, community],
                         parse_event_row
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
                 },
                 3 => {
                     let rows = stmt.query_map(
-                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, k[2] as i32, limit as i64, offset as i64],
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, k[2] as i32, limit as i64, offset as i64, community],
                         parse_event_row
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
@@ -875,15 +908,15 @@ pub async fn get_events(
             }
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+                &format!("SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
                  created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
-                 FROM events WHERE chat_id = ?1 \
+                 FROM events WHERE chat_id = ?1{} \
                  ORDER BY created_at DESC, received_at DESC \
-                 LIMIT ?2 OFFSET ?3"
+                 LIMIT ?2 OFFSET ?3", ban_filter_sql(4))
             ).map_err(|e| format!("Failed to prepare events query: {}", e))?;
 
             let rows = stmt.query_map(
-                rusqlite::params![chat_id, limit as i64, offset as i64],
+                rusqlite::params![chat_id, limit as i64, offset as i64, community],
                 parse_event_row
             ).map_err(|e| format!("Failed to query events: {}", e))?;
             rows.filter_map(|r| r.ok()).collect()
@@ -2517,6 +2550,98 @@ mod tests {
             .query_map([], |r| r.get(0)).unwrap()
             .flatten().collect();
         assert_eq!(ids, vec!["b0", "b1", "b2", "b3", "b4"], "insert order preserves the rowid tiebreak");
+    }
+
+    /// Register `chat` as a channel of `community` so the ban filter can resolve it.
+    fn link_channel_to_community(chat: &str, community: &str) {
+        let conn = crate::db::get_write_connection_guard_static().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO community_channels \
+             (channel_id, community_id, channel_key, epoch, name, created_at) \
+             VALUES (?1, ?2, x'00', 0, 'general', 0)",
+            rusqlite::params![chat, community],
+        )
+        .unwrap();
+    }
+
+    /// A ban hides what the author already posted — not only their next message.
+    #[tokio::test]
+    async fn a_banned_authors_messages_are_not_returned() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_hide";
+        link_channel_to_community(chat, "comm_hide");
+        for (id, npub, at) in [("keep1", "npub1good", 1_000u64), ("spam1", "npub1raider", 2_000), ("keep2", "npub1good", 3_000)] {
+            let msg = Message { id: id.into(), content: "hi".into(), at, npub: Some(npub.into()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_hide", &["npub1raider".to_string()], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let got = get_events(chat_id, None, 50, 0).await.unwrap();
+        let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"spam1"), "a banned author's existing message must not be returned: {ids:?}");
+        assert!(ids.contains(&"keep1") && ids.contains(&"keep2"), "everyone else survives: {ids:?}");
+    }
+
+    /// THE pagination guard. Filtering after `LIMIT` returns a short page, which the
+    /// caller reads as "end of history" — backscroll stops dead behind a wall of
+    /// banned events. Excluding before `LIMIT` keeps a full page full.
+    #[tokio::test]
+    async fn a_wall_of_banned_events_does_not_shorten_the_page() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_page";
+        link_channel_to_community(chat, "comm_page");
+        // 40 banned interleaved with 20 real ones, banned strictly newer so a
+        // naive newest-first page would be nothing but spam.
+        for i in 0..20u64 {
+            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some("npub1good".into()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        for i in 0..40u64 {
+            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some("npub1raider".into()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_page", &["npub1raider".to_string()], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let page = get_events(chat_id, None, 20, 0).await.unwrap();
+        assert_eq!(page.len(), 20, "a page of 20 must return 20 real messages, not what is left after filtering");
+        assert!(page.iter().all(|e| e.npub.as_deref() == Some("npub1good")), "no banned author leaks into the page");
+    }
+
+    /// The kind-filtered path is the one the app actually calls — a page of chat
+    /// messages. Covering only the kindless branch left it unguarded.
+    #[tokio::test]
+    async fn the_kind_filtered_page_excludes_banned_authors_too() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_kinds";
+        link_channel_to_community(chat, "comm_kinds");
+        for i in 0..12u64 {
+            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some("npub1good".into()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        for i in 0..30u64 {
+            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some("npub1raider".into()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_kinds", &["npub1raider".to_string()], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let kinds = [event_kind::PRIVATE_DIRECT_MESSAGE];
+        let page = get_events(chat_id, Some(&kinds), 12, 0).await.unwrap();
+        assert_eq!(page.len(), 12, "the kind-filtered page must fill with real messages");
+        assert!(page.iter().all(|e| e.npub.as_deref() == Some("npub1good")), "no banned author in a kind-filtered page");
+    }
+
+    /// A DM has no community, so the predicate must not exclude anything.
+    #[tokio::test]
+    async fn a_dm_is_unaffected_by_the_ban_filter() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1peer_dm";
+        let msg = Message { id: "dm1".into(), content: "hi".into(), at: 1_000, npub: Some("npub1peer".into()), ..Default::default() };
+        save_message(chat, &msg).await.unwrap();
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        assert_eq!(get_events(chat_id, None, 50, 0).await.unwrap().len(), 1, "a DM resolves no community and filters nothing");
     }
 
     // A batched re-save must keep save_message's upsert semantics: wrapper_event_id is
