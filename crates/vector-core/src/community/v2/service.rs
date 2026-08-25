@@ -2729,6 +2729,17 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
                     }
                 }
                 None => {
+                    // First sight on THIS client. The author writes `at_ms`; they do
+                    // not write this.
+                    let mut ev = ev;
+                    if ev.observed_at.is_none() {
+                        ev.observed_at = Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        );
+                    }
                     by_id.insert(ev.rumor_id, events.len());
                     events.push(ev.clone());
                     added.push(ev);
@@ -2741,6 +2752,7 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         let advanced = if reached_end { newest.max(cursor) } else { cursor };
         if !added.is_empty() || advanced > cursor || restamped {
             crate::db::community::set_guestbook(&cid_hex, &events, advanced)?;
+            mark_guestbook_observed_since(&cid_hex);
         }
         if full && reached_end {
             mark_guestbook_walked(&cid_hex);
@@ -2789,6 +2801,31 @@ pub fn ingest_guestbook_event(community: &CommunityV2, mut ev: guestbook::Guestb
 /// reconnect, live ingest) keeps the store current. The live [`memberlist`]
 /// remains the authoritative walk — a refounding's rekey recipient set must
 /// never trust a possibly-stale store.
+/// Unix seconds from which this client has been following `cid_hex`'s guestbook.
+///
+/// Set once, on the first sync that stores anything, and never moved forward. It is
+/// what makes `observed_at` usable as evidence: a client that only started watching
+/// AFTER a raid began sees every member as new, so its observations prove nothing and
+/// must not be allowed to evict anyone.
+fn guestbook_observed_since(cid_hex: &str) -> Option<u64> {
+    crate::db::settings::get_sql_setting(format!("gb_observed_since:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+fn mark_guestbook_observed_since(cid_hex: &str) {
+    let key = format!("gb_observed_since:{cid_hex}");
+    if crate::db::settings::get_sql_setting(key.clone()).ok().flatten().is_some() {
+        return; // never moves forward — a later stamp would erase our own coverage
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = crate::db::settings::set_sql_setting(key, now.to_string());
+}
+
 pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex)?;
@@ -3221,6 +3258,24 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                         if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
                             let secs = at_ms / 1000;
                             first_seen.entry(*member).and_modify(|e| *e = (*e).min(secs)).or_insert(secs);
+                        }
+                    }
+                    // A Join's `at_ms` is written by its author, so a raider can
+                    // backdate under any window computed from it. What this client
+                    // WATCHED arrive, they cannot forge — but only if we were already
+                    // following before the window opened. A client that started
+                    // watching later sees everyone as new, and trusting it would evict
+                    // the whole community.
+                    if guestbook_observed_since(&cid_hex).is_some_and(|since| since < joined_after_cut) {
+                        if let Ok((local, _)) = crate::db::community::get_guestbook(&cid_hex) {
+                            for ev in &local {
+                                let (guestbook::GuestbookEntry::Join { member, .. }, Some(seen)) = (&ev.entry, ev.observed_at) else {
+                                    continue;
+                                };
+                                // Incriminating only: an observation can move a member
+                                // LATER (catching a backdated claim), never earlier.
+                                first_seen.entry(*member).and_modify(|e| *e = (*e).max(seen)).or_insert(seen);
+                            }
                         }
                     }
                     let before = recipients.len();
@@ -10852,7 +10907,7 @@ mod tests {
         // A member the LOCAL store remembers (an old synced Join) but the WIRE has no
         // trace of: never posted, Join never published on the current plane.
         let quiet = Keys::generate().public_key();
-        let ev = guestbook::GuestbookEvent { epoch: None,
+        let ev = guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [7u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: quiet, invited_by: None, at_ms: 1_000 },
         };
@@ -13295,6 +13350,72 @@ mod tests {
         })
     }
 
+    /// Local guestbook row for `who`, claiming `at_ms` but OBSERVED at `seen`.
+    fn local_join_observed(who: &Keys, at_ms: u64, seen: u64, epoch: u64, tag: u8) -> guestbook::GuestbookEvent {
+        guestbook::GuestbookEvent {
+            rumor_id: [tag; 32],
+            entry: guestbook::GuestbookEntry::Join { member: who.public_key(), invited_by: None, at_ms },
+            epoch: Some(epoch),
+            observed_at: Some(seen),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_backdated_join_cannot_slide_under_the_window_when_we_watched_it_arrive() {
+        // `at_ms` is author-claimed, so a raider can put it a year in the past and pass
+        // any window computed from the claim alone. What this client WATCHED arrive is
+        // not theirs to write.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Backdate", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let liar = Keys::generate();
+
+        // Claims it joined long before the window; we saw it arrive INSIDE the window.
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join = guestbook::build_join_rumor(liar.public_key(), None, 1_000);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &liar, Timestamp::from_secs(1)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        crate::db::community::set_guestbook(&cid_hex, &[local_join_observed(&liar, 1_000, 9_000, community.root_epoch.0, 3)], 0).unwrap();
+        // We were following well before the window opened.
+        crate::db::settings::set_sql_setting(format!("gb_observed_since:{cid_hex}"), "100".into()).unwrap();
+
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            !vended_to(&bed, &community, &liar).await,
+            "a backdated Join must not beat the arrival we watched with our own clock",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_started_watching_late_evicts_nobody() {
+        // Same row, same claim, same observation — but this client only began following
+        // the guestbook AFTER the window opened, so everything looks new to it. Its
+        // observations prove nothing, and acting on them would evict the community.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "LateWatcher", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let quiet = Keys::generate();
+
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join = guestbook::build_join_rumor(quiet.public_key(), None, 1_000);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &quiet, Timestamp::from_secs(1)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        crate::db::community::set_guestbook(&cid_hex, &[local_join_observed(&quiet, 1_000, 9_000, community.root_epoch.0, 4)], 0).unwrap();
+        // Coverage begins INSIDE the window — we were not here before it.
+        crate::db::settings::set_sql_setting(format!("gb_observed_since:{cid_hex}"), "7000".into()).unwrap();
+
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            vended_to(&bed, &community, &quiet).await,
+            "without coverage predating the window our observations prove nothing — an \
+             old member must not be evicted for having been noticed late",
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_purge_vends_only_to_the_retain_list_however_late_a_stranger_arrives() {
         // The Admin Terminal hands over a RETAIN list. Internally that used to become a
@@ -13375,6 +13496,7 @@ mod tests {
             rumor_id: [7u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: quiet.public_key(), invited_by: None, at_ms: 9_900_000 },
             epoch: Some(community.root_epoch.0),
+            observed_at: None,
         };
         crate::db::community::set_guestbook(&cid_hex, &[local_join], 0).unwrap();
 
@@ -17608,11 +17730,11 @@ mod tests {
         let community = create_community(&bed.relay, "Rejoin", bed.relays.clone(), None).await.unwrap();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let (o, m) = (owner.keys.public_key(), member.keys.public_key());
-        let join = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None,
+        let join = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Join { member: m, invited_by: None, at_ms: at },
         };
-        let kick = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None,
+        let kick = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Kick { actor: o, target: m, citation: None, at_ms: at },
         };
@@ -17818,7 +17940,7 @@ mod tests {
         crate::db::community::merge_community_ban_marks(&cid_hex, &[(member_pk.to_hex(), 1_000u64)].into_iter().collect()).unwrap();
 
         // Their Join lands 60s after the ban mark, while the banlist still says banned.
-        let join = guestbook::GuestbookEvent { epoch: None,
+        let join = guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [9u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_060_000 },
         };
@@ -18222,11 +18344,11 @@ mod tests {
         let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
         let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
 
-        let joined = guestbook::GuestbookEvent { epoch: None,
+        let joined = guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [1u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_000 },
         };
-        let kick = |citation, id: u8, at| guestbook::GuestbookEvent { epoch: None,
+        let kick = |citation, id: u8, at| guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Kick { actor: admin.public_key(), target: member_pk, citation, at_ms: at },
         };
