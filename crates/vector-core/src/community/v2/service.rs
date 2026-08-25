@@ -10354,6 +10354,18 @@ mod tests {
         publish_role_at(relay, community, signer, role, version, 1_000).await
     }
 
+    /// Page filler: a signed edition that occupies a slot in the pager's window and
+    /// nothing else. It skips the head/citation relay scans `publish_role` does, which
+    /// are linear in plane size and make a 500-edition test quadratic.
+    async fn publish_filler_edition(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64, ts: u64) {
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).unwrap();
+        let content = crate::community::v2::roles::role_content_json(role).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, None, &content, ts, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
     /// `publish_role` with an explicit wall clock. Every other helper stamps 1_000, so a
     /// test needing more than one page of history must spread its editions out — a page
     /// that is entirely one second wide is a wall `until` cannot step past, and the
@@ -11232,7 +11244,7 @@ mod tests {
 
         // Then bury it under a full page of newer editions.
         for v in 2..(FOLLOW_PAGE as u64 + 2) {
-            publish_role_at(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v, 1_000 + v).await;
+            publish_filler_edition(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v, 1_000 + v).await;
         }
 
         follow_control(&bed.relay, &community).await.unwrap();
@@ -11263,7 +11275,7 @@ mod tests {
         publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
         // A full page of editions sharing ONE second, burying the grant behind the wall.
         for v in 2..(FOLLOW_PAGE as u64 + 2) {
-            publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v).await;
+            publish_filler_edition(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v, 1_000).await;
         }
 
         follow_control(&bed.relay, &community).await.unwrap();
