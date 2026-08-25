@@ -6396,7 +6396,20 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // specific entity is gone. A frozen roster is a fork risk; a WRONG roster is a
         // fork plus silent loss of everyone's standing, which is strictly worse. Until
         // there is per-entity proof of absence, absence stays unproven.
-        if !truncated && !authority.gapped && (stored_complete || seed_only) && newest_roster_at >= stored_at {
+        // NOT gated on `authority.gapped`. That flag is a global OR across every
+        // entity — its own declaration calls it the per-entity flag that "drives
+        // older-paging" — so one unresolvable entity anywhere vetoed the whole roster
+        // cache, permanently once the plane is exhausted and more paging cannot help.
+        // CORD-04 §5 says a gap fails closed FOR THAT ENTITY, suspending and refetching
+        // it, and that already happens: a gapped entity produces no head and so is
+        // simply absent from the fold. Freezing every other entity behind it is the
+        // over-reach, and it is what left live communities unable to re-derive rosters
+        // they could otherwise read perfectly.
+        //
+        // The downgrade defence is `stored_complete`, which is untouched: nothing we
+        // already know can silently vanish. An entity we have never held cannot be
+        // stripped from us by its absence.
+        if !truncated && (stored_complete || seed_only) && newest_roster_at >= stored_at {
             authority_changed |= stored != authority.roles;
             crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
         } else {
