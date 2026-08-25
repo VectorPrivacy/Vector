@@ -16949,6 +16949,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_uncited_edition_cannot_self_promote_or_outlive_a_demotion() {
+        // The two ways an ADD could escalate if the citation were the thing holding
+        // the line. It is not — rank is — and rank is resolved against the CURRENT
+        // roster, which is precisely what the spec says the verifier must do.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoEscalate", bed.relays.clone(), None).await.unwrap();
+        let admin_pk = admin.keys.public_key();
+
+        // An admin at position 3, and a role ABOVE them at position 1.
+        let mid = "d1".repeat(32);
+        let mut mid_role = admin_role(&mid, Permissions::admin().0);
+        mid_role.position = 3;
+        publish_role(&bed.relay, &community, &owner.keys, &mid_role, 1).await;
+        let high = "d2".repeat(32);
+        let mut high_role = admin_role(&high, Permissions::admin().0);
+        high_role.position = 1;
+        publish_role(&bed.relay, &community, &owner.keys, &high_role, 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![mid.clone()], 1).await;
+
+        // 1. SELF-PROMOTION, uncited: the admin grants THEMSELVES the higher role.
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &admin_pk, vec![high.clone(), mid.clone()], 2, None).await;
+        // Assert the PROPERTY, not the shape: the role must not be held, whether the
+        // forged edition was refused outright or folded back to the owner's version.
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == admin_pk.to_hex() && g.role_ids.contains(&high)),
+            "an uncited edition must not let an author grant themselves a role they do not \
+             outrank — you cannot act at or above your own rank, citation or not",
+        );
+
+        // 2. OUTLIVING A DEMOTION, uncited: the owner demotes the admin to nothing,
+        //    and the admin's uncited grant to a bystander must stop being honored the
+        //    moment this client folds the demotion.
+        let bystander = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![mid.clone()], 1, None).await;
+        let before = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !before.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "an admin at position 3 cannot grant position 3 — equal cannot act on equal",
+        );
+
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![], 3).await;
+        let after = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !after.roles.is_admin(&admin_pk.to_hex()),
+            "the owner's demotion folds",
+        );
+        assert!(
+            !after.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "and nothing the demoted author wrote is honored afterwards — authority is \
+             resolved against the CURRENT roster, which is what the citation was only ever \
+             a scheduling hint for",
+        );
+    }
+
+    #[tokio::test]
     async fn an_uncited_edition_folds_on_RANK_alone_and_never_escalates() {
         // CORD-04 §5 calls the `vac` a SYNC FLOOR, not the verdict: a verifier waits
         // until it has synced the cited Grant, then resolves rank against its CURRENT
