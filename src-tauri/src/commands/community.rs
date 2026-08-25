@@ -2763,8 +2763,10 @@ async fn rehydrate_listed_communities(
 // channel-rekey walk) and page messages only.
 
 /// (probe_time_secs, set of community_id_hex that had a fresh control/rekey edition).
-static CONTROL_PROBE: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>)>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new())));
+/// `(probed_at, dirty_set, full_coverage)`. The dirty set is POSITIVE evidence and is
+/// trustworthy however partial the read was; only the CLEAN verdict needs coverage.
+static CONTROL_PROBE: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>, bool)>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new(), false)));
 
 /// A probe result is trusted this long into the sweep (so every channel of a
 /// clean community skips within one boot).
@@ -2789,10 +2791,23 @@ fn probe_now_secs() -> u64 {
 /// community was dirty — the safe default is always "fold".
 fn community_probe_clean(community_id: &str) -> bool {
     let guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-    let (probe_secs, dirty) = &*guard;
+    let (probe_secs, dirty, full_coverage) = &*guard;
     *probe_secs != 0
+        && *full_coverage
         && probe_now_secs().saturating_sub(*probe_secs) < CONTROL_PROBE_TTL_SECS
         && !dirty.contains(community_id)
+}
+
+/// The probe SAW a control or rekey edition land for this community. Positive
+/// evidence, so a partial read still proves it — unlike "clean", which is an absence
+/// verdict and needs full coverage. Drives priority only: what this misses is not
+/// skipped, merely not jumped ahead of everyone's content.
+fn community_probe_dirty(community_id: &str) -> bool {
+    let guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    let (probe_secs, dirty, _) = &*guard;
+    *probe_secs != 0
+        && probe_now_secs().saturating_sub(*probe_secs) < CONTROL_PROBE_TTL_SECS
+        && dirty.contains(community_id)
 }
 
 /// Run the coalesced control probe: publishes the dirty set into `CONTROL_PROBE`
@@ -2855,13 +2870,11 @@ async fn run_control_probe() {
     let dirty_count = dirty.len();
     {
         let mut guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-        // A "clean" verdict is an ABSENCE verdict, and this read is Quorum: a relay
-        // that did not answer may be the one holding the rotation. Publishing clean off
-        // a partial probe skips the whole chain and parks the client on a dead epoch
-        // for the boot. Publish only under full coverage; otherwise leave the safe
-        // default (no usable probe → every community folds), which costs one boot of
-        // full chains instead of one boot of silent staleness.
-        *guard = if full_coverage { (now, dirty) } else { (0, Default::default()) };
+        // Keep the dirty set either way — it is positive evidence, sound however
+        // partial the read. `full_coverage` rides along so only the CLEAN verdict
+        // (an absence verdict, from a Quorum read) demands it: a relay that never
+        // answered may be the one holding the rotation.
+        *guard = (now, dirty, full_coverage);
     }
     // Advance the cursor ONLY on full coverage: a partial probe re-covers next
     // boot, so an edition on a relay that was down is never skipped forever.
@@ -3222,7 +3235,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             .keys()
             .filter_map(|k| <[u8; 32]>::try_from(k.as_slice()).ok())
             .map(vector_core::community::CommunityId)
-            .filter(|id| !community_probe_clean(&vector_core::simd::hex::bytes_to_hex_32(&id.0)))
+            .filter(|id| community_probe_dirty(&vector_core::simd::hex::bytes_to_hex_32(&id.0)))
             .collect();
         if !moved.is_empty() {
             let t = std::time::Instant::now();
