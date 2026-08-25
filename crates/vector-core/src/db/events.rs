@@ -1697,6 +1697,8 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// CHAT-level muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
 /// SENDER-level filtering happens here: a message whose author's DM is muted or whose profile
 /// is blocked never counts, in any chat — muting a person silences their community messages too.
+/// A member BANNED from a community likewise stops counting there: a ban that still badges the
+/// channel sends the reader to look for a message the client will not render.
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
     // Anchor computed once per chat in the CTE so the count scan doesn't re-derive it per row. The
@@ -1721,6 +1723,10 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM community_channels cc \
+                     JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
+                     WHERE cc.channel_id = a.chat_identifier) \
              GROUP BY a.chat_identifier",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
@@ -1753,6 +1759,10 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM community_channels cc \
+                     JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
+                     WHERE cc.channel_id = c.chat_identifier) \
                AND e.created_at > COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
@@ -2676,6 +2686,34 @@ mod tests {
         let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
         assert!(!ids.contains(&"joined_evt"), "the join row goes with them: {ids:?}");
         assert!(!ids.contains(&"spam_after_join"), "and so does what they said: {ids:?}");
+    }
+
+    /// A badge that counts a banned author sends the reader hunting for a message
+    /// the client will never render.
+    #[tokio::test]
+    async fn a_banned_authors_messages_do_not_badge_the_channel() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_unread";
+        link_channel_to_community(chat, "comm_unread");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+
+        let real = Message { id: "real_unread".into(), content: "hi".into(), at: 1_000, npub: Some(good.clone()), ..Default::default() };
+        save_message(chat, &real).await.unwrap();
+        for i in 0..5u64 {
+            let spam = Message { id: format!("spam_unread{i}"), content: "buy".into(), at: 2_000 + i, npub: Some(raider.clone()), ..Default::default() };
+            save_message(chat, &spam).await.unwrap();
+        }
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 6, "before the ban everything counts");
+
+        crate::db::community::set_community_banlist("comm_unread", &[raider_hex], 1).unwrap();
+
+        assert_eq!(
+            unread_count_for_chat(chat).await.unwrap(), 1,
+            "only the message that still renders is counted"
+        );
+        let all = unread_counts().await.unwrap();
+        assert_eq!(all.get(chat).copied().unwrap_or(0), 1, "and the all-chats sweep agrees");
     }
 
     /// A DM has no community, so the predicate must not exclude anything.

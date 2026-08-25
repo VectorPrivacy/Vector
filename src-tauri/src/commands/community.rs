@@ -613,7 +613,13 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
     vector_core::db::scoped(async move {
         // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
         if is_v2_community(community_id) {
-            return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
+            vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string())?;
+            // Their messages stop rendering the moment they are banned, so a badge counting
+            // them sends the reader hunting for something the client will never show. The
+            // unread cache is maintained incrementally and cannot know a ban happened —
+            // recompute every channel they could have posted in, straight from the DB.
+            reconcile_community_unread(community_id).await;
+            return Ok(());
         }
         let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
         let id_bytes = hex_to_id32(community_id)?;
@@ -631,6 +637,7 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
         // (COMMUNITY_ROUTES froze each Channel at the last refresh — without this, a banned author's
         // LIVE messages keep flowing until reopen/restart).
         crate::services::subscription_handler::refresh_community_subscription().await;
+        reconcile_community_unread(community_id).await;
         Ok(())
     })
     .await
@@ -4681,6 +4688,42 @@ pub async fn fetch_pinned_attachment(community_id: String, channel_id: String, m
         .fetch_pinned_attachment(&community_id, &channel_id, &message_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+
+/// Recompute the unread badge for every channel of a Community.
+///
+/// Used after a membership change that retroactively hides messages (a ban), where an
+/// incremental delta cannot be derived — the count has to come back from the query that
+/// now excludes them.
+async fn reconcile_community_unread(community_id: &str) {
+    let Ok(id_bytes) = vector_core::simd::hex::hex_to_bytes_32_checked(community_id).ok_or(()) else {
+        return;
+    };
+    let cid = vector_core::community::CommunityId(id_bytes);
+    let channels: Vec<String> =
+        match vector_core::db::community::community_protocol(&cid).ok().flatten() {
+            Some(vector_core::community::ConcordProtocol::V2) => {
+                vector_core::db::community::load_community_v2(&cid)
+                    .ok()
+                    .flatten()
+                    .map(|c| {
+                        c.channels
+                            .iter()
+                            .map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            _ => vector_core::db::community::load_community(&cid)
+                .ok()
+                .flatten()
+                .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
+                .unwrap_or_default(),
+        };
+    for ch in channels {
+        crate::commands::messaging::reconcile_chat_unread(&ch).await;
+    }
 }
 
 /// Diagnostic: local memberlist vs the wire guestbook fold, with the diff named.
