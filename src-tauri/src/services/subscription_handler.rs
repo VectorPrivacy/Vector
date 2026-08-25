@@ -532,6 +532,77 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
         });
     }
 
+    // Lag probe: a second broadcast receiver stamps FRESH community events the
+    // moment the pool surfaces them, so the main loop's dequeue lag below is
+    // directly measurable (broadcast receivers have independent queues; this one
+    // never awaits handlers). Old fetched history stays silent via the age gate.
+    {
+        let mut tap = client.notifications();
+        vector_core::db::spawn_bound(async move {
+            while let Some(n) = tap.next().await {
+                if let ClientNotification::Event { event, subscription_id, .. } = n {
+                    let k = event.kind.as_u16();
+                    if (3300..=3311).contains(&k) || k == 1059 || k == 21059 {
+                        let age = nostr_sdk::prelude::Timestamp::now()
+                            .as_secs()
+                            .saturating_sub(event.created_at.as_secs());
+                        if age <= 120 {
+                            println!(
+                                "[lag-probe] pool surfaced kind={k} id={} sub={subscription_id} age={age}s",
+                                &event.id.to_hex()[..8]
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+    // Community events get their own worker, off the main loop — the same lesson
+    // the DM lane above carries. At boot the sweep's fetches surface thousands of
+    // community events through this broadcast, each ~100-300ms to fold (decrypt +
+    // persist + sweep-contended DB), and handling them inline queued every LIVE
+    // arrival behind the whole flood (measured: 74s+ from pool to handler).
+    // Two lanes, strict priority: an event fresh enough to be realtime jumps the
+    // backfill queue entirely, so a live message paints after at most the one
+    // fold already in flight. Out-of-order folding is already the ingest model
+    // (relays replay history in arbitrary order); dedup makes requeues no-ops.
+    let (fresh_tx, mut fresh_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    let (bulk_tx, mut bulk_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+    vector_core::db::spawn_bound(async move {
+        let mut flood_count: u64 = 0;
+        let mut flood_micros: u64 = 0;
+        loop {
+            let (event, fresh) = tokio::select! {
+                biased;
+                Some(e) = fresh_rx.recv() => (e, true),
+                Some(e) = bulk_rx.recv() => (e, false),
+                else => break,
+            };
+            let k = event.kind.as_u16();
+            let id8 = if fresh { event.id.to_hex()[..8].to_string() } else { String::new() };
+            let t = std::time::Instant::now();
+            if (3300..=3311).contains(&k) {
+                handle_community_event(event).await;
+            } else {
+                handle_community_v2_event(event).await;
+            }
+            flood_count += 1;
+            flood_micros += t.elapsed().as_micros() as u64;
+            if fresh {
+                println!(
+                    "[lag-probe] community lane handled kind={k} id={id8} in {:?} ({flood_count} events, {}ms folded so far)",
+                    t.elapsed(),
+                    flood_micros / 1000
+                );
+            } else if flood_count % 500 == 0 {
+                println!(
+                    "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative",
+                    flood_micros / 1000
+                );
+            }
+        }
+    });
+
     let mut notifications = client.notifications();
     while let Some(notification) = notifications.next().await {
         {
@@ -557,18 +628,17 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                         // here too would race it to the dedup ledger for every
                         // wrap. This loop's job is everything else.
                         continue;
-                    } else if (3300..=3311).contains(&k) {
+                    } else if (3300..=3311).contains(&k) || k == 1059 || k == 21059 {
                         // Route Community events by KIND, not by subscription id: an event can arrive on the
                         // live community sub OR on a fetch/sync/reconcile sub, so matching only the live sub
-                        // id would drop the rest. dispatch_event resolves the channel by the event's
-                        // z-pseudonym, and process_incoming dedups by outer-event id, so handling every
-                        // community event the pool surfaces is correct and idempotent.
-                        handle_community_event(*event).await;
-                    } else if k == 1059 || k == 21059 {
-                        // v2 wraps (plane-key authors). DM gift wraps matched the gift sub above;
-                        // any other wrap-kind event tries the v2 route — the dispatcher dedups by
-                        // wrap id and drops NotOurs (e.g. a stray DM copy on another sub) for free.
-                        handle_community_v2_event(*event).await;
+                        // id would drop the rest. dispatch resolves the channel from the event itself and
+                        // dedups by outer id, so forwarding every community event the pool surfaces is
+                        // correct and idempotent. The wall-clock age picks the lane (v2 wraps carry
+                        // untweaked timestamps by CORD-01): realtime-fresh events preempt backfill.
+                        let fresh = vector_core::community::is_realtime_fresh(
+                            event.created_at.as_secs().saturating_mul(1000),
+                        );
+                        let _ = if fresh { fresh_tx.send(*event) } else { bulk_tx.send(*event) };
                     } else if SELFSYNC_SUB_IDS.lock().await.contains(&subscription_id) {
                         handle_self_sync_event(*event).await;
                     }
