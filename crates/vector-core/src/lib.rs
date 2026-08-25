@@ -2583,6 +2583,16 @@ impl VectorCore {
                     }
                     inbound::IncomingEvent::Removed { target_id } => {
                         crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                        // Tombstone FIRST, exactly as the DM delete does. Dropping the row
+                        // alone only hides it until the next full sync re-serves the
+                        // original from a relay: nothing recorded that it was removed, so
+                        // it re-ingests cleanly and a moderator's deletion silently undoes
+                        // itself. The deletion may also arrive BEFORE its target, where
+                        // there is no row to drop and this is the only thing that lands.
+                        crate::state::note_message_deleted(target_id);
+                        if let Err(e) = crate::db::events::add_message_tombstone(target_id) {
+                            crate::log_warn!("[Community delete] tombstone write failed: {e}");
+                        }
                         let _ = crate::db::events::delete_event(target_id).await;
                     }
                     inbound::IncomingEvent::ReactionRemoved { reaction_id, .. } => {
