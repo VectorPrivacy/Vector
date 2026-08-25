@@ -6311,12 +6311,41 @@ pub async fn follow_control<T: Transport + ?Sized>(
                 );
             }
         }
-        // The prune removed exactly what was blocking, so completeness now holds
-        // unless my own grant was the blocker.
-        let stored_complete = stored_complete || (coherent && !seed_only && !unprunable_blocker);
+        // The prune removed exactly what was blocking. My own grant is never pruned,
+        // so if IT was a blocker the veto would still stand — and that turned the
+        // self-protection into the freeze it was meant to survive. Cache the fold
+        // anyway and CARRY MY OWN standing across it instead: a bounded, self-limited
+        // exception that cannot keep anyone ELSE authorized, since rotations are
+        // judged on the ROTATOR's entry and mine only ever speaks for me.
+        let stored_complete = stored_complete || (coherent && !seed_only);
+        let carry_my_grant = coherent && !seed_only && unprunable_blocker;
         if !truncated && !authority.gapped && (stored_complete || seed_only) && newest_roster_at >= stored_at {
-            authority_changed |= stored != authority.roles;
-            crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
+            let mut to_store = authority.roles.clone();
+            if carry_my_grant {
+                if let Some(me) = crate::my_public_key() {
+                    let me_hex = me.to_hex();
+                    if let Some(mine) = stored.grants.iter().find(|g| g.member == me_hex) {
+                        if !to_store.grants.iter().any(|g| g.member == me_hex) {
+                            // The roles it names have to come with it, or the grant
+                            // points at nothing and confers no rank.
+                            for rid in &mine.role_ids {
+                                if !to_store.roles.iter().any(|r| r.role_id == *rid) {
+                                    if let Some(role) = stored.roles.iter().find(|r| r.role_id == *rid) {
+                                        to_store.roles.push(role.clone());
+                                    }
+                                }
+                            }
+                            to_store.grants.push(mine.clone());
+                            crate::log_warn!(
+                                "[v2:control {}] carried my own grant across a fold that no longer serves it — the roster advances without self-demoting",
+                                &cid_hex[..8.min(cid_hex.len())]
+                            );
+                        }
+                    }
+                }
+            }
+            authority_changed |= stored != to_store;
+            crate::db::community::set_community_roles(&cid_hex, &to_store, newest_roster_at)?;
         } else {
             // Loud, because the failure mode is silent and total: the roster is what
             // authorizes every rotation, so a client that can never re-cache it is
@@ -10810,6 +10839,56 @@ mod tests {
         let down = FetchErrors(MemoryRelay::new());
         let view = fetch_authority(&down, &community).await;
         assert!(view.banned.contains(&victim_hex), "a transport error retains the persisted banlist");
+    }
+
+    #[tokio::test]
+    async fn my_own_unservable_grant_does_not_freeze_the_whole_roster() {
+        // Refusing to prune my own grant is right — losing my own standing on a bad
+        // read has no path back. But making that refusal veto the ENTIRE roster turned
+        // the self-protection into the freeze it existed to survive: the cache could
+        // never advance, so admins promoted later stayed invisible and their rotations
+        // were refused. Observed in the field as "pruned 13 floors" immediately
+        // followed by "roster NOT cached".
+        //
+        // So the roster advances, and my own standing is carried across it. That is
+        // bounded: my entry only ever speaks for me, and rotations are judged on the
+        // ROTATOR's entry, so carrying mine can never keep anyone else authorized.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "SelfGrant", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let my_role = crate::simd::hex::bytes_to_hex_32(&[0x6e; 32]);
+
+        // A stored roster granting ME a role the plane will never serve, floored.
+        let mut seeded = crate::community::roles::CommunityRoles::default();
+        seeded.roles.push(admin_role(&my_role, Permissions::BAN));
+        seeded.grants.push(crate::community::roles::MemberGrant {
+            member: owner.keys.public_key().to_hex(),
+            role_ids: vec![my_role.clone()],
+        });
+        crate::db::community::set_community_roles(&cid_hex, &seeded, 500).unwrap();
+        let my_grant_eid = crate::simd::hex::bytes_to_hex_32(
+            &crate::community::v2::derive::grant_locator(community.id(), &owner.keys.public_key().to_bytes()),
+        );
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &my_grant_eid, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
+
+        // The plane moves on with a DIFFERENT admin.
+        let newcomer = Keys::generate();
+        let rid = "d3".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &newcomer.public_key(), vec![rid], 1).await;
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            roster.grants.iter().any(|g| g.member == newcomer.public_key().to_hex()),
+            "the roster MUST advance — my own unservable grant may not hold everyone else hostage",
+        );
+        assert!(
+            roster.grants.iter().any(|g| g.member == owner.keys.public_key().to_hex()),
+            "and my own standing is carried across, never silently demoted by a read that could not see it",
+        );
     }
 
     #[tokio::test]
