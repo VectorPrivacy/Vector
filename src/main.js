@@ -3438,6 +3438,12 @@ async function setupRustListeners() {
         // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
         // admin tags + @everyone reflect it (the open overview re-fetches separately below).
         loadCommunityRoles(communityId);
+        // A ban hides what they already posted, but only in the QUERIES — the painted
+        // timeline and its cache still hold the rows. Drop the cache for this
+        // community's channels and re-open the visible one so it re-reads the filtered
+        // source. Deliberately NOT a JS-side banlist filter: the rule lives in one
+        // place, in SQL, and a second copy here would be the one that goes stale.
+        purgeCommunityMessageCache(communityId);
         renderChatlist();
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
@@ -3462,6 +3468,24 @@ async function setupRustListeners() {
     // A v1 community upgraded to Concord v2: the chat row is re-parented in place (same
     // chat_identifier, so history/unread survive). Refresh its metadata to the v2 identity
     // and drop one "Community upgraded" line into the open timeline. Nothing else moves.
+    /// Drop cached/painted messages for a community so the next read comes from the
+    /// filtered queries.
+    ///
+    /// Called when control state moves (ban, kick, rotation). The ban rule is enforced
+    /// in SQL and nowhere else — re-reading is what makes this correct rather than a
+    /// second implementation that can disagree with the first.
+    async function purgeCommunityMessageCache(communityId) {
+        const channels = arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId);
+        if (!channels.length) return;
+        for (const ch of channels) {
+            eventCache.clearConversation(ch.id);
+            ch.messages = [];
+        }
+        // Only the visible channel needs repainting; the rest reload when opened.
+        const open = channels.find(c => c.id === strOpenChat);
+        if (open) await openChat(open);
+    }
+
     _on('community_migrated', async (evt) => {
         const v1Id = evt.payload?.v1_community_id;
         const v2Id = evt.payload?.v2_community_id;
