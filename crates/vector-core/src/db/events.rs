@@ -2851,6 +2851,36 @@ mod tests {
         assert_eq!(ids, vec!["join_good"], "the banned member's arrival goes with their messages");
     }
 
+    /// A moderator's delete has to outlive the row it removed.
+    ///
+    /// Dropping the events row alone only hides the message until the next full
+    /// sync re-serves the original from a relay: nothing recorded that it was
+    /// removed, so it re-ingests cleanly and the deletion silently undoes itself.
+    /// Observed live — an image Sentinel deleted for NSFW reappeared after a
+    /// cold resync.
+    #[tokio::test]
+    async fn a_moderated_delete_survives_the_message_being_re_ingested() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_delete_resync";
+        let (_, author) = ban_pair();
+        let msg = Message { id: "moderated_evt".into(), content: "nsfw".into(), at: 1_000, npub: Some(author.clone()), ..Default::default() };
+        save_message(chat, &msg).await.unwrap();
+
+        // What the moderation path does on receiving the delete.
+        crate::state::note_message_deleted("moderated_evt");
+        add_message_tombstone("moderated_evt").unwrap();
+        delete_event("moderated_evt").await.unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        assert!(get_events(chat_id, None, 50, 0).await.unwrap().is_empty(), "removed on the spot");
+
+        // The relay re-serves the original on the next sync.
+        assert!(
+            crate::state::was_message_deleted("moderated_evt"),
+            "the refusal outlives the row, so the re-ingest is dropped rather than resurrecting it"
+        );
+    }
+
     /// A DM has no community, so the predicate must not exclude anything.
     #[tokio::test]
     async fn a_dm_is_unaffected_by_the_ban_filter() {
