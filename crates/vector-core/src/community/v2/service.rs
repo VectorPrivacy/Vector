@@ -7925,7 +7925,14 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
             saw_complete_candidate = true;
             saw_nonempty_candidate |= !r.blobs.is_empty();
             saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
-            if let Some(blob) = rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch) {
+            // EVERY blob at my locator, not just the first. A locator is a public
+            // index that proves nothing, so anyone may publish a blob at mine;
+            // taking only the first would let a junk one shadow the real key and
+            // park a client that actually holds it. First that opens wins.
+            let mut mine = rekey::find_my_blobs(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch).peekable();
+            let had_candidate = mine.peek().is_some();
+            let mut opened_one = false;
+            for blob in mine {
                 let opened = match scope {
                     // Base blobs are width-declared forms (CORD-06 §1).
                     RekeyScope::Root => rekey::open_base_blob(signer, &r.rotator, community_id, r.new_epoch, blob).await,
@@ -7933,18 +7940,19 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
                         .await
                         .map(|k| rekey::BaseKeyDelivery { new_root: k, control_pk: None, control_root: None }),
                 };
-                match opened {
-                    Ok(d) => {
-                        winners.push(d);
-                        winner_severed.push(scope.id32() == RekeyScope::Root.id32() && r.severed);
-                    }
-                    // A blob AT my locator that won't open is not an exclusion
-                    // (CORD-06 §2: removal = NO blob across all chunks). It must
-                    // never conclude Removed below — that is exactly how a
-                    // pre-split client turned an unreadable width into a false
-                    // self-removal. Stay and keep recovering instead.
-                    Err(_) => my_blob_unopenable = true,
+                if let Ok(d) = opened {
+                    winners.push(d);
+                    winner_severed.push(scope.id32() == RekeyScope::Root.id32() && r.severed);
+                    opened_one = true;
+                    break;
                 }
+            }
+            // A blob AT my locator that won't open is not an exclusion (CORD-06 §2:
+            // removal = NO blob across all chunks). It must never conclude Removed
+            // below — that is exactly how a pre-split client turned an unreadable
+            // width into a false self-removal. Stay and keep recovering instead.
+            if had_candidate && !opened_one {
+                my_blob_unopenable = true;
             }
         }
     }

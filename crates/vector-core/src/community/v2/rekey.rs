@@ -490,8 +490,23 @@ pub fn find_my_blob<'a>(
     scope: RekeyScope,
     epoch: Epoch,
 ) -> Option<&'a RekeyBlob> {
+    find_my_blobs(blobs, rotator_xonly, my_xonly, scope, epoch).next()
+}
+
+/// EVERY blob at my locator, in order. A locator is a public lookup index that
+/// proves nothing, so anyone can publish a blob at mine; with the union in
+/// [`collect_rotations`] more than one can survive to the open. Taking only the
+/// first would let a junk blob shadow the real key and park an adopter that in
+/// fact holds it — so the caller tries each and adopts on the first that opens.
+pub fn find_my_blobs<'a>(
+    blobs: &'a [RekeyBlob],
+    rotator_xonly: &[u8; 32],
+    my_xonly: &[u8; 32],
+    scope: RekeyScope,
+    epoch: Epoch,
+) -> impl Iterator<Item = &'a RekeyBlob> {
     let want = blob_locator(rotator_xonly, my_xonly, scope, epoch);
-    blobs.iter().find(|b| b.locator == want)
+    blobs.iter().filter(move |b| b.locator == want)
 }
 
 // ── The 3303 event (a v2 stream event) ───────────────────────────────────────
@@ -873,8 +888,19 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
             severed: c.severed,
         });
         entry.severed |= c.severed;
-        if entry.held_chunks.insert(c.chunk.0) {
-            entry.blobs.extend(c.blobs.iter().cloned());
+        // UNION the blobs, even when the index is already held. Treating a second
+        // chunk at a known index as pure idempotent re-delivery is safe only while
+        // re-delivery is byte-identical; when two chunks genuinely differ (a
+        // catch-up extension that re-claimed a slot), dropping the loser silently
+        // deletes its recipients from the union — and a recipient with no blob reads
+        // as REMOVED, which tears their community down. Union can only ever ADD
+        // blobs, so it can turn a false removal into an adoption but never the
+        // reverse. Exact duplicates are dropped so ordinary re-delivery stays free.
+        entry.held_chunks.insert(c.chunk.0);
+        for b in &c.blobs {
+            if !entry.blobs.iter().any(|held| held.locator == b.locator && held.wrapped == b.wrapped) {
+                entry.blobs.push(b.clone());
+            }
         }
     }
     by_key.into_values().collect()
@@ -1267,6 +1293,42 @@ mod tests {
             blobs,
             citation: None,
             severed: false,
+        }
+    }
+
+    #[test]
+    fn a_colliding_chunk_index_must_not_swallow_a_recipients_blob() {
+        // Chunks are correlated by index, and a second chunk claiming an index
+        // already held is treated as idempotent re-delivery — its blobs dropped.
+        // That is safe only while re-delivery is byte-identical. The catch-up path
+        // that extends a rotation computes its starting index from a fetch that can
+        // come back blind, and then re-claims index 1; whichever copy a client sees
+        // first wins, so the original recipients in the loser vanish from the union.
+        // A recipient whose blob vanishes reads as REMOVED — and removal deletes the
+        // community locally. Losing a blob to a bookkeeping collision must never be
+        // able to masquerade as a removal verdict.
+        let rotator = keys(1);
+        let prev = [0x55u8; 32];
+        let mine = RekeyBlob { locator: "aa".repeat(32), wrapped: "mine".into() };
+        let other = RekeyBlob { locator: "bb".repeat(32), wrapped: "other".into() };
+
+        // Two chunks both claiming index 1: the original (carrying my blob) and a
+        // re-claim (carrying someone else's).
+        let original = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![mine.clone()], 1, 1);
+        let reclaim = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![other.clone()], 1, 1);
+
+        for (order, chunks) in [
+            ("original first", vec![original.clone(), reclaim.clone()]),
+            ("reclaim first", vec![reclaim.clone(), original.clone()]),
+        ] {
+            let rotations = collect_rotations(&chunks);
+            assert_eq!(rotations.len(), 1, "{order}: same correlation key");
+            let has_mine = rotations[0].blobs.iter().any(|b| b.locator == mine.locator);
+            assert!(
+                has_mine,
+                "{order}: my blob was dropped by an index collision — that reads as a removal \
+                 and removal deletes the community",
+            );
         }
     }
 
