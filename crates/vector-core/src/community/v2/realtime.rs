@@ -667,7 +667,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
             Ok(follow) if follow.self_removed => {
                 crate::log_warn!("[v2:teardown {}] REKEY EXCLUSION: an authorized rotation left us out", &community_id[..8.min(community_id.len())]);
-                let _ = crate::db::community::delete_community(&community_id);
+                // Retain the epoch keys: they open no future epoch, and dropping them
+                // destroys the ability to self-delete our own past messages. Every other
+                // self-removal trigger already retains; this one silently did not.
+                let _ = crate::db::community::delete_community_retain_keys(&community_id);
                 refresh_subscription(&client).await;
                 handler.on_community_self_removed(&community_id);
                 return;
