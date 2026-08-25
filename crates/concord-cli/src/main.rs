@@ -269,6 +269,52 @@ async fn print_relay(c: &vector_core::community::Community) {
     }
     let cur_base = c.server_root_epoch.0;
 
+    // ── v2 CONTROL plane, per held epoch ───────────────────────────────────────
+    // A Refounding republishes a COMPACTION at the new epoch's control address, and
+    // clients only ever read the current one. If that compaction carried fewer
+    // entities than the plane it replaced, the missing ones are not deleted — they
+    // are still sitting at the PRIOR epoch's address, unread forever. That is
+    // indistinguishable, from the current epoch alone, from a relay having dropped
+    // them. This walks every root we hold and says which is true.
+    if matches!(
+        vector_core::db::community::community_protocol(&c.id).ok().flatten(),
+        Some(vector_core::community::ConcordProtocol::V2)
+    ) {
+        use vector_core::community::v2::{control, derive as v2derive};
+        println!("    v2 CONTROL plane per held epoch (roles/grants by author):");
+        for (pe, root) in &roots {
+            let group = v2derive::control_group_key(root, &c.id, *pe);
+            let q = Query { kinds: vec![1059], authors: vec![group.pk_hex()], limit: Some(500), ..Default::default() };
+            let evs = tx.fetch(&q, &c.relays).await.unwrap_or_default();
+            let mut roles: Vec<String> = Vec::new();
+            let mut grants: Vec<String> = Vec::new();
+            let mut other = 0usize;
+            for ev in &evs {
+                match control::open_control_edition(ev, &group) {
+                    Ok((ed, _)) => {
+                        let row = format!("{}v{}/by{}", &hexpref(&ed.entity_id)[..9], ed.version, &ed.author.to_hex()[..8]);
+                        match ed.vsk.as_str() {
+                            vector_core::community::v2::vsk::ROLE => roles.push(row),
+                            vector_core::community::v2::vsk::GRANT => grants.push(row),
+                            _ => other += 1,
+                        }
+                    }
+                    Err(_) => other += 1,
+                }
+            }
+            println!(
+                "      epoch {}: {} wrap(s) — {} role(s) {} grant(s), {} other/unopenable",
+                pe.0, evs.len(), roles.len(), grants.len(), other
+            );
+            if !roles.is_empty() {
+                println!("         roles:  {}", roles.join("  "));
+            }
+            if !grants.is_empty() {
+                println!("         grants: {}", grants.join("  "));
+            }
+        }
+    }
+
     // BASE re-foundings: a base rekey to epoch e is addressed under the PRIOR root (e-1), so try each held
     // root as a prior. ≥2 distinct delivered roots at one epoch = a re-founding fork (B2).
     println!("    BASE (fork = ≥2 roots at one epoch):");
