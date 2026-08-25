@@ -599,7 +599,8 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
     }
     let banned: Vec<PublicKey> = banned_hex
         .iter()
-        .filter_map(|h| PublicKey::from_hex(h).ok())
+        // The table holds bech32, the legacy blob hex — `parse` takes either.
+        .filter_map(|h| PublicKey::parse(h).ok())
         .collect();
 
     let icon = icon_json
@@ -1812,8 +1813,17 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
         let mut ins = tx
             .prepare("INSERT OR IGNORE INTO community_bans (community_id, npub) VALUES (?1, ?2)")
             .map_err(|e| format!("prepare banlist insert: {e}"))?;
-        for npub in banned_hex {
-            ins.execute(params![community_id, npub])
+        for hex in banned_hex {
+            // Stored BECH32, because that is what `events.npub` holds and the whole
+            // point is comparing the two in SQL. The protocol speaks hex, so the
+            // conversion happens here and in `get_community_banlist`, never in the
+            // query. An unparseable entry is stored verbatim rather than dropped —
+            // it simply matches nothing, exactly as before.
+            let joinable = PublicKey::from_hex(hex)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .unwrap_or_else(|| hex.clone());
+            ins.execute(params![community_id, joinable])
                 .map_err(|e| format!("insert ban: {e}"))?;
         }
     }
@@ -2204,7 +2214,11 @@ pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> 
     let rows = stmt
         .query_map(params![community_id], |r| r.get::<_, String>(0))
         .map_err(|e| format!("get banlist: {e}"))?;
-    let mut out: Vec<String> = rows.flatten().collect();
+    // Back to hex for the protocol; the table holds the bech32 the join needs.
+    let mut out: Vec<String> = rows
+        .flatten()
+        .map(|b| PublicKey::parse(&b).map(|pk| pk.to_hex()).unwrap_or(b))
+        .collect();
     if !out.is_empty() {
         return Ok(out);
     }
@@ -2233,8 +2247,12 @@ pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> 
         let mut ins = tx
             .prepare("INSERT OR IGNORE INTO community_bans (community_id, npub) VALUES (?1, ?2)")
             .map_err(|e| format!("prepare adopt: {e}"))?;
-        for npub in &list {
-            ins.execute(params![community_id, npub]).map_err(|e| format!("adopt ban: {e}"))?;
+        for hex in &list {
+            let joinable = PublicKey::from_hex(hex)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .unwrap_or_else(|| hex.clone());
+            ins.execute(params![community_id, joinable]).map_err(|e| format!("adopt ban: {e}"))?;
         }
     }
     tx.execute("UPDATE communities SET banlist = NULL WHERE community_id = ?1", params![community_id])
@@ -3319,8 +3337,12 @@ mod tests {
             // Usable as-is: an encrypted value would not parse, and SQL could not
             // compare it against `events.npub` to drop a banned author before LIMIT.
             assert!(
-                PublicKey::from_hex(&banned_npub).is_ok(),
+                PublicKey::parse(&banned_npub).is_ok(),
                 "the banlist is queryable plaintext by design, got {banned_npub}"
+            );
+            assert!(
+                banned_npub.starts_with("npub1"),
+                "stored in the form `events.npub` uses, or the join matches nothing"
             );
             let key_len: i64 = conn
                 .query_row(
