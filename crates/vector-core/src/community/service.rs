@@ -3473,7 +3473,7 @@ mod tests {
     struct FailingRelay;
     #[async_trait::async_trait]
     impl Transport for FailingRelay {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, _event: &Event, _relays: &[String]) -> Result<(), String> {
             Err("relay unreachable".to_string())
         }
@@ -3506,7 +3506,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for RekeyFailingRelay {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
             if self.blocks(event) { return Err("rekey relay down".to_string()); }
             self.inner.publish(event, relays).await
@@ -5036,7 +5036,7 @@ mod tests {
         }
         #[async_trait::async_trait]
         impl Transport for ChannelRekeyFails {
-            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
             async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.inner.publish(e, r).await }
             async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
                 if e.kind.as_u16() == event_kind::COMMUNITY_REKEY {
@@ -5093,7 +5093,7 @@ mod tests {
         struct ControlPublishFails { inner: MemoryRelay, fail: std::sync::atomic::AtomicBool }
         #[async_trait::async_trait]
         impl Transport for ControlPublishFails {
-            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
             async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.inner.publish(e, r).await }
             async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
                 if self.fail.load(std::sync::atomic::Ordering::Relaxed) && e.kind.as_u16() == event_kind::COMMUNITY_CONTROL {
@@ -5127,7 +5127,7 @@ mod tests {
         struct ReanchorFetchEmpty { inner: MemoryRelay, drop_control: AtomicBool, base_rekeys: AtomicUsize }
         #[async_trait::async_trait]
         impl Transport for ReanchorFetchEmpty {
-            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
             async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.inner.publish(e, r).await }
             async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
                 if e.kind.as_u16() == event_kind::COMMUNITY_REKEY {
@@ -6827,7 +6827,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for SwapDuringPublishRelay {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
             self.swap_if_armed();
             self.inner.publish(event, relays).await
@@ -7795,7 +7795,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for RekeyCountingRelay {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> { self.count(e); self.inner.publish(e, r).await }
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> { self.count(e); self.inner.publish_durable(e, r).await }
         async fn fetch(&self, q: &Query, r: &[String]) -> Result<Vec<Event>, String> { self.inner.fetch(q, r).await }

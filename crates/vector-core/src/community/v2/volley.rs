@@ -427,7 +427,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
         let fallback_pages: Vec<(usize, Vec<Event>)> = futures_util::stream::iter(missed)
             .map(|(idx, keys, q, relays)| {
                 let t = &transport;
-                async move { (idx, t.fetch_plane(&keys, &q, &relays).await.unwrap_or_default()) }
+                async move { (idx, t.fetch_plane(&keys, &q, &relays).await.map(|p| p.events).unwrap_or_default()) }
             })
             .buffer_unordered(24)
             .collect()
