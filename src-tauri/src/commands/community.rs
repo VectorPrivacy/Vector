@@ -2335,6 +2335,17 @@ pub async fn debug_v2_follow_trace(community_id: String) -> Result<serde_json::V
     }))
 }
 
+/// Repair a v2 community's roster cache when it is pinned holding WRONG data:
+/// resets the cache's provenance so the next control fold may replace it, then
+/// folds. Publishes nothing.
+#[tauri::command]
+pub async fn repair_v2_roster(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore
+        .repair_community_roster(&community_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Explain this client's epoch state and WHY it is or isn't adopting the next base
 /// rotation: runs the real fetch+parse+authority+continuity pipeline and reports the
 /// gate each rotation trips, alongside the local state two clients diverge on.

@@ -1,0 +1,11 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-repair-v2-roster"
+description = "Enables the repair_v2_roster command without any pre-configured scope."
+commands.allow = ["repair_v2_roster"]
+
+[[permission]]
+identifier = "deny-repair-v2-roster"
+description = "Denies the repair_v2_roster command without any pre-configured scope."
+commands.deny = ["repair_v2_roster"]
