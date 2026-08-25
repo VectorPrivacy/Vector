@@ -6329,6 +6329,43 @@ pub async fn follow_control<T: Transport + ?Sized>(
                     }
                 }
             }
+            // Per-entity fate of every roster edition in the window. "Blocked" only
+            // says which stored entity produced no head; this says WHY — whether its
+            // editions were absent, or present and dropped, and by whom they were
+            // authored. Guessing between those three cost a day.
+            {
+                use std::collections::BTreeMap;
+                let mut fate: BTreeMap<String, (u64, u64, String)> = BTreeMap::new();
+                for e in &editions {
+                    if e.vsk != vsk::ROLE && e.vsk != vsk::GRANT {
+                        continue;
+                    }
+                    let eid = crate::simd::hex::bytes_to_hex_32(&e.entity_id);
+                    let slot = fate.entry(eid).or_insert((0, 0, String::new()));
+                    slot.0 += 1;
+                    if e.version > slot.1 {
+                        slot.1 = e.version;
+                        slot.2 = e.author.to_hex()[..8].to_string();
+                    }
+                }
+                let head_now: std::collections::HashSet<&str> =
+                    authority.heads.iter().map(|h| h.entity_hex.as_str()).collect();
+                let rows: Vec<String> = fate
+                    .iter()
+                    .map(|(eid, (n, v, author))| {
+                        format!(
+                            "{}:{}ed/v{}/by{}{}{}",
+                            &eid[..8], n, v, author,
+                            if head_now.contains(eid.as_str()) { "/HEAD" } else { "/dropped" },
+                            floors.get(eid).map(|f| format!("/floor@v{}", f.0)).unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                crate::log_warn!(
+                    "[v2:control {}] roster editions in window: [{}]",
+                    &cid_hex[..8.min(cid_hex.len())], rows.join(" ")
+                );
+            }
             crate::log_warn!(
                 "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} doc_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — stored {}r/{}g, fold offers {}r/{}g from {} edition(s) over {} page(s), blocked by [{}]",
                 &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, fold.gapped, stored_complete, newest_roster_at, stored_at,
