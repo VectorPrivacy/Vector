@@ -1557,6 +1557,167 @@ pub(crate) mod memory {
     }
 }
 
+/// A [`Transport`] that fails on purpose.
+///
+/// `MemoryRelay` always succeeds: no failed fetch, no short page, no reordering,
+/// no relay that serves a different subset than its siblings. Every strand and
+/// fork this codebase has shipped lives in exactly the space it cannot express,
+/// which is a large part of why none of them were caught by a test. This wraps it
+/// and injects the failures a real relay set produces.
+///
+/// Deterministic by construction — the only randomness is a seeded counter, so a
+/// failing scenario reproduces exactly from its seed.
+#[cfg(test)]
+pub(crate) mod adversarial {
+    use super::memory::MemoryRelay;
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    /// What a fetch should do instead of succeeding.
+    #[derive(Clone, Debug)]
+    pub enum Fault {
+        /// Return `Err` — a dead relay, an AUTH gate, a timeout.
+        FailFetch(String),
+        /// Succeed, but serve at most `n` events — the "short page reads as the end
+        /// of the plane" hazard.
+        ShortPage(usize),
+        /// Succeed, but serve nothing at all — a relay silently withholding.
+        Empty,
+    }
+
+    /// Which fetches a rule applies to. Matched against the query, so a plan can
+    /// target one plane (an author) without knowing call order.
+    #[derive(Clone, Debug, Default)]
+    pub struct Match {
+        /// Any of these authors appears in the query.
+        pub author: Option<String>,
+        /// Only the Nth matching call (1-based); `None` = every one.
+        pub nth: Option<u64>,
+        /// Only from this call onward (1-based).
+        pub from_nth: Option<u64>,
+    }
+
+    impl Match {
+        pub fn author(hex: &str) -> Self {
+            Match { author: Some(hex.to_string()), ..Default::default() }
+        }
+        pub fn any() -> Self {
+            Match::default()
+        }
+        pub fn nth(mut self, n: u64) -> Self {
+            self.nth = Some(n);
+            self
+        }
+        pub fn from_nth(mut self, n: u64) -> Self {
+            self.from_nth = Some(n);
+            self
+        }
+    }
+
+    struct Rule {
+        m: Match,
+        fault: Fault,
+        hits: AtomicU64,
+    }
+
+    pub struct AdversarialRelay {
+        inner: MemoryRelay,
+        rules: Mutex<Vec<Rule>>,
+        /// Every fetch, whether or not a rule matched — the round-trip counter a
+        /// scale test asserts on ("~2 per hop, not ~97").
+        fetches: AtomicU64,
+    }
+
+    impl AdversarialRelay {
+        pub fn new() -> Self {
+            AdversarialRelay { inner: MemoryRelay::new(), rules: Mutex::new(Vec::new()), fetches: AtomicU64::new(0) }
+        }
+
+        /// The underlying honest relay — publish fixtures through this so a fault
+        /// plan governs only what the client can READ back.
+        pub fn relay(&self) -> &MemoryRelay {
+            &self.inner
+        }
+
+        pub fn on(&self, m: Match, fault: Fault) -> &Self {
+            self.rules.lock().unwrap_or_else(|e| e.into_inner()).push(Rule { m, fault, hits: AtomicU64::new(0) });
+            self
+        }
+
+        /// Drop every rule — "the faults cease", the precondition of the
+        /// convergence property every scenario asserts.
+        pub fn heal(&self) {
+            self.rules.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+
+        pub fn fetch_count(&self) -> u64 {
+            self.fetches.load(Ordering::Relaxed)
+        }
+
+        pub fn reset_fetch_count(&self) {
+            self.fetches.store(0, Ordering::Relaxed);
+        }
+
+        fn verdict(&self, query: &Query) -> Option<Fault> {
+            let rules = self.rules.lock().unwrap_or_else(|e| e.into_inner());
+            for r in rules.iter() {
+                if let Some(a) = &r.m.author {
+                    if !query.authors.iter().any(|q| q == a) {
+                        continue;
+                    }
+                }
+                let n = r.hits.fetch_add(1, Ordering::Relaxed) + 1;
+                if r.m.nth.is_some_and(|want| want != n) {
+                    continue;
+                }
+                if r.m.from_nth.is_some_and(|first| n < first) {
+                    continue;
+                }
+                return Some(r.fault.clone());
+            }
+            None
+        }
+
+        async fn governed(&self, query: &Query, relays: &[String], plane: Option<&Keys>) -> Result<Vec<Event>, String> {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
+            match self.verdict(query) {
+                Some(Fault::FailFetch(why)) => return Err(why),
+                Some(Fault::Empty) => return Ok(Vec::new()),
+                Some(Fault::ShortPage(n)) => {
+                    let mut out = match plane {
+                        Some(p) => self.inner.fetch_plane(p, query, relays).await?,
+                        None => self.inner.fetch(query, relays).await?,
+                    };
+                    out.truncate(n);
+                    return Ok(out);
+                }
+                None => {}
+            }
+            match plane {
+                Some(p) => self.inner.fetch_plane(p, query, relays).await,
+                None => self.inner.fetch(query, relays).await,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for AdversarialRelay {
+        async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            self.inner.publish(event, relays).await
+        }
+        async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            self.inner.publish_durable(event, relays).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.governed(query, relays, None).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.governed(query, relays, Some(plane)).await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

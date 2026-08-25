@@ -7681,6 +7681,33 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                         if let Err(e) = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, next.0, &new_key) {
                             crate::log_warn!("v2: base epoch-key archive failed (this epoch's history may not read back after the next rotation): {e}");
                         }
+                        // CHECKPOINT THE HOP. A client back from a long absence walks
+                        // many epochs in one pass, and the row used to be written only
+                        // after the whole loop — so a fetch failure on the last hop
+                        // discarded every hop already taken. The next attempt started
+                        // from scratch, cost the same again, and on a flaky link could
+                        // never converge at all. Banking here makes the walk resumable:
+                        // progress is monotonic, and an interrupted catch-up picks up
+                        // where it stopped.
+                        //
+                        // The FULL row, never just root+epoch: `control_pk`/
+                        // `control_root` roll with the root, so a narrow write would
+                        // leave the control pair an epoch behind and fold the control
+                        // plane at a dead address. Archive first, then the head — a
+                        // stray archive is harmless, a missing one is permanent.
+                        //
+                        // A leave/delete racing the walk must not be resurrected by an
+                        // upsert, so re-check the row still exists before each write.
+                        match crate::db::community::community_protocol(community.id()) {
+                            Ok(Some(_)) => {
+                                if let Err(e) = crate::db::community::save_community_v2(&cur) {
+                                    crate::log_warn!("v2: hop checkpoint failed at epoch {} (the walk will redo it): {e}", next.0);
+                                }
+                            }
+                            // Gone mid-walk: stop rather than resurrect it.
+                            Ok(None) => return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged }),
+                            Err(e) => crate::log_warn!("v2: hop checkpoint skipped at epoch {}: {e}", next.0),
+                        }
                         advanced = true;
                         changed = true;
                     }
@@ -11621,6 +11648,61 @@ mod tests {
         let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
         assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_catch_up_interrupted_mid_walk_keeps_the_hops_it_already_took() {
+        // A client back from a week offline walks many epochs in one pass. Today the
+        // community row is written ONCE, after the loop, so a fetch failure on the
+        // last hop discards every hop already walked — the next attempt starts from
+        // zero, costs the same again, and on a flaky link may never converge at all.
+        // Progress must be banked per hop.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        // The bed supplies isolated per-account DBs; the adversarial relay replaces
+        // its transport so a fault plan governs what the client can read back.
+        let relay = AdversarialRelay::new();
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "DeepCatchUp", bed.relays.clone(), None).await.unwrap();
+
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(relay.relay(), &bundle_json, None).await.unwrap();
+        let _ = follow_control(relay.relay(), &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // Owner rotates three times while we are away. Owner rotations need no roster.
+        bed.swap_to(&owner);
+        let mut cur = community.clone();
+        let roots = [[0xA1u8; 32], [0xA2; 32], [0xA3; 32]];
+        let recipients = [owner.keys.public_key(), me.keys.public_key()];
+        for (i, root) in roots.iter().enumerate() {
+            publish_base_rotation(relay.relay(), &cur, &owner.keys, &recipients, root, &cur.community_root).await;
+            cur.community_root = *root;
+            cur.root_epoch = Epoch(i as u64 + 1);
+        }
+
+        // Come back, but the plane for the LAST hop is unreachable.
+        bed.swap_to(&me);
+        let third_hop = base_rekey_group_key(&roots[1], joined.id(), Epoch(3));
+        relay.on(Match::author(&third_hop.pk_hex()), Fault::FailFetch("relay dropped".into()));
+
+        let _ = follow_rekeys(&relay, &joined, &crate::db::current_session()).await;
+
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert!(
+            after.root_epoch.0 >= 2,
+            "hops 1 and 2 succeeded and MUST be banked; an interrupted walk that reverts to epoch {} \
+             restarts from scratch every attempt and may never converge on a flaky link",
+            after.root_epoch.0,
+        );
+
+        // Faults cease: the walk resumes from where it banked and reaches the head.
+        relay.heal();
+        let _ = follow_rekeys(&relay, &after, &crate::db::current_session()).await;
+        let healed = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(healed.root_epoch, Epoch(3), "once faults cease the walk converges on the head");
     }
 
     #[tokio::test(flavor = "multi_thread")]
