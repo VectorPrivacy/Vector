@@ -3596,6 +3596,11 @@ async function setupRustListeners() {
         // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
         // admin tags + @everyone reflect it (the open overview re-fetches separately below).
         loadCommunityRoles(communityId);
+        // An open moderation console is a live view of who is in the room. A ban, kick
+        // or rotation changes exactly that, so it must not keep offering rows the
+        // network has already removed — an operator would tick one and act on a roster
+        // that no longer exists.
+        modNoteControlChange(communityId);
         renderChatlist();
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
@@ -4366,6 +4371,11 @@ async function setupRustListeners() {
         // Early-unlock an optimistic "Joining…" row the moment a message streams in (proves
         // read access) — the other release path is the control-fold/sync resolving in acceptCommunityInvite.
         if (chat._joining) clearCommunityJoining(chat.metadata?.custom_fields?.community_id);
+
+        // An open moderation console is looking at a roster that was read when it
+        // opened. A raid arriving after that was invisible in the one tool meant to
+        // remove it, so let arrivals refresh it (debounced inside).
+        modNoteActivity(chat.metadata?.custom_fields?.community_id);
 
         // Get the new message
         const newMessage = evt.payload.message;

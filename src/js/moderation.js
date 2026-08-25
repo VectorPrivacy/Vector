@@ -139,11 +139,94 @@ function modShowTab(which) {
     if (!members && window.openPolicyDesigner) window.openPolicyDesigner(modState.communityId);
 }
 
+/// The console is opened DURING a raid, and its intel was a one-shot read: the
+/// panel showed the roster from the moment it opened, so accounts that walked in
+/// seconds later were invisible in the one tool meant to remove them.
+///
+/// Driven by arrivals, not a clock. Re-reading on a timer would re-run
+/// `policy_console_report` — which judges every member and clusters the message
+/// corpus — on a quiet community forever; a raid announces itself, so refresh
+/// when it does. Debounced, because a wave lands as a burst and each message
+/// would otherwise ask for its own report.
+let modRefreshPending = null;
+let modRefreshedAt = 0;
+
+/// Coalesce a burst, then leave a floor between reports. Sustained spam is the
+/// case that has to stay cheap: `policy_console_report` judges every member and
+/// clusters the corpus, so a flood must not be able to ask for one per message.
+const MOD_REFRESH_COALESCE_MS = 1500;
+const MOD_REFRESH_FLOOR_MS = 6000;
+
+function modStopRefresh() {
+    if (modRefreshPending) {
+        clearTimeout(modRefreshPending);
+        modRefreshPending = null;
+    }
+}
+
+/// A message landed in a community. Refresh the console if it is the one open.
+///
+/// A THROTTLE, not a debounce: an arrival while one is already scheduled is
+/// dropped rather than pushing the deadline out. Resetting per message is what
+/// would let an unrelenting flood — exactly when the console is needed — starve
+/// the refresh forever.
+function modNoteActivity(communityId) {
+    if (!communityId || modState.communityId !== communityId) return;
+    if (modRefreshPending) return; // already coalescing this burst
+    const since = Date.now() - modRefreshedAt;
+    const wait = Math.max(MOD_REFRESH_COALESCE_MS, MOD_REFRESH_FLOOR_MS - since);
+    modRefreshPending = setTimeout(() => {
+        modRefreshPending = null;
+        modRefreshedAt = Date.now();
+        modRefresh(communityId);
+    }, wait);
+}
+
+/// A rotation or control change landed — the roster it implies is authoritative.
+///
+/// Separate from `modNoteActivity` on purpose: message bursts are throttled because
+/// judging a corpus is expensive and arrives constantly, whereas an epoch moves
+/// rarely and changes WHO IS IN THE ROOM. A kicked or banned member lingering in the
+/// selector is worse than a slow refresh — an operator would tick a row that no
+/// longer exists and act on a roster the network has already replaced.
+function modNoteControlChange(communityId) {
+    if (!communityId || modState.communityId !== communityId) return;
+    modStopRefresh();
+    modRefresh(communityId);
+}
+
+async function modRefresh(communityId) {
+    const print = (intel) => JSON.stringify((intel?.report?.members || []).map(m => [m.npub, m.verdict]).sort());
+    // A close, a swap, or a rotation in flight — nothing to repaint onto.
+    if (modState.communityId !== communityId || modState.busy) return;
+    let intel;
+    try {
+        intel = await invoke('get_moderation_intel', { communityId });
+    } catch (_) {
+        return; // a blip must not blank the panel an operator is working in
+    }
+    if (modState.communityId !== communityId || modState.busy) return;
+    if (print(intel) === print(modState.intel)) return;
+    // NEW members default to their verdict; everyone the operator has already
+    // decided on keeps the tick they were given — a refresh must never move a
+    // tick mid-triage.
+    const decided = modState.keep;
+    const seen = new Set((modState.intel?.report?.members || []).map(m => m.npub));
+    modState.intel = intel;
+    modState.keep = new Set(
+        intel.report.members
+            .filter(m => (seen.has(m.npub) ? decided.has(m.npub) : m.verdict !== 'suspect'))
+            .map(m => m.npub)
+    );
+    modApplyIntel();
+}
+
 function closeModerationPanel() {
     if (domModOverlay.classList.contains('closing')) return;
     if (modState.busy) return;
     document.removeEventListener('keydown', modEscape);
     popBack('mod-overlay');
+    modStopRefresh();
     modState.communityId = null;
     domModOverlay.classList.add('closing');
     domModOverlay._closeTimer = setTimeout(() => {
@@ -512,14 +595,33 @@ domModBanRotate.onclick = async () => {
     modSetBusy(true, `Banning ${cut.length}…`);
     try {
         await invoke('ban_community_members', { communityId: modState.communityId, npubs: cut });
-        showToast(`Banned ${cut.length}.`);
-        modSetBusy(false);
-        await modReload();
-        refreshCommunityMemberCount(modState.communityId, true);
     } catch (err) {
         modSetBusy(false);
         await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
+        return;
     }
+    // The ban lands, then the keys move. Banning ALONE stops them posting and
+    // leaves them holding the current key — they read everything until an epoch
+    // they are not vended arrives. This button promises both, so it does both,
+    // and a rotation that fails says so rather than reporting the ban as the
+    // whole job.
+    try {
+        modSetBusy(true, 'Rotating keys…');
+        const retain = [...modState.keep];
+        await invoke('refound_community', { communityId: modState.communityId, retain });
+        showToast(`Banned ${cut.length} and rotated.`);
+    } catch (err) {
+        modSetBusy(false);
+        await popupConfirm(
+            'Banned, but the keys did NOT rotate',
+            `The ${cut.length} account${cut.length === 1 ? ' is' : 's are'} banned and cannot post. They still hold the current key and can READ until a rotation lands. Use <b>Rotate keys</b> to finish.<br><br>` + escapeHtml(String(err)),
+            true, '', 'vector_warning.svg');
+        await modReload();
+        return;
+    }
+    modSetBusy(false);
+    await modReload();
+    refreshCommunityMemberCount(modState.communityId, true);
 };
 
 /// Member-supplied text (an invite label) never reaches innerHTML unescaped.
