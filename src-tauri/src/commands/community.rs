@@ -3325,8 +3325,11 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // exactly the "dead until it all arrives at once" window. Both calls
         // are idempotent refreshes.
         if let Some(client) = vector_core::state::nostr_client() {
-            vector_core::community::realtime::refresh_subscription(&client).await;
-            vector_core::community::v2::realtime::refresh_subscription(&client).await;
+            vector_core::community::realtime::force_refresh_subscription(&client).await;
+            // FORCE: an unchanged author set makes the ordinary refresh a no-op, which
+            // is precisely the boot case — so the sub the sweep just knocked out would
+            // never be rebuilt.
+            vector_core::community::v2::realtime::force_refresh_subscription(&client).await;
             println!("[Boot] live subs re-asserted after sweep");
             crate::services::subscription_handler::reassert_dm_sub().await;
         }

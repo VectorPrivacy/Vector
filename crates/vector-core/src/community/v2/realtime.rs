@@ -245,6 +245,34 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
 /// Refresh the v2 subscription for the held communities: register
 /// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide,
 /// mirroring v1). Idempotent on an unchanged author-set.
+/// Re-subscribe unconditionally, even if the author set is unchanged.
+///
+/// `refresh_subscription` short-circuits when the set has not moved, on the
+/// assumption that the pool re-applies live subs across reconnects. That holds for
+/// a relay that DISCONNECTS. It does not hold for one that silently drops a REQ
+/// under load — the boot sweep floods every relay for ~50s, and a relay that sheds
+/// our subscription there never reconnects, so nothing re-applies it while our own
+/// state still says it is live. The result is a client that looks subscribed and
+/// hears nothing until the author set happens to change.
+///
+/// So the post-sweep re-assert forgets the ids first: the next refresh cannot take
+/// the fast path and genuinely re-subscribes.
+pub async fn force_refresh_subscription(client: &Client) {
+    {
+        let mut sub_guard = V2_SUB_ID.lock().await;
+        if let Some(old) = sub_guard.take() {
+            let _ = client.unsubscribe(&old).await;
+        }
+        let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
+        if let Some(old) = pw.take() {
+            let _ = client.unsubscribe(&old).await;
+        }
+        // Clearing the remembered set too, so the equality check cannot match.
+        V2_SUB_SET.lock().await.clear();
+    }
+    refresh_subscription(client).await;
+}
+
 pub async fn refresh_subscription(client: &Client) {
     // Phase 1, LOCK-FREE: make sure the community relays are added + connected —
     // the slow part (a connect wait of up to ~6s). Holding the sub locks across
