@@ -3710,7 +3710,11 @@ impl VectorCore {
     /// One synchronous v2 follow pass — rekeys first (a base adopt moves the
     /// control address), then a control refold on the FRESH state, the same order
     /// the live follow worker runs. Returns non-fatal warnings.
-    async fn v2_inline_follow(id: &crate::community::CommunityId) -> Vec<String> {
+    /// Walk one community's rekeys + control fold NOW, serialized against the live
+    /// follow worker by the per-community lock. Public so boot can converge a community
+    /// the probe saw move BEFORE paging its content — content read at a superseded
+    /// epoch is wasted work, and may not open at all.
+    pub async fn v2_inline_follow(id: &crate::community::CommunityId) -> Vec<String> {
         crate::db::scoped(async move {
             use crate::community::transport::LiveTransport;
             let session = crate::db::current_session();

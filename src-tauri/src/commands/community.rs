@@ -2862,7 +2862,13 @@ async fn run_control_probe() {
     let dirty_count = dirty.len();
     {
         let mut guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = (now, dirty);
+        // A "clean" verdict is an ABSENCE verdict, and this read is Quorum: a relay
+        // that did not answer may be the one holding the rotation. Publishing clean off
+        // a partial probe skips the whole chain and parks the client on a dead epoch
+        // for the boot. Publish only under full coverage; otherwise leave the safe
+        // default (no usable probe → every community folds), which costs one boot of
+        // full chains instead of one boot of silent staleness.
+        *guard = if full_coverage { (now, dirty) } else { (0, Default::default()) };
     }
     // Advance the cursor ONLY on full coverage: a partial probe re-covers next
     // boot, so an edition on a relay that was down is never skipped forever.
@@ -3206,6 +3212,41 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // breaker bound the concurrent load.
         const BOOT_SYNC_WINDOW: usize = 6;
         use futures_util::stream::StreamExt;
+
+        // Converge the communities that actually MOVED before paging their content.
+        //
+        // Rotations are rare, so this must cost nothing on an ordinary boot: the probe
+        // above already answered "did anything land?" in one batched read, and a clean
+        // verdict means the follow is redundant — those channels sweep immediately, at
+        // exactly today's speed. For a community that DID move, content fetched first
+        // is wasted twice over: it pages a plane about to be superseded, and the
+        // messages may not even open at the epoch we still hold. Converging first makes
+        // that fetch both cheaper and correct.
+        //
+        // Per-community, never a global barrier — nobody waits on someone else's
+        // rotation.
+        let moved: Vec<vector_core::community::CommunityId> = epoch_before
+            .keys()
+            .filter_map(|k| <[u8; 32]>::try_from(k.as_slice()).ok())
+            .map(vector_core::community::CommunityId)
+            .filter(|id| !community_probe_clean(&vector_core::simd::hex::bytes_to_hex_32(&id.0)))
+            .collect();
+        if !moved.is_empty() {
+            let t = std::time::Instant::now();
+            let n = moved.len();
+            futures_util::stream::iter(moved)
+                .map(|id| async move {
+                    if vector_core::db::session_stopped() {
+                        return;
+                    }
+                    let _ = vector_core::VectorCore::v2_inline_follow(&id).await;
+                })
+                .buffer_unordered(BOOT_SYNC_WINDOW)
+                .collect::<Vec<()>>()
+                .await;
+            println!("[Boot] converged {} community(ies) before sweeping in {:?}", n, t.elapsed());
+        }
+
         let channel_count = channels.len();
         futures_util::stream::iter(channels)
             .map(|cid| async move {
