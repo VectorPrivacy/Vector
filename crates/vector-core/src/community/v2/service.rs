@@ -11688,6 +11688,81 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_deep_catch_up_never_loses_ground_and_lands_on_the_head() {
+        // The scenario this program exists for: a member returns after a community
+        // rotated hard while they were away, on a link that keeps dropping.
+        //
+        // This asserts MONOTONICITY and CONVERGENCE — the epoch never moves
+        // backward across passes, and the client ends exactly on the head, not one
+        // short and not overshooting. Retention of a partial walk is a different
+        // property with its own test (see the interrupted-mid-walk case, which fails
+        // without per-hop banking); this one would still pass without banking, and
+        // is not claiming otherwise.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        const HOPS: u64 = 12;
+
+        let relay = AdversarialRelay::new();
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "DeepStorm", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(relay.relay(), &bundle_json, None).await.unwrap();
+        let _ = follow_control(relay.relay(), &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The community rotates HOPS times while we are offline. Owner-signed, so
+        // authority is never the variable under test here — reachability is.
+        bed.swap_to(&owner);
+        let recipients = [owner.keys.public_key(), me.keys.public_key()];
+        let mut cur = community.clone();
+        let mut planes: Vec<String> = Vec::new();
+        for i in 1..=HOPS {
+            let root = [(0x40 + i) as u8; 32];
+            planes.push(base_rekey_group_key(&cur.community_root, cur.id(), Epoch(i)).pk_hex());
+            publish_base_rotation(relay.relay(), &cur, &owner.keys, &recipients, &root, &cur.community_root).await;
+            cur.community_root = root;
+            cur.root_epoch = Epoch(i);
+        }
+
+        // Come back into a storm. The failures are placed MID-WALK on purpose: each
+        // pass gets several hops in before dying, so a walk that does not bank as it
+        // goes loses a batch of work every time and can never get past the first
+        // barrier. Failing only the first ask of each barrier means the link is
+        // genuinely recovering, so the only question is whether progress survives.
+        bed.swap_to(&me);
+        for barrier in [5usize, 9] {
+            relay.on(Match::author(&planes[barrier - 1]).nth(1), Fault::FailFetch("flaky link".into()));
+        }
+
+        let session = crate::db::current_session();
+        let mut last = 0u64;
+        // Bounded retries — the point is that each pass strictly advances, so a
+        // finite number of them suffices however unlucky the link is.
+        for pass in 0..(HOPS * 3) {
+            let held = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+            let now = held.root_epoch.0;
+            assert!(
+                now >= last,
+                "pass {pass}: epoch went BACKWARD ({last} -> {now}); a catch-up must never lose ground",
+            );
+            last = now;
+            if now == HOPS {
+                break;
+            }
+            let _ = follow_rekeys(&relay, &held, &session).await;
+        }
+
+        let healed = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            healed.root_epoch, Epoch(HOPS),
+            "a deep backlog on a failing link must still converge on the head; stuck at {}",
+            healed.root_epoch.0,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_missing_chunk_does_not_block_adopting_the_key_i_already_hold() {
         // Completeness gates ADOPTION today, not just removal. A 1,000-member
         // rotation spans thirteen chunks, so one unreachable chunk parks every
