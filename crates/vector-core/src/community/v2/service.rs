@@ -6368,9 +6368,28 @@ pub async fn follow_control<T: Transport + ?Sized>(
             // authorizes every rotation, so a client that can never re-cache it is
             // permanently deaf to that admin's re-foundings — and the only symptom is
             // an epoch that never advances.
+            // Name the BLOCKERS and what the fold actually found. Without these the
+            // warning says a decision was made but not on what evidence, which is how
+            // a wrong roster stays indistinguishable from a cautious one.
+            let mut blockers: Vec<String> = Vec::new();
+            for r in &stored.roles {
+                if floors.contains_key(&r.role_id) && !head_ents.contains(r.role_id.as_str()) {
+                    blockers.push(format!("role:{}", &r.role_id[..8.min(r.role_id.len())]));
+                }
+            }
+            for g in &stored.grants {
+                if let Some(m) = crate::simd::hex::hex_to_bytes_32_checked(&g.member) {
+                    let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                    if floors.contains_key(&eid) && !head_ents.contains(eid.as_str()) {
+                        blockers.push(format!("grant:{}", &g.member[..8.min(g.member.len())]));
+                    }
+                }
+            }
             crate::log_warn!(
-                "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} doc_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — this client keeps its old roster and will refuse rotations it cannot authorize",
-                &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, fold.gapped, stored_complete, newest_roster_at, stored_at
+                "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} doc_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — stored {}r/{}g, fold offers {}r/{}g, blocked by [{}]",
+                &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, fold.gapped, stored_complete, newest_roster_at, stored_at,
+                stored.roles.len(), stored.grants.len(), authority.roles.roles.len(), authority.roles.grants.len(),
+                blockers.join(", ")
             );
         }
         // Cache the folded invite Registry so Public/Private stays a sync LOCAL read

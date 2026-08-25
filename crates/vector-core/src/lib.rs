@@ -4403,6 +4403,47 @@ impl VectorCore {
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
     }
 
+    /// Repair a v2 community's roster cache: keep what is stored, but reset its
+    /// PROVENANCE to zero so the next control fold is allowed to replace it.
+    ///
+    /// The completeness guard retains the cached roster whenever a stored entity is
+    /// floored but folds no head — protection against a relay quietly stripping
+    /// admins. If the cache itself is wrong, that same guard pins the wrong data in
+    /// place: the fold can see the real roster and still be refused. Zeroing the
+    /// provenance marks the cache a seed — a guess, not evidence — which the fold may
+    /// overwrite. It publishes nothing and touches no key material; worst case the
+    /// next fold writes what it can see, which is what a fresh join would get.
+    pub async fn repair_community_roster(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::CommunityId;
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        if crate::db::community::load_community_v2(&cid).map_err(VectorError::Other)?.is_none() {
+            return Err(VectorError::Other("not a held Concord v2 community".into()));
+        }
+        let before = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let before_at = crate::db::community::get_community_roles_at(community_id).map_err(VectorError::Other)?;
+        crate::db::community::set_community_roles(community_id, &before, 0).map_err(VectorError::Other)?;
+        // Fold immediately so the repair is one step, not two.
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("community vanished mid-repair".into()))?;
+        let follow = crate::community::v2::service::follow_control(&transport, &community).await;
+        let after = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        Ok(serde_json::json!({
+            "provenance_before": before_at,
+            "provenance_after": crate::db::community::get_community_roles_at(community_id).unwrap_or(0),
+            "roles_before": before.roles.len(),
+            "grants_before": before.grants.len(),
+            "roles_after": after.roles.len(),
+            "grants_after": after.grants.len(),
+            "fold_error": follow.as_ref().err().cloned(),
+            "repaired": after.grants.len() > before.grants.len(),
+        }))
+    }
+
     /// Explain this account's epoch state for a v2 community: what it holds, what
     /// the next-epoch rekey plane offers, and why each rotation there was or was not
     /// adopted.
