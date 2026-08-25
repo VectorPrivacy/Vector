@@ -3645,8 +3645,10 @@ async function setupRustListeners() {
             ch.messages = [];
         }
         // Only the visible channel needs repainting; the rest reload when opened.
+        // `openChat` takes the chat ID, not the chat — passing the object throws on
+        // `contact.startsWith` and leaves the room blank and unscrollable.
         const open = channels.find(c => c.id === strOpenChat);
-        if (open) await openChat(open);
+        if (open) await openChat(open.id);
     }
 
     _on('community_migrated', async (evt) => {
