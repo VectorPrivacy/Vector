@@ -750,6 +750,11 @@ pub fn get_pivx_payments_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
 }
 
 /// Get system events (member joined/left) for a chat.
+///
+/// Join/leave lines carry their member in `npub`, so a banned member's arrival is
+/// dropped by the same rule that hides what they said. These have their OWN query —
+/// the chat page never sees them — so filtering the message page alone left a wall of
+/// "has joined" from accounts the client otherwise refuses to render.
 pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEvent>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let chat_id: i64 = conn.query_row(
@@ -758,13 +763,14 @@ pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
     ).map_err(|_| "Chat not found")?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+        &format!("SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
          created_at, received_at, mine, pending, failed, wrapper_event_id, npub \
-         FROM events WHERE chat_id = ?1 AND kind = ?2 ORDER BY created_at ASC, received_at ASC"
+         FROM events WHERE chat_id = ?1 AND kind = ?2{} ORDER BY created_at ASC, received_at ASC",
+         ban_filter_sql(3))
     ).map_err(|e| format!("Failed to prepare: {}", e))?;
 
     let rows = stmt.query_map(
-        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32],
+        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32, community_of_chat(&conn, chat_id)],
         |row| {
             let tags_json: String = row.get(5)?;
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -2667,18 +2673,14 @@ mod tests {
         link_channel_to_community(chat, "comm_join");
         let (raider_hex, raider) = ban_pair();
 
-        let chat_id = crate::db::id_cache::get_or_create_chat_id(chat).unwrap();
-        let join = crate::stored_event::StoredEventBuilder::new()
-            .id("joined_evt")
-            .kind(event_kind::APPLICATION_SPECIFIC)
-            .chat_id(chat_id)
-            .npub(Some(raider.clone()))
-            .content("joined")
-            .created_at(4_000)
-            .build();
-        save_event(&join).await.unwrap();
+        save_system_event_at("joined_evt", chat, SystemEventType::MemberJoined, &raider, None, 4_000, None, None)
+            .await
+            .unwrap();
         let msg = Message { id: "spam_after_join".into(), content: "buy".into(), at: 5_000, npub: Some(raider.clone()), ..Default::default() };
         save_message(chat, &msg).await.unwrap();
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        // Present BEFORE the ban, or the assertions below prove nothing.
+        assert_eq!(get_events(chat_id, None, 50, 0).await.unwrap().len(), 2, "both rows are on record first");
 
         crate::db::community::set_community_banlist("comm_join", &[raider_hex], 1).unwrap();
 
@@ -2714,6 +2716,31 @@ mod tests {
         );
         let all = unread_counts().await.unwrap();
         assert_eq!(all.get(chat).copied().unwrap_or(0), 1, "and the all-chats sweep agrees");
+    }
+
+    /// Join/leave lines have their OWN query — the chat page never sees them — so
+    /// filtering the message page alone left a wall of "has joined" from accounts
+    /// whose every message the client already refused to render.
+    #[tokio::test]
+    async fn a_banned_members_join_line_is_dropped_from_the_system_feed() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_sysfeed";
+        link_channel_to_community(chat, "comm_sysfeed");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+
+        for (id, who) in [("join_good", &good), ("join_raider", &raider)] {
+            save_system_event_at(id, chat, SystemEventType::MemberJoined, who, None, 1_000, None, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(get_system_events_for_chat(chat).unwrap().len(), 2, "both arrivals are on record");
+
+        crate::db::community::set_community_banlist("comm_sysfeed", &[raider_hex], 1).unwrap();
+
+        let feed = get_system_events_for_chat(chat).unwrap();
+        let ids: Vec<&str> = feed.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["join_good"], "the banned member's arrival goes with their messages");
     }
 
     /// A DM has no community, so the predicate must not exclude anything.
