@@ -6455,7 +6455,13 @@ pub async fn follow_control<T: Transport + ?Sized>(
                             } else {
                                 AUTHORITY_REFUSALS
                                     .with(|c| c.borrow().get(eid.as_str()).copied())
-                                    .map(|r| format!("/DROPPED({r})"))
+                                    .map(|r| {
+                                        let extra = MISSING_ROLE_REFS
+                                            .with(|m| m.borrow().get(eid.as_str()).cloned())
+                                            .map(|ids| format!(" wants:{ids}"))
+                                            .unwrap_or_default();
+                                        format!("/DROPPED({r}{extra})")
+                                    })
                                     .unwrap_or_else(|| "/dropped(no candidate survived the fold)".into())
                             },
                             floors.get(eid).map(|f| format!("/floor@v{}", f.0)).unwrap_or_default(),
@@ -7067,6 +7073,9 @@ fn citation_ok_in_fold(
 /// authorized roster plus the per-entity heads of the SELECTED editions (the floor
 /// advances only to authorized heads — an unauthorized forgery never poisons it).
 thread_local! {
+    /// For a grant refused on a missing role reference: which role ids were absent.
+    static MISSING_ROLE_REFS: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
     /// Refusal reasons from the most recent authority fold on this thread — read by
     /// the roster diagnostic. Diagnostic only; nothing branches on it.
     static AUTHORITY_REFUSALS: std::cell::RefCell<std::collections::BTreeMap<String, &'static str>> =
@@ -7162,6 +7171,7 @@ fn select_authorized(
         }
         for cands in grant_cands.values() {
             for c in cands {
+                let c2 = c;
                 let Some(grant) = &c.grant else { continue };
                 let ah = c.author.to_hex();
                 let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
@@ -7177,7 +7187,21 @@ fn select_authorized(
                 // accepted roster) AND the member — the escalation defense (CORD-04 §2).
                 let positions: Option<Vec<u32>> = grant.role_ids.iter().map(|rid| accepted.role(rid).map(|r| r.position)).collect();
                 let Some(positions) = positions else {
-                    note(&mut why, "grant: references a role not in the accepted roster");
+                    // Record WHICH role is missing — a grant refused for pointing at
+                    // an unaccepted role is the head of a dependency chain, and the
+                    // chain is unreadable without naming its next link.
+                    if let Some(m) = why.as_mut() {
+                        let missing: Vec<String> = grant
+                            .role_ids
+                            .iter()
+                            .filter(|rid| accepted.role(rid).is_none())
+                            .map(|rid| rid[..8.min(rid.len())].to_string())
+                            .collect();
+                        MISSING_ROLE_REFS.with(|c| {
+                            c.borrow_mut().insert(c2.head.entity_hex.clone(), missing.join("+"));
+                        });
+                        m.insert(c2.head.entity_hex.clone(), "grant: references a role not in the accepted roster");
+                    }
                     continue;
                 };
                 if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
