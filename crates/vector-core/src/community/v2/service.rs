@@ -7906,7 +7906,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     for (chunks, held) in batches {
         let rotations = rekey::collect_rotations(chunks);
         for r in &rotations {
-            if !rotator_ok(&r.rotator) || r.scope.id32() != scope.id32() || r.new_epoch.0 != next_epoch.0 || !r.is_complete() {
+            if !rotator_ok(&r.rotator) || r.scope.id32() != scope.id32() || r.new_epoch.0 != next_epoch.0 {
                 continue;
             }
             if let Some((held_epoch, held_key)) = held {
@@ -7922,9 +7922,26 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
             if !admissible(r) {
                 continue;
             }
-            saw_complete_candidate = true;
-            saw_nonempty_candidate |= !r.blobs.is_empty();
-            saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
+            // Completeness gates the DESTRUCTIVE direction only. Concluding removal
+            // means "no blob for me anywhere in this rotation", which is only
+            // knowable with every chunk in hand — so `saw_complete_candidate`, and
+            // everything downstream of it, still demands the whole set.
+            //
+            // ADOPTION does not need it. The blob binds its own (scope, epoch)
+            // inside the ciphertext, so a key that opens is this rotation's key
+            // whatever else is unreachable; and admissibility is monotonic in the
+            // blob set — chunks we have not seen can only ADD recipients, so a
+            // rotation that looks admissible on the blobs we hold cannot become a
+            // takeover once the rest arrive. Requiring the full set to adopt made a
+            // large community's rotation as fragile as its least reachable chunk,
+            // and the walk is sequential, so that strand blocked every epoch above
+            // it too. (A rotation that fails admissibility on partial data is still
+            // skipped, never adopted — the unsafe direction stays closed.)
+            if r.is_complete() {
+                saw_complete_candidate = true;
+                saw_nonempty_candidate |= !r.blobs.is_empty();
+                saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
+            }
             // EVERY blob at my locator, not just the first. A locator is a public
             // index that proves nothing, so anyone may publish a blob at mine;
             // taking only the first would let a junk one shadow the real key and
@@ -11668,6 +11685,59 @@ mod tests {
         let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
         assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
         assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_chunk_does_not_block_adopting_the_key_i_already_hold() {
+        // Completeness gates ADOPTION today, not just removal. A 1,000-member
+        // rotation spans thirteen chunks, so one unreachable chunk parks every
+        // member of the community — including everyone whose key is sitting in a
+        // chunk they already fetched and can open right now. Requiring the whole set
+        // to adopt makes a large community's rotation as fragile as its worst chunk,
+        // and the walk is sequential, so the strand blocks every epoch above it too.
+        //
+        // Completeness is required to conclude REMOVAL, which is destructive and
+        // must stay conservative. Adoption is the safe direction: the blob is bound
+        // to (scope, epoch) inside its ciphertext, so a key that opens is the key
+        // for this rotation whatever else is missing.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "PartialChunks", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // A two-chunk rotation where only the chunk carrying MY blob is published.
+        bed.swap_to(&owner);
+        let new_root = [0xC7u8; 32];
+        let new_epoch = Epoch(joined.root_epoch.0 + 1);
+        let prev_commit = super::super::derive::epoch_key_commitment(joined.root_epoch, &joined.community_root);
+        let group = base_rekey_group_key(&joined.community_root, joined.id(), new_epoch);
+        let my_blob = rekey::build_blob_local(
+            owner.keys.secret_key(), &owner.keys.public_key().to_bytes(),
+            &me.keys.public_key(), RekeyScope::Root, new_epoch, &new_root,
+        ).unwrap();
+        // Declares 2 chunks; only chunk 1 ever reaches the relay.
+        let rumor = rekey::build_rekey_rumor(
+            owner.keys.public_key(), RekeyScope::Root, new_epoch, joined.root_epoch,
+            &prev_commit, &[my_blob], 1, 2, 2_000,
+            my_authority_citation(&joined, &owner.keys.public_key()).as_ref(), false,
+        ).unwrap();
+        let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &owner.keys, Timestamp::from_secs(2_000)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+
+        bed.swap_to(&me);
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(!follow.self_removed, "a missing chunk is never a removal");
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            after.root_epoch, new_epoch,
+            "my blob was present and opened — the missing sibling chunk says nothing about MY key, \
+             and parking here strands the whole community behind its least reachable chunk",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
