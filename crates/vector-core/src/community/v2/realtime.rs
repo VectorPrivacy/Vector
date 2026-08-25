@@ -258,6 +258,7 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
 /// So the post-sweep re-assert forgets the ids first: the next refresh cannot take
 /// the fast path and genuinely re-subscribes.
 pub async fn force_refresh_subscription(client: &Client) {
+    println!("[v2-sub] force re-assert begin");
     {
         let mut sub_guard = V2_SUB_ID.lock().await;
         if let Some(old) = sub_guard.take() {
@@ -292,12 +293,20 @@ pub async fn refresh_subscription(client: &Client) {
             // against a still-connecting relay silently fails to register — same
             // trap as v1).
             let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
+            let wait_t = std::time::Instant::now();
             for _ in 0..24 {
                 let pool = client.relays().all().await;
                 if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            {
+                let pool = client.relays().all().await;
+                let up: Vec<String> = wanted.iter()
+                    .filter(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false))
+                    .map(|u| u.to_string()).collect();
+                println!("[v2-sub] connect-wait {:?}: {}/{} wanted relays up: {:?}", wait_t.elapsed(), up.len(), wanted.len(), up);
             }
             // Register every held plane's key BEFORE subscribing, so the responder
             // can answer any NIP-42 challenge our REQs trigger. Cheap + local.
@@ -364,17 +373,35 @@ pub async fn refresh_subscription(client: &Client) {
         if let Some(old) = pw.take() {
             let _ = client.unsubscribe(&old).await;
         }
-        if let Ok(out) = client.subscribe(filter.clone()).await {
-            *pw = Some(out.value);
+        match client.subscribe(filter.clone()).await {
+            Ok(out) => {
+                println!(
+                    "[v2-sub] poolwide {}: ok {:?} failed {:?}",
+                    *out,
+                    out.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+                    out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
+                );
+                *pw = Some(out.value);
+            }
+            Err(e) => println!("[v2-sub] poolwide subscribe FAILED: {e}"),
         }
     }
-    if let Ok(out) = client
+    match client
         .subscribe(nostr_sdk::prelude::ReqTarget::manual(
             relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
         ))
         .await
     {
-        *sub_guard = Some(out.value);
+        Ok(out) => {
+            println!(
+                "[v2-sub] targeted {}: ok {:?} failed {:?}",
+                *out,
+                out.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+                out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
+            );
+            *sub_guard = Some(out.value);
+        }
+        Err(e) => println!("[v2-sub] targeted subscribe FAILED: {e}"),
     }
     mark_subscription_ready();
     drop(set_guard);
