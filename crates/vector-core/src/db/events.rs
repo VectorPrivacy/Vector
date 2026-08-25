@@ -2564,17 +2564,27 @@ mod tests {
         .unwrap();
     }
 
+    /// The banlist speaks HEX and `events.npub` speaks bech32 — the store has to
+    /// bridge them or the filter silently matches nothing in production.
+    fn ban_pair() -> (String, String) {
+        let k = nostr_sdk::prelude::Keys::generate();
+        use nostr_sdk::prelude::ToBech32;
+        (k.public_key().to_hex(), k.public_key().to_bech32().unwrap())
+    }
+
     /// A ban hides what the author already posted — not only their next message.
     #[tokio::test]
     async fn a_banned_authors_messages_are_not_returned() {
         let (_tmp, _guard) = init_test_db();
         let chat = "channel_ban_hide";
         link_channel_to_community(chat, "comm_hide");
-        for (id, npub, at) in [("keep1", "npub1good", 1_000u64), ("spam1", "npub1raider", 2_000), ("keep2", "npub1good", 3_000)] {
-            let msg = Message { id: id.into(), content: "hi".into(), at, npub: Some(npub.into()), ..Default::default() };
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+        for (id, npub, at) in [("keep1", &good, 1_000u64), ("spam1", &raider, 2_000), ("keep2", &good, 3_000)] {
+            let msg = Message { id: id.into(), content: "hi".into(), at, npub: Some(npub.clone()), ..Default::default() };
             save_message(chat, &msg).await.unwrap();
         }
-        crate::db::community::set_community_banlist("comm_hide", &["npub1raider".to_string()], 1).unwrap();
+        crate::db::community::set_community_banlist("comm_hide", &[raider_hex], 1).unwrap();
 
         let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
         let got = get_events(chat_id, None, 50, 0).await.unwrap();
@@ -2593,20 +2603,22 @@ mod tests {
         link_channel_to_community(chat, "comm_page");
         // 40 banned interleaved with 20 real ones, banned strictly newer so a
         // naive newest-first page would be nothing but spam.
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
         for i in 0..20u64 {
-            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some("npub1good".into()), ..Default::default() };
+            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some(good.clone()), ..Default::default() };
             save_message(chat, &msg).await.unwrap();
         }
         for i in 0..40u64 {
-            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some("npub1raider".into()), ..Default::default() };
+            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some(raider.clone()), ..Default::default() };
             save_message(chat, &msg).await.unwrap();
         }
-        crate::db::community::set_community_banlist("comm_page", &["npub1raider".to_string()], 1).unwrap();
+        crate::db::community::set_community_banlist("comm_page", &[raider_hex], 1).unwrap();
 
         let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
         let page = get_events(chat_id, None, 20, 0).await.unwrap();
         assert_eq!(page.len(), 20, "a page of 20 must return 20 real messages, not what is left after filtering");
-        assert!(page.iter().all(|e| e.npub.as_deref() == Some("npub1good")), "no banned author leaks into the page");
+        assert!(page.iter().all(|e| e.npub.as_deref() == Some(good.as_str())), "no banned author leaks into the page");
     }
 
     /// The kind-filtered path is the one the app actually calls — a page of chat
@@ -2616,21 +2628,54 @@ mod tests {
         let (_tmp, _guard) = init_test_db();
         let chat = "channel_ban_kinds";
         link_channel_to_community(chat, "comm_kinds");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
         for i in 0..12u64 {
-            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some("npub1good".into()), ..Default::default() };
+            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some(good.clone()), ..Default::default() };
             save_message(chat, &msg).await.unwrap();
         }
         for i in 0..30u64 {
-            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some("npub1raider".into()), ..Default::default() };
+            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some(raider.clone()), ..Default::default() };
             save_message(chat, &msg).await.unwrap();
         }
-        crate::db::community::set_community_banlist("comm_kinds", &["npub1raider".to_string()], 1).unwrap();
+        crate::db::community::set_community_banlist("comm_kinds", &[raider_hex], 1).unwrap();
 
         let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
         let kinds = [event_kind::PRIVATE_DIRECT_MESSAGE];
         let page = get_events(chat_id, Some(&kinds), 12, 0).await.unwrap();
         assert_eq!(page.len(), 12, "the kind-filtered page must fill with real messages");
-        assert!(page.iter().all(|e| e.npub.as_deref() == Some("npub1good")), "no banned author in a kind-filtered page");
+        assert!(page.iter().all(|e| e.npub.as_deref() == Some(good.as_str())), "no banned author in a kind-filtered page");
+    }
+
+    /// A ban erases their arrival too. The "has joined" row is a system event
+    /// carrying the same author, so nothing about a banned account should remain
+    /// on screen — not the spam, not the trace of them walking in.
+    #[tokio::test]
+    async fn a_banned_members_join_event_is_hidden_with_their_messages() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_join";
+        link_channel_to_community(chat, "comm_join");
+        let (raider_hex, raider) = ban_pair();
+
+        let chat_id = crate::db::id_cache::get_or_create_chat_id(chat).unwrap();
+        let join = crate::stored_event::StoredEventBuilder::new()
+            .id("joined_evt")
+            .kind(event_kind::APPLICATION_SPECIFIC)
+            .chat_id(chat_id)
+            .npub(Some(raider.clone()))
+            .content("joined")
+            .created_at(4_000)
+            .build();
+        save_event(&join).await.unwrap();
+        let msg = Message { id: "spam_after_join".into(), content: "buy".into(), at: 5_000, npub: Some(raider.clone()), ..Default::default() };
+        save_message(chat, &msg).await.unwrap();
+
+        crate::db::community::set_community_banlist("comm_join", &[raider_hex], 1).unwrap();
+
+        let got = get_events(chat_id, None, 50, 0).await.unwrap();
+        let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"joined_evt"), "the join row goes with them: {ids:?}");
+        assert!(!ids.contains(&"spam_after_join"), "and so does what they said: {ids:?}");
     }
 
     /// A DM has no community, so the predicate must not exclude anything.
