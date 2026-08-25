@@ -1931,6 +1931,25 @@ pub fn set_edition_head_with_id(community_id: &str, entity_id: &str, version: u6
 /// ran under — instead of reading the community row at write time. Closes the TOCTOU where a
 /// concurrent re-founding bumps `server_root_epoch` between a fold and its head persist, which would
 /// stamp an old-plane version as the new epoch's floor and wedge the new epoch's genuine head.
+/// Forget one entity's floor.
+///
+/// A floor refuses to fold an edition older than the one we last saw, which is
+/// what stops a relay rolling our authority backwards. But a floor for an entity
+/// the plane will never serve again — its author was demoted, so their editions
+/// stopped counting; or it aged out entirely — is a veto nothing can ever satisfy,
+/// and it blocks the WHOLE roster cache behind it. Dropping such a floor is only
+/// safe once a coherent, quorum-backed read has failed to find the entity, which
+/// is the one caller's job to establish.
+pub fn delete_edition_head(community_id: &str, entity_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM community_edition_heads WHERE community_id = ?1 AND entity_id = ?2",
+        params![community_id, entity_id],
+    )
+    .map_err(|e| format!("delete edition head: {e}"))?;
+    Ok(())
+}
+
 pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: u64) -> Result<(), String> {
     set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), Some(epoch))
 }
