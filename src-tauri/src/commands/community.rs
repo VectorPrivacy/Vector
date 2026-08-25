@@ -3157,13 +3157,26 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // Flatten every joined Community's channels (protocol-agnostic: a v2 community
         // must load through its own reader, not the v1 one).
         let mut channels: Vec<String> = Vec::new();
+        // v2 root epoch per community, sampled BEFORE the sweep. A refounding adopted
+        // while the sweep runs is picked up by every channel it has not reached yet
+        // (each slot re-resolves from the DB), but channels already swept read the OLD
+        // plane and the sweep never revisits them. Comparing after tells us exactly
+        // which few to redo, instead of waiting for a later pass.
+        let mut epoch_before: std::collections::HashMap<Vec<u8>, u64> = std::collections::HashMap::new();
+        let mut v2_channels: std::collections::HashMap<Vec<u8>, Vec<String>> = std::collections::HashMap::new();
         for id in vector_core::db::community::list_community_ids()? {
             match vector_core::db::community::community_protocol(&id).ok().flatten() {
                 Some(vector_core::community::ConcordProtocol::V2) => {
                     if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                        let key = id.0.to_vec();
+                        epoch_before.insert(key.clone(), c.root_epoch.0);
+                        let mut mine = Vec::new();
                         for ch in &c.channels {
-                            channels.push(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0));
+                            let hex = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
+                            mine.push(hex.clone());
+                            channels.push(hex);
                         }
+                        v2_channels.insert(key, mine);
                     }
                 }
                 _ => {
@@ -3223,6 +3236,35 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             channel_count,
             boot_start.elapsed()
         );
+
+        // Redo only the channels of communities whose root moved mid-sweep.
+        let mut restale: Vec<String> = Vec::new();
+        for (key, before) in &epoch_before {
+            let Ok(bytes) = <[u8; 32]>::try_from(key.as_slice()) else { continue };
+            let id = vector_core::community::CommunityId(bytes);
+            if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                if c.root_epoch.0 != *before {
+                    if let Some(chs) = v2_channels.get(key) {
+                        restale.extend(chs.iter().cloned());
+                    }
+                }
+            }
+        }
+        if !restale.is_empty() {
+            let n = restale.len();
+            let t = std::time::Instant::now();
+            futures_util::stream::iter(restale)
+                .map(|cid| async move {
+                    if vector_core::db::session_stopped() {
+                        return;
+                    }
+                    let _ = sync_community_channel(cid, None, None).await;
+                })
+                .buffer_unordered(BOOT_SYNC_WINDOW)
+                .collect::<Vec<()>>()
+                .await;
+            println!("[Boot] re-swept {} channel(s) whose epoch moved mid-sweep in {:?}", n, t.elapsed());
+        }
         // Re-assert the live subscriptions now that the flood is over. A relay
         // under the sweep's load can drop or refuse the boot-time subs, and
         // nothing else re-asks until a reconnect happens to fire — which is

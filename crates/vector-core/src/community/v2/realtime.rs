@@ -601,6 +601,18 @@ pub fn enqueue_follow(id: &CommunityId) {
 /// drains it, running one combined follow per community at a time. Replacing the
 /// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
 /// worker exits; the captured `std::sync::Arc<crate::db::Session>` also stops it. Idempotent per session.
+/// Most recently active community first. Ties keep arrival order, so a batch whose
+/// members have never been read (all zero) is not shuffled into an arbitrary one.
+fn prioritize_by_activity(
+    batch: Vec<CommunityId>,
+    activity: impl Fn(&CommunityId) -> u64,
+) -> Vec<CommunityId> {
+    let mut keyed: Vec<(u64, CommunityId)> = batch.into_iter().map(|id| (activity(&id), id)).collect();
+    // Stable: equal activity keeps the order the ids arrived in.
+    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
 pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
     // Re-send every pending id into the fresh queue: parked pre-worker
@@ -616,20 +628,55 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     *V2_FOLLOW_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     let session = crate::db::current_session();
     crate::db::spawn_bound(async move {
-        while let Some(id) = rx.recv().await {
-            // Remove from pending BEFORE running, so a trigger arriving DURING the
-            // follow re-enqueues (and is processed after) rather than being lost.
-            V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
-            // One community's panic must not take the worker down with it: a dead
-            // worker leaves a closed sender, and every live rotation dispatch after
-            // that is a silent no-op for the rest of the session — the whole client
-            // goes deaf to rotations, which reads to everyone else as a fork.
-            let one = std::panic::AssertUnwindSafe(follow_community(&session, &id, &*handler));
-            if futures_util::FutureExt::catch_unwind(one).await.is_err() {
-                crate::log_warn!(
-                    "[v2:follow {}] worker caught a panic; the queue stays alive",
-                    &crate::simd::hex::bytes_to_hex_32(&id.0)[..8]
-                );
+        while let Some(first) = rx.recv().await {
+            // Drain whatever else is already waiting and take the most recently
+            // ACTIVE community first. Arrival order is boot order, which has nothing
+            // to do with what the user is reading: a community silent for weeks was
+            // ahead of the one on screen, and its walk held the queue while the
+            // active one stayed on a dead epoch — unreadable, and indistinguishable
+            // from a strand. Coalescing already bounds this batch to one entry per
+            // community.
+            let mut batch = vec![first];
+            while let Ok(next) = rx.try_recv() {
+                batch.push(next);
+            }
+            if batch.len() > 1 {
+                let last_msgs = crate::db::events::get_all_chats_last_messages().await.unwrap_or_default();
+                // Most recent message across the community's channels.
+                let activity = |cid: &CommunityId| -> u64 {
+                    crate::db::community::load_community_v2(cid)
+                        .ok()
+                        .flatten()
+                        .map(|c| {
+                            c.channels
+                                .iter()
+                                .filter_map(|ch| {
+                                    let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+                                    last_msgs.get(&ch_hex).and_then(|v| v.first().map(|m| m.at))
+                                })
+                                .max()
+                                .unwrap_or(0)
+                        })
+                        // A row that will not load sorts LAST: unknown is not urgent.
+                        .unwrap_or(0)
+                };
+                batch = prioritize_by_activity(batch, activity);
+            }
+            for id in batch {
+                // Remove from pending BEFORE running, so a trigger arriving DURING the
+                // follow re-enqueues (and is processed after) rather than being lost.
+                V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+                // One community's panic must not take the worker down with it: a dead
+                // worker leaves a closed sender, and every live rotation dispatch after
+                // that is a silent no-op for the rest of the session — the whole client
+                // goes deaf to rotations, which reads to everyone else as a fork.
+                let one = std::panic::AssertUnwindSafe(follow_community(&session, &id, &*handler));
+                if futures_util::FutureExt::catch_unwind(one).await.is_err() {
+                    crate::log_warn!(
+                        "[v2:follow {}] worker caught a panic; the queue stays alive",
+                        &crate::simd::hex::bytes_to_hex_32(&id.0)[..8]
+                    );
+                }
             }
         }
     });
@@ -844,6 +891,44 @@ fn surface_presence(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn cid(b: u8) -> CommunityId {
+        CommunityId([b; 32])
+    }
+
+    #[test]
+    fn the_follow_queue_walks_the_community_you_are_actually_reading_first() {
+        // Arrival order is boot order, which says nothing about what the user has
+        // open. A community silent for weeks used to sit ahead of the active one and
+        // hold the queue while it stayed on a dead epoch — messages unreadable, which
+        // looks exactly like a strand.
+        let stale = cid(1);
+        let active = cid(2);
+        let middling = cid(3);
+        let batch = vec![stale, active, middling]; // arrival order: stale FIRST
+        let out = prioritize_by_activity(batch, |c| match c.0[0] {
+            1 => 1_000,          // weeks ago
+            2 => 9_000_000,      // on screen right now
+            3 => 500_000,
+            _ => 0,
+        });
+        assert_eq!(
+            out,
+            vec![active, middling, stale],
+            "the most recently active community must be followed first regardless of arrival order",
+        );
+    }
+
+    #[test]
+    fn an_all_silent_batch_keeps_its_arrival_order() {
+        // Every candidate unread (a fresh install, or communities never opened): with
+        // nothing to rank on, the order must stay the one the ids arrived in rather
+        // than becoming arbitrary.
+        let batch = vec![cid(7), cid(8), cid(9)];
+        let out = prioritize_by_activity(batch.clone(), |_| 0);
+        assert_eq!(out, batch, "equal activity is a stable sort, not a reshuffle");
+    }
     use super::*;
     use super::super::control::{genesis, CommunityMetadata};
     use crate::community::Epoch;
