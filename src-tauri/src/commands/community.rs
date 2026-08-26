@@ -2342,6 +2342,21 @@ pub async fn debug_v2_follow_trace(community_id: String) -> Result<serde_json::V
     }))
 }
 
+/// Re-vend the epoch chain to members a rotation forgot.
+///
+/// A member missed at one hop is stranded there forever — a client can only
+/// derive `held + 1`, so no later rotation reaches them, and re-inviting does
+/// nothing because they are already a member. Only the rotator holds the
+/// archived roots this needs, which is why it lives on the client that rotated.
+#[tauri::command]
+pub async fn rescue_stranded_members(community_id: String, npubs: Vec<String>) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let refs: Vec<&str> = npubs.iter().map(|s| s.as_str()).collect();
+        vector_core::VectorCore.rescue_stranded_members(&community_id, &refs).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Repair a v2 community's roster cache when it is pinned holding WRONG data:
 /// resets the cache's provenance so the next control fold may replace it, then
 /// folds. Publishes nothing.

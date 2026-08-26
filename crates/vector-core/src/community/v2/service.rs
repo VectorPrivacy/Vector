@@ -2416,7 +2416,7 @@ fn fold_members(
 
 
 /// What a [`rescue_stranded_members`] pass published.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 pub struct RescueReport {
     /// Epoch hops that received catch-up blobs (1..=current, minus any with a missing root).
     pub hops: usize,
@@ -3115,6 +3115,45 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
             }
         }
         let owner_hex_for_channels = community.owner().ok().map(|o| o.to_hex());
+
+        // STAFF COVERAGE GATE: a granted member who is not a recipient would be
+        // stranded at this hop for good — they can only ever derive `held + 1`, so
+        // no later rotation reaches them, while every other client still reads them
+        // as staff. That is silent and permanent, and it happened: an admin holding
+        // a valid grant was vended no key and only surfaced because a human noticed
+        // the member list had shrunk.
+        //
+        // A grant is consensus-complete proof of membership — the same claim
+        // `fold_members` makes when it counts granted members "even if their Join
+        // aged out of the Guestbook entirely". So the recipients must cover them.
+        // Refusing here matches the entity carry-forward directly above, which
+        // ABORTS rather than publish a rotation that drops a floored head: better a
+        // rotation that did not happen than one that quietly severs the staff.
+        //
+        // Only the CUT are exempt — removing someone is the one thing a rotation is
+        // allowed to do to them.
+        {
+            // A banned member is not owed a key; every other grant-holder is.
+            let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+            let missing: Vec<String> = roster_for_channels
+                .grants
+                .iter()
+                .filter(|g| !g.role_ids.is_empty())
+                .filter_map(|g| PublicKey::from_hex(&g.member).ok())
+                .filter(|pk| !removed_set.contains(&pk.to_bytes()))
+                .filter(|pk| !banned.contains(&pk.to_hex()))
+                .filter(|pk| !recipients.contains(pk))
+                .map(|pk| pk.to_hex())
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "re-founding aborted: {} granted member(s) would be vended no key and stranded at epoch {} — {}; no state published",
+                    missing.len(),
+                    prev_epoch.0,
+                    missing.iter().map(|h| h[..8.min(h.len())].to_string()).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        }
 
         // Base rekey blobs, sealed under the PRIOR root: every member's carries the
         // new root + control_pk (104 bytes); a STAFF recipient's (CORD-04 §3)
@@ -10779,6 +10818,180 @@ mod tests {
             "the refounder's survivor list is adopted, so a cut member stops being one"
         );
         assert!(members.contains(&owner), "a survivor the snapshot names stays");
+    }
+
+    /// If the recipients would strand a granted member, publish NOTHING.
+    ///
+    /// A member missed at a hop is stranded there permanently, and every other
+    /// client goes on reading them as staff — silent, irreversible without the
+    /// rescue primitive, and only noticed because a human saw the member list
+    /// shrink. So the rotation refuses instead, exactly as the entity carry-forward
+    /// already refuses a floored head it cannot serve.
+    #[tokio::test]
+    async fn a_rotation_that_would_strand_staff_refuses_to_publish() {
+        let (bed, owner, staffer) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoSilentSever", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let them = staffer.keys.public_key();
+
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xb6; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        // An operator purge whose allow-list forgets an admin: the recipient set
+        // ends up without somebody the roster still grants a role to.
+        let err = refound_community_retaining(&bed.relay, &community, &[], &[owner.keys.public_key()])
+            .await
+            .expect_err("must refuse rather than strand staff");
+        assert!(
+            err.contains("stranded"),
+            "the refusal has to say what it protected, got: {err}"
+        );
+
+        // And nothing was published: the epoch did not move.
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.root_epoch, community.root_epoch, "no state published");
+        assert!(!vended_to(&bed, &community, &staffer.keys).await, "no half-rotation left on the plane");
+        let _ = cid_hex;
+    }
+
+    /// The backstop protects a SILENT granted member. An ACTIVE one is the gap.
+    ///
+    /// `fold_members` seeds granted members with `observed.entry(pk).or_insert(0)`,
+    /// and ts 0 is what dodges `stale_pre_refound`. A staffer who actually talks
+    /// already sits in `observed` with a REAL timestamp, so `or_insert` leaves it
+    /// alone — and if some earlier refounding's snapshot omitted them while their
+    /// last word predates its cut, they are suppressed despite holding a grant.
+    ///
+    /// That is Sentire, 2026-08-26: admin, constantly posting, vended no key.
+    #[tokio::test]
+    async fn a_granted_member_who_talks_is_not_dropped_by_an_old_snapshot() {
+        let (bed, owner, staffer) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "TalkingAdmin", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let them = staffer.keys.public_key();
+
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xb5; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        // They joined and spoke — so `observed` holds a REAL timestamp for them,
+        // not the 0 the grant backstop would have inserted.
+        let spoke_at = 5_000u64;
+        let join = guestbook::GuestbookEvent {
+            epoch: Some(community.root_epoch.0), observed_at: None, rumor_id: [0x31; 32],
+            entry: guestbook::GuestbookEntry::Join { member: them, invited_by: None, at_ms: spoke_at },
+        };
+        // A PRIOR refounding whose snapshot omitted them, cutting after they spoke.
+        let snapshot = guestbook::GuestbookEvent {
+            epoch: Some(community.root_epoch.0), observed_at: None, rumor_id: [0x32; 32],
+            entry: guestbook::GuestbookEntry::Snapshot {
+                refounder: owner.keys.public_key(),
+                members: vec![owner.keys.public_key()],   // them: omitted
+                snapshot_id: [0x32; 32],
+                chunk: (1, 1),
+                at_ms: spoke_at + 1_000,
+            },
+        };
+        crate::db::community::set_guestbook(&cid_hex, &[join, snapshot], 9).unwrap();
+
+        assert!(
+            stored_memberlist(&community).unwrap().contains(&them),
+            "a grant is proof of membership — an old snapshot must not shed the staff it forgot"
+        );
+
+        let _ = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        assert!(
+            vended_to(&bed, &community, &staffer.keys).await,
+            "and the rotation must vend to them, or they are stranded holding a grant"
+        );
+    }
+
+    /// A GRANT is proof of membership, so a rotation must vend to it.
+    ///
+    /// Sentire's shape, 2026-08-26: an admin whose Join had been superseded by an
+    /// earlier refounding's snapshot fell out of BOTH folds the recipient union is
+    /// built from, held a valid admin grant the whole time, and was vended no key.
+    /// It could then only derive `held + 1`, so it was stranded permanently while
+    /// still appearing to be staff to everyone else.
+    ///
+    /// `fold_members` already treats a grant as consensus-complete proof — "this is
+    /// what keeps a Refounding from severing a lurking admin". The rotation has to
+    /// agree with it.
+    #[tokio::test]
+    async fn a_rotation_vends_to_a_granted_member_the_folds_forgot() {
+        let (bed, owner, staffer) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "LurkingAdmin", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let them = staffer.keys.public_key();
+
+        // Staff by GRANT, with no Join anywhere — the lurking admin the backstop
+        // exists for. Never posted, never announced.
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xb4; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&them.to_hex()),
+            "they hold the grant"
+        );
+
+        // An empty guestbook is the whole point: neither fold can see them.
+        crate::db::community::set_guestbook(&cid_hex, &[], 1).unwrap();
+
+        let _rotated = refound_community(&bed.relay, &community, &[]).await.unwrap();
+
+        // The blob is the answer. A member absent from the rotation's recipients is
+        // stranded at the previous epoch for good — they can only ever derive
+        // `held + 1`, so no later rotation reaches them.
+        assert!(
+            vended_to(&bed, &community, &staffer.keys).await,
+            "a rotation removing nobody must vend to a granted member, or it severs its own staff"
+        );
+    }
+
+    /// "Rotate keys" with nobody unticked must remove NOBODY — and must vend to
+    /// everyone, not merely leave them on a list. A rotation that forgets a
+    /// member strands them at the previous epoch permanently: they can only
+    /// derive `held + 1`, so no later rotation can ever reach them.
+    #[tokio::test]
+    async fn a_rotation_that_removes_nobody_vends_to_everybody() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "KeepAll", bed.relays.clone(), None).await.unwrap();
+
+        // A second member joins for real, via the invite path.
+        let bundle = serde_json::to_string(&bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None)).unwrap();
+        bed.swap_to(&member);
+        accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        bed.swap_to(&owner);
+        let before = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(before.contains(&member.keys.public_key()), "present before the rotation");
+
+        // Rotate keeping everyone — the empty `removed` the console sends when
+        // nothing is unticked.
+        let rotated = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        assert_eq!(rotated.root_epoch.0, community.root_epoch.0 + 1, "the epoch rolled");
+
+        let after = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(
+            after.contains(&member.keys.public_key()),
+            "a rotation removing nobody must keep everybody: {before:?} -> {after:?}"
+        );
+
+        // And the member must actually be able to WALK to the new epoch, which is
+        // the half a memberlist cannot show.
+        bed.swap_to(&member);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let follow = follow_rekeys(&bed.relay, &held, &crate::db::current_session()).await.unwrap();
+        assert!(!follow.self_removed, "they were not excluded");
+        let now = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(now.root_epoch.0, rotated.root_epoch.0, "they adopted the new epoch — a blob was vended to them");
     }
 
     /// A revocation has to reach the NETWORK, not just the revoker.
