@@ -124,6 +124,7 @@
     "allow-debug-v2-follow-trace",
     "allow-debug-v2-explain-base-rekey",
     "allow-repair-v2-roster",
+    "allow-rescue-stranded-members",
     "allow-delete-community-message",
     "allow-revoke-reaction",
     "allow-react-to-community-message",

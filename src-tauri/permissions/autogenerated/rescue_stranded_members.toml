@@ -1,0 +1,11 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-rescue-stranded-members"
+description = "Enables the rescue_stranded_members command without any pre-configured scope."
+commands.allow = ["rescue_stranded_members"]
+
+[[permission]]
+identifier = "deny-rescue-stranded-members"
+description = "Denies the rescue_stranded_members command without any pre-configured scope."
+commands.deny = ["rescue_stranded_members"]

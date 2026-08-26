@@ -4506,6 +4506,34 @@ impl VectorCore {
         Ok(())
     }
 
+    /// Re-vend the epoch chain to members a past rotation forgot.
+    ///
+    /// A client follows rekeys hop by hop and can only ever derive `held + 1`, so
+    /// a member missed at one hop is stranded there permanently — no later
+    /// rotation can reach them, and re-inviting does not help because they are
+    /// already a member. This publishes the blobs that should have existed, keyed
+    /// exactly like the original rotation so they merge into it.
+    ///
+    /// Requires rotation authority (owner or BAN) and the archived roots, which
+    /// the rotator holds. Publishing nothing else and touching no membership.
+    pub async fn rescue_stranded_members(&self, community_id: &str, npubs: &[&str]) -> Result<serde_json::Value> {
+        use nostr_sdk::prelude::PublicKey;
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("rescuing requires a Concord v2 community".into()))?;
+        let mut targets: Vec<PublicKey> = Vec::with_capacity(npubs.len());
+        for n in npubs {
+            let pk = PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !targets.contains(&pk) {
+                targets.push(pk);
+            }
+        }
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        let report = crate::community::v2::service::rescue_stranded_members(&transport, &community, &targets)
+            .await
+            .map_err(VectorError::Other)?;
+        serde_json::to_value(report).map_err(|e| VectorError::Other(e.to_string()))
+    }
+
     /// Repair a v2 community's roster cache: keep what is stored, but reset its
     /// PROVENANCE to zero so the next control fold is allowed to replace it.
     ///

@@ -922,6 +922,7 @@ pub fn run() {
             commands::community::debug_v2_follow_trace,
             commands::community::debug_v2_explain_base_rekey,
             commands::community::repair_v2_roster,
+            commands::community::rescue_stranded_members,
             commands::community::delete_community_message,
             commands::community::revoke_reaction,
             commands::community::react_to_community_message,
