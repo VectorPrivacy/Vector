@@ -11022,6 +11022,57 @@ mod tests {
         assert!(members.contains(&owner), "a survivor the snapshot names stays");
     }
 
+    /// A moderation report quotes what was said, so it may only reach someone who
+    /// could have read the room it was said in. Community power is NOT that
+    /// question — BAN says what a moderator may do to people, never which rooms
+    /// they may see — and a bot holding every key would otherwise forward a
+    /// private channel's contents to whoever holds the ban bit.
+    #[tokio::test]
+    async fn reading_a_private_channel_needs_its_own_role_not_community_power() {
+        let (bed, owner, mod_without_access) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Rooms", bed.relays.clone(), None).await.unwrap();
+        let public = community.channels[0].id;
+        let private = create_private_channel(&bed.relay, &community, "back-room").await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        use nostr_sdk::prelude::ToBech32;
+        let them = mod_without_access.keys.public_key();
+        let them_npub = them.to_bech32().unwrap();
+
+        // Give them the fullest COMMUNITY powers there are. It must buy nothing
+        // in a room they were never admitted to.
+        let admin_rid = crate::simd::hex::bytes_to_hex_32(&[0xa7; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&admin_rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![admin_rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::VectorCore.member_has_permission(&cid_hex, &them_npub, Permissions::BAN).unwrap(),
+            "they really do hold BAN"
+        );
+
+        let pub_hex = crate::simd::hex::bytes_to_hex_32(&public.0);
+        let priv_hex = crate::simd::hex::bytes_to_hex_32(&private.0);
+        assert!(
+            crate::VectorCore.member_can_read_channel(&cid_hex, &pub_hex, &them_npub).unwrap(),
+            "a public channel is the community's"
+        );
+        assert!(
+            !crate::VectorCore.member_can_read_channel(&cid_hex, &priv_hex, &them_npub).unwrap(),
+            "BAN is not a key: community power must never open a private room"
+        );
+
+        // The access role is what opens it — and it carries no powers at all.
+        grant_channel_access(&bed.relay, &community, &private, &them).await.unwrap();
+        let community = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let _ = follow_control(&bed.relay, &community).await;
+        assert!(
+            crate::VectorCore.member_can_read_channel(&cid_hex, &priv_hex, &them_npub).unwrap(),
+            "the channel-scoped grant is what admits them"
+        );
+    }
+
     /// Authority must fail CLOSED. A bot gating a chat command on this is the
     /// only thing standing between "a moderator asked" and "anyone in the room
     /// asked", so an unfolded, empty or unreadable roster has to authorise

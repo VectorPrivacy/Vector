@@ -1745,6 +1745,46 @@ impl VectorCore {
     /// holders; `owner` is reported alongside because the owner is entitled
     /// whether or not they hold one (a channel's creator is granted the role, so
     /// an owner-created channel lists them in both).
+    /// Whether `npub` may READ `channel_id` here.
+    ///
+    /// A PUBLIC channel is readable by the community; a PRIVATE one only by the
+    /// holders of one of its channel-scoped access roles (CORD-03), plus the
+    /// owner. Community-level power is NOT the question and must not be
+    /// substituted for it: BAN says what someone may do to people, never which
+    /// rooms they may see, and an access role commonly carries no powers at all.
+    ///
+    /// The reason this exists: a moderation report quotes what was said. Sending
+    /// one built from a private channel to a moderator who holds no key there
+    /// would launder the content out of the room, using the bot as the bypass —
+    /// so anything that forwards evidence asks this first.
+    ///
+    /// Fails closed. A banned member reads nothing, and an unknown channel is an
+    /// error rather than a permissive default.
+    pub fn member_can_read_channel(&self, community_id: &str, channel_id: &str, npub: &str) -> Result<bool> {
+        use nostr_sdk::prelude::PublicKey;
+        let community = Self::v2_community(community_id)?;
+        let id = Self::channel_id_of(channel_id)?;
+        let ch = community.channel(&id).ok_or_else(|| VectorError::Other("unknown channel".into()))?;
+        let who = PublicKey::parse(npub).map_err(|_| VectorError::Other(format!("invalid npub: {npub}")))?.to_hex();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        if crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default().contains(&who) {
+            return Ok(false);
+        }
+        if !ch.private {
+            return Ok(true);
+        }
+        if community.owner().map(|o| o.to_hex()) == Ok(who.clone()) {
+            return Ok(true);
+        }
+        let roster = crate::db::community::get_community_roles(&cid_hex).map_err(VectorError::Other)?;
+        let access_ids = roster.channel_role_ids(&crate::simd::hex::bytes_to_hex_32(&id.0));
+        Ok(roster
+            .grants
+            .iter()
+            .filter(|g| g.member == who)
+            .any(|g| g.role_ids.iter().any(|rid| access_ids.contains(rid))))
+    }
+
     pub fn channel_access(&self, community_id: &str, channel_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
         let community = Self::v2_community(community_id)?;

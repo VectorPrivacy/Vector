@@ -1722,6 +1722,17 @@ impl Member {
             .unwrap_or(false)
     }
 
+    /// Whether this member may READ `channel_id` — public to all, private only to
+    /// the holders of one of its access roles (CORD-03) and the owner.
+    ///
+    /// Community power is not this question: BAN says what someone may do to
+    /// people, never which rooms they may see. Ask before forwarding anything
+    /// quoted from a channel, or a report becomes a way to read a room you were
+    /// never admitted to. Fails closed.
+    pub fn can_read(&self, channel_id: &str) -> bool {
+        self.core.member_can_read_channel(&self.community_id, channel_id, &self.npub).unwrap_or(false)
+    }
+
     /// Whether this member holds `permission` here, per the community's roster.
     ///
     /// The roster is the protocol's ACL, so a bot gating a command on this
