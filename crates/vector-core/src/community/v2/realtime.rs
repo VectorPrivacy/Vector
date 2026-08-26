@@ -79,6 +79,11 @@ const SEEN_WRAPS_CAP: usize = 8192;
 static V2_FOLLOW_TX: LazyLock<StdMutex<Option<UnboundedSender<CommunityId>>>> = LazyLock::new(|| StdMutex::new(None));
 /// Community ids currently queued or processing — coalesces a burst to one follow.
 static V2_FOLLOW_PENDING: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
+/// Queued ids that a LIVE rotation triggered, which the worker takes ahead of the
+/// rest of its batch. Every follow is a network walk, so a boot backlog of dozens
+/// of communities is minutes — spent sitting on the dead epoch of the one that
+/// just rotated, unable to read it and indistinguishable from a strand.
+static V2_FOLLOW_URGENT: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
 /// Per-community follow serialization, shared by the queue worker AND the inline
 /// (headless) follow path. The worker-vs-inline CHOICE is a benign race
 /// (`follow_worker_running` is check-then-act; a worker can spawn right after a
@@ -159,6 +164,7 @@ pub async fn clear() {
     // next login spawns a fresh worker.
     *V2_FOLLOW_TX.lock().unwrap() = None;
     V2_FOLLOW_PENDING.lock().unwrap().clear();
+    V2_FOLLOW_URGENT.lock().unwrap().clear();
     V2_FOLLOW_LOCKS.lock().unwrap().clear();
     // Account A's stream keys must not keep authenticating (or answering relay
     // challenges) once account B is live.
@@ -502,7 +508,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // and rekey per community (no concurrent whole-row clobber) off this hot
                 // path, so a junk-wrap flood can't head-of-line-block the notification loop.
                 inbound::DispatchedV2::Control { .. } | inbound::DispatchedV2::Rekey { .. } => {
-                    enqueue_follow(c.id());
+                    enqueue_follow_urgent(c.id());
                     return;
                 }
                 inbound::DispatchedV2::Dissolved { community_id } => {
@@ -652,6 +658,27 @@ pub fn enqueue_follow(id: &CommunityId) {
     }
 }
 
+/// [`enqueue_follow`], but the worker takes this id ahead of everything already
+/// queued. For the LIVE rotation path only: a control/rekey wrap just told us this
+/// community moved, and the boot backlog ahead of it is dozens of network walks.
+/// Promotes an id that is already queued, so coalescing can't bury the urgency.
+pub fn enqueue_follow_urgent(id: &CommunityId) {
+    V2_FOLLOW_URGENT.lock().unwrap_or_else(|e| e.into_inner()).insert(id.0);
+    enqueue_follow(id);
+}
+
+/// Take the next id, preferring one a live rotation marked urgent.
+fn pop_next_follow(queue: &mut std::collections::VecDeque<CommunityId>) -> Option<CommunityId> {
+    let pos = {
+        let urgent = V2_FOLLOW_URGENT.lock().unwrap_or_else(|e| e.into_inner());
+        if urgent.is_empty() { None } else { queue.iter().position(|id| urgent.contains(&id.0)) }
+    };
+    match pos {
+        Some(i) => queue.remove(i),
+        None => queue.pop_front(),
+    }
+}
+
 /// Spawn the single follow worker for this session. Installs the queue sender and
 /// drains it, running one combined follow per community at a time. Replacing the
 /// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
@@ -717,10 +744,19 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
                 };
                 batch = prioritize_by_activity(batch, activity);
             }
-            for id in batch {
+            let mut queue: std::collections::VecDeque<CommunityId> = batch.into();
+            loop {
+                // Absorb what arrived while the previous follow ran. Without this the
+                // batch is frozen at drain time, and a rotation landing one item in
+                // waits out every remaining walk before it is even looked at.
+                while let Ok(next) = rx.try_recv() {
+                    queue.push_back(next);
+                }
+                let Some(id) = pop_next_follow(&mut queue) else { break };
                 // Remove from pending BEFORE running, so a trigger arriving DURING the
                 // follow re-enqueues (and is processed after) rather than being lost.
                 V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+                V2_FOLLOW_URGENT.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
                 // One community's panic must not take the worker down with it: a dead
                 // worker leaves a closed sender, and every live rotation dispatch after
                 // that is a silent no-op for the rest of the session — the whole client
@@ -1154,6 +1190,51 @@ mod tests {
 
         *V2_FOLLOW_TX.lock().unwrap() = None;
         V2_FOLLOW_PENDING.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn a_live_rotation_is_taken_ahead_of_a_boot_backlog() {
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
+        let backlog: Vec<CommunityId> = (1u8..=30).map(|n| CommunityId([n; 32])).collect();
+        let rotated = CommunityId([0xAA; 32]);
+
+        let mut queue: std::collections::VecDeque<CommunityId> = backlog.clone().into();
+        // The rotation lands at the BACK, exactly as a live dispatch mid-batch does.
+        queue.push_back(rotated);
+
+        // Without the mark it waits out all 30 walks.
+        assert_eq!(pop_next_follow(&mut queue.clone()), Some(backlog[0]));
+
+        V2_FOLLOW_URGENT.lock().unwrap().insert(rotated.0);
+        assert_eq!(
+            pop_next_follow(&mut queue),
+            Some(rotated),
+            "a live rotation must not queue behind dozens of unrelated network walks"
+        );
+        // Everything else keeps its prioritised order behind it.
+        assert_eq!(pop_next_follow(&mut queue), Some(backlog[0]));
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn urgency_promotes_an_id_already_queued() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
+        *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
+        V2_FOLLOW_PENDING.lock().unwrap().clear();
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
+
+        let id = CommunityId([0x33; 32]);
+        enqueue_follow(&id); // boot catch-up queued it first
+        // The live rotation coalesces against that entry — the urgency must still land,
+        // or the promotion is silently swallowed by the dedup.
+        enqueue_follow_urgent(&id);
+        assert!(V2_FOLLOW_URGENT.lock().unwrap().contains(&id.0));
+        assert_eq!(rx.try_recv().ok(), Some(id));
+        assert!(rx.try_recv().is_err(), "still coalesced to one queue entry");
+
+        *V2_FOLLOW_TX.lock().unwrap() = None;
+        V2_FOLLOW_PENDING.lock().unwrap().clear();
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
     }
 
     #[tokio::test]
