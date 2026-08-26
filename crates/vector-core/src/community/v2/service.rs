@@ -11073,6 +11073,44 @@ mod tests {
         );
     }
 
+    /// A revocation has to reach the NETWORK, not just the revoker.
+    ///
+    /// Every other client decides who is staff by folding the control plane, so
+    /// an owner whose demotion never published is the only person who believes
+    /// it happened — and the demoted admin keeps every power everywhere else,
+    /// which is the worst possible direction for this to fail in.
+    #[tokio::test]
+    async fn revoking_admin_publishes_where_everyone_else_reads_it() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Demotion", bed.relays.clone(), None).await.unwrap();
+        let them = member.keys.public_key();
+        let them_hex = them.to_hex();
+
+        grant_admin(&bed.relay, &community, &them).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(view.roles.is_admin(&them_hex), "granted, and readable from the plane");
+
+        revoke_admin(&bed.relay, &community, &them).await.unwrap();
+
+        // The plane, NOT the local row: this is the copy every peer folds.
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.is_admin(&them_hex),
+            "the demotion must be on the plane, or only the owner believes it"
+        );
+
+        // And the same answer through the public API a bot or client would ask.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        use nostr_sdk::prelude::ToBech32;
+        assert!(
+            !crate::VectorCore
+                .member_has_permission(&cid_hex, &them.to_bech32().unwrap(), crate::community::roles::Permissions::BAN)
+                .unwrap(),
+            "a demoted admin holds no powers"
+        );
+    }
+
     /// Authority must fail CLOSED. A bot gating a chat command on this is the
     /// only thing standing between "a moderator asked" and "anyone in the room
     /// asked", so an unfolded, empty or unreadable roster has to authorise
