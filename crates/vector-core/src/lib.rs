@@ -5506,4 +5506,22 @@ mod moderation_cache_audit {
             );
         }
     }
+
+    /// A ban by ANOTHER admin reaches this device as an adopted fold, not a local
+    /// call — and with a moderation bot doing the work, that is the ONLY way it ever
+    /// arrives. The three stores the console reports from must drop the memo on
+    /// write, or the human admin watches a raid that was handled 90 seconds ago.
+    #[test]
+    fn an_adopted_change_drops_the_verdict_too() {
+        let src = include_str!("db/community.rs");
+        for name in ["pub fn set_community_banlist", "pub fn set_community_roles", "pub fn set_guestbook"] {
+            let start = src.find(name).unwrap_or_else(|| panic!("{name} not found — rename?"));
+            let rest = &src[start + name.len()..];
+            let end = rest.find("\npub fn ").unwrap_or(rest.len());
+            assert!(
+                rest[..end].contains("forget_console_verdict"),
+                "{name} changes who the console reports on but leaves the memo standing"
+            );
+        }
+    }
 }

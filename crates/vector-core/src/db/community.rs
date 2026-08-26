@@ -1781,6 +1781,15 @@ pub fn is_author_banned(community_id: &str, author: &PublicKey) -> bool {
     !set.is_empty() && set.contains(&author.to_bytes())
 }
 
+/// Drop the moderation console's memoised verdict for this community. Called from
+/// every write that changes who the console reports on, so an answer adopted from
+/// ANOTHER admin's action invalidates it exactly like a local one: with a bot doing
+/// the moderating, the stale console is the human admin's, and it is the only view
+/// of the raid they have.
+fn forget_console_verdict(community_id: &str) {
+    crate::VectorCore::invalidate_raid_report(community_id);
+}
+
 pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
     let conn = super::get_write_connection_guard_static()?;
     // MONOTONIC in the edition version. Un-banning is the fail-OPEN direction — the
@@ -1833,6 +1842,7 @@ pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64)
     )
     .map_err(|e| format!("set banlist_at: {e}"))?;
     tx.commit().map_err(|e| format!("commit banlist: {e}"))?;
+    forget_console_verdict(community_id);
     // Write-through: the hot-path cache must not lag a fold — a stale ban would wrongly
     // vanish a now-unbanned author's messages (fail-closed).
     BANLIST_CACHE
@@ -1913,6 +1923,7 @@ pub fn set_community_roles(
     roles: &crate::community::roles::CommunityRoles,
     at: i64,
 ) -> Result<(), String> {
+    forget_console_verdict(community_id);
     let json = enc_txt(&serde_json::to_string(roles).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
     conn.execute(
@@ -3071,6 +3082,7 @@ pub fn set_guestbook(
     events: &[crate::community::v2::guestbook::GuestbookEvent],
     cursor_secs: u64,
 ) -> Result<(), String> {
+    forget_console_verdict(community_id);
     let conn = super::get_write_connection_guard_static()?;
     let json = serde_json::to_string(events).map_err(|e| e.to_string())?;
     let enc = enc_txt(&json)?;
