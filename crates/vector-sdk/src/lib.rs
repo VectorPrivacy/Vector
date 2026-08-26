@@ -1547,6 +1547,34 @@ impl Member {
             .unwrap_or(false)
     }
 
+    /// Whether this member holds `permission` here, per the community's roster.
+    ///
+    /// The roster is the protocol's ACL, so a bot gating a command on this
+    /// refuses exactly what the community itself would — no second permission
+    /// model to drift out of step with the first. Prefer it over
+    /// [`is_admin`](Self::is_admin) wherever a specific power is the question:
+    /// "may they kick" and "are they staff" are not the same claim, and a
+    /// channel-scoped role can carry no powers at all.
+    ///
+    /// ```no_run
+    /// # use vector_sdk::vector_core::community::roles::Permissions;
+    /// # async fn f(member: vector_sdk::Member) {
+    /// if member.can(Permissions::BAN) { /* honour the command */ }
+    /// # }
+    /// ```
+    ///
+    /// Fails CLOSED: an unreadable roster answers `false`. Use
+    /// [`try_can`](Self::try_can) where that difference decides something.
+    pub fn can(&self, permission: u64) -> bool {
+        self.try_can(permission).unwrap_or(false)
+    }
+
+    /// [`can`](Self::can), with a failed roster read reported rather than folded
+    /// into "not authorized".
+    pub fn try_can(&self, permission: u64) -> Result<bool> {
+        self.core.member_has_permission(&self.community_id, &self.npub, permission)
+    }
+
     /// Whether this member is an admin (the owner counts as admin).
     pub fn is_admin(&self) -> bool {
         let Ok(roles) = self.core.community_roles(&self.community_id) else { return false };
