@@ -3561,6 +3561,8 @@ impl VectorCore {
         crate::community::v2::service::refound_community(&transport, &community, &removed)
             .await
             .map_err(VectorError::Other)?;
+        // The cut changed who is a member; the memoised verdict still names them.
+        Self::invalidate_raid_report(community_id);
         Ok(())
     }
 
@@ -3689,6 +3691,7 @@ impl VectorCore {
             sweep.refused.len(),
             sweep.failed.len()
         );
+        Self::invalidate_raid_report(community_id);
         Ok(serde_json::json!({
             "kicked": sweep.kicked.len(),
             "refused": sweep.refused.iter().map(|(_, why)| why.clone()).collect::<Vec<_>>(),
@@ -4422,7 +4425,11 @@ impl VectorCore {
             list.extend(hexes);
         }
         let community = Self::load_community_hex(community_id)?;
-        service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
+        service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)?;
+        // A ban removes them from the memberlist; the memoised verdict still counts
+        // them as present and keeps flagging a raid nobody is running any more.
+        Self::invalidate_raid_report(community_id);
+        Ok(())
     }
 
     /// Repair a v2 community's roster cache: keep what is stored, but reset its
@@ -4544,6 +4551,7 @@ impl VectorCore {
         if !session.is_live() {
             return Err(VectorError::Other("account changed during raid containment".into()));
         }
+        Self::invalidate_raid_report(community_id);
         Ok(report)
     }
 
@@ -5469,5 +5477,33 @@ mod history_paging_tests {
 
         // Unknown chat: empty, not an error.
         assert!(core.get_messages_before("test-history-paging-nochat", None, 5).await.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod moderation_cache_audit {
+    /// Every moderation action changes who is a member, and the console's verdict is
+    /// memoised for 90s. An action that does not drop the memo leaves the console
+    /// listing people it just removed and flagging a raid that is already over —
+    /// which is exactly what shipped: `invalidate_raid_report` existed with no
+    /// caller at all. Parsed from source, so a new action cannot quietly skip it.
+    #[test]
+    fn every_moderation_action_drops_the_memoised_verdict() {
+        let src = include_str!("lib.rs");
+        for name in [
+            "pub async fn refound_community",
+            "pub async fn kick_community_members",
+            "pub async fn set_members_banned",
+            "pub async fn contain_raid",
+        ] {
+            let start = src.find(name).unwrap_or_else(|| panic!("{name} not found — rename?"));
+            // The body ends where the next item at method indentation begins.
+            let rest = &src[start + name.len()..];
+            let end = rest.find("\n    pub ").unwrap_or(rest.len());
+            assert!(
+                rest[..end].contains("invalidate_raid_report"),
+                "{name} mutates membership but never drops the memoised console verdict"
+            );
+        }
     }
 }
