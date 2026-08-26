@@ -3677,9 +3677,25 @@ impl VectorCore {
             .collect();
         log_info!("[Moderation] purge: {} to remove, {} retained", removed.len(), keep.len());
         let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
-        crate::community::v2::service::refound_community_retaining(&transport, &community, &removed, &keep)
-            .await
-            .map_err(VectorError::Other)?;
+        // An EMPTY retain means "cut nobody", not "keep nobody".
+        //
+        // The two lines above read the same empty list in opposite directions:
+        // `members_to_remove` correctly removes nobody, while `keep` becomes an empty
+        // ALLOW-LIST — and an allow-list keeps only this device and the owner, so a
+        // plain "Rotate keys" vended to two people and stranded everyone else at the
+        // previous epoch, permanently. It presented as members vanishing from the
+        // list some time later, nowhere near the button that did it.
+        //
+        // A purge is the caller NAMING who stays. Nobody named is not a purge.
+        if keep.is_empty() {
+            crate::community::v2::service::refound_community(&transport, &community, &removed)
+                .await
+                .map_err(VectorError::Other)?;
+        } else {
+            crate::community::v2::service::refound_community_retaining(&transport, &community, &removed, &keep)
+                .await
+                .map_err(VectorError::Other)?;
+        }
         // Re-load onto the epoch the rotation just minted: kicking against the stale
         // struct would address the plane we just buried, which is the whole bug this
         // ordering exists to avoid.

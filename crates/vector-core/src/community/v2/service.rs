@@ -3237,8 +3237,11 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         // vended keys too; being forgotten is not a removal, only `removed` is.
         let members = memberlist(transport, community).await?;
         let removed_set: std::collections::HashSet<[u8; 32]> = removed.iter().map(|p| p.to_bytes()).collect();
+        let net_len = members.len();
         let mut union: std::collections::BTreeSet<PublicKey> = members.into_iter().collect();
-        union.extend(stored_memberlist(community)?);
+        let local = stored_memberlist(community)?;
+        let local_len = local.len();
+        union.extend(local);
         let mut recipients: Vec<PublicKey> = union.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
         if !recipients.iter().any(|p| *p == my_pk) {
             recipients.push(my_pk);
@@ -3387,11 +3390,18 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
                 .map(|pk| pk.to_hex())
                 .collect();
             if !missing.is_empty() {
+                // The counts ride the message: which of the two folds lost them is
+                // the whole diagnosis, and a refusal that does not say leaves the
+                // next person guessing exactly as long as this one did.
                 return Err(format!(
-                    "re-founding aborted: {} granted member(s) would be vended no key and stranded at epoch {} — {}; no state published",
+                    "re-founding aborted: {} granted member(s) would be vended no key and stranded at epoch {} — {}; \
+                     recipients={} (network fold {}, local fold {}); no state published",
                     missing.len(),
                     prev_epoch.0,
-                    missing.iter().map(|h| h[..8.min(h.len())].to_string()).collect::<Vec<_>>().join(", ")
+                    missing.iter().map(|h| h[..8.min(h.len())].to_string()).collect::<Vec<_>>().join(", "),
+                    recipients.len(),
+                    net_len,
+                    local_len
                 ));
             }
         }
@@ -11110,6 +11120,54 @@ mod tests {
             crate::VectorCore.member_can_read_channel(&cid_hex, &priv_hex, &them_npub).unwrap(),
             "the channel-scoped grant is what admits them"
         );
+    }
+
+    /// An empty retain means "cut nobody", never "keep nobody".
+    ///
+    /// The console's "Rotate keys" sends an empty retain when nothing is unticked.
+    /// `members_to_remove` reads that correctly and removes nobody — but the same
+    /// empty list also became an ALLOW-LIST, and an allow-list keeps only the
+    /// rotating device and the owner. So a plain rotation vended to two people and
+    /// stranded everyone else at the previous epoch, permanently, presenting as
+    /// members vanishing some time later nowhere near the button that did it.
+    ///
+    /// The two paths are pinned here against each other, because they take the same
+    /// empty list and must disagree about what it means.
+    #[tokio::test]
+    async fn an_empty_retain_cuts_nobody_rather_than_keeping_nobody() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "EmptyRetain", bed.relays.clone(), None).await.unwrap();
+
+        // A third party who is neither the rotator nor the owner — the only kind of
+        // member an empty allow-list silently drops.
+        let bundle = serde_json::to_string(&bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None)).unwrap();
+        bed.swap_to(&member);
+        accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        bed.swap_to(&owner);
+        assert!(memberlist(&bed.relay, &community).await.unwrap().contains(&member.keys.public_key()));
+
+        // The plain reading: cut nobody, vend to everybody. This is what the button
+        // must reach. (The allow-list reading of the same empty list is covered by
+        // `a_rotation_that_would_strand_staff_refuses_to_publish`.)
+        refound_community(&bed.relay, &community, &[]).await.expect("cutting nobody must succeed");
+        assert!(
+            vended_to(&bed, &community, &member.keys).await,
+            "a plain rotation must vend to a member who is neither the rotator nor the owner"
+        );
+    }
+
+    /// The console's rotate button reaches the "cut nobody" path, not the allow-list
+    /// one. Pinned from source: the two are one `if` apart and read the same empty
+    /// list in opposite directions, which is exactly how this shipped.
+    #[test]
+    fn an_empty_retain_does_not_become_an_allow_list() {
+        let src = include_str!("../../lib.rs");
+        let at = src.find("pub async fn purge_and_refound").expect("purge_and_refound");
+        let body = &src[at..at + 3000];
+        let guard = body.find("if keep.is_empty()").expect("an empty retain must branch away from the allow-list");
+        let retaining = body.find("refound_community_retaining").expect("the allow-list call");
+        assert!(guard < retaining, "the branch has to come BEFORE the allow-list call");
     }
 
     /// If the recipients would strand a granted member, publish NOTHING.
