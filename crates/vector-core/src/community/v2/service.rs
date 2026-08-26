@@ -1167,6 +1167,32 @@ pub(crate) fn sever_marks(cid_hex: &str) -> std::collections::BTreeMap<u64, u64>
         .unwrap_or_default()
 }
 
+/// Who minted each epoch: `root_epoch -> rotator hex`. CORD-02 §5 honors a
+/// Guestbook snapshot "only from the npub whose Refounding minted that epoch",
+/// so the fold has to remember which npub that was — the owner is only the
+/// answer when the owner did the refounding.
+pub(crate) fn epoch_minters(cid_hex: &str) -> std::collections::BTreeMap<u64, String> {
+    crate::db::settings::get_sql_setting(format!("v2_minter:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Remember the rotator that minted `epoch`. Recorded at ADOPTION (and by the
+/// refounder for its own mint), so it is always an npub this device verified as
+/// an authorized rotator — never one a snapshot claims for itself.
+pub(crate) fn record_epoch_minter(cid_hex: &str, epoch: u64, rotator_hex: &str) {
+    let mut m = epoch_minters(cid_hex);
+    if m.get(&epoch).is_some_and(|held| held == rotator_hex) {
+        return;
+    }
+    m.insert(epoch, rotator_hex.to_string());
+    if let Ok(v) = serde_json::to_string(&m) {
+        let _ = crate::db::settings::set_sql_setting(format!("v2_minter:{cid_hex}"), v);
+    }
+}
+
 /// Record a severed rotation. Idempotent; marks only accumulate — the row is a
 /// few bytes and clearing one would let a failed severance read as done (B4).
 pub(crate) fn add_sever_mark(cid_hex: &str, epoch: u64, at_secs: u64) {
@@ -2308,6 +2334,30 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
 /// authority (owner-supreme kicks, refounder snapshots), union observed authors
 /// plus every roster grantee, subtract the banlist, and pin the proven owner.
 /// One implementation, so the live and stored reads can't drift.
+/// Whose Guestbook snapshot seeds this community's CURRENT epoch (CORD-02 §5):
+/// "honored only from the npub whose Refounding minted that epoch". That is the
+/// owner only when the owner did the refounding.
+///
+/// Vector read it as owner-always, so an admin's — or a moderation bot's —
+/// refounding rolled the epoch and vended the keys while its survivor list was
+/// discarded. Every client then folded its own accumulated Joins instead: members
+/// the containment had cut lingered on the roster, and no two clients agreed on it.
+///
+/// The minter comes from the rotation this device VERIFIED and adopted, never from
+/// the snapshot, so writing a snapshot grants nobody authority over it. An epoch
+/// adopted before minters were recorded has no entry and falls back to the owner —
+/// the previous behaviour, never a wider one. Genesis (epoch 0) has no refounder and
+/// therefore no snapshot power at all.
+fn snapshot_authority_for(cid_hex: &str, community: &CommunityV2, owner: &PublicKey) -> Option<PublicKey> {
+    if community.root_epoch.0 == 0 {
+        return None;
+    }
+    let minted_by = epoch_minters(cid_hex)
+        .get(&community.root_epoch.0)
+        .and_then(|h| PublicKey::from_hex(h).ok());
+    Some(minted_by.unwrap_or(*owner))
+}
+
 fn fold_members(
     community: &CommunityV2,
     events: &[guestbook::GuestbookEvent],
@@ -2340,7 +2390,8 @@ fn fold_members(
     // send/receive gates authorize any BAN-holder to refound, but their snapshot is NOT honored
     // here, so a non-owner admin's refound drops silent survivors (incl. migration roster seeds)
     // until they re-post. Binding the minting rotator into snapshot authority is a spec change.
-    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_pk.as_ref();
     // Kick authority (CORD-04 §5/§6): the signer must cite a Grant we've synced AND
     // hold KICK AND strictly outrank the target (the owner is supreme; equal cannot
     // kick equal).
@@ -2549,7 +2600,8 @@ pub async fn wire_guestbook_members<T: Transport + ?Sized>(
     let owner = community.owner()?;
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
         citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
@@ -2585,7 +2637,8 @@ pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool 
     let Ok(owner) = community.owner() else { return false };
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
         citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
@@ -3184,6 +3237,10 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         if let Some(client) = crate::state::nostr_client() {
             super::realtime::refresh_subscription(&client).await;
         }
+        // We minted this epoch, so our own snapshot is what seeds it (CORD-02 §5).
+        // Recorded here so the local fold agrees with every follower's without
+        // waiting to adopt our own rotation back off the wire.
+        record_epoch_minter(&cid_hex, new_epoch.0, &my_pk.to_hex());
         if sever {
             // Severing: the mark persists FIRST (a crash between it and the revoke
             // must retry, not forget — B4), then my own links are tombstoned. Other
@@ -7982,7 +8039,12 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                 let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
                 let batches = vec![(chunks, Some((held_epoch, held_key)))];
                 match advance_scope(&batches, RekeyScope::Root, cur.id(), &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
-                    Advance::Adopt { new_key, control_pk, control_root, severed } => {
+                    Advance::Adopt { new_key, control_pk, control_root, severed, rotator } => {
+                        // CORD-02 §5: this npub's snapshot — and only this npub's —
+                        // seeds the new epoch's Guestbook. Recorded from the rotation
+                        // this device just VERIFIED and adopted, so a snapshot can
+                        // never nominate its own author.
+                        record_epoch_minter(&cid_hex, next.0, &rotator.to_hex());
                         // Record the HOP that was severed, not the walk's final head:
                         // the mark drives both the link condemnation line and the
                         // rescue re-stamp, and a multi-step walk would otherwise
@@ -8132,7 +8194,7 @@ enum Advance {
     /// pair is the BLOB's, never inherited: a legacy 72-byte blob carries
     /// neither (that epoch's Control folds at the legacy address), and channel
     /// rotations never carry any.
-    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool },
+    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool, rotator: PublicKey },
     /// A complete owner rotation at `next_epoch` dropped my blob — I'm removed.
     Removed,
     /// No owner rotation extends my held epoch (yet) — keep the current key.
@@ -8239,6 +8301,9 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     // (Root scope only). Selected by the same lowest-key index, so a same-epoch
     // fork adopts the winner's flag and never a loser's.
     let mut winner_severed: Vec<bool> = Vec::new();
+    // Parallel to `winner_severed`: whose Refounding this delivery came from. The
+    // snapshot authority for the adopted epoch (CORD-02 §5) is exactly this npub.
+    let mut winner_rotator: Vec<PublicKey> = Vec::new();
     let mut saw_complete_candidate = false;
     // Did any qualifying rotation actually carry recipients? See the removal gate.
     let mut saw_nonempty_candidate = false;
@@ -8302,6 +8367,7 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
                 if let Ok(d) = opened {
                     winners.push(d);
                     winner_severed.push(scope.id32() == RekeyScope::Root.id32() && r.severed);
+                    winner_rotator.push(r.rotator);
                     opened_one = true;
                     break;
                 }
@@ -8327,7 +8393,13 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
         let keys: Vec<[u8; 32]> = winners.iter().map(|d| d.new_root).collect();
         let idx = rekey::lowest_key_winner(&keys).expect("winners is non-empty");
         let w = &winners[idx];
-        return Advance::Adopt { new_key: w.new_root, control_pk: w.control_pk, control_root: w.control_root, severed: winner_severed[idx] };
+        return Advance::Adopt {
+            new_key: w.new_root,
+            control_pk: w.control_pk,
+            control_root: w.control_root,
+            severed: winner_severed[idx],
+            rotator: winner_rotator[idx],
+        };
     }
     // A rotation that delivered NO blob to anyone removed nobody. Read literally it
     // is "complete, authorized, and contains no blob for me" — which is the removal
@@ -10650,6 +10722,63 @@ mod tests {
         // onto the current epoch's guestbook plane.
         let wire = wire_guestbook_members(&relay, &e2).await.unwrap();
         assert!(wire.contains(&stranded.public_key()), "the invite page's fold now includes them");
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_refounders_snapshot_seeds_the_roster() {
+        // CORD-02 §5: a snapshot is honored "only from the npub whose Refounding
+        // minted that epoch". Vector read that as the OWNER always, so a moderation
+        // bot's containment rolled the epoch and vended the keys while its survivor
+        // list was thrown away — every client then folded its own accumulated Joins,
+        // keeping members the containment had cut and disagreeing with each other.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "MintedBy", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().unwrap();
+
+        // An admin (NOT the owner) refounded to epoch 1 — this device verified and
+        // adopted that rotation, so it knows who minted it.
+        let admin = Keys::generate();
+        let mut at_epoch_1 = community.clone();
+        at_epoch_1.root_epoch = Epoch(1);
+        record_epoch_minter(&cid_hex, 1, &admin.public_key().to_hex());
+
+        // Someone the containment cut: joined at the old epoch, never banned, and
+        // absent from the survivor list the refounder published.
+        let cut = Keys::generate().public_key();
+        let join = guestbook::GuestbookEvent {
+            epoch: None, observed_at: None, rumor_id: [11u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: cut, invited_by: None, at_ms: 1_000 },
+        };
+        let snapshot = |by: &Keys, id: u8| guestbook::GuestbookEvent {
+            epoch: Some(1), observed_at: None, rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Snapshot {
+                refounder: by.public_key(),
+                members: vec![owner],           // survivors: the cut member is NOT here
+                snapshot_id: [id; 32],
+                chunk: (1, 1),
+                at_ms: 5_000,                   // newer than the Join it supersedes
+            },
+        };
+
+        // A stranger's snapshot must change nothing — authority is the minter, not
+        // whoever manages to write a 3312.
+        let stranger = Keys::generate();
+        crate::db::community::set_guestbook(&cid_hex, &[join.clone(), snapshot(&stranger, 0x51)], 6).unwrap();
+        assert!(
+            stored_memberlist(&at_epoch_1).unwrap().contains(&cut),
+            "a snapshot from an npub that minted nothing seeds no roster"
+        );
+
+        // The actual refounder's snapshot IS the guest list.
+        crate::db::community::set_guestbook(&cid_hex, &[join, snapshot(&admin, 0x52)], 6).unwrap();
+        let members = stored_memberlist(&at_epoch_1).unwrap();
+        assert!(
+            !members.contains(&cut),
+            "the refounder's survivor list is adopted, so a cut member stops being one"
+        );
+        assert!(members.contains(&owner), "a survivor the snapshot names stays");
     }
 
     #[tokio::test]
