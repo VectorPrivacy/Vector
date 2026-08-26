@@ -11022,6 +11022,43 @@ mod tests {
         assert!(members.contains(&owner), "a survivor the snapshot names stays");
     }
 
+    /// Authority must fail CLOSED. A bot gating a chat command on this is the
+    /// only thing standing between "a moderator asked" and "anyone in the room
+    /// asked", so an unfolded, empty or unreadable roster has to authorise
+    /// nobody — `has_permission` finds no grant and denies. The owner is the one
+    /// exception, and is answered without consulting the roster at all.
+    #[tokio::test]
+    async fn permission_is_refused_to_everyone_the_roster_does_not_name() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Authority", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        use nostr_sdk::prelude::ToBech32;
+        let owner_npub = community.owner().unwrap().to_bech32().unwrap();
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+
+        use crate::community::roles::Permissions;
+        for p in [Permissions::KICK, Permissions::BAN, Permissions::MANAGE_ROLES] {
+            assert!(
+                !crate::VectorCore.member_has_permission(&cid_hex, &stranger, p).unwrap(),
+                "an npub the roster never granted anything holds nothing"
+            );
+            assert!(
+                crate::VectorCore.member_has_permission(&cid_hex, &owner_npub, p).unwrap(),
+                "the owner is supreme without a grant to cite"
+            );
+        }
+
+        // A banned npub holds nothing, whatever a stale grant still says.
+        crate::db::community::set_community_banlist(&cid_hex, &[community.owner().unwrap().to_hex()], 1).unwrap();
+        let banned_owner_is_still_owner =
+            crate::VectorCore.member_has_permission(&cid_hex, &owner_npub, Permissions::BAN).unwrap();
+        assert!(banned_owner_is_still_owner, "the owner cannot be locked out of their own community");
+
+        // And a malformed npub is an error, never a silent grant.
+        assert!(crate::VectorCore.member_has_permission(&cid_hex, "not-an-npub", Permissions::BAN).is_err());
+    }
+
     #[tokio::test]
     async fn a_refound_keeps_a_quiet_member_the_network_fold_forgot() {
         // The network fold only sees the current guestbook + the recent posting window,

@@ -4250,6 +4250,40 @@ impl VectorCore {
         Ok(serde_json::json!({ "roles": roles, "grants": grants }))
     }
 
+    /// Whether `npub` holds `permission` in this community, per the folded roster.
+    ///
+    /// The roster IS the ACL (CORD-04), so this is the same question every
+    /// enforcement path asks — a bot gating a chat command on it refuses exactly
+    /// what the protocol would, instead of inventing a second permission model
+    /// that can disagree with the first.
+    ///
+    /// Deliberately NOT [`community_capabilities`]: that answers "could I publish
+    /// this", which additionally needs the Control Plane write key. Here the
+    /// caller is asking *someone else* for authority while the bot does the
+    /// publishing, so the write key is the bot's problem, not theirs.
+    ///
+    /// Fails CLOSED. A banned member holds nothing; an unreadable or not-yet-folded
+    /// roster answers `false` for everyone but the owner, because `has_permission`
+    /// finds no grant. Authority must never be granted by an absence of data.
+    pub fn member_has_permission(&self, community_id: &str, npub: &str, permission: u64) -> Result<bool> {
+        use nostr_sdk::prelude::PublicKey;
+        let who = PublicKey::parse(npub).map_err(|_| VectorError::Other(format!("invalid npub: {npub}")))?.to_hex();
+        let owner_hex = match Self::load_v2_if_v2(community_id)? {
+            Some(v2) => v2.owner().map_err(VectorError::Other)?.to_hex(),
+            None => Self::load_community_hex(community_id)?
+                .owner_attestation
+                .as_ref()
+                .and_then(|att| crate::community::owner::verify_owner_attestation(att, community_id))
+                .map(|pk| pk.to_hex())
+                .unwrap_or_default(),
+        };
+        if who != owner_hex && crate::db::community::get_community_banlist(community_id).unwrap_or_default().contains(&who) {
+            return Ok(false);
+        }
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        Ok(roster.is_authorized(&who, Some(&owner_hex), permission))
+    }
+
     pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
