@@ -1424,6 +1424,7 @@ pub async fn get_messages_around(
 
     let message_events: Vec<StoredEvent> = {
         let conn = super::get_db_connection_guard_static()?;
+        let community = community_of_chat(&conn, chat_id);
 
         // Resolve the anchor's FULL sort key (created_at, received_at, rowid). Paging by created_at
         // alone wedges on a wall of equal timestamps (a message burst): the query keeps returning the
@@ -1449,8 +1450,8 @@ pub async fn get_messages_around(
             "SELECT {} FROM events WHERE chat_id = ?1 AND kind IN ({}) \
              AND (created_at < ?5 OR (created_at = ?5 AND (received_at < ?6 \
                   OR (received_at = ?6 AND rowid <= ?7)))) \
-             ORDER BY created_at DESC, received_at DESC, rowid DESC LIMIT ?8",
-            cols, kind_placeholders
+             {} ORDER BY created_at DESC, received_at DESC, rowid DESC LIMIT ?8",
+            cols, kind_placeholders, ban_filter_sql(9)
         );
         let mut older_stmt = conn.prepare(&older_sql)
             .map_err(|e| format!("Failed to prepare older window query: {}", e))?;
@@ -1458,7 +1459,7 @@ pub async fn get_messages_around(
             rusqlite::params![
                 chat_id,
                 message_kinds[0] as i32, message_kinds[1] as i32, message_kinds[2] as i32,
-                anchor_at, anchor_rt, anchor_rowid, before as i64
+                anchor_at, anchor_rt, anchor_rowid, before as i64, community
             ],
             parse_event_row,
         ).map_err(|e| format!("Failed to query older window: {}", e))?;
@@ -1470,8 +1471,8 @@ pub async fn get_messages_around(
             "SELECT {} FROM events WHERE chat_id = ?1 AND kind IN ({}) \
              AND (created_at > ?5 OR (created_at = ?5 AND (received_at > ?6 \
                   OR (received_at = ?6 AND rowid > ?7)))) \
-             ORDER BY created_at ASC, received_at ASC, rowid ASC LIMIT ?8",
-            cols, kind_placeholders
+             {} ORDER BY created_at ASC, received_at ASC, rowid ASC LIMIT ?8",
+            cols, kind_placeholders, ban_filter_sql(9)
         );
         let mut newer_stmt = conn.prepare(&newer_sql)
             .map_err(|e| format!("Failed to prepare newer window query: {}", e))?;
@@ -1479,7 +1480,7 @@ pub async fn get_messages_around(
             rusqlite::params![
                 chat_id,
                 message_kinds[0] as i32, message_kinds[1] as i32, message_kinds[2] as i32,
-                anchor_at, anchor_rt, anchor_rowid, after as i64
+                anchor_at, anchor_rt, anchor_rowid, after as i64, community
             ],
             parse_event_row,
         ).map_err(|e| format!("Failed to query newer window: {}", e))?;
@@ -2770,6 +2771,34 @@ mod tests {
         assert!(
             crate::state::was_message_deleted("moderated_evt"),
             "the refusal outlives the row, so the re-ingest is dropped rather than resurrecting it"
+        );
+    }
+
+    /// Backscroll windows around an anchor, so a ban has to hold there too —
+    /// otherwise jump-to-message walks straight back into the spam the chat page
+    /// refuses to show.
+    #[tokio::test]
+    async fn the_backscroll_window_excludes_banned_authors() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_window";
+        link_channel_to_community(chat, "comm_window");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+
+        for i in 0..10u64 {
+            let m = Message { id: format!("w_real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some(good.clone()), ..Default::default() };
+            save_message(chat, &m).await.unwrap();
+            let s = Message { id: format!("w_spam{i}"), content: "buy".into(), at: 1_500 + i, npub: Some(raider.clone()), ..Default::default() };
+            save_message(chat, &s).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_window", &[raider_hex], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let win = get_messages_around(chat_id, "w_real5", 20, 20).await.unwrap();
+        assert!(!win.is_empty(), "the window still returns the real messages");
+        assert!(
+            win.iter().all(|m| m.npub.as_deref() == Some(good.as_str())),
+            "no banned author reachable by jumping to a message near them",
         );
     }
 
