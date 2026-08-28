@@ -538,6 +538,11 @@ pub async fn fetch_messages<R: Runtime>(
 
                     // Spawn background task to cache profile images for offline support
                     vector_core::db::spawn_bound(async move {
+                        // Normalize what's already on disk BEFORE filling gaps, so a
+                        // pre-normalization monster GIF doesn't render one more boot.
+                        if let Some(handle) = crate::TAURI_APP.get() {
+                            crate::image_cache::backfill_animated_cache(handle);
+                        }
                         profile::cache_all_profile_images().await;
                     });
 

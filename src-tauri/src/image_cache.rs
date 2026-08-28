@@ -371,7 +371,7 @@ pub async fn cache_image<R: Runtime>(
     };
 
     // Validate the image
-    let extension = match validate_image(&bytes) {
+    let mut extension = match validate_image(&bytes) {
         Some(ext) => ext,
         None => {
             // Unsupported format (e.g. AVIF, absent from our image build) or a
@@ -380,6 +380,31 @@ pub async fn cache_image<R: Runtime>(
             return CacheResult::Failed("Invalid or corrupted image".to_string());
         }
     };
+
+    // Oversized ANIMATIONS get normalized before they ever touch the webview:
+    // WebKit decodes a GIF's full logical screen for every <img> showing it, so
+    // one 800px animated avatar shreds render cycles in every chat row at once.
+    // Statics stay verbatim — a still costs one decode, keep its quality.
+    let mut bytes = bytes;
+    if let Some((target, label)) = animated_display_target(image_type) {
+        if crate::shared::image::animated_format(&bytes).is_some() && needs_animated_transcode(&bytes, target) {
+            match crate::shared::image::transcode_animated(&bytes, target, crate::shared::image::ANIMATED_MAX_FRAMES) {
+                Ok(re) if re.bytes.len() < bytes.len() => {
+                    log_info!(
+                        "[ImageCache] {} animation normalized: {} KB -> {} KB at ≤{target}px",
+                        label, bytes.len() / 1024, re.bytes.len() / 1024
+                    );
+                    bytes = re.bytes;
+                    extension = re.extension;
+                }
+                // A transcode that GREW (tiny-dims, huge-frame-count inputs
+                // re-quantized) or failed keeps the original — fail open to
+                // today's behavior, never lose the image over an optimization.
+                Ok(_) => {}
+                Err(e) => log_debug!("[ImageCache] animation transcode skipped for {}: {}", url, e),
+            }
+        }
+    }
 
     // Get cache directory and create filename
     let cache_dir = match get_cache_dir(handle, image_type) {
@@ -400,6 +425,81 @@ pub async fn cache_image<R: Runtime>(
     log_info!("[ImageCache] Cached {} -> {}", url, path_str);
 
     CacheResult::Cached(path_str)
+}
+
+/// Display-size ceiling for a cached ANIMATION of this type, or None for types
+/// whose animations stay verbatim. An avatar renders ≤80 CSS px, so 160 covers
+/// 2x displays; a banner is a wide hero, 640 keeps motion smooth without the
+/// full-width decode cost.
+fn animated_display_target(image_type: ImageType) -> Option<(u32, &'static str)> {
+    match image_type {
+        ImageType::Avatar => Some((160, "avatar")),
+        ImageType::Banner => Some((640, "banner")),
+        _ => None,
+    }
+}
+
+/// Whether an animated file is worth re-encoding: dimensions above the display
+/// target, or heavy despite small dimensions (a frame-count bomb).
+fn needs_animated_transcode(bytes: &[u8], target: u32) -> bool {
+    const ANIMATED_BYTE_THRESHOLD: usize = 768 * 1024;
+    match crate::shared::image::animated_dims(bytes) {
+        Some((w, h)) => w > target || h > target || bytes.len() > ANIMATED_BYTE_THRESHOLD,
+        None => bytes.len() > ANIMATED_BYTE_THRESHOLD,
+    }
+}
+
+/// One-time sweep of the existing avatar/banner cache: re-encode any oversized
+/// animation already on disk down to its display target, in place. Everything
+/// cached before the download-path normalization existed was written verbatim,
+/// so the worst offenders are already local and re-download never fixes them
+/// (`AlreadyCached` short-circuits on file existence).
+///
+/// GIF-only by design: the rewrite keeps the filename, and profiles store the
+/// cached path VERBATIM (extension included) — a format change would strand
+/// every stored path. Non-GIF animations are rare and get normalized on their
+/// next natural re-download.
+///
+/// Idempotent and cheap to re-run: a normalized file fails the dimensions
+/// check by construction, so later boots read a few file headers and stop.
+pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
+    let mut rewritten = 0usize;
+    for image_type in [ImageType::Avatar, ImageType::Banner] {
+        let Some((target, label)) = animated_display_target(image_type) else { continue };
+        let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("gif") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if crate::shared::image::animated_format(&bytes).is_none()
+                || !needs_animated_transcode(&bytes, target)
+            {
+                continue;
+            }
+            match crate::shared::image::transcode_animated(&bytes, target, crate::shared::image::ANIMATED_MAX_FRAMES) {
+                Ok(re) if re.bytes.len() < bytes.len() => {
+                    if std::fs::write(&path, &re.bytes).is_ok() {
+                        log_info!(
+                            "[ImageCache] backfill: {} {} normalized {} KB -> {} KB",
+                            label,
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                            bytes.len() / 1024,
+                            re.bytes.len() / 1024
+                        );
+                        rewritten += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log_debug!("[ImageCache] backfill skipped {:?}: {}", path.file_name(), e),
+            }
+        }
+    }
+    if rewritten > 0 {
+        log_info!("[ImageCache] backfill: {} cached animation(s) normalized", rewritten);
+    }
 }
 
 /// Cache an avatar for a user profile

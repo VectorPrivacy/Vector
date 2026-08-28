@@ -11123,6 +11123,7 @@ dependencies = [
  "fast-thumbhash",
  "futures-util",
  "gdk",
+ "gif",
  "glib",
  "gtk",
  "hound",

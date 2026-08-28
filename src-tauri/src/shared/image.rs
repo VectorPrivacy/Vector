@@ -306,14 +306,24 @@ pub fn prepare_upload_image(bytes: &[u8], kind: UploadImageKind) -> Result<Encod
     let (max_dimension, byte_budget, animated_budget) = kind.budgets();
 
     if let Some(extension) = animated_format(bytes) {
-        if bytes.len() > animated_budget {
-            return Err(format!(
-                "Animated image is too large ({} KB, max {} KB); please use a smaller one or a static image",
-                bytes.len() / 1024,
-                animated_budget / 1024,
-            ));
+        // Within budget and small enough: pass through untouched, animation and
+        // all. Otherwise re-encode downscaled — the animation survives (frames
+        // stream through the GIF encoder), only the pixels shrink.
+        let within_dims = animated_dims(bytes)
+            .is_some_and(|(w, h)| w <= max_dimension && h <= max_dimension);
+        if bytes.len() <= animated_budget && within_dims {
+            return Ok(EncodedImage { bytes: bytes.to_vec(), extension });
         }
-        return Ok(EncodedImage { bytes: bytes.to_vec(), extension });
+        if let Ok(re) = transcode_animated(bytes, max_dimension, ANIMATED_MAX_FRAMES) {
+            if re.bytes.len() <= animated_budget {
+                return Ok(re);
+            }
+        }
+        return Err(format!(
+            "Animated image is too large ({} KB, max {} KB); please use a smaller one or a static image",
+            bytes.len() / 1024,
+            animated_budget / 1024,
+        ));
     }
 
     // decode_image_bounded rejects decode-bombs and bakes EXIF orientation into
@@ -323,11 +333,192 @@ pub fn prepare_upload_image(bytes: &[u8], kind: UploadImageKind) -> Result<Encod
     compress_image_within_budget(&img, max_dimension, byte_budget, kind.resample_filter())
 }
 
+/// Ceiling for per-frame streaming decode: a frame is `w*h*4` bytes resident,
+/// so 2048² (16 MB) is the most a hostile animation may cost at once. Anything
+/// larger flattens to a still instead of being trusted.
+pub const ANIMATED_MAX_SOURCE_DIM: u32 = 2048;
+/// Frames kept when re-encoding an animation; the tail is dropped. Generous —
+/// a 300-frame avatar loop is already ~30s at typical delays.
+pub const ANIMATED_MAX_FRAMES: usize = 300;
+
+/// Re-encode an animation downscaled to fit `max_dim`, preserving frame delays
+/// and infinite loop. GIF, animated WebP and APNG all decode; the output is
+/// always GIF (the one animated format every WebView renders cheaply and the
+/// `image` crate can write). Frames stream one at a time, so peak memory is a
+/// single frame regardless of input size.
+///
+/// This is the whole defence against animation-bombs shredding the webview:
+/// WebKit decodes the FULL logical screen of a GIF for every <img> showing it,
+/// so an 800px avatar rendered at 48px still costs 800px per instance, forever.
+pub fn transcode_animated(bytes: &[u8], max_dim: u32, max_frames: usize) -> Result<EncodedImage, String> {
+    use image::codecs::gif::GifDecoder;
+    use image::AnimationDecoder;
+
+    let cursor = Cursor::new(bytes);
+    let frames: image::Frames = if bytes.starts_with(b"GIF8") {
+        let dec = GifDecoder::new(cursor).map_err(|e| format!("gif decode: {e}"))?;
+        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
+        dec.into_frames()
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let dec = image::codecs::webp::WebPDecoder::new(cursor).map_err(|e| format!("webp decode: {e}"))?;
+        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
+        dec.into_frames()
+    } else if bytes.starts_with(b"\x89PNG") {
+        let dec = image::codecs::png::PngDecoder::new(cursor).map_err(|e| format!("png decode: {e}"))?;
+        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
+        dec.apng().map_err(|e| format!("apng decode: {e}"))?.into_frames()
+    } else {
+        return Err("not an animated format".into());
+    };
+
+    let mut out: Vec<u8> = Vec::new();
+    {
+        // The raw `gif` crate, not the image facade: differencing is only
+        // renderable with an explicit DisposalMethod::Keep, which the facade
+        // cannot set — its default leaves reused pixels as holes in some
+        // decoders (the image crate's own included).
+        //
+        // First frame peeled: it fixes the canvas dimensions the encoder
+        // needs up front, and seeds the differencing baseline.
+        let mut frames = frames;
+        let first = match frames.next() {
+            Some(f) => f.map_err(|e| format!("frame decode: {e}"))?,
+            None => return Err("no frames decoded".into()),
+        };
+        let fit = |buf: image::RgbaImage| -> image::RgbaImage {
+            if buf.width() > max_dim || buf.height() > max_dim {
+                DynamicImage::ImageRgba8(buf)
+                    .resize(max_dim, max_dim, ::image::imageops::FilterType::Triangle)
+                    .into_rgba8()
+            } else {
+                buf
+            }
+        };
+        let write_frame = |enc: &mut gif::Encoder<&mut Vec<u8>>,
+                           mut rgba: Vec<u8>,
+                           (sw, sh): (u32, u32),
+                           (x0, y0): (u32, u32),
+                           delay: image::Delay|
+         -> Result<(), String> {
+            // Speed 10 ≈ good quantization at a fraction of best-quality cost;
+            // frames this small keep the whole pass in the tens of ms.
+            let mut f = gif::Frame::from_rgba_speed(sw as u16, sh as u16, &mut rgba, 10);
+            f.left = x0 as u16;
+            f.top = y0 as u16;
+            let (ms, _) = delay.numer_denom_ms();
+            f.delay = (ms / 10).clamp(2, u32::from(u16::MAX)) as u16;
+            f.dispose = gif::DisposalMethod::Keep;
+            enc.write_frame(&f).map_err(|e| format!("gif encode: {e}"))
+        };
+
+        let first_delay = first.delay();
+        let mut shown = fit(first.into_buffer());
+        let canvas = shown.dimensions();
+        let mut enc = gif::Encoder::new(&mut out, canvas.0 as u16, canvas.1 as u16, &[])
+            .map_err(|e| format!("gif encode: {e}"))?;
+        enc.set_repeat(gif::Repeat::Infinite).map_err(|e| format!("gif repeat: {e}"))?;
+        write_frame(&mut enc, shown.as_raw().clone(), canvas, (0, 0), first_delay)?;
+
+        // Inter-frame differencing: emit only pixels that changed beyond the
+        // tolerance since what the viewer displays; the rest go transparent
+        // and keep-disposal shows the old pixel through. A naive full-frame
+        // re-encode INFLATES an already optimized GIF several-fold.
+        let mut count = 1usize;
+        for frame in frames {
+            if count >= max_frames {
+                break;
+            }
+            let frame = frame.map_err(|e| format!("frame decode: {e}"))?;
+            let delay = frame.delay();
+            let resized = fit(frame.into_buffer());
+            if resized.dimensions() != canvas {
+                return Err("frame dimensions changed mid-animation".into());
+            }
+            let (sub, x0, y0) = delta_frame(&mut shown, &resized);
+            let dims = sub.dimensions();
+            write_frame(&mut enc, sub.into_raw(), dims, (x0, y0), delay)?;
+            count += 1;
+        }
+    }
+    Ok(EncodedImage { bytes: out, extension: "gif" })
+}
+
+/// Header-only dimensions of an image, without decoding a pixel.
+pub fn animated_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
+/// Per-channel tolerance for frame differencing: a pixel within this of what
+/// the viewer already shows is REUSED (encoded transparent) instead of
+/// re-emitted. The visible drift is bounded by this value per channel — the
+/// comparison is always against the composited display, never the prior delta.
+const DELTA_TOLERANCE: i16 = 8;
+
+/// Encode the difference between what a decoder currently displays (`shown`)
+/// and the next true frame: unchanged-within-tolerance pixels go transparent
+/// (GIF keep-disposal shows the old pixel through), the rest are emitted and
+/// written back into `shown`. Returns the cropped sub-frame and its offsets.
+///
+/// This is the transparency differencing every optimized GIF uses — without it
+/// a re-encode of an optimized source INFLATES several-fold, because full
+/// frames forfeit both the crop and the per-pixel reuse.
+fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage) -> (image::RgbaImage, u32, u32) {
+    let (w, h) = next.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    let s = shown.as_raw();
+    let n = next.as_raw();
+    // Pass 1: bounding box of pixels that must be re-emitted.
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let differs = (0..3).any(|c| (s[i + c] as i16 - n[i + c] as i16).abs() > DELTA_TOLERANCE);
+            if differs {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x + 1);
+                y1 = y1.max(y + 1);
+            }
+        }
+    }
+    if x0 >= x1 || y0 >= y1 {
+        // Nothing changed: a 1x1 transparent frame still carries the delay.
+        return (image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0])), 0, 0);
+    }
+    // Pass 2: build the sub-frame — reused pixels transparent, changed pixels
+    // opaque and mirrored into `shown` so the next comparison sees the truth
+    // the viewer sees.
+    let (sw, sh) = (x1 - x0, y1 - y0);
+    let mut sub = image::RgbaImage::new(sw, sh);
+    let shown_raw: &mut [u8] = shown.as_mut();
+    for y in 0..sh {
+        for x in 0..sw {
+            let i = (((y + y0) * w + (x + x0)) * 4) as usize;
+            let differs = (0..3).any(|c| (shown_raw[i + c] as i16 - n[i + c] as i16).abs() > DELTA_TOLERANCE);
+            if differs {
+                sub.put_pixel(x, y, image::Rgba([n[i], n[i + 1], n[i + 2], 255]));
+                shown_raw[i..i + 4].copy_from_slice(&n[i..i + 4]);
+            }
+        }
+    }
+    (sub, x0, y0)
+}
+
+fn check_animated_dims((w, h): (u32, u32)) -> Result<(), String> {
+    if w == 0 || h == 0 || w > ANIMATED_MAX_SOURCE_DIM || h > ANIMATED_MAX_SOURCE_DIM {
+        return Err(format!("animation dimensions {w}x{h} out of bounds"));
+    }
+    Ok(())
+}
+
 /// If `bytes` is an animated image we must not re-encode, return its extension
 /// (`"gif"`/`"webp"`/`"png"`); otherwise `None`. Biased toward detecting
 /// animation: a false positive only skips stripping/compression, whereas a false
 /// negative would flatten the animation to a still.
-fn animated_format(bytes: &[u8]) -> Option<&'static str> {
+pub fn animated_format(bytes: &[u8]) -> Option<&'static str> {
     // GIF: any GIF may hold multiple frames.
     if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
         return Some("gif");
@@ -804,11 +995,21 @@ mod budget_compression_tests {
 
     #[test]
     fn animated_passes_through_under_budget_and_is_rejected_over() {
-        let gif = b"GIF89a-pretend-frames".to_vec();
+        // A REAL small animation: within dims and budget it must ride
+        // byte-identical (no churn, no re-quantize).
+        let mut gif = Vec::new();
+        {
+            use image::codecs::gif::GifEncoder;
+            let mut enc = GifEncoder::new_with_speed(&mut gif, 30);
+            for c in [[255u8, 0, 0, 255], [0u8, 255, 0, 255]] {
+                let buf = image::RgbaImage::from_pixel(64, 64, image::Rgba(c));
+                enc.encode_frame(image::Frame::new(buf)).unwrap();
+            }
+        }
         let ok = prepare_upload_image(&gif, UploadImageKind::Avatar).expect("passes");
         assert_eq!(ok.extension, "gif");
         assert_eq!(ok.bytes, gif); // untouched, animation preserved
-        // Emoji animated budget is 256 KB; a larger fake GIF is rejected.
+        // An undecodable blob wearing a GIF header is refused, not uploaded.
         let mut big = b"GIF89a".to_vec();
         big.resize(300 * 1024, 0);
         assert!(prepare_upload_image(&big, UploadImageKind::Emoji).is_err());
@@ -823,3 +1024,166 @@ mod budget_compression_tests {
     }
 }
 
+
+#[cfg(test)]
+mod animated_tests {
+    use super::*;
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame, RgbaImage};
+
+    /// A small synthetic animation: `n` solid frames, each a different color,
+    /// 120 ms apart.
+    fn synth_gif(w: u32, h: u32, n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = GifEncoder::new_with_speed(&mut out, 30);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+            for i in 0..n {
+                let px = [((i * 80) % 255) as u8, 40, 200, 255];
+                let buf = RgbaImage::from_pixel(w, h, image::Rgba(px));
+                enc.encode_frame(Frame::from_parts(buf, 0, 0, Delay::from_numer_denom_ms(120, 1))).unwrap();
+            }
+        }
+        out
+    }
+
+    fn decoded_frames(bytes: &[u8]) -> Vec<Frame> {
+        use image::AnimationDecoder;
+        let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).unwrap();
+        dec.into_frames().collect_frames().unwrap()
+    }
+
+    /// The whole point: a big animation comes back smaller, still moving, with
+    /// its timing intact — not flattened to a still.
+    #[test]
+    fn a_transcoded_animation_shrinks_but_keeps_moving() {
+        let src = synth_gif(400, 300, 3);
+        let re = transcode_animated(&src, 160, ANIMATED_MAX_FRAMES).unwrap();
+        assert_eq!(re.extension, "gif");
+        let frames = decoded_frames(&re.bytes);
+        assert_eq!(frames.len(), 3, "every frame survives");
+        let f = &frames[0];
+        assert!(f.buffer().width() <= 160 && f.buffer().height() <= 160, "downscaled to the target");
+        let (ms, _) = f.delay().numer_denom_ms();
+        assert!((60..=250).contains(&ms), "frame timing carried over, got {ms}ms");
+    }
+
+    /// Differencing writes transparent pixels for reused regions, which only
+    /// renders if the disposal method says KEEP — the facade default left the
+    /// reused region as literal holes. Composite the output and look at a
+    /// pixel the second frame did not touch: it must still be the first
+    /// frame's color, not blank.
+    #[test]
+    fn reused_pixels_carry_through_instead_of_becoming_holes() {
+        let red = image::Rgba([200u8, 30, 30, 255]);
+        let blue = image::Rgba([30u8, 30, 200, 255]);
+        let base = RgbaImage::from_pixel(64, 64, red);
+        let mut second = base.clone();
+        for y in 20..30 {
+            for x in 20..30 {
+                second.put_pixel(x, y, blue);
+            }
+        }
+        // Source GIF: two full frames.
+        let mut src = Vec::new();
+        {
+            let mut enc = GifEncoder::new_with_speed(&mut src, 30);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+            for f in [&base, &second] {
+                enc.encode_frame(Frame::from_parts(f.clone(), 0, 0, Delay::from_numer_denom_ms(100, 1))).unwrap();
+            }
+        }
+        let re = transcode_animated(&src, 160, 8).unwrap();
+        let frames = decoded_frames(&re.bytes);
+        assert_eq!(frames.len(), 2);
+        let composited = frames[1].buffer();
+        let far = composited.get_pixel(5, 5);
+        assert!(far[3] == 255 && far[0] > 120, "an untouched pixel keeps frame 1's red, got {far:?}");
+        let patch = composited.get_pixel(24, 24);
+        assert!(patch[2] > 120, "the changed patch really is frame 2's blue, got {patch:?}");
+    }
+
+    /// The frame cap truncates a marathon animation instead of encoding forever.
+    #[test]
+    fn the_frame_cap_truncates_not_rejects() {
+        let src = synth_gif(64, 64, 6);
+        let re = transcode_animated(&src, 160, 4).unwrap();
+        assert_eq!(decoded_frames(&re.bytes).len(), 4);
+    }
+
+    /// An oversized-canvas animation is refused (the caller falls back to a
+    /// still or the verbatim bytes) — streaming decode must never be handed a
+    /// frame worth more memory than the bound.
+    #[test]
+    fn an_animation_bomb_canvas_is_refused() {
+        let src = synth_gif(64, 64, 2);
+        // Forge the logical-screen descriptor to claim a giant canvas.
+        let mut forged = src.clone();
+        forged[6..8].copy_from_slice(&5000u16.to_le_bytes());
+        assert!(transcode_animated(&forged, 160, 8).is_err());
+    }
+
+    /// The upload preparer keeps a small animation byte-identical (no churn),
+    /// and downsizes an oversized one instead of refusing it.
+    #[test]
+    fn upload_prepare_downsizes_an_oversized_animated_avatar() {
+        let small = synth_gif(128, 128, 2);
+        let kept = prepare_upload_image(&small, UploadImageKind::Avatar).unwrap();
+        assert_eq!(kept.bytes, small, "within budget and dims: untouched");
+
+        let big = synth_gif(600, 600, 3);
+        let prepared = prepare_upload_image(&big, UploadImageKind::Avatar).unwrap();
+        assert_eq!(prepared.extension, "gif");
+        let frames = decoded_frames(&prepared.bytes);
+        assert_eq!(frames.len(), 3, "still animated after preparation");
+        assert!(frames[0].buffer().width() <= 512, "resized to the avatar budget");
+    }
+}
+
+#[cfg(test)]
+mod animated_live_probe {
+    use super::*;
+
+    /// Manual probe: transcode a real file named by ANIMATED_FIXTURE and report
+    /// sizes + timing. Not part of the suite.
+    #[test]
+    #[ignore]
+    fn probe_real_animation() {
+        let path = std::env::var("ANIMATED_FIXTURE").expect("set ANIMATED_FIXTURE=/path/to.gif");
+        let target: u32 = std::env::var("ANIMATED_TARGET").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
+        let bytes = std::fs::read(&path).unwrap();
+        let t = std::time::Instant::now();
+        let re = transcode_animated(&bytes, target, ANIMATED_MAX_FRAMES).unwrap();
+        println!(
+            "{}: {} KB -> {} KB at <={}px in {:?}",
+            path, bytes.len() / 1024, re.bytes.len() / 1024, target, t.elapsed()
+        );
+    }
+}
+
+#[cfg(test)]
+mod animated_visual_probe {
+    use super::*;
+
+    /// Manual probe: transcode ANIMATED_FIXTURE, then write composited frames
+    /// 0 / mid / last of BOTH source and output to PROBE_OUT as PNGs.
+    #[test]
+    #[ignore]
+    fn dump_frames_for_eyeballing() {
+        use image::AnimationDecoder;
+        let path = std::env::var("ANIMATED_FIXTURE").unwrap();
+        let out_dir = std::env::var("PROBE_OUT").unwrap();
+        let target: u32 = std::env::var("ANIMATED_TARGET").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
+        let bytes = std::fs::read(&path).unwrap();
+        let re = transcode_animated(&bytes, target, ANIMATED_MAX_FRAMES).unwrap();
+        for (tag, data) in [("src", &bytes), ("out", &re.bytes)] {
+            let dec = image::codecs::gif::GifDecoder::new(Cursor::new(data.as_slice())).unwrap();
+            let frames = dec.into_frames().collect_frames().unwrap();
+            let n = frames.len();
+            for (label, idx) in [("first", 0), ("mid", n / 2), ("last", n - 1)] {
+                frames[idx].buffer().save(format!("{out_dir}/{tag}_{label}.png")).unwrap();
+            }
+            println!("{tag}: {n} frames");
+        }
+    }
+}
