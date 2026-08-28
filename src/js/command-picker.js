@@ -952,6 +952,16 @@ function initCommandSelector(textarea, io, anchorEl) {
                 closeChoiceMenu();
             } else if (e.key === 'Tab') {
                 closeChoiceMenu();
+            } else if (e.key === 'Backspace' || e.key === 'Delete') {
+                // Same walk the text parts have: a picked value clears first
+                // (the menu stays up for a re-pick), an empty trigger walks
+                // backwards — and past the first part cancels the command.
+                e.preventDefault();
+                e.stopPropagation();
+                if (el.value) { setChoiceValue(el, ''); renderChoiceMenu(); return; }
+                closeChoiceMenu();
+                if (idx === 0) { exitComposer(); return; }
+                focusPart(idx - 1, 'end');
             }
             return;
         }
@@ -959,6 +969,13 @@ function initCommandSelector(textarea, io, anchorEl) {
             e.preventDefault();
             e.stopPropagation();
             openChoiceMenu(el, idx, arg);
+            return;
+        }
+        if ((e.key === 'Backspace' || e.key === 'Delete') && el.value) {
+            // Closed-menu twin of the branch above; the empty case falls
+            // through to onPartKey's ordinary backwards walk.
+            e.preventDefault();
+            setChoiceValue(el, '');
             return;
         }
         onPartKey(e, idx);
