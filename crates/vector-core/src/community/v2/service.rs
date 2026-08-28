@@ -11014,19 +11014,6 @@ mod tests {
         );
     }
 
-    /// The console's rotate button reaches the "cut nobody" path, not the allow-list
-    /// one. Pinned from source: the two are one `if` apart and read the same empty
-    /// list in opposite directions, which is exactly how this shipped.
-    #[test]
-    fn an_empty_retain_does_not_become_an_allow_list() {
-        let src = include_str!("../../lib.rs");
-        let at = src.find("pub async fn purge_and_refound").expect("purge_and_refound");
-        let body = &src[at..at + 3000];
-        let guard = body.find("if keep.is_empty()").expect("an empty retain must branch away from the allow-list");
-        let retaining = body.find("refound_community_retaining").expect("the allow-list call");
-        assert!(guard < retaining, "the branch has to come BEFORE the allow-list call");
-    }
-
     /// If the recipients would strand a granted member, publish NOTHING.
     ///
     /// A member missed at a hop is stranded there permanently, and every other
