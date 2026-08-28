@@ -169,6 +169,9 @@ function initCommandSelector(textarea, io, anchorEl) {
                 value = tok.value;
                 cursor = tok.next;
             }
+            // `""` is the positional hole marker (mirrors the Rust parser):
+            // an explicitly empty token skips an optional arg entirely.
+            if (value === '' && !a.required) continue;
             args.push({ name: a.name, value });
         }
         return args;
@@ -1031,11 +1034,12 @@ function initCommandSelector(textarea, io, anchorEl) {
             parts[i].el.closest('.command-part').classList.add('invalid');
             parts[i].el.focus();
         };
-        // Positional wire format: every required part present, no holes before
-        // the last provided value, every provided value well-typed.
+        // Positional wire format: every required part present, every provided
+        // value well-typed. A skipped optional before a filled arg is fine —
+        // it rides the wire as the `""` hole marker.
         for (let i = 0; i < parts.length; i++) {
             const empty = values[i] === '';
-            if (empty && (parts[i].arg.required || i < lastFilled)) return markInvalid(i);
+            if (empty && parts[i].arg.required) return markInvalid(i);
             if (!empty && argTypeError(parts[i].arg, values[i])) return markInvalid(i);
         }
         const text = assembleCommandText(cmd.name, values.slice(0, lastFilled + 1));
