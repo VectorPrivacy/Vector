@@ -11810,21 +11810,36 @@ window.addEventListener("DOMContentLoaded", async () => {
     // registered HERE (DOMContentLoaded) — not inside `setupRustListeners`,
     // which only fires after a successful login. The pre-login picker emits
     // `swap_session` from the unlock screen, well before any login completes.
-    await listen('session_reload', () => {
-        window.location.reload();
-    });
+    // Everything from here to the show() below runs BEFORE the window is visible,
+    // so anything that throws or never settles strands a running app with no GUI.
+    // Each step guards itself rather than trusting the backend to answer.
+    try {
+        await listen('session_reload', () => {
+            window.location.reload();
+        });
+    } catch (e) {
+        console.warn('session_reload listener failed to register:', e);
+    }
 
     // Immediately load and apply theme settings (visual only, don't save)
-    const strTheme = await invoke('get_theme');
-    if (strTheme) {
-        applyTheme(strTheme);
+    try {
+        const strTheme = await invoke('get_theme');
+        if (strTheme) {
+            applyTheme(strTheme);
+        }
+    } catch (e) {
+        console.warn('Theme preload failed; showing with the default:', e);
     }
 
     // Show the main window now that content is ready (prevents white flash on startup)
     // The window starts hidden via tauri.conf.json and Rust setup hides it explicitly
     // The WKWebView background is set to dark natively in lib.rs so no delay is needed
     // Only needed on desktop - mobile doesn't have this issue
-    if (!platformFeatures.is_mobile) {
+    // Optional-chained on purpose: platformFeatures is a global filled by another
+    // bootstrap, and reading `.is_mobile` off an undefined one threw one line
+    // short of the only call that reveals the window. Desktop is the safe
+    // default — a stray show() on mobile is a no-op.
+    if (!platformFeatures?.is_mobile) {
         try {
             await getCurrentWebviewWindow().show();
         } catch (e) {

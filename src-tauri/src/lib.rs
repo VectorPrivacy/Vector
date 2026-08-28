@@ -350,6 +350,26 @@ pub fn run() {
 
             let window = app.get_webview_window("main").unwrap();
 
+            // The window is born hidden (tauri.conf `visible: false`) so the frontend
+            // can paint before it appears — which makes the frontend the ONLY thing
+            // that can ever reveal it. A boot that throws, hangs or never runs leaves
+            // a live process with no GUI and no way back but a kill. This deadline
+            // turns that into a visible, possibly degraded window; it's dark from
+            // `backgroundColor`, so a late reveal is not the white flash the hidden
+            // start exists to prevent. The warning is the diagnosis: if it fires, the
+            // frontend never reached `show()`.
+            #[cfg(desktop)]
+            {
+                let window_reveal = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                    if matches!(window_reveal.is_visible(), Ok(false)) {
+                        log_warn!("Frontend never revealed the window in 6s — showing it anyway");
+                        let _ = window_reveal.show();
+                    }
+                });
+            }
+
             // Setup a graceful shutdown for our Nostr subscriptions
             #[cfg(desktop)]
             let handle_for_window_state = handle.clone();
