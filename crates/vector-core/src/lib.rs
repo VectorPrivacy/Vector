@@ -2217,7 +2217,8 @@ impl VectorCore {
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
             let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content)
+            let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content, &emoji_pairs)
                 .await
                 .map(|_| ())
                 .map_err(VectorError::Other);
