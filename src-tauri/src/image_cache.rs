@@ -482,11 +482,18 @@ pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
         let Some((target, budget, label)) = animated_display_target(image_type) else { continue };
         let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("gif") {
-                continue;
-            }
+        // Largest first: the files worth sweeping for are exactly the ones
+        // hurting the webview most, so they stop hurting soonest — and a
+        // sweep interrupted by app exit resumes next boot having already
+        // taken the biggest wins.
+        let mut paths: Vec<(u64, std::path::PathBuf)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("gif"))
+            .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (m.len(), p)))
+            .collect();
+        paths.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in paths {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             if crate::shared::image::animated_format(&bytes).is_none()
                 || !needs_animated_transcode(&bytes, target)
@@ -956,4 +963,38 @@ pub async fn cache_url_image<R: Runtime>(
     })).ok();
 
     Ok(Some(path_str))
+}
+
+#[cfg(test)]
+mod backfill_probe {
+    /// Manual probe: run the backfill's per-file decision loop against a real
+    /// cache directory named by CACHE_DIR and say what each file decides.
+    #[test]
+    #[ignore]
+    fn probe_backfill_decisions() {
+        let dir = std::path::PathBuf::from(std::env::var("CACHE_DIR").unwrap());
+        let target: u32 = std::env::var("TARGET").unwrap().parse().unwrap();
+        let budget: usize = std::env::var("BUDGET").unwrap().parse().unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("gif") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if crate::shared::image::animated_format(&bytes).is_none() {
+                println!("{name}: not detected as animated");
+                continue;
+            }
+            if !super::needs_animated_transcode(&bytes, target) {
+                println!("{name}: under thresholds, skipped");
+                continue;
+            }
+            match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
+                Ok(re) if re.bytes.len() < bytes.len() => println!("{name}: WOULD REWRITE {} -> {} KB", bytes.len()/1024, re.bytes.len()/1024),
+                Ok(re) => println!("{name}: transcode grew ({} -> {} KB), kept", bytes.len()/1024, re.bytes.len()/1024),
+                Err(e) => println!("{name}: transcode failed: {e}"),
+            }
+        }
+    }
 }
