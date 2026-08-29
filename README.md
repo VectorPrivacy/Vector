@@ -105,13 +105,14 @@ npm run build:bare
 
 Currently, bare builds exclude:
 - Vector Voice AI (Whisper and its GPU ML dependencies, like Vulkan).
+- Tor integration (the embedded `arti` onion-routing client).
 
 ### Standard vs Bare
 
 - **Standard Build**: Full suite of features, maximum utility and range of function.
-- **Bare Build**: Core functionality only, maximum security and efficiency.
+- **Bare Build**: Core functionality only, maximum efficiency and the smallest dependency tree.
 
-The bare build is perfect for users who prioritize security, privacy, and performance over additional features like Local AI and flashy utility features.
+The bare build is perfect for users who prioritize a minimal footprint and performance over additional features like Local AI and in-app Tor routing — network privacy can still come from a system-level Tor or VPN setup.
 
 ---
 

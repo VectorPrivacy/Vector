@@ -26,8 +26,8 @@ When in doubt: would this comment make sense to someone reading the code two yea
 ```bash
 npm run dev              # Desktop development (Tauri dev server)
 npm run build            # Desktop release build
-npm run dev:bare         # Dev without whisper feature (faster compile)
-npm run build:bare       # Release without whisper feature
+npm run dev:bare         # Dev without default features — no whisper AND no tor (faster compile)
+npm run build:bare       # Release without default features (no whisper, no tor)
 npm run android:dev      # Android dev (./scripts/android-dev.sh)
 npm run android:build    # Android release (tauri android build)
 ```
