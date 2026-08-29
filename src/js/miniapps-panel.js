@@ -892,109 +892,115 @@ async function playMiniAppAndInvite() {
         return; // User declined launching multiplayer over clearnet
     }
 
-    // Show upload progress spinner on the invite button and disable all buttons
-    const inviteBtn = domMiniAppLaunchInvite;
-    const originalText = inviteBtn.textContent;
-    inviteBtn.disabled = true;
-    domMiniAppLaunchSolo.disabled = true;
-    domMiniAppLaunchCancel.disabled = true;
-    domMiniAppLaunchSolo.style.opacity = '0.3';
-    domMiniAppLaunchCancel.style.opacity = '0.3';
-    inviteBtn.innerHTML = '<div class="miniapp-downloading-spinner" style="width:18px;height:18px;display:inline-block;vertical-align:middle;--progress:2.5%;background:conic-gradient(var(--icon-color-primary) 0% max(2.5%, var(--progress)), rgba(255,255,255,0.5) max(2.5%, var(--progress)) 100%);"></div>';
-    const spinnerEl = inviteBtn.querySelector('.miniapp-downloading-spinner');
-
-    // Listen for upload progress to update the spinner
-    let progressUnlisten = null;
-    try {
-        progressUnlisten = await listen('attachment_upload_progress', (evt) => {
-            if (spinnerEl && evt.payload.progress != null) {
-                spinnerEl.style.setProperty('--progress', `${evt.payload.progress}%`);
-            }
+    // Fire the send and get out of the user's way: the dialog closes NOW, the
+    // upload runs behind the message bubble's own progress UI, and the game
+    // opens as soon as the optimistic attachment exists. The realtime topic is
+    // minted before the upload starts and rides that pending attachment, so
+    // peers who download later already find the host waiting — playing during
+    // the upload costs joinability nothing.
+    const isGroup = chatIsGroup(getChat(targetChatId));
+    // Snapshot BEFORE firing: an older .xdc message of ours in this chat must
+    // not be mistaken for the one this send is about to surface.
+    const priorXdcId = newestOwnXdcMessage(targetChatId)?.messageId || null;
+    const sendPromise = isGroup
+        ? invoke('send_community_files', {
+            channelId: targetChatId,
+            content: '',
+            filePaths: [app.src_url],
+            nameOverrides: [''],
+            useCompression: false,
+            keepMetadata: false,
+            repliedTo: '',
+        })
+        : invoke('file_message', {
+            receiver: targetChatId,
+            repliedTo: '',
+            filePath: app.src_url,
+            keepMetadata: false,
+            nameOverride: '',
         });
-    } catch (_) { /* non-critical */ }
 
-    // Helper to reset buttons and close dialog
-    const finishAndClose = () => {
-        if (progressUnlisten) progressUnlisten();
-        inviteBtn.disabled = false;
-        inviteBtn.textContent = originalText;
-        domMiniAppLaunchSolo.disabled = false;
-        domMiniAppLaunchCancel.disabled = false;
-        domMiniAppLaunchSolo.style.opacity = '';
-        domMiniAppLaunchCancel.style.opacity = '';
-        closeMiniAppLaunchDialog();
-        closeAttachmentPanel();
-    };
+    closeMiniAppLaunchDialog();
+    closeAttachmentPanel();
 
     try {
-        // Send the Mini App file to the current chat — awaits upload + relay send.
-        // Community channels ride their own send pipeline (file_message is DM-only).
-        let messageId = null;
-        let topicId = null;
-        let filePath = app.src_url;
-        if (chatIsGroup(getChat(targetChatId))) {
-            const result = await invoke('send_community_files', {
-                channelId: targetChatId,
-                content: '',
-                filePaths: [app.src_url],
-                nameOverrides: [''],
-                useCompression: false,
-                keepMetadata: false,
-                repliedTo: '',
-            });
-            if (!result || !result.message_id) {
-                console.error('Play & Invite: send_community_files returned no message_id');
-                finishAndClose();
-                return;
-            }
-            messageId = result.message_id;
-            topicId = result.webxdc_topic || null;
-        } else {
-            const result = await invoke('file_message', {
-                receiver: targetChatId,
-                repliedTo: '',
-                filePath: app.src_url,
-                keepMetadata: false,
-                nameOverride: '',
-            });
-
-            if (!result || !result.event_id) {
-                console.error('Play & Invite: file_message returned no event_id');
-                finishAndClose();
-                return;
-            }
-            messageId = result.event_id;
-
-            // Finalize the pending message in local state
-            finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
-
-            // Find the message in local state to get the topic ID from the attachment
-            const chat = getChat(targetChatId);
-            if (chat) {
-                const msg = chat.messages.find(m => m.id === messageId);
-                if (msg && msg.attachments) {
-                    const xdcAtt = msg.attachments.find(a =>
-                        a.extension === 'xdc' || (a.path && a.path.endsWith('.xdc'))
-                    );
-                    if (xdcAtt) {
-                        topicId = xdcAtt.webxdc_topic || null;
-                        if (xdcAtt.path) filePath = xdcAtt.path;
-                    }
-                }
-            }
+        // The pending bubble (carrying the minted topic) lands in local state
+        // before the first uploaded byte — grab it, or the finished result if
+        // the send beat us to it (smart-forward reuse completes instantly).
+        const found = await waitForOwnXdcMessage(targetChatId, sendPromise, priorXdcId);
+        if (!found) {
+            throw new Error('send surfaced no Mini App message');
         }
+
+        // DM sends resolve with a pending→final id swap to apply.
+        sendPromise.then((result) => {
+            if (!isGroup && result && result.pending_id && result.event_id) {
+                finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+            }
+        }).catch((e) => {
+            // The bubble shows the failed state with its own retry — the open
+            // game keeps running as a solo session.
+            console.error('Play & Invite: send failed after launch:', e);
+        });
 
         // Open the Mini App (consent already given above; the session flag
         // makes openMiniApp's gate a no-op here)
-        await openMiniApp(filePath, targetChatId, messageId, null, topicId);
-
-        finishAndClose();
+        await openMiniApp(found.filePath, targetChatId, found.messageId, null, found.topicId);
     } catch (e) {
         console.error('Failed to send Mini App to chat:', e);
-        finishAndClose();
         // Fallback to solo play if sending fails
         await playMiniAppSoloInternal(app);
     }
+}
+
+/**
+ * Resolve the just-sent Mini App message from local chat state: the newest
+ * own message carrying an .xdc attachment. Polls briefly (the pending bubble
+ * lands within milliseconds of the invoke), racing the send's own completion
+ * so the instant path (reused blob) needs no poll at all.
+ */
+async function waitForOwnXdcMessage(chatId, sendPromise, priorXdcId) {
+    // Completion beats polling when the send is instant; a rejection just ends
+    // the race (the poll below still gets its chance until timeout).
+    let settled = false;
+    sendPromise.then(() => { settled = true; }).catch(() => { settled = true; });
+
+    const fresh = () => {
+        const found = newestOwnXdcMessage(chatId);
+        return found && found.filePath && found.messageId !== priorXdcId ? found : null;
+    };
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+        const found = fresh();
+        if (found) return found;
+        if (settled) {
+            // Send finished (or failed) — one last look, then give up.
+            return fresh();
+        }
+        await new Promise(r => setTimeout(r, 100));
+    }
+    return null;
+}
+
+/** The newest own message in `chatId` carrying an .xdc attachment. */
+function newestOwnXdcMessage(chatId) {
+    const chat = getChat(chatId);
+    if (!chat) return null;
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+        const m = chat.messages[i];
+        if (!m.mine || !m.attachments) continue;
+        const att = m.attachments.find(a =>
+            a.extension === 'xdc' || (a.path && a.path.endsWith('.xdc'))
+        );
+        if (att) {
+            return {
+                messageId: m.id,
+                topicId: att.webxdc_topic || null,
+                filePath: att.path || null,
+            };
+        }
+    }
+    return null;
 }
 
 /**
