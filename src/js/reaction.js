@@ -56,6 +56,38 @@ let reactionLongPressed = false;
 let reactionHoverTip = null;
 let reactionHoverTimer = null;
 let reactionHoverEl = null; // currently armed reaction; null when nothing hovered
+let reactionTipWatchdog = null; // liveness interval while a tip is on screen
+
+// Ground truth for "still hovering": the last real cursor position. The hide
+// path otherwise rests entirely on `mouseout` from the chip — an event that
+// never fires when the chip is REPAINTED under the cursor (someone else's
+// reaction re-renders the row) or SCROLLS away beneath a stationary pointer
+// (WKWebView synthesises no boundary events on scroll). Both leave the tip
+// stuck on screen forever.
+let _lastPointerX = -1;
+let _lastPointerY = -1;
+document.addEventListener('mousemove', (e) => {
+    _lastPointerX = e.clientX;
+    _lastPointerY = e.clientY;
+}, { passive: true });
+
+/** While the tip is visible, verify 4x/sec that its chip still exists and the
+ *  cursor is still on it; anything else hides the tip. */
+function _startReactionTipWatchdog(reactionEl) {
+    if (reactionTipWatchdog) clearInterval(reactionTipWatchdog);
+    reactionTipWatchdog = setInterval(() => {
+        let alive = reactionEl.isConnected;
+        if (alive && _lastPointerX >= 0) {
+            const r = reactionEl.getBoundingClientRect();
+            alive = _lastPointerX >= r.left - 2 && _lastPointerX <= r.right + 2
+                 && _lastPointerY >= r.top - 2 && _lastPointerY <= r.bottom + 2;
+        }
+        if (!alive) {
+            hideReactionHoverTip();
+            reactionHoverEl = null;
+        }
+    }, 250);
+}
 const REACTION_HOVER_DELAY_MS = 500;
 const REACTION_HOVER_NAMES_VISIBLE = 3;
 
@@ -120,6 +152,7 @@ function showReactionHoverTip(reactionEl) {
 
     document.body.appendChild(tip);
     reactionHoverTip = tip;
+    _startReactionTipWatchdog(reactionEl);
 
     // Position above the chip, fall to below if no room. Clamp horizontally.
     const rect = reactionEl.getBoundingClientRect();
@@ -133,6 +166,10 @@ function showReactionHoverTip(reactionEl) {
 }
 
 function hideReactionHoverTip() {
+    if (reactionTipWatchdog) {
+        clearInterval(reactionTipWatchdog);
+        reactionTipWatchdog = null;
+    }
     if (reactionHoverTip) {
         reactionHoverTip.remove();
         reactionHoverTip = null;
