@@ -62,6 +62,9 @@
     "linux": {
       "appimage": {
         "bundleMediaFramework": true
+      },
+      "deb": {
+        "desktopTemplate": "linux/Vector.desktop"
       }
     },
     "android": {
