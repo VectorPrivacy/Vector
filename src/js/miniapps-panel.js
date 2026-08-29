@@ -967,7 +967,10 @@ async function waitForOwnXdcMessage(chatId, sendPromise, priorXdcId) {
 
     const fresh = () => {
         const found = newestOwnXdcMessage(chatId);
-        return found && found.filePath && found.messageId !== priorXdcId ? found : null;
+        // topicId is required: without it the backend derives a topic from the
+        // MESSAGE id, and a pending id derives a different topic than the
+        // final id the receiver holds — the one split that breaks joining.
+        return found && found.filePath && found.topicId && found.messageId !== priorXdcId ? found : null;
     };
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
