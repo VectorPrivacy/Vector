@@ -314,7 +314,7 @@ pub fn prepare_upload_image(bytes: &[u8], kind: UploadImageKind) -> Result<Encod
         if bytes.len() <= animated_budget && within_dims {
             return Ok(EncodedImage { bytes: bytes.to_vec(), extension });
         }
-        if let Ok(re) = transcode_animated(bytes, max_dimension, ANIMATED_MAX_FRAMES) {
+        if let Ok(re) = transcode_animated_budgeted(bytes, max_dimension, animated_budget) {
             if re.bytes.len() <= animated_budget {
                 return Ok(re);
             }
@@ -351,6 +351,78 @@ pub const ANIMATED_MAX_FRAMES: usize = 300;
 /// WebKit decodes the FULL logical screen of a GIF for every <img> showing it,
 /// so an 800px avatar rendered at 48px still costs 800px per instance, forever.
 pub fn transcode_animated(bytes: &[u8], max_dim: u32, max_frames: usize) -> Result<EncodedImage, String> {
+    transcode_animated_opts(bytes, max_dim, max_frames, DELTA_TOLERANCE, 1)
+}
+
+/// Escalate through quality rungs until the animation fits `byte_budget`:
+/// full quality first, then smaller + lossier, finally half the frames too.
+/// Returns the first rung that fits, or the smallest attempt — video-like
+/// content (every pixel new each frame) can defeat GIF entirely, and a best
+/// effort still beats shipping the original to the webview.
+pub fn transcode_animated_budgeted(bytes: &[u8], max_dim: u32, byte_budget: usize) -> Result<EncodedImage, String> {
+    let rungs: [(u32, i16, usize); 3] = [
+        (max_dim, DELTA_TOLERANCE, 1),
+        (max_dim * 7 / 10, 18, 1),
+        (max_dim / 2, 18, 2),
+    ];
+    // One-shot rung selection: the source's own bytes-per-pixel-per-frame
+    // predicts a rung's output within tens of percent (measured), so hopeless
+    // rungs are skipped WITHOUT paying their full encode pass — a 260-frame
+    // video banner goes straight to the rung that can fit, one pass, not
+    // three. The estimate needs a frame count, which a GIF yields from a
+    // header-only scan; when it can't be had, every rung runs as before.
+    let est_src = animated_dims(bytes).zip(gif_frame_count(bytes)).map(|((w, h), frames)| {
+        (bytes.len() as f64 / (frames.max(1) as f64 * f64::from(w * h)), w, h, frames)
+    });
+    let mut best: Option<EncodedImage> = None;
+    let last_i = rungs.len() - 1;
+    for (i, (dim, tol, step)) in rungs.into_iter().enumerate() {
+        if let (Some((bpp, w, h, frames)), false) = (est_src, i == last_i) {
+            let scale = (f64::from(dim) / f64::from(w.max(h))).min(1.0);
+            let px = f64::from(w) * scale * f64::from(h) * scale;
+            let kept = frames.min(ANIMATED_MAX_FRAMES).div_ceil(step);
+            let est = bpp * kept as f64 * px;
+            // 1.5x slack: the estimate ignores the tolerance's help, so it
+            // overshoots on delta-friendly content — skip only the hopeless.
+            if est > byte_budget as f64 * 1.5 {
+                continue;
+            }
+        }
+        let re = transcode_animated_opts(bytes, dim, ANIMATED_MAX_FRAMES, tol, step)?;
+        if re.bytes.len() <= byte_budget {
+            return Ok(re);
+        }
+        if best.as_ref().is_none_or(|b| re.bytes.len() < b.bytes.len()) {
+            best = Some(re);
+        }
+    }
+    best.ok_or_else(|| "no rung produced output".into())
+}
+
+/// Frame count from a GIF's block structure alone — image data is skipped,
+/// never LZW-decoded, so this is milliseconds even on a multi-megabyte file.
+fn gif_frame_count(bytes: &[u8]) -> Option<usize> {
+    let mut opts = gif::DecodeOptions::new();
+    opts.set_color_output(gif::ColorOutput::Indexed);
+    opts.allow_unknown_blocks(true);
+    let mut d = opts.read_info(Cursor::new(bytes)).ok()?;
+    let mut n = 0usize;
+    while let Ok(Some(_)) = d.next_frame_info() {
+        n += 1;
+        if n > 10_000 {
+            return None;
+        }
+    }
+    (n > 0).then_some(n)
+}
+
+fn transcode_animated_opts(
+    bytes: &[u8],
+    max_dim: u32,
+    max_frames: usize,
+    tolerance: i16,
+    frame_step: usize,
+) -> Result<EncodedImage, String> {
     use image::codecs::gif::GifDecoder;
     use image::AnimationDecoder;
 
@@ -424,19 +496,37 @@ pub fn transcode_animated(bytes: &[u8], max_dim: u32, max_frames: usize) -> Resu
         // and keep-disposal shows the old pixel through. A naive full-frame
         // re-encode INFLATES an already optimized GIF several-fold.
         let mut count = 1usize;
-        for frame in frames {
+        // Frame decimation (`frame_step` > 1): skipped frames donate their
+        // delay to the next kept one, so total duration — and perceived speed
+        // — is unchanged, only the motion sampling coarsens.
+        let mut skipped_ms: u32 = 0;
+        for (i, frame) in frames.enumerate() {
             if count >= max_frames {
                 break;
             }
             let frame = frame.map_err(|e| format!("frame decode: {e}"))?;
-            let delay = frame.delay();
+            let (ms, _) = frame.delay().numer_denom_ms();
+            if frame_step > 1 && (i + 1) % frame_step != 0 {
+                skipped_ms += ms;
+                continue;
+            }
+            let delay = image::Delay::from_numer_denom_ms(ms + skipped_ms, 1);
+            skipped_ms = 0;
             let resized = fit(frame.into_buffer());
             if resized.dimensions() != canvas {
                 return Err("frame dimensions changed mid-animation".into());
             }
-            let (sub, x0, y0) = delta_frame(&mut shown, &resized);
-            let dims = sub.dimensions();
-            write_frame(&mut enc, sub.into_raw(), dims, (x0, y0), delay)?;
+            // Keyframe flush: tolerance lets slow drift go stale, and over
+            // enough frames the reused patches read as a dirty window. A full
+            // frame at intervals bounds how long any residue can live.
+            if count % 12 == 0 {
+                shown = resized.clone();
+                write_frame(&mut enc, resized.into_raw(), canvas, (0, 0), delay)?;
+            } else {
+                let (sub, x0, y0) = delta_frame(&mut shown, &resized, tolerance);
+                let dims = sub.dimensions();
+                write_frame(&mut enc, sub.into_raw(), dims, (x0, y0), delay)?;
+            }
             count += 1;
         }
     }
@@ -466,7 +556,7 @@ const DELTA_TOLERANCE: i16 = 8;
 /// This is the transparency differencing every optimized GIF uses — without it
 /// a re-encode of an optimized source INFLATES several-fold, because full
 /// frames forfeit both the crop and the per-pixel reuse.
-fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage) -> (image::RgbaImage, u32, u32) {
+fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage, tolerance: i16) -> (image::RgbaImage, u32, u32) {
     let (w, h) = next.dimensions();
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
     let s = shown.as_raw();
@@ -475,7 +565,7 @@ fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage) -> (image:
     for y in 0..h {
         for x in 0..w {
             let i = ((y * w + x) * 4) as usize;
-            let differs = (0..3).any(|c| (s[i + c] as i16 - n[i + c] as i16).abs() > DELTA_TOLERANCE);
+            let differs = (0..3).any(|c| (s[i + c] as i16 - n[i + c] as i16).abs() > tolerance);
             if differs {
                 x0 = x0.min(x);
                 y0 = y0.min(y);
@@ -497,7 +587,7 @@ fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage) -> (image:
     for y in 0..sh {
         for x in 0..sw {
             let i = (((y + y0) * w + (x + x0)) * 4) as usize;
-            let differs = (0..3).any(|c| (shown_raw[i + c] as i16 - n[i + c] as i16).abs() > DELTA_TOLERANCE);
+            let differs = (0..3).any(|c| (shown_raw[i + c] as i16 - n[i + c] as i16).abs() > tolerance);
             if differs {
                 sub.put_pixel(x, y, image::Rgba([n[i], n[i + 1], n[i + 2], 255]));
                 shown_raw[i..i + 4].copy_from_slice(&n[i..i + 4]);
@@ -1152,8 +1242,13 @@ mod animated_live_probe {
         let path = std::env::var("ANIMATED_FIXTURE").expect("set ANIMATED_FIXTURE=/path/to.gif");
         let target: u32 = std::env::var("ANIMATED_TARGET").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
         let bytes = std::fs::read(&path).unwrap();
+        let budget: usize = std::env::var("ANIMATED_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
         let t = std::time::Instant::now();
-        let re = transcode_animated(&bytes, target, ANIMATED_MAX_FRAMES).unwrap();
+        let re = if budget == usize::MAX {
+            transcode_animated(&bytes, target, ANIMATED_MAX_FRAMES).unwrap()
+        } else {
+            transcode_animated_budgeted(&bytes, target, budget).unwrap()
+        };
         println!(
             "{}: {} KB -> {} KB at <={}px in {:?}",
             path, bytes.len() / 1024, re.bytes.len() / 1024, target, t.elapsed()
@@ -1175,7 +1270,12 @@ mod animated_visual_probe {
         let out_dir = std::env::var("PROBE_OUT").unwrap();
         let target: u32 = std::env::var("ANIMATED_TARGET").ok().and_then(|v| v.parse().ok()).unwrap_or(160);
         let bytes = std::fs::read(&path).unwrap();
-        let re = transcode_animated(&bytes, target, ANIMATED_MAX_FRAMES).unwrap();
+        let budget: usize = std::env::var("ANIMATED_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        let re = if budget == usize::MAX {
+            transcode_animated(&bytes, target, ANIMATED_MAX_FRAMES).unwrap()
+        } else {
+            transcode_animated_budgeted(&bytes, target, budget).unwrap()
+        };
         for (tag, data) in [("src", &bytes), ("out", &re.bytes)] {
             let dec = image::codecs::gif::GifDecoder::new(Cursor::new(data.as_slice())).unwrap();
             let frames = dec.into_frames().collect_frames().unwrap();

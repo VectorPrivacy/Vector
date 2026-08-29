@@ -386,9 +386,9 @@ pub async fn cache_image<R: Runtime>(
     // one 800px animated avatar shreds render cycles in every chat row at once.
     // Statics stay verbatim — a still costs one decode, keep its quality.
     let mut bytes = bytes;
-    if let Some((target, label)) = animated_display_target(image_type) {
+    if let Some((target, budget, label)) = animated_display_target(image_type) {
         if crate::shared::image::animated_format(&bytes).is_some() && needs_animated_transcode(&bytes, target) {
-            match crate::shared::image::transcode_animated(&bytes, target, crate::shared::image::ANIMATED_MAX_FRAMES) {
+            match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
                 Ok(re) if re.bytes.len() < bytes.len() => {
                     log_info!(
                         "[ImageCache] {} animation normalized: {} KB -> {} KB at ≤{target}px",
@@ -431,10 +431,11 @@ pub async fn cache_image<R: Runtime>(
 /// whose animations stay verbatim. An avatar renders ≤80 CSS px, so 160 covers
 /// 2x displays; a banner is a wide hero, 640 keeps motion smooth without the
 /// full-width decode cost.
-fn animated_display_target(image_type: ImageType) -> Option<(u32, &'static str)> {
+fn animated_display_target(image_type: ImageType) -> Option<(u32, usize, &'static str)> {
     match image_type {
-        ImageType::Avatar => Some((160, "avatar")),
-        ImageType::Banner => Some((640, "banner")),
+        // (display-dim ceiling, byte budget the quality ladder aims for)
+        ImageType::Avatar => Some((160, 512 * 1024, "avatar")),
+        ImageType::Banner => Some((640, 1536 * 1024, "banner")),
         _ => None,
     }
 }
@@ -465,7 +466,7 @@ fn needs_animated_transcode(bytes: &[u8], target: u32) -> bool {
 pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
     let mut rewritten = 0usize;
     for image_type in [ImageType::Avatar, ImageType::Banner] {
-        let Some((target, label)) = animated_display_target(image_type) else { continue };
+        let Some((target, budget, label)) = animated_display_target(image_type) else { continue };
         let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
@@ -479,7 +480,7 @@ pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
             {
                 continue;
             }
-            match crate::shared::image::transcode_animated(&bytes, target, crate::shared::image::ANIMATED_MAX_FRAMES) {
+            match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
                 Ok(re) if re.bytes.len() < bytes.len() => {
                     if std::fs::write(&path, &re.bytes).is_ok() {
                         log_info!(
