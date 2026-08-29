@@ -540,8 +540,15 @@ pub async fn fetch_messages<R: Runtime>(
                     vector_core::db::spawn_bound(async move {
                         // Normalize what's already on disk BEFORE filling gaps, so a
                         // pre-normalization monster GIF doesn't render one more boot.
+                        // Blocking pool: a whole-cache sweep is seconds of CPU and
+                        // must not pin a runtime worker for its duration.
                         if let Some(handle) = crate::TAURI_APP.get() {
-                            crate::image_cache::backfill_animated_cache(handle);
+                            let handle = handle.clone();
+                            // spawn-detached: global image cache maintenance inside spawn_blocking, no account state
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::image_cache::backfill_animated_cache(&handle);
+                            })
+                            .await;
                         }
                         profile::cache_all_profile_images().await;
                     });

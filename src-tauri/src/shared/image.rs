@@ -1253,6 +1253,9 @@ mod animated_live_probe {
             "{}: {} KB -> {} KB at <={}px in {:?}",
             path, bytes.len() / 1024, re.bytes.len() / 1024, target, t.elapsed()
         );
+        if let Ok(save) = std::env::var("PROBE_SAVE") {
+            std::fs::write(save, &re.bytes).unwrap();
+        }
     }
 }
 

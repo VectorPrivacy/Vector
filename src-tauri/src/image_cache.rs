@@ -388,7 +388,20 @@ pub async fn cache_image<R: Runtime>(
     let mut bytes = bytes;
     if let Some((target, budget, label)) = animated_display_target(image_type) {
         if crate::shared::image::animated_format(&bytes).is_some() && needs_animated_transcode(&bytes, target) {
-            match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
+            // Blocking pool: a monster GIF costs up to a second or two of CPU,
+            // which must not stall the async workers serving everything else.
+            let owned = bytes;
+            let (returned, result) = match tokio::task::spawn_blocking(move || {
+                let r = crate::shared::image::transcode_animated_budgeted(&owned, target, budget);
+                (owned, r)
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => return CacheResult::Failed(format!("transcode task: {e}")),
+            };
+            bytes = returned;
+            match result {
                 Ok(re) if re.bytes.len() < bytes.len() => {
                     log_info!(
                         "[ImageCache] {} animation normalized: {} KB -> {} KB at ≤{target}px",
@@ -482,7 +495,11 @@ pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
             }
             match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
                 Ok(re) if re.bytes.len() < bytes.len() => {
-                    if std::fs::write(&path, &re.bytes).is_ok() {
+                    // Temp + rename: the webview's asset protocol can read this
+                    // exact path mid-rewrite, and a truncate-then-write window
+                    // would serve it half a GIF.
+                    let tmp = path.with_extension("gif.tmp");
+                    if std::fs::write(&tmp, &re.bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
                         log_info!(
                             "[ImageCache] backfill: {} {} normalized {} KB -> {} KB",
                             label,
