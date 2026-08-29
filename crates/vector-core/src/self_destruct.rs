@@ -135,12 +135,10 @@ pub(crate) async fn purge_one(id: &str, db_fallback: Option<(Vec<crate::types::A
         let unique = crate::deletion::filter_unreferenced_attachments(id, attachments).await;
         crate::deletion::delete_cached_attachment_files_pub(&unique);
 
-        // Our own, now-unreferenced blob → wipe it network-side too.
+        // Our own, now-unreferenced blob → wipe it network-side too, minus any
+        // url the ledger says another message still rides (smart-forward).
         if mine {
-            let urls: Vec<String> = unique
-                .iter()
-                .flat_map(|a| a.all_urls().map(str::to_string))
-                .collect();
+            let urls: Vec<String> = crate::deletion::scrub_safe_urls(&unique, id);
             if !urls.is_empty() {
                 if crate::state::nostr_client().is_some() {
                     if let Ok(signer) = crate::signer::active_signer() {

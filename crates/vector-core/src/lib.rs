@@ -2257,6 +2257,9 @@ impl VectorCore {
                 .map(|(_, msg)| msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect())
                 .unwrap_or_default()
         };
+        // Smart-forward gate: scrub only urls no OTHER message still references.
+        let attachment_urls =
+            crate::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, message_id).unwrap_or_default();
 
         if let Some(id) = self.v2_community_for_channel(channel_id)? {
             // v2: the cooperative in-plane kind-5 (the wrap-ciphertext scrub needs

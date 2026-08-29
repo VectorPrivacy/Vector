@@ -471,6 +471,21 @@ where
 /// just ACKed. Some servers 2xx an upload they dedupe against a stale index
 /// or quietly drop — the ACK is worthless, only a cache-cold fetch tells the
 /// truth. A definitive 404/410 (after a short grace retry) fails the server;
+/// STRICT liveness for smart-forward reuse: only a positive 2xx HEAD counts.
+/// The post-upload verifier above fails OPEN (an unreachable server shouldn't
+/// sink an upload that ACKed); a REUSE decision is the opposite — on anything
+/// but proof the blob serves, we fall through to a fresh upload, which always
+/// works. Never assume here.
+pub async fn blob_is_served(url: &str, timeout: std::time::Duration) -> bool {
+    let Ok(client) = crate::net::build_http_client(timeout) else {
+        return false;
+    };
+    match client.head(url).send().await {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
 /// anything else passes, so a flaky HEAD can't sink a good upload.
 async fn uploaded_blob_serves(url: &str) -> bool {
     let client = match crate::net::build_http_client(std::time::Duration::from_secs(10)) {

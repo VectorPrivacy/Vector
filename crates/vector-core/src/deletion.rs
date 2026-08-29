@@ -136,11 +136,9 @@ pub async fn delete_own_dm(rumor_id: &EventId) -> Result<DeleteOutcome, String> 
     delete_cached_attachment_files(&unique_attachments);
 
     // Blossom URLs derived from the filtered (refcount-aware) set — the
-    // primary plus every mirror (same hash, other origins).
-    let attachment_urls: Vec<String> = unique_attachments
-        .iter()
-        .flat_map(|a| a.all_urls().map(str::to_string))
-        .collect();
+    // primary plus every mirror (same hash, other origins) — then gated
+    // against the DB ledger: a smart-forwarded blob backs OTHER messages too.
+    let attachment_urls: Vec<String> = scrub_safe_urls(&unique_attachments, &rumor_id.to_hex());
 
     let wraps_total = keys.len();
     let mut wraps_dispatched = 0usize;
@@ -377,26 +375,59 @@ pub async fn filter_unreferenced_attachments(
     if attachments.is_empty() {
         return attachments;
     }
-    let state = crate::state::STATE.lock().await;
+    // STATE pass first, lock released before any DB read (lock-order hygiene).
+    let state_referenced: Vec<bool> = {
+        let state = crate::state::STATE.lock().await;
+        attachments
+            .iter()
+            .map(|att| {
+                // Dedup key: the attachment's SHA-256 (Attachment.id).
+                // Empty id can't be matched, so treat as unique.
+                let hash = &*att.id;
+                if hash.is_empty() {
+                    return false;
+                }
+                state.chats.iter().any(|chat| {
+                    chat.iter_compact().any(|m| {
+                        let msg_id_hex = m.id_hex();
+                        msg_id_hex != excluding_message_id
+                            && m.attachments.iter().any(|a| a.id_eq(hash))
+                    })
+                })
+            })
+            .collect()
+    };
+    // DB pass second: STATE windows to recent messages, so a reference in an
+    // older message is invisible there — the ledger is the authority. A read
+    // failure counts as referenced: deleting less is recoverable, deleting a
+    // still-shared file is not.
     attachments
         .into_iter()
-        .filter(|att| {
-            // Dedup key: the attachment's SHA-256 (Attachment.id).
-            // Empty id can't be matched, so treat as unique.
+        .zip(state_referenced)
+        .filter(|(att, in_state)| {
+            if *in_state {
+                return false;
+            }
             let hash = &*att.id;
             if hash.is_empty() {
                 return true;
             }
-            let referenced_elsewhere = state.chats.iter().any(|chat| {
-                chat.iter_compact().any(|m| {
-                    let msg_id_hex = m.id_hex();
-                    msg_id_hex != excluding_message_id
-                        && m.attachments.iter().any(|a| a.id_eq(hash))
-                })
-            });
-            !referenced_elsewhere
+            !crate::db::attachments::hash_referenced_elsewhere(hash, excluding_message_id).unwrap_or(true)
         })
+        .map(|(att, _)| att)
         .collect()
+}
+
+/// Of these attachments' remote urls, the ones no OTHER event still references
+/// — the only ones a delete may scrub from Blossom. One blob backs many
+/// messages under smart-forward, and the shared copy must outlive every send
+/// but the last. A ledger read failure scrubs nothing, same reasoning as above.
+pub fn scrub_safe_urls(attachments: &[crate::types::Attachment], excluding_event_id: &str) -> Vec<String> {
+    let urls: Vec<String> = attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect();
+    if urls.is_empty() {
+        return urls;
+    }
+    crate::db::attachments::urls_unreferenced_elsewhere(&urls, excluding_event_id).unwrap_or_default()
 }
 
 fn delete_cached_attachment_files(attachments: &[crate::types::Attachment]) {
