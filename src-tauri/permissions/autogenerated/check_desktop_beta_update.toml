@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-desktop-beta-update"
+description = "Enables the check_desktop_beta_update command without any pre-configured scope."
+commands.allow = ["check_desktop_beta_update"]
+
+[[permission]]
+identifier = "deny-check-desktop-beta-update"
+description = "Denies the check_desktop_beta_update command without any pre-configured scope."
+commands.deny = ["check_desktop_beta_update"]

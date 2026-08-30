@@ -333,6 +333,8 @@
     "allow-get-background-service-prompted",
     "allow-set-background-service-prompted",
     "allow-check-app-update",
+    "allow-check-desktop-beta-update",
+    "allow-install-desktop-beta-update",
     "allow-check-account-downgrade",
     "allow-get-install-source",
     "allow-open-update-source",
