@@ -125,6 +125,14 @@ impl AudioRecorder {
         let (tx, rx) = mpsc::channel();
         *self.stop_tx.lock().unwrap() = Some(tx);
 
+        // cpal's AAudio host reads device params through `ndk_context`, which
+        // panics unregistered (service-only process, or pre-registration) — and a
+        // panic here can abort. Refuse with an error instead.
+        #[cfg(target_os = "android")]
+        if !crate::android::utils::context_registered() {
+            return Err("Audio unavailable: Android context not registered".to_string());
+        }
+
         let host = cpal::default_host();
         let device = host.default_input_device().ok_or("No input device found")?;
 

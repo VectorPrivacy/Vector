@@ -131,21 +131,27 @@ pub fn run() {
     // Install a panic hook that logs the crash before the process dies.
     // Without this, panics in spawned tasks vanish silently.
     std::panic::set_hook(Box::new(|info| {
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let msg = format!("[PANIC {:02}:{:02}:{:02}Z] {info}\n\nBacktrace:\n{backtrace}\n",
-            (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-        eprintln!("{msg}");
-        // Append to log file (shared with log_error!)
-        if let Ok(data_dir) = account_manager::get_app_data_dir() {
+        // A panic ESCAPING a panic hook aborts the process on the spot, so the
+        // reporter must never be able to kill what it reports on: everything
+        // here is catch_unwind-wrapped, and stderr uses the error-swallowing
+        // write (eprintln! itself panics when stderr is gone).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let msg = format!("[PANIC {:02}:{:02}:{:02}Z] {info}\n\nBacktrace:\n{backtrace}\n",
+                (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("vector.log")) {
-                let _ = write!(f, "{}\n", &msg);
+            let _ = writeln!(std::io::stderr(), "{msg}");
+            // Append to log file (shared with log_error!)
+            if let Ok(data_dir) = account_manager::get_app_data_dir() {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("vector.log")) {
+                    let _ = write!(f, "{}\n", &msg);
+                }
             }
-        }
+        }));
     }));
 
     // Harden against memory inspection and debugger attachment (release builds only).

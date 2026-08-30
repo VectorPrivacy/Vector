@@ -12,6 +12,29 @@ fn try_android_context() -> Option<AndroidContext> {
     std::panic::catch_unwind(ndk_context::android_context).ok()
 }
 
+/// Whether tao has registered the ndk context yet. Gate for code whose
+/// DEPENDENCIES call `ndk_context::android_context()` unguarded (iroh's
+/// hickory-resolver reads system DNS with it and the panic aborts the
+/// process): they must not run before registration, and never in the
+/// Activity-less service-only process, where it never comes.
+pub fn context_registered() -> bool {
+    try_android_context().is_some()
+}
+
+/// Unwind fence for JNI entry points. A Rust panic crossing an `extern "C"`
+/// boundary is a process abort; inside the fence it becomes a logged default
+/// instead. The default must be safe for the Java caller (unit, or a null
+/// object the Kotlin side treats as failure).
+pub fn jni_fence<T>(name: &str, default: impl FnOnce() -> T, body: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(v) => v,
+        Err(_) => {
+            vector_core::log_warn!("[JNI] {} panicked — returned default instead of aborting", name);
+            default()
+        }
+    }
+}
+
 /// Standard buffer size for reading streams
 pub const STREAM_BUFFER_SIZE: i32 = 8192;
 

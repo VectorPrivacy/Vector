@@ -94,6 +94,14 @@ fn get_device_sample_rate() -> Result<u32, String> {
         return Ok(cached);
     }
 
+    // cpal's AAudio host reads device params through `ndk_context`, which
+    // panics unregistered (service-only process, or pre-registration) — and a
+    // panic here can abort. Refuse with an error instead.
+    #[cfg(target_os = "android")]
+    if !crate::android::utils::context_registered() {
+        return Err("Audio unavailable: Android context not registered".to_string());
+    }
+
     // Query the device
     let host = cpal::default_host();
     let device = host
