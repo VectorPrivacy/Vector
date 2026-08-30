@@ -973,7 +973,10 @@ function _dmsgRenderFileAttachment(target, msg, cAttachment) {
                 const topicId = attachment?.webxdc_topic || null;
                 const shouldOpen = await checkChatMiniAppPermissions(path);
                 if (!shouldOpen) return;
-                await openMiniApp(path, strOpenChat, msg.id, null, topicId);
+                // A declined Tor consent opens nothing — the optimistic
+                // "Playing" below must not paint over a cancelled launch.
+                const opened = await openMiniApp(path, strOpenChat, msg.id, null, topicId);
+                if (opened === false) return;
                 if (fileDiv._updateMiniAppStatus) {
                     if (topicId) {
                         invoke('miniapp_get_realtime_status', { topicId })
