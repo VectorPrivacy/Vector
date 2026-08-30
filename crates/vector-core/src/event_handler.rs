@@ -698,14 +698,7 @@ pub async fn commit_prepared_event(
                     // not at tap: the box renders downloaded from its first paint and
                     // no bytes are re-fetched. The ledger probe is an indexed lookup;
                     // the content hash only runs when a plausible candidate exists.
-                    for att in &mut msg.attachments {
-                        if !att.downloaded {
-                            if let Some(path) = crate::db::attachments::verify_local_copy(att).await {
-                                att.downloaded = true;
-                                att.path = path;
-                            }
-                        }
-                    }
+                    crate::db::attachments::verify_message_attachments(&mut msg, None).await;
                     commit_dm_message(msg, &contact, is_mine, is_new, &wrapper_event_id, wrapper_event_id_bytes, wrapper_created_at, handler, true).await
                 }
                 RumorProcessingResult::Reaction(reaction) => {

@@ -254,6 +254,37 @@ pub async fn verify_local_copy(att: &crate::types::Attachment) -> Option<String>
     .flatten()
 }
 
+/// Run [`verify_local_copy`] over a message's undownloaded attachments,
+/// converting verified claims in place. No-op for messages whose files are
+/// unknown (indexed probe misses) or already resident.
+///
+/// `chat_hint` also patches the already-ingested STATE copy (community folds
+/// put the message into STATE before this can run); pass `None` when the
+/// verified copy is the one still headed for STATE.
+pub async fn verify_message_attachments(msg: &mut crate::types::Message, chat_hint: Option<&str>) {
+    let mut converted: Vec<(String, String)> = Vec::new();
+    for att in &mut msg.attachments {
+        if !att.downloaded {
+            if let Some(path) = verify_local_copy(att).await {
+                att.downloaded = true;
+                att.path = path.clone();
+                converted.push((att.id.clone(), path));
+            }
+        }
+    }
+    if let Some(chat) = chat_hint {
+        if !converted.is_empty() {
+            let mut state = crate::state::STATE.lock().await;
+            for (att_id, path) in converted {
+                state.update_attachment(chat, &msg.id, &att_id, |a| {
+                    a.set_downloaded(true);
+                    a.path = path.into_boxed_str();
+                });
+            }
+        }
+    }
+}
+
 /// Paths where these bytes already landed: every `downloaded=1` row for the
 /// hash, wherever the file was saved (collision suffixes included — the name
 /// on the message says nothing about the name on disk). Rows are CLAIMS: the

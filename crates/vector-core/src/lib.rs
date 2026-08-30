@@ -2573,7 +2573,7 @@ impl VectorCore {
     ) -> usize {
         crate::db::scoped(async move {
             use crate::community::inbound;
-            let outcomes = {
+            let mut outcomes = {
                 let mut st = state::STATE.lock().await;
                 inbound::process_channel_batch(&mut st, &events, &channel, &my_pk)
             };
@@ -2581,6 +2581,16 @@ impl VectorCore {
             // Message saves COLLECT into one batched transaction; deletes are flush barriers
             // (see flush_message_batch — a save committing after a delete it preceded on the
             // wire would resurrect the deleted row).
+            // Bytes we already hold verify at arrival (indexed probe first, hash
+            // only on a plausible candidate), mirroring the DM ingest — the batch
+            // below borrows, so claims convert here while outcomes are still owned.
+            for o in &mut outcomes {
+                if let inbound::IncomingEvent::NewMessage(m)
+                | inbound::IncomingEvent::Updated { message: m, .. } = o
+                {
+                    crate::db::attachments::verify_message_attachments(m, Some(channel_id)).await;
+                }
+            }
             let mut pending: Vec<&crate::types::Message> = Vec::new();
             for o in &outcomes {
                 // Every arm below writes this account's DB — a swap can land between them.
@@ -3055,6 +3065,14 @@ impl VectorCore {
             // Pass 2 — persist: message saves COLLECT into batched transactions; deletes are
             // flush barriers (a save committing after a delete it preceded on the wire would
             // resurrect the deleted row). One tx per page in the common no-delete case.
+            // Bytes we already hold verify at arrival (indexed probe first, hash
+            // only on a plausible candidate), mirroring the DM ingest — the batch
+            // below borrows, so claims convert here while outcomes are still owned.
+            for o in &mut outcomes {
+                if let ChatPersist::New(m) | ChatPersist::Updated { message: m, .. } = o {
+                    crate::db::attachments::verify_message_attachments(m, Some(channel_id)).await;
+                }
+            }
             let mut pending: Vec<&crate::types::Message> = Vec::new();
             for outcome in &outcomes {
                 if !session.is_live() {

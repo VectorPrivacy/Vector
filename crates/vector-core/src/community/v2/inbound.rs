@@ -269,6 +269,10 @@ pub async fn persist_chat_event(
             if !m.replied_to.is_empty() {
                 let _ = crate::db::events::populate_reply_context(&mut m).await;
             }
+            // Bytes we already hold verify at ARRIVAL, mirroring the DM ingest:
+            // before the persist below, so the row lands downloaded; the hint
+            // patches the STATE copy apply_chat_to_state already inserted.
+            crate::db::attachments::verify_message_attachments(&mut m, Some(channel_id)).await;
             ChatPersist::New(m)
         }
         o => o,

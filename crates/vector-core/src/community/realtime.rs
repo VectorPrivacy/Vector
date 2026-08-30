@@ -354,6 +354,9 @@ pub async fn dispatch_event(
                 if !msg.replied_to.is_empty() {
                     let _ = crate::db::events::populate_reply_context(&mut msg).await;
                 }
+                // Bytes we already hold verify at arrival, mirroring the DM ingest —
+                // the box paints downloaded, nothing re-fetches.
+                crate::db::attachments::verify_message_attachments(&mut msg, Some(&chat_id)).await;
                 let _ = crate::db::events::save_message(&chat_id, &msg).await;
                 // This is the LIVE stream (limit-0 subscription) — back-paged history arrives via a
                 // separate one-shot batch, never here. But a relay backfilling from a peer pushes
