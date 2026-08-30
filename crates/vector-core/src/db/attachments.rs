@@ -219,6 +219,41 @@ pub struct ReusableUpload {
 /// CLAIMS this hash (a hostile sender's fabricated imeta) never qualifies —
 /// our own sends set it by construction. Own uploads win the ordering:
 /// their blobs live on our servers under our delete authority.
+/// The verified on-disk copy of a claimed attachment, if any: candidates are
+/// the ledger's recorded paths for the hash plus the download dir under the
+/// wire name, size-gated cheaply (wire size is ciphertext length, 16 AES-GCM
+/// bytes over the plaintext), then content-hashed on the blocking pool. The
+/// claim is never trusted without the hash passing — same bar as a download.
+pub async fn verify_local_copy(att: &crate::types::Attachment) -> Option<String> {
+    let expected = att.id.clone();
+    let mut candidates: Vec<std::path::PathBuf> = downloaded_paths_by_hash(&expected)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    if !att.name.is_empty() {
+        candidates.push(crate::db::get_download_dir().join(&att.name));
+    }
+    let size = att.size;
+    candidates.retain(|p| match std::fs::metadata(p) {
+        Ok(m) => size == 0 || m.len() == size || m.len() + 16 == size,
+        Err(_) => false,
+    });
+    if candidates.is_empty() {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || {
+        candidates.into_iter().find_map(|p| {
+            let bytes = std::fs::read(&p).ok()?;
+            (crate::crypto::sha256_hex(&bytes) == expected)
+                .then(|| p.to_string_lossy().to_string())
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Paths where these bytes already landed: every `downloaded=1` row for the
 /// hash, wherever the file was saved (collision suffixes included — the name
 /// on the message says nothing about the name on disk). Rows are CLAIMS: the
@@ -402,6 +437,39 @@ mod tests {
             "only the downloaded row with a real path answers"
         );
         assert!(downloaded_paths_by_hash("H9").unwrap().is_empty());
+    }
+
+    /// Arrival-time verification: a claimed hash resolves to the on-disk copy
+    /// only when the CONTENT matches — a ledger row pointing at the wrong
+    /// bytes (or nothing) never converts a claim into a download.
+    #[tokio::test]
+    async fn a_claim_verifies_against_real_bytes_or_not_at_all() {
+        let (_tmp, _guard) = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("counter-strike.xdc");
+        std::fs::write(&good, b"the actual game bytes").unwrap();
+        let real_hash = crate::crypto::sha256_hex(b"the actual game bytes");
+
+        let mut row = att(&real_hash, "https://b.example/cs", true, true);
+        row.path = good.to_string_lossy().to_string();
+        save("chat_a", "evt_cs", true, row).await;
+
+        let claim = |hash: &str, size: u64| crate::types::Attachment {
+            id: hash.to_string(),
+            size,
+            ..Default::default()
+        };
+        // Exact plaintext size and ciphertext size (+16) both pass the gate.
+        let plain_len = b"the actual game bytes".len() as u64;
+        assert!(verify_local_copy(&claim(&real_hash, plain_len)).await.is_some());
+        assert!(verify_local_copy(&claim(&real_hash, plain_len + 16)).await.is_some());
+        assert!(verify_local_copy(&claim(&real_hash, 0)).await.is_some(), "sizeless claims still verify by content");
+        // Wrong size: cheap gate refuses before any read.
+        assert!(verify_local_copy(&claim(&real_hash, plain_len + 1)).await.is_none());
+
+        // A row whose file was swapped out from under it: hash fails, no trust.
+        std::fs::write(&good, b"not the game").unwrap();
+        assert!(verify_local_copy(&claim(&real_hash, plain_len)).await.is_none());
     }
 
     /// One blob, many messages: the shared copy must outlive every send but
