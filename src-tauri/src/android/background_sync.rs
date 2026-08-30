@@ -79,41 +79,84 @@ static BG_DATA_DIR: OnceLock<String> = OnceLock::new();
 static PRESWAP_FOREGROUND_CLIENT: Mutex<Option<Client>> = Mutex::new(None);
 
 /// Called from MainActivity.onResume via JNI
+/// Restore the ndk context registration tao 0.34 used to perform: tao 0.35
+/// dropped it and NOTHING else in the tauri 2.11 stack registers one, so
+/// every `ndk_context::android_context()` consumer (iroh's hickory-resolver,
+/// cpal, netdev, our own JNI fallbacks) panicked unconditionally — and a
+/// panic escaping the app main is a process abort. Called from
+/// MainActivity.onCreate with the activity, once per process; the global ref
+/// is deliberately leaked because the registration is process-lifetime.
+/// The service-only process never runs this, matching tao 0.34: consumers
+/// there must keep failing soft through their guards.
+#[no_mangle]
+pub extern "C" fn Java_io_vectorapp_MainActivity_nativeRegisterNdkContext(
+    env: JNIEnv,
+    _class: JClass,
+    activity: JObject<'_>,
+) {
+    crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeRegisterNdkContext", || (), move || {
+        static REGISTERED: std::sync::Once = std::sync::Once::new();
+        let vm = match env.get_java_vm() {
+            Ok(vm) => vm,
+            Err(e) => {
+                logcat(&format!("nativeRegisterNdkContext: no JavaVM: {:?}", e));
+                return;
+            }
+        };
+        let global = match env.new_global_ref(&activity) {
+            Ok(g) => g,
+            Err(e) => {
+                logcat(&format!("nativeRegisterNdkContext: no global ref: {:?}", e));
+                return;
+            }
+        };
+        REGISTERED.call_once(|| {
+            let vm_ptr = vm.get_java_vm_pointer().cast();
+            let ctx_ptr = global.as_obj().as_raw().cast();
+            std::mem::forget(global);
+            unsafe { ndk_context::initialize_android_context(vm_ptr, ctx_ptr) };
+            logcat("ndk context registered (tao 0.35 no longer does this)");
+        });
+})
+}
+
 #[no_mangle]
 pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnResume(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    ACTIVITY_IN_FOREGROUND.store(true, Ordering::Release);
-    ACTIVITY_EVER_CREATED.store(true, Ordering::Release);
-    logcat("Activity resumed (foreground)");
+    crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeOnResume", || (), move || {
+        ACTIVITY_IN_FOREGROUND.store(true, Ordering::Release);
+        ACTIVITY_EVER_CREATED.store(true, Ordering::Release);
+        logcat("Activity resumed (foreground)");
 
-    // Stop standalone sync — the full app's live subscriptions take over
-    if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
-        logcat("Stopping standalone sync (activity resumed)");
-        STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
-        STOP_NOTIFY.notify_one();
-    }
+        // Stop standalone sync — the full app's live subscriptions take over
+        if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
+            logcat("Stopping standalone sync (activity resumed)");
+            STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
+            STOP_NOTIFY.notify_one();
+        }
 
-    // Restore the foreground client as the global. The standalone sync replaced it with its own client
-    // (torn down on the stop above); leaving that in place orphans the foreground notification loop from
-    // every subscription added afterward (mid-session community delivery dies until restart). Reconnect
-    // it too — its sockets dropped while backgrounded, and the pool re-applies the live subs on connect.
-    if let Some(fg) = PRESWAP_FOREGROUND_CLIENT.lock().unwrap().take() {
-        logcat("Restoring foreground client as global (post-resume)");
-        set_nostr_client(fg.clone());
-        tauri::async_runtime::spawn(async move {
-            fg.connect().await;
-        });
-    }
+        // Restore the foreground client as the global. The standalone sync replaced it with its own client
+        // (torn down on the stop above); leaving that in place orphans the foreground notification loop from
+        // every subscription added afterward (mid-session community delivery dies until restart). Reconnect
+        // it too — its sockets dropped while backgrounded, and the pool re-applies the live subs on connect.
+        if let Some(fg) = PRESWAP_FOREGROUND_CLIENT.lock().unwrap().take() {
+            logcat("Restoring foreground client as global (post-resume)");
+            set_nostr_client(fg.clone());
+            tauri::async_runtime::spawn(async move {
+                fg.connect().await;
+            });
+        }
 
-    // A message for the chat the user already has open, arriving while softly backgrounded, is
-    // auto-marked read but still posts a notification (the activity wasn't foreground). The chat
-    // never re-opens, so the in-app read path can't clear it — cancel the active chat's notification
-    // here on resume. Only the active chat; notifications for other chats stay until those are read.
-    if let Some(chat_id) = vector_core::state::get_active_chat() {
-        cancel_notification_jni(&chat_id);
-    }
+        // A message for the chat the user already has open, arriving while softly backgrounded, is
+        // auto-marked read but still posts a notification (the activity wasn't foreground). The chat
+        // never re-opens, so the in-app read path can't clear it — cancel the active chat's notification
+        // here on resume. Only the active chat; notifications for other chats stay until those are read.
+        if let Some(chat_id) = vector_core::state::get_active_chat() {
+            cancel_notification_jni(&chat_id);
+        }
+})
 }
 
 /// Called from MainActivity.onPause via JNI
@@ -122,29 +165,31 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnPause(
     _env: JNIEnv,
     _class: JClass,
 ) {
-    ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
-    logcat("Activity paused (background)");
+    crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeOnPause", || (), move || {
+        ACTIVITY_IN_FOREGROUND.store(false, Ordering::Release);
+        logcat("Activity paused (background)");
 
-    // Start standalone sync if the foreground service is active but standalone sync isn't running.
-    // This handles the case where the app was open (standalone sync was skipped), and the user
-    // now backgrounds the app — the service is still alive but nobody is processing events.
-    if BACKGROUND_SYNC_ACTIVE.load(Ordering::SeqCst)
-        && !STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst)
-    {
-        if let Some(data_dir) = BG_DATA_DIR.get() {
-            logcat("Activity paused, starting standalone sync");
-            let data_dir = data_dir.clone();
-            STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
-            std::thread::spawn(move || {
-                STANDALONE_SYNC_RUNNING.store(true, Ordering::SeqCst);
-                run_standalone_sync_loop(&data_dir);
-                STANDALONE_SYNC_RUNNING.store(false, Ordering::SeqCst);
-                logcat("Standalone sync thread exited");
-            });
-        } else {
-            logcat("Activity paused but no data_dir stored, cannot start sync");
+        // Start standalone sync if the foreground service is active but standalone sync isn't running.
+        // This handles the case where the app was open (standalone sync was skipped), and the user
+        // now backgrounds the app — the service is still alive but nobody is processing events.
+        if BACKGROUND_SYNC_ACTIVE.load(Ordering::SeqCst)
+            && !STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst)
+        {
+            if let Some(data_dir) = BG_DATA_DIR.get() {
+                logcat("Activity paused, starting standalone sync");
+                let data_dir = data_dir.clone();
+                STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    STANDALONE_SYNC_RUNNING.store(true, Ordering::SeqCst);
+                    run_standalone_sync_loop(&data_dir);
+                    STANDALONE_SYNC_RUNNING.store(false, Ordering::SeqCst);
+                    logcat("Standalone sync thread exited");
+                });
+            } else {
+                logcat("Activity paused but no data_dir stored, cannot start sync");
+            }
         }
-    }
+})
 }
 
 /// Called from MainActivity when user taps a notification with a chat_id extra.
@@ -155,26 +200,28 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnNotificationTap(
     _class: JClass,
     chat_id: JString<'_>,
 ) {
-    let chat_id: String = env.get_string(&chat_id)
-        .map(|s| s.into())
-        .unwrap_or_default();
-    if chat_id.is_empty() {
-        return;
-    }
-    logcat(&format!("Notification tap → chat: {}...", &chat_id[..chat_id.len().min(20)]));
+    crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeOnNotificationTap", || (), move || {
+        let chat_id: String = env.get_string(&chat_id)
+            .map(|s| s.into())
+            .unwrap_or_default();
+        if chat_id.is_empty() {
+            return;
+        }
+        logcat(&format!("Notification tap → chat: {}...", &chat_id[..chat_id.len().min(20)]));
 
-    // Store as pending action (frontend may not be ready yet)
-    crate::deep_link::set_pending_notification_action(&chat_id);
+        // Store as pending action (frontend may not be ready yet)
+        crate::deep_link::set_pending_notification_action(&chat_id);
 
-    // Emit to frontend immediately if Tauri is running
-    if let Some(handle) = crate::TAURI_APP.get() {
-        use tauri::Emitter;
-        let action = crate::deep_link::DeepLinkAction {
-            action_type: "chat".to_string(),
-            target: chat_id,
-        };
-        let _ = handle.emit("deep_link_action", &action);
-    }
+        // Emit to frontend immediately if Tauri is running
+        if let Some(handle) = crate::TAURI_APP.get() {
+            use tauri::Emitter;
+            let action = crate::deep_link::DeepLinkAction {
+                action_type: "chat".to_string(),
+                target: chat_id,
+            };
+            let _ = handle.emit("deep_link_action", &action);
+        }
+})
 }
 
 /// Called from MainActivity when another app shares files/text *into* Vector
@@ -187,35 +234,37 @@ pub extern "C" fn Java_io_vectorapp_MainActivity_nativeOnShareReceived(
     uris: JObjectArray<'_>,
     text: JString<'_>,
 ) {
-    let mut uri_vec: Vec<String> = Vec::new();
-    if let Ok(len) = env.get_array_length(&uris) {
-        for i in 0..len {
-            if let Ok(obj) = env.get_object_array_element(&uris, i) {
-                let js = JString::from(obj);
-                // Convert into an owned String in a single statement so the
-                // JavaStr/Result temporaries (which borrow `js`) are dropped at
-                // the `;`, before `js` itself drops at the end of the block.
-                let owned: Option<String> = env.get_string(&js).ok().map(|s| s.into());
-                if let Some(s) = owned {
-                    // Only accept content:// URIs. Legitimate cross-app shares
-                    // are always content:// (Android blocks file:// in
-                    // EXTRA_STREAM); rejecting other schemes stops a crafted
-                    // share from coaxing us into reading our own private files
-                    // (e.g. file:///data/data/<pkg>/...) and sending them.
-                    if s.starts_with("content://") {
-                        uri_vec.push(s);
-                    } else if !s.is_empty() {
-                        logcat(&format!("Share: rejected non-content URI scheme: {}",
-                            s.split(':').next().unwrap_or("?")));
+    crate::android::utils::jni_fence("Java_io_vectorapp_MainActivity_nativeOnShareReceived", || (), move || {
+        let mut uri_vec: Vec<String> = Vec::new();
+        if let Ok(len) = env.get_array_length(&uris) {
+            for i in 0..len {
+                if let Ok(obj) = env.get_object_array_element(&uris, i) {
+                    let js = JString::from(obj);
+                    // Convert into an owned String in a single statement so the
+                    // JavaStr/Result temporaries (which borrow `js`) are dropped at
+                    // the `;`, before `js` itself drops at the end of the block.
+                    let owned: Option<String> = env.get_string(&js).ok().map(|s| s.into());
+                    if let Some(s) = owned {
+                        // Only accept content:// URIs. Legitimate cross-app shares
+                        // are always content:// (Android blocks file:// in
+                        // EXTRA_STREAM); rejecting other schemes stops a crafted
+                        // share from coaxing us into reading our own private files
+                        // (e.g. file:///data/data/<pkg>/...) and sending them.
+                        if s.starts_with("content://") {
+                            uri_vec.push(s);
+                        } else if !s.is_empty() {
+                            logcat(&format!("Share: rejected non-content URI scheme: {}",
+                                s.split(':').next().unwrap_or("?")));
+                        }
                     }
                 }
             }
         }
-    }
-    let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
+        let text: String = env.get_string(&text).map(|s| s.into()).unwrap_or_default();
 
-    logcat(&format!("Share received: {} file(s), {} text chars", uri_vec.len(), text.len()));
-    crate::share::set_pending_share(uri_vec, text);
+        logcat(&format!("Share received: {} file(s), {} text chars", uri_vec.len(), text.len()));
+        crate::share::set_pending_share(uri_vec, text);
+})
 }
 
 /// Called by VectorNotificationService when the foreground service starts.
@@ -229,66 +278,68 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStartBackgro
     data_dir: JString<'_>,
     context: JObject<'_>,
 ) {
-    logcat("Foreground service starting background sync");
-    BACKGROUND_SYNC_ACTIVE.store(true, Ordering::SeqCst);
-    STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
+    crate::android::utils::jni_fence("Java_io_vectorapp_VectorNotificationService_nativeStartBackgroundSync", || (), move || {
+        logcat("Foreground service starting background sync");
+        BACKGROUND_SYNC_ACTIVE.store(true, Ordering::SeqCst);
+        STOP_STANDALONE_SYNC.store(false, Ordering::SeqCst);
 
-    // Store the JavaVM and application context for cross-thread JNI calls.
-    if BG_JAVA_VM.get().is_none() {
-        match env.get_java_vm() {
-            Ok(vm) => { let _ = BG_JAVA_VM.set(vm); }
-            Err(e) => logcat(&format!("Failed to get JavaVM: {:?}", e)),
+        // Store the JavaVM and application context for cross-thread JNI calls.
+        if BG_JAVA_VM.get().is_none() {
+            match env.get_java_vm() {
+                Ok(vm) => { let _ = BG_JAVA_VM.set(vm); }
+                Err(e) => logcat(&format!("Failed to get JavaVM: {:?}", e)),
+            }
         }
-    }
-    if BG_APP_CONTEXT.get().is_none() {
-        match env.new_global_ref(&context) {
-            Ok(global_ref) => { let _ = BG_APP_CONTEXT.set(global_ref); }
-            Err(e) => logcat(&format!("Failed to create context GlobalRef: {:?}", e)),
+        if BG_APP_CONTEXT.get().is_none() {
+            match env.new_global_ref(&context) {
+                Ok(global_ref) => { let _ = BG_APP_CONTEXT.set(global_ref); }
+                Err(e) => logcat(&format!("Failed to create context GlobalRef: {:?}", e)),
+            }
         }
-    }
 
-    // Register the NIP-55 signer backend for service-only mode (no Activity, so
-    // lib.rs's setup hook never ran). Idempotent — a no-op in full-app mode.
-    crate::android::external_signer::register();
+        // Register the NIP-55 signer backend for service-only mode (no Activity, so
+        // lib.rs's setup hook never ran). Idempotent — a no-op in full-app mode.
+        crate::android::external_signer::register();
 
-    let data_dir_str: String = match env.get_string(&data_dir) {
-        Ok(s) => s.into(),
-        Err(e) => {
-            logcat(&format!("Failed to get dataDir string: {:?}", e));
+        let data_dir_str: String = match env.get_string(&data_dir) {
+            Ok(s) => s.into(),
+            Err(e) => {
+                logcat(&format!("Failed to get dataDir string: {:?}", e));
+                return;
+            }
+        };
+
+        // Store data_dir for later use by nativeOnPause
+        let _ = BG_DATA_DIR.set(data_dir_str.clone());
+
+        // If an Activity has ever been created in this process, we're in full-app mode.
+        // Defer standalone sync to nativeOnPause (when the user actually backgrounds).
+        // This avoids racing with the Activity lifecycle flicker (onResume→onPause→onResume)
+        // that happens during Activity creation, where ACTIVITY_IN_FOREGROUND is briefly false.
+        let activity_exists = ACTIVITY_EVER_CREATED.load(Ordering::Acquire);
+        let tauri_running = crate::TAURI_APP.get().is_some();
+        logcat(&format!("Guard check: activity_exists={}, TAURI_APP={}", activity_exists, tauri_running));
+        if activity_exists || tauri_running {
+            logcat("Full app mode, standalone sync deferred to onPause");
             return;
         }
-    };
 
-    // Store data_dir for later use by nativeOnPause
-    let _ = BG_DATA_DIR.set(data_dir_str.clone());
+        // If standalone sync is already running, skip
+        if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
+            logcat("Standalone sync already running, skipping");
+            return;
+        }
 
-    // If an Activity has ever been created in this process, we're in full-app mode.
-    // Defer standalone sync to nativeOnPause (when the user actually backgrounds).
-    // This avoids racing with the Activity lifecycle flicker (onResume→onPause→onResume)
-    // that happens during Activity creation, where ACTIVITY_IN_FOREGROUND is briefly false.
-    let activity_exists = ACTIVITY_EVER_CREATED.load(Ordering::Acquire);
-    let tauri_running = crate::TAURI_APP.get().is_some();
-    logcat(&format!("Guard check: activity_exists={}, TAURI_APP={}", activity_exists, tauri_running));
-    if activity_exists || tauri_running {
-        logcat("Full app mode, standalone sync deferred to onPause");
-        return;
-    }
+        logcat("Starting standalone sync thread for service-only mode");
 
-    // If standalone sync is already running, skip
-    if STANDALONE_SYNC_RUNNING.load(Ordering::SeqCst) {
-        logcat("Standalone sync already running, skipping");
-        return;
-    }
-
-    logcat("Starting standalone sync thread for service-only mode");
-
-    // Spawn a background thread for persistent relay subscription
-    std::thread::spawn(move || {
-        STANDALONE_SYNC_RUNNING.store(true, Ordering::SeqCst);
-        run_standalone_sync_loop(&data_dir_str);
-        STANDALONE_SYNC_RUNNING.store(false, Ordering::SeqCst);
-        logcat("Standalone sync thread exited");
-    });
+        // Spawn a background thread for persistent relay subscription
+        std::thread::spawn(move || {
+            STANDALONE_SYNC_RUNNING.store(true, Ordering::SeqCst);
+            run_standalone_sync_loop(&data_dir_str);
+            STANDALONE_SYNC_RUNNING.store(false, Ordering::SeqCst);
+            logcat("Standalone sync thread exited");
+        });
+})
 }
 
 /// Called when transitioning back to foreground or when service is destroyed.
@@ -298,10 +349,12 @@ pub extern "C" fn Java_io_vectorapp_VectorNotificationService_nativeStopBackgrou
     _env: JNIEnv,
     _class: JClass,
 ) {
-    logcat("Stopping background sync");
-    BACKGROUND_SYNC_ACTIVE.store(false, Ordering::SeqCst);
-    STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
-    STOP_NOTIFY.notify_one();
+    crate::android::utils::jni_fence("Java_io_vectorapp_VectorNotificationService_nativeStopBackgroundSync", || (), move || {
+        logcat("Stopping background sync");
+        BACKGROUND_SYNC_ACTIVE.store(false, Ordering::SeqCst);
+        STOP_STANDALONE_SYNC.store(true, Ordering::SeqCst);
+        STOP_NOTIFY.notify_one();
+})
 }
 
 /// The service-only process discards Rust stdout/stderr, so a panic in the sync
@@ -1164,24 +1217,26 @@ pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeMarkAsRead(
     _class: JClass,
     chat_id: JString<'_>,
 ) {
-    let chat_id: String = match env.get_string(&chat_id) {
-        Ok(s) => s.into(),
-        Err(_) => return,
-    };
-    if chat_id.is_empty() { return; }
-    logcat(&format!("Mark as read: {}...", &chat_id[..chat_id.len().min(20)]));
-
-    // Spawn a thread with its own tokio runtime (JNI calls are synchronous)
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => { logcat(&format!("mark_as_read rt error: {:?}", e)); return; }
+    crate::android::utils::jni_fence("Java_io_vectorapp_NotificationActionReceiver_nativeMarkAsRead", || (), move || {
+        let chat_id: String = match env.get_string(&chat_id) {
+            Ok(s) => s.into(),
+            Err(_) => return,
         };
-        rt.block_on(async {
-            let result = crate::chat::mark_as_read_headless(&chat_id).await;
-            logcat(&format!("mark_as_read_headless result: {}", result));
+        if chat_id.is_empty() { return; }
+        logcat(&format!("Mark as read: {}...", &chat_id[..chat_id.len().min(20)]));
+
+        // Spawn a thread with its own tokio runtime (JNI calls are synchronous)
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => { logcat(&format!("mark_as_read rt error: {:?}", e)); return; }
+            };
+            rt.block_on(async {
+                let result = crate::chat::mark_as_read_headless(&chat_id).await;
+                logcat(&format!("mark_as_read_headless result: {}", result));
+            });
         });
-    });
+})
 }
 
 /// Called from NotificationActionReceiver when the user sends an inline reply.
@@ -1194,96 +1249,98 @@ pub extern "C" fn Java_io_vectorapp_NotificationActionReceiver_nativeSendReply(
     chat_id: JString<'_>,
     content: JString<'_>,
 ) {
-    let chat_id: String = match env.get_string(&chat_id) {
-        Ok(s) => s.into(),
-        Err(_) => return,
-    };
-    let content: String = match env.get_string(&content) {
-        Ok(s) => s.into(),
-        Err(_) => return,
-    };
-    if chat_id.is_empty() || content.is_empty() { return; }
-    let chat_preview: String = chat_id.chars().take(20).collect();
-    let content_preview: String = content.chars().take(40).collect();
-    logcat(&format!("Inline reply to {}...: {}", chat_preview, content_preview));
-
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(e) => { logcat(&format!("send_reply rt error: {:?}", e)); return; }
+    crate::android::utils::jni_fence("Java_io_vectorapp_NotificationActionReceiver_nativeSendReply", || (), move || {
+        let chat_id: String = match env.get_string(&chat_id) {
+            Ok(s) => s.into(),
+            Err(_) => return,
         };
-        rt.block_on(async {
-            // Wait for background sync to finish initializing the client (up to 15s).
-            // This handles the race where the service just restarted and bootstrap
-            // hasn't completed yet when the user taps Reply.
-            let mut waited = 0u32;
-            while crate::nostr_client().is_none() && waited < 150 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                waited += 1;
-            }
-            if waited > 0 {
-                logcat(&format!("Waited {}ms for client init", waited * 100));
-            }
+        let content: String = match env.get_string(&content) {
+            Ok(s) => s.into(),
+            Err(_) => return,
+        };
+        if chat_id.is_empty() || content.is_empty() { return; }
+        let chat_preview: String = chat_id.chars().take(20).collect();
+        let content_preview: String = content.chars().take(40).collect();
+        logcat(&format!("Inline reply to {}...: {}", chat_preview, content_preview));
 
-            match crate::message::send_text_reply_headless(&chat_id, &content).await {
-                Ok(_) => {
-                    logcat("Inline reply sent successfully");
-                    // Look up our own profile for avatar and display name
-                    let (sender_label, avatar) = {
-                        let my_pk = crate::my_public_key()
-                            .and_then(|pk| pk.to_bech32().ok());
-                        match my_pk {
-                            Some(npub) => {
-                                let state = crate::STATE.lock().await;
-                                match state.get_profile(&npub) {
-                                    Some(profile) => {
-                                        let name = if !profile.display_name.is_empty() {
-                                            format!("Me ({})", &*profile.display_name)
-                                        } else if !profile.name.is_empty() {
-                                            format!("Me ({})", &*profile.name)
-                                        } else {
-                                            "Me".to_string()
-                                        };
-                                        let av = if !profile.avatar_cached.is_empty() {
-                                            Some(profile.avatar_cached.to_string())
-                                        } else {
-                                            None
-                                        };
-                                        (name, av)
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => { logcat(&format!("send_reply rt error: {:?}", e)); return; }
+            };
+            rt.block_on(async {
+                // Wait for background sync to finish initializing the client (up to 15s).
+                // This handles the race where the service just restarted and bootstrap
+                // hasn't completed yet when the user taps Reply.
+                let mut waited = 0u32;
+                while crate::nostr_client().is_none() && waited < 150 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    waited += 1;
+                }
+                if waited > 0 {
+                    logcat(&format!("Waited {}ms for client init", waited * 100));
+                }
+
+                match crate::message::send_text_reply_headless(&chat_id, &content).await {
+                    Ok(_) => {
+                        logcat("Inline reply sent successfully");
+                        // Look up our own profile for avatar and display name
+                        let (sender_label, avatar) = {
+                            let my_pk = crate::my_public_key()
+                                .and_then(|pk| pk.to_bech32().ok());
+                            match my_pk {
+                                Some(npub) => {
+                                    let state = crate::STATE.lock().await;
+                                    match state.get_profile(&npub) {
+                                        Some(profile) => {
+                                            let name = if !profile.display_name.is_empty() {
+                                                format!("Me ({})", &*profile.display_name)
+                                            } else if !profile.name.is_empty() {
+                                                format!("Me ({})", &*profile.name)
+                                            } else {
+                                                "Me".to_string()
+                                            };
+                                            let av = if !profile.avatar_cached.is_empty() {
+                                                Some(profile.avatar_cached.to_string())
+                                            } else {
+                                                None
+                                            };
+                                            (name, av)
+                                        }
+                                        None => ("Me".to_string(), None),
                                     }
-                                    None => ("Me".to_string(), None),
                                 }
+                                None => ("Me".to_string(), None),
                             }
-                            None => ("Me".to_string(), None),
-                        }
-                    };
-                    // Re-post notification with our reply appended so the user sees confirmation
-                    post_notification_jni(
-                        &sender_label,
-                        &content,
-                        avatar.as_deref(),
-                        Some(&chat_id),
-                        Some(&sender_label),
-                        None,
-                        None,
-                    );
+                        };
+                        // Re-post notification with our reply appended so the user sees confirmation
+                        post_notification_jni(
+                            &sender_label,
+                            &content,
+                            avatar.as_deref(),
+                            Some(&chat_id),
+                            Some(&sender_label),
+                            None,
+                            None,
+                        );
+                    }
+                    Err(e) => {
+                        logcat(&format!("Inline reply failed: {}", e));
+                        // Post a failure notice so the notification spinner clears
+                        post_notification_jni(
+                            "Vector",
+                            "Reply failed to send",
+                            None,
+                            Some(&chat_id),
+                            None,
+                            None,
+                            None,
+                        );
+                    }
                 }
-                Err(e) => {
-                    logcat(&format!("Inline reply failed: {}", e));
-                    // Post a failure notice so the notification spinner clears
-                    post_notification_jni(
-                        "Vector",
-                        "Reply failed to send",
-                        None,
-                        Some(&chat_id),
-                        None,
-                        None,
-                        None,
-                    );
-                }
-            }
+            });
         });
-    });
+})
 }
 
 /// Check if background sync is currently active (foreground service running)
