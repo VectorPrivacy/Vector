@@ -3483,7 +3483,7 @@ async function setupRustListeners() {
         }
         // Only the visible channel needs repainting; the rest reload when opened.
         const open = channels.find(c => c.id === strOpenChat);
-        if (open) await openChat(open);
+        if (open) await openChat(open.id);
     }
 
     _on('community_migrated', async (evt) => {
