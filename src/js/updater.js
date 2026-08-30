@@ -52,30 +52,32 @@ function parseVersion(raw) {
     };
 }
 
-// The beta opt-in: a stable build asking to be offered release candidates.
-// Per-install by design (an update applies to the machine, not an account),
-// so it lives in localStorage like the rich-composer escape hatch.
-function betaUpdatesEnabled() {
-    try { return localStorage.getItem('beta_updates') === 'true'; } catch (_) { return false; }
+// The Beta Updates preference. Per-install by design (an update applies to
+// the machine, not an account), so it lives in localStorage like the
+// rich-composer escape hatch. Unset defaults to the build's native channel:
+// a preview build follows the preview channel until the user opts out.
+function updateChannel() {
+    let stored = null;
+    try { stored = localStorage.getItem('beta_updates'); } catch (_) {}
+    if (stored === 'true') return 'preview';
+    if (stored === 'false') return 'stable';
+    return versionInfo.preview === null ? 'stable' : 'preview';
 }
 
-// Whether the beta channel actually applies right now. A preview build is
-// already ON the channel, and an Android store build can only be updated by
-// its store (which never carries previews), so both drop to the normal path.
-function betaChannelActive() {
-    if (!betaUpdatesEnabled()) return false;
-    if (versionInfo.preview !== null) return false;
+// The channel to actually follow. An Android store build can only be updated
+// by its store (which never carries previews), so it always reads stable.
+function followPreviewChannel() {
     if (platformFeatures.os === 'android' && androidInstallSource.has_store) return false;
-    return true;
+    return updateChannel() === 'preview';
 }
 
-// The toggle renders only where opting in can work: desktop, or a sideloaded
-// Android build. Store builds and preview builds hide it.
+// The toggle renders wherever the choice can work: desktop, or a sideloaded
+// Android build — RCs included, where OFF means "sit on this build until the
+// official release". Store builds hide it.
 function updateBetaRowVisibility() {
     const row = document.getElementById('beta-updates-row');
     if (!row) return;
-    const eligible = versionInfo.preview === null
-        && (platformFeatures.os !== 'android' || !androidInstallSource.has_store);
+    const eligible = platformFeatures.os !== 'android' || !androidInstallSource.has_store;
     row.style.display = eligible ? '' : 'none';
 }
 
@@ -111,7 +113,7 @@ function initializeUpdaterUI() {
         betaInfo.onclick = (e) => {
             e.preventDefault();
             e.stopPropagation();
-            popupConfirm('Beta Updates', 'Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you\'ll be moved onto the official build the moment it releases.', true);
+            popupConfirm('Beta Updates', 'Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you\'ll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there.', true);
         };
     }
 
@@ -119,7 +121,7 @@ function initializeUpdaterUI() {
     // chosen channel, and flipping it OFF withdraws an offered RC.
     const betaToggle = document.getElementById('beta-updates-toggle');
     if (betaToggle) {
-        betaToggle.checked = betaUpdatesEnabled();
+        betaToggle.checked = updateChannel() === 'preview';
         betaToggle.addEventListener('change', () => {
             try { localStorage.setItem('beta_updates', betaToggle.checked ? 'true' : 'false'); } catch (_) {}
             currentUpdate = null;
@@ -183,7 +185,7 @@ async function openAndroidUpdateSource() {
             updateUI('downloading', '', total > 0 ? Math.round((received / total) * 100) : 0);
         });
         try {
-            const result = await window.__TAURI__.core.invoke('download_and_install_update', { beta: betaChannelActive() });
+            const result = await window.__TAURI__.core.invoke('download_and_install_update', { beta: followPreviewChannel() });
             if (result === 'needs-permission') {
                 updateUI('available', 'Allow installs from Vector, then tap again');
             } else {
@@ -394,7 +396,7 @@ async function checkForUpdates(silent = false) {
                 if (!silent) updateUI('error', 'Update check paused until Tor connects');
                 return false;
             }
-            const info = await window.__TAURI__.core.invoke('check_app_update', { beta: betaChannelActive() });
+            const info = await window.__TAURI__.core.invoke('check_app_update', { beta: followPreviewChannel() });
             if (!info.available) {
                 if (!silent) updateUI('no-updates');
                 return false;
@@ -418,19 +420,23 @@ async function checkForUpdates(silent = false) {
             }
             return false;
         }
-        // Beta opt-in on a stable build: the baked updater config points at the
-        // stable endpoint, so the check runs through a backend command that
-        // builds a preview-channel updater at runtime. Same manifest format,
-        // same signature verification, different pointer.
-        if (betaChannelActive()) {
-            const info = await window.__TAURI__.core.invoke('check_desktop_beta_update', {
+        // The baked updater config points at the build's native channel. When
+        // the user's choice differs (stable build opted INTO beta, or a
+        // preview build opted OUT), the check runs through a backend command
+        // that builds an updater for the chosen channel at runtime. Same
+        // manifest format, same signature verification, different pointer.
+        const wantedChannel = followPreviewChannel() ? 'preview' : 'stable';
+        const bakedChannel = versionInfo.preview === null ? 'stable' : 'preview';
+        if (wantedChannel !== bakedChannel) {
+            const info = await window.__TAURI__.core.invoke('check_channel_update', {
+                channel: wantedChannel,
                 proxy: transport.proxy || null,
             });
             if (!info.available) {
                 if (!silent) updateUI('no-updates');
                 return false;
             }
-            currentUpdate = { version: info.latest, body: info.notes, betaChannel: true };
+            currentUpdate = { version: info.latest, body: info.notes, channelOverride: true };
             updateUI('available');
             return true;
         }
@@ -467,22 +473,22 @@ async function downloadUpdate() {
     
     updateUI('downloading', '', 0);
 
-    // Beta channel: the Update object lives backend-side (stashed by the
+    // Channel override: the Update object lives backend-side (stashed by the
     // check), so download + install runs there and streams progress back.
-    if (currentUpdate.betaChannel) {
+    if (currentUpdate.channelOverride) {
         try {
             const stopProgress = await window.__TAURI__.event.listen('update_download_progress', (evt) => {
                 const { received = 0, total = 0 } = evt.payload || {};
                 updateUI('downloading', '', total > 0 ? Math.round((received / total) * 100) : 0);
             });
             try {
-                await window.__TAURI__.core.invoke('install_desktop_beta_update');
+                await window.__TAURI__.core.invoke('install_channel_update');
             } finally {
                 stopProgress();
             }
             updateUI('ready');
         } catch (error) {
-            console.error('Updater: Error installing beta update:', error);
+            console.error('Updater: Error installing update:', error);
             updateUI('error', 'Failed to download update');
         }
         return;
