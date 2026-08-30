@@ -2035,7 +2035,13 @@ function getChatSortTimestamp(chat) {
         lastActivity = t;
     }
 
-    return lastActivity || 0;
+    // Monotonic ratchet: the key never regresses for the lifetime of the chat
+    // object. A control-state purge empties `chat.messages`, and without this
+    // the key fell back to the community's CREATION time — the chat sank down
+    // the list mid-session, unread badge and all, until its cache repopulated.
+    const ratchet = Math.max(lastActivity || 0, chat._sortStamp || 0);
+    chat._sortStamp = ratchet;
+    return ratchet;
 }
 
 /**
