@@ -81,8 +81,11 @@ class VectorNotificationService : Service() {
                 GENERIC_NOTIFICATION_ID
             }
 
-            // Fresh requestCode per post — avoids PendingIntent caching issues with FLAG_IMMUTABLE
-            val pendingRequestCode = notificationCounter.getAndIncrement()
+            // STABLE per-chat requestCode (see the action intents below): the
+            // counter resets with the process while PendingIntents outlive it,
+            // so a counter code can resurrect an old intent with old extras.
+            // UPDATE_CURRENT refreshes the extras either way.
+            val pendingRequestCode = notificationId * 2 + 1073741823
 
             val launchIntent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -160,8 +163,13 @@ class VectorNotificationService : Service() {
                     putExtra("chat_id", chatId)
                     putExtra("notification_id", notificationId)
                 }
+                // Request codes must be STABLE per chat+action and the flags must
+                // include UPDATE_CURRENT: a counter resets with the process, and a
+                // PendingIntent outlives it — Android then hands back the previous
+                // process's intent with its OLD extras (extras never distinguish
+                // PendingIntents), silently routing this action at a different chat.
                 val markReadPending = PendingIntent.getBroadcast(
-                    context, notificationCounter.getAndIncrement(), markReadIntent,
+                    context, notificationId * 2, markReadIntent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )
 
@@ -174,8 +182,8 @@ class VectorNotificationService : Service() {
                     putExtra("notification_id", notificationId)
                 }
                 val replyPending = PendingIntent.getBroadcast(
-                    context, notificationCounter.getAndIncrement(), replyIntent,
-                    PendingIntent.FLAG_MUTABLE
+                    context, notificationId * 2 + 1, replyIntent,
+                    PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
                 val replyAction = NotificationCompat.Action.Builder(
                     R.drawable.ic_notification, "Reply", replyPending
