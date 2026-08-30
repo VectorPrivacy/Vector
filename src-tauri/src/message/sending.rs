@@ -649,6 +649,16 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
 /// Used by Android notification inline-reply (JNI).
 #[allow(dead_code)]
 pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
+    // A notification's chat id is an npub for a DM but a 64-hex CHANNEL id for
+    // a community message — route by form. The DM-only path made every
+    // community inline reply die on "Invalid npub" before it touched the wire.
+    if !chat_id.starts_with("npub1") {
+        crate::commands::community::send_community_message(
+            chat_id.to_string(), content.to_string(), None, None,
+        ).await?;
+        crate::chat::mark_as_read_headless(chat_id).await;
+        return Ok(String::new());
+    }
     let config = SendConfig {
         expiration: vector_core::self_destruct::resolve_send_expiry(chat_id),
         ..SendConfig::headless()
