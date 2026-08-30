@@ -113,6 +113,21 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Opt out of the modal "Bad Image" hard-error dialog: injected hooks and GPU
+    // driver probes LoadLibrary optional DLLs that can be corrupt on user machines;
+    // with these flags the load fails quietly instead of blocking on a dialog.
+    // Inherited by the WebView2 child processes. Standard practice (Chromium, Firefox).
+    #[cfg(windows)]
+    {
+        const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+        const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+        extern "system" {
+            fn GetErrorMode() -> u32;
+            fn SetErrorMode(mode: u32) -> u32;
+        }
+        unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX) };
+    }
+
     // Install a panic hook that logs the crash before the process dies.
     // Without this, panics in spawned tasks vanish silently.
     std::panic::set_hook(Box::new(|info| {

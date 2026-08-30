@@ -67,6 +67,11 @@
         "desktopTemplate": "linux/Vector.desktop"
       }
     },
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    },
     "android": {
       "minSdkVersion": 26
     },
