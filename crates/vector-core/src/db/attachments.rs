@@ -219,6 +219,23 @@ pub struct ReusableUpload {
 /// CLAIMS this hash (a hostile sender's fabricated imeta) never qualifies —
 /// our own sends set it by construction. Own uploads win the ordering:
 /// their blobs live on our servers under our delete authority.
+/// Paths where these bytes already landed: every `downloaded=1` row for the
+/// hash, wherever the file was saved (collision suffixes included — the name
+/// on the message says nothing about the name on disk). Rows are CLAIMS: the
+/// caller must hash-verify a path before treating it as the content.
+pub fn downloaded_paths_by_hash(hash: &str) -> Result<Vec<String>, String> {
+    let conn = crate::db::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT path FROM attachments WHERE hash = ?1 AND downloaded = 1 AND path != ''")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([hash], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
 pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, String> {
     if hash.is_empty() {
         return Ok(None);
@@ -363,6 +380,28 @@ mod tests {
         assert!(find_reusable_by_hash("H2").unwrap().is_none(), "unverified rows never qualify");
         assert!(find_reusable_by_hash("H3").unwrap().is_none(), "keyless rows never qualify");
         assert!(find_reusable_by_hash("H9").unwrap().is_none());
+    }
+
+    /// A re-received file must resolve to the copy already on disk, wherever
+    /// it landed — the ledger's path, not the message's display name, is the
+    /// authority. Undownloaded and pathless rows stay invisible.
+    #[tokio::test]
+    async fn the_ledger_knows_where_the_bytes_already_landed() {
+        let (_tmp, _guard) = init_test_db();
+        let mut on_disk = att("HP", "https://b.example/p", true, true);
+        on_disk.path = "/dl/counter-strike-1.xdc".to_string();
+        save("chat_a", "evt_disk", true, on_disk).await;
+        let mut ghost = att("HP", "https://b.example/p2", true, false);
+        ghost.path = "/dl/never-finished.xdc".to_string();
+        save("chat_b", "evt_ghost", false, ghost).await;
+        save("chat_c", "evt_pathless", true, att("HP", "https://b.example/p3", true, true)).await;
+
+        assert_eq!(
+            downloaded_paths_by_hash("HP").unwrap(),
+            vec!["/dl/counter-strike-1.xdc".to_string()],
+            "only the downloaded row with a real path answers"
+        );
+        assert!(downloaded_paths_by_hash("H9").unwrap().is_empty());
     }
 
     /// One blob, many messages: the shared copy must outlive every send but

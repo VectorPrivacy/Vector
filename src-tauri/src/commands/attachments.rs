@@ -355,8 +355,15 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 // and correctly falls through to a real download. Size gates
                                 // the read so an obvious mismatch skips the full hash.
                                 let content_matches = |p: &std::path::PathBuf| {
+                                    // The wire `size` is the CIPHERTEXT length; the disk file is
+                                    // plaintext, 16 AES-GCM tag bytes shorter. Accept either form
+                                    // (plaintext references carry the plaintext size) — an exact
+                                    // equality here kept this whole branch dead and every
+                                    // re-received file downloading bytes it already had.
                                     let size_ok = attachment.size == 0
-                                        || std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false);
+                                        || std::fs::metadata(p)
+                                            .map(|m| m.len() == attachment.size || m.len() + 16 == attachment.size)
+                                            .unwrap_or(false);
                                     size_ok
                                         && std::fs::read(p)
                                             .map(|b| util::calculate_file_hash(&b) == expected_hash)
@@ -367,6 +374,17 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 } else {
                                     name_path.filter(|p| p.exists() && content_matches(p))
                                 };
+                                // Third candidate: wherever the ledger says these bytes already
+                                // landed — a collision-suffixed download, or a file we SENT from
+                                // an arbitrary path. Rows are claims; content_matches still
+                                // hash-verifies before anything is trusted.
+                                let file_path = file_path.or_else(|| {
+                                    vector_core::db::attachments::downloaded_paths_by_hash(&expected_hash)
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(std::path::PathBuf::from)
+                                        .find(|p| p.exists() && content_matches(p))
+                                });
                                 if let Some(file_path) = file_path {
                                     // File already exists! Update the state and return success
                                     attachment.set_downloaded(true);
