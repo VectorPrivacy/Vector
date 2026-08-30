@@ -39,7 +39,7 @@ binary was compiled against.
 | -------------------- | --------------------------------------- | ------------------------------------ |
 | Version              | `0.4.2`                                 | `0.4.2-1`                            |
 | Updater endpoint     | `releases/latest/download/latest.json`  | `releases/download/preview/latest.json` |
-| Offered previews?    | No, `/releases/latest` skips pre-releases | Yes                                |
+| Offered previews?    | Only with the Beta Updates opt-in (Settings > Updates), which reads the preview pointer at runtime | Yes                                |
 | Offered stable?      | Yes                                     | Yes, the pointer tracks both channels |
 
 `preview` is a permanent pointer release whose only asset is an update manifest. It exists because
