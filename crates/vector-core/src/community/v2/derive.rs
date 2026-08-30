@@ -120,12 +120,43 @@ impl GroupKey {
     }
 
     fn derive(label: &str, secret: &[u8], id32: &[u8; 32], epoch: Option<u64>) -> Self {
+        // Memoized: the HKDF is cheap, but Keys::new + the self-ECDH are two
+        // EC point-multiplies, and the dispatch trial re-paid them for every
+        // held community on every arriving wrap — a full core on a live
+        // evening. Pure function of its inputs, so the memo is exact; keyed
+        // by a digest so no input secret sits in the map, session-scoped so
+        // an account's derived keys die with its session.
+        let memo_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(label.as_bytes());
+            h.update([0u8]);
+            h.update(secret);
+            h.update(id32);
+            h.update(epoch.unwrap_or(u64::MAX).to_be_bytes());
+            h.update([epoch.is_some() as u8]);
+            h.finalize().into()
+        };
+        struct GroupKeyMemo;
+        type MemoMap = std::sync::Mutex<std::collections::HashMap<[u8; 32], GroupKey>>;
+        let memo: std::sync::Arc<MemoMap> =
+            crate::db::current_session().scoped::<GroupKeyMemo, MemoMap>();
+        if let Some(hit) = memo.lock().unwrap_or_else(|e| e.into_inner()).get(&memo_key) {
+            return hit.clone();
+        }
         let info = build_info(label, id32, epoch);
         let sk = hkdf_to_secret_key(secret, &info);
         let keys = Keys::new(sk);
         let conv_key = ConversationKey::derive(keys.secret_key(), &keys.public_key())
             .expect("self-ECDH of a valid keypair cannot fail");
-        GroupKey { keys, conv_key }
+        let out = GroupKey { keys, conv_key };
+        let mut map = memo.lock().unwrap_or_else(|e| e.into_inner());
+        // Bound: communities x channels x a few epochs is tiny; a runaway
+        // (mass rekey probing) resets rather than grows.
+        if map.len() >= 1024 {
+            map.clear();
+        }
+        map.insert(memo_key, out.clone());
+        out
     }
 
     /// The Stream address (x-only pubkey) — what `authors` filters match.
