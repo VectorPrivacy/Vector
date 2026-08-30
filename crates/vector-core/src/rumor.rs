@@ -371,18 +371,25 @@ fn process_file_attachment(
     context: RumorContext,
     download_dir: &Path,
 ) -> Result<RumorProcessingResult, String> {
-    // Extract decryption parameters
+    // Extract decryption parameters. Absent/empty key = a PUBLIC plaintext
+    // blob shared by reference (e.g. a store app) — download + hash-verify,
+    // no decrypt. NIP-17 marks these tags optional; requiring them dropped
+    // such messages outright. A key WITHOUT a nonce is still malformed.
     let decryption_key = rumor.tags
         .find_kind("decryption-key")
         .and_then(|tag| tag.content())
-        .ok_or("Missing decryption-key tag")?
+        .unwrap_or_default()
         .to_string();
 
-    let decryption_nonce = rumor.tags
-        .find_kind("decryption-nonce")
-        .and_then(|tag| tag.content())
-        .ok_or("Missing decryption-nonce tag")?
-        .to_string();
+    let decryption_nonce = if decryption_key.is_empty() {
+        String::new()
+    } else {
+        rumor.tags
+            .find_kind("decryption-nonce")
+            .and_then(|tag| tag.content())
+            .ok_or("Missing decryption-nonce tag")?
+            .to_string()
+    };
 
     // Extract original file hash (ox tag) if present
     let original_file_hash = rumor.tags
@@ -479,7 +486,9 @@ fn process_file_attachment(
     let valid_path_basis =
         |s: &str| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_hexdigit());
     let original_file_hash = original_file_hash.filter(|h| valid_path_basis(h));
-    if !valid_path_basis(&decryption_nonce) {
+    // A plaintext reference (empty key forces empty nonce above) skips this:
+    // its basis is the ox claim or a digest of the url, both safe hex.
+    if !decryption_key.is_empty() && !valid_path_basis(&decryption_nonce) {
         return Err("Invalid decryption-nonce tag".to_string());
     }
     let file_hash = crate::crypto::attachment_identity_basis(
@@ -1419,6 +1428,46 @@ mod tests {
         let result = process_rumor(rumor, ctx, &temp_dir()).unwrap();
 
         assert!(matches!(result, RumorProcessingResult::Ignored));
+    }
+
+    #[test]
+    fn a_file_without_decryption_tags_is_a_plaintext_reference_not_a_drop() {
+        // Smart-forward Tier 2: a public blob (e.g. a store app) shared by
+        // reference carries url + ox + size and NO decryption tags. NIP-17
+        // marks the tags optional; this used to error out the whole message.
+        let keys = test_keypair();
+        let ox_hash = "deadbeef".repeat(8);
+        let t = tags(vec![
+            custom_tag("ox", &[&ox_hash]),
+            custom_tag("file-type", &["application/x-webxdc"]),
+            custom_tag("name", &["game.xdc"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/deadbeef.xdc", t);
+        let result = process_rumor(rumor, dm_context(&keys), &temp_dir()).unwrap();
+        match result {
+            RumorProcessingResult::FileAttachment(msg) => {
+                let att = &msg.attachments[0];
+                assert!(att.key.is_empty());
+                assert!(att.nonce.is_empty());
+                assert_eq!(att.id, ox_hash, "identity must be the plaintext hash claim");
+                assert!(!att.downloaded, "a reference is a claim, never resident content");
+            }
+            other => panic!("expected FileAttachment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_key_without_a_nonce_is_still_malformed() {
+        // The leniency is for ABSENT crypto, not broken crypto: a key that
+        // cannot decrypt anything must not demote the file to plaintext.
+        let keys = test_keypair();
+        let t = tags(vec![
+            custom_tag("decryption-key", &["aabbccdd"]),
+            custom_tag("ox", &[&"deadbeef".repeat(8)]),
+            custom_tag("file-type", &["image/jpeg"]),
+        ]);
+        let rumor = make_rumor(&keys, Kind::from_u16(15), "https://blossom.example/deadbeef.jpg", t);
+        assert!(process_rumor(rumor, dm_context(&keys), &temp_dir()).is_err());
     }
 
     // ========================================================================

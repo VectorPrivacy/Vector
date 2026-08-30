@@ -697,6 +697,17 @@ impl VectorCore {
                 }
                 encrypted.extend_from_slice(&chunk);
             }
+            // Plaintext public blob (no decryption tags): the sender's `ox` claim
+            // is the only integrity check available, so it is mandatory here —
+            // unverifiable plaintext is treated as a dead source, not served.
+            if attachment.key.is_empty() {
+                let claim = attachment.original_hash.as_deref().unwrap_or(&attachment.id);
+                if crate::crypto::sha256_hex(&encrypted) == claim {
+                    return Ok(encrypted);
+                }
+                last_err = "plaintext blob fails its hash claim".to_string();
+                next_source!();
+            }
             match crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce) {
                 Ok(plain) => {
                     if i > 1 {

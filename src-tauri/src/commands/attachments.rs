@@ -535,6 +535,22 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     break 'source;
                 }
 
+                // Plaintext public blob (no decryption tags): AES-GCM normally
+                // authenticates the bytes; here the sender's `ox` claim is the only
+                // integrity check, so enforce it per source before saving.
+                if attachment_for_decrypt.key.is_empty() {
+                    if let Some(claim) = attachment_for_decrypt.original_hash.as_deref() {
+                        if util::calculate_file_hash(&data) != claim {
+                            vector_core::log_net_fail!(
+                                "[AttachmentDownload] {} served plaintext that fails its hash claim — bad source",
+                                url
+                            );
+                            last_error = "Source served corrupt bytes".to_string();
+                            break 'source;
+                        }
+                    }
+                }
+
                 match decrypt_and_save_attachment(handle, &data, &attachment_for_decrypt).await {
                     Ok(ok) => saved = Some(ok),
                     Err(error) => {
