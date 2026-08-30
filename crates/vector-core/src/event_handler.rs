@@ -989,7 +989,22 @@ async fn commit_dm_message(
         added
     };
 
-    if added {
+    // A banned author's message is stored but never SHOWN: the queries that build a
+    // page already drop it, and painting it live was the one way it still reached the
+    // screen. Gated at emission rather than at persist so an unban restores their
+    // history — the row is still there, the filter simply stops matching.
+    let hidden_author = msg
+        .npub
+        .as_deref()
+        .and_then(|author| {
+            let community = crate::db::community::community_id_for_channel(contact).ok().flatten()?;
+            nostr_sdk::prelude::PublicKey::parse(author)
+                .ok()
+                .map(|pk| crate::db::community::is_author_banned(&community, &pk))
+        })
+        .unwrap_or(false);
+
+    if added && !hidden_author {
         // Emit to frontend
         crate::traits::emit_event("message_new", &serde_json::json!({
             "message": &msg,

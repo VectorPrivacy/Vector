@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-channel-update"
+description = "Enables the install_channel_update command without any pre-configured scope."
+commands.allow = ["install_channel_update"]
+
+[[permission]]
+identifier = "deny-install-channel-update"
+description = "Denies the install_channel_update command without any pre-configured scope."
+commands.deny = ["install_channel_update"]

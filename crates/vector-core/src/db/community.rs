@@ -581,13 +581,26 @@ pub fn load_community(id: &CommunityId) -> Result<Option<Community>, String> {
     let banlist_json = dec_txt(&banlist_json);
     let owner_attestation = owner_attestation.map(|s| dec_txt(&s));
 
-    // Banlist: stored as a JSON array of hex pubkeys; parse to PublicKeys (skipping any
-    // malformed entry) and denormalize onto every channel so the inbound path can drop
-    // banned authors. A bad/empty column degrades to "no bans", never an error.
-    let banned: Vec<PublicKey> = serde_json::from_str::<Vec<String>>(&banlist_json)
-        .unwrap_or_default()
+    // Banlist from `community_bans`, denormalized onto every channel so the inbound
+    // path can drop banned authors. The legacy blob is read ONLY as a fallback for a
+    // row this account has not touched since migration 90 — it is not a second store,
+    // and `get_community_banlist` retires it on first read. Malformed entries are
+    // skipped; an empty result degrades to "no bans", never an error.
+    let id_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+    let mut banned_hex: Vec<String> = conn
+        .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
+        .and_then(|mut st| {
+            st.query_map(params![id_hex], |r| r.get::<_, String>(0))
+                .map(|rows| rows.flatten().collect::<Vec<String>>())
+        })
+        .unwrap_or_default();
+    if banned_hex.is_empty() {
+        banned_hex = serde_json::from_str::<Vec<String>>(&banlist_json).unwrap_or_default();
+    }
+    let banned: Vec<PublicKey> = banned_hex
         .iter()
-        .filter_map(|h| PublicKey::from_hex(h).ok())
+        // The table holds bech32, the legacy blob hex — `parse` takes either.
+        .filter_map(|h| PublicKey::parse(h).ok())
         .collect();
 
     let icon = icon_json
@@ -1225,6 +1238,7 @@ fn delete_community_inner(community_id: &str, retain_keys: bool) -> Result<(), S
         // Per-entity edition heads (keyless model) — else stale refuse-downgrade floors + self_hash
         // anchors survive a leave/re-join and reject a legitimately reset chain.
         Some("DELETE FROM community_edition_heads WHERE community_id = ?1"),
+        Some("DELETE FROM community_bans WHERE community_id = ?1"),
     ]
     .into_iter()
     .flatten()
@@ -1514,13 +1528,57 @@ pub fn is_author_banned(community_id: &str, author: &PublicKey) -> bool {
 }
 
 pub fn set_community_banlist(community_id: &str, banned_hex: &[String], at: i64) -> Result<(), String> {
-    let json = enc_txt(&serde_json::to_string(banned_hex).map_err(|e| e.to_string())?)?;
     let conn = super::get_write_connection_guard_static()?;
-    conn.execute(
-        "UPDATE communities SET banlist = ?1, banlist_at = ?2 WHERE community_id = ?3",
-        params![json, at, community_id],
+    // MONOTONIC in the edition version. Un-banning is the fail-OPEN direction — the
+    // un-banned party's rotations and messages start being honored again — so an
+    // older edition must never overwrite a newer one, however it reached us. The
+    // fold's floors already refuse a downgrade; this makes the storage layer refuse
+    // it too, so no future folding change can reintroduce the hole. Checked before
+    // writing so a refused downgrade touches neither the row nor the hot cache.
+    let current_at: Option<i64> = conn
+        .query_row("SELECT banlist_at FROM communities WHERE community_id = ?1", params![community_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| format!("read banlist_at: {e}"))?
+        .flatten();
+    if current_at.is_some_and(|have| have > at) {
+        crate::log_warn!(
+            "[Banlist] refused a stale edition (v{at} behind held v{}) — un-banning is the fail-open direction",
+            current_at.unwrap_or(0)
+        );
+        return Ok(());
+    }
+    // The banlist lives in `community_bans`, not as a blob: SQL has to compare it
+    // against `events.npub` to drop a banned author's rows BEFORE `LIMIT`, and a
+    // filter applied after `LIMIT` returns short pages. Whole-set replace in one
+    // transaction — the fold hands us the complete list every time, so there is no
+    // partial state to reconcile and no second copy to drift.
+    let tx = conn.unchecked_transaction().map_err(|e| format!("banlist tx: {e}"))?;
+    tx.execute("DELETE FROM community_bans WHERE community_id = ?1", params![community_id])
+        .map_err(|e| format!("clear banlist: {e}"))?;
+    {
+        let mut ins = tx
+            .prepare("INSERT OR IGNORE INTO community_bans (community_id, npub) VALUES (?1, ?2)")
+            .map_err(|e| format!("prepare banlist insert: {e}"))?;
+        for hex in banned_hex {
+            // Stored BECH32, because that is what `events.npub` holds and the whole
+            // point is comparing the two in SQL. The protocol speaks hex, so the
+            // conversion happens here and in `get_community_banlist`, never in the
+            // query. An unparseable entry is stored verbatim rather than dropped —
+            // it simply matches nothing, exactly as before.
+            let joinable = PublicKey::from_hex(hex)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .unwrap_or_else(|| hex.clone());
+            ins.execute(params![community_id, joinable])
+                .map_err(|e| format!("insert ban: {e}"))?;
+        }
+    }
+    tx.execute(
+        "UPDATE communities SET banlist_at = ?1 WHERE community_id = ?2",
+        params![at, community_id],
     )
-    .map_err(|e| format!("set banlist: {e}"))?;
+    .map_err(|e| format!("set banlist_at: {e}"))?;
+    tx.commit().map_err(|e| format!("commit banlist: {e}"))?;
     // Write-through: the hot-path cache must not lag a fold — a stale ban would wrongly
     // vanish a now-unbanned author's messages (fail-closed).
     BANLIST_CACHE
@@ -1659,6 +1717,25 @@ pub fn set_edition_head_with_id(community_id: &str, entity_id: &str, version: u6
 /// ran under — instead of reading the community row at write time. Closes the TOCTOU where a
 /// concurrent re-founding bumps `server_root_epoch` between a fold and its head persist, which would
 /// stamp an old-plane version as the new epoch's floor and wedge the new epoch's genuine head.
+/// Forget one entity's floor.
+///
+/// A floor refuses to fold an edition older than the one we last saw, which is
+/// what stops a relay rolling our authority backwards. But a floor for an entity
+/// the plane will never serve again — its author was demoted, so their editions
+/// stopped counting; or it aged out entirely — is a veto nothing can ever satisfy,
+/// and it blocks the WHOLE roster cache behind it. Dropping such a floor is only
+/// safe once a coherent, quorum-backed read has failed to find the entity, which
+/// is the one caller's job to establish.
+pub fn delete_edition_head(community_id: &str, entity_id: &str) -> Result<(), String> {
+    let conn = super::get_write_connection_guard_static()?;
+    conn.execute(
+        "DELETE FROM community_edition_heads WHERE community_id = ?1 AND entity_id = ?2",
+        params![community_id, entity_id],
+    )
+    .map_err(|e| format!("delete edition head: {e}"))?;
+    Ok(())
+}
+
 pub fn set_edition_head_at_epoch(community_id: &str, entity_id: &str, version: u64, self_hash: &[u8; 32], inner_id: &[u8; 32], epoch: u64) -> Result<(), String> {
     set_edition_head_inner(community_id, entity_id, version, self_hash, Some(inner_id), Some(epoch))
 }
@@ -1877,15 +1954,59 @@ pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collecti
 /// A Community's current banlist (hex pubkeys). Empty for an unknown community or empty list.
 pub fn get_community_banlist(community_id: &str) -> Result<Vec<String>, String> {
     let conn = super::get_db_connection_guard_static()?;
-    let json: Option<String> = conn
+    let mut stmt = conn
+        .prepare("SELECT npub FROM community_bans WHERE community_id = ?1")
+        .map_err(|e| format!("prepare get banlist: {e}"))?;
+    let rows = stmt
+        .query_map(params![community_id], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("get banlist: {e}"))?;
+    // Back to hex for the protocol; the table holds the bech32 the join needs.
+    let mut out: Vec<String> = rows
+        .flatten()
+        .map(|b| PublicKey::parse(&b).map(|pk| pk.to_hex()).unwrap_or(b))
+        .collect();
+    if !out.is_empty() {
+        return Ok(out);
+    }
+    // Empty may mean "nobody is banned" or "this row predates migration 90". The
+    // legacy blob is encrypted, so the migration itself could not read it — the key
+    // is not available at schema time. Adopt it on first read instead, where it is,
+    // and clear it so this runs once.
+    drop(stmt);
+    let legacy: Option<String> = conn
         .query_row(
-            "SELECT banlist FROM communities WHERE community_id = ?1",
+            "SELECT banlist FROM communities WHERE community_id = ?1 AND banlist IS NOT NULL AND banlist != ''",
             params![community_id],
             |r| r.get(0),
         )
         .optional()
-        .map_err(|e| format!("get banlist: {e}"))?;
-    Ok(json.and_then(|j| serde_json::from_str(&dec_txt(&j)).ok()).unwrap_or_default())
+        .map_err(|e| format!("read legacy banlist: {e}"))?
+        .flatten();
+    let Some(blob) = legacy else { return Ok(out) };
+    let decoded = dec_txt(&blob);
+    let Ok(list) = serde_json::from_str::<Vec<String>>(&decoded) else { return Ok(out) };
+    if list.is_empty() {
+        return Ok(out);
+    }
+    let tx = conn.unchecked_transaction().map_err(|e| format!("adopt tx: {e}"))?;
+    {
+        let mut ins = tx
+            .prepare("INSERT OR IGNORE INTO community_bans (community_id, npub) VALUES (?1, ?2)")
+            .map_err(|e| format!("prepare adopt: {e}"))?;
+        for hex in &list {
+            let joinable = PublicKey::from_hex(hex)
+                .ok()
+                .and_then(|pk| pk.to_bech32().ok())
+                .unwrap_or_else(|| hex.clone());
+            ins.execute(params![community_id, joinable]).map_err(|e| format!("adopt ban: {e}"))?;
+        }
+    }
+    tx.execute("UPDATE communities SET banlist = NULL WHERE community_id = ?1", params![community_id])
+        .map_err(|e| format!("retire legacy banlist: {e}"))?;
+    tx.commit().map_err(|e| format!("commit adopt: {e}"))?;
+    crate::log_info!("[Banlist] adopted {} legacy ban(s) into community_bans", list.len());
+    out = list;
+    Ok(out)
 }
 
 /// Replace a Community's cached invite-link registry (active link locators, hex), folded from the
@@ -1922,6 +2043,22 @@ pub fn get_community_invite_registry(community_id: &str) -> Result<Vec<String>, 
 pub struct InviteLinkSetRow {
     pub creator_hex: String,
     pub locators: Vec<String>,
+}
+
+/// The creators the folded invite Registry currently lists for this community —
+/// the cheap local answer to "might I hold a live public link here?".
+pub fn invite_link_set_creators(community_id: &str) -> Result<Vec<String>, String> {
+    let conn = super::get_write_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT creator FROM community_invite_link_sets WHERE community_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![community_id], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .map(|stored| dec_txt(&stored))
+        .collect();
+    Ok(rows)
 }
 
 /// Replace ALL of a Community's per-creator invite-link sets with the freshly-folded set (latest-wins).
@@ -2766,7 +2903,7 @@ mod tests {
     fn guestbook_round_trips_events_and_cursor() {
         let (_tmp, _guard) = init_test_db();
         let member = nostr_sdk::prelude::Keys::generate();
-        let ev = crate::community::v2::guestbook::GuestbookEvent {
+        let ev = crate::community::v2::guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [7u8; 32],
             entry: crate::community::v2::guestbook::GuestbookEntry::Join {
                 member: member.public_key(),
@@ -2934,7 +3071,25 @@ mod tests {
             assert_eq!(root_len, 60, "server_root_key must be ciphertext, not a raw 32-byte key");
             assert_ne!(name, "Secret HQ", "name must not be plaintext on disk");
             assert!(crate::crypto::looks_encrypted(&name), "name column is ciphertext");
-            assert!(crate::crypto::looks_encrypted(&banlist), "banlist column is ciphertext");
+            // The banlist is NOT here any more: it lives in `community_bans`, in
+            // plaintext, because SQL has to compare it against `events.npub` to drop a
+            // banned author's rows before LIMIT. Deliberate — every message author is
+            // already stored in the clear. The legacy column stays in the at-rest sweep
+            // so a PIN change before adoption cannot garble a row that still holds one.
+            let _ = &banlist;
+            let banned_npub: String = conn
+                .query_row("SELECT npub FROM community_bans WHERE community_id = ?1 LIMIT 1", params![cid], |r| r.get(0))
+                .unwrap();
+            // Usable as-is: an encrypted value would not parse, and SQL could not
+            // compare it against `events.npub` to drop a banned author before LIMIT.
+            assert!(
+                PublicKey::parse(&banned_npub).is_ok(),
+                "the banlist is queryable plaintext by design, got {banned_npub}"
+            );
+            assert!(
+                banned_npub.starts_with("npub1"),
+                "stored in the form `events.npub` uses, or the join matches nothing"
+            );
             let key_len: i64 = conn
                 .query_row(
                     "SELECT length(key) FROM community_epoch_keys WHERE community_id = ?1 LIMIT 1",

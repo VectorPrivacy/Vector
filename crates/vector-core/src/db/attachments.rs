@@ -197,3 +197,192 @@ pub fn rewrite_downloaded_paths(old_prefixes: &[String], new_dir: &std::path::Pa
     }
     Ok(affected)
 }
+
+/// A prior upload of this exact plaintext, reusable by reference: the blob is
+/// already on a Blossom server and `key`/`nonce` decrypt it.
+#[derive(Debug, Clone)]
+pub struct ReusableUpload {
+    pub url: String,
+    pub key: String,
+    pub nonce: String,
+    pub size: u64,
+    /// Whether the event that carried it was ours — a foreign blob's lifetime
+    /// belongs to its uploader, so a reuse of it wants a background mirror.
+    pub mine: bool,
+}
+
+/// The smart-forward ledger read: has this exact plaintext (by SHA-256) ever
+/// crossed this account with a decryptable blob behind it?
+///
+/// `downloaded = 1` is the trust gate: the download path hash-verifies the
+/// decrypted bytes against `hash` before setting it, so a row that merely
+/// CLAIMS this hash (a hostile sender's fabricated imeta) never qualifies —
+/// our own sends set it by construction. Own uploads win the ordering:
+/// their blobs live on our servers under our delete authority.
+pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, String> {
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.url, a.key, a.nonce, a.size, COALESCE(e.mine, 0)
+             FROM attachments a JOIN events e ON e.id = a.event_id
+             WHERE a.hash = ?1 AND a.url <> '' AND a.key <> '' AND a.nonce <> '' AND a.downloaded = 1
+             ORDER BY COALESCE(e.mine, 0) DESC, a.id DESC LIMIT 1",
+        )
+        .map_err(|e| format!("find_reusable_by_hash prepare: {e}"))?;
+    let row = stmt
+        .query_row(rusqlite::params![hash], |r| {
+            Ok(ReusableUpload {
+                url: r.get(0)?,
+                key: r.get(1)?,
+                nonce: r.get(2)?,
+                size: r.get::<_, i64>(3)? as u64,
+                mine: r.get::<_, i64>(4)? != 0,
+            })
+        })
+        .ok();
+    Ok(row)
+}
+
+/// Of `urls`, the ones NO other event's attachment still points at — the only
+/// ones a delete may scrub from Blossom. One blob can back many messages
+/// (smart-forward), and the shared copy must outlive every send but the last.
+/// DB-backed on purpose: the in-memory STATE windows to recent messages, so a
+/// reference in an older message is invisible there.
+pub fn urls_unreferenced_elsewhere(urls: &[String], excluding_event_id: &str) -> Result<Vec<String>, String> {
+    if urls.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM attachments WHERE url = ?1 AND event_id <> ?2 LIMIT 1")
+        .map_err(|e| format!("urls_unreferenced prepare: {e}"))?;
+    let mut out = Vec::with_capacity(urls.len());
+    for url in urls {
+        let referenced = stmt.exists(rusqlite::params![url, excluding_event_id])
+            .map_err(|e| format!("urls_unreferenced query: {e}"))?;
+        if !referenced {
+            out.push(url.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Whether any OTHER event's attachment shares this plaintext hash — the local
+/// file half of the same refcount: the decrypted file on disk serves every
+/// message that names its hash, windowed out of memory or not.
+pub fn hash_referenced_elsewhere(hash: &str, excluding_event_id: &str) -> Result<bool, String> {
+    if hash.is_empty() {
+        return Ok(false);
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM attachments WHERE hash = ?1 AND event_id <> ?2 LIMIT 1")
+        .map_err(|e| format!("hash_referenced prepare: {e}"))?;
+    stmt.exists(rusqlite::params![hash, excluding_event_id])
+        .map_err(|e| format!("hash_referenced query: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Attachment, Message};
+
+    static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(74000);
+
+    fn make_test_npub(n: u32) -> String {
+        const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut payload = vec![b'q'; 58];
+        let mut x = n as u64;
+        let mut i = 58;
+        while x > 0 && i > 0 {
+            i -= 1;
+            payload[i] = BECH32[(x as usize) % 32];
+            x /= 32;
+        }
+        format!("npub1{}", std::str::from_utf8(&payload).unwrap())
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let account = make_test_npub(n);
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn att(hash: &str, url: &str, keyed: bool, downloaded: bool) -> Attachment {
+        Attachment {
+            id: hash.to_string(),
+            key: if keyed { "k".into() } else { String::new() },
+            nonce: if keyed { "n".into() } else { String::new() },
+            url: url.to_string(),
+            size: 42,
+            downloaded,
+            ..Default::default()
+        }
+    }
+
+    async fn save(chat: &str, event_id: &str, mine: bool, a: Attachment) {
+        let msg = Message {
+            id: event_id.to_string(),
+            content: String::new(),
+            mine,
+            at: 1_000_000,
+            attachments: vec![a],
+            ..Default::default()
+        };
+        crate::db::events::save_message(chat, &msg).await.unwrap();
+    }
+
+    /// The smart-forward ledger: a verified prior send/download of the same
+    /// plaintext is reusable, our own upload wins over a foreign one, and a
+    /// row that never proved itself (undownloaded, or keyless) never qualifies.
+    #[tokio::test]
+    async fn the_ledger_finds_a_prior_upload_and_prefers_our_own() {
+        let (_tmp, _guard) = init_test_db();
+        save("chat_a", "evt_foreign", false, att("H1", "https://b.example/foreign", true, true)).await;
+        save("chat_b", "evt_mine", true, att("H1", "https://b.example/mine", true, true)).await;
+        save("chat_c", "evt_unverified", false, att("H2", "https://b.example/x", true, false)).await;
+        save("chat_d", "evt_keyless", true, att("H3", "https://b.example/y", false, true)).await;
+
+        let hit = find_reusable_by_hash("H1").unwrap().expect("H1 is reusable");
+        assert_eq!(hit.url, "https://b.example/mine", "own upload preferred");
+        assert!(hit.mine);
+        assert_eq!(hit.key, "k");
+        assert_eq!(hit.size, 42);
+
+        assert!(find_reusable_by_hash("H2").unwrap().is_none(), "unverified rows never qualify");
+        assert!(find_reusable_by_hash("H3").unwrap().is_none(), "keyless rows never qualify");
+        assert!(find_reusable_by_hash("H9").unwrap().is_none());
+    }
+
+    /// One blob, many messages: the shared copy must outlive every send but
+    /// the last. The gate answers from the DB, not memory — an old message
+    /// windowed out of STATE still holds its reference here.
+    #[tokio::test]
+    async fn a_shared_blob_survives_every_delete_but_the_last() {
+        let (_tmp, _guard) = init_test_db();
+        let url = "https://b.example/shared".to_string();
+        save("chat_a", "evt_first", true, att("HH", &url, true, true)).await;
+        save("chat_b", "evt_second", true, att("HH", &url, true, true)).await;
+
+        // Deleting either message alone: the other still rides the blob.
+        assert!(urls_unreferenced_elsewhere(&[url.clone()], "evt_first").unwrap().is_empty());
+        assert!(urls_unreferenced_elsewhere(&[url.clone()], "evt_second").unwrap().is_empty());
+        assert!(hash_referenced_elsewhere("HH", "evt_first").unwrap());
+
+        // The sibling's row goes (its event deleted) — NOW the last delete may scrub.
+        crate::db::events::delete_event("evt_second").await.unwrap();
+        assert_eq!(urls_unreferenced_elsewhere(&[url.clone()], "evt_first").unwrap(), vec![url]);
+        assert!(!hash_referenced_elsewhere("HH", "evt_first").unwrap());
+    }
+}

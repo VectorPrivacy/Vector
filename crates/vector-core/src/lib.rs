@@ -697,6 +697,17 @@ impl VectorCore {
                 }
                 encrypted.extend_from_slice(&chunk);
             }
+            // Plaintext public blob (no decryption tags): the sender's `ox` claim
+            // is the only integrity check available, so it is mandatory here —
+            // unverifiable plaintext is treated as a dead source, not served.
+            if attachment.key.is_empty() {
+                let claim = attachment.original_hash.as_deref().unwrap_or(&attachment.id);
+                if crate::crypto::sha256_hex(&encrypted) == claim {
+                    return Ok(encrypted);
+                }
+                last_err = "plaintext blob fails its hash claim".to_string();
+                next_source!();
+            }
             match crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce) {
                 Ok(plain) => {
                     if i > 1 {
@@ -2217,7 +2228,8 @@ impl VectorCore {
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
             let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content)
+            let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content, &emoji_pairs)
                 .await
                 .map(|_| ())
                 .map_err(VectorError::Other);
@@ -2256,6 +2268,9 @@ impl VectorCore {
                 .map(|(_, msg)| msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect())
                 .unwrap_or_default()
         };
+        // Smart-forward gate: scrub only urls no OTHER message still references.
+        let attachment_urls =
+            crate::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, message_id).unwrap_or_default();
 
         if let Some(id) = self.v2_community_for_channel(channel_id)? {
             // v2: the cooperative in-plane kind-5 (the wrap-ciphertext scrub needs
@@ -2583,6 +2598,16 @@ impl VectorCore {
                     }
                     inbound::IncomingEvent::Removed { target_id } => {
                         crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                        // Tombstone FIRST, exactly as the DM delete does. Dropping the row
+                        // alone only hides it until the next full sync re-serves the
+                        // original from a relay: nothing recorded that it was removed, so
+                        // it re-ingests cleanly and a moderator's deletion silently undoes
+                        // itself. The deletion may also arrive BEFORE its target, where
+                        // there is no row to drop and this is the only thing that lands.
+                        crate::state::note_message_deleted(target_id);
+                        if let Err(e) = crate::db::events::add_message_tombstone(target_id) {
+                            crate::log_warn!("[Community delete] tombstone write failed: {e}");
+                        }
                         let _ = crate::db::events::delete_event(target_id).await;
                     }
                     inbound::IncomingEvent::ReactionRemoved { reaction_id, .. } => {
@@ -2819,7 +2844,11 @@ impl VectorCore {
     /// One synchronous v2 follow pass — rekeys first (a base adopt moves the
     /// control address), then a control refold on the FRESH state, the same order
     /// the live follow worker runs. Returns non-fatal warnings.
-    async fn v2_inline_follow(id: &crate::community::CommunityId) -> Vec<String> {
+    /// Walk one community's rekeys + control fold NOW, serialized against the live
+    /// follow worker by the per-community lock. Public so boot can converge a community
+    /// the probe saw move BEFORE paging its content — content read at a superseded
+    /// epoch is wasted work, and may not open at all.
+    pub async fn v2_inline_follow(id: &crate::community::CommunityId) -> Vec<String> {
         crate::db::scoped(async move {
             use crate::community::transport::LiveTransport;
             let session = crate::db::current_session();
@@ -2840,8 +2869,14 @@ impl VectorCore {
                 // A tombstone surfaced during catch-up — sealed read-only; stop here.
                 Ok(f) if f.dissolved => return warnings,
                 Ok(f) if f.self_removed => {
-                    // An authorized rotation that excluded us IS a removal — but the
-                    let _ = crate::db::community::delete_community(&cid_hex);
+                    // An authorized rotation that excluded us IS a removal — but keep the
+                    // epoch keys, exactly as every other self-removal path does. They grant
+                    // no future read (post-removal keys are never delivered); dropping them
+                    // only destroys the ability to author a 3305 self-delete of our OWN past
+                    // messages, each sealed under the epoch it was sent at. That is the one
+                    // thing a removed member should still be able to do — and doubly so if
+                    // the removal turns out to have been a false positive.
+                    let _ = crate::db::community::delete_community_retain_keys(&cid_hex);
                     return warnings;
                 }
                 Ok(_) => {}
@@ -2849,15 +2884,22 @@ impl VectorCore {
             }
             if let Ok(Some(fresh)) = crate::db::community::load_community_v2(id) {
                 match crate::community::v2::service::follow_control(&transport, &fresh).await {
-                    // A control change can reveal rekey work that predates it (a
-                    // just-announced private channel's key crate already sits on its
-                    // rekey plane), so walk the rekeys once more on the fresh state.
-                    Ok(Some(changed)) => {
-                        if let Err(e) = crate::community::v2::service::follow_rekeys(&transport, &changed, &session).await {
-                            warnings.push(format!("v2 rekey follow failed: {e}"));
+                    // Walk the rekeys once more whenever the control fold moved ANYTHING.
+                    // The document half reveals rekey work that predates it (a just-announced
+                    // private channel's key crate already sits on its rekey plane). The
+                    // AUTHORITY half is the one that strands: the walk above gates every
+                    // rotation on the roster and citation heads this fold just wrote, so a
+                    // promote-then-rotate is refused on pass 1 and, without this, never
+                    // reconsidered. Re-read from the DB — the authority half moves columns
+                    // the returned document does not carry.
+                    Ok(control) if control.moved() => {
+                        if let Ok(Some(latest)) = crate::db::community::load_community_v2(id) {
+                            if let Err(e) = crate::community::v2::service::follow_rekeys(&transport, &latest, &session).await {
+                                warnings.push(format!("v2 rekey follow failed: {e}"));
+                            }
                         }
                     }
-                    Ok(None) => {}
+                    Ok(_) => {}
                     Err(e) => warnings.push(format!("v2 control follow failed: {e}")),
                 }
             }
@@ -2867,7 +2909,7 @@ impl VectorCore {
             // banned headless client running against a community that already dropped it.
             if let Some(me) = crate::my_public_key() {
                 if crate::db::community::is_author_banned(&cid_hex, &me) {
-                    let _ = crate::db::community::delete_community(&cid_hex);
+                    let _ = crate::db::community::delete_community_retain_keys(&cid_hex);
                 }
             }
             warnings
@@ -3293,6 +3335,41 @@ impl VectorCore {
 
     /// The community's owner npub + the admin npubs (role overview). A local read,
     /// like [`Self::community_capabilities`].
+    /// Whether `npub` holds `permission` in this community, per the folded roster.
+    ///
+    /// The roster IS the ACL (CORD-04), so this is the same question every
+    /// enforcement path asks — a bot gating a chat command on it refuses exactly
+    /// what the protocol would, instead of inventing a second permission model
+    /// that can disagree with the first.
+    ///
+    /// Deliberately NOT [`community_capabilities`]: that answers "could I publish
+    /// this", which additionally needs the Control Plane write key. Here the
+    /// caller is asking *someone else* for authority while the bot does the
+    /// publishing, so the write key is the bot's problem, not theirs.
+    ///
+    /// Fails CLOSED. A banned member holds nothing; an unreadable or not-yet-folded
+    /// roster answers `false` for everyone but the owner, because `has_permission`
+    /// finds no grant. Authority must never be granted by an absence of data.
+    pub fn member_has_permission(&self, community_id: &str, npub: &str, permission: u64) -> Result<bool> {
+        use nostr_sdk::prelude::PublicKey;
+        let who = PublicKey::parse(npub).map_err(|_| VectorError::Other(format!("invalid npub: {npub}")))?.to_hex();
+        let owner_hex = match Self::load_v2_if_v2(community_id)? {
+            Some(v2) => v2.owner().map_err(VectorError::Other)?.to_hex(),
+            None => Self::load_community_hex(community_id)?
+                .owner_attestation
+                .as_ref()
+                .and_then(|att| crate::community::owner::verify_owner_attestation(att, community_id))
+                .map(|pk| pk.to_hex())
+                .unwrap_or_default(),
+        };
+        if who != owner_hex && crate::db::community::get_community_banlist(community_id).unwrap_or_default().contains(&who) {
+            return Ok(false);
+        }
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        Ok(roster.is_authorized(&who, Some(&owner_hex), permission))
+    }
+
+
     pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {
@@ -3469,6 +3546,156 @@ impl VectorCore {
         }
         let community = Self::load_community_hex(community_id)?;
         service::publish_banlist(&transport, &community, &list).await.map_err(VectorError::Other)
+    }
+
+    /// Re-vend the epoch chain to members a past rotation forgot.
+    ///
+    /// A client follows rekeys hop by hop and can only ever derive `held + 1`, so
+    /// a member missed at one hop is stranded there permanently — no later
+    /// rotation can reach them, and re-inviting does not help because they are
+    /// already a member. This publishes the blobs that should have existed, keyed
+    /// exactly like the original rotation so they merge into it.
+    ///
+    /// Requires rotation authority (owner or BAN) and the archived roots, which
+    /// the rotator holds. Publishing nothing else and touching no membership.
+    pub async fn rescue_stranded_members(&self, community_id: &str, npubs: &[&str]) -> Result<serde_json::Value> {
+        use nostr_sdk::prelude::PublicKey;
+        let community = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("rescuing requires a Concord v2 community".into()))?;
+        let mut targets: Vec<PublicKey> = Vec::with_capacity(npubs.len());
+        for n in npubs {
+            let pk = PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !targets.contains(&pk) {
+                targets.push(pk);
+            }
+        }
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(30));
+        let report = crate::community::v2::service::rescue_stranded_members(&transport, &community, &targets)
+            .await
+            .map_err(VectorError::Other)?;
+        serde_json::to_value(report).map_err(|e| VectorError::Other(e.to_string()))
+    }
+
+    /// Repair a v2 community's roster cache: keep what is stored, but reset its
+    /// PROVENANCE to zero so the next control fold is allowed to replace it.
+    ///
+    /// The completeness guard retains the cached roster whenever a stored entity is
+    /// floored but folds no head — protection against a relay quietly stripping
+    /// admins. If the cache itself is wrong, that same guard pins the wrong data in
+    /// place: the fold can see the real roster and still be refused. Zeroing the
+    /// provenance marks the cache a seed — a guess, not evidence — which the fold may
+    /// overwrite. It publishes nothing and touches no key material; worst case the
+    /// next fold writes what it can see, which is what a fresh join would get.
+    pub async fn repair_community_roster(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::CommunityId;
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        if crate::db::community::load_community_v2(&cid).map_err(VectorError::Other)?.is_none() {
+            return Err(VectorError::Other("not a held Concord v2 community".into()));
+        }
+        let before = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let before_at = crate::db::community::get_community_roles_at(community_id).map_err(VectorError::Other)?;
+        crate::db::community::set_community_roles(community_id, &before, 0).map_err(VectorError::Other)?;
+        // Fold immediately so the repair is one step, not two.
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("community vanished mid-repair".into()))?;
+        let follow = crate::community::v2::service::follow_control(&transport, &community).await;
+        let after = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        Ok(serde_json::json!({
+            "provenance_before": before_at,
+            "provenance_after": crate::db::community::get_community_roles_at(community_id).unwrap_or(0),
+            "roles_before": before.roles.len(),
+            "grants_before": before.grants.len(),
+            "roles_after": after.roles.len(),
+            "grants_after": after.grants.len(),
+            "fold_error": follow.as_ref().err().cloned(),
+            "repaired": after.grants.len() > before.grants.len(),
+        }))
+    }
+
+    /// Explain this account's epoch state for a v2 community: what it holds, what
+    /// the next-epoch rekey plane offers, and why each rotation there was or was not
+    /// adopted.
+    ///
+    /// This is the answer to "is this client stranded, and why" — a question that is
+    /// otherwise unanswerable, because a stranded client sees only silence and
+    /// silence looks exactly like a quiet community. Run it from two clients on one
+    /// community to compare their views; the `held` block is where they diverge
+    /// first. Read-only; returns public keys and verdicts, never key material.
+    pub async fn explain_epoch_state(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        let community = crate::db::community::load_community_v2(&cid)
+            .map_err(VectorError::Other)?
+            .ok_or_else(|| VectorError::Other("not a held Concord v2 community".into()))?;
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(15));
+        crate::community::v2::service::explain_epoch_state(&transport, &community)
+            .await
+            .map_err(VectorError::Other)
+    }
+
+    /// Contain a raid (v2 only): ban the named raiders, cut everyone who joined
+    /// through the door during the raid window, and perform a SEVERING Refounding
+    /// — the rotation that REVOKES the public invite links instead of carrying
+    /// them into the new epoch.
+    ///
+    /// This is the raid lane. An ordinary ban keeps its shipped behaviour, where a
+    /// Public community deliberately does not roll the root (the stable-URL refresh
+    /// would undo it). Here the link IS the attack surface, so it closes.
+    ///
+    /// `window_start_secs` is the raid's opening edge (unix seconds); pass 0 to cut
+    /// only the convicted. Returns an honest report — a failed refound is reported,
+    /// never dressed up as a closed door.
+    pub async fn contain_raid(
+        &self,
+        community_id: &str,
+        npubs: &[&str],
+        window_start_secs: u64,
+        cut_also: &[&str],
+    ) -> Result<crate::community::v2::service::ContainmentReport> {
+        use crate::community::{transport::LiveTransport, CommunityId};
+        if community_id.len() != 64 {
+            return Err(VectorError::Other("malformed community id".into()));
+        }
+        let mut pks: Vec<nostr_sdk::prelude::PublicKey> = Vec::with_capacity(npubs.len());
+        for n in npubs {
+            let pk = nostr_sdk::prelude::PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !pks.contains(&pk) {
+                pks.push(pk);
+            }
+        }
+        let mut extra: Vec<nostr_sdk::prelude::PublicKey> = Vec::with_capacity(cut_also.len());
+        for n in cut_also {
+            let pk = nostr_sdk::prelude::PublicKey::parse(n).map_err(|_| VectorError::Other(format!("invalid npub: {n}")))?;
+            if !extra.contains(&pk) {
+                extra.push(pk);
+            }
+        }
+        let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
+        match crate::db::community::community_protocol(&cid).map_err(VectorError::Other)? {
+            Some(crate::community::ConcordProtocol::V2) => {}
+            // v1 has no severing rotation and no per-creator link custody; routing a
+            // containment there would silently do something else entirely.
+            _ => return Err(VectorError::Other("raid containment requires a Concord v2 community".into())),
+        }
+        // Unbound caller (SDK/command): a swap mid-containment would ban in one
+        // account and rotate in another.
+        let session = crate::db::current_session();
+        let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
+        let report = crate::community::v2::service::contain_raid(&transport, &cid, &pks, window_start_secs, &extra)
+            .await
+            .map_err(VectorError::Other)?;
+        if !session.is_live() {
+            return Err(VectorError::Other("account changed during raid containment".into()));
+        }
+        Ok(report)
     }
 
     /// Owner dissolution / "Delete Community": publish the terminal GroupDissolved tombstone (and
@@ -3871,7 +4098,12 @@ impl VectorCore {
     /// non-blocking. State-only (no handler replay of history). Called at `listen()`
     /// start and on reconnect; safe to call manually — the v2 enqueue is a no-op if
     /// no `listen()` worker is running.
-    pub async fn sync_communities(&self) -> Result<()> {
+    /// Returns each community's non-fatal follow warnings (rekey/control catch-up
+    /// failures), prefixed with the id. A caller that discards them is blind to
+    /// "the sync ran, but this account never adopted the rotation" — which reads
+    /// exactly like a healthy quiet sync while the account sits on a dead epoch.
+    pub async fn sync_communities(&self) -> Result<Vec<String>> {
+        let mut all_warnings: Vec<String> = Vec::new();
         // Discover + rehydrate memberships from the Community List across devices (CORD-02 §8),
         // bootstrapping from the client's connected relays so even a fresh device that
         // holds no community yet can find them. Best-effort.
@@ -3890,7 +4122,10 @@ impl VectorCore {
                     if community::v2::realtime::follow_worker_running() {
                         community::v2::realtime::enqueue_follow(c.id());
                     } else {
-                        let _ = Self::v2_inline_follow(c.id()).await;
+                        let cid_hex = crate::simd::hex::bytes_to_hex_32(&c.id().0);
+                        all_warnings.extend(
+                            Self::v2_inline_follow(c.id()).await.into_iter().map(|w| format!("{}: {w}", &cid_hex[..8])),
+                        );
                     }
                 }
                 if !joined.is_empty() {
@@ -3909,7 +4144,10 @@ impl VectorCore {
                 if community::v2::realtime::follow_worker_running() {
                     community::v2::realtime::enqueue_follow(&id);
                 } else {
-                    let _ = Self::v2_inline_follow(&id).await;
+                    let cid_hex = crate::simd::hex::bytes_to_hex_32(&id.0);
+                    all_warnings.extend(
+                        Self::v2_inline_follow(&id).await.into_iter().map(|w| format!("{}: {w}", &cid_hex[..8])),
+                    );
                 }
                 // Back-fill each channel's chat, exactly as the v1 arm below does.
                 // Without this a headless client only ever sees messages that arrive
@@ -3934,7 +4172,7 @@ impl VectorCore {
                 }
             }
         }
-        Ok(())
+        Ok(all_warnings)
     }
 
 

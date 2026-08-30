@@ -1865,7 +1865,7 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
         const domMsg = document.getElementById(oldId);
         if (domMsg) {
             const profile = getProfile(chatId);
-            domMsg.replaceWith(renderMessage(msg, profile, oldId));
+            replaceMessageRow(domMsg, renderMessage(msg, profile, oldId));
         }
         strLastMsgID = eventId;
         softChatScroll();
@@ -2340,6 +2340,11 @@ async function surfaceCommunitySummary(summary) {
         chat.metadata.custom_fields.name = summary.name;
         chat.metadata.custom_fields.description = summary.description || '';
         chat.metadata.custom_fields.community_id = summary.community_id;
+        // Same stamps the backend persists, or the in-memory graft disagrees with the
+        // DB until the next reboot: without `primary_channel`, EVERY channel row
+        // passes the render fallback and the community appears once per channel.
+        chat.metadata.custom_fields.channel_name = ch.name || '';
+        if (summary.primary_channel) chat.metadata.custom_fields.primary_channel = summary.primary_channel;
         chat.metadata.custom_fields.is_owner = summary.is_owner ? 'true' : 'false';
         chat.metadata.custom_fields.dissolved = summary.dissolved ? 'true' : 'false';
         // Protocol stack (1 = v1, 2 = v2) gates v2-only affordances (e.g. the
@@ -3433,6 +3438,12 @@ async function setupRustListeners() {
         // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
         // admin tags + @everyone reflect it (the open overview re-fetches separately below).
         loadCommunityRoles(communityId);
+        // A ban hides what they already posted, but only in the QUERIES — the painted
+        // timeline and its cache still hold the rows. Drop the cache for this
+        // community's channels and re-open the visible one so it re-reads the filtered
+        // source. Deliberately NOT a JS-side banlist filter: the rule lives in one
+        // place, in SQL, and a second copy here would be the one that goes stale.
+        purgeCommunityMessageCache(communityId);
         renderChatlist();
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
@@ -3457,6 +3468,24 @@ async function setupRustListeners() {
     // A v1 community upgraded to Concord v2: the chat row is re-parented in place (same
     // chat_identifier, so history/unread survive). Refresh its metadata to the v2 identity
     // and drop one "Community upgraded" line into the open timeline. Nothing else moves.
+    /// Drop cached/painted messages for a community so the next read comes from the
+    /// filtered queries.
+    ///
+    /// Called when control state moves (ban, kick, rotation). The ban rule is enforced
+    /// in SQL and nowhere else — re-reading is what makes this correct rather than a
+    /// second implementation that can disagree with the first.
+    async function purgeCommunityMessageCache(communityId) {
+        const channels = arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId);
+        if (!channels.length) return;
+        for (const ch of channels) {
+            eventCache.clearConversation(ch.id);
+            ch.messages = [];
+        }
+        // Only the visible channel needs repainting; the rest reload when opened.
+        const open = channels.find(c => c.id === strOpenChat);
+        if (open) await openChat(open.id);
+    }
+
     _on('community_migrated', async (evt) => {
         const v1Id = evt.payload?.v1_community_id;
         const v2Id = evt.payload?.v2_community_id;
@@ -3913,7 +3942,7 @@ async function setupRustListeners() {
                             }
                             setTimeout(() => {
                                 const newEl = renderMessage(memMsg, profile, msgId);
-                                domMsg.replaceWith(newEl);
+                                replaceMessageRow(domMsg, newEl);
                                 // Grow + fade in the new icon
                                 const icon = newEl.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
                                 if (icon) {
@@ -3925,7 +3954,7 @@ async function setupRustListeners() {
                                 softChatScroll();
                             }, 200);
                         } else {
-                            domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                            replaceMessageRow(domMsg, renderMessage(memMsg, profile, msgId));
                         }
                     }
                 }
@@ -3960,7 +3989,7 @@ async function setupRustListeners() {
                     const domMsg = document.getElementById(msgId);
                     const memMsg = cChat.messages.find(m => m.id === msgId);
                     if (domMsg && memMsg) {
-                        domMsg.replaceWith(renderMessage(memMsg, profile, msgId));
+                        replaceMessageRow(domMsg, renderMessage(memMsg, profile, msgId));
                     }
                 }
             }
@@ -4537,6 +4566,18 @@ async function setupRustListeners() {
                 // the row is about to vanish and the toolbar would otherwise
                 // stay at its last position pointing at nothing.
                 if (_dmsgToolbarTarget === domMsg) hideMessageToolbar();
+
+                // One fewer thing to scroll down to. Measured BEFORE the fade
+                // collapses the row, and only for rows actually below the fold:
+                // the badge counts arrivals the reader has not reached, so a
+                // moderator clearing six posts otherwise leaves "6+ new
+                // messages" pointing at rows that no longer exist.
+                if (unreadBelowCount > 0
+                    && domMsg.offsetTop >= domChatMessages.scrollTop + domChatMessages.clientHeight) {
+                    setUnreadBelow(unreadBelowCount - 1);
+                    // Nothing unread left below means the divider marks nothing.
+                    if (unreadBelowCount === 0) clearUnreadDivider();
+                }
 
                 // Remember the row that follows ours so we can re-evaluate its
                 // streak attribute after removal (it may flip first ↔ continuation).
@@ -9049,6 +9090,7 @@ async function openChat(contact) {
     if (fProfileEditMode) exitProfileEditMode(true);
     domProfile.style.display = 'none';
     domChatNew.style.display = 'none';
+    domCreateGroup.style.display = 'none';
     domChats.style.display = 'none';
     domGroupOverview.style.display = 'none';
     // Hide the Settings/Invites tabs too — a chat opened from inside one of them (deep-link join,
@@ -9057,7 +9099,11 @@ async function openChat(contact) {
     domInvites.style.display = 'none';
     // Jumping to a chat (e.g. mini-profile "Send Message" from the member list) closes Group
     // Details for good — drop its back entry so back-nav doesn't land on a dead re-hide step.
+    // Same for the two composers: opening a conversation abandons them, so leaving their
+    // entries behind would send back-nav to a panel that is no longer on screen.
     popBack('group-overview');
+    popBack('create-group');
+    popBack('new-chat');
     domChat.style.display = '';
     // Match the fade transition the navbar/account tabs use for visual cohesion.
     domChat.classList.add('fadein-anim');
@@ -9407,6 +9453,13 @@ async function handleIncomingShare(payload) {
  * Open the dialog for starting a new chat
  */
 function openNewChat() {
+    // The two composers are alternatives, not layers. Left up, the other one stays
+    // behind this pane with its back entry intact, so closing this one reveals it
+    // instead of returning to the list. Not closeCreateGroup(): that navigates to
+    // the chat list, which is where we are leaving.
+    popBack('create-group');
+    domCreateGroup.style.display = 'none';
+
     pushBack('new-chat', closeChat);
     // Display the UI
     domChatNew.style.display = '';
@@ -11757,21 +11810,36 @@ window.addEventListener("DOMContentLoaded", async () => {
     // registered HERE (DOMContentLoaded) — not inside `setupRustListeners`,
     // which only fires after a successful login. The pre-login picker emits
     // `swap_session` from the unlock screen, well before any login completes.
-    await listen('session_reload', () => {
-        window.location.reload();
-    });
+    // Everything from here to the show() below runs BEFORE the window is visible,
+    // so anything that throws or never settles strands a running app with no GUI.
+    // Each step guards itself rather than trusting the backend to answer.
+    try {
+        await listen('session_reload', () => {
+            window.location.reload();
+        });
+    } catch (e) {
+        console.warn('session_reload listener failed to register:', e);
+    }
 
     // Immediately load and apply theme settings (visual only, don't save)
-    const strTheme = await invoke('get_theme');
-    if (strTheme) {
-        applyTheme(strTheme);
+    try {
+        const strTheme = await invoke('get_theme');
+        if (strTheme) {
+            applyTheme(strTheme);
+        }
+    } catch (e) {
+        console.warn('Theme preload failed; showing with the default:', e);
     }
 
     // Show the main window now that content is ready (prevents white flash on startup)
     // The window starts hidden via tauri.conf.json and Rust setup hides it explicitly
     // The WKWebView background is set to dark natively in lib.rs so no delay is needed
     // Only needed on desktop - mobile doesn't have this issue
-    if (!platformFeatures.is_mobile) {
+    // Optional-chained on purpose: platformFeatures is a global filled by another
+    // bootstrap, and reading `.is_mobile` off an undefined one threw one line
+    // short of the only call that reveals the window. Desktop is the safe
+    // default — a stray show() on mobile is a no-op.
+    if (!platformFeatures?.is_mobile) {
         try {
             await getCurrentWebviewWindow().show();
         } catch (e) {
@@ -12837,7 +12905,12 @@ async function sendMessage(messageText) {
 // --- Mention Selector ---
 // Shared by the @mention selector AND the command composer's User params —
 // one source for "who is taggable in the open chat".
-const getMentionCandidates = () => {
+/** The taggable pool for the open chat.
+ *
+ *  `includeSelf` because the two callers want different pools: an @mention of
+ *  yourself pings nobody, while a command's user parameter is often ABOUT you —
+ *  `/why` and `/pardon` on your own npub were unreachable from the UI. */
+const getMentionCandidates = (includeSelf = false) => {
         const chat = arrChats.find(c => c.id === strOpenChat);
         if (!chat) return [];
         const isCommunity = chat.chat_type === 'Community';
@@ -12855,6 +12928,9 @@ const getMentionCandidates = () => {
         // Member List already shows; observed senders cover anyone the roster fetch hasn't
         // caught up with yet (it refreshes throttled while the chat is open).
         const npubs = new Set(chat.participants || []);
+        // Not always a participant of the chat it is in, and never an observed
+        // sender in one nobody has spoken in yet.
+        if (includeSelf && strPubkey) npubs.add(strPubkey);
         if (isCommunity) {
             for (const np of Object.keys(lastActive)) npubs.add(np);
             const communityId = chat.metadata?.custom_fields?.community_id;
@@ -12866,12 +12942,14 @@ const getMentionCandidates = () => {
             }
         }
         const candidates = [...npubs]
-            .filter(npub => npub && npub !== strPubkey && npub.startsWith('npub1'))
+            .filter(npub => npub && (includeSelf || npub !== strPubkey) && npub.startsWith('npub1'))
             .map(npub => {
                 const p = getProfile(npub);
                 return {
                     npub,
-                    name: getName(npub),
+                    // Marked, because a moderator picking a subject from a list
+                    // of names should not have to recognise their own.
+                    name: npub === strPubkey ? getName(npub) + ' (you)' : getName(npub),
                     avatarSrc: p ? getProfileAvatarSrc(p) : null,
                     lastActive: lastActive[npub] || 0
                 };
@@ -12934,7 +13012,13 @@ function _upgradeCommandRows(chatId) {
         if (msg.addressed_bots && msg.addressed_bots.length) continue;
         if (!/^\s*\/[a-z0-9_-]{1,32}\s+\S/.test(msg.content || '')) continue;
         const domMsg = document.getElementById(msg.id);
-        if (domMsg) domMsg.replaceWith(renderMessage(msg, profile, msg.id));
+        if (!domMsg) continue;
+        // Already an action line: re-rendering it produces the same row, and
+        // `replaceWith` above the viewport costs the reader their scroll
+        // position for nothing. This runs on every command-set load, so
+        // without the check a row churns every time.
+        if (domMsg.querySelector('.dmsg-command-line')) continue;
+        replaceMessageRow(domMsg, renderMessage(msg, profile, msg.id));
     }
 }
 
@@ -12951,7 +13035,10 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
         },
         // User params: the same taggable-member pool the @mention selector
         // uses ('everyone' excluded — a User arg is one real npub).
-        mentionCandidates: () => getMentionCandidates().filter(c => c.npub.startsWith('npub1')),
+        // Self included: `/why` and `/pardon` are most often asked about the
+        // person asking. `@everyone` is dropped by the npub filter, which is
+        // right — it is a ping, not somebody a command can name.
+        mentionCandidates: () => getMentionCandidates(true).filter(c => c.npub.startsWith('npub1')),
         // The structured composer assembles the final "/cmd args" text and
         // hands it to the ordinary send pipeline (validation + bot tag ride
         // routeForSend inside sendMessage).
@@ -12961,21 +13048,15 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
                 domChatMessageInputVoice.style.display = 'none';
                 domChatMessageInputSend.style.display = '';
                 domChatMessageInputSend.classList.add('active');
-                // The command composer grows the input area as it slides in;
-                // keep a bottom-pinned user glued to the live tail frame-by-frame
-                // for the transition, exactly as the reply bar does.
-                if (chatPinnedToBottom && (!CHAT_WINDOW_ENABLED || isAtDataBottom())) {
-                    const start = performance.now();
-                    const followPin = () => {
-                        beginProgrammaticScroll();
-                        domChatMessages.scrollTop = domChatMessages.scrollHeight;
-                        if (performance.now() - start < 280) requestAnimationFrame(followPin);
-                    };
-                    requestAnimationFrame(followPin);
-                }
             } else {
                 resetSendMicButtons();
             }
+            // BOTH directions. The command composer grows the input area as it
+            // slides in and shrinks it as it slides out, and a bottom-pinned
+            // reader has to stay glued to the live tail through either — the
+            // reply bar does the same. Only the growth was followed, so sending
+            // a command left the view hanging above the bottom afterwards.
+            followPinThroughComposerResize();
         },
         // The command manifest loads async, often after the timeline painted;
         // upgrade any untagged `/cmd args` rows once it is known (DM invocations).
@@ -12983,6 +13064,22 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
     },
     document.getElementById('chat-box')
 ) : null;
+
+/** Glue a bottom-pinned reader to the live tail across a composer resize.
+ *
+ *  Frame by frame rather than once: the input area animates, so a single
+ *  scroll-to-bottom lands on the height it had at that instant and the rest of
+ *  the transition slides out from under the reader. */
+function followPinThroughComposerResize() {
+    if (!chatPinnedToBottom || (CHAT_WINDOW_ENABLED && !isAtDataBottom())) return;
+    const start = performance.now();
+    const followPin = () => {
+        beginProgrammaticScroll();
+        domChatMessages.scrollTop = domChatMessages.scrollHeight;
+        if (performance.now() - start < 280) requestAnimationFrame(followPin);
+    };
+    requestAnimationFrame(followPin);
+}
 
 /**
  * Immediately reset send/mic buttons to mic state (no animation)
@@ -13768,6 +13865,22 @@ let lastScrollTop = 0;
 // told apart from the user moving away from the bottom.
 let _lastPinEvalHeight = 0;
 let _userScrolledAway = false;
+/** Swap a rendered message row without moving the reader.
+ *
+ *  `replaceWith` removes before it inserts, so the list is briefly shorter and
+ *  the engine clamps `scrollTop` down by the row's height. Put it back, and mark
+ *  the move as ours: a re-render is never the reader leaving the page. */
+function replaceMessageRow(domMsg, fresh) {
+    const s = domChatMessages;
+    const top = s ? s.scrollTop : 0;
+    beginProgrammaticScroll();
+    domMsg.replaceWith(fresh);
+    if (s && s.scrollTop !== top) {
+        s.scrollTop = top;
+        beginProgrammaticScroll();
+    }
+}
+
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
  *  user). Call immediately before any programmatic scrollTop change so a drop-top
@@ -14110,6 +14223,11 @@ function updateCreateGroupSelectionStatus() {
  * Open Create Group tab
  */
 function openCreateGroup() {
+    // Mutually exclusive with Start New Chat — see openNewChat for why the pane and
+    // its back entry both have to go.
+    popBack('new-chat');
+    domChatNew.style.display = 'none';
+
     pushBack('create-group', closeCreateGroup);
     // Show panel
     domCreateGroup.style.display = '';

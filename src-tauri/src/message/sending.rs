@@ -486,6 +486,11 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
         let remote_urls: Vec<String> = msg.attachments.iter()
             .flat_map(|a| a.all_urls().map(str::to_string))
             .collect();
+        // Smart-forward gate: a failed REUSING send points at a blob the
+        // original message still needs — scrub only what nothing else rides.
+        let remote_urls =
+            vector_core::db::attachments::urls_unreferenced_elsewhere(&remote_urls, &message_id)
+                .unwrap_or_default();
         if !remote_urls.is_empty() {
             // Best-effort blob cleanup — route through the active client
             // signer so bunker users sign auth events under their identity

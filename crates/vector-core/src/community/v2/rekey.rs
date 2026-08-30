@@ -69,6 +69,11 @@ const TAG_NEW_EPOCH: &str = "newepoch";
 const TAG_PREV_EPOCH: &str = "prevepoch";
 const TAG_PREV_COMMIT: &str = "prevcommit";
 const TAG_CHUNK: &str = "chunk";
+/// Root-scope containment marker (CORD-06 Severing Refounding): an adopter
+/// revokes its own public invite links instead of refreshing them into the new
+/// epoch. Grants no authority of its own — it rides a rotation the adopt gate
+/// has already verified.
+const TAG_SEVER: &str = "sever";
 
 /// What a rekey rotates (CORD-06 §1). The 32-byte scope id is stamped into every
 /// blob's plaintext so a blob can't be spliced onto another coordinate.
@@ -485,8 +490,23 @@ pub fn find_my_blob<'a>(
     scope: RekeyScope,
     epoch: Epoch,
 ) -> Option<&'a RekeyBlob> {
+    find_my_blobs(blobs, rotator_xonly, my_xonly, scope, epoch).next()
+}
+
+/// EVERY blob at my locator, in order. A locator is a public lookup index that
+/// proves nothing, so anyone can publish a blob at mine; with the union in
+/// [`collect_rotations`] more than one can survive to the open. Taking only the
+/// first would let a junk blob shadow the real key and park an adopter that in
+/// fact holds it — so the caller tries each and adopts on the first that opens.
+pub fn find_my_blobs<'a>(
+    blobs: &'a [RekeyBlob],
+    rotator_xonly: &[u8; 32],
+    my_xonly: &[u8; 32],
+    scope: RekeyScope,
+    epoch: Epoch,
+) -> impl Iterator<Item = &'a RekeyBlob> {
     let want = blob_locator(rotator_xonly, my_xonly, scope, epoch);
-    blobs.iter().find(|b| b.locator == want)
+    blobs.iter().filter(move |b| b.locator == want)
 }
 
 // ── The 3303 event (a v2 stream event) ───────────────────────────────────────
@@ -506,6 +526,8 @@ pub struct RekeyChunk {
     /// The rotator's `vac` (CORD-06 §Authority: "a rotation cites the Grant it
     /// acts under like any authority action"). `None` when the owner rotates.
     pub citation: Option<crate::community::edition::AuthorityCitation>,
+    /// Severing containment marker ([`TAG_SEVER`], root scope only).
+    pub severed: bool,
 }
 
 /// The key that groups chunks of ONE rotation: `(rotator, scope_id, new_epoch,
@@ -534,6 +556,7 @@ pub fn build_rekey_rumor(
     chunk_n: u32,
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
 ) -> Result<UnsignedEvent, RekeyError> {
     if new_epoch.0 <= prev_epoch.0 {
         return Err(RekeyError::NonMonotonicEpoch);
@@ -557,6 +580,9 @@ pub fn build_rekey_rumor(
     // never honored by a lagging client." The owner cites nothing.
     if let Some(c) = citation {
         tags.push(c.to_tag());
+    }
+    if severed {
+        tags.push(Tag::custom(TAG_SEVER, ["1"]));
     }
     // Rekeys fold by their tags, not time; still stamp created_at for the wire.
     Ok(stream::build_rumor_secs(super::kind::REKEY, rotator, &content, tags, at_secs))
@@ -605,6 +631,7 @@ pub fn build_rekey_chunks_local(
     blobs: &[RekeyBlob],
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
@@ -625,6 +652,7 @@ pub fn build_rekey_chunks_local(
             n,
             at_secs,
             citation,
+            severed,
         )?;
         let (wrap, _) = seal_rekey_chunk(&rumor, rekey_group, rotator_keys, Timestamp::from_secs(at_secs))?;
         out.push(wrap);
@@ -647,6 +675,7 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     blobs: &[RekeyBlob],
     at_secs: u64,
     citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
 ) -> Result<Vec<Event>, RekeyError> {
     let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
         vec![&[]]
@@ -656,7 +685,47 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
     let n = groups.len() as u32;
     let mut out = Vec::with_capacity(groups.len());
     for (idx, group_blobs) in groups.iter().enumerate() {
-        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs, citation)?;
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, idx as u32 + 1, n, at_secs, citation, severed)?;
+        let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
+        out.push(wrap);
+    }
+    Ok(out)
+}
+
+/// Extend an already-published rotation's chunk set with additional blobs — the
+/// catch-up path for members a rotation forgot.
+///
+/// Indices start at `start_after + 1` and the declared total covers them, so no
+/// reader ever sees two chunks claiming the same slot. That constraint is load-
+/// bearing on DEPLOYED clients: [`collect_rotations`] keeps the first chunk seen
+/// per index, so a colliding slot silently drops the loser's blobs — and for an
+/// original recipient that reads as their own removal. Disjoint indices merge as
+/// a pure union under every fetch order, and [`Rotation::is_complete`] only
+/// requires `1..=declared_first_seen`, which extras never break.
+pub async fn build_rekey_chunk_extension<S: crate::signer::VectorSigner + ?Sized>(
+    signer: &S,
+    rotator_pk: PublicKey,
+    rekey_group: &GroupKey,
+    scope: RekeyScope,
+    new_epoch: Epoch,
+    prev_epoch: Epoch,
+    prev_commit: &[u8; 32],
+    blobs: &[RekeyBlob],
+    at_secs: u64,
+    citation: Option<&crate::community::edition::AuthorityCitation>,
+    severed: bool,
+    start_after: u32,
+) -> Result<Vec<Event>, RekeyError> {
+    let groups: Vec<&[RekeyBlob]> = if blobs.is_empty() {
+        vec![&[]]
+    } else {
+        blobs.chunks(MAX_REKEY_BLOBS_PER_EVENT).collect()
+    };
+    let n = start_after + groups.len() as u32;
+    let mut out = Vec::with_capacity(groups.len());
+    for (idx, group_blobs) in groups.iter().enumerate() {
+        let i = start_after + idx as u32 + 1;
+        let rumor = build_rekey_rumor(rotator_pk, scope, new_epoch, prev_epoch, prev_commit, group_blobs, i, n, at_secs, citation, severed)?;
         let (wrap, _) = stream::seal_and_wrap_signed(signer, rotator_pk, &rumor, SealForm::Encrypted, rekey_group, stream::KIND_WRAP, Timestamp::from_secs(at_secs), &[]).await?;
         out.push(wrap);
     }
@@ -695,6 +764,13 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         return Err(RekeyError::TooManyBlobs(blobs.len()));
     }
 
+    // Spec-shaped: present means exactly "1" (CORD-01 §5 strictness), absent means false.
+    let severed = match unique_tag(rumor, TAG_SEVER)?.as_deref() {
+        None => false,
+        Some("1") => true,
+        Some(_) => return Err(RekeyError::BadTag(TAG_SEVER)),
+    };
+
     Ok(RekeyChunk {
         rotator: opened.author,
         scope,
@@ -704,6 +780,7 @@ pub fn parse_rekey_chunk(opened: &OpenedStream) -> Result<RekeyChunk, RekeyError
         chunk: (chunk_i, chunk_n),
         blobs,
         citation: crate::community::edition::AuthorityCitation::from_tags(&rumor.tags),
+        severed,
     })
 }
 
@@ -759,6 +836,9 @@ pub struct Rotation {
     /// The rotator's `vac`, taken from the first chunk seen (every chunk of one
     /// rotation carries the same citation — they share a signer and an action).
     pub citation: Option<crate::community::edition::AuthorityCitation>,
+    /// OR across chunks: any severed chunk marks the whole rotation severed, so
+    /// an extension (rescue) can never launder the flag away.
+    pub severed: bool,
 }
 
 impl Rotation {
@@ -805,9 +885,22 @@ pub fn collect_rotations(chunks: &[RekeyChunk]) -> Vec<Rotation> {
             declared_chunks: c.chunk.1,
             held_chunks: std::collections::BTreeSet::new(),
             citation: c.citation.clone(),
+            severed: c.severed,
         });
-        if entry.held_chunks.insert(c.chunk.0) {
-            entry.blobs.extend(c.blobs.iter().cloned());
+        entry.severed |= c.severed;
+        // UNION the blobs, even when the index is already held. Treating a second
+        // chunk at a known index as pure idempotent re-delivery is safe only while
+        // re-delivery is byte-identical; when two chunks genuinely differ (a
+        // catch-up extension that re-claimed a slot), dropping the loser silently
+        // deletes its recipients from the union — and a recipient with no blob reads
+        // as REMOVED, which tears their community down. Union can only ever ADD
+        // blobs, so it can turn a false removal into an adoption but never the
+        // reverse. Exact duplicates are dropped so ordinary re-delivery stays free.
+        entry.held_chunks.insert(c.chunk.0);
+        for b in &c.blobs {
+            if !entry.blobs.iter().any(|held| held.locator == b.locator && held.wrapped == b.wrapped) {
+                entry.blobs.push(b.clone());
+            }
         }
     }
     by_key.into_values().collect()
@@ -1077,7 +1170,7 @@ mod tests {
         let key = [0xABu8; 32];
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Channel(CHAN), Epoch(1), &key).unwrap();
         let commit = epoch_key_commitment(Epoch(0), &[0xEEu8; 32]);
-        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &commit, &[blob.clone()], 1, 1, 100, None).unwrap();
+        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &commit, &[blob.clone()], 1, 1, 100, None, false).unwrap();
         let (wrap, _) = seal_rekey_chunk(&rumor, &group, &rotator, Timestamp::from_secs(100)).unwrap();
 
         // The wrap is signed by the group key, not the rotator (no identity on the wire).
@@ -1107,7 +1200,7 @@ mod tests {
         let group = base_rekey_group(&prior_root, &community, Epoch(1));
         let blob = build_blob_local(rotator.secret_key(), &xonly(&rotator), &recipient.public_key(), RekeyScope::Root, Epoch(1), &new_root).unwrap();
         let commit = epoch_key_commitment(Epoch(0), &prior_root);
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &commit, &[blob], 100, None).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &commit, &[blob], 100, None, false).unwrap();
         assert_eq!(chunks.len(), 1);
 
         let opened = stream::open_wrap(&chunks[0], &group).unwrap();
@@ -1134,7 +1227,7 @@ mod tests {
                 build_blob_local(rotator.secret_key(), &xonly(&rotator), &r.public_key(), RekeyScope::Root, Epoch(1), &[0xCDu8; 32]).unwrap()
             })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &blobs, 100, None, false).unwrap();
         assert_eq!(chunks.len(), 1, "a full send chunk is exactly one event");
         assert!(chunks[0].as_json().len() <= 65_536, "a full chunk must fit a 64KB relay event");
     }
@@ -1147,7 +1240,7 @@ mod tests {
         let blobs: Vec<RekeyBlob> = (0..MAX_REKEY_BLOBS_PER_EVENT + 1)
             .map(|_| RekeyBlob { locator: "aa".repeat(32), wrapped: "x".into() })
             .collect();
-        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100, None).unwrap();
+        let chunks = build_rekey_chunks_local(&rotator, &group, RekeyScope::Root, Epoch(2), Epoch(1), &[0u8; 32], &blobs, 100, None, false).unwrap();
         assert_eq!(chunks.len(), 2);
         let parsed: Vec<RekeyChunk> = chunks.iter().map(|w| parse_rekey_chunk(&stream::open_wrap(w, &group).unwrap()).unwrap()).collect();
         assert_eq!(parsed[0].chunk, (1, 2));
@@ -1160,7 +1253,7 @@ mod tests {
     fn plaintext_sealed_rekey_is_rejected() {
         let rotator = keys(1);
         let group = channel_rekey_group(&root(), &CHAN, Epoch(1));
-        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &[0u8; 32], &[], 1, 1, 100, None).unwrap();
+        let rumor = build_rekey_rumor(rotator.public_key(), RekeyScope::Channel(CHAN), Epoch(1), Epoch(0), &[0u8; 32], &[], 1, 1, 100, None, false).unwrap();
         let seal = stream::build_seal(&rumor, SealForm::Plaintext, &group, &rotator).unwrap();
         let (wrap, _) = stream::wrap_seal(&seal, &group, stream::KIND_WRAP, Timestamp::from_secs(1)).unwrap();
         let opened = stream::open_wrap(&wrap, &group).unwrap();
@@ -1171,7 +1264,7 @@ mod tests {
     fn non_monotonic_epoch_is_refused_at_mint_and_on_parse() {
         let rotator = keys(1);
         assert!(matches!(
-            build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(1), &[0u8; 32], &[], 1, 1, 100, None),
+            build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(1), &[0u8; 32], &[], 1, 1, 100, None, false),
             Err(RekeyError::NonMonotonicEpoch)
         ));
     }
@@ -1181,7 +1274,7 @@ mod tests {
         let rotator = keys(1);
         for (i, n) in [(0u32, 1u32), (2, 1), (1, 0)] {
             assert!(
-                matches!(build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &[], i, n, 100, None), Err(RekeyError::BadChunkIndex)),
+                matches!(build_rekey_rumor(rotator.public_key(), RekeyScope::Root, Epoch(1), Epoch(0), &[0u8; 32], &[], i, n, 100, None, false), Err(RekeyError::BadChunkIndex)),
                 "chunk ({i},{n}) must be rejected"
             );
         }
@@ -1199,6 +1292,72 @@ mod tests {
             chunk: (i, n),
             blobs,
             citation: None,
+            severed: false,
+        }
+    }
+
+    #[test]
+    fn a_colliding_chunk_index_must_not_swallow_a_recipients_blob() {
+        // Chunks are correlated by index, and a second chunk claiming an index
+        // already held is treated as idempotent re-delivery — its blobs dropped.
+        // That is safe only while re-delivery is byte-identical. The catch-up path
+        // that extends a rotation computes its starting index from a fetch that can
+        // come back blind, and then re-claims index 1; whichever copy a client sees
+        // first wins, so the original recipients in the loser vanish from the union.
+        // A recipient whose blob vanishes reads as REMOVED — and removal deletes the
+        // community locally. Losing a blob to a bookkeeping collision must never be
+        // able to masquerade as a removal verdict.
+        let rotator = keys(1);
+        let prev = [0x55u8; 32];
+        let mine = RekeyBlob { locator: "aa".repeat(32), wrapped: "mine".into() };
+        let other = RekeyBlob { locator: "bb".repeat(32), wrapped: "other".into() };
+
+        // Two chunks both claiming index 1: the original (carrying my blob) and a
+        // re-claim (carrying someone else's).
+        let original = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![mine.clone()], 1, 1);
+        let reclaim = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![other.clone()], 1, 1);
+
+        for (order, chunks) in [
+            ("original first", vec![original.clone(), reclaim.clone()]),
+            ("reclaim first", vec![reclaim.clone(), original.clone()]),
+        ] {
+            let rotations = collect_rotations(&chunks);
+            assert_eq!(rotations.len(), 1, "{order}: same correlation key");
+            let has_mine = rotations[0].blobs.iter().any(|b| b.locator == mine.locator);
+            assert!(
+                has_mine,
+                "{order}: my blob was dropped by an index collision — that reads as a removal \
+                 and removal deletes the community",
+            );
+        }
+    }
+
+    #[test]
+    fn a_severed_rotation_cannot_be_laundered_by_an_unmarked_chunk() {
+        // The containment marker rides EVERY chunk of a rotation, but a rotation's
+        // chunk set can be extended later (the catch-up path for members a rotation
+        // forgot). An extension built without the marker would, under first-seen
+        // semantics, present a severed epoch as an ordinary one — and an adopter
+        // reading it that way refreshes the very invite links the containment meant
+        // to bury, re-opening the door the raid came through. The fold is therefore
+        // an OR across chunks, in either arrival order.
+        let rotator = keys(1);
+        let prev = [0x44u8; 32];
+        let mut marked = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![], 1, 2);
+        marked.severed = true;
+        let unmarked = chunk_at(&rotator, RekeyScope::Root, 2, 1, &prev, vec![], 2, 2);
+
+        for (order, chunks) in [
+            ("marked first", vec![marked.clone(), unmarked.clone()]),
+            ("unmarked first", vec![unmarked.clone(), marked.clone()]),
+        ] {
+            let rotations = collect_rotations(&chunks);
+            assert_eq!(rotations.len(), 1, "{order}: one correlation key, one rotation");
+            assert!(
+                rotations[0].severed,
+                "{order}: an unmarked sibling must never launder the containment away",
+            );
+            assert!(rotations[0].is_complete(), "{order}: both chunks held");
         }
     }
 

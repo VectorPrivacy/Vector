@@ -39,6 +39,43 @@ pub enum Evidence {
     Full,
 }
 
+/// A plane fetch plus how much of the relay set actually answered it.
+///
+/// One honest relay is enough to RUN Concord: a valid, sealed, signed event is
+/// proof on its own, and no amount of corroboration adds to it. So coverage never
+/// gates accepting data — a single relay's answer is taken whole.
+///
+/// It gates exactly one thing: concluding that something is **absent**. An empty
+/// result from four relays where three timed out says nothing; the same empty
+/// result where all four answered is real evidence. Both used to be a bare
+/// `Vec<Event>`, indistinguishable, so every "it's gone" decision in the protocol
+/// was really "nobody who happened to reply mentioned it".
+///
+/// Coverage is always relative to the REACHABLE set, never an absolute quorum: a
+/// one-relay community reports 1/1 and its absences are as confirmed as they can
+/// ever be. Nothing halts for want of relays.
+#[derive(Debug, Clone)]
+pub struct PlaneFetch {
+    pub events: Vec<Event>,
+    /// Relays that resolved successfully (an empty EOSE counts — that is a real answer).
+    pub answered: usize,
+    /// Relays attempted.
+    pub attempted: usize,
+}
+
+impl PlaneFetch {
+    /// Every relay we could reach answered, so an empty `events` IS absence.
+    pub fn is_complete(&self) -> bool {
+        self.answered > 0 && self.answered == self.attempted
+    }
+
+    /// For transports with no relay set of their own (the in-memory test relays and
+    /// the v1 stubs): one authoritative source, fully answered.
+    pub fn whole(events: Vec<Event>) -> Self {
+        PlaneFetch { events, answered: 1, attempted: 1 }
+    }
+}
+
 /// The slice of a relay query the Community protocol needs: event kinds, the `z`
 /// pseudonym tag values, and an optional `since` floor. Production translates
 /// this into a Nostr `Filter`; the in-memory relay matches it directly.
@@ -189,7 +226,7 @@ pub trait Transport {
     /// epoch). This fetches over a connection authed as the plane itself. Required
     /// (not defaulted — a default async-trait method forces a Sync bound on every
     /// generic caller); the in-memory test relay just fetches (no auth).
-    async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String>;
+    async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<PlaneFetch, String>;
 
     /// DURABLE publish for security-critical control events (rekeys, bans, the invite registry, deletes):
     /// retry **each relay independently** until it ACKs, up to [`MAX_PUBLISH_ATTEMPTS`] times, re-sending
@@ -1206,9 +1243,9 @@ impl Transport for LiveTransport {
         self.fetch_counted(query, relays).await.map(|(events, _successes, _attempted)| events)
     }
 
-    async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+    async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<PlaneFetch, String> {
         if relays.is_empty() {
-            return Ok(Vec::new());
+            return Ok(PlaneFetch { events: Vec::new(), answered: 0, attempted: 0 });
         }
         #[cfg(feature = "tor")]
         wait_until_tor_ready(
@@ -1277,16 +1314,31 @@ impl Transport for LiveTransport {
         let mut result: Vec<Event> = Vec::new();
         let mut seen: std::collections::HashSet<EventId> = std::collections::HashSet::new();
         let mut successes = 0usize;
-        for r in &targets {
-            let res = fetch_relay_eose(&client, r, filter.clone(), self.timeout).await;
-            // Feed the shared breaker so this auth path both benefits from AND
-            // contributes to the pool-wide dead-relay knowledge.
-            breaker_record(r, res.is_ok(), true);
-            if let Ok(events) = res {
-                successes += 1;
-                for e in events {
-                    if seen.insert(e.id) {
-                        result.push(e);
+        // CONCURRENTLY. Serially, one dead relay cost its entire timeout before the
+        // next was even tried, and the whole plane read paid that on every page of
+        // every epoch of a catch-up. The union is order-independent, so there is
+        // nothing to serialize for.
+        {
+            use futures_util::stream::{FuturesUnordered, StreamExt};
+            let mut inflight: FuturesUnordered<_> = targets
+                .iter()
+                .map(|r| {
+                    let client = client.clone();
+                    let filter = filter.clone();
+                    let timeout = self.timeout;
+                    async move { (r.clone(), fetch_relay_eose(&client, r, filter, timeout).await) }
+                })
+                .collect();
+            while let Some((r, res)) = inflight.next().await {
+                // Feed the shared breaker so this auth path both benefits from AND
+                // contributes to the pool-wide dead-relay knowledge.
+                breaker_record(&r, res.is_ok(), true);
+                if let Ok(events) = res {
+                    successes += 1;
+                    for e in events {
+                        if seen.insert(e.id) {
+                            result.push(e);
+                        }
                     }
                 }
             }
@@ -1299,7 +1351,7 @@ impl Transport for LiveTransport {
             return Err(format!("no relay answered the plane fetch (0/{} attempted)", targets.len()));
         }
         // The client stays POOLED (not disconnected) for the next page/epoch/community.
-        Ok(result)
+        Ok(PlaneFetch { events: result, answered: successes, attempted: targets.len() })
     }
 
     async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
@@ -1550,9 +1602,173 @@ pub(crate) mod memory {
             Ok(out)
         }
 
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<PlaneFetch, String> {
             // No auth in the in-memory relay — a plane fetch is just a fetch.
-            self.fetch(query, relays).await
+            Ok(PlaneFetch::whole(self.fetch(query, relays).await?))
+        }
+    }
+}
+
+/// A [`Transport`] that fails on purpose.
+///
+/// `MemoryRelay` always succeeds: no failed fetch, no short page, no reordering,
+/// no relay that serves a different subset than its siblings. Every strand and
+/// fork this codebase has shipped lives in exactly the space it cannot express,
+/// which is a large part of why none of them were caught by a test. This wraps it
+/// and injects the failures a real relay set produces.
+///
+/// Deterministic by construction — the only randomness is a seeded counter, so a
+/// failing scenario reproduces exactly from its seed.
+#[cfg(test)]
+pub(crate) mod adversarial {
+    use super::memory::MemoryRelay;
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    /// What a fetch should do instead of succeeding.
+    #[derive(Clone, Debug)]
+    pub enum Fault {
+        /// Return `Err` — a dead relay, an AUTH gate, a timeout.
+        FailFetch(String),
+        /// Succeed, but serve at most `n` events — the "short page reads as the end
+        /// of the plane" hazard.
+        ShortPage(usize),
+        /// Succeed, but serve nothing at all — a relay silently withholding.
+        Empty,
+    }
+
+    /// Which fetches a rule applies to. Matched against the query, so a plan can
+    /// target one plane (an author) without knowing call order.
+    #[derive(Clone, Debug, Default)]
+    pub struct Match {
+        /// Any of these authors appears in the query.
+        pub author: Option<String>,
+        /// Only the Nth matching call (1-based); `None` = every one.
+        pub nth: Option<u64>,
+        /// Only from this call onward (1-based).
+        pub from_nth: Option<u64>,
+    }
+
+    impl Match {
+        pub fn author(hex: &str) -> Self {
+            Match { author: Some(hex.to_string()), ..Default::default() }
+        }
+        pub fn any() -> Self {
+            Match::default()
+        }
+        pub fn nth(mut self, n: u64) -> Self {
+            self.nth = Some(n);
+            self
+        }
+        pub fn from_nth(mut self, n: u64) -> Self {
+            self.from_nth = Some(n);
+            self
+        }
+    }
+
+    struct Rule {
+        m: Match,
+        fault: Fault,
+        hits: AtomicU64,
+    }
+
+    pub struct AdversarialRelay {
+        inner: MemoryRelay,
+        rules: Mutex<Vec<Rule>>,
+        /// Every fetch, whether or not a rule matched — the round-trip counter a
+        /// scale test asserts on ("~2 per hop, not ~97").
+        fetches: AtomicU64,
+    }
+
+    impl AdversarialRelay {
+        pub fn new() -> Self {
+            AdversarialRelay { inner: MemoryRelay::new(), rules: Mutex::new(Vec::new()), fetches: AtomicU64::new(0) }
+        }
+
+        /// The underlying honest relay — publish fixtures through this so a fault
+        /// plan governs only what the client can READ back.
+        pub fn relay(&self) -> &MemoryRelay {
+            &self.inner
+        }
+
+        pub fn on(&self, m: Match, fault: Fault) -> &Self {
+            self.rules.lock().unwrap_or_else(|e| e.into_inner()).push(Rule { m, fault, hits: AtomicU64::new(0) });
+            self
+        }
+
+        /// Drop every rule — "the faults cease", the precondition of the
+        /// convergence property every scenario asserts.
+        pub fn heal(&self) {
+            self.rules.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        }
+
+        pub fn fetch_count(&self) -> u64 {
+            self.fetches.load(Ordering::Relaxed)
+        }
+
+        pub fn reset_fetch_count(&self) {
+            self.fetches.store(0, Ordering::Relaxed);
+        }
+
+        fn verdict(&self, query: &Query) -> Option<Fault> {
+            let rules = self.rules.lock().unwrap_or_else(|e| e.into_inner());
+            for r in rules.iter() {
+                if let Some(a) = &r.m.author {
+                    if !query.authors.iter().any(|q| q == a) {
+                        continue;
+                    }
+                }
+                let n = r.hits.fetch_add(1, Ordering::Relaxed) + 1;
+                if r.m.nth.is_some_and(|want| want != n) {
+                    continue;
+                }
+                if r.m.from_nth.is_some_and(|first| n < first) {
+                    continue;
+                }
+                return Some(r.fault.clone());
+            }
+            None
+        }
+
+        async fn governed(&self, query: &Query, relays: &[String], plane: Option<&Keys>) -> Result<Vec<Event>, String> {
+            self.fetches.fetch_add(1, Ordering::Relaxed);
+            match self.verdict(query) {
+                Some(Fault::FailFetch(why)) => return Err(why),
+                Some(Fault::Empty) => return Ok(Vec::new()),
+                Some(Fault::ShortPage(n)) => {
+                    let mut out = match plane {
+                        Some(p) => self.inner.fetch_plane(p, query, relays).await?.events,
+                        None => self.inner.fetch(query, relays).await?,
+                    };
+                    out.truncate(n);
+                    return Ok(out);
+                }
+                None => {}
+            }
+            match plane {
+                Some(p) => self.inner.fetch_plane(p, query, relays).await.map(|f| f.events),
+                None => self.inner.fetch(query, relays).await,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for AdversarialRelay {
+        async fn publish(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            self.inner.publish(event, relays).await
+        }
+        async fn publish_durable(&self, event: &Event, relays: &[String]) -> Result<(), String> {
+            self.inner.publish_durable(event, relays).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            self.governed(query, relays, None).await
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<PlaneFetch, String> {
+            // `Empty` answers with nothing (coverage intact, so absence is real)
+            // while `FailFetch` propagates an Err (nobody answered, so absence is
+            // unproven) — the exact distinction the coverage field carries.
+            Ok(PlaneFetch::whole(self.governed(query, relays, Some(plane)).await?))
         }
     }
 }

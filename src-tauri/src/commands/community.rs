@@ -613,7 +613,13 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
     vector_core::db::scoped(async move {
         // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
         if is_v2_community(community_id) {
-            return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
+            vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string())?;
+            // Their messages stop rendering the moment they are banned, so a badge counting
+            // them sends the reader hunting for something the client will never show. The
+            // unread cache is maintained incrementally and cannot know a ban happened —
+            // recompute every channel they could have posted in, straight from the DB.
+            reconcile_community_unread(community_id).await;
+            return Ok(());
         }
         let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
         let id_bytes = hex_to_id32(community_id)?;
@@ -631,6 +637,7 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
         // (COMMUNITY_ROUTES froze each Channel at the last refresh — without this, a banned author's
         // LIVE messages keep flowing until reopen/restart).
         crate::services::subscription_handler::refresh_community_subscription().await;
+        reconcile_community_unread(community_id).await;
         Ok(())
     })
     .await
@@ -1216,6 +1223,9 @@ struct PreparedCommunityAttachment {
     attachment: vector_core::types::Attachment,
     /// Ciphertext to upload to Blossom.
     encrypted: Vec<u8>,
+    /// The reused blob belongs to another uploader — mirror it to our servers
+    /// in the background once the send is out.
+    reused_foreign: bool,
     /// Original MIME (servers reject `application/octet-stream` but accept the same bytes
     /// under their real type) — used for capability-aware server routing.
     mime: String,
@@ -1327,11 +1337,32 @@ async fn process_outbound_community_attachment_bytes(
         let _ = std::fs::write(&local_path, &bytes);
     }
 
+    // Smart-forward: a prior verified send/download of these exact bytes left a
+    // decryptable blob behind — reference it instead of re-encrypting and
+    // re-uploading. Liveness is proven (strict HEAD), never assumed.
+    let reused = match vector_core::db::attachments::find_reusable_by_hash(&plaintext_hash) {
+        Ok(Some(r)) if vector_core::blossom::blob_is_served(&r.url, Duration::from_secs(5)).await => {
+            vector_core::log_info!("[SmartForward] {} reused ({}, {} KB) — no upload", &plaintext_hash[..8], if r.mine { "own blob" } else { "foreign blob, mirroring in background" }, r.size / 1024);
+            Some(r)
+        }
+        _ => None,
+    };
+
     // Encrypt with a fresh key+nonce; the ciphertext is uploaded later (after the optimistic
-    // bubble is shown) so progress + cancel drive the sender's UI.
-    let params = vector_core::crypto::generate_encryption_params();
-    let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
-    let encrypted_size = encrypted.len() as u64;
+    // bubble is shown) so progress + cancel drive the sender's UI. On reuse the
+    // ciphertext is empty and the url pre-filled — the upload loop skips it.
+    let (key, nonce, url, encrypted, encrypted_size, reused_foreign) = match reused {
+        Some(r) => {
+            let size = r.size;
+            (r.key, r.nonce, r.url, Vec::new(), size, !r.mine)
+        }
+        None => {
+            let params = vector_core::crypto::generate_encryption_params();
+            let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
+            let size = encrypted.len() as u64;
+            (params.key, params.nonce, String::new(), encrypted, size, false)
+        }
+    };
     let mime = vector_core::crypto::mime_from_extension(&extension).to_string();
 
     // Mini Apps: mint the realtime topic at send time so every member joins the
@@ -1345,11 +1376,11 @@ async fn process_outbound_community_attachment_bytes(
 
     let attachment = Attachment {
         id: plaintext_hash.clone(),
-        key: params.key,
-        nonce: params.nonce,
+        key,
+        nonce,
         extension,
         name,
-        url: String::new(), // filled in once the upload completes
+        url, // pre-filled on reuse; filled in once the upload completes otherwise
         path: local_path.to_string_lossy().to_string(),
         size: encrypted_size,
         img_meta,
@@ -1360,7 +1391,7 @@ async fn process_outbound_community_attachment_bytes(
         original_hash: Some(plaintext_hash),
         fallback_urls: Vec::new(), // filled by the post-upload mirror fan-out
     };
-    Ok(PreparedCommunityAttachment { attachment, encrypted, mime })
+    Ok(PreparedCommunityAttachment { attachment, encrypted, mime, reused_foreign })
 }
 
 /// Post a Community message carrying a caption (`content`, may be empty) plus one or more
@@ -1566,7 +1597,26 @@ async fn dispatch_community_attachment_message(
         // Upload each attachment, driving the progress ring (keyed by pending_id) + filling URLs.
         let mut uploaded: Vec<vector_core::types::Attachment> = Vec::with_capacity(prepared.len());
         for prep in prepared {
-            let PreparedCommunityAttachment { mut attachment, encrypted, mime } = prep;
+            let PreparedCommunityAttachment { mut attachment, encrypted, mime, reused_foreign } = prep;
+            // Smart-forward: the attachment already references a live blob —
+            // no upload, no fan-out; the send is just the message. A foreign
+            // blob gets a background mirror as availability insurance.
+            if !attachment.url.is_empty() {
+                callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &attachment.url);
+                if reused_foreign {
+                    let signer_bg = signer.clone();
+                    let url_bg = attachment.url.clone();
+                    vector_core::db::spawn_bound(async move {
+                        let _ = vector_core::blossom::mirror_blob_to_servers(
+                            signer_bg, &url_bg,
+                            vector_core::blossom_servers::compute_enabled_servers(),
+                            1, Duration::from_secs(8),
+                        ).await;
+                    });
+                }
+                uploaded.push(attachment);
+                continue;
+            }
             let cb_for_progress = callback.clone();
             let pid_for_progress = pending_id.clone();
             let progress_cb: vector_core::blossom::ProgressCallback =
@@ -2335,17 +2385,43 @@ pub async fn debug_v2_follow_trace(community_id: String) -> Result<serde_json::V
     }))
 }
 
-/// Explain WHY a wedged v2 community isn't adopting its next base rotation:
-/// runs the real fetch+parse+authority+continuity pipeline and reports the gate
-/// each rotation trips. Read-only (public keys only).
-#[cfg(debug_assertions)]
+/// Re-vend the epoch chain to members a rotation forgot.
+///
+/// A member missed at one hop is stranded there forever — a client can only
+/// derive `held + 1`, so no later rotation reaches them, and re-inviting does
+/// nothing because they are already a member. Only the rotator holds the
+/// archived roots this needs, which is why it lives on the client that rotated.
+#[tauri::command]
+pub async fn rescue_stranded_members(community_id: String, npubs: Vec<String>) -> Result<serde_json::Value, String> {
+    vector_core::db::scoped(async move {
+        let refs: Vec<&str> = npubs.iter().map(|s| s.as_str()).collect();
+        vector_core::VectorCore.rescue_stranded_members(&community_id, &refs).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Repair a v2 community's roster cache when it is pinned holding WRONG data:
+/// resets the cache's provenance so the next control fold may replace it, then
+/// folds. Publishes nothing.
+#[tauri::command]
+pub async fn repair_v2_roster(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore
+        .repair_community_roster(&community_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Explain this client's epoch state and WHY it is or isn't adopting the next base
+/// rotation: runs the real fetch+parse+authority+continuity pipeline and reports the
+/// gate each rotation trips, alongside the local state two clients diverge on.
+/// Read-only (public keys only). Ships in release — a strand is silent otherwise.
 #[tauri::command]
 pub async fn debug_v2_explain_base_rekey(community_id: String) -> Result<serde_json::Value, String> {
     use vector_core::community::transport::LiveTransport;
     let id = CommunityId(hex_to_id32(&community_id)?);
     let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
     let transport = LiveTransport::with_timeout(Duration::from_secs(12));
-    vector_core::community::v2::service::debug_explain_base_rekey(&transport, &c).await
+    vector_core::community::v2::service::explain_epoch_state(&transport, &c).await
 }
 
 /// Wire-level probe for a v2 community's rotation planes. For each candidate
@@ -2752,8 +2828,10 @@ async fn rehydrate_listed_communities(
 // channel-rekey walk) and page messages only.
 
 /// (probe_time_secs, set of community_id_hex that had a fresh control/rekey edition).
-static CONTROL_PROBE: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>)>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new())));
+/// `(probed_at, dirty_set, full_coverage)`. The dirty set is POSITIVE evidence and is
+/// trustworthy however partial the read was; only the CLEAN verdict needs coverage.
+static CONTROL_PROBE: std::sync::LazyLock<std::sync::Mutex<(u64, std::collections::HashSet<String>, bool)>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new((0, std::collections::HashSet::new(), false)));
 
 /// A probe result is trusted this long into the sweep (so every channel of a
 /// clean community skips within one boot).
@@ -2778,10 +2856,23 @@ fn probe_now_secs() -> u64 {
 /// community was dirty — the safe default is always "fold".
 fn community_probe_clean(community_id: &str) -> bool {
     let guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-    let (probe_secs, dirty) = &*guard;
+    let (probe_secs, dirty, full_coverage) = &*guard;
     *probe_secs != 0
+        && *full_coverage
         && probe_now_secs().saturating_sub(*probe_secs) < CONTROL_PROBE_TTL_SECS
         && !dirty.contains(community_id)
+}
+
+/// The probe SAW a control or rekey edition land for this community. Positive
+/// evidence, so a partial read still proves it — unlike "clean", which is an absence
+/// verdict and needs full coverage. Drives priority only: what this misses is not
+/// skipped, merely not jumped ahead of everyone's content.
+fn community_probe_dirty(community_id: &str) -> bool {
+    let guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
+    let (probe_secs, dirty, _) = &*guard;
+    *probe_secs != 0
+        && probe_now_secs().saturating_sub(*probe_secs) < CONTROL_PROBE_TTL_SECS
+        && dirty.contains(community_id)
 }
 
 /// Run the coalesced control probe: publishes the dirty set into `CONTROL_PROBE`
@@ -2844,7 +2935,11 @@ async fn run_control_probe() {
     let dirty_count = dirty.len();
     {
         let mut guard = CONTROL_PROBE.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = (now, dirty);
+        // Keep the dirty set either way — it is positive evidence, sound however
+        // partial the read. `full_coverage` rides along so only the CLEAN verdict
+        // (an absence verdict, from a Quorum read) demands it: a relay that never
+        // answered may be the one holding the rotation.
+        *guard = (now, dirty, full_coverage);
     }
     // Advance the cursor ONLY on full coverage: a partial probe re-covers next
     // boot, so an edition on a relay that was down is never skipped forever.
@@ -3139,13 +3234,26 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // Flatten every joined Community's channels (protocol-agnostic: a v2 community
         // must load through its own reader, not the v1 one).
         let mut channels: Vec<String> = Vec::new();
+        // v2 root epoch per community, sampled BEFORE the sweep. A refounding adopted
+        // while the sweep runs is picked up by every channel it has not reached yet
+        // (each slot re-resolves from the DB), but channels already swept read the OLD
+        // plane and the sweep never revisits them. Comparing after tells us exactly
+        // which few to redo, instead of waiting for a later pass.
+        let mut epoch_before: std::collections::HashMap<Vec<u8>, u64> = std::collections::HashMap::new();
+        let mut v2_channels: std::collections::HashMap<Vec<u8>, Vec<String>> = std::collections::HashMap::new();
         for id in vector_core::db::community::list_community_ids()? {
             match vector_core::db::community::community_protocol(&id).ok().flatten() {
                 Some(vector_core::community::ConcordProtocol::V2) => {
                     if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                        let key = id.0.to_vec();
+                        epoch_before.insert(key.clone(), c.root_epoch.0);
+                        let mut mine = Vec::new();
                         for ch in &c.channels {
-                            channels.push(vector_core::simd::hex::bytes_to_hex_32(&ch.id.0));
+                            let hex = vector_core::simd::hex::bytes_to_hex_32(&ch.id.0);
+                            mine.push(hex.clone());
+                            channels.push(hex);
                         }
+                        v2_channels.insert(key, mine);
                     }
                 }
                 _ => {
@@ -3175,6 +3283,41 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // breaker bound the concurrent load.
         const BOOT_SYNC_WINDOW: usize = 6;
         use futures_util::stream::StreamExt;
+
+        // Converge the communities that actually MOVED before paging their content.
+        //
+        // Rotations are rare, so this must cost nothing on an ordinary boot: the probe
+        // above already answered "did anything land?" in one batched read, and a clean
+        // verdict means the follow is redundant — those channels sweep immediately, at
+        // exactly today's speed. For a community that DID move, content fetched first
+        // is wasted twice over: it pages a plane about to be superseded, and the
+        // messages may not even open at the epoch we still hold. Converging first makes
+        // that fetch both cheaper and correct.
+        //
+        // Per-community, never a global barrier — nobody waits on someone else's
+        // rotation.
+        let moved: Vec<vector_core::community::CommunityId> = epoch_before
+            .keys()
+            .filter_map(|k| <[u8; 32]>::try_from(k.as_slice()).ok())
+            .map(vector_core::community::CommunityId)
+            .filter(|id| community_probe_dirty(&vector_core::simd::hex::bytes_to_hex_32(&id.0)))
+            .collect();
+        if !moved.is_empty() {
+            let t = std::time::Instant::now();
+            let n = moved.len();
+            futures_util::stream::iter(moved)
+                .map(|id| async move {
+                    if vector_core::db::session_stopped() {
+                        return;
+                    }
+                    let _ = vector_core::VectorCore::v2_inline_follow(&id).await;
+                })
+                .buffer_unordered(BOOT_SYNC_WINDOW)
+                .collect::<Vec<()>>()
+                .await;
+            println!("[Boot] converged {} community(ies) before sweeping in {:?}", n, t.elapsed());
+        }
+
         let channel_count = channels.len();
         futures_util::stream::iter(channels)
             .map(|cid| async move {
@@ -3205,6 +3348,49 @@ pub async fn sync_communities_boot() -> Result<(), String> {
             channel_count,
             boot_start.elapsed()
         );
+
+        // Redo only the channels of communities whose root moved mid-sweep.
+        let mut restale: Vec<String> = Vec::new();
+        for (key, before) in &epoch_before {
+            let Ok(bytes) = <[u8; 32]>::try_from(key.as_slice()) else { continue };
+            let id = vector_core::community::CommunityId(bytes);
+            if let Ok(Some(c)) = vector_core::db::community::load_community_v2(&id) {
+                if c.root_epoch.0 != *before {
+                    if let Some(chs) = v2_channels.get(key) {
+                        restale.extend(chs.iter().cloned());
+                    }
+                }
+            }
+        }
+        if !restale.is_empty() {
+            let n = restale.len();
+            let t = std::time::Instant::now();
+            futures_util::stream::iter(restale)
+                .map(|cid| async move {
+                    if vector_core::db::session_stopped() {
+                        return;
+                    }
+                    let _ = sync_community_channel(cid, None, None).await;
+                })
+                .buffer_unordered(BOOT_SYNC_WINDOW)
+                .collect::<Vec<()>>()
+                .await;
+            println!("[Boot] re-swept {} channel(s) whose epoch moved mid-sweep in {:?}", n, t.elapsed());
+        }
+        // Re-assert the live subscriptions now that the flood is over. A relay
+        // under the sweep's load can drop or refuse the boot-time subs, and
+        // nothing else re-asks until a reconnect happens to fire — which is
+        // exactly the "dead until it all arrives at once" window. Both calls
+        // are idempotent refreshes.
+        if let Some(client) = vector_core::state::nostr_client() {
+            vector_core::community::realtime::force_refresh_subscription(&client).await;
+            // FORCE: an unchanged author set makes the ordinary refresh a no-op, which
+            // is precisely the boot case — so the sub the sweep just knocked out would
+            // never be rebuilt.
+            vector_core::community::v2::realtime::force_refresh_subscription(&client).await;
+            println!("[Boot] live subs re-asserted after sweep");
+            crate::services::subscription_handler::reassert_dm_sub().await;
+        }
         drop(_claim);
         Ok(())
     })
@@ -3278,7 +3464,11 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
         .await?;
 
         // Layer 3 — best-effort Blossom blob delete for attachments (signed by the active
-        // identity so bunker accounts authorize correctly).
+        // identity so bunker accounts authorize correctly). Smart-forward gate:
+        // only urls no OTHER message still references may be scrubbed.
+        let attachment_urls =
+            vector_core::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, &message_id)
+                .unwrap_or_default();
         if !attachment_urls.is_empty() {
             if let Some(_client) = vector_core::state::nostr_client() {
                 if let Ok(signer) = vector_core::signer::active_signer() {
@@ -4563,4 +4753,69 @@ pub async fn fetch_pinned_attachment(community_id: String, channel_id: String, m
         .fetch_pinned_attachment(&community_id, &channel_id, &message_id)
         .await
         .map_err(|e| e.to_string())
+}
+
+
+/// Recompute the unread badge for every channel of a Community.
+///
+/// Used after a membership change that retroactively hides messages (a ban), where an
+/// incremental delta cannot be derived — the count has to come back from the query that
+/// now excludes them.
+async fn reconcile_community_unread(community_id: &str) {
+    let Ok(id_bytes) = vector_core::simd::hex::hex_to_bytes_32_checked(community_id).ok_or(()) else {
+        return;
+    };
+    let cid = vector_core::community::CommunityId(id_bytes);
+    let channels: Vec<String> =
+        match vector_core::db::community::community_protocol(&cid).ok().flatten() {
+            Some(vector_core::community::ConcordProtocol::V2) => {
+                vector_core::db::community::load_community_v2(&cid)
+                    .ok()
+                    .flatten()
+                    .map(|c| {
+                        c.channels
+                            .iter()
+                            .map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            _ => vector_core::db::community::load_community(&cid)
+                .ok()
+                .flatten()
+                .map(|c| c.channels.iter().map(|ch| ch.id.to_hex()).collect())
+                .unwrap_or_default(),
+        };
+    for ch in channels {
+        crate::commands::messaging::reconcile_chat_unread(&ch).await;
+    }
+}
+
+/// Diagnostic: local memberlist vs the wire guestbook fold, with the diff named.
+/// `pruned` = counted locally but absent from the current epoch's plane — the set a
+/// rotation stranded without keys. `wire_only` = the inverse (joined since our last
+/// local fold caught up).
+#[tauri::command]
+pub async fn debug_v2_memberlist_diff(community_id: String) -> Result<serde_json::Value, String> {
+    use nostr_sdk::prelude::ToBech32;
+    vector_core::db::scoped(async move {
+        let id = CommunityId(hex_to_id32(&community_id)?);
+        let c = vector_core::db::community::load_community_v2(&id)?.ok_or("not a held v2 community")?;
+        let transport = LiveTransport::with_timeout(Duration::from_secs(20));
+        let wire = vector_core::community::v2::service::wire_guestbook_members(&transport, &c).await?;
+        let local = vector_core::community::v2::service::stored_memberlist(&c)?;
+        let wire_set: std::collections::HashSet<_> = wire.iter().copied().collect();
+        let local_set: std::collections::HashSet<_> = local.iter().copied().collect();
+        let b32 = |pks: Vec<nostr_sdk::prelude::PublicKey>| -> Vec<String> {
+            pks.into_iter().filter_map(|p| p.to_bech32().ok()).collect()
+        };
+        Ok(serde_json::json!({
+            "epoch": c.root_epoch.0,
+            "wire": wire.len(),
+            "local": local.len(),
+            "pruned": b32(local.iter().filter(|p| !wire_set.contains(p)).copied().collect()),
+            "wire_only": b32(wire.iter().filter(|p| !local_set.contains(p)).copied().collect()),
+        }))
+    })
+    .await
 }

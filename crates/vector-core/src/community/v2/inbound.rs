@@ -169,7 +169,7 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             let (_c, added) = state.add_reaction_to_message(&target_id, reaction)?;
             added.then(|| state.find_message(&target_id).map(|(_c, m)| ChatPersist::Updated { message: m, edit_event: None }))?
         }
-        ChatEvent::Edit { opened, target, new_content } => {
+        ChatEvent::Edit { opened, target, new_content, emoji } => {
             // Dedup by the edit's own rumor id (its MESSAGE_EDIT row below): the
             // in-message `apply_edit` dedups silently, so without this a re-wrapped
             // duplicate would still return Updated and re-fire the handler — the
@@ -185,13 +185,21 @@ pub fn apply_chat_to_state(state: &mut ChatState, event: &ChatEvent, channel_id:
             }
             // Apply to STATE via the shared canonical applier (seeds history with the
             // original once, dedups by `edited_at`, swaps content) — reused from v1/DMs.
+            // The edit's emoji pairs ride along: apply_edit adopts the LATEST edit's
+            // set, so peers render the replacement text from the replacement's tags.
             let edited_at = opened.at_ms;
-            let (_c, message) = state.update_message(&target_id, |m| m.apply_edit(new_content.clone(), edited_at, Vec::new()))?;
-            // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), matching v1.
+            let emoji_tags: Vec<crate::types::EmojiTag> = emoji
+                .iter()
+                .map(|(shortcode, url)| crate::types::EmojiTag { shortcode: shortcode.clone(), url: url.clone() })
+                .collect();
+            let (_c, message) = state.update_message(&target_id, |m| m.apply_edit(new_content.clone(), edited_at, emoji_tags.clone()))?;
+            // Persist as a folded MESSAGE_EDIT event (chat_id set at save time), matching
+            // v1 — emoji tags included, or the reload fold re-strips what the live fold kept.
             let edit_event = crate::stored_event::StoredEventBuilder::new()
                 .id(opened.rumor_id.to_hex())
                 .kind(crate::stored_event::event_kind::MESSAGE_EDIT)
                 .content(new_content.clone())
+                .tags(emoji.iter().map(|(s, u)| vec!["emoji".to_string(), s.clone(), u.clone()]).collect())
                 .reference_id(Some(target_id.clone()))
                 .created_at(edited_at / 1000)
                 .mine(opened.author == *my_pubkey)
@@ -696,7 +704,7 @@ mod tests {
         let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
 
         let msg_id = service::send_message(&relay, &community, &general, "original").await.unwrap();
-        service::send_edit(&relay, &community, &general, &msg_id, "edited!").await.unwrap();
+        service::send_edit(&relay, &community, &general, &msg_id, "edited!", &[]).await.unwrap();
 
         // Apply messages BEFORE their edits (a target must be resident to edit).
         let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
@@ -720,6 +728,68 @@ mod tests {
         assert_eq!(content.as_deref(), Some("edited!"), "the edit applied to the stored message");
         let edit_id = events.iter().find_map(|e| matches!(e, ChatEvent::Edit { .. }).then(|| e.opened().rumor_id.to_hex())).unwrap();
         assert!(crate::db::events::event_exists(&edit_id).unwrap(), "the MESSAGE_EDIT event is persisted (folds on reload)");
+    }
+
+    /// An edit's custom emoji must survive the whole span: the wire (NIP-30 tags
+    /// on the 3302 rumor), the live fold (the message's emoji set), and the
+    /// persisted MESSAGE_EDIT row (the reload fold re-reads tags from there).
+    /// A receiver has no pack to fall back on — the event is all they get.
+    #[tokio::test]
+    async fn an_edit_carries_its_custom_emoji_to_peers_and_across_restart() {
+        let (_tmp, _guard, me) = init();
+        let relay = MemoryRelay::new();
+        let community = service::create_community(&relay, "EditEmoji", vec!["wss://r".into()], None).await.unwrap();
+        let general = community.channels[0].id;
+        let cid = crate::simd::hex::bytes_to_hex_32(&general.0);
+        let group = super::super::derive::channel_group_key(&community.community_root, &general, community.root_epoch);
+
+        let msg_id = service::send_message(&relay, &community, &general, "plain").await.unwrap();
+        service::send_edit(
+            &relay, &community, &general, &msg_id,
+            "now with :vectorlove:",
+            &[("vectorlove", "https://cdn.example/vectorlove.webp")],
+        ).await.unwrap();
+
+        let q = crate::community::transport::Query { kinds: vec![stream::KIND_WRAP], authors: vec![group.pk_hex()], ..Default::default() };
+        let wraps = relay.fetch(&q, &community.relays).await.unwrap();
+        let mut events: Vec<ChatEvent> = wraps.iter().filter_map(|w| chat::open_chat_event(w, &group, &general, community.root_epoch).ok()).collect();
+        events.sort_by_key(|e| (!matches!(e, ChatEvent::Message { .. }), e.opened().at_ms));
+
+        let wire_emoji = events.iter().find_map(|e| match e {
+            ChatEvent::Edit { emoji, .. } => Some(emoji.clone()),
+            _ => None,
+        }).expect("the edit decodes");
+        assert_eq!(
+            wire_emoji,
+            vec![("vectorlove".to_string(), "https://cdn.example/vectorlove.webp".to_string())],
+            "the 3302 rumor carries the NIP-30 pair on the wire"
+        );
+
+        for ev in &events {
+            let outcome = {
+                let mut st = crate::state::STATE.lock().await;
+                apply_chat_to_state(&mut st, ev, &cid, &me.public_key())
+            };
+            if let Some(o) = outcome {
+                persist_chat(&cid, &o).await;
+            }
+        }
+
+        let folded = {
+            let st = crate::state::STATE.lock().await;
+            st.find_message(&msg_id).map(|(_, m)| m.emoji_tags.clone())
+        }.expect("message resident");
+        assert_eq!(folded.len(), 1, "the fold adopted the edit's emoji set");
+        assert_eq!(folded[0].shortcode, "vectorlove");
+        assert_eq!(folded[0].url, "https://cdn.example/vectorlove.webp");
+
+        let edit_id = events.iter().find_map(|e| matches!(e, ChatEvent::Edit { .. }).then(|| e.opened().rumor_id.to_hex())).unwrap();
+        let (_wrap, stored_tags) = crate::db::events::get_event_wrap_context(&edit_id)
+            .unwrap()
+            .expect("the MESSAGE_EDIT row is persisted");
+        let restored = crate::types::EmojiTag::extract_from_stored(&stored_tags);
+        assert_eq!(restored.len(), 1, "the MESSAGE_EDIT row carries the tags the reload fold reads");
+        assert_eq!(restored[0].shortcode, "vectorlove");
     }
 
     #[tokio::test]
@@ -1001,7 +1071,7 @@ mod tests {
         let ev = chat::open_chat_event(&w2, &group, &general, community.root_epoch).unwrap();
         assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned message is dropped");
 
-        let edit = chat::build_edit_rumor(rogue.public_key(), &general, community.root_epoch, &m1_id, "rewritten", 7_000);
+        let edit = chat::build_edit_rumor(rogue.public_key(), &general, community.root_epoch, &m1_id, "rewritten", &[], 7_000);
         let (we, _) = chat::seal_chat_rumor(&edit, &group, &rogue, Timestamp::from_secs(7), false).unwrap();
         let ev = chat::open_chat_event(&we, &group, &general, community.root_epoch).unwrap();
         assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a banned edit is dropped");
@@ -1139,7 +1209,7 @@ mod tests {
         let msg = chat::build_message_rumor(member.public_key(), &general, community.root_epoch, "v1 text", None, &[], vec![], 5_000);
         let msg_id = msg.id.unwrap().to_hex();
         let (mw, _) = chat::seal_chat_rumor(&msg, &group, &member, Timestamp::from_secs(5), false).unwrap();
-        let edit = chat::build_edit_rumor(member.public_key(), &general, community.root_epoch, &msg_id, "v2 text", 6_000);
+        let edit = chat::build_edit_rumor(member.public_key(), &general, community.root_epoch, &msg_id, "v2 text", &[], 6_000);
         let (ew, _) = chat::seal_chat_rumor(&edit, &group, &member, Timestamp::from_secs(6), false).unwrap();
         for w in [&mw, &ew] {
             if let Ok(ev) = chat::open_chat_event(w, &group, &general, community.root_epoch) {
@@ -1181,7 +1251,7 @@ mod tests {
 
         // A stranger (member, holds the key) forges an edit of the author's message.
         let stranger = Keys::generate();
-        let edit = chat::build_edit_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, "TAMPERED", 6_000);
+        let edit = chat::build_edit_rumor(stranger.public_key(), &general, community.root_epoch, &msg_id, "TAMPERED", &[], 6_000);
         let (ew, _) = chat::seal_chat_rumor(&edit, &group, &stranger, Timestamp::from_secs(6), false).unwrap();
         let ev = chat::open_chat_event(&ew, &group, &general, community.root_epoch).unwrap();
         assert!(persist_chat_event(&ev, &cid, &me.public_key()).await.is_none(), "a forged edit yields no outcome");

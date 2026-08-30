@@ -777,6 +777,13 @@ const BOTTOM_HOLD_MS = 900;
 let _bottomHoldUntil = 0;
 let _bottomHoldRaf = null;
 
+/** When the user last reached for the scroller themselves. WKWebView can revert
+ *  a programmatic snap during the layout that follows it, which looks exactly
+ *  like a scroll-up; only a real gesture tells the two apart. */
+let _lastScrollGesture = 0;
+for (const ev of ['wheel', 'touchmove', 'pointerdown', 'keydown'])
+    domChatMessages.addEventListener(ev, () => { _lastScrollGesture = Date.now(); }, { passive: true });
+
 /** Is the app currently asserting "we belong at the bottom"? The pin recompute
  *  consults this so a settling layout can't be mistaken for the user leaving. */
 function chatBottomHoldPending() { return Date.now() < _bottomHoldUntil; }
@@ -786,6 +793,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
     if (_bottomHoldRaf !== null) return; // already holding; the deadline just moved
     let lastHeight = domChatMessages.scrollHeight;
     let lastSet = null;   // where WE last put the view, to tell our own scroll from theirs
+    let lastSetAt = 0;
     let firstTick = true;
     const tick = () => {
         _bottomHoldRaf = null;
@@ -806,7 +814,12 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
             // is scrolling away mid-settle. Our own snaps re-open the programmatic
             // window every growth frame, which would otherwise swallow their intent
             // and leave the pin stuck on — stand down and latch it here instead.
+            //
+            // Gated on a real gesture: WKWebView reverts a snap of its own accord
+            // during the layout that follows, and an untouched trackpad cannot mean
+            // the user left.
             if (lastSet !== null && el.scrollTop < lastSet - 4
+                && _lastScrollGesture > lastSetAt
                 && height - el.scrollTop - el.clientHeight > 8) {
                 _bottomHoldUntil = 0;
                 _userScrolledAway = true;
@@ -819,6 +832,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
                     beginProgrammaticScroll();
                     el.scrollTop = height;
                     lastSet = el.scrollTop;
+                    lastSetAt = Date.now();
                 }
             }
             firstTick = false;

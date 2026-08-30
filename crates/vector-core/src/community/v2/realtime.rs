@@ -79,6 +79,11 @@ const SEEN_WRAPS_CAP: usize = 8192;
 static V2_FOLLOW_TX: LazyLock<StdMutex<Option<UnboundedSender<CommunityId>>>> = LazyLock::new(|| StdMutex::new(None));
 /// Community ids currently queued or processing — coalesces a burst to one follow.
 static V2_FOLLOW_PENDING: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
+/// Queued ids that a LIVE rotation triggered, which the worker takes ahead of the
+/// rest of its batch. Every follow is a network walk, so a boot backlog of dozens
+/// of communities is minutes — spent sitting on the dead epoch of the one that
+/// just rotated, unable to read it and indistinguishable from a strand.
+static V2_FOLLOW_URGENT: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|| StdMutex::new(HashSet::new()));
 /// Per-community follow serialization, shared by the queue worker AND the inline
 /// (headless) follow path. The worker-vs-inline CHOICE is a benign race
 /// (`follow_worker_running` is check-then-act; a worker can spawn right after a
@@ -127,7 +132,7 @@ pub async fn debug_run_follow_stages(id: &CommunityId, session: &std::sync::Arc<
         return (rekeys, "community gone".into(), "-".into());
     };
     let control = match super::service::follow_control(&transport, &c).await {
-        Ok(v) => format!("Ok(changed={})", v.is_some()),
+        Ok(v) => format!("Ok(changed={} authority={})", v.updated.is_some(), v.authority_changed),
         Err(e) => format!("ERR: {e}"),
     };
     let Ok(Some(c)) = crate::db::community::load_community_v2(id) else {
@@ -159,6 +164,7 @@ pub async fn clear() {
     // next login spawns a fresh worker.
     *V2_FOLLOW_TX.lock().unwrap() = None;
     V2_FOLLOW_PENDING.lock().unwrap().clear();
+    V2_FOLLOW_URGENT.lock().unwrap().clear();
     V2_FOLLOW_LOCKS.lock().unwrap().clear();
     // Account A's stream keys must not keep authenticating (or answering relay
     // challenges) once account B is live.
@@ -245,6 +251,35 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
 /// Refresh the v2 subscription for the held communities: register
 /// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide,
 /// mirroring v1). Idempotent on an unchanged author-set.
+/// Re-subscribe unconditionally, even if the author set is unchanged.
+///
+/// `refresh_subscription` short-circuits when the set has not moved, on the
+/// assumption that the pool re-applies live subs across reconnects. That holds for
+/// a relay that DISCONNECTS. It does not hold for one that silently drops a REQ
+/// under load — the boot sweep floods every relay for ~50s, and a relay that sheds
+/// our subscription there never reconnects, so nothing re-applies it while our own
+/// state still says it is live. The result is a client that looks subscribed and
+/// hears nothing until the author set happens to change.
+///
+/// So the post-sweep re-assert forgets the ids first: the next refresh cannot take
+/// the fast path and genuinely re-subscribes.
+pub async fn force_refresh_subscription(client: &Client) {
+    println!("[v2-sub] force re-assert begin");
+    {
+        let mut sub_guard = V2_SUB_ID.lock().await;
+        if let Some(old) = sub_guard.take() {
+            let _ = client.unsubscribe(&old).await;
+        }
+        let mut pw = V2_POOLWIDE_SUB_ID.lock().await;
+        if let Some(old) = pw.take() {
+            let _ = client.unsubscribe(&old).await;
+        }
+        // Clearing the remembered set too, so the equality check cannot match.
+        V2_SUB_SET.lock().await.clear();
+    }
+    refresh_subscription(client).await;
+}
+
 pub async fn refresh_subscription(client: &Client) {
     // Phase 1, LOCK-FREE: make sure the community relays are added + connected —
     // the slow part (a connect wait of up to ~6s). Holding the sub locks across
@@ -264,12 +299,20 @@ pub async fn refresh_subscription(client: &Client) {
             // against a still-connecting relay silently fails to register — same
             // trap as v1).
             let wanted: Vec<RelayUrl> = relays.iter().filter_map(|r| RelayUrl::parse(r).ok()).collect();
+            let wait_t = std::time::Instant::now();
             for _ in 0..24 {
                 let pool = client.relays().all().await;
                 if wanted.iter().any(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false)) {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            {
+                let pool = client.relays().all().await;
+                let up: Vec<String> = wanted.iter()
+                    .filter(|u| pool.get(u).map(|r| r.status() == RelayStatus::Connected).unwrap_or(false))
+                    .map(|u| u.to_string()).collect();
+                println!("[v2-sub] connect-wait {:?}: {}/{} wanted relays up: {:?}", wait_t.elapsed(), up.len(), wanted.len(), up);
             }
             // Register every held plane's key BEFORE subscribing, so the responder
             // can answer any NIP-42 challenge our REQs trigger. Cheap + local.
@@ -336,17 +379,35 @@ pub async fn refresh_subscription(client: &Client) {
         if let Some(old) = pw.take() {
             let _ = client.unsubscribe(&old).await;
         }
-        if let Ok(out) = client.subscribe(filter.clone()).await {
-            *pw = Some(out.value);
+        match client.subscribe(filter.clone()).await {
+            Ok(out) => {
+                println!(
+                    "[v2-sub] poolwide {}: ok {:?} failed {:?}",
+                    *out,
+                    out.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+                    out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
+                );
+                *pw = Some(out.value);
+            }
+            Err(e) => println!("[v2-sub] poolwide subscribe FAILED: {e}"),
         }
     }
-    if let Ok(out) = client
+    match client
         .subscribe(nostr_sdk::prelude::ReqTarget::manual(
             relays.iter().cloned().map(|u| (u, vec![filter.clone()])),
         ))
         .await
     {
-        *sub_guard = Some(out.value);
+        Ok(out) => {
+            println!(
+                "[v2-sub] targeted {}: ok {:?} failed {:?}",
+                *out,
+                out.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+                out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
+            );
+            *sub_guard = Some(out.value);
+        }
+        Err(e) => println!("[v2-sub] targeted subscribe FAILED: {e}"),
     }
     mark_subscription_ready();
     drop(set_guard);
@@ -447,7 +508,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 // and rekey per community (no concurrent whole-row clobber) off this hot
                 // path, so a junk-wrap flood can't head-of-line-block the notification loop.
                 inbound::DispatchedV2::Control { .. } | inbound::DispatchedV2::Rekey { .. } => {
-                    enqueue_follow(c.id());
+                    enqueue_follow_urgent(c.id());
                     return;
                 }
                 inbound::DispatchedV2::Dissolved { community_id } => {
@@ -575,17 +636,46 @@ pub fn enqueue_follow(id: &CommunityId) {
     if !pending.insert(id.0) {
         return; // already queued or processing — coalesce.
     }
-    match V2_FOLLOW_TX.lock().unwrap().as_ref() {
-        Some(tx) if tx.send(*id).is_ok() => {}
-        _ => {
-            // No worker yet — PARK the id in the pending set instead of
-            // dropping it; spawn_follow_worker drains parked ids into its
-            // fresh queue. The boot sweep's enqueues race notifs' worker
-            // spawn (they fire the moment init completes), so a pre-worker
-            // enqueue must defer, never silently vanish — a dropped boot
-            // refold leaves an offline-rotated community wedged at its old
-            // epoch until some live event happens to trigger a dispatch.
+    let closed = {
+        let tx = V2_FOLLOW_TX.lock().unwrap_or_else(|e| e.into_inner());
+        match tx.as_ref() {
+            Some(tx) if tx.send(*id).is_ok() => false,
+            // A worker that EXISTED and died leaves a closed sender. Parking
+            // against it is a permanent swallow: the id stays in `pending`, so
+            // every later enqueue coalesces into it and the unconditional call
+            // sites — including the live rotation dispatch — become no-ops for
+            // the rest of the session. Un-park instead, so the guarded callers
+            // fall back to the inline follow.
+            Some(tx) => tx.is_closed(),
+            // No worker YET — park. The boot sweep races the worker spawn, and
+            // spawn_follow_worker drains parked ids into its fresh queue; a
+            // dropped boot refold leaves an offline-rotated community wedged.
+            None => false,
         }
+    };
+    if closed {
+        pending.remove(&id.0);
+    }
+}
+
+/// [`enqueue_follow`], but the worker takes this id ahead of everything already
+/// queued. For the LIVE rotation path only: a control/rekey wrap just told us this
+/// community moved, and the boot backlog ahead of it is dozens of network walks.
+/// Promotes an id that is already queued, so coalescing can't bury the urgency.
+pub fn enqueue_follow_urgent(id: &CommunityId) {
+    V2_FOLLOW_URGENT.lock().unwrap_or_else(|e| e.into_inner()).insert(id.0);
+    enqueue_follow(id);
+}
+
+/// Take the next id, preferring one a live rotation marked urgent.
+fn pop_next_follow(queue: &mut std::collections::VecDeque<CommunityId>) -> Option<CommunityId> {
+    let pos = {
+        let urgent = V2_FOLLOW_URGENT.lock().unwrap_or_else(|e| e.into_inner());
+        if urgent.is_empty() { None } else { queue.iter().position(|id| urgent.contains(&id.0)) }
+    };
+    match pos {
+        Some(i) => queue.remove(i),
+        None => queue.pop_front(),
     }
 }
 
@@ -593,6 +683,18 @@ pub fn enqueue_follow(id: &CommunityId) {
 /// drains it, running one combined follow per community at a time. Replacing the
 /// sender (a re-`listen()`) or [`clear`] (a swap) closes the old channel so the old
 /// worker exits; the captured `std::sync::Arc<crate::db::Session>` also stops it. Idempotent per session.
+/// Most recently active community first. Ties keep arrival order, so a batch whose
+/// members have never been read (all zero) is not shuffled into an arbitrary one.
+fn prioritize_by_activity(
+    batch: Vec<CommunityId>,
+    activity: impl Fn(&CommunityId) -> u64,
+) -> Vec<CommunityId> {
+    let mut keyed: Vec<(u64, CommunityId)> = batch.into_iter().map(|id| (activity(&id), id)).collect();
+    // Stable: equal activity keeps the order the ids arrived in.
+    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
 pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
     // Re-send every pending id into the fresh queue: parked pre-worker
@@ -600,19 +702,73 @@ pub fn spawn_follow_worker(handler: Arc<dyn InboundEventHandler>) {
     // Entries stay in the set — the worker removes each as it starts
     // processing, preserving the coalescing invariant.
     {
-        let pending = V2_FOLLOW_PENDING.lock().unwrap();
+        let pending = V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner());
         for id in pending.iter() {
             let _ = tx.send(CommunityId(*id));
         }
     }
-    *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
+    *V2_FOLLOW_TX.lock().unwrap_or_else(|e| e.into_inner()) = Some(tx);
     let session = crate::db::current_session();
     crate::db::spawn_bound(async move {
-        while let Some(id) = rx.recv().await {
-            // Remove from pending BEFORE running, so a trigger arriving DURING the
-            // follow re-enqueues (and is processed after) rather than being lost.
-            V2_FOLLOW_PENDING.lock().unwrap().remove(&id.0);
-            follow_community(&session, &id, &*handler).await;
+        while let Some(first) = rx.recv().await {
+            // Drain whatever else is already waiting and take the most recently
+            // ACTIVE community first. Arrival order is boot order, which has nothing
+            // to do with what the user is reading: a community silent for weeks was
+            // ahead of the one on screen, and its walk held the queue while the
+            // active one stayed on a dead epoch — unreadable, and indistinguishable
+            // from a strand. Coalescing already bounds this batch to one entry per
+            // community.
+            let mut batch = vec![first];
+            while let Ok(next) = rx.try_recv() {
+                batch.push(next);
+            }
+            if batch.len() > 1 {
+                let last_msgs = crate::db::events::get_all_chats_last_messages().await.unwrap_or_default();
+                // Most recent message across the community's channels.
+                let activity = |cid: &CommunityId| -> u64 {
+                    crate::db::community::load_community_v2(cid)
+                        .ok()
+                        .flatten()
+                        .map(|c| {
+                            c.channels
+                                .iter()
+                                .filter_map(|ch| {
+                                    let ch_hex = crate::simd::hex::bytes_to_hex_32(&ch.id.0);
+                                    last_msgs.get(&ch_hex).and_then(|v| v.first().map(|m| m.at))
+                                })
+                                .max()
+                                .unwrap_or(0)
+                        })
+                        // A row that will not load sorts LAST: unknown is not urgent.
+                        .unwrap_or(0)
+                };
+                batch = prioritize_by_activity(batch, activity);
+            }
+            let mut queue: std::collections::VecDeque<CommunityId> = batch.into();
+            loop {
+                // Absorb what arrived while the previous follow ran. Without this the
+                // batch is frozen at drain time, and a rotation landing one item in
+                // waits out every remaining walk before it is even looked at.
+                while let Ok(next) = rx.try_recv() {
+                    queue.push_back(next);
+                }
+                let Some(id) = pop_next_follow(&mut queue) else { break };
+                // Remove from pending BEFORE running, so a trigger arriving DURING the
+                // follow re-enqueues (and is processed after) rather than being lost.
+                V2_FOLLOW_PENDING.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+                V2_FOLLOW_URGENT.lock().unwrap_or_else(|e| e.into_inner()).remove(&id.0);
+                // One community's panic must not take the worker down with it: a dead
+                // worker leaves a closed sender, and every live rotation dispatch after
+                // that is a silent no-op for the rest of the session — the whole client
+                // goes deaf to rotations, which reads to everyone else as a fork.
+                let one = std::panic::AssertUnwindSafe(follow_community(&session, &id, &*handler));
+                if futures_util::FutureExt::catch_unwind(one).await.is_err() {
+                    crate::log_warn!(
+                        "[v2:follow {}] worker caught a panic; the queue stays alive",
+                        &crate::simd::hex::bytes_to_hex_32(&id.0)[..8]
+                    );
+                }
+            }
         }
     });
 }
@@ -649,7 +805,10 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             }
             Ok(follow) if follow.self_removed => {
                 crate::log_warn!("[v2:teardown {}] REKEY EXCLUSION: an authorized rotation left us out", &community_id[..8.min(community_id.len())]);
-                let _ = crate::db::community::delete_community(&community_id);
+                // Retain the epoch keys: they open no future epoch, and dropping them
+                // destroys the ability to self-delete our own past messages. Every other
+                // self-removal trigger already retains; this one silently did not.
+                let _ = crate::db::community::delete_community_retain_keys(&community_id);
                 refresh_subscription(&client).await;
                 handler.on_community_self_removed(&community_id);
                 return;
@@ -663,8 +822,13 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
                 // Surfaced, not swallowed: with EOSE-verified fetches an AUTH-gated
                 // or dead rekey plane now reports here instead of masquerading as
                 // "no rotation" — the exact signature of an epoch wedge.
-                crate::log_warn!("[v2:follow {}] rekey follow failed (will retry on next trigger): {}", &community_id[..8.min(community_id.len())], e);
-                return;
+                //
+                // Fall THROUGH to the control pass rather than returning. Control is
+                // the authority fold; it depends on the root (unchanged by this
+                // failure), not on the rekey walk. Returning here meant a base-plane
+                // blip also skipped the roster refresh, so the next walk re-refused
+                // for lack of authority — the strand loop in a different dress.
+                crate::log_warn!("[v2:follow {}] rekey follow failed (control pass still runs): {}", &community_id[..8.min(community_id.len())], e);
             }
         }
 
@@ -672,10 +836,36 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
         let Ok(Some(current)) = crate::db::community::load_community_v2(id) else {
             return;
         };
-        let control_changed = matches!(
-            super::service::follow_control(&transport, &current).await,
-            Ok(Some(_))
-        );
+        let control = match super::service::follow_control(&transport, &current).await {
+            Ok(c) => c,
+            Err(e) => {
+                // Never swallowed: a control failure stops the roster and the floors
+                // advancing, which is exactly what freezes authority and strands this
+                // client on a dead epoch. It used to vanish into a `matches!`.
+                crate::log_warn!("[v2:follow {}] control follow failed: {}", &community_id[..8.min(community_id.len())], e);
+                super::service::ControlFollow::default()
+            }
+        };
+        let control_changed = control.updated.is_some();
+        // The authority half is what the rekey walk gates on, and the walk ran BEFORE
+        // this fold. Re-walk once, in-process, on the freshly-written state — a queue
+        // re-enqueue would be both slower and, on a coalesced queue, droppable.
+        if control.moved() {
+            if let Ok(Some(latest)) = crate::db::community::load_community_v2(id) {
+                match super::service::follow_rekeys(&transport, &latest, session).await {
+                    Ok(f) if f.self_removed || f.dissolved => {}
+                    Ok(f) if f.updated.is_some() => {
+                        refresh_subscription(&client).await;
+                        handler.on_community_refreshed(&community_id);
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::log_warn!(
+                        "[v2:follow {}] post-authority rekey re-walk failed: {}",
+                        &community_id[..8.min(community_id.len())], e
+                    ),
+                }
+            }
+        }
         // Re-judge parked key vends on EVERY pass, not only when the fold moved. A
         // vend that lands AFTER its Grant folded has nothing left to change the
         // control plane, so gating this on `changed` strands it until some unrelated
@@ -792,6 +982,44 @@ fn surface_presence(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn cid(b: u8) -> CommunityId {
+        CommunityId([b; 32])
+    }
+
+    #[test]
+    fn the_follow_queue_walks_the_community_you_are_actually_reading_first() {
+        // Arrival order is boot order, which says nothing about what the user has
+        // open. A community silent for weeks used to sit ahead of the active one and
+        // hold the queue while it stayed on a dead epoch — messages unreadable, which
+        // looks exactly like a strand.
+        let stale = cid(1);
+        let active = cid(2);
+        let middling = cid(3);
+        let batch = vec![stale, active, middling]; // arrival order: stale FIRST
+        let out = prioritize_by_activity(batch, |c| match c.0[0] {
+            1 => 1_000,          // weeks ago
+            2 => 9_000_000,      // on screen right now
+            3 => 500_000,
+            _ => 0,
+        });
+        assert_eq!(
+            out,
+            vec![active, middling, stale],
+            "the most recently active community must be followed first regardless of arrival order",
+        );
+    }
+
+    #[test]
+    fn an_all_silent_batch_keeps_its_arrival_order() {
+        // Every candidate unread (a fresh install, or communities never opened): with
+        // nothing to rank on, the order must stay the one the ids arrived in rather
+        // than becoming arbitrary.
+        let batch = vec![cid(7), cid(8), cid(9)];
+        let out = prioritize_by_activity(batch.clone(), |_| 0);
+        assert_eq!(out, batch, "equal activity is a stable sort, not a reshuffle");
+    }
     use super::*;
     use super::super::control::{genesis, CommunityMetadata};
     use crate::community::Epoch;
@@ -962,6 +1190,51 @@ mod tests {
 
         *V2_FOLLOW_TX.lock().unwrap() = None;
         V2_FOLLOW_PENDING.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn a_live_rotation_is_taken_ahead_of_a_boot_backlog() {
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
+        let backlog: Vec<CommunityId> = (1u8..=30).map(|n| CommunityId([n; 32])).collect();
+        let rotated = CommunityId([0xAA; 32]);
+
+        let mut queue: std::collections::VecDeque<CommunityId> = backlog.clone().into();
+        // The rotation lands at the BACK, exactly as a live dispatch mid-batch does.
+        queue.push_back(rotated);
+
+        // Without the mark it waits out all 30 walks.
+        assert_eq!(pop_next_follow(&mut queue.clone()), Some(backlog[0]));
+
+        V2_FOLLOW_URGENT.lock().unwrap().insert(rotated.0);
+        assert_eq!(
+            pop_next_follow(&mut queue),
+            Some(rotated),
+            "a live rotation must not queue behind dozens of unrelated network walks"
+        );
+        // Everything else keeps its prioritised order behind it.
+        assert_eq!(pop_next_follow(&mut queue), Some(backlog[0]));
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
+    }
+
+    #[test]
+    fn urgency_promotes_an_id_already_queued() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CommunityId>();
+        *V2_FOLLOW_TX.lock().unwrap() = Some(tx);
+        V2_FOLLOW_PENDING.lock().unwrap().clear();
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
+
+        let id = CommunityId([0x33; 32]);
+        enqueue_follow(&id); // boot catch-up queued it first
+        // The live rotation coalesces against that entry — the urgency must still land,
+        // or the promotion is silently swallowed by the dedup.
+        enqueue_follow_urgent(&id);
+        assert!(V2_FOLLOW_URGENT.lock().unwrap().contains(&id.0));
+        assert_eq!(rx.try_recv().ok(), Some(id));
+        assert!(rx.try_recv().is_err(), "still coalesced to one queue entry");
+
+        *V2_FOLLOW_TX.lock().unwrap() = None;
+        V2_FOLLOW_PENDING.lock().unwrap().clear();
+        V2_FOLLOW_URGENT.lock().unwrap().clear();
     }
 
     #[tokio::test]

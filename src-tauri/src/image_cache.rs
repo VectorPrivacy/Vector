@@ -371,7 +371,7 @@ pub async fn cache_image<R: Runtime>(
     };
 
     // Validate the image
-    let extension = match validate_image(&bytes) {
+    let mut extension = match validate_image(&bytes) {
         Some(ext) => ext,
         None => {
             // Unsupported format (e.g. AVIF, absent from our image build) or a
@@ -380,6 +380,44 @@ pub async fn cache_image<R: Runtime>(
             return CacheResult::Failed("Invalid or corrupted image".to_string());
         }
     };
+
+    // Oversized ANIMATIONS get normalized before they ever touch the webview:
+    // WebKit decodes a GIF's full logical screen for every <img> showing it, so
+    // one 800px animated avatar shreds render cycles in every chat row at once.
+    // Statics stay verbatim — a still costs one decode, keep its quality.
+    let mut bytes = bytes;
+    if let Some((target, budget, label)) = animated_display_target(image_type) {
+        if crate::shared::image::animated_format(&bytes).is_some() && needs_animated_transcode(&bytes, target) {
+            // Blocking pool: a monster GIF costs up to a second or two of CPU,
+            // which must not stall the async workers serving everything else.
+            let owned = bytes;
+            let (returned, result) = match tokio::task::spawn_blocking(move || {
+                let r = crate::shared::image::transcode_animated_budgeted(&owned, target, budget);
+                (owned, r)
+            })
+            .await
+            {
+                Ok(pair) => pair,
+                Err(e) => return CacheResult::Failed(format!("transcode task: {e}")),
+            };
+            bytes = returned;
+            match result {
+                Ok(re) if re.bytes.len() < bytes.len() => {
+                    log_info!(
+                        "[ImageCache] {} animation normalized: {} KB -> {} KB at ≤{target}px",
+                        label, bytes.len() / 1024, re.bytes.len() / 1024
+                    );
+                    bytes = re.bytes;
+                    extension = re.extension;
+                }
+                // A transcode that GREW (tiny-dims, huge-frame-count inputs
+                // re-quantized) or failed keeps the original — fail open to
+                // today's behavior, never lose the image over an optimization.
+                Ok(_) => {}
+                Err(e) => log_debug!("[ImageCache] animation transcode skipped for {}: {}", url, e),
+            }
+        }
+    }
 
     // Get cache directory and create filename
     let cache_dir = match get_cache_dir(handle, image_type) {
@@ -400,6 +438,93 @@ pub async fn cache_image<R: Runtime>(
     log_info!("[ImageCache] Cached {} -> {}", url, path_str);
 
     CacheResult::Cached(path_str)
+}
+
+/// Display-size ceiling for a cached ANIMATION of this type, or None for types
+/// whose animations stay verbatim. An avatar renders ≤80 CSS px, so 160 covers
+/// 2x displays; a banner is a wide hero, 640 keeps motion smooth without the
+/// full-width decode cost.
+fn animated_display_target(image_type: ImageType) -> Option<(u32, usize, &'static str)> {
+    match image_type {
+        // (display-dim ceiling, byte budget the quality ladder aims for)
+        ImageType::Avatar => Some((160, 512 * 1024, "avatar")),
+        ImageType::Banner => Some((640, 1536 * 1024, "banner")),
+        _ => None,
+    }
+}
+
+/// Whether an animated file is worth re-encoding: dimensions above the display
+/// target, or heavy despite small dimensions (a frame-count bomb).
+fn needs_animated_transcode(bytes: &[u8], target: u32) -> bool {
+    const ANIMATED_BYTE_THRESHOLD: usize = 768 * 1024;
+    match crate::shared::image::animated_dims(bytes) {
+        Some((w, h)) => w > target || h > target || bytes.len() > ANIMATED_BYTE_THRESHOLD,
+        None => bytes.len() > ANIMATED_BYTE_THRESHOLD,
+    }
+}
+
+/// One-time sweep of the existing avatar/banner cache: re-encode any oversized
+/// animation already on disk down to its display target, in place. Everything
+/// cached before the download-path normalization existed was written verbatim,
+/// so the worst offenders are already local and re-download never fixes them
+/// (`AlreadyCached` short-circuits on file existence).
+///
+/// GIF-only by design: the rewrite keeps the filename, and profiles store the
+/// cached path VERBATIM (extension included) — a format change would strand
+/// every stored path. Non-GIF animations are rare and get normalized on their
+/// next natural re-download.
+///
+/// Idempotent and cheap to re-run: a normalized file fails the dimensions
+/// check by construction, so later boots read a few file headers and stop.
+pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
+    let mut rewritten = 0usize;
+    for image_type in [ImageType::Avatar, ImageType::Banner] {
+        let Some((target, budget, label)) = animated_display_target(image_type) else { continue };
+        let Ok(dir) = get_cache_dir(handle, image_type) else { continue };
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        // Largest first: the files worth sweeping for are exactly the ones
+        // hurting the webview most, so they stop hurting soonest — and a
+        // sweep interrupted by app exit resumes next boot having already
+        // taken the biggest wins.
+        let mut paths: Vec<(u64, std::path::PathBuf)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("gif"))
+            .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (m.len(), p)))
+            .collect();
+        paths.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, path) in paths {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            if crate::shared::image::animated_format(&bytes).is_none()
+                || !needs_animated_transcode(&bytes, target)
+            {
+                continue;
+            }
+            match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
+                Ok(re) if re.bytes.len() < bytes.len() => {
+                    // Temp + rename: the webview's asset protocol can read this
+                    // exact path mid-rewrite, and a truncate-then-write window
+                    // would serve it half a GIF.
+                    let tmp = path.with_extension("gif.tmp");
+                    if std::fs::write(&tmp, &re.bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_ok() {
+                        log_info!(
+                            "[ImageCache] backfill: {} {} normalized {} KB -> {} KB",
+                            label,
+                            path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                            bytes.len() / 1024,
+                            re.bytes.len() / 1024
+                        );
+                        rewritten += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log_debug!("[ImageCache] backfill skipped {:?}: {}", path.file_name(), e),
+            }
+        }
+    }
+    if rewritten > 0 {
+        log_info!("[ImageCache] backfill: {} cached animation(s) normalized", rewritten);
+    }
 }
 
 /// Cache an avatar for a user profile
@@ -838,4 +963,38 @@ pub async fn cache_url_image<R: Runtime>(
     })).ok();
 
     Ok(Some(path_str))
+}
+
+#[cfg(test)]
+mod backfill_probe {
+    /// Manual probe: run the backfill's per-file decision loop against a real
+    /// cache directory named by CACHE_DIR and say what each file decides.
+    #[test]
+    #[ignore]
+    fn probe_backfill_decisions() {
+        let dir = std::path::PathBuf::from(std::env::var("CACHE_DIR").unwrap());
+        let target: u32 = std::env::var("TARGET").unwrap().parse().unwrap();
+        let budget: usize = std::env::var("BUDGET").unwrap().parse().unwrap();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("gif") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if crate::shared::image::animated_format(&bytes).is_none() {
+                println!("{name}: not detected as animated");
+                continue;
+            }
+            if !super::needs_animated_transcode(&bytes, target) {
+                println!("{name}: under thresholds, skipped");
+                continue;
+            }
+            match crate::shared::image::transcode_animated_budgeted(&bytes, target, budget) {
+                Ok(re) if re.bytes.len() < bytes.len() => println!("{name}: WOULD REWRITE {} -> {} KB", bytes.len()/1024, re.bytes.len()/1024),
+                Ok(re) => println!("{name}: transcode grew ({} -> {} KB), kept", bytes.len()/1024, re.bytes.len()/1024),
+                Err(e) => println!("{name}: transcode failed: {e}"),
+            }
+        }
+    }
 }

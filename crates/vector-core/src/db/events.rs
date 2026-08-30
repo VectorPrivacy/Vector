@@ -750,6 +750,11 @@ pub fn get_pivx_payments_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
 }
 
 /// Get system events (member joined/left) for a chat.
+///
+/// Join/leave lines carry their member in `npub`, so a banned member's arrival is
+/// dropped by the same rule that hides what they said. These have their OWN query —
+/// the chat page never sees them — so filtering the message page alone left a wall of
+/// "has joined" from accounts the client otherwise refuses to render.
 pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEvent>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let chat_id: i64 = conn.query_row(
@@ -758,13 +763,14 @@ pub fn get_system_events_for_chat(conversation_id: &str) -> Result<Vec<StoredEve
     ).map_err(|_| "Chat not found")?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+        &format!("SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
          created_at, received_at, mine, pending, failed, wrapper_event_id, npub \
-         FROM events WHERE chat_id = ?1 AND kind = ?2 ORDER BY created_at ASC, received_at ASC"
+         FROM events WHERE chat_id = ?1 AND kind = ?2{} ORDER BY created_at ASC, received_at ASC",
+         ban_filter_sql(3))
     ).map_err(|e| format!("Failed to prepare: {}", e))?;
 
     let rows = stmt.query_map(
-        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32],
+        rusqlite::params![chat_id, event_kind::APPLICATION_SPECIFIC as i32, community_of_chat(&conn, chat_id)],
         |row| {
             let tags_json: String = row.get(5)?;
             let tags: Vec<Vec<String>> = serde_json::from_str(&tags_json).unwrap_or_default();
@@ -818,6 +824,37 @@ fn parse_event_row(row: &rusqlite::Row) -> rusqlite::Result<StoredEvent> {
     })
 }
 
+/// The community this chat's channel belongs to, or `None` for a DM.
+///
+/// Resolved once per query rather than joined per row: the ban predicate then
+/// seeks `community_bans`' primary key instead of walking chats -> channels for
+/// every candidate event.
+fn community_of_chat(conn: &rusqlite::Connection, chat_id: i64) -> Option<String> {
+    conn.query_row(
+        "SELECT cc.community_id FROM community_channels cc \
+         JOIN chats c ON c.chat_identifier = cc.channel_id WHERE c.id = ?1",
+        rusqlite::params![chat_id],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Excludes a banned author's events BEFORE `LIMIT`.
+///
+/// A ban has to hide what they already posted, not just stop the next message —
+/// and it has to do it here, in SQL. Filtering the page after it is fetched
+/// returns fewer rows than asked for, which reads to the caller as "end of
+/// history": backscroll stops early, and a wall of banned events hides
+/// everything older than itself. `?{n}` is NULL for a DM, where the whole
+/// predicate short-circuits.
+fn ban_filter_sql(param: usize) -> String {
+    format!(
+        " AND (?{param} IS NULL OR events.npub IS NULL OR NOT EXISTS ( \
+            SELECT 1 FROM community_bans b \
+            WHERE b.community_id = ?{param} AND b.npub = events.npub))"
+    )
+}
+
 /// Get events for a chat with pagination, optionally filtered by kind.
 /// Message/edit content is decrypted via maybe_decrypt.
 pub async fn get_events(
@@ -828,6 +865,7 @@ pub async fn get_events(
 ) -> Result<Vec<StoredEvent>, String> {
     let events: Vec<StoredEvent> = {
         let conn = super::get_db_connection_guard_static()?;
+        let community = community_of_chat(&conn, chat_id);
 
         if let Some(k) = kinds {
             let kind_placeholders: String = (0..k.len())
@@ -836,14 +874,15 @@ pub async fn get_events(
                 .join(",");
             let limit_param = k.len() + 2;
             let offset_param = k.len() + 3;
+            let community_param = k.len() + 4;
 
             let sql = format!(
                 "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
                  created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
-                 FROM events WHERE chat_id = ?1 AND kind IN ({}) \
+                 FROM events WHERE chat_id = ?1 AND kind IN ({}){} \
                  ORDER BY created_at DESC, received_at DESC \
                  LIMIT ?{} OFFSET ?{}",
-                kind_placeholders, limit_param, offset_param
+                kind_placeholders, ban_filter_sql(community_param), limit_param, offset_param
             );
 
             let mut stmt = conn.prepare(&sql)
@@ -852,21 +891,21 @@ pub async fn get_events(
             match k.len() {
                 1 => {
                     let rows = stmt.query_map(
-                        rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64],
+                        rusqlite::params![chat_id, k[0] as i32, limit as i64, offset as i64, community],
                         parse_event_row
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
                 },
                 2 => {
                     let rows = stmt.query_map(
-                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, limit as i64, offset as i64],
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, limit as i64, offset as i64, community],
                         parse_event_row
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
                 },
                 3 => {
                     let rows = stmt.query_map(
-                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, k[2] as i32, limit as i64, offset as i64],
+                        rusqlite::params![chat_id, k[0] as i32, k[1] as i32, k[2] as i32, limit as i64, offset as i64, community],
                         parse_event_row
                     ).map_err(|e| format!("Failed to query events: {}", e))?;
                     rows.filter_map(|r| r.ok()).collect()
@@ -875,15 +914,15 @@ pub async fn get_events(
             }
         } else {
             let mut stmt = conn.prepare(
-                "SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
+                &format!("SELECT id, kind, chat_id, user_id, content, tags, reference_id, \
                  created_at, received_at, mine, pending, failed, wrapper_event_id, npub, preview_metadata \
-                 FROM events WHERE chat_id = ?1 \
+                 FROM events WHERE chat_id = ?1{} \
                  ORDER BY created_at DESC, received_at DESC \
-                 LIMIT ?2 OFFSET ?3"
+                 LIMIT ?2 OFFSET ?3", ban_filter_sql(4))
             ).map_err(|e| format!("Failed to prepare events query: {}", e))?;
 
             let rows = stmt.query_map(
-                rusqlite::params![chat_id, limit as i64, offset as i64],
+                rusqlite::params![chat_id, limit as i64, offset as i64, community],
                 parse_event_row
             ).map_err(|e| format!("Failed to query events: {}", e))?;
             rows.filter_map(|r| r.ok()).collect()
@@ -1385,6 +1424,7 @@ pub async fn get_messages_around(
 
     let message_events: Vec<StoredEvent> = {
         let conn = super::get_db_connection_guard_static()?;
+        let community = community_of_chat(&conn, chat_id);
 
         // Resolve the anchor's FULL sort key (created_at, received_at, rowid). Paging by created_at
         // alone wedges on a wall of equal timestamps (a message burst): the query keeps returning the
@@ -1410,8 +1450,8 @@ pub async fn get_messages_around(
             "SELECT {} FROM events WHERE chat_id = ?1 AND kind IN ({}) \
              AND (created_at < ?5 OR (created_at = ?5 AND (received_at < ?6 \
                   OR (received_at = ?6 AND rowid <= ?7)))) \
-             ORDER BY created_at DESC, received_at DESC, rowid DESC LIMIT ?8",
-            cols, kind_placeholders
+             {} ORDER BY created_at DESC, received_at DESC, rowid DESC LIMIT ?8",
+            cols, kind_placeholders, ban_filter_sql(9)
         );
         let mut older_stmt = conn.prepare(&older_sql)
             .map_err(|e| format!("Failed to prepare older window query: {}", e))?;
@@ -1419,7 +1459,7 @@ pub async fn get_messages_around(
             rusqlite::params![
                 chat_id,
                 message_kinds[0] as i32, message_kinds[1] as i32, message_kinds[2] as i32,
-                anchor_at, anchor_rt, anchor_rowid, before as i64
+                anchor_at, anchor_rt, anchor_rowid, before as i64, community
             ],
             parse_event_row,
         ).map_err(|e| format!("Failed to query older window: {}", e))?;
@@ -1431,8 +1471,8 @@ pub async fn get_messages_around(
             "SELECT {} FROM events WHERE chat_id = ?1 AND kind IN ({}) \
              AND (created_at > ?5 OR (created_at = ?5 AND (received_at > ?6 \
                   OR (received_at = ?6 AND rowid > ?7)))) \
-             ORDER BY created_at ASC, received_at ASC, rowid ASC LIMIT ?8",
-            cols, kind_placeholders
+             {} ORDER BY created_at ASC, received_at ASC, rowid ASC LIMIT ?8",
+            cols, kind_placeholders, ban_filter_sql(9)
         );
         let mut newer_stmt = conn.prepare(&newer_sql)
             .map_err(|e| format!("Failed to prepare newer window query: {}", e))?;
@@ -1440,7 +1480,7 @@ pub async fn get_messages_around(
             rusqlite::params![
                 chat_id,
                 message_kinds[0] as i32, message_kinds[1] as i32, message_kinds[2] as i32,
-                anchor_at, anchor_rt, anchor_rowid, after as i64
+                anchor_at, anchor_rt, anchor_rowid, after as i64, community
             ],
             parse_event_row,
         ).map_err(|e| format!("Failed to query newer window: {}", e))?;
@@ -1664,6 +1704,8 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// CHAT-level muted/blocked filtering is left to the caller (it lives in RAM state, cheaply).
 /// SENDER-level filtering happens here: a message whose author's DM is muted or whose profile
 /// is blocked never counts, in any chat — muting a person silences their community messages too.
+/// A member BANNED from a community likewise stops counting there: a ban that still badges the
+/// channel sends the reader to look for a message the client will not render.
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
     // Anchor computed once per chat in the CTE so the count scan doesn't re-derive it per row. The
@@ -1688,6 +1730,10 @@ pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, S
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM community_channels cc \
+                     JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
+                     WHERE cc.channel_id = a.chat_identifier) \
              GROUP BY a.chat_identifier",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
@@ -1720,6 +1766,10 @@ pub async fn unread_count_for_chat(chat_identifier: &str) -> Result<u32, String>
                      SELECT chat_identifier FROM chats WHERE muted = 1 \
                      UNION \
                      SELECT npub FROM profiles WHERE is_blocked = 1)) \
+               AND NOT EXISTS ( \
+                     SELECT 1 FROM community_channels cc \
+                     JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
+                     WHERE cc.channel_id = c.chat_identifier) \
                AND e.created_at > COALESCE(( \
                      SELECT MAX(e2.created_at) FROM events e2 \
                      WHERE e2.chat_id = c.id \
@@ -2517,6 +2567,250 @@ mod tests {
             .query_map([], |r| r.get(0)).unwrap()
             .flatten().collect();
         assert_eq!(ids, vec!["b0", "b1", "b2", "b3", "b4"], "insert order preserves the rowid tiebreak");
+    }
+
+    /// Register `chat` as a channel of `community` so the ban filter can resolve it.
+    fn link_channel_to_community(chat: &str, community: &str) {
+        let conn = crate::db::get_write_connection_guard_static().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO community_channels \
+             (channel_id, community_id, channel_key, epoch, name, created_at) \
+             VALUES (?1, ?2, x'00', 0, 'general', 0)",
+            rusqlite::params![chat, community],
+        )
+        .unwrap();
+    }
+
+    /// The banlist speaks HEX and `events.npub` speaks bech32 — the store has to
+    /// bridge them or the filter silently matches nothing in production.
+    fn ban_pair() -> (String, String) {
+        let k = nostr_sdk::prelude::Keys::generate();
+        use nostr_sdk::prelude::ToBech32;
+        (k.public_key().to_hex(), k.public_key().to_bech32().unwrap())
+    }
+
+    /// A ban hides what the author already posted — not only their next message.
+    #[tokio::test]
+    async fn a_banned_authors_messages_are_not_returned() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_hide";
+        link_channel_to_community(chat, "comm_hide");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+        for (id, npub, at) in [("keep1", &good, 1_000u64), ("spam1", &raider, 2_000), ("keep2", &good, 3_000)] {
+            let msg = Message { id: id.into(), content: "hi".into(), at, npub: Some(npub.clone()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_hide", &[raider_hex], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let got = get_events(chat_id, None, 50, 0).await.unwrap();
+        let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"spam1"), "a banned author's existing message must not be returned: {ids:?}");
+        assert!(ids.contains(&"keep1") && ids.contains(&"keep2"), "everyone else survives: {ids:?}");
+    }
+
+    /// THE pagination guard. Filtering after `LIMIT` returns a short page, which the
+    /// caller reads as "end of history" — backscroll stops dead behind a wall of
+    /// banned events. Excluding before `LIMIT` keeps a full page full.
+    #[tokio::test]
+    async fn a_wall_of_banned_events_does_not_shorten_the_page() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_page";
+        link_channel_to_community(chat, "comm_page");
+        // 40 banned interleaved with 20 real ones, banned strictly newer so a
+        // naive newest-first page would be nothing but spam.
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+        for i in 0..20u64 {
+            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some(good.clone()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        for i in 0..40u64 {
+            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some(raider.clone()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_page", &[raider_hex], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let page = get_events(chat_id, None, 20, 0).await.unwrap();
+        assert_eq!(page.len(), 20, "a page of 20 must return 20 real messages, not what is left after filtering");
+        assert!(page.iter().all(|e| e.npub.as_deref() == Some(good.as_str())), "no banned author leaks into the page");
+    }
+
+    /// The kind-filtered path is the one the app actually calls — a page of chat
+    /// messages. Covering only the kindless branch left it unguarded.
+    #[tokio::test]
+    async fn the_kind_filtered_page_excludes_banned_authors_too() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_kinds";
+        link_channel_to_community(chat, "comm_kinds");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+        for i in 0..12u64 {
+            let msg = Message { id: format!("real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some(good.clone()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        for i in 0..30u64 {
+            let msg = Message { id: format!("spam{i}"), content: "buy".into(), at: 5_000 + i, npub: Some(raider.clone()), ..Default::default() };
+            save_message(chat, &msg).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_kinds", &[raider_hex], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let kinds = [event_kind::PRIVATE_DIRECT_MESSAGE];
+        let page = get_events(chat_id, Some(&kinds), 12, 0).await.unwrap();
+        assert_eq!(page.len(), 12, "the kind-filtered page must fill with real messages");
+        assert!(page.iter().all(|e| e.npub.as_deref() == Some(good.as_str())), "no banned author in a kind-filtered page");
+    }
+
+    /// A ban erases their arrival too. The "has joined" row is a system event
+    /// carrying the same author, so nothing about a banned account should remain
+    /// on screen — not the spam, not the trace of them walking in.
+    #[tokio::test]
+    async fn a_banned_members_join_event_is_hidden_with_their_messages() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_join";
+        link_channel_to_community(chat, "comm_join");
+        let (raider_hex, raider) = ban_pair();
+
+        save_system_event_at("joined_evt", chat, SystemEventType::MemberJoined, &raider, None, 4_000, None, None)
+            .await
+            .unwrap();
+        let msg = Message { id: "spam_after_join".into(), content: "buy".into(), at: 5_000, npub: Some(raider.clone()), ..Default::default() };
+        save_message(chat, &msg).await.unwrap();
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        // Present BEFORE the ban, or the assertions below prove nothing.
+        assert_eq!(get_events(chat_id, None, 50, 0).await.unwrap().len(), 2, "both rows are on record first");
+
+        crate::db::community::set_community_banlist("comm_join", &[raider_hex], 1).unwrap();
+
+        let got = get_events(chat_id, None, 50, 0).await.unwrap();
+        let ids: Vec<&str> = got.iter().map(|e| e.id.as_str()).collect();
+        assert!(!ids.contains(&"joined_evt"), "the join row goes with them: {ids:?}");
+        assert!(!ids.contains(&"spam_after_join"), "and so does what they said: {ids:?}");
+    }
+
+    /// A badge that counts a banned author sends the reader hunting for a message
+    /// the client will never render.
+    #[tokio::test]
+    async fn a_banned_authors_messages_do_not_badge_the_channel() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_unread";
+        link_channel_to_community(chat, "comm_unread");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+
+        let real = Message { id: "real_unread".into(), content: "hi".into(), at: 1_000, npub: Some(good.clone()), ..Default::default() };
+        save_message(chat, &real).await.unwrap();
+        for i in 0..5u64 {
+            let spam = Message { id: format!("spam_unread{i}"), content: "buy".into(), at: 2_000 + i, npub: Some(raider.clone()), ..Default::default() };
+            save_message(chat, &spam).await.unwrap();
+        }
+        assert_eq!(unread_count_for_chat(chat).await.unwrap(), 6, "before the ban everything counts");
+
+        crate::db::community::set_community_banlist("comm_unread", &[raider_hex], 1).unwrap();
+
+        assert_eq!(
+            unread_count_for_chat(chat).await.unwrap(), 1,
+            "only the message that still renders is counted"
+        );
+        let all = unread_counts().await.unwrap();
+        assert_eq!(all.get(chat).copied().unwrap_or(0), 1, "and the all-chats sweep agrees");
+    }
+
+    /// Join/leave lines have their OWN query — the chat page never sees them — so
+    /// filtering the message page alone left a wall of "has joined" from accounts
+    /// whose every message the client already refused to render.
+    #[tokio::test]
+    async fn a_banned_members_join_line_is_dropped_from_the_system_feed() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_sysfeed";
+        link_channel_to_community(chat, "comm_sysfeed");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+
+        for (id, who) in [("join_good", &good), ("join_raider", &raider)] {
+            save_system_event_at(id, chat, SystemEventType::MemberJoined, who, None, 1_000, None, None)
+                .await
+                .unwrap();
+        }
+        assert_eq!(get_system_events_for_chat(chat).unwrap().len(), 2, "both arrivals are on record");
+
+        crate::db::community::set_community_banlist("comm_sysfeed", &[raider_hex], 1).unwrap();
+
+        let feed = get_system_events_for_chat(chat).unwrap();
+        let ids: Vec<&str> = feed.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["join_good"], "the banned member's arrival goes with their messages");
+    }
+
+    /// A moderator's delete has to outlive the row it removed.
+    ///
+    /// Dropping the events row alone only hides the message until the next full
+    /// sync re-serves the original from a relay: nothing recorded that it was
+    /// removed, so it re-ingests cleanly and the deletion silently undoes itself.
+    /// Observed live — an image Sentinel deleted for NSFW reappeared after a
+    /// cold resync.
+    #[tokio::test]
+    async fn a_moderated_delete_survives_the_message_being_re_ingested() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_delete_resync";
+        let (_, author) = ban_pair();
+        let msg = Message { id: "moderated_evt".into(), content: "nsfw".into(), at: 1_000, npub: Some(author.clone()), ..Default::default() };
+        save_message(chat, &msg).await.unwrap();
+
+        // What the moderation path does on receiving the delete.
+        crate::state::note_message_deleted("moderated_evt");
+        add_message_tombstone("moderated_evt").unwrap();
+        delete_event("moderated_evt").await.unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        assert!(get_events(chat_id, None, 50, 0).await.unwrap().is_empty(), "removed on the spot");
+
+        // The relay re-serves the original on the next sync.
+        assert!(
+            crate::state::was_message_deleted("moderated_evt"),
+            "the refusal outlives the row, so the re-ingest is dropped rather than resurrecting it"
+        );
+    }
+
+    /// Backscroll windows around an anchor, so a ban has to hold there too —
+    /// otherwise jump-to-message walks straight back into the spam the chat page
+    /// refuses to show.
+    #[tokio::test]
+    async fn the_backscroll_window_excludes_banned_authors() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "channel_ban_window";
+        link_channel_to_community(chat, "comm_window");
+        let (raider_hex, raider) = ban_pair();
+        let (_, good) = ban_pair();
+
+        for i in 0..10u64 {
+            let m = Message { id: format!("w_real{i}"), content: "hi".into(), at: 1_000 + i, npub: Some(good.clone()), ..Default::default() };
+            save_message(chat, &m).await.unwrap();
+            let s = Message { id: format!("w_spam{i}"), content: "buy".into(), at: 1_500 + i, npub: Some(raider.clone()), ..Default::default() };
+            save_message(chat, &s).await.unwrap();
+        }
+        crate::db::community::set_community_banlist("comm_window", &[raider_hex], 1).unwrap();
+
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        let win = get_messages_around(chat_id, "w_real5", 20, 20).await.unwrap();
+        assert!(!win.is_empty(), "the window still returns the real messages");
+        assert!(
+            win.iter().all(|m| m.npub.as_deref() == Some(good.as_str())),
+            "no banned author reachable by jumping to a message near them",
+        );
+    }
+
+    /// A DM has no community, so the predicate must not exclude anything.
+    #[tokio::test]
+    async fn a_dm_is_unaffected_by_the_ban_filter() {
+        let (_tmp, _guard) = init_test_db();
+        let chat = "npub1peer_dm";
+        let msg = Message { id: "dm1".into(), content: "hi".into(), at: 1_000, npub: Some("npub1peer".into()), ..Default::default() };
+        save_message(chat, &msg).await.unwrap();
+        let chat_id = crate::db::id_cache::get_chat_id_by_identifier(chat).unwrap();
+        assert_eq!(get_events(chat_id, None, 50, 0).await.unwrap().len(), 1, "a DM resolves no community and filters nothing");
     }
 
     // A batched re-save must keep save_message's upsert semantics: wrapper_event_id is

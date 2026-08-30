@@ -1,7 +1,7 @@
 {
   "name": "vector",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.4-1",
   "type": "module",
   "scripts": {
     "tauri": "tauri",
@@ -9,9 +9,9 @@
     "tauri:build": "tauri build",
     "tauri:dev:bare": "tauri dev -- --no-default-features",
     "tauri:build:bare": "tauri build -- --no-default-features",
-    "dev": "npm run tauri:dev",
+    "dev": "node scripts/build-frontend.mjs --dev && npm run tauri:dev",
     "build": "npm run tauri:build",
-    "dev:bare": "npm run tauri:dev:bare",
+    "dev:bare": "node scripts/build-frontend.mjs --dev && npm run tauri:dev:bare",
     "build:bare": "npm run tauri:build:bare",
     "android:dev": "./scripts/android-dev.sh",
     "android:build": "tauri android build --target aarch64 armv7",

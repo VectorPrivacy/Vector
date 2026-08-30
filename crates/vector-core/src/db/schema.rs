@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 88;
+pub const HIGHEST_MIGRATION_ID: u32 = 90;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1294,6 +1294,57 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("migration 88: {}", e))?;
+        Ok(())
+    })?;
+
+    // Migration 89: the policy store. Bytes, not columns — a policy is hashed
+    // over the EXACT bytes it arrived as, and one day those same bytes ride a
+    // control-plane edition to every device and client. Normalising it into
+    // columns would mean re-serialising to evaluate, which changes the hash and
+    // breaks the only identity the wire has.
+    run_atomic_migration(conn, 89, "Community policy store", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_policies (
+                community_id TEXT NOT NULL,
+                policy_id    TEXT NOT NULL,
+                bytes        TEXT NOT NULL,
+                hash         TEXT NOT NULL,
+                enabled      INTEGER NOT NULL DEFAULT 1,
+                updated_at   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (community_id, policy_id)
+            )",
+            [],
+        )
+        .map_err(|e| format!("create community_policies: {e}"))?;
+        Ok(())
+    })?;
+
+    // The banlist's queryable home. It lived only as an encrypted blob on the
+    // communities row, which SQL cannot compare against — so a banned author's
+    // messages could not be excluded before LIMIT, and filtering them after it
+    // returned short pages and broke backscroll.
+    //
+    // Plaintext by necessity: `events.npub` is plaintext, and a join needs both
+    // sides in the same form. Deliberate — every message author is already stored
+    // in the clear, so the list mainly hides members who never posted, and the
+    // column it retires is one fewer for the at-rest sweep to forget.
+    run_atomic_migration(conn, 90, "Queryable community banlist", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS community_bans (
+                community_id TEXT NOT NULL,
+                npub         TEXT NOT NULL,
+                PRIMARY KEY (community_id, npub)
+            )",
+            [],
+        )
+        .map_err(|e| format!("create community_bans: {e}"))?;
+        // The hot path is 'is THIS author banned in THIS community', which the
+        // primary key already serves; this one serves 'list the bans' cheaply.
+        tx.execute(
+            "CREATE INDEX IF NOT EXISTS idx_community_bans_community ON community_bans(community_id)",
+            [],
+        )
+        .map_err(|e| format!("index community_bans: {e}"))?;
         Ok(())
     })?;
 

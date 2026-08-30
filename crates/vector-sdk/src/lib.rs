@@ -226,6 +226,9 @@ pub use vector_core::{
     VectorError,
 };
 
+/// What a [`Community::contain_raid`] call actually accomplished.
+pub use vector_core::community::v2::service::ContainmentReport;
+
 /// Alias for the SDK's error type.
 pub use vector_core::VectorError as Error;
 
@@ -513,7 +516,7 @@ impl VectorBot {
     /// metadata) and fetch recent messages into local state. Runs automatically inside
     /// [`on_message`](Self::on_message)/`listen` on connect and periodically for outage resilience;
     /// exposed for manual use (e.g. right after a known reconnect).
-    pub async fn sync_communities(&self) -> Result<()> {
+    pub async fn sync_communities(&self) -> Result<Vec<String>> {
         self.core.sync_communities().await
     }
 
@@ -1177,6 +1180,62 @@ impl Community {
         self.core.set_members_banned(&self.id, npubs, true).await
     }
 
+    /// Contain a raid: ban the raiders, cut everyone who walked in through the
+    /// invite link during the raid, and roll the community root with a **severing
+    /// refounding** — the rotation that revokes the public invite links instead of
+    /// carrying them into the new epoch.
+    ///
+    /// This is the difference between a ban and a containment. [`ban_many`] in a
+    /// public community silences the accounts you name and leaves the door open,
+    /// which is correct for spammers and useless against a raid: the next wave
+    /// walks in through the same link with fresh keys. Here the door closes with
+    /// the rotation, and only a fresh link deliberately minted by a creator
+    /// re-opens it.
+    ///
+    /// `window_start_secs` is when the raid began (unix seconds). Members who
+    /// joined at-or-after it are cut from the new epoch even if they never posted
+    /// — a raid arrives *through* the door, and a lurker who slipped in at exactly
+    /// the wrong moment can rejoin later. They are cut, not banned. Pass `0` to cut
+    /// only the accounts you name.
+    ///
+    /// Requires a Concord v2 community and the `BAN` permission. The returned
+    /// report is honest about partial failure: check
+    /// [`refound_ok`](ContainmentReport::refound_ok)
+    /// — when it is false the raiders are silenced but the door may still be open,
+    /// which is a human's problem to hear about.
+    ///
+    /// ```no_run
+    /// # async fn f(community: vector_sdk::Community, raid_began: u64) -> vector_sdk::Result<()> {
+    /// let report = community.contain_raid(&["npub1raider…", "npub1raider2…"], raid_began).await?;
+    /// if !report.refound_ok {
+    ///     // Tell someone: the community is still reachable through the old link.
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn contain_raid(
+        &self,
+        npubs: &[&str],
+        window_start_secs: u64,
+    ) -> Result<ContainmentReport> {
+        self.core.contain_raid(&self.id, npubs, window_start_secs, &[]).await
+    }
+
+    /// [`contain_raid`](Self::contain_raid), plus an explicit extra cut list.
+    ///
+    /// The window cut works from Guestbook Join timestamps, which are claimed by
+    /// their AUTHORS — a quiet raider who backdated their Join reads as
+    /// established and slips through. A caller that watched the accounts arrive
+    /// on its own clock names them in `cut_also`: they are cut from the new
+    /// epoch (not banned) no matter what their Join claims.
+    pub async fn contain_raid_with(
+        &self,
+        npubs: &[&str],
+        window_start_secs: u64,
+        cut_also: &[&str],
+    ) -> Result<ContainmentReport> {
+        self.core.contain_raid(&self.id, npubs, window_start_secs, cut_also).await
+    }
+
     /// Lift several bans as one unit — the reductive mirror of
     /// [`ban_many`](Self::ban_many): one banlist edition removing every target,
     /// no rotation.
@@ -1486,6 +1545,34 @@ impl Member {
             .ok()
             .and_then(|r| r.get("owner").and_then(|o| o.as_str()).map(|o| o == self.npub))
             .unwrap_or(false)
+    }
+
+    /// Whether this member holds `permission` here, per the community's roster.
+    ///
+    /// The roster is the protocol's ACL, so a bot gating a command on this
+    /// refuses exactly what the community itself would — no second permission
+    /// model to drift out of step with the first. Prefer it over
+    /// [`is_admin`](Self::is_admin) wherever a specific power is the question:
+    /// "may they kick" and "are they staff" are not the same claim, and a
+    /// channel-scoped role can carry no powers at all.
+    ///
+    /// ```no_run
+    /// # use vector_sdk::vector_core::community::roles::Permissions;
+    /// # async fn f(member: vector_sdk::Member) {
+    /// if member.can(Permissions::BAN) { /* honour the command */ }
+    /// # }
+    /// ```
+    ///
+    /// Fails CLOSED: an unreadable roster answers `false`. Use
+    /// [`try_can`](Self::try_can) where that difference decides something.
+    pub fn can(&self, permission: u64) -> bool {
+        self.try_can(permission).unwrap_or(false)
+    }
+
+    /// [`can`](Self::can), with a failed roster read reported rather than folded
+    /// into "not authorized".
+    pub fn try_can(&self, permission: u64) -> Result<bool> {
+        self.core.member_has_permission(&self.community_id, &self.npub, permission)
     }
 
     /// Whether this member is an admin (the owner counts as admin).

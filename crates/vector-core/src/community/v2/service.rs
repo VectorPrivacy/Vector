@@ -333,10 +333,11 @@ pub async fn send_edit<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     target_id_hex: &str,
     new_content: &str,
+    emoji: &[(&str, &str)],
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = next_send_ms();
-    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, at_ms);
+    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
@@ -678,7 +679,7 @@ pub async fn fetch_channel_history<T: Transport + ?Sized>(
                     ..Default::default()
                 };
                 if let Ok(evs) = transport.fetch_plane(plane.keys(), &q, &community.relays).await {
-                    for e in evs {
+                    for e in evs.events {
                         if wrap_ids.insert(e.id) {
                             wraps.push(e);
                         }
@@ -1027,6 +1028,7 @@ async fn record_minted_link<T: Transport + ?Sized>(transport: &T, community: &Co
                 label: minted.label.clone(),
                 created_at: now_ms() / 1000,
                 expires_at: minted.expires_at_ms,
+                epoch: Some(community.root_epoch.0),
                 extra: Default::default(),
             });
         }
@@ -1050,12 +1052,23 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
         let my_pk = me_pk()?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let mut list = fetch_invite_list(transport, &community.relays).await?.ok_or("no invite list found to revoke from")?;
-        let entry = list
-            .entries
-            .iter()
-            .find(|e| e.token == token_hex && e.community_id == cid_hex)
-            .cloned()
-            .ok_or("no such link in the invite list")?;
+        let entry = list.entries.iter().find(|e| e.token == token_hex && e.community_id == cid_hex).cloned();
+        let Some(entry) = entry else {
+            // The list is OURS and was positively fetched; a token it neither vends is a
+            // husk — a local row kept past a revocation or privatize performed elsewhere
+            // (another device, Armada). The row carries no signer_sk, so no revocation
+            // can EVER be built from it: erroring here just leaves an entry the owner can
+            // neither use nor remove. Pruning the local record is the only completion.
+            // (Ok(None) above still errors — an unreadable list is not proof of absence.)
+            let tombstoned = list.tombstones.iter().any(|t| t.token == token_hex && t.community_id == cid_hex);
+            crate::log_warn!(
+                "[Invites] link {} is not in the fetched invite list ({}) — pruning the local record",
+                &token_hex[..token_hex.len().min(8)],
+                if tombstoned { "already tombstoned" } else { "retired elsewhere" }
+            );
+            let _ = crate::db::community::delete_public_invite(token_hex);
+            return Ok(());
+        };
         // Re-post the bundle coordinate as a revocation tombstone (creator-signed).
         let link_signer = Keys::parse(&entry.signer_sk).map_err(|_| "malformed link signer")?;
         let revocation = invite::build_revocation(&link_signer).map_err(|e| e.to_string())?;
@@ -1142,6 +1155,149 @@ pub async fn revoke_public_link<T: Transport + ?Sized>(transport: &T, community:
     .await
 }
 
+// ── Severing containment (CORD-06 Severing Refounding) ──────────────────────
+
+/// Persisted sever marks for a community: `root_epoch -> rotation at_secs`.
+/// A mark means "epoch E was a containment": link severance retries against it
+/// on every follow pass, and a rescue extension of that hop re-stamps the tag.
+pub(crate) fn sever_marks(cid_hex: &str) -> std::collections::BTreeMap<u64, u64> {
+    crate::db::settings::get_sql_setting(format!("v2_sever:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Who minted each epoch: `root_epoch -> rotator hex`. CORD-02 §5 honors a
+/// Guestbook snapshot "only from the npub whose Refounding minted that epoch",
+/// so the fold has to remember which npub that was — the owner is only the
+/// answer when the owner did the refounding.
+pub(crate) fn epoch_minters(cid_hex: &str) -> std::collections::BTreeMap<u64, String> {
+    crate::db::settings::get_sql_setting(format!("v2_minter:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Remember the rotator that minted `epoch`. Recorded at ADOPTION (and by the
+/// refounder for its own mint), so it is always an npub this device verified as
+/// an authorized rotator — never one a snapshot claims for itself.
+pub(crate) fn record_epoch_minter(cid_hex: &str, epoch: u64, rotator_hex: &str) {
+    let mut m = epoch_minters(cid_hex);
+    if m.get(&epoch).is_some_and(|held| held == rotator_hex) {
+        return;
+    }
+    m.insert(epoch, rotator_hex.to_string());
+    if let Ok(v) = serde_json::to_string(&m) {
+        let _ = crate::db::settings::set_sql_setting(format!("v2_minter:{cid_hex}"), v);
+    }
+}
+
+/// Record a severed rotation. Idempotent; marks only accumulate — the row is a
+/// few bytes and clearing one would let a failed severance read as done (B4).
+pub(crate) fn add_sever_mark(cid_hex: &str, epoch: u64, at_secs: u64) {
+    let mut marks = sever_marks(cid_hex);
+    marks.insert(epoch, at_secs);
+    if let Ok(v) = serde_json::to_string(&marks) {
+        let _ = crate::db::settings::set_sql_setting(format!("v2_sever:{cid_hex}"), v);
+    }
+}
+
+/// Sever MY OWN condemned public links: revoke (not refresh) every live link of
+/// mine for this community whose minted-at epoch sits below the highest severed
+/// epoch. The epoch is the discriminator — deterministic on every device, so a
+/// second device adopting the containment late can never eat the fresh link the
+/// owner minted to re-open (it carries the post-raid epoch), while a link minted
+/// mid-raid by a not-yet-adopted device carries the raid-era epoch and dies.
+/// Batched: every tombstone publishes, then ONE 13303 republish and ONE registry
+/// edition for the whole set. Deliberately WITHOUT `revoke_public_link`'s
+/// last-link refound escalation: every caller here sits inside a rotation
+/// (refound or follow), where that escalation self-deadlocks on `follow_lock` —
+/// and the severed rotation IS the read-cut the escalation exists to provide.
+/// Returns the number revoked; `Ok(0)` when there is nothing of mine to sever.
+async fn sever_own_links<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+) -> Result<usize, String> {
+    crate::db::scoped(async move {
+        let session = crate::db::current_session();
+        let signer = crate::signer::active_signer()?;
+        let my_pk = me_pk()?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let Some(condemn_below) = sever_marks(&cid_hex).keys().copied().max() else {
+            return Ok(0); // no containment on record — nothing is condemned.
+        };
+        // Local fast-path: the folded Registry names every creator with a live
+        // link, and my own mints also leave local rows. Neither names me → no
+        // 13303 fetch; a plain member pays nothing here.
+        let maybe_mine = crate::db::community::invite_link_set_creators(&cid_hex)
+            .map(|cs| cs.contains(&my_pk.to_hex()))
+            .unwrap_or(true)
+            || !crate::db::community::list_public_invites(&cid_hex).unwrap_or_default().is_empty();
+        if !maybe_mine {
+            return Ok(0);
+        }
+        let Some(mut list) = fetch_invite_list(transport, &community.relays).await? else {
+            return Ok(0); // no list ever published — nothing of mine exists.
+        };
+        let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+        let victims: Vec<invite::InviteEntry> = list
+            .entries
+            .iter()
+            .filter(|e| e.community_id == cid_hex && !dead.contains(e.token.as_str()) && e.epoch.unwrap_or(0) < condemn_below)
+            .cloned()
+            .collect();
+        if victims.is_empty() {
+            return Ok(0);
+        }
+        let mut revoked_tokens: Vec<String> = Vec::with_capacity(victims.len());
+        for entry in &victims {
+            // One corrupt entry must not wedge the batch (and with it the
+            // community's Public/Private reading) forever: tombstone the husk —
+            // no revocation can ever be built from it anyway.
+            match Keys::parse(&entry.signer_sk) {
+                Ok(link_signer) => {
+                    let revocation = invite::build_revocation(&link_signer).map_err(|e| e.to_string())?;
+                    transport.publish_durable(&revocation, &community.relays).await?;
+                }
+                Err(_) => crate::log_warn!("[Sever] link {} carries a malformed signer — tombstoning the husk", &entry.token[..entry.token.len().min(8)]),
+            }
+            list.tombstones.push(invite::InviteTombstone {
+                token: entry.token.clone(),
+                community_id: cid_hex.clone(),
+                extra: Default::default(),
+            });
+            revoked_tokens.push(entry.token.clone());
+        }
+        list.entries.retain(|e| !revoked_tokens.contains(&e.token));
+        let event = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.map_err(|e| e.to_string())?;
+        transport.publish(&event, &community.relays).await?;
+        let signers = live_signers_for(&list, &cid_hex, now_ms());
+        publish_invite_registry(transport, community, &session, &signers).await?;
+        for token in &revoked_tokens {
+            let _ = crate::db::community::delete_public_invite(token);
+        }
+        crate::log_info!("[Sever] revoked {} own public link(s) (containment)", revoked_tokens.len());
+        Ok(revoked_tokens.len())
+    })
+    .await
+}
+
+/// The follow-pass severance retry (B4): while a sever mark exists and I still
+/// hold live links at-or-below its line, re-attempt. A miss here is load-bearing
+/// — a stale registry keeps the community reading Public, which silently skips
+/// every future ban's refound — so this runs on every follow until it drains.
+pub(crate) async fn retry_pending_severance<T: Transport + ?Sized>(transport: &T, community: &CommunityV2) {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    if sever_marks(&cid_hex).is_empty() {
+        return;
+    }
+    if let Err(e) = sever_own_links(transport, community).await {
+        crate::log_warn!("[Sever] pending link severance retry failed (will retry next follow): {e}");
+    }
+}
+
 /// Refresh every live public link's bundle behind its stable URL (CORD-05 §2) — e.g.
 /// after a Rekey/Refounding rolled the keys — by re-posting the bundle at the same
 /// coordinate with the CURRENT community state, so a link shared once keeps working
@@ -1178,8 +1334,16 @@ pub async fn refresh_public_links<T: Transport + ?Sized>(transport: &T, communit
         let creator = my_pk;
         let now = now_ms();
         let dead: std::collections::HashSet<&str> = list.tombstones.iter().map(|t| t.token.as_str()).collect();
+        // A containment condemns every link below its epoch. Refreshing one would
+        // RE-ARM the exact door the severing rotation closed (with the new root,
+        // no less) — and once re-armed, no retry could tell it from a legitimate
+        // link. Skip here; the severance retry owns their burial.
+        let condemn_below = sever_marks(&cid_hex).keys().copied().max().unwrap_or(0);
         for entry in &list.entries {
             if entry.community_id != cid_hex || dead.contains(entry.token.as_str()) || entry.token.len() != 2 * super::derive::TOKEN_LEN {
+                continue;
+            }
+            if entry.epoch.unwrap_or(0) < condemn_below {
                 continue;
             }
             // An expired link can't be joined, so refreshing it just re-states a
@@ -1249,15 +1413,18 @@ async fn fetch_control_plane_whole<T: Transport + ?Sized>(transport: &T, communi
     let mut oldest: Option<u64> = None;
     let mut until: Option<u64> = None;
     for page in 0..COMPACT_MAX_PAGES {
-        // Quorum, DECLARED (the until→Full transport floor is gone): these
-        // control reads tolerate a partial union — their fold semantics are
-        // fail-safe on gaps (seeded banlists, withheld roster cache).
+        // Full, not Quorum: `None` here means "could not be read whole", and a
+        // majority that simply lacks another creator's Registry answers as fast as
+        // one that has it — so a Quorum read returns Some(empty) and the plane reads
+        // link-free. The ban path turns that into a Refounding of a PUBLIC community,
+        // which CORD-05 §5 forbids: the link refresh re-posts the bundle behind the
+        // same URL, so the rotation severs nothing and buries foreign-link joiners.
         let query = Query {
             kinds: vec![stream::KIND_WRAP],
             authors: vec![control.pk_hex()],
             until,
             limit: Some(FOLLOW_PAGE),
-            evidence: crate::community::transport::Evidence::Quorum,
+            evidence: crate::community::transport::Evidence::Full,
             ..Default::default()
         };
         let Ok(wraps) = transport.fetch(&query, &community.relays).await else { return None };
@@ -1391,18 +1558,19 @@ async fn accept_bundle<T: Transport + ?Sized>(
                 && v.community_id == community.id().0
                 && v.community_root == community.community_root
         });
-        let (community, join_heads, join_banlist, join_pins, join_banlist_content) = match handoff {
-            Some(v) => {
-                let mut c = v.folded;
-                // The preview holds no acquisition time — stamp the JOIN's.
-                c.created_at_ms = at_ms;
-                (c, v.heads, v.banned, v.pins, v.banlist_persist)
-            }
-            None => {
-                let vj = verify_owner_root_and_reconcile(transport, community).await?;
-                (vj.community, vj.heads, vj.banned, vj.pins, vj.banlist_persist)
-            }
-        };
+        let (community, join_heads, join_banlist, join_pins, join_banlist_content, join_roles, join_authority_heads) =
+            match handoff {
+                Some(v) => {
+                    let mut c = v.folded;
+                    // The preview holds no acquisition time — stamp the JOIN's.
+                    c.created_at_ms = at_ms;
+                    (c, v.heads, v.banned, v.pins, v.banlist_persist, v.roles, v.authority_heads)
+                }
+                None => {
+                    let vj = verify_owner_root_and_reconcile(transport, community).await?;
+                    (vj.community, vj.heads, vj.banned, vj.pins, vj.banlist_persist, vj.roles, vj.authority_heads)
+                }
+            };
 
         // A dissolved community is a grave (CORD-02 §9): refuse to join it.
         if is_dissolved(transport, &community).await {
@@ -1425,7 +1593,7 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // state outrunning its floor); the first post-join follow then can't persist a
         // state below what this join already showed.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        for h in &join_heads {
+        for h in join_heads.iter().chain(join_authority_heads.iter()) {
             crate::db::community::set_edition_head_at_epoch(&cid_hex, &h.entity_hex, h.version, &h.self_hash, &h.inner_id, community.root_epoch.0)?;
         }
         crate::db::community::save_community_v2(&community)?;
@@ -1446,6 +1614,14 @@ async fn accept_bundle<T: Transport + ?Sized>(
         // follow — a join backfills state, it doesn't announce edits.
         if let Some((banned_list, version)) = &join_banlist_content {
             let _ = crate::db::community::set_community_banlist(&cid_hex, banned_list, *version as i64);
+        }
+        // The ROSTER, same rule as the banlist and pins above: the walk already
+        // paid for it. Persisted BEFORE the channels register, because the first
+        // history ingest reads it to honor moderation hides — an empty roster
+        // authorizes nobody, so every admin-hidden message would render to the
+        // fresh member until the follow worker's queued re-walk landed.
+        if let Some((roles, at)) = &join_roles {
+            let _ = crate::db::community::set_community_roles(&cid_hex, roles, *at);
         }
         for (channel_hex, content, version, _author, _at) in &join_pins {
             if matches!(
@@ -1532,6 +1708,18 @@ struct VerifiedJoin {
     pins: Vec<(String, String, u64, String, u64)>,
     /// The authorized banlist head's content + version, for local persistence.
     banlist_persist: Option<(Vec<String>, u64)>,
+    /// The FULL authorized roster (admins included) from the same walk, with the
+    /// newest roster edition's `created_at`. `None` when the fold saw a gap.
+    ///
+    /// This is the one authority artifact the join used to throw away — and a
+    /// fresh member whose roster is empty until the follow worker's re-walk
+    /// renders every moderator-hidden message in the meantime: the hide gate
+    /// reads the stored roster, and an empty roster authorizes nobody.
+    roles: Option<(crate::community::roles::CommunityRoles, i64)>,
+    /// Role/Grant/Banlist heads folded under the full authority, so an
+    /// ADMIN-signed grant seeds the same refuse-downgrade floor an owner-signed
+    /// one does.
+    authority_heads: Vec<FoldedHead>,
 }
 
 async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
@@ -1694,12 +1882,26 @@ async fn verify_owner_root_and_reconcile<T: Transport + ?Sized>(
     // roster). Only the pins are taken from this pass — the DOCUMENT adoption above
     // stays owner-only, its stricter envelope unchanged.
     let pins = apply_control_fold(&community, &all_editions, &empty_floors, &authority_full).pins_persist;
+    // The newest roster edition's stamp, exactly as follow_control computes it, so
+    // the follow's own freshness gate composes with a join-seeded roster.
+    let newest_roster_at = all_editions
+        .iter()
+        .filter(|e| e.vsk == vsk::ROLE || e.vsk == vsk::GRANT || e.vsk == vsk::BANLIST)
+        .map(|e| e.created_at as i64)
+        .max()
+        .unwrap_or(0);
+    // An anchored walk read the plane back to genesis, so the window is complete
+    // by construction; `gapped` still gates the persist for the same reason
+    // follow_control's does — a withheld edition must not fold into a baseline.
+    let roles = (!authority_full.gapped).then(|| (authority_full.roles.clone(), newest_roster_at));
     Ok(VerifiedJoin {
         community: fold.updated.unwrap_or(community),
         heads: fold.heads,
         banned: authority_full.banned,
         pins,
         banlist_persist: authority_full.banlist_persist,
+        roles,
+        authority_heads: authority_full.heads,
     })
 }
 
@@ -1832,6 +2034,8 @@ struct VerifiedPreview {
     /// persists them exactly like a direct join.
     pins: Vec<(String, String, u64, String, u64)>,
     banlist_persist: Option<(Vec<String>, u64)>,
+    roles: Option<(crate::community::roles::CommunityRoles, i64)>,
+    authority_heads: Vec<FoldedHead>,
 }
 static VERIFIED_PREVIEW: std::sync::Mutex<Option<VerifiedPreview>> = std::sync::Mutex::new(None);
 const VERIFIED_PREVIEW_TTL: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1866,6 +2070,8 @@ pub async fn preview_bundle<T: Transport + ?Sized>(transport: &T, bundle: &Commu
                 banned: vj.banned,
                 pins: vj.pins,
                 banlist_persist: vj.banlist_persist,
+                roles: vj.roles,
+                authority_heads: vj.authority_heads,
             });
             Ok(folded)
         }
@@ -2129,6 +2335,30 @@ async fn fetch_guestbook_events<T: Transport + ?Sized>(
 /// authority (owner-supreme kicks, refounder snapshots), union observed authors
 /// plus every roster grantee, subtract the banlist, and pin the proven owner.
 /// One implementation, so the live and stored reads can't drift.
+/// Whose Guestbook snapshot seeds this community's CURRENT epoch (CORD-02 §5):
+/// "honored only from the npub whose Refounding minted that epoch". That is the
+/// owner only when the owner did the refounding.
+///
+/// Vector read it as owner-always, so an admin's — or a moderation bot's —
+/// refounding rolled the epoch and vended the keys while its survivor list was
+/// discarded. Every client then folded its own accumulated Joins instead: members
+/// the containment had cut lingered on the roster, and no two clients agreed on it.
+///
+/// The minter comes from the rotation this device VERIFIED and adopted, never from
+/// the snapshot, so writing a snapshot grants nobody authority over it. An epoch
+/// adopted before minters were recorded has no entry and falls back to the owner —
+/// the previous behaviour, never a wider one. Genesis (epoch 0) has no refounder and
+/// therefore no snapshot power at all.
+fn snapshot_authority_for(cid_hex: &str, community: &CommunityV2, owner: &PublicKey) -> Option<PublicKey> {
+    if community.root_epoch.0 == 0 {
+        return None;
+    }
+    let minted_by = epoch_minters(cid_hex)
+        .get(&community.root_epoch.0)
+        .and_then(|h| PublicKey::from_hex(h).ok());
+    Some(minted_by.unwrap_or(*owner))
+}
+
 fn fold_members(
     community: &CommunityV2,
     events: &[guestbook::GuestbookEvent],
@@ -2161,7 +2391,8 @@ fn fold_members(
     // send/receive gates authorize any BAN-holder to refound, but their snapshot is NOT honored
     // here, so a non-owner admin's refound drops silent survivors (incl. migration roster seeds)
     // until they re-post. Binding the minting rotator into snapshot authority is a spec change.
-    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_pk.as_ref();
     // Kick authority (CORD-04 §5/§6): the signer must cite a Grant we've synced AND
     // hold KICK AND strictly outrank the target (the owner is supreme; equal cannot
     // kick equal).
@@ -2170,13 +2401,224 @@ fn fold_members(
         citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
             && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
     };
-    let coalesced = guestbook::coalesce(events, now_ms(), snapshot_authority, &can_kick);
-    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at);
+    let now = now_ms();
+    let coalesced = guestbook::coalesce(events, now, snapshot_authority, &can_kick);
+    // The live refound's guest list also gates the observed-forward path in
+    // complete_memberlist, so a raid spammer whose Kick was buried by the rotation
+    // isn't silently re-admitted by their old spam.
+    let refound = guestbook::live_refound(events, snapshot_authority, now);
+    let mut members = guestbook::complete_memberlist(&coalesced, &observed, banlist, banned_at, refound.as_ref());
     // The owner is a member by definition, independent of any fetched Join.
     if !banlist.contains(&owner) {
         members.insert(owner);
     }
     Ok(members.into_iter().collect())
+}
+
+
+/// What a [`rescue_stranded_members`] pass published.
+#[derive(Debug, Default, serde::Serialize)]
+pub struct RescueReport {
+    /// Epoch hops that received catch-up blobs (1..=current, minus any with a missing root).
+    pub hops: usize,
+    /// Hops skipped because an archived root was missing — those members stay wedged there.
+    pub hops_skipped: usize,
+    pub chunks_published: usize,
+    pub targets: usize,
+}
+
+/// Re-vend the epoch chain to members a past rotation forgot.
+///
+/// DELIBERATELY not surfaced in any client: [`refound_community`]'s recipient union
+/// exists so this situation cannot arise from our own rotations. This stays as the
+/// operator/SDK primitive for strandings we don't control — another client's rotation
+/// folding a narrower memberlist, or a pre-union build. It re-keyed 39 live members
+/// once; prevention is the product, this is the fire axe.
+///
+/// A client follows rekeys hop by hop: from its held root it derives ONE plane —
+/// `base_rekey_group(held_root, cid, held_epoch + 1)` — and can never jump. A member
+/// excluded from the recipient set at hop N therefore wedges at N−1 forever; no later
+/// rotation can reach them because they cannot even derive where to look.
+///
+/// The rotator holds every archived root, so it can publish what should have existed:
+/// for each hop, additional blobs addressed to the stranded set, built with the SAME
+/// (rotator, scope, epoch, prev-commitment) as the original rotation. `collect_rotations`
+/// correlates on exactly that key, so the catch-up blobs merge into the rotation every
+/// client already validated — the stranded client's next follow simply finds its blob
+/// and walks the whole chain forward. No action needed on their side; works on any
+/// client version.
+///
+/// Intermediate blobs carry the CURRENT control pair (the historical pairs are not
+/// archived). A mid-walk client briefly holds a future control address, and the final
+/// hop — which every walk ends on — sets the same, correct pair.
+///
+/// A Guestbook snapshot addendum at the current epoch re-seeds the rescued members for
+/// outside readers (the invite page) and for clients whose fold lost them.
+pub async fn rescue_stranded_members<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    targets: &[PublicKey],
+) -> Result<RescueReport, String> {
+    crate::db::scoped(async move {
+        let mut report = RescueReport { targets: targets.len(), ..Default::default() };
+        if targets.is_empty() {
+            return Ok(report);
+        }
+        let signer = crate::signer::active_signer()?;
+        let my_pk = me_pk()?;
+        let cid = community.id();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+        let owner = community.owner()?;
+        let owner_hex = owner.to_hex();
+        // Key-granting is rotation-shaped authority: the receive side only honors blobs
+        // inside rotations whose rotator it admits, so an unauthorized caller could only
+        // publish noise — but fail loudly here rather than publish it.
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+        if my_pk != owner && !roster.is_authorized(&my_pk.to_hex(), Some(&owner_hex), crate::community::roles::Permissions::BAN) {
+            return Err("rescuing stranded members requires rotation authority (owner or BAN)".to_string());
+        }
+        let control_pk = community.control_pk.ok_or("rescue requires a split community (no control pk held)")?;
+        let citation = my_authority_citation(community, &my_pk);
+
+        // Every archived root, plus the live head (belt-and-suspenders: the head is
+        // archived at rotation time, but the union costs nothing).
+        let mut roots: std::collections::BTreeMap<u64, [u8; 32]> =
+            crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX)?
+                .into_iter()
+                .map(|(e, k)| (e.0, k))
+                .collect();
+        roots.insert(community.root_epoch.0, community.community_root);
+
+        let at_secs = now_ms() / 1000;
+        for e in 1..=community.root_epoch.0 {
+            let (Some(prev_root), Some(new_root)) = (roots.get(&(e - 1)).copied(), roots.get(&e).copied()) else {
+                crate::log_warn!("[Rescue] no archived root for hop {} -> {} — members wedged there stay wedged", e - 1, e);
+                report.hops_skipped += 1;
+                continue;
+            };
+            let group = super::derive::base_rekey_group_key(&prev_root, cid, Epoch(e));
+            let prev_commit = super::derive::epoch_key_commitment(Epoch(e - 1), &prev_root);
+            // The catch-up EXTENDS the original rotation's chunk set: same correlation
+            // key, indices past its highest slot. Re-claiming a slot is not an option —
+            // collect_rotations keeps the first chunk per index, and if ours won, the
+            // original recipients in the losing chunk would fold as removed.
+            let existing = fetch_rekey_chunks(transport, &community.relays, &group).await?;
+            let start_after = existing
+                .iter()
+                .filter(|c| {
+                    c.rotator == my_pk
+                        && c.scope == super::rekey::RekeyScope::Root
+                        && c.new_epoch == Epoch(e)
+                        && c.prev_commit == prev_commit
+                })
+                .map(|c| c.chunk.0.max(c.chunk.1))
+                .max()
+                .unwrap_or(0);
+            // The owner rides every catch-up chunk: an extension inherits the original
+            // chunks' owner blob, but a plane a relay withheld folds ours standalone,
+            // and a rotation without an owner blob is inadmissible by design.
+            let mut recipients: Vec<PublicKey> = targets.to_vec();
+            if !recipients.contains(&my_pk) {
+                recipients.push(my_pk);
+            }
+            let mut blobs = Vec::with_capacity(recipients.len());
+            for r in &recipients {
+                // Staff get the control secret exactly as a live rotation would give it.
+                let staff = *r == my_pk || roster.is_staff(&r.to_hex(), Some(&owner_hex));
+                let ctl_root = if staff { community.control_root.as_ref() } else { None };
+                blobs.push(
+                    super::rekey::build_base_blob(&signer, &my_pk.to_bytes(), r, Epoch(e), &new_root, &control_pk.to_bytes(), ctl_root)
+                        .await
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            // A rescue extension can fold STANDALONE on a withheld plane, so it
+            // must re-state the hop's sever itself: from the fetched siblings, or
+            // from the persisted mark when the plane withheld even those.
+            let severed_hop = existing
+                .iter()
+                .any(|c| c.scope == super::rekey::RekeyScope::Root && c.new_epoch == Epoch(e) && c.severed)
+                || sever_marks(&cid_hex).contains_key(&e);
+            let chunks = super::rekey::build_rekey_chunk_extension(
+                &signer,
+                my_pk,
+                &group,
+                super::rekey::RekeyScope::Root,
+                Epoch(e),
+                Epoch(e - 1),
+                &prev_commit,
+                &blobs,
+                at_secs,
+                citation.as_ref(),
+                severed_hop,
+                start_after,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+            for c in &chunks {
+                transport.publish_durable(c, &community.relays).await?;
+                report.chunks_published += 1;
+            }
+            report.hops += 1;
+        }
+
+        // Re-seed them in the current epoch's Guestbook: snapshot chunks are
+        // independently useful (CORD-02 §5), so an addendum under a fresh snap id folds
+        // as Joined on every client and every outside reader. Best-effort, like a
+        // rotation's own snapshot.
+        let gb_group = super::derive::guestbook_group_key(&community.community_root, cid, community.root_epoch);
+        let snap_id = crate::community::random_32();
+        for rumor in guestbook::build_snapshot_rumors(my_pk, targets, snap_id, at_secs * 1000) {
+            if let Ok((wrap, _)) = guestbook::seal_guestbook_rumor_signed(&signer, my_pk, &rumor, &gb_group, Timestamp::from_secs(at_secs)).await {
+                let _ = transport.publish(&wrap, &community.relays).await;
+            }
+        }
+
+        crate::log_info!(
+            "[Rescue] {} member(s): {} hop(s) re-vended ({} skipped), {} chunk(s) published, snapshot addendum at epoch {}",
+            targets.len(),
+            report.hops,
+            report.hops_skipped,
+            report.chunks_published,
+            community.root_epoch.0
+        );
+        Ok(report)
+    })
+    .await
+}
+
+/// Diagnostic: the memberlist as the WIRE alone tells it — the current epoch's
+/// guestbook plane fetched fresh and folded with no local observation and no roster
+/// backstop. This is what an outside reader (the invite page) computes, so the diff
+/// against [`stored_memberlist`] is exactly the set a rotation left behind: counted
+/// locally, absent from the snapshot, holding no current key.
+pub async fn wire_guestbook_members<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+) -> Result<Vec<PublicKey>, String> {
+    let (events, _newest, _reached_end) = fetch_guestbook_events(transport, community, 0).await?;
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+    let owner = community.owner()?;
+    let owner_hex = owner.to_hex();
+    let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_pk.as_ref();
+    let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
+        let actor_hex = actor.to_hex();
+        citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
+            && roles.can_act_on_member(&actor_hex, Some(&owner_hex), &target.to_hex(), crate::community::roles::Permissions::KICK)
+    };
+    let coalesced = guestbook::coalesce(&events, now_ms(), snapshot_authority, &can_kick);
+    let banlist: std::collections::BTreeSet<PublicKey> = crate::db::community::get_community_banlist(&cid_hex)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|h| PublicKey::from_hex(h).ok())
+        .collect();
+    Ok(coalesced
+        .iter()
+        .filter(|(pk, st)| st.verdict == guestbook::Verdict::Joined && !banlist.contains(pk))
+        .map(|(pk, _)| *pk)
+        .collect())
 }
 
 /// Did the AUTHORIZED Guestbook coalesce rule `member` KICKED, per the stored plane?
@@ -2196,7 +2638,8 @@ pub fn stored_kick_verdict(community: &CommunityV2, member: &PublicKey) -> bool 
     let Ok(owner) = community.owner() else { return false };
     let owner_hex = owner.to_hex();
     let roles = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
-    let snapshot_authority = (community.root_epoch.0 > 0).then_some(&owner);
+    let snapshot_authority_pk = snapshot_authority_for(&cid_hex, community, &owner);
+    let snapshot_authority = snapshot_authority_pk.as_ref();
     let can_kick = |actor: &PublicKey, target: &PublicKey, citation: Option<&crate::community::edition::AuthorityCitation>| {
         let actor_hex = actor.to_hex();
         citation_is_synced(&cid_hex, &owner_hex, &actor_hex, citation)
@@ -2231,20 +2674,47 @@ pub async fn sync_guestbook<T: Transport + ?Sized>(
         // the rumor-id merge below dedups the re-fetched edge.
         let since = if full { 0 } else { cursor.saturating_sub(1) };
         let (fresh, newest, reached_end) = fetch_guestbook_events(transport, community, since).await?;
-        let known: std::collections::HashSet<[u8; 32]> = events.iter().map(|e| e.rumor_id).collect();
+        // Every event off this fetch came from the plane we hold the key to. The stamp is
+        // what lets the fold tell a Join carried over from a buried epoch apart from a
+        // live one; a row stored before stamping existed earns its stamp on re-read.
+        let live = Some(community.root_epoch.0);
+        let mut by_id: std::collections::HashMap<[u8; 32], usize> = events.iter().enumerate().map(|(i, e)| (e.rumor_id, i)).collect();
         let mut added = Vec::new();
-        for ev in fresh {
-            if !known.contains(&ev.rumor_id) {
-                events.push(ev.clone());
-                added.push(ev);
+        let mut restamped = false;
+        for mut ev in fresh {
+            ev.epoch = live;
+            match by_id.get(&ev.rumor_id) {
+                Some(&i) => {
+                    if events[i].epoch.is_none() {
+                        events[i].epoch = live;
+                        restamped = true;
+                    }
+                }
+                None => {
+                    // First sight on THIS client. The author writes `at_ms`; they do
+                    // not write this.
+                    let mut ev = ev;
+                    if ev.observed_at.is_none() {
+                        ev.observed_at = Some(
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        );
+                    }
+                    by_id.insert(ev.rumor_id, events.len());
+                    events.push(ev.clone());
+                    added.push(ev);
+                }
             }
         }
         // Advance ONLY on a walk that ran out of plane. `newest` counts every wrap seen,
         // including ones skipped or that failed to open, so moving it after a truncated
         // walk is what buries the events that walk never reached.
         let advanced = if reached_end { newest.max(cursor) } else { cursor };
-        if !added.is_empty() || advanced > cursor {
+        if !added.is_empty() || advanced > cursor || restamped {
             crate::db::community::set_guestbook(&cid_hex, &events, advanced)?;
+            mark_guestbook_observed_since(&cid_hex);
         }
         if full && reached_end {
             mark_guestbook_walked(&cid_hex);
@@ -2275,12 +2745,13 @@ fn mark_guestbook_walked(community_id: &str) {
 
 /// Fold ONE live guestbook event into the store (the realtime path — no fetch).
 /// Returns whether it was new.
-pub fn ingest_guestbook_event(community: &CommunityV2, ev: guestbook::GuestbookEvent, wrap_secs: u64) -> Result<bool, String> {
+pub fn ingest_guestbook_event(community: &CommunityV2, mut ev: guestbook::GuestbookEvent, wrap_secs: u64) -> Result<bool, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (mut events, cursor) = crate::db::community::get_guestbook(&cid_hex)?;
     if events.iter().any(|e| e.rumor_id == ev.rumor_id) {
         return Ok(false);
     }
+    ev.epoch = Some(community.root_epoch.0);
     events.push(ev);
     crate::db::community::set_guestbook(&cid_hex, &events, cursor.max(wrap_secs))?;
     Ok(true)
@@ -2292,6 +2763,31 @@ pub fn ingest_guestbook_event(community: &CommunityV2, ev: guestbook::GuestbookE
 /// reconnect, live ingest) keeps the store current. The live [`memberlist`]
 /// remains the authoritative walk — a refounding's rekey recipient set must
 /// never trust a possibly-stale store.
+/// Unix seconds from which this client has been following `cid_hex`'s guestbook.
+///
+/// Set once, on the first sync that stores anything, and never moved forward. It is
+/// what makes `observed_at` usable as evidence: a client that only started watching
+/// AFTER a raid began sees every member as new, so its observations prove nothing and
+/// must not be allowed to evict anyone.
+fn guestbook_observed_since(cid_hex: &str) -> Option<u64> {
+    crate::db::settings::get_sql_setting(format!("gb_observed_since:{cid_hex}"))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+}
+
+fn mark_guestbook_observed_since(cid_hex: &str) {
+    let key = format!("gb_observed_since:{cid_hex}");
+    if crate::db::settings::get_sql_setting(key.clone()).ok().flatten().is_some() {
+        return; // never moves forward — a later stamp would erase our own coverage
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = crate::db::settings::set_sql_setting(key, now.to_string());
+}
+
 pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex)?;
@@ -2435,6 +2931,41 @@ pub async fn is_dissolved<T: Transport + ?Sized>(transport: &T, community: &Comm
 /// publish, and a head we can't fetch ABORTS with ZERO published state — so a
 /// transient miss never strands a published rekey with a half-anchored plane.
 pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey]) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, false, 0, None).await
+}
+
+/// A SEVERING Refounding (CORD-06 Severing): the rotation carries the `sever`
+/// marker, and every adopter — this client included — revokes its own public
+/// invite links instead of refreshing them into the new epoch. The read-cut is
+/// real even while the community was Public: the door closes with the rotation,
+/// and only a deliberate fresh mint re-opens it.
+pub async fn refound_community_severing<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], joined_after_cut: u64) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, true, joined_after_cut, None).await
+}
+
+/// `joined_after_cut`: seconds. A member whose EARLIEST Join is at or after this is
+/// vended no key. 0 disables it. The test is positive evidence only — a member with no
+/// Join on the reachable guestbook (buried epoch, aged-out window) is NOT excluded, and
+/// an unreadable guestbook excludes nobody. Absence must never evict: five rotations
+/// once shed 39 real members that way.
+/// Re-found vending keys to `retain` ONLY (plus the owner and this device).
+///
+/// An operator picked a list; anyone not on it gets nothing, whenever they arrived.
+/// The removal-list form cannot express that: it is computed from the memberlist at
+/// one instant while the refound fetches its own later, so an account that appears in
+/// between is on neither list and is vended a key by default — implicitly RETAINED by
+/// the very purge meant to be exhaustive. An allow-list has no such gap, and unlike a
+/// join-time cut it is immune to a backdated (author-claimed) Join.
+pub async fn refound_community_retaining<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    removed: &[PublicKey],
+    retain: &[PublicKey],
+) -> Result<CommunityV2, String> {
+    refound_community_with(transport, community, removed, false, 0, Some(retain)).await
+}
+
+async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, removed: &[PublicKey], sever: bool, joined_after_cut: u64, allow_only: Option<&[PublicKey]>) -> Result<CommunityV2, String> {
     crate::db::scoped(async move {
         let cid = community.id();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
@@ -2606,9 +3137,21 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         }
 
         // Recipients: the current members minus `removed`, plus me (multi-device).
+        //
+        // UNION of the network fold and the LOCAL memberlist. The network fold only
+        // observes the recent window, so a quiet member whose Join lives on a buried
+        // epoch falls out of it — and out of the key set and snapshot — on every
+        // rotation. Five rotations in one evening shed 39 real members that way, each
+        // left wedged at the hop that first forgot them. Locally-known members are
+        // vended keys too; being forgotten is not a removal, only `removed` is.
         let members = memberlist(transport, community).await?;
         let removed_set: std::collections::HashSet<[u8; 32]> = removed.iter().map(|p| p.to_bytes()).collect();
-        let mut recipients: Vec<PublicKey> = members.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
+        let net_len = members.len();
+        let mut union: std::collections::BTreeSet<PublicKey> = members.into_iter().collect();
+        let local = stored_memberlist(community)?;
+        let local_len = local.len();
+        union.extend(local);
+        let mut recipients: Vec<PublicKey> = union.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
         if !recipients.iter().any(|p| *p == my_pk) {
             recipients.push(my_pk);
         }
@@ -2636,6 +3179,142 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         }
         let owner_hex_for_channels = community.owner().ok().map(|o| o.to_hex());
 
+        // Operator purge: vend ONLY to the chosen list.
+        //
+        // Not a time test — a hard allow-list, so an account that arrived between the
+        // operator's selection and this fetch is excluded by NOT BEING ON IT, with no
+        // window to slip through and nothing to backdate. Owner and this device are
+        // always kept: a purge must not orphan the community or lock out the operator
+        // running it.
+        if let Some(allow) = allow_only {
+            let allowed: std::collections::HashSet<[u8; 32]> = allow.iter().map(|p| p.to_bytes()).collect();
+            let before = recipients.len();
+            recipients.retain(|r| {
+                *r == my_pk
+                    || Some(r.to_hex()) == owner_hex_for_channels
+                    || allowed.contains(&r.to_bytes())
+            });
+            let dropped = before.saturating_sub(recipients.len());
+            if dropped > 0 {
+                crate::log_info!(
+                    "[Refound {}] purge: {} member(s) not on the retain list vended no key",
+                    &cid_hex[..8.min(cid_hex.len())], dropped
+                );
+            }
+        }
+
+        // Containment: vend no key to anyone who walked in DURING the raid.
+        //
+        // `removed` is a list computed at one instant; the recipient set above is a
+        // LIVE fetch taken later, and re-taken on every retry. A bot joining in that
+        // gap lands in the memberlist, misses the list, and is handed a working key
+        // for the epoch meant to evict it. Testing the join TIME instead of matching a
+        // frozen list is immune to when the fetch happens: a later read only surfaces
+        // more late joiners, and each one fails the same test.
+        //
+        // Positive evidence only. No Join on the reachable guestbook means OLD (or
+        // buried), never "new" — and an unreadable guestbook filters nobody, because
+        // failing closed here would evict the whole community on one bad read.
+        if joined_after_cut > 0 {
+            match fetch_guestbook_events(transport, community, 0).await {
+                Ok((events, _, _)) => {
+                    let mut first_seen: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+                    for ev in &events {
+                        if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
+                            let secs = at_ms / 1000;
+                            first_seen.entry(*member).and_modify(|e| *e = (*e).min(secs)).or_insert(secs);
+                        }
+                    }
+                    // A Join's `at_ms` is written by its author, so a raider can
+                    // backdate under any window computed from it. What this client
+                    // WATCHED arrive, they cannot forge — but only if we were already
+                    // following before the window opened. A client that started
+                    // watching later sees everyone as new, and trusting it would evict
+                    // the whole community.
+                    if guestbook_observed_since(&cid_hex).is_some_and(|since| since < joined_after_cut) {
+                        if let Ok((local, _)) = crate::db::community::get_guestbook(&cid_hex) {
+                            for ev in &local {
+                                let (guestbook::GuestbookEntry::Join { member, .. }, Some(seen)) = (&ev.entry, ev.observed_at) else {
+                                    continue;
+                                };
+                                // Incriminating only: an observation can move a member
+                                // LATER (catching a backdated claim), never earlier.
+                                first_seen.entry(*member).and_modify(|e| *e = (*e).max(seen)).or_insert(seen);
+                            }
+                        }
+                    }
+                    let before = recipients.len();
+                    recipients.retain(|r| {
+                        if *r == my_pk || Some(r.to_hex()) == owner_hex_for_channels {
+                            return true;
+                        }
+                        // A moderator who joined moments before a raid is still a moderator.
+                        if roster_for_channels.is_staff(&r.to_hex(), owner_hex_for_channels.as_deref()) {
+                            return true;
+                        }
+                        first_seen.get(r).is_none_or(|joined| *joined < joined_after_cut)
+                    });
+                    let dropped = before.saturating_sub(recipients.len());
+                    if dropped > 0 {
+                        crate::log_info!(
+                            "[Refound {}] containment: {} raid-window joiner(s) vended no key",
+                            &cid_hex[..8.min(cid_hex.len())], dropped
+                        );
+                    }
+                }
+                Err(e) => crate::log_warn!(
+                    "[Refound {}] guestbook unreadable — raid-window joiners NOT filtered, only the named cut is severed ({e})",
+                    &cid_hex[..8.min(cid_hex.len())]
+                ),
+            }
+        }
+
+        // STAFF COVERAGE GATE: a granted member who is not a recipient would be
+        // stranded at this hop for good — they can only ever derive `held + 1`, so
+        // no later rotation reaches them, while every other client still reads them
+        // as staff. That is silent and permanent, and it happened: an admin holding
+        // a valid grant was vended no key and only surfaced because a human noticed
+        // the member list had shrunk.
+        //
+        // A grant is consensus-complete proof of membership — the same claim
+        // `fold_members` makes when it counts granted members "even if their Join
+        // aged out of the Guestbook entirely". So the recipients must cover them.
+        // Refusing here matches the entity carry-forward directly above, which
+        // ABORTS rather than publish a rotation that drops a floored head: better a
+        // rotation that did not happen than one that quietly severs the staff.
+        //
+        // Only the CUT are exempt — removing someone is the one thing a rotation is
+        // allowed to do to them.
+        {
+            // A banned member is not owed a key; every other grant-holder is.
+            let banned = crate::db::community::get_community_banlist(&cid_hex).unwrap_or_default();
+            let missing: Vec<String> = roster_for_channels
+                .grants
+                .iter()
+                .filter(|g| !g.role_ids.is_empty())
+                .filter_map(|g| PublicKey::from_hex(&g.member).ok())
+                .filter(|pk| !removed_set.contains(&pk.to_bytes()))
+                .filter(|pk| !banned.contains(&pk.to_hex()))
+                .filter(|pk| !recipients.contains(pk))
+                .map(|pk| pk.to_hex())
+                .collect();
+            if !missing.is_empty() {
+                // The counts ride the message: which of the two folds lost them is
+                // the whole diagnosis, and a refusal that does not say leaves the
+                // next person guessing exactly as long as this one did.
+                return Err(format!(
+                    "re-founding aborted: {} granted member(s) would be vended no key and stranded at epoch {} — {}; \
+                     recipients={} (network fold {}, local fold {}); no state published",
+                    missing.len(),
+                    prev_epoch.0,
+                    missing.iter().map(|h| h[..8.min(h.len())].to_string()).collect::<Vec<_>>().join(", "),
+                    recipients.len(),
+                    net_len,
+                    local_len
+                ));
+            }
+        }
+
         // Base rekey blobs, sealed under the PRIOR root: every member's carries the
         // new root + control_pk (104 bytes); a STAFF recipient's (CORD-04 §3)
         // appends the control_root itself (136) — the rotator is staff by
@@ -2654,7 +3333,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         }
         let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
         let base_chunks =
-            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), sever)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -2692,7 +3371,7 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
                 );
             }
             let ch_group = super::derive::channel_rekey_group_key(&community.community_root, &ch.id, ch_new_epoch);
-            let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+            let ch_chunks = super::rekey::build_rekey_chunks(&signer, my_pk, &ch_group, super::rekey::RekeyScope::Channel(ch.id), ch_new_epoch, ch.epoch, &ch_prev_commit, &ch_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
                 .await
                 .map_err(|e| e.to_string())?;
             channel_updates.push((ch.id, ch_new_key, ch_new_epoch));
@@ -2757,18 +3436,38 @@ pub async fn refound_community<T: Transport + ?Sized>(transport: &T, community: 
         if let Some(client) = crate::state::nostr_client() {
             super::realtime::refresh_subscription(&client).await;
         }
-        // Refresh any live public links so their bundles carry the NEW root behind the
-        // same URL (a link shared once survives the rotation, CORD-05 §2). Idempotent,
-        // so retry a transient failure — a stranded link lands a new joiner on the dead
-        // pre-refound epoch, and there's no other trigger to heal it before the next
-        // refounding. A persistent failure is logged (refound already succeeded).
-        for attempt in 0..3u8 {
-            match refresh_public_links(transport, &updated).await {
-                Ok(()) => break,
-                Err(e) if attempt == 2 => {
-                    crate::log_warn!("v2: post-refounding public-link refresh failed after retries ({e}); live links may serve the prior root until the next refresh");
+        // We minted this epoch, so our own snapshot is what seeds it (CORD-02 §5).
+        // Recorded here so the local fold agrees with every follower's without
+        // waiting to adopt our own rotation back off the wire.
+        record_epoch_minter(&cid_hex, new_epoch.0, &my_pk.to_hex());
+        if sever {
+            // Severing: the mark persists FIRST (a crash between it and the revoke
+            // must retry, not forget — B4), then my own links are tombstoned. Other
+            // creators' links die when their clients adopt the marked rotation.
+            add_sever_mark(&cid_hex, new_epoch.0, at_secs);
+            for attempt in 0..3u8 {
+                match sever_own_links(transport, &updated).await {
+                    Ok(_) => break,
+                    Err(e) if attempt == 2 => {
+                        crate::log_warn!("v2: post-severing link revocation failed after retries ({e}); the sever mark retries it on the next follow");
+                    }
+                    Err(_) => continue,
                 }
-                Err(_) => continue,
+            }
+        } else {
+            // Refresh any live public links so their bundles carry the NEW root behind the
+            // same URL (a link shared once survives the rotation, CORD-05 §2). Idempotent,
+            // so retry a transient failure — a stranded link lands a new joiner on the dead
+            // pre-refound epoch, and there's no other trigger to heal it before the next
+            // refounding. A persistent failure is logged (refound already succeeded).
+            for attempt in 0..3u8 {
+                match refresh_public_links(transport, &updated).await {
+                    Ok(()) => break,
+                    Err(e) if attempt == 2 => {
+                        crate::log_warn!("v2: post-refounding public-link refresh failed after retries ({e}); live links may serve the prior root until the next refresh");
+                    }
+                    Err(_) => continue,
+                }
             }
         }
         Ok(updated)
@@ -2904,7 +3603,7 @@ pub async fn refound_at_birth<T: Transport + ?Sized>(
         ];
         let base_group = super::derive::base_rekey_group_key(&community.community_root, cid, new_epoch);
         let base_chunks =
-            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+            super::rekey::build_rekey_chunks(&signer, my_pk, &base_group, super::rekey::RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &base_blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
                 .await
                 .map_err(|e| e.to_string())?;
 
@@ -4491,6 +5190,185 @@ async fn run_moderation_batch<T: Transport + ?Sized>(
     my_verdict
 }
 
+// ── Raid containment (CORD-06 Severing Refounding) ──────────────────────────
+
+/// What a containment actually accomplished. Every field is an honest count —
+/// a caller (Sentinel, a moderation console) reports these to a human, so a
+/// half-done containment must never read as a closed door.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ContainmentReport {
+    /// Raiders added to the Banlist.
+    pub banned: usize,
+    /// Members cut for joining inside the raid window without being convicted.
+    pub window_cut: usize,
+    /// Root epoch before and after. Equal = the refound did NOT land.
+    pub epoch_before: u64,
+    pub epoch_after: u64,
+    /// True only if the severing refound published.
+    pub refound_ok: bool,
+    /// My own public links revoked here. Other creators' links die as their
+    /// clients adopt the severed rotation.
+    pub own_links_revoked: usize,
+    /// Creators whose links are still live pending their client's adoption.
+    pub foreign_link_creators: Vec<String>,
+    /// Non-fatal problems worth showing a human.
+    pub warnings: Vec<String>,
+}
+
+/// Contain a raid: ban the raiders, cut everyone who walked in through the door
+/// during the raid window, then perform a SEVERING Refounding — the rotation
+/// that revokes the invite links instead of carrying them into the new epoch.
+///
+/// This is the raid lane, not a general ban. An ordinary ban (even in a Public
+/// community) keeps its shipped behaviour — [`set_members_banned`] decides
+/// internally, and a public one deliberately does NOT roll the root. Here the
+/// door itself is the vector, so it closes with the rotation.
+///
+/// `window_start_secs` is the raid's opening edge: unconvicted members who
+/// joined at-or-after it are cut from the new epoch (NOT banned — an innocent
+/// caught in the window rejoins through the owner's next link). Members already
+/// present before the window are never cut, however quiet.
+pub async fn contain_raid<T: Transport + ?Sized>(
+    transport: &T,
+    community_id: &crate::community::CommunityId,
+    raiders: &[PublicKey],
+    window_start_secs: u64,
+    cut_also: &[PublicKey],
+) -> Result<ContainmentReport, String> {
+    crate::db::scoped(async move {
+        let mut report = ContainmentReport::default();
+        let community = crate::db::community::load_community_v2(community_id)?
+            .ok_or_else(|| "v2 community not found".to_string())?;
+        report.epoch_before = community.root_epoch.0;
+        report.epoch_after = community.root_epoch.0;
+        let owner = community.owner()?;
+        let my_pk = me_pk()?;
+
+        // 1. Ban the convicted. Goes through the coalescer: the banlist edition is
+        //    a read-modify-write, and a concurrent single ban would otherwise
+        //    rebuild from a stale list and erase this one. A FAILED ban (most
+        //    plausibly the 500-entry banlist ceiling under a mega-raid) must not
+        //    abort the containment: the refound below cuts the raiders
+        //    cryptographically whether or not the list could name them.
+        if !raiders.is_empty() {
+            match set_members_banned(transport, community_id, raiders, true).await {
+                Ok(()) => report.banned = raiders.len(),
+                Err(e) => report.warnings.push(format!("banlist did not land ({e}) — the refound still cuts every named raider")),
+            }
+        }
+
+        // Re-read: the ban published a Banlist edition and stripped grants.
+        let community = crate::db::community::load_community_v2(community_id)?
+            .ok_or_else(|| "v2 community not found".to_string())?;
+
+        // 2. The window cut. A raid arrives THROUGH the link, so everyone who
+        //    walked in during it is part of the wave for containment purposes —
+        //    conviction only ever names the ones who spoke. Never the owner, never
+        //    staff, never anyone whose earliest trace predates the window.
+        //
+        //    `cut_also` first: Join timestamps are AUTHOR-claimed, so a quiet
+        //    raider who backdated their Join slides under any window this fold
+        //    can compute. A caller watching arrivals on its own clock (Sentinel's
+        //    receive log) names them here and they are cut regardless.
+        let mut cut: Vec<PublicKey> = raiders.to_vec();
+        for pk in cut_also {
+            if !cut.contains(pk) {
+                cut.push(*pk);
+                report.window_cut += 1;
+            }
+        }
+        if window_start_secs > 0 {
+            let roster = crate::db::community::get_community_roles(
+                &crate::simd::hex::bytes_to_hex_32(&community.id().0),
+            )
+            .unwrap_or_default();
+            let owner_hex = owner.to_hex();
+            match fetch_guestbook_events(transport, &community, 0).await {
+                Ok((events, _, _)) => {
+                    // EARLIEST trace per member: a re-announced Join must never make
+                    // an established member read as a window joiner.
+                    let mut first_seen: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
+                    for ev in &events {
+                        if let guestbook::GuestbookEntry::Join { member, at_ms, .. } = &ev.entry {
+                            let secs = at_ms / 1000;
+                            first_seen
+                                .entry(*member)
+                                .and_modify(|e| *e = (*e).min(secs))
+                                .or_insert(secs);
+                        }
+                    }
+                    for (pk, joined) in first_seen {
+                        if joined < window_start_secs || pk == owner || pk == my_pk || cut.contains(&pk) {
+                            continue;
+                        }
+                        // Staff are never cut by a window: a moderator who joined
+                        // moments before a raid is still a moderator.
+                        if roster.is_staff(&pk.to_hex(), Some(&owner_hex)) {
+                            continue;
+                        }
+                        cut.push(pk);
+                        report.window_cut += 1;
+                    }
+                }
+                Err(e) => report
+                    .warnings
+                    .push(format!("guestbook unreadable — no window cut applied, only convicted raiders are severed ({e})")),
+            }
+        }
+
+        // 3. The severing refound. Private channels are deliberately NOT rotated
+        //    separately: the root roll re-keys every plane, and link-borne raiders
+        //    were never entitled to a private channel in the first place.
+        //
+        //    Under the MODERATION lock, exactly as `run_moderation_batch` holds it
+        //    across ITS refound: an ordinary ban racing this rotation would publish
+        //    a banlist edition the compaction fetch below has already read past,
+        //    and the new epoch would carry it away — a ban silently erased at the
+        //    moment bans matter most. Lock order (moderation → follow) matches the
+        //    shipped path. Retried: the refound's coverage gate fails closed under
+        //    exactly the relay lag a mid-raid flood produces.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let links_before = crate::db::community::list_public_invites(&cid_hex).map(|l| l.len()).unwrap_or(0);
+        let unit = moderation_lock(community_id);
+        let _guard = unit.lock().await;
+        let mut refound = Err("severing refound never attempted".to_string());
+        for attempt in 0..3u8 {
+            refound = refound_community_severing(transport, &community, &cut, window_start_secs).await;
+            if refound.is_ok() {
+                break;
+            }
+            if attempt < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1))).await;
+            }
+        }
+        match refound {
+            Ok(updated) => {
+                report.refound_ok = true;
+                report.epoch_after = updated.root_epoch.0;
+                let links_after = crate::db::community::list_public_invites(&cid_hex).map(|l| l.len()).unwrap_or(0);
+                report.own_links_revoked = links_before.saturating_sub(links_after);
+                if links_after > 0 {
+                    report.warnings.push(format!(
+                        "{links_after} of my own link(s) survived the sever — the mark retries them on the next follow"
+                    ));
+                }
+                report.foreign_link_creators = crate::db::community::invite_link_set_creators(&cid_hex)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|c| *c != my_pk.to_hex())
+                    .collect();
+            }
+            Err(e) => {
+                // The banlist landed and silences the named raiders at every honest
+                // reader, but the DOOR IS STILL OPEN. Never dress this as success.
+                report.warnings.push(format!("SEVERING REFOUND FAILED — the invite door may still be open: {e}"));
+            }
+        }
+        Ok(report)
+    })
+    .await
+}
+
 /// Edit the community metadata (vsk 0, CORD-02 §6). Gated on the reader side by
 /// `MANAGE_METADATA`.
 pub async fn edit_community_metadata<T: Transport + ?Sized>(transport: &T, community: &CommunityV2, meta: &control::CommunityMetadata) -> Result<(), String> {
@@ -4799,7 +5677,7 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
         }
         let group = channel_rekey_group_key(&community.community_root, &channel_id, epoch);
         let at_secs = now_ms() / 1000;
-        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(channel_id), epoch, Epoch(0), &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
             .await
             .map_err(|e| e.to_string())?;
         for c in &chunks {
@@ -5252,7 +6130,7 @@ async fn rekey_channel_excluding<T: Transport + ?Sized>(
         }
         let group = channel_rekey_group_key(&community.community_root, channel_id, new_epoch);
         let at_secs = now_ms() / 1000;
-        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(*channel_id), new_epoch, ch.epoch, &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref())
+        let chunks = rekey::build_rekey_chunks(&signer, my_pk, &group, RekeyScope::Channel(*channel_id), new_epoch, ch.epoch, &prev_commit, &blobs, at_secs, my_authority_citation(community, &my_pk).as_ref(), false)
             .await
             .map_err(|e| e.to_string())?;
         for c in &chunks {
@@ -5435,10 +6313,32 @@ pub async fn delete_channel<T: Transport + ?Sized>(transport: &T, community: &Co
 ///
 /// Returns the updated community iff something changed (so the caller can skip a
 /// redundant re-subscribe + refresh notification).
+/// What a control fold moved. `updated` is the community DOCUMENT (metadata,
+/// channels, adopted control root); `authority_changed` is the roster/banlist/
+/// registry — which live in their own columns and so are invisible in `updated`.
+///
+/// The distinction is load-bearing: the rekey walk's authority gates read exactly
+/// the state `authority_changed` covers, so a caller that keys its retry off
+/// `updated` alone will refuse a rotation on pass 1, silently fix the roster on
+/// pass 2, and never look again. That is a permanent strand — and a strand is a
+/// fork to everyone else.
+#[derive(Debug, Default)]
+pub struct ControlFollow {
+    pub updated: Option<CommunityV2>,
+    pub authority_changed: bool,
+}
+
+impl ControlFollow {
+    /// Did anything at all move? Either half warrants another rekey walk.
+    pub fn moved(&self) -> bool {
+        self.updated.is_some() || self.authority_changed
+    }
+}
+
 pub async fn follow_control<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
-) -> Result<Option<CommunityV2>, String> {
+) -> Result<ControlFollow, String> {
     crate::db::scoped(async move {
         community.owner()?; // fail fast if the community is somehow unproven.
         let control = control::ControlPlane::of(community);
@@ -5461,8 +6361,6 @@ pub async fn follow_control<T: Transport + ?Sized>(
         let mut editions: Vec<ParsedEdition> = Vec::new();
         let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
         let mut seen_wraps: std::collections::HashSet<nostr_sdk::prelude::EventId> = std::collections::HashSet::new();
-        let mut oldest: Option<u64> = None;
-        let mut until: Option<u64> = None;
         let mut fold = ControlFold { updated: None, heads: Vec::new(), gapped: false, pins_persist: Vec::new() };
         let mut authority = AuthoritySet::owner_only();
         // Whether this round gave up with editions still unread. The follow is
@@ -5471,57 +6369,135 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // withholds the ROSTER cache below: caching a partial authority as this
         // device's baseline is the one step that outlives the round.
         let mut truncated = true;
-        for _ in 0..FOLLOW_MAX_PAGES {
-            // Quorum, DECLARED (the until→Full transport floor is gone): these
-            // control reads tolerate a partial union — their fold semantics are
-            // fail-safe on gaps (seeded banlists, withheld roster cache).
-            let query = Query {
-                kinds: vec![stream::KIND_WRAP],
-                authors: vec![control.pk_hex()],
-                until,
-                limit: Some(FOLLOW_PAGE),
-                evidence: crate::community::transport::Evidence::Quorum,
-                ..Default::default()
-            };
-            let wraps = transport.fetch(&query, &community.relays).await?;
-            // The `until` cursor is INCLUSIVE (a `-1` step can skip same-second siblings
-            // at a page boundary); the wrap-id dedup makes re-served boundary events
-            // free, and a page with nothing new means the relay is exhausted.
-            let mut fresh = 0usize;
-            for w in &wraps {
-                if !seen_wraps.insert(w.id) {
-                    continue;
-                }
-                fresh += 1;
-                let at = w.created_at.as_secs();
-                if oldest.is_none_or(|o| at < o) {
-                    oldest = Some(at);
-                }
-                // Open + seal-verify every edition; authority is resolved by the roster
-                // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
-                if let Ok((ed, _)) = control.open(w) {
-                    if seen.insert(ed.inner_id) {
-                        editions.push(ed);
+        let mut pages_read = 0usize;
+        // Quorum answers as soon as a majority does, so a fast subset that happens not
+        // to hold an older edition is indistinguishable from that edition not existing —
+        // and the same subset answers every boot, so the retain never lifts and the
+        // roster cache freezes with no way back. This fold draws an ABSENCE verdict
+        // (`stored_complete`, `truncated`), and CORD-04 §5 makes a gap fail closed FOR
+        // THAT ENTITY and refetch. So escalate: read at Quorum, and if anything we
+        // already hold is still unaccounted for, read again at Full before concluding.
+        // Healthy folds never pay for the second tier.
+        for tier in [
+            crate::community::transport::Evidence::Quorum,
+            crate::community::transport::Evidence::Full,
+        ] {
+            let mut until: Option<u64> = None;
+            let mut oldest: Option<u64> = None;
+            truncated = true;
+            for _ in 0..FOLLOW_MAX_PAGES {
+                pages_read += 1;
+                let query = Query {
+                    kinds: vec![stream::KIND_WRAP],
+                    authors: vec![control.pk_hex()],
+                    until,
+                    limit: Some(FOLLOW_PAGE),
+                    evidence: tier,
+                    ..Default::default()
+                };
+                let wraps = transport.fetch(&query, &community.relays).await?;
+                // The `until` cursor is INCLUSIVE (a `-1` step can skip same-second siblings
+                // at a page boundary); the wrap-id dedup makes re-served boundary events
+                // free, and a page with nothing new means the relay is exhausted.
+                let mut fresh = 0usize;
+                for w in &wraps {
+                    if !seen_wraps.insert(w.id) {
+                        continue;
+                    }
+                    fresh += 1;
+                    let at = w.created_at.as_secs();
+                    if oldest.is_none_or(|o| at < o) {
+                        oldest = Some(at);
+                    }
+                    // Open + seal-verify every edition; authority is resolved by the roster
+                    // fold (CORD-04 §5), not by a signer filter here — an admin's edits fold.
+                    if let Ok((ed, _)) = control.open(w) {
+                        if seen.insert(ed.inner_id) {
+                            editions.push(ed);
+                        }
                     }
                 }
+                // Roster first (roles/grants/banlist → authorized set), then the authority-
+                // gated metadata/channel fold over the same edition set.
+                authority = fold_authority(community, &editions, &floors);
+                fold = apply_control_fold(community, &editions, &floors, &authority);
+                // "Nothing is gapped" is NOT "I have read enough".
+                //
+                // An entity we track whose editions are entirely absent from the window
+                // folds away silently — absence dangles no link, so it raises no gap. The
+                // loop therefore declared the very first page coherent and stopped, and a
+                // community whose grants sit older than one page could never re-derive its
+                // own roster: every fold offered zero grants, and only the completeness
+                // guard retaining the cache kept the admin list alive at all. That made the
+                // cache the sole surviving copy of the roster rather than a cache.
+                //
+                // So keep paging while anything we already know about is still unaccounted
+                // for. This only ever reads MORE; it cannot lose data, and it terminates on
+                // the page cap or an exhausted plane exactly as before.
+                let heads_now: std::collections::HashSet<&str> =
+                    authority.heads.iter().map(|h| h.entity_hex.as_str()).collect();
+                // A FAILED read must not read as "I track nothing" — that makes
+                // "everything is accounted for" trivially true and stops the walk at the
+                // first page, which is the exact failure this loop exists to prevent.
+                // Fail toward reading MORE.
+                let all_accounted = match crate::db::community::get_community_roles(&cid_hex) {
+                    Ok(known) => {
+                        // A roster we have not built yet accounts for nothing, so
+                        // "everything I track is present" is vacuously TRUE and stops a
+                        // COLD device at the first page — caching whatever the newest
+                        // window happened to hold as its whole baseline, and losing every
+                        // grant older than one page. The early break is an optimisation
+                        // for a client that already knows what it is looking for.
+                        (!known.roles.is_empty() || !known.grants.is_empty())
+                            && known.roles.iter().all(|r| heads_now.contains(r.role_id.as_str()))
+                            && known.grants.iter().all(|g| {
+                                crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
+                                    let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                                    heads_now.contains(eid.as_str())
+                                })
+                            })
+                    }
+                    Err(e) => {
+                        crate::log_warn!("[v2:control {}] roster read failed mid-page ({e}) — paging on rather than assuming nothing is tracked", &cid_hex[..8.min(cid_hex.len())]);
+                        false
+                    }
+                };
+                if !(fold.gapped || authority.gapped) && all_accounted {
+                    truncated = false; // coherent AND complete for everything we track
+                    break;
+                }
+                if fresh == 0 {
+                    // A FULL page with nothing new is a same-second wall no `until` steps
+                    // past, so older editions stay unreachable; a short page is the end
+                    // of the plane, and a gap in THAT is the relay withholding, not us
+                    // giving up early.
+                    truncated = wraps.len() >= FOLLOW_PAGE;
+                    break;
+                }
+                until = oldest;
             }
-            // Roster first (roles/grants/banlist → authorized set), then the authority-
-            // gated metadata/channel fold over the same edition set.
-            authority = fold_authority(community, &editions, &floors);
-            fold = apply_control_fold(community, &editions, &floors, &authority);
-            if !(fold.gapped || authority.gapped) {
-                truncated = false; // nothing is gapped: this view is coherent
+
+            if tier == crate::community::transport::Evidence::Full {
                 break;
             }
-            if fresh == 0 {
-                // A FULL page with nothing new is a same-second wall no `until` steps
-                // past, so older editions stay unreachable; a short page is the end
-                // of the plane, and a gap in THAT is the relay withholding, not us
-                // giving up early.
-                truncated = wraps.len() >= FOLLOW_PAGE;
+            let stored_so_far = crate::db::community::get_community_roles(&cid_hex).unwrap_or_default();
+            let heads_so_far: std::collections::HashSet<&str> =
+                authority.heads.iter().map(|h| h.entity_hex.as_str()).collect();
+            let accounted = stored_so_far.roles.iter().all(|r| !floors.contains_key(&r.role_id) || heads_so_far.contains(r.role_id.as_str()))
+                && stored_so_far.grants.iter().all(|g| {
+                    crate::simd::hex::hex_to_bytes_32_checked(&g.member).is_none_or(|m| {
+                        let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                        !floors.contains_key(&eid) || heads_so_far.contains(eid.as_str())
+                    })
+                });
+            if accounted {
                 break;
             }
-            until = oldest;
+            crate::log_debug!(
+                "[v2:control {}] {} stored entit(ies) unaccounted after a Quorum read — re-reading at Full before drawing an absence verdict",
+                &cid_hex[..8.min(cid_hex.len())],
+                stored_so_far.roles.len() + stored_so_far.grants.len()
+            );
         }
 
         // The fetches straddled awaits; a swap since the guard was captured must not
@@ -5529,7 +6505,7 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // A leave/delete raced this follow: writing now would resurrect the community
         // row and orphan floor rows past delete_community's wipe.
         if crate::db::community::community_protocol(community.id())?.is_none() {
-            return Ok(None);
+            return Ok(ControlFollow::default());
         }
         // Persist advanced floors BEFORE the state save (a failed floor write must not
         // let saved state outrun its floor), stamping the epoch this fold ran under —
@@ -5594,9 +6570,147 @@ pub async fn follow_control<T: Transport + ?Sized>(
         // no stored roster) folding under a plane a member has inflated past the pager.
         // `stored_complete` is trivially true with nothing stored, so without this the
         // first sync would cache a partial authority as its own baseline.
-        if !truncated && !authority.gapped && stored_complete && newest_roster_at >= crate::db::community::get_community_roles_at(&cid_hex)? {
+        let stored_at = crate::db::community::get_community_roles_at(&cid_hex)?;
+        // `stored_at == 0` is a roster with NO plane provenance: the optimistic local
+        // merge every creator writes (`merge_local_roster`) so a just-made role works
+        // before its edition folds. It is a guess about the plane, not evidence about
+        // it, so it must never out-vote a coherent fold — and it was: the seed names
+        // entities the plane no longer heads, `stored_complete` goes false forever, and
+        // the roster can never be replaced. A community's OWNER is the likeliest holder
+        // of such a seed, so the wedge lands on exactly the account whose rotations
+        // everyone else is waiting to adopt.
+        let seed_only = stored_at == 0;
+        // A floor that can NEVER be satisfied must not veto the roster forever.
+        //
+        // `stored_complete` retains the cache when a stored entity is floored but
+        // folded no head, because a withholding relay looks exactly like that. The
+        // trouble is that an entity can legitimately stop producing a head for good:
+        // its author was demoted, so `select_authorized` drops their editions; or the
+        // entity was compacted away. The veto then holds forever, the roster can never
+        // be replaced, and a client with a stale roster refuses every rotation from an
+        // admin promoted since — which is a fork, arrived at silently.
+        //
+        // So when the read was COHERENT — the whole plane paged, nothing gapped, and
+        // the fetch itself is quorum-backed — an entity that produced no head is
+        // genuinely not there as far as the reachable relay set can tell. Forget its
+        // floor and let the roster move. A read that was truncated or gapped proves
+        // nothing and still retains, which is the withholding case the guard exists
+        // for. My OWN grant is never pruned: losing my own standing on a bad read is
+        // the one mistake with no path back.
+        // NO FLOOR PRUNING. An attempt at it evicted thirteen real admins from a live
+        // community: their grant editions were merely outside the fetched window, and
+        // "the plane is serving newer editions than mine" is not evidence that a
+        // specific entity is gone. A frozen roster is a fork risk; a WRONG roster is a
+        // fork plus silent loss of everyone's standing, which is strictly worse. Until
+        // there is per-entity proof of absence, absence stays unproven.
+        // NOT gated on `authority.gapped`. That flag is a global OR across every
+        // entity — its own declaration calls it the per-entity flag that "drives
+        // older-paging" — so one unresolvable entity anywhere vetoed the whole roster
+        // cache, permanently once the plane is exhausted and more paging cannot help.
+        // CORD-04 §5 says a gap fails closed FOR THAT ENTITY, suspending and refetching
+        // it, and that already happens: a gapped entity produces no head and so is
+        // simply absent from the fold. Freezing every other entity behind it is the
+        // over-reach, and it is what left live communities unable to re-derive rosters
+        // they could otherwise read perfectly.
+        //
+        // The downgrade defence is `stored_complete`, which is untouched: nothing we
+        // already know can silently vanish. An entity we have never held cannot be
+        // stripped from us by its absence.
+        if !truncated && (stored_complete || seed_only) && newest_roster_at >= stored_at {
             authority_changed |= stored != authority.roles;
             crate::db::community::set_community_roles(&cid_hex, &authority.roles, newest_roster_at)?;
+        } else {
+            // Loud, because the failure mode is silent and total: the roster is what
+            // authorizes every rotation, so a client that can never re-cache it is
+            // permanently deaf to that admin's re-foundings — and the only symptom is
+            // an epoch that never advances.
+            // Name the BLOCKERS and what the fold actually found. Without these the
+            // warning says a decision was made but not on what evidence, which is how
+            // a wrong roster stays indistinguishable from a cautious one.
+            let mut blockers: Vec<String> = Vec::new();
+            for r in &stored.roles {
+                if floors.contains_key(&r.role_id) && !head_ents.contains(r.role_id.as_str()) {
+                    blockers.push(format!("role:{}", &r.role_id[..8.min(r.role_id.len())]));
+                }
+            }
+            for g in &stored.grants {
+                if let Some(m) = crate::simd::hex::hex_to_bytes_32_checked(&g.member) {
+                    let eid = crate::simd::hex::bytes_to_hex_32(&super::derive::grant_locator(community.id(), &m));
+                    if floors.contains_key(&eid) && !head_ents.contains(eid.as_str()) {
+                        blockers.push(format!("grant:{}", &g.member[..8.min(g.member.len())]));
+                    }
+                }
+            }
+            // Per-entity fate of every roster edition in the window. "Blocked" only
+            // says which stored entity produced no head; this says WHY — whether its
+            // editions were absent, or present and dropped, and by whom they were
+            // authored. Guessing between those three cost a day.
+            {
+                use std::collections::BTreeMap;
+                let mut fate: BTreeMap<String, (u64, u64, String, &str)> = BTreeMap::new();
+                for e in &editions {
+                    if e.vsk != vsk::ROLE && e.vsk != vsk::GRANT {
+                        continue;
+                    }
+                    let kind = if e.vsk == vsk::ROLE { "role" } else { "grant" };
+                    let eid = crate::simd::hex::bytes_to_hex_32(&e.entity_id);
+                    let slot = fate.entry(eid).or_insert((0, 0, String::new(), kind));
+                    slot.0 += 1;
+                    if e.version > slot.1 {
+                        slot.1 = e.version;
+                        slot.2 = e.author.to_hex()[..8].to_string();
+                        slot.3 = kind;
+                    }
+                }
+                let head_now: std::collections::HashSet<&str> =
+                    authority.heads.iter().map(|h| h.entity_hex.as_str()).collect();
+                let rows: Vec<String> = fate
+                    .iter()
+                    .map(|(eid, (n, v, author, kind))| {
+                        format!(
+                            "{}[{kind}]:{}ed/v{}/by{}{}{}",
+                            &eid[..8], n, v, author,
+                            if head_now.contains(eid.as_str()) {
+                                "/HEAD".to_string()
+                            } else {
+                                AUTHORITY_REFUSALS
+                                    .with(|c| c.borrow().get(eid.as_str()).copied())
+                                    .map(|r| {
+                                        let extra = MISSING_ROLE_REFS
+                                            .with(|m| m.borrow().get(eid.as_str()).cloned())
+                                            .map(|ids| format!(" wants:{ids}"))
+                                            .unwrap_or_default();
+                                        format!("/DROPPED({r}{extra})")
+                                    })
+                                    .unwrap_or_else(|| "/dropped(no candidate survived the fold)".into())
+                            },
+                            floors.get(eid).map(|f| format!("/floor@v{}", f.0)).unwrap_or_default(),
+                        )
+                    })
+                    .collect();
+                // The OWNER is the root of all authority: every other author needs a
+                // grant that traces back to them. If no edition here is owner-authored
+                // the chain cannot bootstrap at all, and that is a different bug from
+                // any individual entity being rejected.
+                crate::log_warn!(
+                    "[v2:control {}] fold accepted roles: [{}]",
+                    &cid_hex[..8.min(cid_hex.len())],
+                    authority.roles.roles.iter().map(|r| format!("{}@pos{}", &r.role_id[..8.min(r.role_id.len())], r.position)).collect::<Vec<_>>().join(" ")
+                );
+                crate::log_warn!(
+                    "[v2:control {}] owner={} — roster editions in window: [{}]",
+                    &cid_hex[..8.min(cid_hex.len())],
+                    community.owner().map(|o| o.to_hex()[..8].to_string()).unwrap_or_else(|_| "UNPROVEN".into()),
+                    rows.join(" ")
+                );
+            }
+            crate::log_warn!(
+                "[v2:control {}] roster NOT cached (truncated={} authority_gapped={} doc_gapped={} stored_complete={} newest_roster_at={} stored_at={}) — stored {}r/{}g, fold offers {}r/{}g from {} edition(s) over {} page(s), blocked by [{}]",
+                &cid_hex[..8.min(cid_hex.len())], truncated, authority.gapped, fold.gapped, stored_complete, newest_roster_at, stored_at,
+                stored.roles.len(), stored.grants.len(), authority.roles.roles.len(), authority.roles.grants.len(),
+                editions.len(), pages_read,
+                blockers.join(", ")
+            );
         }
         // Cache the folded invite Registry so Public/Private stays a sync LOCAL read
         // (v1 parity — `invite_registry` is the column every caller reads). Gated like
@@ -5667,9 +6781,9 @@ pub async fn follow_control<T: Transport + ?Sized>(
         match updated {
             Some(u) => {
                 crate::db::community::save_community_v2(&u)?;
-                Ok(Some(u))
+                Ok(ControlFollow { updated: Some(u), authority_changed })
             }
-            None => Ok(None),
+            None => Ok(ControlFollow { updated: None, authority_changed }),
         }
     })
     .await
@@ -5726,6 +6840,9 @@ async fn adopt_my_control_wrap(community: &CommunityV2, editions: &[ParsedEditio
 /// when paging further is what's wanted. The old ceiling of 4 (~2k editions) sat
 /// under a plane that 100 roles + 400 grants already outgrows before counting
 /// superseded versions, which accumulate until a compaction retires them.
+/// One walk's hop bound. A backlog deeper than this converges across passes,
+/// because every adopted hop is checkpointed before the next is attempted.
+const MAX_WALK_STEPS: usize = 128;
 const FOLLOW_MAX_PAGES: usize = 32;
 const FOLLOW_PAGE: usize = 500;
 /// Page ceiling for a COMPACTION read (CORD-06 §3: a Refounder that cannot fold
@@ -6032,7 +7149,7 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     let empty: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Preliminary roster (bans not yet applied) — the authority view the banlist head
     // is judged against.
-    let (prelim, prelim_heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty);
+    let (prelim, prelim_heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &empty, None);
 
     // Banlist (CORD-04 §4), folded AUTHORITY-aware so its two anti-roster hazards are
     // both closed:
@@ -6108,7 +7225,10 @@ fn fold_authority(community: &CommunityV2, editions: &[ParsedEdition], floors: &
     // Final roster (CORD-04 §4: a banned npub vanishes — every edition it authored is
     // dropped, and a grant TO a banned member carries no rank). Re-run selection with
     // the banned set excluded so a banned admin loses authority.
-    let (mut authorized, mut heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &banned);
+    UNCITED_ACCEPTED.with(|n| *n.borrow_mut() = 0);
+    let mut refusals: std::collections::BTreeMap<String, &'static str> = Default::default();
+    let (mut authorized, mut heads) = select_authorized(cid, &role_cands, &grant_cands, owner_hex.as_deref(), &banned, Some(&mut refusals));
+    AUTHORITY_REFUSALS.with(|c| *c.borrow_mut() = refusals);
     if let Some(bh) = banlist_head {
         heads.push(bh);
     }
@@ -6173,6 +7293,19 @@ fn citation_ok_in_fold(
     crate::community::roster::authority_citation_satisfied(&as_entity, owner_hex, &actor_hex, &grant_hex, citation)
 }
 
+thread_local! {
+    /// How many uncited editions the last fold admitted on rank alone — pre-citation
+    /// clients' output. Visibility only; the rank gates decide.
+    static UNCITED_ACCEPTED: std::cell::RefCell<u32> = const { std::cell::RefCell::new(0) };
+    /// For a grant refused on a missing role reference: which role ids were absent.
+    static MISSING_ROLE_REFS: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+    /// Refusal reasons from the most recent authority fold on this thread — read by
+    /// the roster diagnostic. Diagnostic only; nothing branches on it.
+    static AUTHORITY_REFUSALS: std::cell::RefCell<std::collections::BTreeMap<String, &'static str>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
 /// The owner-seeded delegation fixpoint (CORD-04 §1/§2), author-AWARE: per entity it
 /// takes the highest-version candidate whose author is authorized to author it under
 /// the roster resolved SO FAR, dropping unauthorized higher versions rather than
@@ -6187,6 +7320,10 @@ fn select_authorized(
     grant_cands: &std::collections::BTreeMap<String, Vec<AuthorityCand>>,
     owner_hex: Option<&str>,
     excluded: &std::collections::BTreeSet<String>,
+    // Why each entity was refused, for diagnosis. A rejection here is invisible by
+    // construction — every gate is a bare `continue` — so a roster that silently
+    // collapses gives a reader nothing to go on.
+    mut why: Option<&mut std::collections::BTreeMap<String, &'static str>>,
 ) -> (crate::community::roles::CommunityRoles, Vec<FoldedHead>) {
     use crate::community::roles::{CommunityRoles, Permissions};
     let mut accepted = CommunityRoles::default();
@@ -6226,19 +7363,42 @@ fn select_authorized(
                 for c in cands[i..hi].iter().rev() {
                     let Some(role) = &c.role else { continue };
                     let ah = c.author.to_hex();
+                    let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
+                        if let Some(m) = w.as_mut() {
+                            m.insert(c.head.entity_hex.clone(), r);
+                        }
+                    };
                     if excluded.contains(&ah) || role.position == 0 {
+                        note(&mut why, "role: author banned or position 0");
                         continue;
                     }
                     if !accepted.can_act_on_position(&ah, owner_hex, role.position, Permissions::MANAGE_ROLES) {
+                        note(&mut why, "role: author lacks MANAGE_ROLES over this position");
                         continue;
                     }
                     if let Some(prev) = standing {
                         if !accepted.can_act_on_position(&ah, owner_hex, prev, Permissions::MANAGE_ROLES) {
+                            note(&mut why, "role: author cannot outrank the position it replaces");
                             continue;
                         }
                     }
+                    // A `vac` is a SYNC FLOOR, not the verdict (CORD-04 §5): a verifier
+                    // waits until it has synced the cited Grant, then resolves rank
+                    // against its CURRENT roster. So a citation we cannot resolve still
+                    // parks — that is a real sync gap. But an edition carrying NO
+                    // citation declared no floor to wait for, and refusing it converts a
+                    // sync aid into an authority requirement the spec says it is not.
+                    //
+                    // This cannot escalate: every rank gate above has already passed —
+                    // the author is authorized under the roster resolved so far and
+                    // strictly outranks both this position and the one it replaces. The
+                    // citation never granted authority; it only decided when to look.
                     if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
-                        continue;
+                        if c.citation.is_some() {
+                            note(&mut why, "role: cited a grant we cannot resolve");
+                            continue;
+                        }
+                        UNCITED_ACCEPTED.with(|n| *n.borrow_mut() += 1);
                     }
                     admissible.insert(c.head.self_hash);
                     standing = Some(role.position);
@@ -6257,17 +7417,78 @@ fn select_authorized(
         }
         for cands in grant_cands.values() {
             for c in cands {
+                let c2 = c;
                 let Some(grant) = &c.grant else { continue };
                 let ah = c.author.to_hex();
+                let note = |w: &mut Option<&mut std::collections::BTreeMap<String, &'static str>>, r: &'static str| {
+                    if let Some(m) = w.as_mut() {
+                        m.insert(c.head.entity_hex.clone(), r);
+                    }
+                };
                 if excluded.contains(&ah) || excluded.contains(&grant.member) {
+                    note(&mut why, "grant: author or member banned");
                     continue;
                 }
                 // The granter must outrank every granted role (resolved against the
                 // accepted roster) AND the member — the escalation defense (CORD-04 §2).
-                let positions: Option<Vec<u32>> = grant.role_ids.iter().map(|rid| accepted.role(rid).map(|r| r.position)).collect();
-                let Some(positions) = positions else { continue };
-                if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
+                //
+                // Resolve the roles that CAN be resolved rather than discarding the
+                // grant whole. All-or-nothing deadlocks a community that grew the
+                // ordinary way: an admin creates a role, the owner grants that role to
+                // them, and now the grant needs the role accepted while the role needs
+                // the grant. Neither can go first, the fixpoint lands empty, and the
+                // entire roster — the owner's own grants included — collapses. Seen on
+                // two live communities; the cached roster was all that hid it.
+                //
+                // Partial resolution is strictly fail-closed: it can only ever grant
+                // FEWER roles than the edition names, every retained role is still
+                // rank-checked below, and the unresolved ones fold in on a later
+                // iteration once their own authority settles. Nothing is granted that
+                // the author did not write.
+                let resolved: Vec<(String, u32)> = grant
+                    .role_ids
+                    .iter()
+                    .filter_map(|rid| accepted.role(rid).map(|r| (rid.clone(), r.position)))
+                    .collect();
+                let positions: Vec<u32> = resolved.iter().map(|(_, p)| *p).collect();
+                if resolved.is_empty() && !grant.role_ids.is_empty() {
+                    // Record WHICH role is missing — a grant refused for pointing at
+                    // an unaccepted role is the head of a dependency chain, and the
+                    // chain is unreadable without naming its next link.
+                    if let Some(m) = why.as_mut() {
+                        let missing: Vec<String> = grant
+                            .role_ids
+                            .iter()
+                            .filter(|rid| accepted.role(rid).is_none())
+                            .map(|rid| rid[..8.min(rid.len())].to_string())
+                            .collect();
+                        MISSING_ROLE_REFS.with(|c| {
+                            c.borrow_mut().insert(c2.head.entity_hex.clone(), missing.join("+"));
+                        });
+                        m.insert(c2.head.entity_hex.clone(), "grant: references a role not in the accepted roster");
+                    }
                     continue;
+                }
+                // An unresolvable citation parks; an absent one is tolerated ONLY when
+                // the edition grants something. The rank gate below is what stops
+                // escalation, and it needs a position to check: a REVOCATION carries no
+                // role ids, so `positions.iter().all(..)` is vacuously true and the
+                // citation is the only thing standing there. Without this an
+                // unauthorized stranger strips any member's roles with a forged empty
+                // grant — proven by `a_non_owner_cannot_strip_a_members_grant_by_forging_a_higher_version`.
+                //
+                // So: an uncited edition may ADD authority (fully rank-checked) but
+                // never REMOVE it.
+                if !citation_ok_in_fold(cid, &heads, owner_hex, &c.author, c.citation.as_ref()) {
+                    if c.citation.is_some() {
+                        note(&mut why, "grant: cited a grant we cannot resolve");
+                        continue;
+                    }
+                    if resolved.is_empty() {
+                        note(&mut why, "grant: UNCITED revocation — a strip must cite its authority");
+                        continue;
+                    }
+                    UNCITED_ACCEPTED.with(|n| *n.borrow_mut() += 1);
                 }
                 if positions.iter().all(|p| accepted.can_act_on_position(&ah, owner_hex, *p, Permissions::MANAGE_ROLES))
                     && accepted.can_act_on_member(&ah, owner_hex, &grant.member, Permissions::MANAGE_ROLES)
@@ -6276,8 +7497,12 @@ fn select_authorized(
                     // advance a completeness check must see), but don't carry the husk
                     // into the roster.
                     next_heads.push(c.head.clone());
-                    if !grant.role_ids.is_empty() {
-                        next.grants.push(grant.clone());
+                    if !resolved.is_empty() {
+                        // Carry only the resolved subset; the rest arrive on a later
+                        // iteration, or never, if they were never legitimate.
+                        let mut g = grant.clone();
+                        g.role_ids = resolved.iter().map(|(rid, _)| rid.clone()).collect();
+                        next.grants.push(g);
                     }
                     break;
                 }
@@ -6510,13 +7735,20 @@ pub(crate) fn channel_rekey_addressing_roots(cur_root: [u8; 32], cid_hex: &str) 
 /// §2: "a convergence check, not a secrecy mechanism") — authority is its
 /// boundary; its epoch is the scan cursor, advancing past complete rotations
 /// that exclude us so the walk converges on the channel's current epoch.
-/// Diagnostic: run the base-rotation fetch+parse pipeline for a wedged community
-/// and report, per rotation found at the next-epoch base plane, WHY
-/// `follow_rekeys` did or didn't adopt it — the exact `advance_scope` gate that
-/// tripped. Read-only. Every rotator/owner is a PUBLIC key; no secret material
-/// is returned.
-#[cfg(debug_assertions)]
-pub async fn debug_explain_base_rekey<T: Transport + ?Sized>(
+/// Explain this client's epoch state: what we hold, what the next-epoch base plane
+/// offers, and — per rotation found there — exactly which `advance_scope` gate
+/// decided we did or did not adopt it.
+///
+/// **Ships in release builds deliberately.** A strand is silent by construction: a
+/// client parked on a dead epoch is subscribed at its own addresses and simply sees
+/// nothing, which is indistinguishable from a quiet community. Answering "why is
+/// this client stuck" without this meant reading sqlite by hand. It is also the
+/// instrument for comparing two clients' views of one community — the local half
+/// (`held`) is what diverges first.
+///
+/// Read-only, and safe to surface: every rotator/owner is a PUBLIC key, and no key
+/// material, blob plaintext or roster secret is returned.
+pub async fn explain_epoch_state<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
 ) -> Result<serde_json::Value, String> {
@@ -6583,13 +7815,48 @@ pub async fn debug_explain_base_rekey<T: Transport + ?Sized>(
                 "my_blob_present": has_my_blob,
                 "owner_kept": owner_kept,
                 "blob_count": r.blobs.len(),
+                "severing": r.severed,
                 "verdict": verdict,
             })
         })
         .collect();
 
+    // The LOCAL half. Two clients on one community diverge here first, and every
+    // field is a thing that has silently frozen a client in the field: the roster
+    // is what authorizes a rotator, its provenance is what the freeze-guard reads,
+    // and the invite registry is what Public/Private hangs off.
+    let roster_at = crate::db::community::get_community_roles_at(&cid_hex).unwrap_or(0);
+    let admin_count = roster.grants.iter().filter(|g| roster.is_admin(&g.member)).count();
+    let held = serde_json::json!({
+        "root_epoch": held_epoch.0,
+        "roster_roles": roster.roles.len(),
+        "roster_grants": roster.grants.len(),
+        "roster_admins": admin_count,
+        // 0 = a locally-seeded roster that never folded from the plane. A client
+        // whose roster never gains provenance can never authorize a non-owner
+        // admin, so it refuses their rotations forever.
+        "roster_provenance_at": roster_at,
+        "banlist_entries": banned.len(),
+        "sever_marks": sever_marks(&cid_hex).keys().copied().collect::<Vec<_>>(),
+        "control_plane_split": community.control_pk.is_some(),
+        "private_channels": community.channels.iter().filter(|c| c.private).count(),
+        "channels_awaiting_key": community.channels.iter().filter(|c| c.private && c.key.is_none()).count(),
+    });
+
+    // The one-line answer. `probing_next_epoch` existing at all proves the community
+    // moved without us; what we did about it is the `rotations` verdicts.
+    let summary = if rotations.is_empty() {
+        "UP TO DATE (or the plane is unreachable): no rotation offered at held+1"
+    } else if reports.iter().any(|r| r["verdict"].as_str().is_some_and(|v| v.starts_with("ADOPT"))) {
+        "BEHIND: an adoptable rotation is waiting — run a sync"
+    } else {
+        "WEDGED: a rotation exists at held+1 and every one was refused (see verdicts)"
+    };
+
     Ok(serde_json::json!({
+        "summary": summary,
         "recorded_owner": owner.to_hex(),
+        "held": held,
         "held_root_epoch": held_epoch.0,
         "probing_next_epoch": next.0,
         "base_plane_pk": group.pk_hex(),
@@ -6700,10 +7967,137 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             !banned.contains(&rh) && roster.can_act_on_member(&rh, Some(&owner_hex), &me_hex, crate::community::roles::Permissions::BAN)
         };
 
+                // A non-owner Refounding may only remove members the rotator strictly
+        // OUTRANKS. The protected set is the owner plus every grant-holder the
+        // rotator can't act on with BAN (a peer or superior) — excluding one is
+        // an authority-escalation takeover, so its rotation is inadmissible.
+        // Plain members hold no grant and are always outranked by a BAN-holder,
+        // so removing them is legitimate and needs no memberlist.
+        let base_admissible = |r: &rekey::Rotation| -> bool {
+            if r.rotator == owner {
+                return true; // the owner is supreme.
+            }
+            // Uncited (or citing a Grant we haven't synced) → skip entirely:
+            // neither adopt nor conclude a removal, exactly like an
+            // unauthorized rotation. It parks and heals on the next follow.
+            if !cited_ok(r) {
+                return false;
+            }
+            let rotator_hex = r.rotator.to_hex();
+            let has_blob = |xonly: &[u8; 32]| {
+                rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), xonly, r.scope, r.new_epoch).is_some()
+            };
+            // The owner is never a valid removed target.
+            if !has_blob(&owner.to_bytes()) {
+                return false;
+            }
+            for g in &roster.grants {
+                if g.member == rotator_hex || g.member == owner_hex || banned.contains(&g.member) {
+                    continue; // self, owner (checked), or an already-authorized removal.
+                }
+                // A grant-holder the rotator can't act on is a peer/superior.
+                if !roster.can_act_on_member(&rotator_hex, Some(&owner_hex), &g.member, crate::community::roles::Permissions::BAN) {
+                    if let Ok(pk) = PublicKey::from_hex(&g.member) {
+                        if !has_blob(&pk.to_bytes()) {
+                            return false; // a peer/superior was excluded.
+                        }
+                    }
+                }
+            }
+            true
+        };
+
+        // ── Same-epoch convergence, BEFORE walking forward (CORD-06 §3) ─────────
+        //
+        // Two authorized rotators can mint the same epoch concurrently. The spec's
+        // tiebreak is deterministic — the lexicographically lowest new base key wins
+        // — but it was only ever applied among rotations seen in ONE fetch. A client
+        // that saw only the higher sibling adopted it and then looked exclusively
+        // for its successor, so the lower sibling became permanently unreachable:
+        // two halves of a community, both at the same epoch number, different keys,
+        // unable to read each other, forever. Nobody was misbehaving.
+        //
+        // So re-check the epoch we ALREADY hold on every follow, and step sideways
+        // onto a strictly lower sibling. Down-only, exactly as the spec requires: a
+        // held epoch converges only downward, so a flaky fetch that returns just the
+        // higher sibling can never re-fork a settled epoch, and the walk terminates
+        // because each convergence strictly decreases the held key.
+        //
+        // The losing branch's key is simply dropped. Messages already ingested from
+        // it stay readable — they are stored decrypted under the account vault, not
+        // re-derived from the epoch key — so converging costs only the fork-window
+        // messages this client never fetched, which live on a branch nobody reads.
+        if cur.root_epoch.0 > 0 {
+            let prior = crate::db::community::held_epoch_key(
+                &cid_hex,
+                crate::community::SERVER_ROOT_SCOPE_HEX,
+                cur.root_epoch.0 - 1,
+            )
+            .ok()
+            .flatten();
+            if let Some(prior_root) = prior {
+                let group = base_rekey_group_key(&prior_root, cur.id(), cur.root_epoch);
+                match fetch_rekey_chunks(transport, &cur.relays, &group).await {
+                    Ok(siblings) if !siblings.is_empty() => {
+                        let held_before = cur.community_root;
+                        match advance_scope(
+                            &[(siblings, Some((Epoch(cur.root_epoch.0 - 1), prior_root)))],
+                            RekeyScope::Root,
+                            cur.id(),
+                            &base_rotator_ok,
+                            &base_rotator_outranks_me,
+                            &base_admissible,
+                            &signer,
+                            &my_xonly,
+                            cur.root_epoch,
+                        )
+                        .await
+                        {
+                            // Strictly lower only. Equal = the branch we already hold.
+                            Advance::Adopt { new_key, control_pk, control_root, .. } if new_key < held_before => {
+                                crate::log_warn!(
+                                    "[v2:follow {}] same-epoch fork at epoch {} — converging DOWN onto the canonical sibling",
+                                    &cid_hex[..8.min(cid_hex.len())], cur.root_epoch.0
+                                );
+                                cur.community_root = new_key;
+                                cur.control_pk = control_pk.and_then(|pk| PublicKey::from_slice(&pk).ok());
+                                cur.control_root = control_root;
+                                if let Err(e) = crate::db::community::store_epoch_key(
+                                    &cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, cur.root_epoch.0, &new_key,
+                                ) {
+                                    crate::log_warn!("v2: converged epoch-key archive failed: {e}");
+                                }
+                                if matches!(crate::db::community::community_protocol(community.id()), Ok(Some(_))) {
+                                    let _ = crate::db::community::save_community_v2(&cur);
+                                }
+                                changed = true;
+                            }
+                            // A sibling we cannot open is NOT a removal: refusing to
+                            // converge parks us on a branch that still works, where
+                            // concluding removal here would delete the community over
+                            // a fork we merely could not read.
+                            _ => {}
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => crate::log_warn!(
+                        "[v2:follow {}] same-epoch fork check failed (will retry): {}",
+                        &cid_hex[..8.min(cid_hex.len())], e
+                    ),
+                }
+            }
+        }
+
         // Bound the catch-up: each real step consumes a valid authorized rotation, so a
         // finite chain terminates naturally; the cap defends against a relay feeding a
         // pathological set.
-        const MAX_STEPS: usize = 128;
+        const MAX_STEPS: usize = MAX_WALK_STEPS;
+        // Wide enough to collapse a large community's channel fan into one wave,
+        // narrow enough that a catch-up does not present as a burst to every relay.
+        const CHANNEL_FAN_CONCURRENCY: usize = 8;
+        // Containment hops adopted in this walk (B2: any one of them condemns —
+        // a later ordinary hop in the same walk must not relaunder links open).
+        let mut severed_hops: Vec<u64> = Vec::new();
         for _ in 0..MAX_STEPS {
             let mut advanced = false;
 
@@ -6716,20 +8110,52 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             // Private channels first: a removal-forced channel rekey rides the PRIOR
             // root (CORD-06 D2), so read channels before a base adopt moves it.
             let channel_ids: Vec<ChannelId> = cur.channels.iter().filter(|c| c.private).map(|c| c.id).collect();
-            for cid in channel_ids {
-                let (held_key, held_epoch) = match cur.channel(&cid) {
-                    Some(ch) => (ch.key, ch.epoch),
-                    None => continue,
-                };
-                let next = Epoch(held_epoch.0.saturating_add(1));
-                let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
-                let mut batches: Vec<(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)> = Vec::new();
+            // One concurrent wave per hop, not one round-trip per (channel, root).
+            // Serially this was `private channels x addressing roots` fetches before a
+            // single hop could be decided — around a hundred for a large community, and
+            // a week's absence walks dozens of hops. The decisions below still run
+            // serially and in the same order; only the reads overlap.
+            let fan: Vec<(ChannelId, Option<[u8; 32]>, Epoch, Epoch)> = channel_ids
+                .iter()
+                .filter_map(|cid| {
+                    cur.channel(cid).map(|ch| {
+                        (*cid, ch.key, ch.epoch, Epoch(ch.epoch.0.saturating_add(1)))
+                    })
+                })
+                .collect();
+            let mut prefetched: std::collections::HashMap<([u8; 32], usize), Vec<rekey::RekeyChunk>> =
+                std::collections::HashMap::new();
+            {
+                use futures_util::stream::StreamExt;
                 // root #0 = current, #1.. = archived priors (indices only — root
                 // bytes are key material and must never reach a log).
-                for (ri, root) in addressing_roots.iter().enumerate() {
-                    let group = channel_rekey_group_key(root, &cid, next);
-                    let chunks = match fetch_rekey_chunks(transport, &cur.relays, &group).await {
-                        Ok(c) => c,
+                let jobs: Vec<(ChannelId, usize, GroupKey, Epoch)> = fan
+                    .iter()
+                    .flat_map(|(cid, _, _, next)| {
+                        addressing_roots.iter().enumerate().map(move |(ri, root)| {
+                            (*cid, ri, channel_rekey_group_key(root, cid, *next), *next)
+                        })
+                    })
+                    .collect();
+                let relays = &cur.relays;
+                let mut results = futures_util::stream::iter(jobs)
+                    .map(|(cid, ri, group, next)| async move {
+                        (cid, ri, next, fetch_rekey_chunks(transport, relays, &group).await)
+                    })
+                    .buffer_unordered(CHANNEL_FAN_CONCURRENCY);
+                while let Some((cid, ri, next, out)) = results.next().await {
+                    let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+                    match out {
+                        Ok(chunks) => {
+                            if chunks.is_empty() {
+                                continue;
+                            }
+                            crate::log_debug!(
+                                "[v2:follow {}] ch {} next e{} root#{}/{}: {} rekey chunk(s)",
+                                &cid_hex[..8], &ch_hex[..8], next.0, ri, addressing_roots.len(), chunks.len()
+                            );
+                            prefetched.insert((cid.0, ri), chunks);
+                        }
                         Err(e) => {
                             crate::log_warn!(
                                 "[v2:follow {}] ch {} next e{} root#{}/{}: rekey plane fetch failed: {}",
@@ -6737,15 +8163,17 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                             );
                             return Err(e);
                         }
-                    };
-                    if chunks.is_empty() {
-                        continue;
                     }
-                    crate::log_debug!(
-                        "[v2:follow {}] ch {} next e{} root#{}/{}: {} rekey chunk(s)",
-                        &cid_hex[..8], &ch_hex[..8], next.0, ri, addressing_roots.len(), chunks.len()
-                    );
-                    batches.push((chunks, held_key.map(|k| (held_epoch, k))));
+                }
+            }
+
+            for (cid, held_key, held_epoch, next) in fan {
+                let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
+                let mut batches: Vec<(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)> = Vec::new();
+                for ri in 0..addressing_roots.len() {
+                    if let Some(chunks) = prefetched.remove(&(cid.0, ri)) {
+                        batches.push((chunks, held_key.map(|k| (held_epoch, k))));
+                    }
                 }
                 // Keyless-adopt residual (documented, deferred hardening): a malicious
                 // AUTHORIZED admin can fork a keyless member onto an orphan low-key
@@ -6809,47 +8237,20 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                 let group = base_rekey_group_key(&cur.community_root, cur.id(), next);
                 let chunks = fetch_rekey_chunks(transport, &cur.relays, &group).await?;
                 let batches = vec![(chunks, Some((held_epoch, held_key)))];
-                // A non-owner Refounding may only remove members the rotator strictly
-                // OUTRANKS. The protected set is the owner plus every grant-holder the
-                // rotator can't act on with BAN (a peer or superior) — excluding one is
-                // an authority-escalation takeover, so its rotation is inadmissible.
-                // Plain members hold no grant and are always outranked by a BAN-holder,
-                // so removing them is legitimate and needs no memberlist.
-                let base_admissible = |r: &rekey::Rotation| -> bool {
-                    if r.rotator == owner {
-                        return true; // the owner is supreme.
-                    }
-                    // Uncited (or citing a Grant we haven't synced) → skip entirely:
-                    // neither adopt nor conclude a removal, exactly like an
-                    // unauthorized rotation. It parks and heals on the next follow.
-                    if !cited_ok(r) {
-                        return false;
-                    }
-                    let rotator_hex = r.rotator.to_hex();
-                    let has_blob = |xonly: &[u8; 32]| {
-                        rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), xonly, r.scope, r.new_epoch).is_some()
-                    };
-                    // The owner is never a valid removed target.
-                    if !has_blob(&owner.to_bytes()) {
-                        return false;
-                    }
-                    for g in &roster.grants {
-                        if g.member == rotator_hex || g.member == owner_hex || banned.contains(&g.member) {
-                            continue; // self, owner (checked), or an already-authorized removal.
-                        }
-                        // A grant-holder the rotator can't act on is a peer/superior.
-                        if !roster.can_act_on_member(&rotator_hex, Some(&owner_hex), &g.member, crate::community::roles::Permissions::BAN) {
-                            if let Ok(pk) = PublicKey::from_hex(&g.member) {
-                                if !has_blob(&pk.to_bytes()) {
-                                    return false; // a peer/superior was excluded.
-                                }
-                            }
-                        }
-                    }
-                    true
-                };
                 match advance_scope(&batches, RekeyScope::Root, cur.id(), &base_rotator_ok, &base_rotator_outranks_me, &base_admissible, &signer, &my_xonly, next).await {
-                    Advance::Adopt { new_key, control_pk, control_root } => {
+                    Advance::Adopt { new_key, control_pk, control_root, severed, rotator } => {
+                        // CORD-02 §5: this npub's snapshot — and only this npub's —
+                        // seeds the new epoch's Guestbook. Recorded from the rotation
+                        // this device just VERIFIED and adopted, so a snapshot can
+                        // never nominate its own author.
+                        record_epoch_minter(&cid_hex, next.0, &rotator.to_hex());
+                        // Record the HOP that was severed, not the walk's final head:
+                        // the mark drives both the link condemnation line and the
+                        // rescue re-stamp, and a multi-step walk would otherwise
+                        // present the containment at the wrong epoch.
+                        if severed {
+                            severed_hops.push(next.0);
+                        }
                         cur.community_root = new_key;
                         cur.root_epoch = next;
                         // The control pair is the blob's, never inherited: the
@@ -6876,6 +8277,33 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
                         // minter archived it).
                         if let Err(e) = crate::db::community::store_epoch_key(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX, next.0, &new_key) {
                             crate::log_warn!("v2: base epoch-key archive failed (this epoch's history may not read back after the next rotation): {e}");
+                        }
+                        // CHECKPOINT THE HOP. A client back from a long absence walks
+                        // many epochs in one pass, and the row used to be written only
+                        // after the whole loop — so a fetch failure on the last hop
+                        // discarded every hop already taken. The next attempt started
+                        // from scratch, cost the same again, and on a flaky link could
+                        // never converge at all. Banking here makes the walk resumable:
+                        // progress is monotonic, and an interrupted catch-up picks up
+                        // where it stopped.
+                        //
+                        // The FULL row, never just root+epoch: `control_pk`/
+                        // `control_root` roll with the root, so a narrow write would
+                        // leave the control pair an epoch behind and fold the control
+                        // plane at a dead address. Archive first, then the head — a
+                        // stray archive is harmless, a missing one is permanent.
+                        //
+                        // A leave/delete racing the walk must not be resurrected by an
+                        // upsert, so re-check the row still exists before each write.
+                        match crate::db::community::community_protocol(community.id()) {
+                            Ok(Some(_)) => {
+                                if let Err(e) = crate::db::community::save_community_v2(&cur) {
+                                    crate::log_warn!("v2: hop checkpoint failed at epoch {} (the walk will redo it): {e}", next.0);
+                                }
+                            }
+                            // Gone mid-walk: stop rather than resurrect it.
+                            Ok(None) => return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged }),
+                            Err(e) => crate::log_warn!("v2: hop checkpoint skipped at epoch {}: {e}", next.0),
                         }
                         advanced = true;
                         changed = true;
@@ -6912,6 +8340,11 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             );
         }
         if !changed {
+            // A pending severance whose revoke was interrupted must heal on QUIET
+            // passes too — waiting for the next rotation means a one-shot transport
+            // blip leaves the community reading Public (and every future ban
+            // refound-less) until someone happens to rotate again.
+            retry_pending_severance(transport, &cur).await;
             return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged });
         }
         // A leave/delete raced this follow: saving would resurrect the community row
@@ -6920,14 +8353,32 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
             return Ok(RekeyFollow { updated: None, self_removed: false, dissolved: false, wedged });
         }
         crate::db::community::save_community_v2(&cur)?;
-        // Carry my own live links across the rotation someone ELSE performed
+        // Mark every containment hop FIRST: the marks are what condemn links, and
+        // both the severance below and the refresh consult them — so the order of
+        // those two stops mattering (a condemned link is skipped by the refresh
+        // and buried by the severance, in either order, on any pass).
+        for hop in &severed_hops {
+            add_sever_mark(&cid_hex, *hop, now_ms() / 1000);
+        }
+        if !severed_hops.is_empty() {
+            // Someone ELSE ran a Severing Refounding: my links minted below the
+            // severed epoch are the raid's door — bury them instead of carrying
+            // them forward. A fresh link minted at-or-after it survives every
+            // device's adopt, however late (the epoch is the same on all of them).
+            if let Err(e) = sever_own_links(transport, &cur).await {
+                crate::log_warn!("[Sever] own-link revocation on adopt failed (retries next follow): {e}");
+            }
+        }
+        // Carry my SURVIVING links across the rotation someone ELSE performed
         // (CORD-05 §2). The refounder refreshes only the bundles they can reach —
         // their own — so without this every other creator's links keep vending the
         // superseded root and drop new joiners onto a dead epoch, which is exactly
-        // the stranding the stable-URL refresh exists to prevent. Best-effort and
-        // idempotent: a creator with no links for this community returns early, and
-        // a failure only delays the heal until the next adoption or refound.
+        // the stranding the stable-URL refresh exists to prevent. Condemned links
+        // are skipped inside (see the guard there). Best-effort and idempotent.
         let _ = refresh_public_links(transport, &cur).await;
+        // A pending sever mark (mine or adopted) whose revoke never completed
+        // keeps retrying while condemned links remain (B4).
+        retry_pending_severance(transport, &cur).await;
         Ok(RekeyFollow { updated: Some(cur), self_removed: false, dissolved: false, wedged })
     })
     .await
@@ -6942,7 +8393,7 @@ enum Advance {
     /// pair is the BLOB's, never inherited: a legacy 72-byte blob carries
     /// neither (that epoch's Control folds at the legacy address), and channel
     /// rotations never carry any.
-    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]> },
+    Adopt { new_key: [u8; 32], control_pk: Option<[u8; 32]>, control_root: Option<[u8; 32]>, severed: bool, rotator: PublicKey },
     /// A complete owner rotation at `next_epoch` dropped my blob — I'm removed.
     Removed,
     /// No owner rotation extends my held epoch (yet) — keep the current key.
@@ -6984,7 +8435,13 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
         // shared user-authed client's REQ for a plane's events is CLOSED, so an
         // offline rotation catch-up would return nothing and wedge at the old
         // epoch. `fetch_plane` rides a connection authed as the plane itself.
-        let wraps = transport.fetch_plane(group.keys(), &query, relays).await?;
+        let page = transport.fetch_plane(group.keys(), &query, relays).await?;
+        // A page nobody fully answered must not read as "the plane ends here": the
+        // short-page break below is a completeness verdict, and drawing it from a
+        // degraded read is how a client concludes a rotation is absent when it is
+        // merely unreachable.
+        let page_complete = page.is_complete();
+        let wraps = page.events;
         let mut fresh = 0usize;
         for w in &wraps {
             if !seen.insert(w.id) {
@@ -7003,7 +8460,7 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
         }
         // Drained, or a same-second wall the pager can't step past (second-granular
         // until) — either way stop; the accumulated set is what advance_scope folds.
-        if fresh == 0 || wraps.len() < REKEY_PAGE {
+        if fresh == 0 || (wraps.len() < REKEY_PAGE && page_complete) {
             break;
         }
         match oldest {
@@ -7039,14 +8496,23 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
     next_epoch: Epoch,
 ) -> Advance {
     let mut winners: Vec<rekey::BaseKeyDelivery> = Vec::new();
+    // Parallel to `winners`: whether each delivery's rotation is a containment
+    // (Root scope only). Selected by the same lowest-key index, so a same-epoch
+    // fork adopts the winner's flag and never a loser's.
+    let mut winner_severed: Vec<bool> = Vec::new();
+    // Parallel to `winner_severed`: whose Refounding this delivery came from. The
+    // snapshot authority for the adopted epoch (CORD-02 §5) is exactly this npub.
+    let mut winner_rotator: Vec<PublicKey> = Vec::new();
     let mut saw_complete_candidate = false;
+    // Did any qualifying rotation actually carry recipients? See the removal gate.
+    let mut saw_nonempty_candidate = false;
     let mut saw_outranking_candidate = false;
     let mut my_blob_unopenable = false;
     let keyed = batches.iter().any(|(_, held)| held.is_some());
     for (chunks, held) in batches {
         let rotations = rekey::collect_rotations(chunks);
         for r in &rotations {
-            if !rotator_ok(&r.rotator) || r.scope.id32() != scope.id32() || r.new_epoch.0 != next_epoch.0 || !r.is_complete() {
+            if !rotator_ok(&r.rotator) || r.scope.id32() != scope.id32() || r.new_epoch.0 != next_epoch.0 {
                 continue;
             }
             if let Some((held_epoch, held_key)) = held {
@@ -7062,9 +8528,34 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
             if !admissible(r) {
                 continue;
             }
-            saw_complete_candidate = true;
-            saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
-            if let Some(blob) = rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch) {
+            // Completeness gates the DESTRUCTIVE direction only. Concluding removal
+            // means "no blob for me anywhere in this rotation", which is only
+            // knowable with every chunk in hand — so `saw_complete_candidate`, and
+            // everything downstream of it, still demands the whole set.
+            //
+            // ADOPTION does not need it. The blob binds its own (scope, epoch)
+            // inside the ciphertext, so a key that opens is this rotation's key
+            // whatever else is unreachable; and admissibility is monotonic in the
+            // blob set — chunks we have not seen can only ADD recipients, so a
+            // rotation that looks admissible on the blobs we hold cannot become a
+            // takeover once the rest arrive. Requiring the full set to adopt made a
+            // large community's rotation as fragile as its least reachable chunk,
+            // and the walk is sequential, so that strand blocked every epoch above
+            // it too. (A rotation that fails admissibility on partial data is still
+            // skipped, never adopted — the unsafe direction stays closed.)
+            if r.is_complete() {
+                saw_complete_candidate = true;
+                saw_nonempty_candidate |= !r.blobs.is_empty();
+                saw_outranking_candidate |= rotator_may_remove_me(&r.rotator);
+            }
+            // EVERY blob at my locator, not just the first. A locator is a public
+            // index that proves nothing, so anyone may publish a blob at mine;
+            // taking only the first would let a junk one shadow the real key and
+            // park a client that actually holds it. First that opens wins.
+            let mut mine = rekey::find_my_blobs(&r.blobs, &r.rotator.to_bytes(), my_xonly, r.scope, r.new_epoch).peekable();
+            let had_candidate = mine.peek().is_some();
+            let mut opened_one = false;
+            for blob in mine {
                 let opened = match scope {
                     // Base blobs are width-declared forms (CORD-06 §1).
                     RekeyScope::Root => rekey::open_base_blob(signer, &r.rotator, community_id, r.new_epoch, blob).await,
@@ -7072,15 +8563,20 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
                         .await
                         .map(|k| rekey::BaseKeyDelivery { new_root: k, control_pk: None, control_root: None }),
                 };
-                match opened {
-                    Ok(d) => winners.push(d),
-                    // A blob AT my locator that won't open is not an exclusion
-                    // (CORD-06 §2: removal = NO blob across all chunks). It must
-                    // never conclude Removed below — that is exactly how a
-                    // pre-split client turned an unreadable width into a false
-                    // self-removal. Stay and keep recovering instead.
-                    Err(_) => my_blob_unopenable = true,
+                if let Ok(d) = opened {
+                    winners.push(d);
+                    winner_severed.push(scope.id32() == RekeyScope::Root.id32() && r.severed);
+                    winner_rotator.push(r.rotator);
+                    opened_one = true;
+                    break;
                 }
+            }
+            // A blob AT my locator that won't open is not an exclusion (CORD-06 §2:
+            // removal = NO blob across all chunks). It must never conclude Removed
+            // below — that is exactly how a pre-split client turned an unreadable
+            // width into a false self-removal. Stay and keep recovering instead.
+            if had_candidate && !opened_one {
+                my_blob_unopenable = true;
             }
         }
     }
@@ -7096,7 +8592,22 @@ async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
         let keys: Vec<[u8; 32]> = winners.iter().map(|d| d.new_root).collect();
         let idx = rekey::lowest_key_winner(&keys).expect("winners is non-empty");
         let w = &winners[idx];
-        return Advance::Adopt { new_key: w.new_root, control_pk: w.control_pk, control_root: w.control_root };
+        return Advance::Adopt {
+            new_key: w.new_root,
+            control_pk: w.control_pk,
+            control_root: w.control_root,
+            severed: winner_severed[idx],
+            rotator: winner_rotator[idx],
+        };
+    }
+    // A rotation that delivered NO blob to anyone removed nobody. Read literally it
+    // is "complete, authorized, and contains no blob for me" — which is the removal
+    // shape — but removal DELETES the community locally, so one empty rotation from
+    // an authorized rotator would evict the entire membership at once, irreversibly.
+    // An empty recipient set is a malformed or aborted rotation, never a verdict
+    // about any individual. Nobody is removed by a rotation that removed everybody.
+    if saw_complete_candidate && !saw_nonempty_candidate {
+        return Advance::Stay;
     }
     if saw_complete_candidate && !my_blob_unopenable && (!keyed || saw_outranking_candidate) {
         Advance::Removed
@@ -7678,7 +9189,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Transport for SwapMidFetch<'_> {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.inner.publish(e, r).await
         }
@@ -7702,7 +9213,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for SwapMidPublish {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.inner.publish(e, r).await
         }
@@ -7725,7 +9236,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for FixedFetch {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
             Ok(())
         }
@@ -9045,6 +10556,27 @@ mod tests {
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
 
+    /// A channel edition at an EXPLICIT time, so a paging test can order the plane —
+    /// the default helper stamps everything 1_000, which leaves newest-first paging
+    /// arbitrary and any "buried edition" scenario vacuous.
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_channel_edition_at(
+        relay: &MemoryRelay,
+        community: &CommunityV2,
+        signer: &Keys,
+        channel_id: &ChannelId,
+        name: &str,
+        version: u64,
+        at_secs: u64,
+    ) {
+        let group = control::ControlPlane::of(community).write_group().unwrap();
+        let meta = control::ChannelMetadata { name: name.into(), private: false, deleted: None, ..Default::default() };
+        let content = serde_json::to_string(&meta).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::CHANNEL_METADATA, &channel_id.0, version, None, &content, at_secs, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(at_secs)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
     /// Publish an owner-grammar community-metadata edition (rename etc.), chained
     /// to the current relay head like a real owner client.
     async fn publish_community_meta(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, name: &str, version: u64) {
@@ -9129,13 +10661,33 @@ mod tests {
 
     /// Publish a Role edition (vsk 1) signed by `signer`, chained to the current head.
     async fn publish_role(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64) {
+        publish_role_at(relay, community, signer, role, version, 1_000).await
+    }
+
+    /// Page filler: a signed edition that occupies a slot in the pager's window and
+    /// nothing else. It skips the head/citation relay scans `publish_role` does, which
+    /// are linear in plane size and make a 500-edition test quadratic.
+    async fn publish_filler_edition(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64, ts: u64) {
+        let group = control::ControlPlane::of(&community).write_group().unwrap();
+        let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).unwrap();
+        let content = crate::community::v2::roles::role_content_json(role).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, None, &content, ts, None);
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap();
+        relay.publish(&wrap, &community.relays).await.unwrap();
+    }
+
+    /// `publish_role` with an explicit wall clock. Every other helper stamps 1_000, so a
+    /// test needing more than one page of history must spread its editions out — a page
+    /// that is entirely one second wide is a wall `until` cannot step past, and the
+    /// pager correctly refuses rather than paging forever.
+    async fn publish_role_at(relay: &MemoryRelay, community: &CommunityV2, signer: &Keys, role: &Role, version: u64, ts: u64) {
         let group = control::ControlPlane::of(&community).write_group().unwrap();
         let role_id = crate::simd::hex::hex_to_bytes_32_checked(&role.role_id).unwrap();
         let prev = head_hash_on_relay(relay, community, &role_id).await;
         let content = crate::community::v2::roles::role_content_json(role).unwrap();
         let cite = cite_on_relay(relay, community, signer).await;
-        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, 1_000, cite.as_ref());
-        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(1_000)).unwrap();
+        let rumor = control::build_edition_rumor(signer.public_key(), vsk::ROLE, &role_id, version, prev.as_ref(), &content, ts, cite.as_ref());
+        let (wrap, _) = control::seal_control_edition(&rumor, &group, signer, Timestamp::from_secs(ts)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
     }
 
@@ -9302,6 +10854,488 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rescue_lets_a_stranded_member_walk_every_missed_hop() {
+        // A member forgotten by two consecutive rotations is wedged at epoch 0: their
+        // client derives base_rekey_group(root_0, cid, 1), finds no blob, and can never
+        // even compute where epoch 2 lives. The rescue publishes the blobs that should
+        // have existed, correlated into the ORIGINAL rotations — then the walk just works.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Stranded", vec!["wss://r".into()], None).await.unwrap();
+        let stranded = Keys::generate();
+
+        // Two rotations that never vend to `stranded` (they are in no fold: never
+        // joined the wire, never posted, not in the local store).
+        let e1 = refound_community(&relay, &community, &[]).await.unwrap();
+        let e2 = refound_community(&relay, &e1, &[]).await.unwrap();
+        assert_eq!(e2.root_epoch, Epoch(2));
+
+        // Wedged: no blob for them at the only plane they can derive.
+        let hop1 = base_rekey_group_key(&community.community_root, community.id(), Epoch(1));
+        let chunks = fetch_rekey_chunks(&relay, &community.relays, &hop1).await.unwrap();
+        let r1 = &rekey::collect_rotations(&chunks)[0];
+        assert!(
+            rekey::find_my_blob(&r1.blobs, &r1.rotator.to_bytes(), &stranded.public_key().to_bytes(), r1.scope, r1.new_epoch).is_none(),
+            "genuinely stranded before the rescue"
+        );
+
+        let report = rescue_stranded_members(&relay, &e2, &[stranded.public_key()]).await.unwrap();
+        assert_eq!(report.hops, 2, "one catch-up per missed hop");
+        assert_eq!(report.hops_skipped, 0);
+
+        // Walk exactly as a client would: derive each hop's plane from the PREVIOUS
+        // root, find our blob inside the correlated rotation, open, adopt, repeat.
+        let signer = crate::signer::ActiveSigner::Keys(stranded.clone());
+        let mut held_root = community.community_root;
+        for e in 1..=2u64 {
+            let group = base_rekey_group_key(&held_root, community.id(), Epoch(e));
+            let chunks = fetch_rekey_chunks(&relay, &community.relays, &group).await.unwrap();
+            let rotations = rekey::collect_rotations(&chunks);
+            let rot = rotations
+                .iter()
+                .find(|r| {
+                    rekey::find_my_blob(&r.blobs, &r.rotator.to_bytes(), &stranded.public_key().to_bytes(), r.scope, r.new_epoch).is_some()
+                })
+                .expect("a rotation now carries our blob");
+            let blob = rekey::find_my_blob(&rot.blobs, &rot.rotator.to_bytes(), &stranded.public_key().to_bytes(), rot.scope, rot.new_epoch).unwrap();
+            let delivery = rekey::open_base_blob(&signer, &rot.rotator, community.id(), Epoch(e), blob).await.unwrap();
+            held_root = delivery.new_root;
+        }
+        assert_eq!(held_root, e2.community_root, "the walk ends on the live root");
+
+        // Merge safety on DEPLOYED clients: the catch-up extended the original chunk
+        // set (disjoint indices), so everything folds as ONE complete rotation and no
+        // original recipient's blob was displaced — a slot collision would fold as
+        // their removal.
+        let chunks = fetch_rekey_chunks(&relay, &community.relays, &hop1).await.unwrap();
+        let rotations = rekey::collect_rotations(&chunks);
+        assert_eq!(rotations.len(), 1, "catch-up merged into the original rotation, not a fork");
+        assert!(rotations[0].is_complete(), "the extended set still reads complete");
+        let owner_pk = e2.owner().unwrap();
+        assert!(
+            rekey::find_my_blob(&rotations[0].blobs, &rotations[0].rotator.to_bytes(), &owner_pk.to_bytes(), rotations[0].scope, rotations[0].new_epoch).is_some(),
+            "the original recipient's blob survived the extension"
+        );
+
+        // And the outside world counts them again: the snapshot addendum seeded them
+        // onto the current epoch's guestbook plane.
+        let wire = wire_guestbook_members(&relay, &e2).await.unwrap();
+        assert!(wire.contains(&stranded.public_key()), "the invite page's fold now includes them");
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_refounders_snapshot_seeds_the_roster() {
+        // CORD-02 §5: a snapshot is honored "only from the npub whose Refounding
+        // minted that epoch". Vector read that as the OWNER always, so a moderation
+        // bot's containment rolled the epoch and vended the keys while its survivor
+        // list was thrown away — every client then folded its own accumulated Joins,
+        // keeping members the containment had cut and disagreeing with each other.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "MintedBy", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let owner = community.owner().unwrap();
+
+        // An admin (NOT the owner) refounded to epoch 1 — this device verified and
+        // adopted that rotation, so it knows who minted it.
+        let admin = Keys::generate();
+        let mut at_epoch_1 = community.clone();
+        at_epoch_1.root_epoch = Epoch(1);
+        record_epoch_minter(&cid_hex, 1, &admin.public_key().to_hex());
+
+        // Someone the containment cut: joined at the old epoch, never banned, and
+        // absent from the survivor list the refounder published.
+        let cut = Keys::generate().public_key();
+        let join = guestbook::GuestbookEvent {
+            epoch: None, observed_at: None, rumor_id: [11u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: cut, invited_by: None, at_ms: 1_000 },
+        };
+        let snapshot = |by: &Keys, id: u8| guestbook::GuestbookEvent {
+            epoch: Some(1), observed_at: None, rumor_id: [id; 32],
+            entry: guestbook::GuestbookEntry::Snapshot {
+                refounder: by.public_key(),
+                members: vec![owner],           // survivors: the cut member is NOT here
+                snapshot_id: [id; 32],
+                chunk: (1, 1),
+                at_ms: 5_000,                   // newer than the Join it supersedes
+            },
+        };
+
+        // A stranger's snapshot must change nothing — authority is the minter, not
+        // whoever manages to write a 3312.
+        let stranger = Keys::generate();
+        crate::db::community::set_guestbook(&cid_hex, &[join.clone(), snapshot(&stranger, 0x51)], 6).unwrap();
+        assert!(
+            stored_memberlist(&at_epoch_1).unwrap().contains(&cut),
+            "a snapshot from an npub that minted nothing seeds no roster"
+        );
+
+        // The actual refounder's snapshot IS the guest list.
+        crate::db::community::set_guestbook(&cid_hex, &[join, snapshot(&admin, 0x52)], 6).unwrap();
+        let members = stored_memberlist(&at_epoch_1).unwrap();
+        assert!(
+            !members.contains(&cut),
+            "the refounder's survivor list is adopted, so a cut member stops being one"
+        );
+        assert!(members.contains(&owner), "a survivor the snapshot names stays");
+    }
+
+    /// An empty retain means "cut nobody", never "keep nobody".
+    ///
+    /// The console's "Rotate keys" sends an empty retain when nothing is unticked.
+    /// `members_to_remove` reads that correctly and removes nobody — but the same
+    /// empty list also became an ALLOW-LIST, and an allow-list keeps only the
+    /// rotating device and the owner. So a plain rotation vended to two people and
+    /// stranded everyone else at the previous epoch, permanently, presenting as
+    /// members vanishing some time later nowhere near the button that did it.
+    ///
+    /// The two paths are pinned here against each other, because they take the same
+    /// empty list and must disagree about what it means.
+    #[tokio::test]
+    async fn an_empty_retain_cuts_nobody_rather_than_keeping_nobody() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "EmptyRetain", bed.relays.clone(), None).await.unwrap();
+
+        // A third party who is neither the rotator nor the owner — the only kind of
+        // member an empty allow-list silently drops.
+        let bundle = serde_json::to_string(&bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None)).unwrap();
+        bed.swap_to(&member);
+        accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        bed.swap_to(&owner);
+        assert!(memberlist(&bed.relay, &community).await.unwrap().contains(&member.keys.public_key()));
+
+        // The plain reading: cut nobody, vend to everybody. This is what the button
+        // must reach. (The allow-list reading of the same empty list is covered by
+        // `a_rotation_that_would_strand_staff_refuses_to_publish`.)
+        refound_community(&bed.relay, &community, &[]).await.expect("cutting nobody must succeed");
+        assert!(
+            vended_to(&bed, &community, &member.keys).await,
+            "a plain rotation must vend to a member who is neither the rotator nor the owner"
+        );
+    }
+
+    /// If the recipients would strand a granted member, publish NOTHING.
+    ///
+    /// A member missed at a hop is stranded there permanently, and every other
+    /// client goes on reading them as staff — silent, irreversible without the
+    /// rescue primitive, and only noticed because a human saw the member list
+    /// shrink. So the rotation refuses instead, exactly as the entity carry-forward
+    /// already refuses a floored head it cannot serve.
+    #[tokio::test]
+    async fn a_rotation_that_would_strand_staff_refuses_to_publish() {
+        let (bed, owner, staffer) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoSilentSever", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let them = staffer.keys.public_key();
+
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xb6; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        // An operator purge whose allow-list forgets an admin: the recipient set
+        // ends up without somebody the roster still grants a role to.
+        let err = refound_community_retaining(&bed.relay, &community, &[], &[owner.keys.public_key()])
+            .await
+            .expect_err("must refuse rather than strand staff");
+        assert!(
+            err.contains("stranded"),
+            "the refusal has to say what it protected, got: {err}"
+        );
+
+        // And nothing was published: the epoch did not move.
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(held.root_epoch, community.root_epoch, "no state published");
+        assert!(!vended_to(&bed, &community, &staffer.keys).await, "no half-rotation left on the plane");
+        let _ = cid_hex;
+    }
+
+    /// The backstop protects a SILENT granted member. An ACTIVE one is the gap.
+    ///
+    /// `fold_members` seeds granted members with `observed.entry(pk).or_insert(0)`,
+    /// and ts 0 is what dodges `stale_pre_refound`. A staffer who actually talks
+    /// already sits in `observed` with a REAL timestamp, so `or_insert` leaves it
+    /// alone — and if some earlier refounding's snapshot omitted them while their
+    /// last word predates its cut, they are suppressed despite holding a grant.
+    ///
+    /// That is Sentire, 2026-08-26: admin, constantly posting, vended no key.
+    #[tokio::test]
+    async fn a_granted_member_who_talks_is_not_dropped_by_an_old_snapshot() {
+        let (bed, owner, staffer) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "TalkingAdmin", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let them = staffer.keys.public_key();
+
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xb5; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        // They joined and spoke — so `observed` holds a REAL timestamp for them,
+        // not the 0 the grant backstop would have inserted.
+        let spoke_at = 5_000u64;
+        let join = guestbook::GuestbookEvent {
+            epoch: Some(community.root_epoch.0), observed_at: None, rumor_id: [0x31; 32],
+            entry: guestbook::GuestbookEntry::Join { member: them, invited_by: None, at_ms: spoke_at },
+        };
+        // A PRIOR refounding whose snapshot omitted them, cutting after they spoke.
+        let snapshot = guestbook::GuestbookEvent {
+            epoch: Some(community.root_epoch.0), observed_at: None, rumor_id: [0x32; 32],
+            entry: guestbook::GuestbookEntry::Snapshot {
+                refounder: owner.keys.public_key(),
+                members: vec![owner.keys.public_key()],   // them: omitted
+                snapshot_id: [0x32; 32],
+                chunk: (1, 1),
+                at_ms: spoke_at + 1_000,
+            },
+        };
+        crate::db::community::set_guestbook(&cid_hex, &[join, snapshot], 9).unwrap();
+
+        assert!(
+            stored_memberlist(&community).unwrap().contains(&them),
+            "a grant is proof of membership — an old snapshot must not shed the staff it forgot"
+        );
+
+        let _ = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        assert!(
+            vended_to(&bed, &community, &staffer.keys).await,
+            "and the rotation must vend to them, or they are stranded holding a grant"
+        );
+    }
+
+    /// A GRANT is proof of membership, so a rotation must vend to it.
+    ///
+    /// Sentire's shape, 2026-08-26: an admin whose Join had been superseded by an
+    /// earlier refounding's snapshot fell out of BOTH folds the recipient union is
+    /// built from, held a valid admin grant the whole time, and was vended no key.
+    /// It could then only derive `held + 1`, so it was stranded permanently while
+    /// still appearing to be staff to everyone else.
+    ///
+    /// `fold_members` already treats a grant as consensus-complete proof — "this is
+    /// what keeps a Refounding from severing a lurking admin". The rotation has to
+    /// agree with it.
+    #[tokio::test]
+    async fn a_rotation_vends_to_a_granted_member_the_folds_forgot() {
+        let (bed, owner, staffer) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "LurkingAdmin", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let them = staffer.keys.public_key();
+
+        // Staff by GRANT, with no Join anywhere — the lurking admin the backstop
+        // exists for. Never posted, never announced.
+        let rid = crate::simd::hex::bytes_to_hex_32(&[0xb4; 32]);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &them, vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&them.to_hex()),
+            "they hold the grant"
+        );
+
+        // An empty guestbook is the whole point: neither fold can see them.
+        crate::db::community::set_guestbook(&cid_hex, &[], 1).unwrap();
+
+        let _rotated = refound_community(&bed.relay, &community, &[]).await.unwrap();
+
+        // The blob is the answer. A member absent from the rotation's recipients is
+        // stranded at the previous epoch for good — they can only ever derive
+        // `held + 1`, so no later rotation reaches them.
+        assert!(
+            vended_to(&bed, &community, &staffer.keys).await,
+            "a rotation removing nobody must vend to a granted member, or it severs its own staff"
+        );
+    }
+
+    /// "Rotate keys" with nobody unticked must remove NOBODY — and must vend to
+    /// everyone, not merely leave them on a list. A rotation that forgets a
+    /// member strands them at the previous epoch permanently: they can only
+    /// derive `held + 1`, so no later rotation can ever reach them.
+    #[tokio::test]
+    async fn a_rotation_that_removes_nobody_vends_to_everybody() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "KeepAll", bed.relays.clone(), None).await.unwrap();
+
+        // A second member joins for real, via the invite path.
+        let bundle = serde_json::to_string(&bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None)).unwrap();
+        bed.swap_to(&member);
+        accept_parked_invite(&bed.relay, &bundle, None).await.unwrap();
+        bed.swap_to(&owner);
+        let before = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(before.contains(&member.keys.public_key()), "present before the rotation");
+
+        // Rotate keeping everyone — the empty `removed` the console sends when
+        // nothing is unticked.
+        let rotated = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        assert_eq!(rotated.root_epoch.0, community.root_epoch.0 + 1, "the epoch rolled");
+
+        let after = memberlist(&bed.relay, &community).await.unwrap();
+        assert!(
+            after.contains(&member.keys.public_key()),
+            "a rotation removing nobody must keep everybody: {before:?} -> {after:?}"
+        );
+
+        // And the member must actually be able to WALK to the new epoch, which is
+        // the half a memberlist cannot show.
+        bed.swap_to(&member);
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let follow = follow_rekeys(&bed.relay, &held, &crate::db::current_session()).await.unwrap();
+        assert!(!follow.self_removed, "they were not excluded");
+        let now = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(now.root_epoch.0, rotated.root_epoch.0, "they adopted the new epoch — a blob was vended to them");
+    }
+
+    /// A revocation has to reach the NETWORK, not just the revoker.
+    ///
+    /// Every other client decides who is staff by folding the control plane, so
+    /// an owner whose demotion never published is the only person who believes
+    /// it happened — and the demoted admin keeps every power everywhere else,
+    /// which is the worst possible direction for this to fail in.
+    #[tokio::test]
+    async fn revoking_admin_publishes_where_everyone_else_reads_it() {
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Demotion", bed.relays.clone(), None).await.unwrap();
+        let them = member.keys.public_key();
+        let them_hex = them.to_hex();
+
+        grant_admin(&bed.relay, &community, &them).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(view.roles.is_admin(&them_hex), "granted, and readable from the plane");
+
+        revoke_admin(&bed.relay, &community, &them).await.unwrap();
+
+        // The plane, NOT the local row: this is the copy every peer folds.
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.is_admin(&them_hex),
+            "the demotion must be on the plane, or only the owner believes it"
+        );
+
+        // And the same answer through the public API a bot or client would ask.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        use nostr_sdk::prelude::ToBech32;
+        assert!(
+            !crate::VectorCore
+                .member_has_permission(&cid_hex, &them.to_bech32().unwrap(), crate::community::roles::Permissions::BAN)
+                .unwrap(),
+            "a demoted admin holds no powers"
+        );
+    }
+
+    /// Authority must fail CLOSED. A bot gating a chat command on this is the
+    /// only thing standing between "a moderator asked" and "anyone in the room
+    /// asked", so an unfolded, empty or unreadable roster has to authorise
+    /// nobody — `has_permission` finds no grant and denies. The owner is the one
+    /// exception, and is answered without consulting the roster at all.
+    #[tokio::test]
+    async fn permission_is_refused_to_everyone_the_roster_does_not_name() {
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Authority", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        use nostr_sdk::prelude::ToBech32;
+        let owner_npub = community.owner().unwrap().to_bech32().unwrap();
+        let stranger = Keys::generate().public_key().to_bech32().unwrap();
+
+        use crate::community::roles::Permissions;
+        for p in [Permissions::KICK, Permissions::BAN, Permissions::MANAGE_ROLES] {
+            assert!(
+                !crate::VectorCore.member_has_permission(&cid_hex, &stranger, p).unwrap(),
+                "an npub the roster never granted anything holds nothing"
+            );
+            assert!(
+                crate::VectorCore.member_has_permission(&cid_hex, &owner_npub, p).unwrap(),
+                "the owner is supreme without a grant to cite"
+            );
+        }
+
+        // A banned npub holds nothing, whatever a stale grant still says.
+        crate::db::community::set_community_banlist(&cid_hex, &[community.owner().unwrap().to_hex()], 1).unwrap();
+        let banned_owner_is_still_owner =
+            crate::VectorCore.member_has_permission(&cid_hex, &owner_npub, Permissions::BAN).unwrap();
+        assert!(banned_owner_is_still_owner, "the owner cannot be locked out of their own community");
+
+        // And a malformed npub is an error, never a silent grant.
+        assert!(crate::VectorCore.member_has_permission(&cid_hex, "not-an-npub", Permissions::BAN).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_refound_keeps_a_quiet_member_the_network_fold_forgot() {
+        // The network fold only sees the current guestbook + the recent posting window,
+        // so a quiet member whose Join lives on a buried epoch vanishes from it — and a
+        // rotation that trusts the fold alone silently sheds them. Being forgotten must
+        // not be a removal: only the explicit `removed` list is.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "QuietOnes", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // A member the LOCAL store remembers (an old synced Join) but the WIRE has no
+        // trace of: never posted, Join never published on the current plane.
+        let quiet = Keys::generate().public_key();
+        let ev = guestbook::GuestbookEvent { epoch: None, observed_at: None,
+            rumor_id: [7u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: quiet, invited_by: None, at_ms: 1_000 },
+        };
+        crate::db::community::set_guestbook(&cid_hex, std::slice::from_ref(&ev), 1).unwrap();
+        assert!(stored_memberlist(&community).unwrap().contains(&quiet), "locally known");
+        assert!(!memberlist(&relay, &community).await.unwrap().contains(&quiet), "network fold has forgotten them");
+
+        let rotated = refound_community(&relay, &community, &[]).await.unwrap();
+
+        // They made the new epoch's snapshot — the wire now carries them, so an outside
+        // reader counts them and their client has a rekey blob to walk forward on.
+        let wire = wire_guestbook_members(&relay, &rotated).await.unwrap();
+        assert!(wire.contains(&quiet), "the quiet member survived the rotation onto the wire");
+
+        // The explicit removed list still removes, union or no union.
+        let rotated2 = refound_community(&relay, &rotated, &[quiet]).await.unwrap();
+        let wire2 = wire_guestbook_members(&relay, &rotated2).await.unwrap();
+        assert!(!wire2.contains(&quiet), "an explicit removal is honoured");
+    }
+
+    #[tokio::test]
+    async fn revoking_a_husk_prunes_the_local_row_instead_of_erroring_forever() {
+        // The list is per-creator and cross-device: another device (or Armada) can
+        // retire a link this one still holds a row for. That row carries no signer_sk,
+        // so no revocation can ever be built from it — the old behaviour errored with
+        // "no such link in the invite list" BEFORE the local delete, leaving an entry
+        // the owner could neither use nor remove.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "Husks", vec!["wss://r".into()], None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let minted = mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        let token_hex = crate::simd::hex::bytes_to_hex_16(&minted.token);
+        assert_eq!(crate::db::community::list_public_invites(&cid_hex).unwrap().len(), 1);
+
+        // "Another device" retires the link: republish the invite list without it.
+        let signer = crate::signer::active_signer().unwrap();
+        let my_pk = me_pk().unwrap();
+        let mut list = fetch_invite_list(&relay, &community.relays).await.unwrap().unwrap();
+        list.entries.retain(|e| e.token != token_hex);
+        let ev = invite::build_invite_list_event_signed(&signer, my_pk, &list).await.unwrap();
+        relay.publish(&ev, &community.relays).await.unwrap();
+
+        // This device's revoke now completes by pruning, not by erroring.
+        revoke_public_link(&relay, &community, &token_hex).await.unwrap();
+        assert!(
+            crate::db::community::list_public_invites(&cid_hex).unwrap().is_empty(),
+            "the husk row is gone — the panel can no longer show a link nobody can use or remove"
+        );
+
+        // An unreadable list is NOT proof of absence: only a fetched list may prune.
+        // (Guarded by the ok_or above the husk branch; a fresh row + an empty relay
+        // would hit "no invite list found", never the prune.)
+    }
+
+    #[tokio::test]
     async fn revoking_the_last_link_privatizes_and_rotates_but_an_earlier_revoke_does_not() {
         // CORD-06 §3: converting a Public Community to Private is a Refounding
         // trigger — revoking stops NEW acquisitions, only the rotation cuts off
@@ -9432,7 +11466,7 @@ mod tests {
         .await
         .unwrap();
         let base_group = base_rekey_group_key(&community.community_root, community.id(), new_epoch);
-        let chunks = rekey::build_rekey_chunks_local(&owner.keys, &base_group, RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[garbled, own], 2_000, None).unwrap();
+        let chunks = rekey::build_rekey_chunks_local(&owner.keys, &base_group, RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[garbled, own], 2_000, None, false).unwrap();
         for c in &chunks {
             bed.relay.publish(c, &community.relays).await.unwrap();
         }
@@ -9679,7 +11713,7 @@ mod tests {
     struct FetchErrors(MemoryRelay);
     #[async_trait::async_trait]
     impl crate::community::transport::Transport for FetchErrors {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
             self.0.publish(e, r).await
         }
@@ -9709,6 +11743,360 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_fold_pages_past_a_full_window_to_find_the_roster_it_tracks() {
+        // Soapbox's actual shape. The grants that define the admin list are OLDER than
+        // one page of a busy control plane. An entity absent from the window dangles no
+        // link, so it raises no gap, so the pager called the very first page "coherent"
+        // and stopped — every fold offered zero grants, forever, and only the
+        // completeness guard retaining the cache kept the admin list alive. That made
+        // the cache the last surviving copy of the roster rather than a cache.
+        //
+        // Coherent is not complete. The fold must page until what it tracks is found.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "DeepFold", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let rid = "e7".repeat(32);
+        let admin = Keys::generate();
+
+        // The roster, at t=1_000 — the OLDEST thing on the plane.
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "baseline: the admin folds while its editions are still in reach",
+        );
+
+        // Bury it under MORE than one page of strictly NEWER control traffic.
+        for i in 0..(FOLLOW_PAGE + 50) {
+            publish_channel_edition_at(
+                &bed.relay, &community, &owner.keys,
+                &ChannelId(crate::simd::hex::hex_to_bytes_32(&format!("{:064x}", i + 1))),
+                &format!("ch{i}"), 1, 2_000 + i as u64,
+            ).await;
+        }
+
+        // Forget the grant's FLOOR. Re-establishing it is the observable proof that
+        // the fold actually reached the grant edition, rather than merely retaining a
+        // cached roster it could not re-derive.
+        let grant_eid = crate::simd::hex::bytes_to_hex_32(
+            &crate::community::v2::derive::grant_locator(community.id(), &admin.public_key().to_bytes()),
+        );
+        crate::db::community::delete_edition_head(&cid_hex, &grant_eid).unwrap();
+        assert!(
+            crate::db::community::get_edition_head(&cid_hex, &grant_eid).unwrap().is_none(),
+            "precondition: the floor is gone",
+        );
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert!(
+            crate::db::community::get_edition_head(&cid_hex, &grant_eid).unwrap().is_some(),
+            "the fold MUST page past the newest window and reach the grant that defines the \
+             admin list — stopping at the first coherent-looking page is how a community \
+             becomes unable to re-derive its own roster",
+        );
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "and the admin survives",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_grant_naming_a_role_its_own_holder_created_still_folds() {
+        // The deadlock that emptied two live communities' rosters.
+        //
+        // A community grows the ordinary way: the owner promotes an admin, the admin
+        // creates a role of their own, and the owner then grants that role onward. Now
+        // the grant references a role whose AUTHOR draws authority from a grant — and
+        // under all-or-nothing resolution neither can go first. The fixpoint lands
+        // empty, and every grant in the community dies with it, the owner's included.
+        //
+        // Resolving the roles a grant CAN resolve breaks the cycle without granting
+        // anything the author did not write: the retained roles are still rank-checked,
+        // and the rest fold in on a later iteration.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "GrantCycle", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let admin = Keys::generate();
+        let member = Keys::generate();
+
+        // 1. The owner's own role, and a grant of it to the admin.
+        let owner_role = "aa".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&owner_role, Permissions::ADMIN_ALL), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![owner_role.clone()], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "the admin is promoted",
+        );
+
+        // 2. The ADMIN creates a role of their own, beneath theirs.
+        let admin_made = "bb".repeat(32);
+        let mut made = admin_role(&admin_made, Permissions::BAN);
+        made.position = 5;
+        publish_role(&bed.relay, &community, &admin, &made, 1).await;
+
+        follow_control(&bed.relay, &community).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            roster.role(&admin_made).is_some(),
+            "an admin-authored role folds while its author's grant is resolvable",
+        );
+        assert!(
+            roster.is_admin(&admin.public_key().to_hex()),
+            "and the admin keeps their own standing — a cycle here empties the roster",
+        );
+
+        // 3. The owner grants the ADMIN-MADE role to a member, alongside a role that
+        //    is not resolvable at all. Under all-or-nothing the whole grant dies and
+        //    takes the roster with it; resolved partially, the member gets what the
+        //    owner actually granted.
+        publish_grant(
+            &bed.relay, &community, &owner.keys, &member.public_key(),
+            vec![admin_made.clone(), "cc".repeat(32)], 1,
+        ).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        let mg = roster.grants.iter().find(|g| g.member == member.public_key().to_hex());
+        assert!(
+            mg.is_some_and(|g| g.role_ids.contains(&admin_made)),
+            "the resolvable half of the grant is honored",
+        );
+        assert!(
+            mg.is_some_and(|g| !g.role_ids.iter().any(|r| r == &"cc".repeat(32))),
+            "and the unresolvable half is NOT — partial resolution only ever grants less",
+        );
+        assert!(
+            roster.is_admin(&admin.public_key().to_hex()),
+            "the rest of the roster survives it",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cold_device_pages_past_the_first_window_to_find_an_older_grant() {
+        // The early break stops paging once every entity we track has a head. On a
+        // COLD device we track NOTHING, so that condition is vacuously true and the
+        // walk stops at page one — the roster is then whatever the newest window
+        // happened to hold, and an admin granted before it silently is not one.
+        // That is the roster collapse, arrived at by an optimisation.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "ColdPage", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // The grant that matters goes down FIRST, so a full newest-first page buries it.
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
+
+        // Then bury it under a full page of newer editions.
+        for v in 2..(FOLLOW_PAGE as u64 + 2) {
+            publish_filler_edition(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v, 1_000 + v).await;
+        }
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "a cold device must page PAST the first window — stopping there caches a \
+             partial authority as its own baseline and drops every older grant",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_cold_fold_banks_nothing_at_all() {
+        // A page that is entirely one second wide is a wall `until` cannot step past,
+        // so the plane below it is unreachable and the fold is TRUNCATED. Refusing to
+        // show that partial roster is not enough — it must not be BANKED either. A
+        // stored baseline carries a provenance stamp that the next, complete fold has
+        // to beat, and names entities that a complete fold may not head, so banking a
+        // partial window is how a client talks itself into a permanent wedge.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Wall", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
+        // A full page of editions sharing ONE second, burying the grant behind the wall.
+        for v in 2..(FOLLOW_PAGE as u64 + 2) {
+            publish_filler_edition(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), v, 1_000).await;
+        }
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert_eq!(
+            crate::db::community::get_community_roles_at(&cid_hex).unwrap(),
+            0,
+            "a truncated fold must bank NO baseline — a stored partial roster outranks \
+             the complete fold that follows it and can never be replaced",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_window_never_overwrites_a_newer_cached_roster() {
+        // The roster cache carries the provenance timestamp of the fold that wrote it.
+        // A later fold reading an OLDER window (a lagging relay, a short page) must not
+        // replace it — that is a downgrade with no gap and no truncation to catch it.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Monotone", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()));
+
+        // Stamp the cached roster far in the future: any real fold now reads older.
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        crate::db::community::set_community_roles(&cid_hex, &roster, i64::MAX).unwrap();
+
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "an older window must not overwrite a newer cached roster",
+        );
+        assert_eq!(
+            crate::db::community::get_community_roles_at(&cid_hex).unwrap(),
+            i64::MAX,
+            "and the newer provenance stamp survives — otherwise the next fold downgrades freely",
+        );
+    }
+
+    /// A fast majority that does not hold the older editions. Quorum returns as soon
+    /// as it answers, so those editions read as absent; only a Full read waits for the
+    /// relay that has them. This is the shape a slow Ditto/Soapbox relay produces.
+    struct SlowMajority<'a>(&'a MemoryRelay, u64);
+    #[async_trait::async_trait]
+    impl Transport for SlowMajority<'_> {
+        async fn publish(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish(e, r).await
+        }
+        async fn fetch(&self, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+            let out = self.0.fetch(query, relays).await?;
+            if query.evidence == crate::community::transport::Evidence::Full {
+                return Ok(out);
+            }
+            Ok(out.into_iter().filter(|e| e.created_at.as_secs() > self.1).collect())
+        }
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
+            self.0.fetch_plane(plane, query, relays).await
+        }
+        async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
+            self.0.publish_durable(e, r).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_live_link_a_quorum_cannot_see_still_reads_public() {
+        // The ban path asks this to decide whether to refound. CORD-05 §5 forbids
+        // refounding a Public community — the link refresh re-posts the bundle behind
+        // the same URL, so the rotation severs nothing and strands foreign-link joiners
+        // on a buried epoch. A Quorum read that misses another creator's Registry makes
+        // a Public community read Private, which takes exactly that forbidden branch.
+        let (_tmp, _guard, _owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let community = create_community(&relay, "QuorumBlind", vec!["wss://r".into()], None).await.unwrap();
+        mint_public_link(&relay, &community, "https://x", None, None).await.unwrap();
+        assert!(community_is_public(&relay, &community).await, "the link is live on the plane");
+
+        // u64::MAX: nothing is newer, so the Quorum read is blinded entirely. The
+        // link is minted with the real clock, so a small cutoff filters nothing.
+        let slow = SlowMajority(&relay, u64::MAX);
+        assert!(
+            community_is_public(&slow, &community).await,
+            "a live link only a minority relay serves must still read Public — reading \
+             Private here refounds a Public community on ban, severing nothing",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quorum_that_cannot_see_a_stored_entity_escalates_to_full() {
+        // The roster fold draws an absence verdict, and an absence verdict from a
+        // MAJORITY is not one: the same fast subset answers every boot, so the retain
+        // never lifts and the cache freezes holding the only surviving copy of the
+        // roster. Read again at Full before concluding anything is gone.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Escalate", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid.clone()], 1).await;
+
+        // Bank a complete roster the honest way, so the entities are STORED and floored.
+        follow_control(&bed.relay, &community).await.unwrap();
+        assert!(crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()));
+
+        // A SECOND admin is granted. Its edition lands on the plane like every other,
+        // below the cutoff — so a Quorum read cannot see it, and a client that concludes
+        // from Quorum alone retains the old roster and never learns about them.
+        let admin2 = Keys::generate();
+        publish_grant(&bed.relay, &community, &owner.keys, &admin2.public_key(), vec![rid], 1).await;
+
+        let slow = SlowMajority(&bed.relay, 5_000);
+        follow_control(&slow, &community).await.unwrap();
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            roster.is_admin(&admin.public_key().to_hex()),
+            "the first admin survives — the retain is doing its job",
+        );
+        assert!(
+            roster.is_admin(&admin2.public_key().to_hex()),
+            "and the roster still ADVANCES: a Quorum read that could not account for a \
+             stored entity must re-read at Full, or the cache freezes holding the only \
+             surviving copy of the roster and no promotion ever lands again",
+        );
+    }
+
+    #[tokio::test]
+    async fn one_gapped_entity_does_not_freeze_the_rest_of_the_roster() {
+        // `authority.gapped` is a global OR across every entity, but the spec makes a
+        // gap fail closed FOR THAT ENTITY — suspend it, refetch it — not for the whole
+        // community. Treating it as a veto froze live rosters that were otherwise
+        // folding perfectly, and permanently once the plane is exhausted and no further
+        // paging can resolve the hole.
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "OneGap", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+
+        // A healthy admin the plane fully describes.
+        let admin = Keys::generate();
+        let rid = "e5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+
+        // And a second role the plane DOES serve, floored at a hash nothing chains to:
+        // its editions are present but unanchored, which is the withholding shape that
+        // fails closed and raises the gap. A floor on an entity absent from the window
+        // would not — the fold only visits entities it sees.
+        let rid2 = "c7".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid2, Permissions::BAN), 5).await;
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &rid2, 3, &[9u8; 32], &[9u8; 32], community.root_epoch.0).unwrap();
+
+        follow_control(&bed.relay, &community).await.unwrap();
+
+        assert!(
+            crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&admin.public_key().to_hex()),
+            "a hole in ONE entity must not withhold every other entity's authority — that is \
+             how a community that folds correctly still shows an empty roster",
+        );
+    }
+
+    #[tokio::test]
     async fn follow_control_retains_the_roster_when_a_floored_role_ages_out() {
         let (bed, owner, _m) = TestBed::new();
         bed.swap_to(&owner);
@@ -9721,7 +12109,7 @@ mod tests {
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &a, vec![rid.clone()], 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &b, vec![rid.clone()], 1).await;
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         assert!(crate::db::community::get_community_roles(&cid_hex).unwrap().is_admin(&a.to_hex()), "seeded");
 
         // relay2 serves A's grant but NOT the role (aged out of the window): the fold
@@ -9729,7 +12117,7 @@ mod tests {
         // stored roster rather than persist the lossy one.
         let relay2 = MemoryRelay::new();
         publish_grant(&relay2, &community, &owner.keys, &a, vec![rid.clone()], 1).await;
-        follow_control(&relay2, &community).await.unwrap();
+        follow_control(&relay2, &community).await.unwrap().updated;
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(roster.is_admin(&a.to_hex()) && roster.is_admin(&b.to_hex()), "a floored-but-unfetched role retains the stored roster");
     }
@@ -9768,7 +12156,7 @@ mod tests {
         let (ban_wrap, _) = control::seal_control_edition(&ban_rumor, &group, &admin, Timestamp::from_secs(1_000)).unwrap();
         relay.publish(&ban_wrap, &community.relays).await.unwrap();
 
-        let updated = follow_control(&relay, &community).await.unwrap();
+        let updated = follow_control(&relay, &community).await.unwrap().updated;
         assert!(
             updated.as_ref().is_none_or(|c| c.name != "Uncited Rename"),
             "an uncited metadata edit must not be honored",
@@ -9797,12 +12185,12 @@ mod tests {
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
         publish_community_meta(&relay, &community, &admin, "Admin Rename", 2).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("admin edit authorized");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("admin edit authorized");
         assert_eq!(updated.name, "Admin Rename", "an admin with MANAGE_METADATA renames");
 
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![], 2).await; // revoke
         publish_community_meta(&relay, &community, &admin, "Demoted Rename", 3).await;
-        let _ = follow_control(&relay, &community).await.unwrap();
+        let _ = follow_control(&relay, &community).await.unwrap().updated;
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert_eq!(held.name, "Admin Rename", "a demoted admin's edit is dropped; the name holds");
     }
@@ -9815,7 +12203,7 @@ mod tests {
         let stranger = Keys::generate();
         publish_community_meta(&relay, &community, &stranger, "Hijacked", 2).await;
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a roleless member's metadata edit never folds"
         );
     }
@@ -9834,7 +12222,7 @@ mod tests {
         publish_grant(&relay, &community, &rogue, &rogue.public_key(), vec![rid.clone()], 1).await;
         publish_community_meta(&relay, &community, &rogue, "Seized", 2).await;
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a self-signed grant confers no authority"
         );
     }
@@ -9876,7 +12264,7 @@ mod tests {
         publish_community_meta(&relay, &community, &admin, "Banned Rename", 2).await;
 
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a banned admin's edit is dropped even with an unstripped grant"
         );
         let authority = fold_authority(&community, &fetch_control(&relay, &community).await, &load_floors(&community));
@@ -9921,7 +12309,7 @@ mod tests {
         let community = create_community(&relay, "NoUnban", vec!["wss://r".into()], None).await.unwrap();
         let target = "cc".repeat(32);
         publish_banlist(&relay, &community, &owner, &[target.clone()], 1).await;
-        follow_control(&relay, &community).await.unwrap(); // persists the ban
+        follow_control(&relay, &community).await.unwrap().updated; // persists the ban
 
         let rogue = Keys::generate();
         publish_banlist(&relay, &community, &rogue, &[], 2).await; // unauthorized higher, empty
@@ -10112,7 +12500,7 @@ mod tests {
             }
             self.0.fetch(query, relays).await
         }
-        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             self.0.fetch_plane(plane, query, relays).await
         }
         async fn publish_durable(&self, e: &Event, r: &[String]) -> Result<(), String> {
@@ -10188,6 +12576,48 @@ mod tests {
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
         assert_eq!(reloaded.channels.len(), channels_after_first, "the DB holds one clean channel set");
         assert_eq!(crate::db::community::list_community_ids().unwrap().iter().filter(|id| id.0 == community.id().0).count(), 1, "exactly one community row");
+    }
+
+    #[tokio::test]
+    async fn a_fresh_joiner_can_authorize_a_moderators_hide_before_any_follow() {
+        // The join walk reads the control plane to genesis anyway, and it already
+        // folds the full roster for the ban gate. Throwing that roster away left
+        // the fresh member's stored roles EMPTY until the follow worker's queued
+        // re-walk — and the hide gate reads the stored roster, so every message a
+        // moderator had hidden rendered to exactly the person who should never
+        // see it: someone who just walked in.
+        let (bed, owner, member) = TestBed::new();
+        let admin = Keys::generate();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Moderated", bed.relays.clone(), None).await.unwrap();
+        grant_admin(&bed.relay, &community, &admin.public_key()).await.unwrap();
+        send_direct_invite(&bed.relay, &community, &member.keys.public_key(), None, None).await.unwrap();
+
+        // A FRESH account accepts. No follow_control runs in this test — what the
+        // join itself persisted is all the joiner has.
+        bed.swap_to(&member);
+        let invite = fetch_direct_invite(&bed.relay, &bed.relays, &member.keys.public_key()).await;
+        let joined = accept_direct_invite(&bed.relay, &invite).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+
+        let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(!roster.grants.is_empty(), "the join persisted the roster it already folded");
+        let owner_hex = joined.owner().unwrap().to_hex();
+        let victim = Keys::generate().public_key().to_hex();
+        assert!(
+            crate::community::moderation::can_hide(Some(&owner_hex), &roster, &admin.public_key().to_hex(), &victim),
+            "the admin's hides are honorable on the FIRST history ingest, not after a follow"
+        );
+        // And the grant's refuse-downgrade floor is seeded, so the citation gate
+        // (`actor_authority_pinned`) can resolve the same grant.
+        let grant_hex = crate::simd::hex::bytes_to_hex_32(&crate::community::v2::derive::grant_locator(
+            joined.id(),
+            &admin.public_key().to_bytes(),
+        ));
+        assert!(
+            crate::db::community::get_edition_head(&cid_hex, &grant_hex).unwrap().is_some(),
+            "the admin-signed grant head survived the join"
+        );
     }
 
     #[tokio::test]
@@ -10285,7 +12715,7 @@ mod tests {
             send_reaction(&bed.relay, &sealed, &general, &"a".repeat(64), &"b".repeat(64), crate::community::v2::kind::MESSAGE, "+", None)
                 .await
                 .unwrap_err(),
-            send_edit(&bed.relay, &sealed, &general, &"a".repeat(64), "revised").await.unwrap_err(),
+            send_edit(&bed.relay, &sealed, &general, &"a".repeat(64), "revised", &[]).await.unwrap_err(),
         ] {
             assert!(err.contains("dissolved"), "every write is refused, got: {err}");
         }
@@ -10354,7 +12784,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Withheld", vec!["wss://good".into()], None).await.unwrap();
         publish_banlist(&relay, &community, &owner, &["cc".repeat(32)], 1).await;
-        follow_control(&relay, &community).await.unwrap(); // seed the banlist floor
+        follow_control(&relay, &community).await.unwrap().updated; // seed the banlist floor
 
         // Re-point the held community to an EMPTY relay + save, so the Refounding (which
         // reloads fresh state) fetches none of the committed heads.
@@ -10463,6 +12893,1039 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adopting_a_severing_rotation_revokes_my_own_links_instead_of_refreshing_them() {
+        // The inverse of the sibling test: a SEVERING refound flips the stable-URL
+        // contract. A raid arrives through the door, so every creator's client
+        // buries its own links on adopt rather than carrying them into the new
+        // epoch — which is the only way the OWNER's link dies when a bot admin ran
+        // the containment (only the creator holds a link's signer secret).
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "SeverHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "b1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "my link is live before the raid");
+
+        // The owner runs a SEVERING refound (the raid lane).
+        let new_root = [0xD5; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated
+            .expect("the owner's severing Refounding is adopted");
+        assert_eq!(updated.root_epoch, Epoch(1), "I still advance to the new epoch");
+
+        let err = fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err();
+        assert!(err.contains("revoked"), "my link must be a grave, not a refreshed door: {err}");
+        assert!(
+            crate::db::community::list_public_invites(&crate::simd::hex::bytes_to_hex_32(&updated.id().0)).unwrap().is_empty(),
+            "and the local record goes with it",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_severing_adopt_never_deadlocks_the_last_link_creator() {
+        // The severance runs INSIDE the follow, which holds `follow_lock` for the
+        // whole call. `revoke_public_link`'s last-live-link escalation re-founds —
+        // taking that same non-reentrant lock — so routing severance through it
+        // would wedge this community's follow forever, for the very client whose
+        // revocation empties the registry (typically the owner). The escalation-free
+        // path is the fix; this test is its guard.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoDeadlock", bed.relays.clone(), None).await.unwrap();
+        let rid = "b2".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        // My link is the ONLY one in the registry — revoking it empties the
+        // aggregate, which is exactly the escalation's trigger condition.
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok());
+
+        let new_root = [0xD6; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+
+        let followed = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            follow_rekeys(&bed.relay, &joined, &crate::db::current_session()),
+        )
+        .await
+        .expect("the severing follow must not deadlock on follow_lock")
+        .unwrap();
+        assert_eq!(followed.updated.expect("adopted").root_epoch, Epoch(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_severing_adopt_spares_a_link_minted_after_the_raid() {
+        // Severance is bounded by the rotation's own wire stamp, not "now". A
+        // second device that adopts late must not eat the fresh link the owner
+        // minted to re-open the community after the raid was over.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "FreshDoor", bed.relays.clone(), None).await.unwrap();
+        let rid = "b3".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let raid_era = mint_public_link(&bed.relay, &joined, "https://old", None, None).await.unwrap();
+
+        let new_root = [0xD7; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &new_root, &joined.community_root).await;
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated.expect("adopted");
+        assert!(
+            fetch_public_bundle(&bed.relay, &raid_era.url).await.unwrap_err().contains("revoked"),
+            "the raid-era link is buried",
+        );
+
+        // The raid is over and the owner deliberately re-opens the community. The
+        // pending-severance retry runs on every follow, so a door minted after the
+        // containment must survive them all — otherwise no one could ever re-open.
+        let fresh = mint_public_link(&bed.relay, &updated, "https://new", None, None).await.unwrap();
+        let _ = follow_rekeys(&bed.relay, &updated, &crate::db::current_session()).await.unwrap();
+        assert!(
+            fetch_public_bundle(&bed.relay, &fresh.url).await.is_ok(),
+            "a link minted after the containment survives later follow passes",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unauthorized_severing_rotation_never_touches_my_links() {
+        // The sever tag grants no authority of its own: it rides a rotation the
+        // adopt gate has already verified. A plain member's forged severing
+        // rotation is refused whole, so the tag is never even read.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "NoForge", bed.relays.clone(), None).await.unwrap();
+        let rid = "b4".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+
+        // A stranger with no BAN mints a severing rotation.
+        let stranger = Keys::generate();
+        publish_severing_base_rotation(&bed.relay, &joined, &stranger, &[me.keys.public_key(), owner.keys.public_key()], &[0xD8; 32], &joined.community_root).await;
+
+        let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(followed.updated.is_none(), "an unauthorized rotation is not adopted");
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok(), "and my link is untouched");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_degraded_plane_read_is_not_evidence_of_absence() {
+        // One honest relay is enough to RUN Concord — a sealed, signed rotation is
+        // proof on its own. What one relay's silence is NOT enough for is concluding
+        // a rotation does not exist. Those two cases used to be the same empty list,
+        // so a client that could not reach anyone decided the community had simply
+        // stopped rotating, and parked. Coverage is what separates them, and it is
+        // measured against the REACHABLE set, so a single-relay community still gets
+        // definitive answers.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        let relay = AdversarialRelay::new();
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "Coverage", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(relay.relay(), &bundle_json, None).await.unwrap();
+        let _ = follow_control(relay.relay(), &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        bed.swap_to(&owner);
+        publish_base_rotation(relay.relay(), &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &[0xE9; 32], &joined.community_root).await;
+        bed.swap_to(&me);
+
+        // The plane cannot be reached at all: an Err, not an empty answer.
+        let plane = base_rekey_group_key(&joined.community_root, joined.id(), Epoch(1));
+        relay.on(Match::author(&plane.pk_hex()), Fault::FailFetch("relay down".into()));
+        let _ = follow_rekeys(&relay, &joined, &crate::db::current_session()).await;
+        let during = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            during.root_epoch, joined.root_epoch,
+            "an unreachable plane must not advance anything — but it must also not be \
+             mistaken for a community that stopped rotating",
+        );
+
+        // The relay comes back. The rotation was there the whole time.
+        relay.heal();
+        let _ = follow_rekeys(&relay, &during, &crate::db::current_session()).await;
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            after.root_epoch, Epoch(1),
+            "once a relay answers, the rotation it was holding is adopted — the earlier \
+             silence was never evidence",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_older_banlist_edition_can_never_un_ban() {
+        // Un-banning is the fail-open direction: the un-banned party's rotations and
+        // messages start being honored again. So a stale edition arriving late — a
+        // slow relay, a replay, a re-fold under a narrowed window — must never
+        // overwrite a newer list. Enforced at the storage layer so no future folding
+        // change can reintroduce it.
+        let (bed, owner, _me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "BanMonotonic", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let villain_keys = Keys::generate();
+        let villain = villain_keys.public_key().to_hex();
+
+        crate::db::community::set_community_banlist(&cid_hex, &[villain.clone()], 5).unwrap();
+        assert!(crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain));
+
+        // An OLDER edition (version 3) tries to replace it with an empty list.
+        crate::db::community::set_community_banlist(&cid_hex, &[], 3).unwrap();
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain),
+            "a lower-versioned edition must not un-ban",
+        );
+        assert!(
+            crate::db::community::is_author_banned(&cid_hex, &villain_keys.public_key()),
+            "and the hot cache must not hold the list we declined to persist",
+        );
+
+        // A NEWER edition legitimately un-bans.
+        crate::db::community::set_community_banlist(&cid_hex, &[], 6).unwrap();
+        assert!(
+            !crate::db::community::is_author_banned(&cid_hex, &villain_keys.public_key()),
+            "a newer edition still lifts a ban — monotonic, not frozen",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_withholding_relay_cannot_wipe_the_banlist_or_the_roster() {
+        // Absence is not evidence. A relay that serves NO control editions folds an
+        // empty aggregate, and an empty fold raises no gap flag — nothing is missing
+        // from a window that contains nothing. Persisting that would un-ban every
+        // banned member and strip every admin, locally, on one bad fetch. Un-banning
+        // is the fail-OPEN direction: the un-banned party's rotations start being
+        // honored again, which is how one client ends up on a branch minted by
+        // someone everyone else has evicted.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        let relay = AdversarialRelay::new();
+        let (bed, owner, _me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "WitholdWipe", bed.relays.clone(), None).await.unwrap();
+        let rid = "c4".repeat(32);
+        let admin = Keys::generate();
+        publish_role(relay.relay(), &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(relay.relay(), &community, &owner.keys, &admin.public_key(), vec![rid], 1).await;
+        let villain = Keys::generate();
+        set_banlist(relay.relay(), &community, &[villain.public_key().to_hex()]).await.unwrap();
+        let _ = follow_control(&relay, &community).await;
+
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain.public_key().to_hex()),
+            "the ban folded",
+        );
+        let roster_before = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(!roster_before.grants.is_empty(), "the admin's grant folded");
+
+        // Now the control plane serves nothing at all.
+        let control_pk = control::ControlPlane::of(&community).pk_hex();
+        relay.on(Match::author(&control_pk), Fault::Empty);
+        let _ = follow_control(&relay, &community).await;
+
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&villain.public_key().to_hex()),
+            "an empty control window must NEVER un-ban — that is the fail-open direction",
+        );
+        let roster_after = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert_eq!(
+            roster_after.grants.len(), roster_before.grants.len(),
+            "and must never strip standing: an empty fold is absence, not a demotion",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_banned_rotators_refounding_is_never_honored() {
+        // Holding a key is never authority (CORD-06 §Authority). A member banned
+        // moments ago still holds the current root, so they can mint a perfectly
+        // shaped Refounding — right prev_commit, right epoch, real blobs. If a
+        // client honors it, the banned party has just re-keyed the community around
+        // itself and split every member who folded the ban from every member who
+        // did not. The banlist has to be consulted at ADOPT time, not only at send.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "BannedRotator", bed.relays.clone(), None).await.unwrap();
+        let rid = "a9".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        let rogue = Keys::generate();
+        publish_grant(&bed.relay, &community, &owner.keys, &rogue.public_key(), vec![rid], 1).await;
+        let _ = follow_control(&bed.relay, &community).await;
+
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The rogue admin is banned, and we fold that ban.
+        bed.swap_to(&owner);
+        set_banlist(&bed.relay, &community, &[rogue.public_key().to_hex()]).await.unwrap();
+        bed.swap_to(&me);
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(
+            crate::db::community::get_community_banlist(&cid_hex).unwrap().contains(&rogue.public_key().to_hex()),
+            "the ban folded before the rotation arrives",
+        );
+
+        // Still holding the root, the banned admin mints a Refounding anyway.
+        bed.swap_to(&owner);
+        publish_base_rotation(
+            &bed.relay, &joined, &rogue,
+            &[owner.keys.public_key(), me.keys.public_key(), rogue.public_key()],
+            &[0xBA; 32], &joined.community_root,
+        ).await;
+
+        bed.swap_to(&me);
+        let held_before = joined.root_epoch;
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(!follow.self_removed, "a banned rotator can never remove anyone");
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            after.root_epoch, held_before,
+            "a banned member's rotation must not move the epoch — honoring it hands the community to the party just evicted",
+        );
+        assert_eq!(after.community_root, joined.community_root, "and must not move the root");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rekey_exclusion_keeps_my_epoch_keys() {
+        // Being removed must not cost me the ability to scrub my own history. The
+        // epoch keys open no FUTURE epoch — post-removal keys are never delivered —
+        // so retaining them leaks nothing; they are only what lets me author a 3305
+        // self-delete of messages I already sent, each sealed under the epoch it was
+        // sent at. Every other self-removal path retains them. The rekey-exclusion
+        // path silently did not, so an eviction (or a false positive) destroyed that.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "ExclusionKeys", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        assert!(
+            !crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap().is_empty(),
+            "the joiner archived its epoch key",
+        );
+
+        // The owner rotates and leaves me out — a genuine, authorized removal.
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key()], &[0xD1; 32], &joined.community_root).await;
+
+        bed.swap_to(&me);
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(follow.self_removed, "an authorized rotation that excluded me IS a removal");
+
+        // The teardown the caller performs on self_removed.
+        crate::db::community::delete_community_retain_keys(&cid_hex).unwrap();
+        assert!(
+            crate::db::community::load_community_v2(joined.id()).unwrap().is_none(),
+            "the community is gone",
+        );
+        assert!(
+            !crate::db::community::held_epoch_keys(&cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap().is_empty(),
+            "but my epoch keys survive, so I can still self-delete what I wrote",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_adopted_the_losing_fork_converges_down_onto_the_canonical_one() {
+        // Two authorized rotators mint the same epoch concurrently. The tiebreak is
+        // deterministic — lowest new base key wins — but it only ever ran across
+        // rotations seen in ONE fetch. A client that saw only the higher sibling
+        // adopted it and then looked exclusively for its successor, so the canonical
+        // branch became permanently unreachable: two halves of a community at the
+        // same epoch number, different keys, unable to read each other, with nobody
+        // misbehaving. Convergence has to be re-checked, not decided once.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "ForkHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "f1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // TWO rotators, which is what a real fork requires: rotations correlate on
+        // (rotator, scope, epoch, prevcommit), so one rotator minting twice would
+        // merge into a single rotation rather than fork — and `mint_or_reuse` stops
+        // an honest rotator doing that anyway. A second BAN-holder is the genuine
+        // concurrent-refound case. Low wins the spec's tiebreak.
+        let rival = Keys::generate();
+        bed.swap_to(&owner);
+        publish_grant(&bed.relay, &community, &owner.keys, &rival.public_key(), vec!["f1".repeat(32)], 1).await;
+        // The owner's client must fold the grant before minting the rival's rotation:
+        // a non-owner rotation carries a `vac` citing the Grant it acts under, and an
+        // uncited one is inadmissible by design.
+        let _ = follow_control(&bed.relay, &community).await;
+        bed.swap_to(&me);
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        let low = [0x11u8; 32];
+        let high = [0xF1u8; 32];
+        let recipients = [owner.keys.public_key(), me.keys.public_key(), rival.public_key()];
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &recipients, &high, &joined.community_root).await;
+
+        // We see ONLY the high sibling first and adopt it — the fork is now set.
+        bed.swap_to(&me);
+        let session = crate::db::current_session();
+        let _ = follow_rekeys(&bed.relay, &joined, &session).await.unwrap();
+        let forked = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(forked.root_epoch, Epoch(1), "adopted the sibling we could see");
+        assert_eq!(forked.community_root, high, "and it is the LOSING branch");
+
+        // The rival BAN-holder's sibling surfaces afterwards — a separate rotation,
+        // and the one the deterministic tiebreak says everyone must land on.
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &rival, &recipients, &low, &joined.community_root).await;
+
+        bed.swap_to(&me);
+        let _ = follow_rekeys(&bed.relay, &forked, &session).await.unwrap();
+        let healed = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            healed.community_root, low,
+            "a settled epoch MUST converge down onto the canonical sibling, or the community stays split",
+        );
+        assert_eq!(healed.root_epoch, Epoch(1), "same epoch — this is a sideways step, not an advance");
+
+        // Down-only: re-running must not bounce back up to the higher sibling, or two
+        // clients seeing the pair in different orders would oscillate forever.
+        let _ = follow_rekeys(&bed.relay, &healed, &session).await.unwrap();
+        let settled = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(settled.community_root, low, "convergence is down-only and stable");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_deep_catch_up_never_loses_ground_and_lands_on_the_head() {
+        // The scenario this program exists for: a member returns after a community
+        // rotated hard while they were away, on a link that keeps dropping.
+        //
+        // This asserts MONOTONICITY and CONVERGENCE — the epoch never moves
+        // backward across passes, and the client ends exactly on the head, not one
+        // short and not overshooting. Retention of a partial walk is a different
+        // property with its own test (see the interrupted-mid-walk case, which fails
+        // without per-hop banking); this one would still pass without banking, and
+        // is not claiming otherwise.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        const HOPS: u64 = 12;
+
+        let relay = AdversarialRelay::new();
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "DeepStorm", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(relay.relay(), &bundle_json, None).await.unwrap();
+        let _ = follow_control(relay.relay(), &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The community rotates HOPS times while we are offline. Owner-signed, so
+        // authority is never the variable under test here — reachability is.
+        bed.swap_to(&owner);
+        let recipients = [owner.keys.public_key(), me.keys.public_key()];
+        let mut cur = community.clone();
+        let mut planes: Vec<String> = Vec::new();
+        for i in 1..=HOPS {
+            let root = [(0x40 + i) as u8; 32];
+            planes.push(base_rekey_group_key(&cur.community_root, cur.id(), Epoch(i)).pk_hex());
+            publish_base_rotation(relay.relay(), &cur, &owner.keys, &recipients, &root, &cur.community_root).await;
+            cur.community_root = root;
+            cur.root_epoch = Epoch(i);
+        }
+
+        // Come back into a storm. The failures are placed MID-WALK on purpose: each
+        // pass gets several hops in before dying, so a walk that does not bank as it
+        // goes loses a batch of work every time and can never get past the first
+        // barrier. Failing only the first ask of each barrier means the link is
+        // genuinely recovering, so the only question is whether progress survives.
+        bed.swap_to(&me);
+        for barrier in [5usize, 9] {
+            relay.on(Match::author(&planes[barrier - 1]).nth(1), Fault::FailFetch("flaky link".into()));
+        }
+
+        let session = crate::db::current_session();
+        let mut last = 0u64;
+        // Bounded retries — the point is that each pass strictly advances, so a
+        // finite number of them suffices however unlucky the link is.
+        for pass in 0..(HOPS * 3) {
+            let held = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+            let now = held.root_epoch.0;
+            assert!(
+                now >= last,
+                "pass {pass}: epoch went BACKWARD ({last} -> {now}); a catch-up must never lose ground",
+            );
+            last = now;
+            if now == HOPS {
+                break;
+            }
+            let _ = follow_rekeys(&relay, &held, &session).await;
+        }
+
+        let healed = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            healed.root_epoch, Epoch(HOPS),
+            "a deep backlog on a failing link must still converge on the head; stuck at {}",
+            healed.root_epoch.0,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_chunk_does_not_block_adopting_the_key_i_already_hold() {
+        // Completeness gates ADOPTION today, not just removal. A 1,000-member
+        // rotation spans thirteen chunks, so one unreachable chunk parks every
+        // member of the community — including everyone whose key is sitting in a
+        // chunk they already fetched and can open right now. Requiring the whole set
+        // to adopt makes a large community's rotation as fragile as its worst chunk,
+        // and the walk is sequential, so the strand blocks every epoch above it too.
+        //
+        // Completeness is required to conclude REMOVAL, which is destructive and
+        // must stay conservative. Adoption is the safe direction: the blob is bound
+        // to (scope, epoch) inside its ciphertext, so a key that opens is the key
+        // for this rotation whatever else is missing.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "PartialChunks", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // A two-chunk rotation where only the chunk carrying MY blob is published.
+        bed.swap_to(&owner);
+        let new_root = [0xC7u8; 32];
+        let new_epoch = Epoch(joined.root_epoch.0 + 1);
+        let prev_commit = super::super::derive::epoch_key_commitment(joined.root_epoch, &joined.community_root);
+        let group = base_rekey_group_key(&joined.community_root, joined.id(), new_epoch);
+        let my_blob = rekey::build_blob_local(
+            owner.keys.secret_key(), &owner.keys.public_key().to_bytes(),
+            &me.keys.public_key(), RekeyScope::Root, new_epoch, &new_root,
+        ).unwrap();
+        // Declares 2 chunks; only chunk 1 ever reaches the relay.
+        let rumor = rekey::build_rekey_rumor(
+            owner.keys.public_key(), RekeyScope::Root, new_epoch, joined.root_epoch,
+            &prev_commit, &[my_blob], 1, 2, 2_000,
+            my_authority_citation(&joined, &owner.keys.public_key()).as_ref(), false,
+        ).unwrap();
+        let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &owner.keys, Timestamp::from_secs(2_000)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+
+        bed.swap_to(&me);
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(!follow.self_removed, "a missing chunk is never a removal");
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(
+            after.root_epoch, new_epoch,
+            "my blob was present and opened — the missing sibling chunk says nothing about MY key, \
+             and parking here strands the whole community behind its least reachable chunk",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_empty_rotation_is_never_a_mass_removal() {
+        // `is_complete` is satisfied by a single chunk declaring n=1 — including one
+        // carrying ZERO blobs, which the builders emit verbatim for an empty
+        // recipient set. Read literally that is "a complete, authorized rotation
+        // containing no blob for me", i.e. removal — and the removal path DELETES the
+        // community locally, keys and all. From the owner, one such rotation would
+        // evict every member of the community at once, irreversibly.
+        //
+        // Nobody can be removed by a rotation that removed everybody.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "EmptyRotation", bed.relays.clone(), None).await.unwrap();
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // The owner publishes a complete rotation with no recipients at all.
+        bed.swap_to(&owner);
+        publish_base_rotation(&bed.relay, &joined, &owner.keys, &[], &[0xB0; 32], &joined.community_root).await;
+
+        bed.swap_to(&me);
+        let follow = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(
+            !follow.self_removed,
+            "an all-empty rotation must NEVER read as my removal — that path deletes the community",
+        );
+        assert!(
+            crate::db::community::load_community_v2(joined.id()).unwrap().is_some(),
+            "and the community must still be held",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_catch_up_interrupted_mid_walk_keeps_the_hops_it_already_took() {
+        // A client back from a week offline walks many epochs in one pass. Today the
+        // community row is written ONCE, after the loop, so a fetch failure on the
+        // last hop discards every hop already walked — the next attempt starts from
+        // zero, costs the same again, and on a flaky link may never converge at all.
+        // Progress must be banked per hop.
+        use crate::community::transport::adversarial::{AdversarialRelay, Fault, Match};
+        // The bed supplies isolated per-account DBs; the adversarial relay replaces
+        // its transport so a fault plan governs what the client can read back.
+        let relay = AdversarialRelay::new();
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(relay.relay(), "DeepCatchUp", bed.relays.clone(), None).await.unwrap();
+
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(relay.relay(), &bundle_json, None).await.unwrap();
+        let _ = follow_control(relay.relay(), &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+
+        // Owner rotates three times while we are away. Owner rotations need no roster.
+        bed.swap_to(&owner);
+        let mut cur = community.clone();
+        let roots = [[0xA1u8; 32], [0xA2; 32], [0xA3; 32]];
+        let recipients = [owner.keys.public_key(), me.keys.public_key()];
+        for (i, root) in roots.iter().enumerate() {
+            publish_base_rotation(relay.relay(), &cur, &owner.keys, &recipients, root, &cur.community_root).await;
+            cur.community_root = *root;
+            cur.root_epoch = Epoch(i as u64 + 1);
+        }
+
+        // Come back, but the plane for the LAST hop is unreachable.
+        bed.swap_to(&me);
+        let third_hop = base_rekey_group_key(&roots[1], joined.id(), Epoch(3));
+        relay.on(Match::author(&third_hop.pk_hex()), Fault::FailFetch("relay dropped".into()));
+
+        let _ = follow_rekeys(&relay, &joined, &crate::db::current_session()).await;
+
+        let after = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert!(
+            after.root_epoch.0 >= 2,
+            "hops 1 and 2 succeeded and MUST be banked; an interrupted walk that reverts to epoch {} \
+             restarts from scratch every attempt and may never converge on a flaky link",
+            after.root_epoch.0,
+        );
+
+        // Faults cease: the walk resumes from where it banked and reaches the head.
+        relay.heal();
+        let _ = follow_rekeys(&relay, &after, &crate::db::current_session()).await;
+        let healed = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        assert_eq!(healed.root_epoch, Epoch(3), "once faults cease the walk converges on the head");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_promote_is_reported_as_an_authority_change() {
+        // The single line whose absence was the fork. A promote moves the ROSTER,
+        // which lives in its own column and never appears in the returned document —
+        // so a caller keying its retry off `updated` alone sees "nothing happened",
+        // skips the re-walk, and leaves the rekey pass that just refused this admin's
+        // rotation to never reconsider it. Asserted at the unit level deliberately:
+        // an integration drill can pass for the wrong reason (a roster cached on some
+        // earlier pass), and this codebase has been bitten by exactly that before.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "PromoteReports", bed.relays.clone(), None).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap(); // settle the baseline
+
+        let rid = "e1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.keys.public_key(), vec![rid], 1).await;
+
+        let control = follow_control(&bed.relay, &community).await.unwrap();
+        assert!(
+            control.authority_changed,
+            "a promote MUST report an authority change — this is what re-runs the rekey walk",
+        );
+        assert!(control.moved(), "and therefore counts as movement");
+        assert!(
+            control.updated.is_none(),
+            "while moving no document at all — which is precisely why `updated` alone was blind",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_seeded_roster_never_vetoes_a_coherent_control_fold() {
+        // `merge_local_roster` seeds an optimistic roster at `roles_at = 0` so a
+        // just-created role works before its edition folds. That seed names entities
+        // the plane may never head, which made `stored_complete` false FOREVER — the
+        // roster could never be replaced, and a roster that never updates cannot
+        // authorize anyone, so the client silently refused every rotation that admin
+        // published. It landed on owners, who seed the most.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "SeedVeto", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let rid = "c1".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin.keys.public_key(), vec![rid], 1).await;
+
+        // A seed naming an entity the plane will never head, with NO provenance —
+        // exactly what creating a private channel leaves behind.
+        let ghost = "d4".repeat(32);
+        let mut seeded = crate::community::roles::CommunityRoles::default();
+        seeded.roles.push(admin_role(&ghost, Permissions::MANAGE_CHANNELS));
+        seeded.grants.push(crate::community::roles::MemberGrant {
+            member: owner.keys.public_key().to_hex(),
+            role_ids: vec![ghost.clone()],
+        });
+        crate::db::community::set_community_roles(&cid_hex, &seeded, 0).unwrap();
+        // A floor for the ghost is what turns `stored_complete` false.
+        crate::db::community::set_edition_head_at_epoch(&cid_hex, &ghost, 1, &[0u8; 32], &[0u8; 32], community.root_epoch.0).unwrap();
+
+        follow_control(&bed.relay, &community).await.unwrap().updated;
+
+        let folded = crate::db::community::get_community_roles(&cid_hex).unwrap();
+        assert!(
+            folded.grants.iter().any(|g| g.member == admin.keys.public_key().to_hex()),
+            "a coherent fold must replace a provenance-less seed, or the client is deaf to this admin forever",
+        );
+        assert_ne!(
+            crate::db::community::get_community_roles_at(&cid_hex).unwrap(),
+            0,
+            "and the replacement carries the plane's provenance",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pending_severance_heals_on_a_quiet_follow_pass() {
+        // The retry must run on passes that adopt NOTHING. A one-shot transport
+        // blip during the original severance otherwise has no healing trigger
+        // until some future rotation happens to be adopted — and until then the
+        // community reads Public, which silently strips the refound from every
+        // ordinary ban.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "QuietHeal", bed.relays.clone(), None).await.unwrap();
+        let rid = "b5".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+
+        // A containment was adopted but its revoke was interrupted: the mark is
+        // down, the epoch-0 link still stands.
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&joined.id().0);
+        add_sever_mark(&cid_hex, 1, 5_000);
+        assert!(fetch_public_bundle(&bed.relay, &minted.url).await.is_ok());
+
+        // A QUIET follow — no rotation anywhere — must finish the burial.
+        let followed = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap();
+        assert!(followed.updated.is_none(), "nothing to adopt");
+        assert!(
+            fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
+            "the interrupted severance healed with no rotation to carry it",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sever_survives_a_later_ordinary_rotation_in_the_same_walk() {
+        // Sticky severance: a client catching up walks EVERY missed rotation in
+        // one pass. If the containment hop is followed by an ordinary one,
+        // last-hop-wins semantics would refresh the links right back open — the
+        // door the raid came through, re-armed with the newest root.
+        let (bed, owner, me) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "StickySever", bed.relays.clone(), None).await.unwrap();
+        let rid = "b6".repeat(32);
+        publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::BAN | Permissions::CREATE_INVITE), 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &me.keys.public_key(), vec![rid], 1).await;
+        let bundle = bundle_of(&community, BundleAudience::Link, Some(owner.keys.public_key()), None, None);
+        let bundle_json = serde_json::to_string(&bundle).unwrap();
+        bed.swap_to(&me);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        let _ = follow_control(&bed.relay, &joined).await;
+        let joined = crate::db::community::load_community_v2(joined.id()).unwrap().unwrap();
+        let minted = mint_public_link(&bed.relay, &joined, "https://x", None, None).await.unwrap();
+
+        // Hop 1: the containment. Hop 2: an ordinary rotation on top of it.
+        let root1 = [0xE1; 32];
+        publish_severing_base_rotation(&bed.relay, &joined, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &root1, &joined.community_root).await;
+        let mut stepped = joined.clone();
+        stepped.community_root = root1;
+        stepped.root_epoch = Epoch(1);
+        let root2 = [0xE2; 32];
+        publish_base_rotation(&bed.relay, &stepped, &owner.keys, &[owner.keys.public_key(), me.keys.public_key()], &root2, &root1).await;
+
+        let updated = follow_rekeys(&bed.relay, &joined, &crate::db::current_session()).await.unwrap().updated.expect("both hops adopt");
+        assert_eq!(updated.root_epoch, Epoch(2), "the walk reached the ordinary head");
+        assert!(
+            fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
+            "the containment's burial survived the ordinary hop behind it",
+        );
+    }
+
+    /// Did the severing refound vend `who` a key? Opens the base rotation and looks
+    /// for a blob at their locator.
+    async fn vended_to(bed: &TestBed, before: &CommunityV2, who: &Keys) -> bool {
+        let next = Epoch(before.root_epoch.0 + 1);
+        let group = base_rekey_group_key(&before.community_root, before.id(), next);
+        let chunks = fetch_rekey_chunks(&bed.relay, &before.relays, &group).await.unwrap();
+        rekey::collect_rotations(&chunks).iter().any(|r| {
+            rekey::find_my_blobs(
+                &r.blobs,
+                &r.rotator.to_bytes(),
+                &who.public_key().to_bytes(),
+                RekeyScope::Root,
+                next,
+            )
+            .next()
+            .is_some()
+        })
+    }
+
+    /// Local guestbook row for `who`, claiming `at_ms` but OBSERVED at `seen`.
+    fn local_join_observed(who: &Keys, at_ms: u64, seen: u64, epoch: u64, tag: u8) -> guestbook::GuestbookEvent {
+        guestbook::GuestbookEvent {
+            rumor_id: [tag; 32],
+            entry: guestbook::GuestbookEntry::Join { member: who.public_key(), invited_by: None, at_ms },
+            epoch: Some(epoch),
+            observed_at: Some(seen),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_backdated_join_cannot_slide_under_the_window_when_we_watched_it_arrive() {
+        // `at_ms` is author-claimed, so a raider can put it a year in the past and pass
+        // any window computed from the claim alone. What this client WATCHED arrive is
+        // not theirs to write.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Backdate", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let liar = Keys::generate();
+
+        // Claims it joined long before the window; we saw it arrive INSIDE the window.
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join = guestbook::build_join_rumor(liar.public_key(), None, 1_000);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &liar, Timestamp::from_secs(1)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        crate::db::community::set_guestbook(&cid_hex, &[local_join_observed(&liar, 1_000, 9_000, community.root_epoch.0, 3)], 0).unwrap();
+        // We were following well before the window opened.
+        crate::db::settings::set_sql_setting(format!("gb_observed_since:{cid_hex}"), "100".into()).unwrap();
+
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            !vended_to(&bed, &community, &liar).await,
+            "a backdated Join must not beat the arrival we watched with our own clock",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_that_started_watching_late_evicts_nobody() {
+        // Same row, same claim, same observation — but this client only began following
+        // the guestbook AFTER the window opened, so everything looks new to it. Its
+        // observations prove nothing, and acting on them would evict the community.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "LateWatcher", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let quiet = Keys::generate();
+
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        let join = guestbook::build_join_rumor(quiet.public_key(), None, 1_000);
+        let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, &quiet, Timestamp::from_secs(1)).unwrap();
+        bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        crate::db::community::set_guestbook(&cid_hex, &[local_join_observed(&quiet, 1_000, 9_000, community.root_epoch.0, 4)], 0).unwrap();
+        // Coverage begins INSIDE the window — we were not here before it.
+        crate::db::settings::set_sql_setting(format!("gb_observed_since:{cid_hex}"), "7000".into()).unwrap();
+
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            vended_to(&bed, &community, &quiet).await,
+            "without coverage predating the window our observations prove nothing — an \
+             old member must not be evicted for having been noticed late",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_purge_vends_only_to_the_retain_list_however_late_a_stranger_arrives() {
+        // The Admin Terminal hands over a RETAIN list. Internally that used to become a
+        // removal list computed from the memberlist at one instant, while the refound
+        // fetched its own later — so an account appearing in between was on neither
+        // list and got a key by DEFAULT, implicitly retained by the purge meant to be
+        // exhaustive. An allow-list closes it with no window and nothing to backdate.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Purge", bed.relays.clone(), None).await.unwrap();
+        let kept = Keys::generate();
+        let stranger = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        // The stranger even BACKDATES their Join — an allow-list does not care.
+        for (who, at_ms) in [(&kept, 2_000_000u64), (&stranger, 1_000u64)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        // The operator selected exactly one member. Nobody named the stranger.
+        refound_community_retaining(&bed.relay, &community, &[], &[kept.public_key()]).await.unwrap();
+
+        assert!(
+            vended_to(&bed, &community, &kept).await,
+            "the selected member keeps their key",
+        );
+        assert!(
+            !vended_to(&bed, &community, &stranger).await,
+            "an account not on the retain list is vended NO key, no matter when it \
+             appeared or what Join time it claims",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_raid_window_joiner_is_vended_no_key_even_if_nobody_named_them() {
+        // The recipient set is a LIVE fetch taken AFTER the cut was computed, and
+        // re-taken on every retry. A bot arriving in that gap is in the memberlist and
+        // absent from the cut — and was handed a working key for the very epoch meant
+        // to evict it. Testing join TIME catches it with nobody naming it.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "RaceCut", bed.relays.clone(), None).await.unwrap();
+        let established = Keys::generate();
+        let late = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        for (who, at_ms) in [(&established, 2_000_000u64), (&late, 9_000_000)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        // Window opens at 5_000s. `late` is named by NOBODY — the cut is empty.
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            !vended_to(&bed, &community, &late).await,
+            "a raid-window joiner must be vended NO key, even when nobody named them",
+        );
+        assert!(
+            vended_to(&bed, &community, &established).await,
+            "and the member who was already here keeps theirs",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_whose_join_is_not_on_the_plane_is_never_read_as_a_late_joiner() {
+        // THE regression that matters. A quiet member's Join lives on a buried epoch,
+        // so the reachable guestbook has no trace of them at all. Absence must read as
+        // OLD, never as new — reading it the other way shed 39 real members across five
+        // rotations. Here the Join exists ONLY locally, exactly as a buried one does.
+        let (bed, owner, _o) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Buried", bed.relays.clone(), None).await.unwrap();
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let quiet = Keys::generate();
+        let local_join = guestbook::GuestbookEvent {
+            rumor_id: [7u8; 32],
+            entry: guestbook::GuestbookEntry::Join { member: quiet.public_key(), invited_by: None, at_ms: 9_900_000 },
+            epoch: Some(community.root_epoch.0),
+            observed_at: None,
+        };
+        crate::db::community::set_guestbook(&cid_hex, &[local_join], 0).unwrap();
+
+        // Even stamped INSIDE the window, a Join the plane does not serve must not evict.
+        refound_community_severing(&bed.relay, &community, &[], 5_000).await.unwrap();
+
+        assert!(
+            vended_to(&bed, &community, &quiet).await,
+            "no Join on the reachable plane means OLD — absence of evidence must never evict",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn contain_raid_bans_cuts_and_severs_end_to_end() {
+        let (bed, owner, _other) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Containment", bed.relays.clone(), None).await.unwrap();
+        let minted = mint_public_link(&bed.relay, &community, "https://x", None, None).await.unwrap();
+
+        // Three arrivals: an established member (before the window), a convicted
+        // raider and a quiet lurker (both inside it).
+        let established = Keys::generate();
+        let raider = Keys::generate();
+        let lurker = Keys::generate();
+        let gb = super::super::derive::guestbook_group_key(&community.community_root, community.id(), community.root_epoch);
+        for (who, at_ms) in [(&established, 2_000_000u64), (&raider, 9_000_000), (&lurker, 9_500_000)] {
+            let join = guestbook::build_join_rumor(who.public_key(), None, at_ms);
+            let (wrap, _) = guestbook::seal_guestbook_rumor(&join, &gb, who, Timestamp::from_secs(at_ms / 1000)).unwrap();
+            bed.relay.publish(&wrap, &bed.relays).await.unwrap();
+        }
+
+        let report = contain_raid(&bed.relay, community.id(), &[raider.public_key()], 5_000, &[]).await.unwrap();
+        assert_eq!(report.banned, 1, "the convicted raider is banned");
+        assert_eq!(report.window_cut, 1, "the lurker who joined inside the window is cut");
+        assert!(report.refound_ok, "the severing refound landed: {:?}", report.warnings);
+        assert_eq!((report.epoch_before, report.epoch_after), (0, 1), "the root rolled");
+        assert_eq!(report.own_links_revoked, 1, "the door closed with it");
+
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        let banlist = crate::db::community::get_community_banlist(&cid_hex).unwrap();
+        assert!(banlist.contains(&raider.public_key().to_hex()), "raider on the banlist");
+        assert!(!banlist.contains(&lurker.public_key().to_hex()), "the lurker is cut, never banned — they can rejoin through a fresh link");
+        assert!(!banlist.contains(&established.public_key().to_hex()));
+        assert!(
+            fetch_public_bundle(&bed.relay, &minted.url).await.unwrap_err().contains("revoked"),
+            "the invite URL the raid used is a grave",
+        );
+
+        // The rotation's recipient set is the severance line: the established
+        // member rides into the new epoch, the raider and the lurker do not.
+        let updated = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(updated.root_epoch, Epoch(1));
+        let members = memberlist(&bed.relay, &updated).await.unwrap();
+        assert!(members.contains(&established.public_key()), "established member survives");
+        assert!(!members.contains(&raider.public_key()), "raider gone");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn adopting_someone_elses_rotation_refreshes_my_own_live_links() {
         // CORD-05 §2: a link shared once keeps working across rotations, because
         // its bundle is re-posted behind the same URL. The Refounder can only
@@ -10671,7 +14134,7 @@ mod tests {
         let meta = control::CommunityMetadata { name: "Fanout".into(), relays: many, ..Default::default() };
         edit_community_metadata(&relay, &community, &meta).await.unwrap();
 
-        let updated = follow_control(&relay, &community).await.unwrap()
+        let updated = follow_control(&relay, &community).await.unwrap().updated
             .expect("the metadata edition is folded");
         assert_eq!(
             updated.relays.len(),
@@ -10682,7 +14145,7 @@ mod tests {
         // …and the fold must SETTLE: comparing an oversize edition against the
         // capped working set would never be equal, so every later fold would
         // report a change and re-save forever.
-        let again = follow_control(&relay, &updated).await.unwrap();
+        let again = follow_control(&relay, &updated).await.unwrap().updated;
         assert!(again.is_none(), "re-folding the same oversize edition must be a no-op");
     }
 
@@ -10921,7 +14384,7 @@ mod tests {
 
         // Owner follows: the admin's rename folds (authorized).
         bed.swap_to(&owner);
-        let updated = follow_control(&bed.relay, &community).await.unwrap().expect("the admin edit folds");
+        let updated = follow_control(&bed.relay, &community).await.unwrap().updated.expect("the admin edit folds");
         assert_eq!(updated.name, "Lifecycle Renamed", "an authorized admin's metadata edit is honored");
 
         // Ban the member (the three-removal composition, in order).
@@ -10970,7 +14433,7 @@ mod tests {
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::ADMIN_ALL), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &member.keys.public_key(), vec![rid.clone()], 1).await;
         // Owner folds → the authorized role/grant heads are floored.
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         assert!(fetch_authority(&bed.relay, &community).await.roles.is_admin(&member.keys.public_key().to_hex()), "member is admin pre-attack");
 
         // The attacker (a non-owner) forges v2 of the admin role, chaining onto v1.
@@ -11071,7 +14534,7 @@ mod tests {
         assert!(texts_in(&bed.relay, &b_view, &priv_id).await.contains(&"A: mods-only channel".to_string()), "B reads the PRIVATE channel with the bundle key");
         // B folds the control plane (persisting the roster) — the live worker does
         // this right after any join; B's admin standing gates B's channel ops below.
-        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap() {
+        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap().updated {
             b_view = fresh;
         }
         println!("[follow] B folded control (roster persisted: B is @admin)");
@@ -11095,7 +14558,7 @@ mod tests {
         send_reaction(&bed.relay, &b_view, &general, &m1, &a_hex, super::super::kind::MESSAGE, "🔥", None).await.unwrap();
         bed.swap_to(&a);
         let m_edit = send_message(&bed.relay, &community, &general, "A: this will be edited").await.unwrap();
-        send_edit(&bed.relay, &community, &general, &m_edit, "A: edited!").await.unwrap();
+        send_edit(&bed.relay, &community, &general, &m_edit, "A: edited!", &[]).await.unwrap();
         let m_del = send_message(&bed.relay, &community, &general, "A: this will be deleted").await.unwrap();
         send_delete(&bed.relay, &community, &general, &m_del, super::super::kind::MESSAGE).await.unwrap();
         println!("[ops] reaction + edit + delete round-tripped");
@@ -11105,7 +14568,7 @@ mod tests {
         let bugs = create_public_channel(&bed.relay, &b_view, "bug-reports").await.unwrap();
         println!("[channel] B(admin) +public #bug-reports {}", crate::simd::hex::bytes_to_hex_32(&bugs.0));
         bed.swap_to(&a);
-        if let Some(updated) = follow_control(&bed.relay, &community).await.unwrap() {
+        if let Some(updated) = follow_control(&bed.relay, &community).await.unwrap().updated {
             community = updated;
         }
         assert!(community.channels.iter().any(|c| c.id.0 == bugs.0), "A folds in B's authorized new channel");
@@ -11122,7 +14585,7 @@ mod tests {
         println!("[channel] +private #vault {} (B is unentitled — no delivery)", crate::simd::hex::bytes_to_hex_32(&vault.0));
         bed.swap_to(&b);
         let session_b2 = crate::db::current_session();
-        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap() {
+        if let Some(fresh) = follow_control(&bed.relay, &b_view).await.unwrap().updated {
             b_view = fresh;
         }
         let ch = b_view.channel(&vault).expect("B recorded the announced private channel");
@@ -11310,7 +14773,7 @@ mod tests {
         become_acct(&b);
         let session_b = crate::db::current_session();
         let mut b_view = crate::db::community::load_community_v2(b_view.id()).unwrap().unwrap();
-        if let Some(fresh) = follow_control(&transport, &b_view).await.expect("B control follow") {
+        if let Some(fresh) = follow_control(&transport, &b_view).await.expect("B control follow").updated {
             b_view = fresh;
         }
         if let Some(fresh) = follow_rekeys(&transport, &b_view, &session_b).await.expect("B rekey follow").updated {
@@ -11426,7 +14889,7 @@ mod tests {
             let rk = follow_rekeys(&bed.relay, &cur, &session).await.unwrap();
             assert!(!rk.self_removed);
             let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
-            let ctl = follow_control(&bed.relay, &cur).await.unwrap();
+            let ctl = follow_control(&bed.relay, &cur).await.unwrap().updated;
             if rk.updated.is_none() && ctl.is_none() {
                 break;
             }
@@ -11451,6 +14914,57 @@ mod tests {
                 assert!(paged.iter().any(|t| t.contains(&format!("epoch{epoch}"))), "channel {id_hex} pages back to epoch-{epoch} history");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_backlog_deeper_than_max_steps_still_converges() {
+        // MAX_STEPS bounds ONE walk, not the catch-up. A member who slept through more
+        // rotations than the bound must still land on the head — silently stopping at
+        // the bound leaves them on a dead epoch reading nothing, which is
+        // indistinguishable from a quiet community.
+        let (bed, owner, member) = TestBed::new();
+        bed.swap_to(&owner);
+        let mut community = create_community(&bed.relay, "DeepSleeper", bed.relays.clone(), None).await.unwrap();
+        let bundle_json = serde_json::to_string(&bundle_of(&community, BundleAudience::Member(member.keys.public_key()), Some(owner.keys.public_key()), None, None)).unwrap();
+
+        bed.swap_to(&member);
+        let joined = accept_parked_invite(&bed.relay, &bundle_json, None).await.unwrap();
+        assert_eq!(joined.root_epoch, Epoch(0));
+
+        // Past the bound, deliberately.
+        bed.swap_to(&owner);
+        let depth = MAX_WALK_STEPS + 3;
+        for _ in 0..depth {
+            community = refound_community(&bed.relay, &community, &[]).await.unwrap();
+        }
+        assert_eq!(community.root_epoch, Epoch(depth as u64));
+
+        // The member follows repeatedly, exactly as a client does on each sync. Every
+        // pass must make forward progress and none may lose ground.
+        bed.swap_to(&member);
+        let mut last = 0u64;
+        for pass in 1..=8 {
+            // Reload from the DB each pass, exactly as a client does: this is what
+            // proves every hop was CHECKPOINTED, not merely held in the walk's memory.
+            let view = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+            let session = crate::db::current_session();
+            let _ = follow_rekeys(&bed.relay, &view, &session).await.unwrap();
+            let view = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+            assert!(
+                view.root_epoch.0 >= last,
+                "pass {pass} lost ground: {} -> {}",
+                last, view.root_epoch.0
+            );
+            last = view.root_epoch.0;
+            if last == depth as u64 {
+                break;
+            }
+        }
+        let view = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        assert_eq!(
+            view.root_epoch, Epoch(depth as u64),
+            "a backlog deeper than one walk's step bound must still converge across passes",
+        );
     }
 
     #[tokio::test]
@@ -11511,7 +15025,7 @@ mod tests {
             let rekeyed = follow_rekeys(&bed.relay, &cur, &session).await.unwrap();
             assert!(!rekeyed.self_removed, "the member was never removed");
             let cur = crate::db::community::load_community_v2(member_view.id()).unwrap().unwrap();
-            let controlled = follow_control(&bed.relay, &cur).await.unwrap();
+            let controlled = follow_control(&bed.relay, &cur).await.unwrap().updated;
             if rekeyed.updated.is_none() && controlled.is_none() {
                 break;
             }
@@ -11683,9 +15197,9 @@ mod tests {
         let rid = "d4".repeat(32);
         publish_role(&relay, &community, &owner, &admin_role(&rid, Permissions::MANAGE_METADATA), 1).await;
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![rid.clone()], 1).await;
-        follow_control(&relay, &community).await.unwrap(); // seed floors incl. the grant at v1
+        follow_control(&relay, &community).await.unwrap().updated; // seed floors incl. the grant at v1
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![], 2).await; // revoke → grant floor v2
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
 
         // A stale relay serves only the grant prefix (v1, the live grant).
         inject_stale_prefix(&relay, &community, 1, "wss://stale").await;
@@ -11730,7 +15244,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Fresh", vec!["wss://r".into()], None).await.unwrap();
         // Only the genesis editions exist; folding them reproduces the held view.
-        assert!(follow_control(&relay, &community).await.unwrap().is_none());
+        assert!(follow_control(&relay, &community).await.unwrap().updated.is_none());
     }
 
     #[tokio::test]
@@ -11741,7 +15255,7 @@ mod tests {
         let new_id = ChannelId([0x5a; 32]);
         publish_channel_edition(&relay, &community, &owner, &new_id, "announcements", false, 1, false).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("a new channel changed the view");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("a new channel changed the view");
         assert_eq!(updated.channels.len(), 2);
         let added = updated.channel(&new_id).expect("the new channel folded in");
         assert_eq!(added.name, "announcements");
@@ -11768,7 +15282,7 @@ mod tests {
         publish_community_meta(&relay, &community, &owner, "New Name", 2).await;
         publish_channel_edition(&relay, &community, &owner, &general, "lobby", false, 2, false).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().unwrap();
+        let updated = follow_control(&relay, &community).await.unwrap().updated.unwrap();
         assert_eq!(updated.name, "New Name");
         assert_eq!(updated.channel(&general).unwrap().name, "lobby");
         assert_eq!(updated.channels.len(), 1, "a rename doesn't add a channel");
@@ -11783,12 +15297,12 @@ mod tests {
 
         // The channel is first added and folded into the held view.
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
-        let with_extra = follow_control(&relay, &community).await.unwrap().expect("added");
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.expect("added");
         assert!(with_extra.channel(&extra).is_some());
 
         // Then it's tombstoned — the delete (higher version) folds the held one back out.
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
-        let updated = follow_control(&relay, &with_extra).await.unwrap().expect("removed");
+        let updated = follow_control(&relay, &with_extra).await.unwrap().updated.expect("removed");
         assert!(updated.channel(&extra).is_none(), "a deleted channel folds out");
         assert_eq!(updated.channels.len(), 1, "only #general remains");
     }
@@ -11818,7 +15332,7 @@ mod tests {
         let community = create_community(&relay, "Original", vec!["wss://good".into()], None).await.unwrap();
         publish_community_meta(&relay, &community, &owner, "Renamed", 2).await;
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("rename adopted");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("rename adopted");
         assert_eq!(updated.name, "Renamed");
 
         // The stale relay holds only the genesis prefix; point the follow at it.
@@ -11826,7 +15340,7 @@ mod tests {
         let mut stale_view = updated.clone();
         stale_view.relays = vec!["wss://stale".into()];
         assert!(
-            follow_control(&relay, &stale_view).await.unwrap().is_none(),
+            follow_control(&relay, &stale_view).await.unwrap().updated.is_none(),
             "a stale-only relay must not change the held view"
         );
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -11843,12 +15357,12 @@ mod tests {
         // A same-content metadata edit: no visible change (None), but the floor must
         // still advance to v2 (so the genesis metadata can't re-present below).
         publish_community_meta(&relay, &community, &owner, "Prune2", 2).await;
-        assert!(follow_control(&relay, &community).await.unwrap().is_none());
+        assert!(follow_control(&relay, &community).await.unwrap().updated.is_none());
 
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
-        let with_extra = follow_control(&relay, &community).await.unwrap().expect("added");
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.expect("added");
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
-        let pruned = follow_control(&relay, &with_extra).await.unwrap().expect("removed");
+        let pruned = follow_control(&relay, &with_extra).await.unwrap().updated.expect("removed");
         assert!(pruned.channel(&extra).is_none());
 
         // The stale relay serves the add (v1) but withholds the delete (v2).
@@ -11856,7 +15370,7 @@ mod tests {
         let mut stale_view = pruned.clone();
         stale_view.relays = vec!["wss://stale".into()];
         assert!(
-            follow_control(&relay, &stale_view).await.unwrap().is_none(),
+            follow_control(&relay, &stale_view).await.unwrap().updated.is_none(),
             "the withheld delete must not resurrect the channel"
         );
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -11872,7 +15386,7 @@ mod tests {
         let relay = MemoryRelay::new();
         let community = create_community(&relay, "Before", vec!["wss://good".into()], None).await.unwrap();
         publish_community_meta(&relay, &community, &owner, "Edited", 2).await;
-        let updated = follow_control(&relay, &community).await.unwrap().expect("edit adopted");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("edit adopted");
         assert_eq!(updated.name, "Edited");
 
         // Refounding lands (epoch bump saved by the rekey path); the compacted head
@@ -11881,7 +15395,7 @@ mod tests {
         crate::db::community::save_community_v2(&refounded).unwrap();
         publish_community_meta(&relay, &refounded, &owner, "Compacted", 5).await;
 
-        let adopted = follow_control(&relay, &refounded).await.unwrap().expect("compacted head adopted");
+        let adopted = follow_control(&relay, &refounded).await.unwrap().updated.expect("compacted head adopted");
         assert_eq!(adopted.name, "Compacted", "a fresh epoch bootstraps despite the dangling prev");
         // The persisted floor is stamped with the epoch the FOLD ran under.
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -11905,7 +15419,7 @@ mod tests {
         let genesis_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
 
         publish_community_meta(&relay, &community, &owner, "Ours", 2).await;
-        let ours = follow_control(&relay, &community).await.unwrap().expect("ours adopted");
+        let ours = follow_control(&relay, &community).await.unwrap().updated.expect("ours adopted");
         assert_eq!(ours.name, "Ours");
 
         // Our committed v2 edition's tiebreak id.
@@ -11938,7 +15452,7 @@ mod tests {
         };
         relay.publish(&fork_wrap, &community.relays).await.unwrap();
 
-        let converged = follow_control(&relay, &ours).await.unwrap().expect("fork winner adopted");
+        let converged = follow_control(&relay, &ours).await.unwrap().updated.expect("fork winner adopted");
         assert_eq!(converged.name, "Theirs", "the floor converges to the lower-inner-id winner");
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let held = crate::db::community::get_edition_head_inner_id(&cid_hex, &cid_hex).unwrap();
@@ -11968,11 +15482,11 @@ mod tests {
         let (w4, _) = control::seal_control_edition(&r4, &group, &owner, Timestamp::from_secs(4_000)).unwrap();
         relay.publish(&w4, &community.relays).await.unwrap();
 
-        let updated = follow_control(&relay, &community).await.unwrap().expect("the verified prefix applies");
+        let updated = follow_control(&relay, &community).await.unwrap().updated.expect("the verified prefix applies");
         assert_eq!(updated.name, "Two", "the anchored prefix lands; the detached v4 does not");
 
         relay.publish(&w3, &community.relays).await.unwrap();
-        let healed = follow_control(&relay, &updated).await.unwrap().expect("the chain heals");
+        let healed = follow_control(&relay, &updated).await.unwrap().updated.expect("the chain heals");
         assert_eq!(healed.name, "Four", "once the link arrives, the head advances past the prefix");
     }
 
@@ -11987,7 +15501,7 @@ mod tests {
         let group = control::ControlPlane::of(&community).write_group().unwrap();
 
         publish_community_meta(&relay, &community, &owner, "Two", 2).await;
-        let base = follow_control(&relay, &community).await.unwrap().expect("floor at v2");
+        let base = follow_control(&relay, &community).await.unwrap().updated.expect("floor at v2");
         publish_community_meta(&relay, &base, &owner, "Three", 3).await; // ts 1_000 (old)
         let v3_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
 
@@ -12006,7 +15520,7 @@ mod tests {
         let (w4, _) = control::seal_control_edition(&r4, &group, &owner, Timestamp::from_secs(10_000)).unwrap();
         relay.publish(&w4, &community.relays).await.unwrap();
 
-        let healed = follow_control(&relay, &base).await.unwrap().expect("paging recovered the chain");
+        let healed = follow_control(&relay, &base).await.unwrap().updated.expect("paging recovered the chain");
         assert_eq!(healed.name, "Four", "the gap paged past the flood to the floor link");
     }
 
@@ -12022,7 +15536,7 @@ mod tests {
         crate::db::community::delete_community(&cid_hex).unwrap();
 
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a follow racing a delete is a no-op"
         );
         assert!(crate::db::community::load_community_v2(community.id()).unwrap().is_none(), "the community stays deleted");
@@ -12091,7 +15605,7 @@ mod tests {
         let genesis_hash = head_hash_on_relay(&relay, &community, &community.id().0).await.unwrap();
 
         publish_community_meta(&relay, &community, &owner, "Ours", 2).await;
-        let ours = follow_control(&relay, &community).await.unwrap().expect("ours adopted");
+        let ours = follow_control(&relay, &community).await.unwrap().updated.expect("ours adopted");
         assert_eq!(ours.name, "Ours");
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let held_before = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().unwrap();
@@ -12115,7 +15629,7 @@ mod tests {
         stale_view.relays = vec!["wss://stale".into()];
 
         assert!(
-            follow_control(&relay, &stale_view).await.unwrap().is_none(),
+            follow_control(&relay, &stale_view).await.unwrap().updated.is_none(),
             "a losing fork served without our floor edition changes nothing"
         );
         let held_after = crate::db::community::get_edition_head(&cid_hex, &cid_hex).unwrap().unwrap();
@@ -12137,7 +15651,7 @@ mod tests {
         publish_channel_edition(&relay, &community, &rogue, &rogue_id, "backdoor", false, 1, false).await;
 
         assert!(
-            follow_control(&relay, &community).await.unwrap().is_none(),
+            follow_control(&relay, &community).await.unwrap().updated.is_none(),
             "a non-owner control edition is not folded"
         );
     }
@@ -12156,6 +15670,7 @@ mod tests {
         let updated = follow_control(&relay, &community)
             .await
             .unwrap()
+            .updated
             .expect("the keyless record is a change");
         let ch = updated.channel(&priv_id).expect("the private channel is recorded");
         assert!(ch.private && ch.key.is_none(), "recorded keyless");
@@ -13086,7 +16601,30 @@ mod tests {
             .iter()
             .map(|r| rekey::build_blob_local(rotator.secret_key(), &rotator.public_key().to_bytes(), r, RekeyScope::Root, new_epoch, new_root).unwrap())
             .collect();
-        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref()).unwrap();
+        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref(), false).unwrap();
+        for e in &events {
+            relay.publish(e, &community.relays).await.unwrap();
+        }
+    }
+
+    /// A base rotation that carries the containment marker (CORD-06 Severing).
+    async fn publish_severing_base_rotation(
+        relay: &MemoryRelay,
+        community: &CommunityV2,
+        rotator: &Keys,
+        recipients: &[PublicKey],
+        new_root: &[u8; 32],
+        prev_key: &[u8; 32],
+    ) {
+        let new_epoch = Epoch(community.root_epoch.0 + 1);
+        let prev_epoch = community.root_epoch;
+        let prev_commit = super::super::derive::epoch_key_commitment(prev_epoch, prev_key);
+        let group = base_rekey_group_key(&community.community_root, community.id(), new_epoch);
+        let blobs: Vec<_> = recipients
+            .iter()
+            .map(|r| rekey::build_blob_local(rotator.secret_key(), &rotator.public_key().to_bytes(), r, RekeyScope::Root, new_epoch, new_root).unwrap())
+            .collect();
+        let events = rekey::build_rekey_chunks_local(rotator, &group, RekeyScope::Root, new_epoch, prev_epoch, &prev_commit, &blobs, 2_000, my_authority_citation(community, &rotator.public_key()).as_ref(), true).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -13141,7 +16679,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &[0x44; 32]);
         let group = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &new_key).unwrap();
-        let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None).unwrap();
+        let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None, false).unwrap();
         for e in &events {
             relay.publish(e, &community.relays).await.unwrap();
         }
@@ -13152,6 +16690,45 @@ mod tests {
         assert_eq!(ch.epoch, Epoch(1), "the private channel advanced an epoch");
         assert_eq!(ch.key, Some(new_key), "adopted the fresh channel key");
         assert_eq!(updated.root_epoch, Epoch(0), "the base is untouched by a channel rotation");
+    }
+
+    #[tokio::test]
+    async fn a_whole_channel_fan_rotates_in_one_hop_without_crossing_keys() {
+        // The fan is fetched concurrently and keyed by (channel, addressing root). A
+        // mis-keyed prefetch cannot hand channel A's key to channel B — the blob's
+        // scope is authenticated, so a wrong batch is refused rather than adopted — but
+        // it CAN starve a channel of the chunks that are sitting on the plane for it,
+        // which reads as "that channel never rotates" and strands its members.
+        let (_tmp, _guard, owner) = init_test_db();
+        let relay = MemoryRelay::new();
+        let mut community = create_community(&relay, "FanRot", vec!["wss://r".into()], None).await.unwrap();
+
+        // Distinct held key AND distinct fresh key per channel — a swap between any
+        // two is then visible as an equality failure rather than a silent pass.
+        let fan: Vec<(ChannelId, [u8; 32], [u8; 32])> = (0u8..12)
+            .map(|i| (ChannelId([0x30 + i; 32]), [0x40 + i; 32], [0x80 + i; 32]))
+            .collect();
+        for (id, held, _) in &fan {
+            add_private_channel(&mut community, *id, *held, Epoch(0));
+        }
+
+        for (id, held, fresh) in &fan {
+            let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), held);
+            let group = channel_rekey_group_key(&community.community_root, id, Epoch(1));
+            let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(*id), Epoch(1), fresh).unwrap();
+            let events = rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(*id), Epoch(1), Epoch(0), &prev_commit, &[blob], 2_000, None, false).unwrap();
+            for e in &events {
+                relay.publish(e, &community.relays).await.unwrap();
+            }
+        }
+
+        let session = crate::db::current_session();
+        let updated = follow_rekeys(&relay, &community, &session).await.unwrap().updated.expect("adopted");
+        for (id, _, fresh) in &fan {
+            let ch = updated.channel(id).expect("channel survived the fan");
+            assert_eq!(ch.epoch, Epoch(1), "every channel in the fan advanced");
+            assert_eq!(ch.key, Some(*fresh), "each channel adopted ITS OWN key, not a neighbour's");
+        }
     }
 
     #[tokio::test]
@@ -13197,7 +16774,7 @@ mod tests {
         // Chunk 1 of a declared 2, carrying someone else's blob (not mine).
         let other = Keys::generate();
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &other.public_key(), RekeyScope::Root, new_epoch, &[0xB3; 32]).unwrap();
-        let rumor = rekey::build_rekey_rumor(owner.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 2, 2_000, None).unwrap();
+        let rumor = rekey::build_rekey_rumor(owner.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 2, 2_000, None, false).unwrap();
         let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &owner, Timestamp::from_secs(2_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
 
@@ -13254,7 +16831,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let group = channel_rekey_group_key(&root0, &priv_id, Epoch(2));
         let blob = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &prev_commit, &[blob], 2_000, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -13293,7 +16870,7 @@ mod tests {
         let pc1 = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
         let g1 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(1));
         let b1 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(1), &key1).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &g1, RekeyScope::Channel(priv_id), Epoch(1), Epoch(0), &pc1, &[b1], 2_000, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         // Epoch 2: a later rotation includes ME (e.g. a removal-forced re-mint whose
@@ -13302,7 +16879,7 @@ mod tests {
         let pc2 = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let b2 = rekey::build_blob_local(owner.secret_key(), &owner.public_key().to_bytes(), &owner.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc2, &[b2], 2_100, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -13343,7 +16920,7 @@ mod tests {
         let g2 = channel_rekey_group_key(&community.community_root, &priv_id, Epoch(2));
         let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
         let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &admin.public_key()).as_ref()).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &admin.public_key()).as_ref(), false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         let session = crate::db::current_session();
@@ -13356,7 +16933,7 @@ mod tests {
         let pc3 = super::super::derive::epoch_key_commitment(Epoch(2), &key2);
         let g3 = channel_rekey_group_key(&updated.community_root, &priv_id, Epoch(3));
         let rb = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(3), &key3).unwrap();
-        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&rogue, &g3, RekeyScope::Channel(priv_id), Epoch(3), Epoch(2), &pc3, &[rb], 2_100, None, false).unwrap() {
             relay.publish(&e, &updated.relays).await.unwrap();
         }
         let follow = follow_rekeys(&relay, &updated, &session).await.unwrap();
@@ -13398,7 +16975,7 @@ mod tests {
         let pc = super::super::derive::epoch_key_commitment(Epoch(1), &key1);
         let g2 = channel_rekey_group_key(&held.community_root, &priv_id, Epoch(2));
         let pb = rekey::build_blob_local(peer.secret_key(), &peer.public_key().to_bytes(), &peer.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, my_authority_citation(&held, &peer.public_key()).as_ref()).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&peer, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[pb], 2_000, my_authority_citation(&held, &peer.public_key()).as_ref(), false).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let session = crate::db::current_session();
@@ -13411,7 +16988,7 @@ mod tests {
         let key3 = [0xA3; 32];
         let stranger = Keys::generate();
         let ob = rekey::build_blob_local(owner.keys.secret_key(), &owner.keys.public_key().to_bytes(), &stranger.public_key(), RekeyScope::Channel(priv_id), Epoch(2), &key3).unwrap();
-        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&owner.keys, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[ob], 2_100, None, false).unwrap() {
             bed.relay.publish(&e, &held.relays).await.unwrap();
         }
         let follow = follow_rekeys(&bed.relay, &held, &session).await.unwrap();
@@ -13517,7 +17094,7 @@ mod tests {
         struct FetchErrors;
         #[async_trait::async_trait]
         impl Transport for FetchErrors {
-            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+            async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
             async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
                 panic!("republish must NOT publish when the remote fetch failed");
             }
@@ -13622,7 +17199,7 @@ mod tests {
         let prev_commit = super::super::derive::epoch_key_commitment(Epoch(0), &community.community_root);
         for i in 0..260u64 {
             let blob = rekey::build_blob_local(rogue.secret_key(), &rogue.public_key().to_bytes(), &rogue.public_key(), RekeyScope::Root, new_epoch, &[0xEE; 32]).unwrap();
-            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i, None).unwrap();
+            let rumor = rekey::build_rekey_rumor(rogue.public_key(), RekeyScope::Root, new_epoch, Epoch(0), &prev_commit, &[blob], 1, 1, 3_000 + i, None, false).unwrap();
             let (wrap, _) = rekey::seal_rekey_chunk(&rumor, &group, &rogue, Timestamp::from_secs(3_000 + i)).unwrap();
             relay.publish(&wrap, &community.relays).await.unwrap();
         }
@@ -13689,7 +17266,7 @@ mod tests {
         let me_pk = crate::state::MY_SECRET_KEY.to_keys().unwrap().public_key();
         let blob = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
         // Authorized admin, correct continuity, my blob present — but NO citation.
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, None, false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
 
@@ -13701,7 +17278,7 @@ mod tests {
         let cited = my_authority_citation(&community, &admin.public_key());
         assert!(cited.is_some(), "the seeded head yields a citation");
         let blob2 = rekey::build_blob_local(admin.secret_key(), &admin.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), &key2).unwrap();
-        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob2], 2_100, cited.as_ref()).unwrap() {
+        for e in rekey::build_rekey_chunks_local(&admin, &g2, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob2], 2_100, cited.as_ref(), false).unwrap() {
             relay.publish(&e, &community.relays).await.unwrap();
         }
         let out = follow_rekeys(&relay, &community, &crate::db::current_session()).await.unwrap();
@@ -13743,7 +17320,7 @@ mod tests {
         let key_b = [0xFB; 32]; // higher — a's must win regardless of publish order
         for (signer, k) in [(&a, &key_a), (&b, &key_b)] {
             let blob = rekey::build_blob_local(signer.secret_key(), &signer.public_key().to_bytes(), &me_pk, RekeyScope::Channel(priv_id), Epoch(2), k).unwrap();
-            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &signer.public_key()).as_ref()).unwrap() {
+            for e in rekey::build_rekey_chunks_local(signer, &group, RekeyScope::Channel(priv_id), Epoch(2), Epoch(1), &pc, &[blob], 2_000, my_authority_citation(&community, &signer.public_key()).as_ref(), false).unwrap() {
                 relay.publish(&e, &community.relays).await.unwrap();
             }
         }
@@ -13948,7 +17525,7 @@ mod tests {
         poisoned.channels[0].key = Some([0x66; 32]);
         crate::db::community::save_community_v2(&poisoned).unwrap();
 
-        let healed = follow_control(&relay, &poisoned).await.unwrap().expect("healed");
+        let healed = follow_control(&relay, &poisoned).await.unwrap().updated.expect("healed");
         let ch = healed.channel(&general).unwrap();
         assert!(!ch.private, "the owner's public declaration overrides the bundle");
         assert_eq!(ch.key, None, "a healed public channel derives from the root");
@@ -13963,10 +17540,10 @@ mod tests {
         let community = create_community(&relay, "Prune", vec!["wss://r".into()], None).await.unwrap();
         let extra = ChannelId([0x77; 32]);
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 1, false).await;
-        let with_extra = follow_control(&relay, &community).await.unwrap().unwrap();
+        let with_extra = follow_control(&relay, &community).await.unwrap().updated.unwrap();
         assert!(with_extra.channel(&extra).is_some());
         publish_channel_edition(&relay, &community, &owner, &extra, "temp", false, 2, true).await;
-        let after = follow_control(&relay, &with_extra).await.unwrap().unwrap();
+        let after = follow_control(&relay, &with_extra).await.unwrap().updated.unwrap();
         assert!(after.channel(&extra).is_none());
 
         let reloaded = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -14010,7 +17587,7 @@ mod tests {
     }
     #[async_trait::async_trait]
     impl Transport for CappedRelay {
-        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> { self.fetch(query, relays).await }
+        async fn fetch_plane(&self, _plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> { Ok(crate::community::transport::PlaneFetch::whole(self.fetch(query, relays).await?)) }
         async fn publish(&self, _e: &Event, _r: &[String]) -> Result<(), String> {
             Ok(())
         }
@@ -14313,7 +17890,7 @@ mod tests {
         send_reaction(&bed.relay, &community, &general, &msg_id, &me_hex, super::super::kind::MESSAGE, ":fire:", Some(("fire", "https://e/f.png")))
             .await
             .unwrap();
-        send_edit(&bed.relay, &community, &general, &msg_id, "edited").await.unwrap();
+        send_edit(&bed.relay, &community, &general, &msg_id, "edited", &[]).await.unwrap();
         send_delete(&bed.relay, &community, &general, &msg_id, super::super::kind::MESSAGE).await.unwrap();
 
         let page = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
@@ -14524,11 +18101,11 @@ mod tests {
         let community = create_community(&bed.relay, "Rejoin", bed.relays.clone(), None).await.unwrap();
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let (o, m) = (owner.keys.public_key(), member.keys.public_key());
-        let join = |at: u64, id: u8| guestbook::GuestbookEvent {
+        let join = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Join { member: m, invited_by: None, at_ms: at },
         };
-        let kick = |at: u64, id: u8| guestbook::GuestbookEvent {
+        let kick = |at: u64, id: u8| guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Kick { actor: o, target: m, citation: None, at_ms: at },
         };
@@ -14589,51 +18166,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_uncited_admin_edition_is_not_folded_but_a_cited_one_is() {
-        // CORD-04 §5 on the CONTROL PLANE: "a verifier won't act on the edition
-        // until it has synced at least that Grant". The citation resolves against
-        // the heads THIS fold accepted — an external floor would refuse every
-        // non-owner edition on a bootstrap and the roster could never fold.
+    async fn an_uncited_edition_cannot_self_promote_or_outlive_a_demotion() {
+        // The two ways an ADD could escalate if the citation were the thing holding
+        // the line. It is not — rank is — and rank is resolved against the CURRENT
+        // roster, which is precisely what the spec says the verifier must do.
         let (bed, owner, admin) = TestBed::new();
         bed.swap_to(&owner);
-        let community = create_community(&bed.relay, "Cited", bed.relays.clone(), None).await.unwrap();
+        let community = create_community(&bed.relay, "NoEscalate", bed.relays.clone(), None).await.unwrap();
+        let admin_pk = admin.keys.public_key();
+
+        // An admin at position 3, and a role ABOVE them at position 1.
+        let mid = "d1".repeat(32);
+        let mut mid_role = admin_role(&mid, Permissions::admin().0);
+        mid_role.position = 3;
+        publish_role(&bed.relay, &community, &owner.keys, &mid_role, 1).await;
+        let high = "d2".repeat(32);
+        let mut high_role = admin_role(&high, Permissions::admin().0);
+        high_role.position = 1;
+        publish_role(&bed.relay, &community, &owner.keys, &high_role, 1).await;
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![mid.clone()], 1).await;
+
+        // 1. SELF-PROMOTION, uncited: the admin grants THEMSELVES the higher role.
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &admin_pk, vec![high.clone(), mid.clone()], 2, None).await;
+        // Assert the PROPERTY, not the shape: the role must not be held, whether the
+        // forged edition was refused outright or folded back to the owner's version.
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == admin_pk.to_hex() && g.role_ids.contains(&high)),
+            "an uncited edition must not let an author grant themselves a role they do not \
+             outrank — you cannot act at or above your own rank, citation or not",
+        );
+
+        // 2. OUTLIVING A DEMOTION, uncited: the owner demotes the admin to nothing,
+        //    and the admin's uncited grant to a bystander must stop being honored the
+        //    moment this client folds the demotion.
+        let bystander = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![mid.clone()], 1, None).await;
+        let before = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !before.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "an admin at position 3 cannot grant position 3 — equal cannot act on equal",
+        );
+
+        publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![], 3).await;
+        let after = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !after.roles.is_admin(&admin_pk.to_hex()),
+            "the owner's demotion folds",
+        );
+        assert!(
+            !after.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "and nothing the demoted author wrote is honored afterwards — authority is \
+             resolved against the CURRENT roster, which is what the citation was only ever \
+             a scheduling hint for",
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uncited_edition_folds_on_rank_alone_and_never_escalates() {
+        // CORD-04 §5 calls the `vac` a SYNC FLOOR, not the verdict: a verifier waits
+        // until it has synced the cited Grant, then resolves rank against its CURRENT
+        // roster. Refusing an edition that cites NOTHING promoted that sync aid into an
+        // authority requirement — and pre-citation clients emitted no `vac` at all, so
+        // whole live rosters folded to nothing while a lenient implementation read the
+        // same plane fine.
+        //
+        // What actually prevents escalation is rank, and rank is unchanged. This pins
+        // both halves: a genuine in-rank edition folds without a citation, and an
+        // out-of-rank one does not, cited or otherwise.
+        let (bed, owner, admin) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Uncited", bed.relays.clone(), None).await.unwrap();
         let admin_pk = admin.keys.public_key();
         let rid = "c3".repeat(32);
         publish_role(&bed.relay, &community, &owner.keys, &admin_role(&rid, Permissions::admin().0), 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &admin_pk, vec![rid.clone()], 1).await;
 
-        // The admin grants a bystander, citing NOTHING.
-        // A LOWER role (position 5) — an admin at position 1 may grant beneath
-        // themselves but never at their own rank (equal cannot act on equal).
+        // A role BENEATH the admin (they sit at position 1).
         let low_rid = "c4".repeat(32);
         let mut low = admin_role(&low_rid, Permissions::admin().0);
         low.position = 5;
         publish_role(&bed.relay, &community, &owner.keys, &low, 1).await;
 
+        // 1. GENUINE and in-rank, citing nothing → folds.
         let bystander = Keys::generate().public_key();
         publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![low_rid.clone()], 1, None).await;
         let view = fetch_authority(&bed.relay, &community).await;
         assert!(
-            !view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
-            "an uncited non-owner edition is not folded"
+            view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
+            "an uncited edition from an author the roster DOES authorize, acting beneath \
+             their own rank, is genuine and must fold",
         );
-        // The owner's own editions still fold — supreme cites nothing.
-        assert!(view.roles.is_admin(&admin_pk.to_hex()), "the owner-authored grant folds");
+        assert!(view.roles.is_admin(&admin_pk.to_hex()), "the owner-authored grant still folds");
 
-        // Same edition, now citing the admin's real grant: honored. (follow_control
-        // is what PERSISTS the folded heads a citation is built from.)
-        let _ = follow_control(&bed.relay, &community).await;
-        let entity_id = crate::community::v2::derive::grant_locator(community.id(), &admin_pk.to_bytes());
-        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-        let entity_hex = crate::simd::hex::bytes_to_hex_32(&entity_id);
-        let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
-        let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
-        publish_grant_citing(&bed.relay, &community, &admin.keys, &bystander, vec![low_rid], 2, Some(&cite)).await;
+        // 2. ESCALATION, uncited: a stranger the roster authorizes for nothing.
+        let stranger = Keys::generate();
+        let victim = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &stranger, &victim, vec![low_rid.clone()], 1, None).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == victim.to_hex()),
+            "an uncited edition from an UNAUTHORIZED author must never fold — dropping the \
+             citation requirement must not become a way in",
+        );
 
+        // 3. ESCALATION, uncited, by a real admin acting AT their own rank: equal
+        //    cannot act on equal, citation or not.
+        let peer = Keys::generate().public_key();
+        publish_grant_citing(&bed.relay, &community, &admin.keys, &peer, vec![rid.clone()], 1, None).await;
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(
+            !view.roles.grants.iter().any(|g| g.member == peer.to_hex()),
+            "an authorized author still cannot grant AT their own rank — rank is what \
+             stops escalation, and it is untouched",
+        );
+
+        // 4. ESCALATION, uncited REVOCATION — the case that makes the citation
+        //    load-bearing. A strip names no roles, so the rank gate has no position to
+        //    check and passes vacuously; the citation is the only thing standing there.
+        //    An uncited edition may ADD authority, never remove it.
+        publish_grant_citing(&bed.relay, &community, &stranger, &bystander, vec![], 9, None).await;
         let view = fetch_authority(&bed.relay, &community).await;
         assert!(
             view.roles.grants.iter().any(|g| g.member == bystander.to_hex()),
-            "the same edition WITH its synced citation folds"
+            "an uncited empty grant must NOT strip a member — a revocation's rank check is \
+             vacuous, so tolerating it uncited hands any stranger a demotion primitive",
         );
     }
 
@@ -14654,7 +18311,7 @@ mod tests {
         crate::db::community::merge_community_ban_marks(&cid_hex, &[(member_pk.to_hex(), 1_000u64)].into_iter().collect()).unwrap();
 
         // Their Join lands 60s after the ban mark, while the banlist still says banned.
-        let join = guestbook::GuestbookEvent {
+        let join = guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [9u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_060_000 },
         };
@@ -14719,7 +18376,7 @@ mod tests {
             tokio::task::yield_now().await;
             self.0.fetch(query, relays).await
         }
-        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             tokio::task::yield_now().await;
             self.0.fetch_plane(plane, query, relays).await
         }
@@ -14915,7 +18572,7 @@ mod tests {
             tokio::task::yield_now().await;
             self.0.fetch(query, relays).await
         }
-        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<Vec<Event>, String> {
+        async fn fetch_plane(&self, plane: &Keys, query: &Query, relays: &[String]) -> Result<crate::community::transport::PlaneFetch, String> {
             tokio::task::yield_now().await;
             self.0.fetch_plane(plane, query, relays).await
         }
@@ -15058,11 +18715,11 @@ mod tests {
         let (version, edition_hash) = crate::db::community::get_edition_head(&cid_hex, &entity_hex).unwrap().unwrap();
         let cite = crate::community::edition::AuthorityCitation { entity_id, version, edition_hash };
 
-        let joined = guestbook::GuestbookEvent {
+        let joined = guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [1u8; 32],
             entry: guestbook::GuestbookEntry::Join { member: member_pk, invited_by: None, at_ms: 1_000 },
         };
-        let kick = |citation, id: u8, at| guestbook::GuestbookEvent {
+        let kick = |citation, id: u8, at| guestbook::GuestbookEvent { epoch: None, observed_at: None,
             rumor_id: [id; 32],
             entry: guestbook::GuestbookEntry::Kick { actor: admin.public_key(), target: member_pk, citation, at_ms: at },
         };
@@ -15155,7 +18812,7 @@ mod tests {
         grant_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
 
         // The passive follow folds + persists; the read is then LOCAL (v1 parity).
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(roster.is_admin(&member_hex), "the persisted roster reads back without a fetch");
 
@@ -15168,7 +18825,7 @@ mod tests {
 
         // A real revocation (a NEWER grant edition) does replace it.
         revoke_admin(&bed.relay, &community, &member.keys.public_key()).await.unwrap();
-        follow_control(&bed.relay, &community).await.unwrap();
+        follow_control(&bed.relay, &community).await.unwrap().updated;
         let roster = crate::db::community::get_community_roles(&cid_hex).unwrap();
         assert!(!roster.is_admin(&member_hex), "the revoke folds + persists");
     }
@@ -15268,7 +18925,7 @@ mod tests {
 
         let eid = crate::community::v2::derive::pins_locator(community.id(), &general);
         publish_control_edition(&relay, &community, vsk::PINS, &eid, &content).await.unwrap();
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
 
         let read = read_channel_pins(&community, &general).unwrap();
         assert!(!read.sealed);
@@ -15338,7 +18995,7 @@ mod tests {
         let (wrap, _) = control::seal_control_edition(&rumor, &group, &rogue, Timestamp::from_secs(2_000)).unwrap();
         relay.publish(&wrap, &community.relays).await.unwrap();
 
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
         let read = read_channel_pins(&community, &general).unwrap();
         assert_eq!(read.version, 0, "an unauthorized edition never persists a head");
         assert!(read.pins.is_empty());
@@ -15364,10 +19021,10 @@ mod tests {
             color: 0,
         };
         publish_role(&relay, &community, &owner, &legacy, 1).await;
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
 
         assert!(upgrade_admin_role_pin_bit(&relay, &community).await.unwrap(), "the widening publishes");
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
         let roles = crate::db::community::get_community_roles(&cid_hex).unwrap();
         let widened = roles.roles.iter().find(|r| r.role_id == rid).expect("same entity");
         assert!(widened.permissions.contains(Permissions::PIN_MESSAGES), "bit 11 landed");
@@ -15433,7 +19090,7 @@ mod tests {
         let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
         publish_pin_list(&relay, &community, &ch, &[entry]).await.unwrap();
 
-        send_edit(&relay, &community, &general, &rumor_id, "second thoughts").await.unwrap();
+        send_edit(&relay, &community, &general, &rumor_id, "second thoughts", &[]).await.unwrap();
         let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
         let edit_opened = page
             .iter()
@@ -15469,7 +19126,7 @@ mod tests {
         let general = community.channels[0].id;
 
         let rumor_id = send_message(&relay, &community, &general, "before").await.unwrap();
-        send_edit(&relay, &community, &general, &rumor_id, "after").await.unwrap();
+        send_edit(&relay, &community, &general, &rumor_id, "after", &[]).await.unwrap();
         let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
         let edit_event = &page.iter().find(|f| matches!(&f.event, ChatEvent::Edit { .. })).expect("the edit reads back").event;
         let msg_event = &page.iter().find(|f| matches!(&f.event, ChatEvent::Message { .. })).expect("the message reads back").event;
@@ -15575,7 +19232,7 @@ mod tests {
         );
 
         // The wire agrees: a real fold confirms rather than regresses.
-        follow_control(&relay, &community).await.unwrap();
+        follow_control(&relay, &community).await.unwrap().updated;
         let folded = crate::db::community::get_community_banlist(&cid_hex).unwrap();
         assert!(folded.contains(&spammer_a) && folded.contains(&spammer_b));
     }

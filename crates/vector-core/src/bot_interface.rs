@@ -358,6 +358,14 @@ pub fn parse_command_text(manifest: &BotManifest, content: &str) -> Option<Parse
         if value.len() > MAX_ARG_VALUE_LEN {
             return None;
         }
+        // An explicitly empty token (`""`) is the positional format's hole
+        // marker: it skips an OPTIONAL arg so a later one is still reachable
+        // ("/listings \"\" 2" = no category, page 2). A required arg keeps the
+        // empty value — an empty String can be a deliberate answer, and typing
+        // judges it, not the tokenizer.
+        if value.is_empty() && !a.required {
+            continue;
+        }
         args.push((a.name.clone(), value));
     }
     Some(ParsedCommand { name, args })
@@ -720,6 +728,50 @@ mod tests {
         let back = BotManifest::from_event(&ev).unwrap();
         assert_eq!(back.commands.len(), 2);
         assert_eq!(back.command("price").unwrap().args[0].choices.len(), 3);
+    }
+
+    /// The positional format needs a hole marker or a later arg is unreachable
+    /// past a skipped one: a composer skipping an optional first Choice used to
+    /// have no way to send the second arg at all.
+    #[test]
+    fn an_empty_token_skips_an_optional_arg_so_later_ones_are_reachable() {
+        let m = BotManifest {
+            v: 1,
+            commands: vec![CommandSpec {
+                name: "listings".into(),
+                description: String::new(),
+                args: vec![
+                    ArgSpec {
+                        name: "category".into(),
+                        arg_type: ArgType::Choice,
+                        description: String::new(),
+                        required: false,
+                        choices: vec!["general".into(), "gaming".into()],
+                    },
+                    ArgSpec {
+                        name: "page".into(),
+                        arg_type: ArgType::Int,
+                        description: String::new(),
+                        required: false,
+                        choices: vec![],
+                    },
+                ],
+            }],
+        };
+        m.validate().expect("a legal manifest — required-first forbids the reverse shape");
+        let spec = m.command("listings").unwrap();
+
+        let parsed = parse_command_text(&m, r#"/listings "" 2"#).unwrap();
+        assert_eq!(parsed.args, vec![("page".to_string(), "2".to_string())], "the hole never becomes an argument");
+        let typed = typed_args(spec, &parsed).expect("a skipped optional passes typing");
+        assert!(!typed.contains_key("category"));
+        assert_eq!(typed.get("page").and_then(|v| v.as_int()), Some(2));
+
+        // A REQUIRED arg's explicit empty is a value, not a hole — typing judges it.
+        let pm = price_manifest();
+        let parsed = parse_command_text(&pm, r#"/say "" hello"#).unwrap();
+        assert_eq!(parsed.args.len(), 2, "an empty required token still binds");
+        assert!(typed_args(pm.command("say").unwrap(), &parsed).is_err(), "and fails as a non-integer, not silently absent");
     }
 
     #[test]

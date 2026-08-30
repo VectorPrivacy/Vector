@@ -595,6 +595,22 @@ impl VectorAgent {
         }
     }
 
+    #[tool(description = "Repair a Concord v2 Community's roster cache when it is stuck holding WRONG data: keeps what is stored but resets its provenance so the next control fold may replace it, then folds immediately. Publishes nothing and touches no keys. Use when explain_epoch_state shows a roster that disagrees with reality.")]
+    async fn repair_community_roster(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.repair_community_roster(&req.community_id).await {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
+    #[tool(description = "Explain this account's epoch state for a Concord v2 Community: the epoch and roster it holds, what the next-epoch rekey plane offers, and why each rotation there was or was not adopted. Use it to answer 'am I stranded on an old epoch, and why' — a stranded client otherwise just sees silence, which looks identical to a quiet community. Run it from two different accounts on the same Community to compare their views. Read-only.")]
+    async fn explain_epoch_state(&self, Parameters(req): Parameters<CommunityIdRequest>) -> Result<CallToolResult, McpError> {
+        match self.core.explain_epoch_state(&req.community_id).await {
+            Ok(v) => Ok(CallToolResult::success(vec![Content::text(serde_json::to_string_pretty(&v).unwrap_or_else(|_| "{}".into()))])),
+            Err(e) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        }
+    }
+
     #[tool(description = "Fetch the latest page of a Community channel from relays (messages, reactions, edits, deletes, presence). Returns the count of new messages. Then use get_messages to read them.")]
     async fn sync_community_channel(&self, Parameters(req): Parameters<SyncCommunityChannelRequest>) -> Result<CallToolResult, McpError> {
         match self.core.sync_community_channel(&req.channel_id, req.limit).await {

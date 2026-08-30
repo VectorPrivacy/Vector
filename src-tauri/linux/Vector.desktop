@@ -1,0 +1,17 @@
+[Desktop Entry]
+Categories=Network;InstantMessaging;Chat;
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Exec={{exec}} %u
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+StartupNotify=true
+Keywords=messenger;chat;nostr;private;encrypted;dm;
+X-GNOME-UsesNotifications=true
+{{#if mime_type}}
+MimeType={{mime_type}}
+{{/if}}

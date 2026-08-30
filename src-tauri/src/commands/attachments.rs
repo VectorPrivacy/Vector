@@ -535,6 +535,22 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     break 'source;
                 }
 
+                // Plaintext public blob (no decryption tags): AES-GCM normally
+                // authenticates the bytes; here the sender's `ox` claim is the only
+                // integrity check, so enforce it per source before saving.
+                if attachment_for_decrypt.key.is_empty() {
+                    if let Some(claim) = attachment_for_decrypt.original_hash.as_deref() {
+                        if util::calculate_file_hash(&data) != claim {
+                            vector_core::log_net_fail!(
+                                "[AttachmentDownload] {} served plaintext that fails its hash claim — bad source",
+                                url
+                            );
+                            last_error = "Source served corrupt bytes".to_string();
+                            break 'source;
+                        }
+                    }
+                }
+
                 match decrypt_and_save_attachment(handle, &data, &attachment_for_decrypt).await {
                     Ok(ok) => saved = Some(ok),
                     Err(error) => {
@@ -689,12 +705,17 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     "chat_id": &chat_id
                 })).unwrap();
 
-                // In-memory backfill: update all other messages in this chat that share
-                // the same attachment hash, and push message_update events to the frontend.
+                // In-memory backfill: update EVERY resident message sharing the
+                // attachment hash — across ALL chats, not just this one. The same
+                // file forwarded between a DM and a Community (smart-forward's
+                // whole point) has copies in both; the DB backfill below covers
+                // disk, but a chat already loaded in STATE would keep offering a
+                // download for a file that's on disk until reopened.
                 // Two passes to satisfy the borrow checker (mut for update, then immut for serialize).
                 let hash_bytes = hex_string_to_bytes(&file_hash);
-                let mut backfilled_msg_ids: Vec<String> = Vec::new();
-                if let Some(chat_mut) = state.get_chat_mut(&npub) {
+                let mut backfilled: Vec<(String, String)> = Vec::new(); // (chat_id, msg_id)
+                for chat_mut in state.chats.iter_mut() {
+                    let cid = chat_mut.id.clone();
                     for compact_msg in chat_mut.messages.iter_mut() {
                         if compact_msg.id_hex() == msg_id { continue; }
                         let mut changed = false;
@@ -707,19 +728,19 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             }
                         }
                         if changed {
-                            backfilled_msg_ids.push(compact_msg.id_hex());
+                            backfilled.push((cid.clone(), compact_msg.id_hex()));
                         }
                     }
                 }
-                // Emit message_update for each backfilled message
-                if let Some(chat_ref) = state.get_chat(&npub) {
-                    for backfill_id in &backfilled_msg_ids {
+                // Emit message_update for each backfilled message, into ITS chat.
+                for (backfill_chat, backfill_id) in &backfilled {
+                    if let Some(chat_ref) = state.get_chat(backfill_chat) {
                         if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
                             let backfill_msg = compact_msg.to_message(&state.interner);
                             handle.emit("message_update", serde_json::json!({
                                 "old_id": &backfill_msg.id,
                                 "message": &backfill_msg,
-                                "chat_id": &chat_id
+                                "chat_id": backfill_chat
                             })).unwrap();
                         }
                     }

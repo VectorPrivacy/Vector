@@ -113,6 +113,21 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Opt out of the modal "Bad Image" hard-error dialog: injected hooks and GPU
+    // driver probes LoadLibrary optional DLLs that can be corrupt on user machines;
+    // with these flags the load fails quietly instead of blocking on a dialog.
+    // Inherited by the WebView2 child processes. Standard practice (Chromium, Firefox).
+    #[cfg(windows)]
+    {
+        const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+        const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+        extern "system" {
+            fn GetErrorMode() -> u32;
+            fn SetErrorMode(mode: u32) -> u32;
+        }
+        unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX) };
+    }
+
     // Install a panic hook that logs the crash before the process dies.
     // Without this, panics in spawned tasks vanish silently.
     std::panic::set_hook(Box::new(|info| {
@@ -349,6 +364,26 @@ pub fn run() {
             let handle = app.app_handle().clone();
 
             let window = app.get_webview_window("main").unwrap();
+
+            // The window is born hidden (tauri.conf `visible: false`) so the frontend
+            // can paint before it appears — which makes the frontend the ONLY thing
+            // that can ever reveal it. A boot that throws, hangs or never runs leaves
+            // a live process with no GUI and no way back but a kill. This deadline
+            // turns that into a visible, possibly degraded window; it's dark from
+            // `backgroundColor`, so a late reveal is not the white flash the hidden
+            // start exists to prevent. The warning is the diagnosis: if it fires, the
+            // frontend never reached `show()`.
+            #[cfg(desktop)]
+            {
+                let window_reveal = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+                    if matches!(window_reveal.is_visible(), Ok(false)) {
+                        log_warn!("Frontend never revealed the window in 6s — showing it anyway");
+                        let _ = window_reveal.show();
+                    }
+                });
+            }
 
             // Setup a graceful shutdown for our Nostr subscriptions
             #[cfg(desktop)]
@@ -654,6 +689,8 @@ pub fn run() {
             commands::system::get_background_service_prompted,
             commands::system::set_background_service_prompted,
             commands::updates::check_app_update,
+            commands::updates::check_channel_update,
+            commands::updates::install_channel_update,
             commands::updates::check_account_downgrade,
             commands::updates::get_install_source,
             commands::updates::open_update_source,
@@ -862,6 +899,7 @@ pub fn run() {
             commands::community::get_community_members,
             commands::community::get_chat_commands,
             commands::community::ban_community_member,
+            commands::community::debug_v2_memberlist_diff,
             commands::community::unban_community_member,
             commands::community::delete_community,
             commands::community::migrate_community,
@@ -886,8 +924,9 @@ pub fn run() {
             commands::community::debug_v2_probe_rekey_planes,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_follow_trace,
-            #[cfg(debug_assertions)]
             commands::community::debug_v2_explain_base_rekey,
+            commands::community::repair_v2_roster,
+            commands::community::rescue_stranded_members,
             commands::community::delete_community_message,
             commands::community::revoke_reaction,
             commands::community::react_to_community_message,

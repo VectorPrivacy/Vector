@@ -941,7 +941,19 @@ pub async fn miniapp_open(
                     }
                 }
 
-                log_info!("[WEBXDC] Preconnect: joining with {} bootstrap peers", bootstrap_peers.len());
+                log_info!(
+                    "[WEBXDC] Preconnect: joining with {} bootstrap peer(s): [{}]",
+                    bootstrap_peers.len(),
+                    bootstrap_peers
+                        .iter()
+                        .map(|p| format!(
+                            "{} via {}",
+                            super::realtime::short_id(&p.id),
+                            super::realtime::relay_urls(p)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
 
                 // Create gossip channel with bootstrap peers and NO event target.
                 // Incoming data is BUFFERED (not dropped) until joinRealtimeChannel

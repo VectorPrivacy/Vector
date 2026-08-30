@@ -184,7 +184,12 @@ impl IrohState {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        log_info!("[WEBXDC] Endpoint bound, relay ready");
+        let our_addr = endpoint.addr();
+        log_info!(
+            "[WEBXDC] Endpoint bound as {} — home relay: {}",
+            short_id(&our_addr.id),
+            relay_urls(&our_addr)
+        );
 
         // Create gossip with max message size of 128 KB
         let gossip = Gossip::builder()
@@ -274,11 +279,7 @@ impl IrohState {
     /// Get our endpoint address for peer discovery.
     /// Rule 4: Only relay URLs — direct IPs cause path migration issues.
     pub fn get_node_addr(&self) -> EndpointAddr {
-        let addr = self.endpoint.addr();
-        let relay_only: std::collections::BTreeSet<_> = addr.addrs.into_iter()
-            .filter(|ta| matches!(ta, TransportAddr::Relay(_)))
-            .collect();
-        EndpointAddr { id: addr.id, addrs: relay_only }
+        relay_only(self.endpoint.addr())
     }
 
     /// Join a gossip topic and start the subscriber loop
@@ -336,10 +337,19 @@ impl IrohState {
 
         // NOW connect — topic subscription is registered, safe to receive
         for peer_addr in &peers {
+            // Belt and braces: `decode_node_addr` already stripped these, but
+            // this loop dials whatever it is handed, and a future caller
+            // building an address another way must not reopen the hole.
+            let peer_addr = &relay_only(peer_addr.clone());
             if !peer_addr.addrs.is_empty() {
                 let addr = peer_addr.clone();
                 let ep = self.endpoint.clone();
                 let g = self.gossip.clone();
+                log_info!(
+                    "[WEBXDC] Bootstrap dial {} via relay: {}",
+                    short_id(&addr.id),
+                    relay_urls(&addr)
+                );
                 vector_core::db::spawn_bound(async move {
                     match ep.connect(addr, GOSSIP_ALPN).await {
                         Ok(conn) => {
@@ -429,14 +439,9 @@ impl IrohState {
 
     /// Single attempt to add a peer (no retries)
     pub(crate) async fn try_add_peer(&self, topic: &TopicId, peer: &EndpointAddr) -> Result<()> {
-        // Rule 4: Build relay-only address (strip direct IPs to prevent path migration)
-        let mut peer_addr = EndpointAddr {
-            id: peer.id,
-            addrs: peer.addrs.iter()
-                .filter(|a| matches!(a, TransportAddr::Relay(_)))
-                .cloned()
-                .collect(),
-        };
+        // Rule 4: strip direct IPs — path migration, and an IP disclosure to
+        // whoever nominated the address.
+        let mut peer_addr = relay_only(peer.clone());
 
         // Rule 5: If peer has no relay URL, inject ours (both use same N0 relay infrastructure)
         if peer_addr.addrs.is_empty() {
@@ -450,7 +455,11 @@ impl IrohState {
             }
         }
 
-        log_trace!("[WEBXDC] add_peer: Connecting to peer {}", peer_addr.id);
+        log_info!(
+            "[WEBXDC] add_peer: connecting to {} via relay: {}",
+            short_id(&peer_addr.id),
+            relay_urls(&peer_addr)
+        );
 
         // Connect and hand to gossip, then join_peers.
         // Topic subscription already exists (channel is in the map),
@@ -1077,14 +1086,61 @@ pub fn encode_node_addr(addr: &EndpointAddr) -> Result<String> {
     Ok(base32_nopad_encode(json.as_bytes()))
 }
 
-/// Decode an endpoint address from a string received via Nostr
+/// Decode an endpoint address from a string received via Nostr.
+///
+/// Relay-only, and this is the boundary that enforces it (Rule 4). The bytes
+/// are written by whoever published the advertisement, so `addrs` is entirely
+/// their choice — and dialling a direct address they nominate shows them our
+/// real IP, whatever our own advertisement says. Stripping here rather than at
+/// each dial makes a hostile address unrepresentable instead of merely
+/// unhandled: `join_channel`'s bootstrap loop reached `endpoint.connect`
+/// without the filter `try_add_peer` applies, and every peer address in the
+/// process arrives through this function.
+///
+/// Nothing legitimate is lost. Direct paths are refused on purpose elsewhere
+/// too: they cause the migration to an unreachable path that Rule 2 exists to
+/// prevent.
 pub fn decode_node_addr(s: &str) -> Result<EndpointAddr> {
     let bytes = base32_nopad_decode(s.as_bytes())
         .map_err(|e| anyhow!(e))
         .context("Invalid node address encoding")?;
     let json = String::from_utf8(bytes)?;
     let addr: EndpointAddr = serde_json::from_str(&json)?;
-    Ok(addr)
+    Ok(relay_only(addr))
+}
+
+/// A node id trimmed for logs. Full ids are 64 hex characters and every log
+/// line here carries one; the leading bytes are enough to follow a peer
+/// through a session.
+pub fn short_id(id: &PublicKey) -> String {
+    id.to_string().chars().take(16).collect()
+}
+
+/// The relay URLs an address carries, for logging. Empty reads as `none`,
+/// which is the interesting case: an address with no relay is undiallable,
+/// and ours having none means our advertisements are going out unreachable.
+pub fn relay_urls(addr: &EndpointAddr) -> String {
+    let urls: Vec<String> = addr
+        .addrs
+        .iter()
+        .filter_map(|ta| match ta {
+            TransportAddr::Relay(url) => Some(url.to_string()),
+            _ => None,
+        })
+        .collect();
+    if urls.is_empty() { "none".to_string() } else { urls.join(", ") }
+}
+
+/// An endpoint address with every non-relay transport removed.
+pub fn relay_only(addr: EndpointAddr) -> EndpointAddr {
+    EndpointAddr {
+        id: addr.id,
+        addrs: addr
+            .addrs
+            .into_iter()
+            .filter(|ta| matches!(ta, TransportAddr::Relay(_)))
+            .collect(),
+    }
 }
 
 /// Check if an IP address is a LAN/private address
@@ -1110,6 +1166,47 @@ mod tests {
         let encoded = encode_topic_id(&topic);
         let decoded = decode_topic_id(&encoded).unwrap();
         assert_eq!(topic, decoded);
+    }
+
+    /// The advertisement is written by the peer, so `addrs` is their choice.
+    /// Dialling a direct address they nominate shows them our real IP no
+    /// matter how carefully our own advertisement is filtered, and the
+    /// bootstrap loop dialled whatever it was handed.
+    #[test]
+    fn a_peer_cannot_get_us_to_dial_a_direct_address() {
+        let id = SecretKey::from([7u8; 32]).public();
+        let relay: iroh::RelayUrl = "https://relay.example./".parse().unwrap();
+        let hostile: std::net::SocketAddr = "203.0.113.9:41234".parse().unwrap();
+
+        // What an attacker publishes: a relay we would use, plus their own
+        // socket. The relay entry makes it look ordinary.
+        let mut addrs = std::collections::BTreeSet::new();
+        addrs.insert(TransportAddr::Relay(relay.clone()));
+        addrs.insert(TransportAddr::Ip(hostile));
+        let encoded = encode_node_addr(&EndpointAddr { id, addrs }).unwrap();
+
+        let decoded = decode_node_addr(&encoded).unwrap();
+        assert_eq!(decoded.id, id, "the peer is still reachable");
+        assert!(
+            decoded.addrs.iter().all(|a| matches!(a, TransportAddr::Relay(_))),
+            "a direct address survived the decode: {:?}",
+            decoded.addrs
+        );
+        assert!(
+            decoded.addrs.contains(&TransportAddr::Relay(relay)),
+            "the relay path must survive, or the peer becomes undiallable"
+        );
+    }
+
+    #[test]
+    fn a_relay_only_peer_is_unchanged() {
+        let id = SecretKey::from([9u8; 32]).public();
+        let relay: iroh::RelayUrl = "https://relay.example./".parse().unwrap();
+        let mut addrs = std::collections::BTreeSet::new();
+        addrs.insert(TransportAddr::Relay(relay));
+        let addr = EndpointAddr { id, addrs };
+        let round_tripped = decode_node_addr(&encode_node_addr(&addr).unwrap()).unwrap();
+        assert_eq!(round_tripped.addrs, addr.addrs);
     }
 
     #[test]

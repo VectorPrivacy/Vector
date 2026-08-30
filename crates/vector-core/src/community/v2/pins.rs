@@ -565,7 +565,7 @@ mod tests {
         let (entry, opened) = entry_for(&author, "teh typo");
 
         // The author's own edit, through the real pipeline.
-        let edit_rumor = build_edit_rumor(author.public_key(), &chan(), Epoch(0), &opened.rumor_id.to_hex(), "the typo, fixed", AT + 5_000);
+        let edit_rumor = build_edit_rumor(author.public_key(), &chan(), Epoch(0), &opened.rumor_id.to_hex(), "the typo, fixed", &[], AT + 5_000);
         let wrap = seal_chat_rumor(&edit_rumor, &group(), &author, WRAP_AT, false).unwrap().0;
         let edit_opened = match open_chat_event(&wrap, &group(), &chan(), Epoch(0)).unwrap() {
             ChatEvent::Edit { opened, .. } => opened,
@@ -579,7 +579,7 @@ mod tests {
 
         // A STRANGER's edit of the same message: refused, entry unchanged.
         let stranger = Keys::generate();
-        let foreign_rumor = build_edit_rumor(stranger.public_key(), &chan(), Epoch(0), &opened.rumor_id.to_hex(), "hijacked", AT + 6_000);
+        let foreign_rumor = build_edit_rumor(stranger.public_key(), &chan(), Epoch(0), &opened.rumor_id.to_hex(), "hijacked", &[], AT + 6_000);
         let wrap = seal_chat_rumor(&foreign_rumor, &group(), &stranger, WRAP_AT, false).unwrap().0;
         let foreign_opened = match open_chat_event(&wrap, &group(), &chan(), Epoch(0)).unwrap() {
             ChatEvent::Edit { opened, .. } => opened,

@@ -243,17 +243,23 @@ pub fn build_delete_rumor(
 
 /// Build a kind-3302 edit rumor: `e` = the author's own message rumor id,
 /// content = the replacement text (fields unpinned upstream; this shape
-/// matches the CORD examples).
+/// matches the CORD examples). `emoji` carries the NIP-30 pairs for any
+/// `:shortcode:` in the replacement — the edit is what peers render from, so
+/// it must be as self-describing as the message it replaces.
 pub fn build_edit_rumor(
     author: PublicKey,
     channel_id: &ChannelId,
     epoch: Epoch,
     target_rumor_id_hex: &str,
     new_content: &str,
+    emoji: &[(&str, &str)],
     at_ms: u64,
 ) -> UnsignedEvent {
     let mut tags = stream::channel_binding_tags(channel_id, epoch);
     tags.push(Tag::custom("e", [target_rumor_id_hex.to_string()]));
+    for (shortcode, url) in emoji {
+        tags.push(emoji_tag(shortcode, url));
+    }
     stream::build_rumor_ms(kind::EDIT, author, new_content, tags, at_ms)
 }
 
@@ -377,10 +383,13 @@ pub enum ChatEvent {
         target_kind: Option<u16>,
     },
     /// Kind 3302 — author-only validity is likewise judged at fold time.
+    /// `emoji` is the NIP-30 pairs for the REPLACEMENT text; the fold adopts
+    /// them wholesale, so an edit that drops a shortcode retires its image.
     Edit {
         opened: OpenedStream,
         target: [u8; 32],
         new_content: String,
+        emoji: Vec<(String, String)>,
     },
     /// Kind 3310 — payload opaque, read `opened.rumor` directly.
     Webxdc { opened: OpenedStream },
@@ -519,7 +528,8 @@ fn parse_chat_rumor(opened: OpenedStream) -> Result<ChatEvent, ChatError> {
         kind::EDIT => {
             let target = decode_id32(required_tag(&opened.rumor, TAG_TARGET)?, TAG_TARGET)?;
             let new_content = opened.rumor.content.clone();
-            Ok(ChatEvent::Edit { opened, target, new_content })
+            let emoji = collect_emoji(&opened.rumor);
+            Ok(ChatEvent::Edit { opened, target, new_content, emoji })
         }
         kind::WEBXDC => Ok(ChatEvent::Webxdc { opened }),
         kind::TYPING => Ok(ChatEvent::Typing { opened }),
@@ -911,8 +921,8 @@ mod tests {
     #[test]
     fn edit_round_trip_replaces_content() {
         let author = Keys::generate();
-        let rumor = build_edit_rumor(author.public_key(), &chan(), Epoch(0), &"de".repeat(32), "fixed the typo", AT);
-        let ChatEvent::Edit { opened, target, new_content } = open(&seal(&rumor, &author)).unwrap() else {
+        let rumor = build_edit_rumor(author.public_key(), &chan(), Epoch(0), &"de".repeat(32), "fixed the typo", &[], AT);
+        let ChatEvent::Edit { opened, target, new_content, .. } = open(&seal(&rumor, &author)).unwrap() else {
             panic!("expected an Edit");
         };
         assert_eq!(opened.author, author.public_key());
