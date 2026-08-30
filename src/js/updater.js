@@ -106,6 +106,15 @@ function initializeUpdaterUI() {
         restartButton.addEventListener('click', () => window.__TAURI__.process.relaunch());
     }
 
+    const betaInfo = document.getElementById('beta-updates-info');
+    if (betaInfo) {
+        betaInfo.onclick = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            popupConfirm('Beta Updates', 'Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you\'ll be moved onto the official build the moment it releases.', true);
+        };
+    }
+
     // Beta opt-in toggle: flipping it re-checks immediately on the newly
     // chosen channel, and flipping it OFF withdraws an offered RC.
     const betaToggle = document.getElementById('beta-updates-toggle');
