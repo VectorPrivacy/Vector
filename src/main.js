@@ -12925,7 +12925,10 @@ const getMentionCandidates = (includeSelf = false) => {
         if (chat.messages) {
             for (let i = chat.messages.length - 1; i >= 0; i--) {
                 const m = chat.messages[i];
-                const sender = m.npub || (m.mine ? strPubkey : chat.id);
+                // A join/leave line names its member — a fresh joiner who has
+                // not spoken yet is taggable the moment their line lands, not
+                // only after the throttled roster refresh notices them.
+                const sender = m.npub || m.system_event?.member_npub || (m.mine ? strPubkey : chat.id);
                 if (!lastActive[sender]) lastActive[sender] = m.at || 0;
             }
         }
