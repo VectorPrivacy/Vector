@@ -206,14 +206,57 @@ fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
 }
 
 #[cfg(target_os = "linux")]
-fn write_clipboard_files_impl(_paths: Vec<String>) -> Result<(), String> {
-    // Deferred (not a missing API — gtk 0.18 does have Clipboard::set_with_data +
-    // SelectionData::set_uris). X11/Wayland clipboards are owner-served: setting
-    // text/uri-list + x-special/gnome-copied-files needs a persistent selection
-    // owner served from the GTK main thread for the app's lifetime, which warrants
-    // building + verifying on a real Linux box. Paste-in works today; until copy-out
-    // lands, surface the error so the UI can fall back to Share.
-    Err("Copying files to the clipboard isn't supported on Linux yet".to_string())
+fn write_clipboard_files_impl(paths: Vec<String>) -> Result<(), String> {
+    // Owner-served selection: `set_with_data`'s closure IS the persistent owner,
+    // held by GTK until another app claims the clipboard. Serve three formats —
+    // text/uri-list (portable paste target), x-special/gnome-copied-files (what
+    // GTK file managers read: verb + uri lines, so paste-in-Files copies), and
+    // plain text (terminals/editors get the paths). GDK backs this on both X11
+    // and Wayland.
+    let app = crate::TAURI_APP.get().ok_or("App handle unavailable")?.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let result = (|| -> Result<(), String> {
+            let display = gdk::Display::default().ok_or("No display")?;
+            let clipboard = gtk::Clipboard::default(&display).ok_or("No clipboard")?;
+            let uris = paths
+                .iter()
+                .map(|p| {
+                    glib::filename_to_uri(p, None)
+                        .map(|u| u.to_string())
+                        .map_err(|e| format!("Not a valid file path ({p}): {e}"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let gnome_payload = format!("copy\n{}", uris.join("\n"));
+            let text_payload = paths.join("\n");
+            let targets = [
+                gtk::TargetEntry::new("text/uri-list", gtk::TargetFlags::empty(), 0),
+                gtk::TargetEntry::new("x-special/gnome-copied-files", gtk::TargetFlags::empty(), 1),
+                gtk::TargetEntry::new("UTF8_STRING", gtk::TargetFlags::empty(), 2),
+                gtk::TargetEntry::new("text/plain;charset=utf-8", gtk::TargetFlags::empty(), 2),
+            ];
+            let ok = clipboard.set_with_data(&targets, move |_clip, sel, info| {
+                match info {
+                    0 => {
+                        let refs: Vec<&str> = uris.iter().map(|s| s.as_str()).collect();
+                        sel.set_uris(&refs);
+                    }
+                    1 => sel.set(&gdk::Atom::intern("x-special/gnome-copied-files"), 8, gnome_payload.as_bytes()),
+                    _ => {
+                        sel.set_text(&text_payload);
+                    }
+                }
+            });
+            if !ok {
+                return Err("Could not claim the clipboard".to_string());
+            }
+            Ok(())
+        })();
+        let _ = tx.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "Clipboard write timed out".to_string())?
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "android", target_os = "windows", target_os = "linux")))]

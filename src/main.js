@@ -12633,6 +12633,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 || arrItems.find(item => item.type.startsWith('image/'));
             const fileBlob = fileItem ? fileItem.getAsFile() : null;
             const fileMime = fileItem ? fileItem.type : '';
+            const strPlain = dt ? (dt.getData('text/plain') || '') : '';
 
             // A file copy (Finder/Explorer) also carries a text representation of the
             // path, so the default paste inserts the filename into the input. We must
@@ -12641,7 +12642,9 @@ window.addEventListener("DOMContentLoaded", async () => {
             const dtTypes = Array.from(dt?.types || []);
             const hasFile = (dt?.files && dt.files.length > 0)
                 || arrItems.some(it => it.kind === 'file')
-                || dtTypes.includes('Files');
+                || dtTypes.includes('Files')
+                // WebKitGTK never advertises `Files`; a copied file arrives as a URI list.
+                || dtTypes.includes('text/uri-list');
             if (hasFile || fileBlob) evt.preventDefault();
 
             // Snapshot the composer so we can scrub any filename text that still
@@ -12721,9 +12724,50 @@ window.addEventListener("DOMContentLoaded", async () => {
 
                 // Open the file preview dialog with the pasted image bytes
                 openFilePreviewWithBytes(bytes, fileName, ext, bytes.length, strOpenChat, strReplyRef);
+                return;
+            }
+
+            // WebKitGTK hands JS an empty `text/uri-list` and an `<img>` tag for a
+            // copied bitmap — the pixels sit on the GTK clipboard the webview never
+            // exposes. Only reached when the paste carried no text and no in-band
+            // file, so a plain-text paste never pays for it.
+            if (!strPlain) {
+                const clipBytes = await readClipboardImageBytes();
+                if (clipBytes) {
+                    restoreInput();
+                    const strReplyRef = strCurrentReplyReference;
+                    cancelReply();
+                    openFilePreviewWithBytes(clipBytes, 'pasted_image.png', 'png', clipBytes.length, strOpenChat, strReplyRef);
+                }
             }
         }
     };
+
+/**
+ * Read a bitmap off the OS clipboard and encode it as PNG bytes.
+ * Returns null whenever the clipboard holds no image — the common case, not an error.
+ */
+async function readClipboardImageBytes() {
+    try {
+        const cm = window.__TAURI__?.clipboardManager;
+        if (!cm?.readImage) return null;
+        const img = await cm.readImage();
+        const { width, height } = await img.size();
+        if (!width || !height) return null;
+        const rgba = await img.rgba();
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext('2d').putImageData(
+            new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0
+        );
+        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        if (!blob) return null;
+        return new Uint8Array(await blob.arrayBuffer());
+    } catch (e) {
+        return null;
+    }
+}
 
 // Unified message sending function
 async function sendMessage(messageText) {
