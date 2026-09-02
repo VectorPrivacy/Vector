@@ -113,24 +113,45 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Opt out of the modal "Bad Image" hard-error dialog: injected hooks and GPU
+    // driver probes LoadLibrary optional DLLs that can be corrupt on user machines;
+    // with these flags the load fails quietly instead of blocking on a dialog.
+    // Inherited by the WebView2 child processes. Standard practice (Chromium, Firefox).
+    #[cfg(windows)]
+    {
+        const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+        const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+        extern "system" {
+            fn GetErrorMode() -> u32;
+            fn SetErrorMode(mode: u32) -> u32;
+        }
+        unsafe { SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX) };
+    }
+
     // Install a panic hook that logs the crash before the process dies.
     // Without this, panics in spawned tasks vanish silently.
     std::panic::set_hook(Box::new(|info| {
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let msg = format!("[PANIC {:02}:{:02}:{:02}Z] {info}\n\nBacktrace:\n{backtrace}\n",
-            (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-        eprintln!("{msg}");
-        // Append to log file (shared with log_error!)
-        if let Ok(data_dir) = account_manager::get_app_data_dir() {
+        // A panic ESCAPING a panic hook aborts the process on the spot, so the
+        // reporter must never be able to kill what it reports on: everything
+        // here is catch_unwind-wrapped, and stderr uses the error-swallowing
+        // write (eprintln! itself panics when stderr is gone).
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let msg = format!("[PANIC {:02}:{:02}:{:02}Z] {info}\n\nBacktrace:\n{backtrace}\n",
+                (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("vector.log")) {
-                let _ = write!(f, "{}\n", &msg);
+            let _ = writeln!(std::io::stderr(), "{msg}");
+            // Append to log file (shared with log_error!)
+            if let Ok(data_dir) = account_manager::get_app_data_dir() {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("vector.log")) {
+                    let _ = write!(f, "{}\n", &msg);
+                }
             }
-        }
+        }));
     }));
 
     // Harden against memory inspection and debugger attachment (release builds only).
@@ -674,6 +695,8 @@ pub fn run() {
             commands::system::get_background_service_prompted,
             commands::system::set_background_service_prompted,
             commands::updates::check_app_update,
+            commands::updates::check_channel_update,
+            commands::updates::install_channel_update,
             commands::updates::check_account_downgrade,
             commands::updates::get_install_source,
             commands::updates::open_update_source,

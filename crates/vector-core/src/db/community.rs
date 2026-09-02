@@ -51,6 +51,7 @@ pub(crate) fn hex_id_to_32(hex: &str) -> Result<[u8; 32], String> {
 /// Persist a Community and all its channels (upsert). Secrets are stored as raw
 /// blobs in the account-scoped DB.
 pub fn save_community(community: &Community) -> Result<(), String> {
+    crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let relays_json = serde_json::to_string(&community.relays).map_err(|e| e.to_string())?;
     let community_id = community.id.to_hex();
@@ -1202,6 +1203,7 @@ pub fn upsert_public_invite(
 /// is no protocol "leave" (membership is key possession), so leaving is purely local:
 /// drop the keys + stop subscribing.
 pub fn delete_community(community_id: &str) -> Result<(), String> {
+    crate::community::v2::realtime::invalidate_held_v2_cache();
     delete_community_inner(community_id, false)
 }
 
@@ -1211,6 +1213,7 @@ pub fn delete_community(community_id: &str) -> Result<(), String> {
 /// `3305` self-delete of one's own past messages, each sealed under the epoch key it was sent
 /// at. Used by every self-removal trigger (voluntary leave, kick of me, ban-rekey exclusion).
 pub fn delete_community_retain_keys(community_id: &str) -> Result<(), String> {
+    crate::community::v2::realtime::invalidate_held_v2_cache();
     delete_community_inner(community_id, true)
 }
 
@@ -2446,6 +2449,7 @@ pub fn set_read_cut_pending(community_id: &str, pending: bool) -> Result<(), Str
 /// exactly once — a re-wrapped tombstone (fresh outer id, same owner seal) then
 /// can't spam the handler.
 pub fn set_community_dissolved(community_id: &str) -> Result<bool, String> {
+    crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let changed = conn
         .execute(
@@ -2786,6 +2790,7 @@ struct ChannelMetaStash {
 /// Persist a v2 community + its channels atomically. UPSERT so a metadata
 /// re-save preserves banlist/roles (managed by the fold, not here).
 pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Result<(), String> {
+    crate::community::v2::realtime::invalidate_held_v2_cache();
     let conn = super::get_write_connection_guard_static()?;
     let id_hex = crate::simd::hex::bytes_to_hex_32(&c.identity.community_id.0);
     let relays_json = serde_json::to_string(&c.relays).map_err(|e| e.to_string())?;

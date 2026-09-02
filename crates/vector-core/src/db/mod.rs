@@ -1214,6 +1214,13 @@ pub fn init_database(npub: &str) -> Result<(), String> {
     let db_path = profile_dir.join("vector.db");
     let mut conn = create_connection(&db_path)?;
 
+    // Migrations are boot-time, one-shot work: if another connection holds the
+    // write lock (a straggling task from the previous session, a slow host),
+    // waiting longer is strictly better than failing account init. The 5s
+    // default is tuned for steady-state queries, not this.
+    conn.execute_batch("PRAGMA busy_timeout=30000;")
+        .map_err(|e| format!("Failed to set migration busy_timeout: {}", e))?;
+
     // Before ANY write. SQL_SCHEMA is all CREATE TABLE IF NOT EXISTS, so an
     // older build would resurrect tables newer migrations dropped and then
     // start writing rows against a schema it cannot see.

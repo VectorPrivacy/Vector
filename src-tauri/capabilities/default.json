@@ -349,6 +349,8 @@
     "allow-get-background-service-prompted",
     "allow-set-background-service-prompted",
     "allow-check-app-update",
+    "allow-check-channel-update",
+    "allow-install-channel-update",
     "allow-check-account-downgrade",
     "allow-get-install-source",
     "allow-open-update-source",

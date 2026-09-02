@@ -355,8 +355,15 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 // and correctly falls through to a real download. Size gates
                                 // the read so an obvious mismatch skips the full hash.
                                 let content_matches = |p: &std::path::PathBuf| {
+                                    // The wire `size` is the CIPHERTEXT length; the disk file is
+                                    // plaintext, 16 AES-GCM tag bytes shorter. Accept either form
+                                    // (plaintext references carry the plaintext size) — an exact
+                                    // equality here kept this whole branch dead and every
+                                    // re-received file downloading bytes it already had.
                                     let size_ok = attachment.size == 0
-                                        || std::fs::metadata(p).map(|m| m.len() == attachment.size).unwrap_or(false);
+                                        || std::fs::metadata(p)
+                                            .map(|m| m.len() == attachment.size || m.len() + 16 == attachment.size)
+                                            .unwrap_or(false);
                                     size_ok
                                         && std::fs::read(p)
                                             .map(|b| util::calculate_file_hash(&b) == expected_hash)
@@ -367,6 +374,17 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                 } else {
                                     name_path.filter(|p| p.exists() && content_matches(p))
                                 };
+                                // Third candidate: wherever the ledger says these bytes already
+                                // landed — a collision-suffixed download, or a file we SENT from
+                                // an arbitrary path. Rows are claims; content_matches still
+                                // hash-verifies before anything is trusted.
+                                let file_path = file_path.or_else(|| {
+                                    vector_core::db::attachments::downloaded_paths_by_hash(&expected_hash)
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .map(std::path::PathBuf::from)
+                                        .find(|p| p.exists() && content_matches(p))
+                                });
                                 if let Some(file_path) = file_path {
                                     // File already exists! Update the state and return success
                                     attachment.set_downloaded(true);
@@ -535,6 +553,22 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     break 'source;
                 }
 
+                // Plaintext public blob (no decryption tags): AES-GCM normally
+                // authenticates the bytes; here the sender's `ox` claim is the only
+                // integrity check, so enforce it per source before saving.
+                if attachment_for_decrypt.key.is_empty() {
+                    if let Some(claim) = attachment_for_decrypt.original_hash.as_deref() {
+                        if util::calculate_file_hash(&data) != claim {
+                            vector_core::log_net_fail!(
+                                "[AttachmentDownload] {} served plaintext that fails its hash claim — bad source",
+                                url
+                            );
+                            last_error = "Source served corrupt bytes".to_string();
+                            break 'source;
+                        }
+                    }
+                }
+
                 match decrypt_and_save_attachment(handle, &data, &attachment_for_decrypt).await {
                     Ok(ok) => saved = Some(ok),
                     Err(error) => {
@@ -689,12 +723,17 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     "chat_id": &chat_id
                 })).unwrap();
 
-                // In-memory backfill: update all other messages in this chat that share
-                // the same attachment hash, and push message_update events to the frontend.
+                // In-memory backfill: update EVERY resident message sharing the
+                // attachment hash — across ALL chats, not just this one. The same
+                // file forwarded between a DM and a Community (smart-forward's
+                // whole point) has copies in both; the DB backfill below covers
+                // disk, but a chat already loaded in STATE would keep offering a
+                // download for a file that's on disk until reopened.
                 // Two passes to satisfy the borrow checker (mut for update, then immut for serialize).
                 let hash_bytes = hex_string_to_bytes(&file_hash);
-                let mut backfilled_msg_ids: Vec<String> = Vec::new();
-                if let Some(chat_mut) = state.get_chat_mut(&npub) {
+                let mut backfilled: Vec<(String, String)> = Vec::new(); // (chat_id, msg_id)
+                for chat_mut in state.chats.iter_mut() {
+                    let cid = chat_mut.id.clone();
                     for compact_msg in chat_mut.messages.iter_mut() {
                         if compact_msg.id_hex() == msg_id { continue; }
                         let mut changed = false;
@@ -707,19 +746,19 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             }
                         }
                         if changed {
-                            backfilled_msg_ids.push(compact_msg.id_hex());
+                            backfilled.push((cid.clone(), compact_msg.id_hex()));
                         }
                     }
                 }
-                // Emit message_update for each backfilled message
-                if let Some(chat_ref) = state.get_chat(&npub) {
-                    for backfill_id in &backfilled_msg_ids {
+                // Emit message_update for each backfilled message, into ITS chat.
+                for (backfill_chat, backfill_id) in &backfilled {
+                    if let Some(chat_ref) = state.get_chat(backfill_chat) {
                         if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
                             let backfill_msg = compact_msg.to_message(&state.interner);
                             handle.emit("message_update", serde_json::json!({
                                 "old_id": &backfill_msg.id,
                                 "message": &backfill_msg,
-                                "chat_id": &chat_id
+                                "chat_id": backfill_chat
                             })).unwrap();
                         }
                     }

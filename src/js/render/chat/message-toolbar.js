@@ -305,8 +305,8 @@ function showMessageToolbar(rowEl) {
     }
 
     // Copy-file: put the downloaded attachment on the OS clipboard as a real file
-    // (paste into Finder/Explorer or another chat). Same gating as reveal — the
-    // file must exist on disk. Desktop only for now (the backend errors elsewhere).
+    // (paste into Finder/Explorer/Files or another chat). Same gating as reveal —
+    // the file must exist on disk. Desktop only (the backend errors on mobile).
     copyFileBtn.hidden = !downloadedPath;
     if (downloadedPath) {
         copyFileBtn.dataset.path = downloadedPath;

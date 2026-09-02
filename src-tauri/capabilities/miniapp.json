@@ -5,6 +5,11 @@
   "windows": [
     "miniapp:*"
   ],
+  "remote": {
+    "urls": [
+      "http://webxdc.*.host"
+    ]
+  },
   "permissions": [
     "core:event:allow-listen",
     "core:event:allow-emit",

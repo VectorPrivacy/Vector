@@ -28,6 +28,9 @@ class MainActivity : TauriActivity() {
 
         @JvmStatic
         external fun nativeOnResume()
+
+        @JvmStatic
+        external fun nativeRegisterNdkContext(activity: android.app.Activity)
         @JvmStatic
         external fun nativeOnPause()
         @JvmStatic
@@ -127,6 +130,11 @@ class MainActivity : TauriActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Hand Rust the activity for ndk_context (tao 0.35 stopped registering it).
+        try { nativeRegisterNdkContext(this) } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "nativeRegisterNdkContext failed", e)
+        }
 
         // Ensure hardware acceleration is enabled
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED)

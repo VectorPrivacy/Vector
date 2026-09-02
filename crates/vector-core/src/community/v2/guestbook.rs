@@ -534,13 +534,13 @@ pub fn coalesce(
 /// The base is the union of every honored snapshot ON THE LIVE EPOCH (the refound
 /// snapshot plus any addendum — within one epoch snapshots only add); the cut is
 /// the earliest of them, the refound itself.
-pub struct Refound {
+pub(super) struct Refound {
     pub cut: u64,
     pub base: BTreeSet<PublicKey>,
     pub rumor_id: [u8; 32],
 }
 
-pub fn live_refound(
+pub(super) fn live_refound(
     events: &[GuestbookEvent],
     snapshot_authority: Option<&PublicKey>,
     horizon: u64,

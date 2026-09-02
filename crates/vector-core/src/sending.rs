@@ -816,15 +816,36 @@ pub async fn send_file_dm(
     // === Generate image metadata (thumbhash + dimensions) for image files ===
     let img_meta = crypto::generate_image_metadata(&file_bytes);
 
-    // === Encrypt → upload → build rumor → send ===
-    let params = crypto::generate_encryption_params();
-    let encrypted = crypto::encrypt_data(&file_bytes, &params)?;
-    let encrypted_size = encrypted.len() as u64;
+    // === Smart-forward: reuse a prior upload of this exact plaintext ===
+    //
+    // The ledger is the attachments table: every verified send or download of
+    // these bytes left url+key+nonce behind. A live blob means no encrypt, no
+    // upload — the message just references it. Liveness is proven, never
+    // assumed: a dead or unreachable blob falls through to the fresh upload.
+    let reused: Option<crate::db::attachments::ReusableUpload> =
+        match crate::db::attachments::find_reusable_by_hash(&file_hash) {
+            Ok(Some(r)) if crate::blossom::blob_is_served(&r.url, std::time::Duration::from_secs(5)).await => {
+                crate::log_info!("[SmartForward] {} reused ({}, {} KB) — no upload", &file_hash[..8], if r.mine { "own blob" } else { "foreign blob, mirroring in background" }, r.size / 1024);
+                Some(r)
+            }
+            _ => None,
+        };
+
+    // === Encrypt → upload → build rumor → send (skipped wholesale on reuse) ===
+    let (att_key, att_nonce, att_url, encrypted_size, encrypted) = match &reused {
+        Some(r) => (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size, None),
+        None => {
+            let params = crypto::generate_encryption_params();
+            let encrypted = crypto::encrypt_data(&file_bytes, &params)?;
+            let size = encrypted.len() as u64;
+            (params.key, params.nonce, String::new(), size, Some(encrypted))
+        }
+    };
 
     let attachment = Attachment {
-        id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
+        id: file_hash.clone(), key: att_key.clone(), nonce: att_nonce.clone(),
         extension: extension.to_string(), name: filename.to_string(),
-        url: String::new(), path: local_path_str.clone(), size: encrypted_size,
+        url: att_url.clone(), path: local_path_str.clone(), size: encrypted_size,
         img_meta: img_meta.clone(), downloading: false, downloaded: true,
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
@@ -857,57 +878,81 @@ pub async fn send_file_dm(
     // Send the original MIME even though bytes are ciphertext: many
     // Blossom servers reject `application/octet-stream` but accept the
     // same bytes under their original type.
-    let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
-        signer.clone(), servers, Arc::new(encrypted), Some(mime_type),
-        /* is_encrypted */ true,
-        progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
-        config.cancel_token.clone(),
-    ).await {
-        Ok(url) => url,
-        Err(e) => {
-            let failed_msg = {
+    let (upload_url, mirror_urls) = match encrypted {
+        // Reuse: the attachment already points at a live blob. No upload, no
+        // fan-out — the send is just the message.
+        None => {
+            callback.on_upload_complete(receiver_npub, &pending_id, &file_hash, &att_url);
+            // A FOREIGN blob's lifetime belongs to its uploader; mirror it to
+            // our servers in the background as availability insurance. Never
+            // blocks or delays the send — best-effort by design.
+            if reused.as_ref().is_some_and(|r| !r.mine) {
+                let signer_bg = signer.clone();
+                let url_bg = att_url.clone();
+                crate::db::spawn_bound(async move {
+                    let _ = crate::blossom::mirror_blob_to_servers(
+                        signer_bg, &url_bg, crate::state::get_blossom_servers(),
+                        1, std::time::Duration::from_secs(8),
+                    ).await;
+                });
+            }
+            (att_url.clone(), Vec::new())
+        }
+        Some(encrypted) => {
+            let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
+                signer.clone(), servers, Arc::new(encrypted), Some(mime_type),
+                /* is_encrypted */ true,
+                progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
+                config.cancel_token.clone(),
+            ).await {
+                Ok(url) => url,
+                Err(e) => {
+                    let failed_msg = {
+                        let mut state = STATE.lock().await;
+                        state.update_message(&pending_id, |msg| {
+                            msg.set_failed(true);
+                            msg.set_pending(false);
+                        })
+                    };
+                    if let Some((_chat_id, ref msg)) = failed_msg {
+                        callback.on_failed(receiver_npub, &pending_id, msg);
+                        callback.on_persist(receiver_npub, msg);
+                    }
+                    return Err(format!("Upload failed: {}", e));
+                }
+            };
+
+            {
                 let mut state = STATE.lock().await;
                 state.update_message(&pending_id, |msg| {
-                    msg.set_failed(true);
-                    msg.set_pending(false);
-                })
-            };
-            if let Some((_chat_id, ref msg)) = failed_msg {
-                callback.on_failed(receiver_npub, &pending_id, msg);
-                callback.on_persist(receiver_npub, msg);
+                    if let Some(att) = msg.attachments.last_mut() {
+                        att.url = upload_url.clone().into_boxed_str();
+                    }
+                });
             }
-            return Err(format!("Upload failed: {}", e));
+            callback.on_upload_complete(receiver_npub, &pending_id, &file_hash, &upload_url);
+
+            // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride the
+            // rumor as NIP-17 `fallback` tags so the message survives its primary
+            // host dying later; zero mirrors never delays or fails the send.
+            let mirror_urls = crate::blossom::mirror_blob_to_servers(
+                signer.clone(),
+                &upload_url,
+                crate::state::get_blossom_servers(),
+                2,
+                std::time::Duration::from_secs(5),
+            ).await;
+            if !mirror_urls.is_empty() {
+                let mut state = STATE.lock().await;
+                state.update_message(&pending_id, |msg| {
+                    if let Some(att) = msg.attachments.last_mut() {
+                        att.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
+                    }
+                });
+            }
+            (upload_url, mirror_urls)
         }
     };
-
-    {
-        let mut state = STATE.lock().await;
-        state.update_message(&pending_id, |msg| {
-            if let Some(att) = msg.attachments.last_mut() {
-                att.url = upload_url.clone().into_boxed_str();
-            }
-        });
-    }
-    callback.on_upload_complete(receiver_npub, &pending_id, &file_hash, &upload_url);
-
-    // BUD-04 mirror fan-out: bounded, best-effort. Verified mirrors ride the
-    // rumor as NIP-17 `fallback` tags so the message survives its primary
-    // host dying later; zero mirrors never delays or fails the send.
-    let mirror_urls = crate::blossom::mirror_blob_to_servers(
-        signer.clone(),
-        &upload_url,
-        crate::state::get_blossom_servers(),
-        2,
-        std::time::Duration::from_secs(5),
-    ).await;
-    if !mirror_urls.is_empty() {
-        let mut state = STATE.lock().await;
-        state.update_message(&pending_id, |msg| {
-            if let Some(att) = msg.attachments.last_mut() {
-                att.fallback_urls = Some(mirror_urls.iter().map(|s| s.as_str().into()).collect());
-            }
-        });
-    }
 
     // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
@@ -915,8 +960,8 @@ pub async fn send_file_dm(
         .tag(Tag::custom("file-type", [mime_type]))
         .tag(Tag::custom("size", [encrypted_size.to_string()]))
         .tag(Tag::custom("encryption-algorithm", ["aes-gcm"]))
-        .tag(Tag::custom("decryption-key", [params.key.as_str()]))
-        .tag(Tag::custom("decryption-nonce", [params.nonce.as_str()]))
+        .tag(Tag::custom("decryption-key", [att_key.as_str()]))
+        .tag(Tag::custom("decryption-nonce", [att_nonce.as_str()]))
         .tag(Tag::custom("ox", [file_hash.clone()]));
     for fb in &mirror_urls {
         file_rumor = file_rumor.tag(Tag::custom("fallback", [fb.as_str()]));

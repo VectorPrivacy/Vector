@@ -901,6 +901,28 @@ impl RealtimeManager {
         // the frontend obtains once-per-session user consent before launching
         // a realtime-capable Mini App while Tor is enabled.
 
+        // Android: iroh's resolver stack (hickory, netdev) reads system config
+        // through `ndk_context`, and hickory's reader ABORTS the process when
+        // the context isn't registered yet — tao 0.35 registers it later in
+        // startup than 0.34 did, so a boot-time peer-advert preconnect can
+        // race into the window. Wait it out; the service-only process never
+        // registers one, so cap the wait and refuse there (it has no UI for
+        // a realtime session anyway).
+        #[cfg(target_os = "android")]
+        {
+            let mut registered = crate::android::utils::context_registered();
+            for _ in 0..50 {
+                if registered { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                registered = crate::android::utils::context_registered();
+            }
+            if !registered {
+                return Err(anyhow::anyhow!(
+                    "Android context never registered — refusing to start Iroh (service-only process?)"
+                ));
+            }
+        }
+
         // Slow path: write lock, double-check, initialize
         let mut guard = self.iroh.write().await;
         if let Some(ref iroh) = *guard {

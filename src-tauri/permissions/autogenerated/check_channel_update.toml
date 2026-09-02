@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-check-channel-update"
+description = "Enables the check_channel_update command without any pre-configured scope."
+commands.allow = ["check_channel_update"]
+
+[[permission]]
+identifier = "deny-check-channel-update"
+description = "Denies the check_channel_update command without any pre-configured scope."
+commands.deny = ["check_channel_update"]

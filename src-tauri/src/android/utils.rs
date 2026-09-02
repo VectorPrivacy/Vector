@@ -1,6 +1,39 @@
 use jni::{JavaVM, JNIEnv};
 use jni::objects::JObject;
-use ndk_context::android_context;
+use ndk_context::AndroidContext;
+
+/// `ndk_context::android_context()` without the abort: the upstream getter
+/// PANICS before tao registers the context, and tao 0.35 registers LATER in
+/// startup than 0.34 did — so an early thread in either process mode could
+/// take the whole app down with it. A probe that answers None lets every
+/// caller fail soft (their `Result` surface already exists) and retry once
+/// the context lands.
+fn try_android_context() -> Option<AndroidContext> {
+    std::panic::catch_unwind(ndk_context::android_context).ok()
+}
+
+/// Whether tao has registered the ndk context yet. Gate for code whose
+/// DEPENDENCIES call `ndk_context::android_context()` unguarded (iroh's
+/// hickory-resolver reads system DNS with it and the panic aborts the
+/// process): they must not run before registration, and never in the
+/// Activity-less service-only process, where it never comes.
+pub fn context_registered() -> bool {
+    try_android_context().is_some()
+}
+
+/// Unwind fence for JNI entry points. A Rust panic crossing an `extern "C"`
+/// boundary is a process abort; inside the fence it becomes a logged default
+/// instead. The default must be safe for the Java caller (unit, or a null
+/// object the Kotlin side treats as failure).
+pub fn jni_fence<T>(name: &str, default: impl FnOnce() -> T, body: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(v) => v,
+        Err(_) => {
+            vector_core::log_warn!("[JNI] {} panicked — returned default instead of aborting", name);
+            default()
+        }
+    }
+}
 
 /// Standard buffer size for reading streams
 pub const STREAM_BUFFER_SIZE: i32 = 8192;
@@ -33,8 +66,9 @@ where
         return out;
     }
 
-    // Fallback: Activity context (only safe when an Activity exists).
-    let ctx = android_context();
+    // Fallback: Activity context (only present once tao has registered it).
+    let ctx = try_android_context()
+        .ok_or("Android context not registered yet (early startup or service-only mode)")?;
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|e| format!("Failed to get JavaVM: {:?}", e))?;
 
@@ -71,7 +105,8 @@ pub fn with_android_activity<F, R>(f: F) -> Result<R, String>
 where
     F: for<'a> FnOnce(&mut JNIEnv<'a>, &JObject<'a>) -> Result<R, String>,
 {
-    let ctx = android_context();
+    let ctx = try_android_context()
+        .ok_or("No Activity context (service-only process, or before tao registers)")?;
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|e| format!("Failed to get JavaVM: {:?}", e))?;
 

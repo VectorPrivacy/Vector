@@ -87,9 +87,10 @@ async function confirmMiniAppTorExposure(filePath) {
 async function openMiniApp(filePath, chatId = '', messageId = '', href = null, topicId = null) {
     const { invoke } = window.__TAURI__.core;
     if (!(await confirmMiniAppTorExposure(filePath))) {
-        return; // user declined the Tor IP-exposure prompt
+        return false; // user declined the Tor IP-exposure prompt — nothing opened
     }
-    return await invoke('miniapp_open', { filePath, chatId, messageId, href, topicId });
+    await invoke('miniapp_open', { filePath, chatId, messageId, href, topicId });
+    return true;
 }
 
 /**

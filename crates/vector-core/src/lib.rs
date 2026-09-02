@@ -697,6 +697,17 @@ impl VectorCore {
                 }
                 encrypted.extend_from_slice(&chunk);
             }
+            // Plaintext public blob (no decryption tags): the sender's `ox` claim
+            // is the only integrity check available, so it is mandatory here —
+            // unverifiable plaintext is treated as a dead source, not served.
+            if attachment.key.is_empty() {
+                let claim = attachment.original_hash.as_deref().unwrap_or(&attachment.id);
+                if crate::crypto::sha256_hex(&encrypted) == claim {
+                    return Ok(encrypted);
+                }
+                last_err = "plaintext blob fails its hash claim".to_string();
+                next_source!();
+            }
             match crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce) {
                 Ok(plain) => {
                     if i > 1 {
@@ -2358,7 +2369,8 @@ impl VectorCore {
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
             let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
             let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
-            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content)
+            let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
+            return crate::community::v2::service::send_edit(&transport, &community, &ch, message_id, new_content, &emoji_pairs)
                 .await
                 .map(|_| ())
                 .map_err(VectorError::Other);
@@ -2397,6 +2409,9 @@ impl VectorCore {
                 .map(|(_, msg)| msg.attachments.iter().flat_map(|a| a.all_urls().map(str::to_string)).collect())
                 .unwrap_or_default()
         };
+        // Smart-forward gate: scrub only urls no OTHER message still references.
+        let attachment_urls =
+            crate::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, message_id).unwrap_or_default();
 
         if let Some(id) = self.v2_community_for_channel(channel_id)? {
             // v2: the cooperative in-plane kind-5 (the wrap-ciphertext scrub needs
@@ -2699,7 +2714,7 @@ impl VectorCore {
     ) -> usize {
         crate::db::scoped(async move {
             use crate::community::inbound;
-            let outcomes = {
+            let mut outcomes = {
                 let mut st = state::STATE.lock().await;
                 inbound::process_channel_batch(&mut st, &events, &channel, &my_pk)
             };
@@ -2707,6 +2722,16 @@ impl VectorCore {
             // Message saves COLLECT into one batched transaction; deletes are flush barriers
             // (see flush_message_batch — a save committing after a delete it preceded on the
             // wire would resurrect the deleted row).
+            // Bytes we already hold verify at arrival (indexed probe first, hash
+            // only on a plausible candidate), mirroring the DM ingest — the batch
+            // below borrows, so claims convert here while outcomes are still owned.
+            for o in &mut outcomes {
+                if let inbound::IncomingEvent::NewMessage(m)
+                | inbound::IncomingEvent::Updated { message: m, .. } = o
+                {
+                    crate::db::attachments::verify_message_attachments(m, Some(channel_id)).await;
+                }
+            }
             let mut pending: Vec<&crate::types::Message> = Vec::new();
             for o in &outcomes {
                 // Every arm below writes this account's DB — a swap can land between them.
@@ -3990,6 +4015,14 @@ impl VectorCore {
             // Pass 2 — persist: message saves COLLECT into batched transactions; deletes are
             // flush barriers (a save committing after a delete it preceded on the wire would
             // resurrect the deleted row). One tx per page in the common no-delete case.
+            // Bytes we already hold verify at arrival (indexed probe first, hash
+            // only on a plausible candidate), mirroring the DM ingest — the batch
+            // below borrows, so claims convert here while outcomes are still owned.
+            for o in &mut outcomes {
+                if let ChatPersist::New(m) | ChatPersist::Updated { message: m, .. } = o {
+                    crate::db::attachments::verify_message_attachments(m, Some(channel_id)).await;
+                }
+            }
             let mut pending: Vec<&crate::types::Message> = Vec::new();
             for outcome in &outcomes {
                 if !session.is_live() {
@@ -4268,8 +4301,6 @@ impl VectorCore {
         serde_json::to_value(&pins).map_err(|e| VectorError::Other(e.to_string()))
     }
 
-    /// The community's owner npub + the admin npubs (role overview). A local read,
-    /// like [`Self::community_capabilities`].
     /// The whole role graph: every role with its position and colour, and who
     /// holds what.
     ///
@@ -4340,6 +4371,8 @@ impl VectorCore {
         Ok(roster.is_authorized(&who, Some(&owner_hex), permission))
     }
 
+    /// The community's owner npub + the admin npubs (role overview). A local read,
+    /// like [`Self::community_capabilities`].
     pub fn community_roles(&self, community_id: &str) -> Result<serde_json::Value> {
         use nostr_sdk::prelude::{PublicKey, ToBech32};
         if let Some(v2) = Self::load_v2_if_v2(community_id)? {

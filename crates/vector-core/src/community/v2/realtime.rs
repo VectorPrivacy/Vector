@@ -248,6 +248,41 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
         .collect()
 }
 
+/// Session-scoped short-TTL cache over [`load_held_v2`] for the dispatch hot
+/// path: dispatch runs per arriving wrap (typing indicators included), and a
+/// fresh load vault-decrypts EVERY community row each time — measured at a
+/// full core on a live evening. Writers invalidate on every community-row
+/// write, and the TTL only backstops a missed writer; it adds nothing to
+/// rotation propagation, which already waits on the follow worker's write.
+struct HeldV2Cache;
+type HeldV2Slot = std::sync::Mutex<Option<(std::time::Instant, Arc<Vec<CommunityV2>>)>>;
+fn held_v2_cache() -> Arc<HeldV2Slot> {
+    crate::db::current_session().scoped::<HeldV2Cache, HeldV2Slot>()
+}
+
+pub fn load_held_v2_cached() -> Arc<Vec<CommunityV2>> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    let cache = held_v2_cache();
+    {
+        let g = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, held)) = g.as_ref() {
+            if at.elapsed() < TTL {
+                return Arc::clone(held);
+            }
+        }
+    }
+    let fresh = Arc::new(load_held_v2());
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((std::time::Instant::now(), Arc::clone(&fresh)));
+    fresh
+}
+
+/// Drop the held-communities cache — call after ANY write that changes what
+/// [`load_held_v2`] returns (row save, dissolve, delete, join).
+pub fn invalidate_held_v2_cache() {
+    *held_v2_cache().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
 /// Refresh the v2 subscription for the held communities: register
 /// `{kinds:[1059,21059], authors:[…]}` on their relays (targeted + pool-wide,
 /// mirroring v1). Idempotent on an unchanged author-set.
@@ -499,8 +534,8 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                 seen.insert(keep);
             }
         }
-        let communities = load_held_v2();
-        for c in &communities {
+        let communities = load_held_v2_cached();
+        for c in communities.iter() {
             match inbound::dispatch_wrap(&event, c, &my_pk, &*handler) {
                 inbound::DispatchedV2::NotOurs => continue,
                 // A control OR a rekey wrap: just enqueue a follow for this community.

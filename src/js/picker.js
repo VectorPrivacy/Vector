@@ -2246,6 +2246,34 @@ const PACK_CANVAS_FRAME_SLACK_MS = 4;
 let _emojiTooltipEl = null;
 let _emojiTooltipTimer = null;
 let _emojiTooltipCurrentAnchor = null;
+let _emojiTooltipWatchdog = null;
+
+// Ground truth for "still hovering" — mouseout never fires for an anchor that
+// re-renders under the cursor or scrolls away beneath a stationary pointer
+// (WKWebView synthesises no boundary events on scroll), which left the tooltip
+// stuck on screen. Only anchored tooltips are watched; the pack canvas has no
+// per-cell anchor and manages its own dismissal.
+let _emojiTipPointerX = -1;
+let _emojiTipPointerY = -1;
+document.addEventListener('mousemove', (e) => {
+    _emojiTipPointerX = e.clientX;
+    _emojiTipPointerY = e.clientY;
+}, { passive: true });
+
+function _startEmojiTooltipWatchdog(anchor) {
+    if (_emojiTooltipWatchdog) clearInterval(_emojiTooltipWatchdog);
+    _emojiTooltipWatchdog = setInterval(() => {
+        // Anchor changed or cleared since arming: this watchdog is stale.
+        if (_emojiTooltipCurrentAnchor !== anchor) return;
+        let alive = anchor.isConnected;
+        if (alive && _emojiTipPointerX >= 0) {
+            const r = anchor.getBoundingClientRect();
+            alive = _emojiTipPointerX >= r.left - 2 && _emojiTipPointerX <= r.right + 2
+                 && _emojiTipPointerY >= r.top - 2 && _emojiTipPointerY <= r.bottom + 2;
+        }
+        if (!alive) hideEmojiTooltip();
+    }, 250);
+}
 
 /** Touch-only mobiles synthesise mouseover/mouseout on tap, which would
  *  flash the tooltip on every emoji selection — suppress on mobile.
@@ -2282,6 +2310,10 @@ function showEmojiTooltipAt(text, x, y) {
 }
 
 function hideEmojiTooltip() {
+    if (_emojiTooltipWatchdog) {
+        clearInterval(_emojiTooltipWatchdog);
+        _emojiTooltipWatchdog = null;
+    }
     if (_emojiTooltipTimer) {
         clearTimeout(_emojiTooltipTimer);
         _emojiTooltipTimer = null;
@@ -2314,6 +2346,7 @@ document.addEventListener('mouseover', (e) => {
     if (!text) return;
     const rect = el.getBoundingClientRect();
     scheduleEmojiTooltipAt(text, rect.left + rect.width / 2, rect.top);
+    _startEmojiTooltipWatchdog(el);
 }, true);
 
 document.addEventListener('mouseout', (e) => {

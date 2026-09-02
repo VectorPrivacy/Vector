@@ -333,10 +333,11 @@ pub async fn send_edit<T: Transport + ?Sized>(
     channel_id: &ChannelId,
     target_id_hex: &str,
     new_content: &str,
+    emoji: &[(&str, &str)],
 ) -> Result<String, String> {
     let (author_pk, group, epoch) = chat_send_context(community, channel_id)?;
     let at_ms = next_send_ms();
-    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, at_ms);
+    let rumor = chat::build_edit_rumor(author_pk, channel_id, epoch, target_id_hex, new_content, emoji, at_ms);
     publish_chat(transport, community, &group, author_pk, channel_id, epoch, rumor, at_ms, false).await
 }
 
@@ -12870,7 +12871,7 @@ mod tests {
             send_reaction(&bed.relay, &sealed, &general, &"a".repeat(64), &"b".repeat(64), crate::community::v2::kind::MESSAGE, "+", None)
                 .await
                 .unwrap_err(),
-            send_edit(&bed.relay, &sealed, &general, &"a".repeat(64), "revised").await.unwrap_err(),
+            send_edit(&bed.relay, &sealed, &general, &"a".repeat(64), "revised", &[]).await.unwrap_err(),
         ] {
             assert!(err.contains("dissolved"), "every write is refused, got: {err}");
         }
@@ -14713,7 +14714,7 @@ mod tests {
         send_reaction(&bed.relay, &b_view, &general, &m1, &a_hex, super::super::kind::MESSAGE, "🔥", None).await.unwrap();
         bed.swap_to(&a);
         let m_edit = send_message(&bed.relay, &community, &general, "A: this will be edited").await.unwrap();
-        send_edit(&bed.relay, &community, &general, &m_edit, "A: edited!").await.unwrap();
+        send_edit(&bed.relay, &community, &general, &m_edit, "A: edited!", &[]).await.unwrap();
         let m_del = send_message(&bed.relay, &community, &general, "A: this will be deleted").await.unwrap();
         send_delete(&bed.relay, &community, &general, &m_del, super::super::kind::MESSAGE).await.unwrap();
         println!("[ops] reaction + edit + delete round-tripped");
@@ -18045,7 +18046,7 @@ mod tests {
         send_reaction(&bed.relay, &community, &general, &msg_id, &me_hex, super::super::kind::MESSAGE, ":fire:", Some(("fire", "https://e/f.png")))
             .await
             .unwrap();
-        send_edit(&bed.relay, &community, &general, &msg_id, "edited").await.unwrap();
+        send_edit(&bed.relay, &community, &general, &msg_id, "edited", &[]).await.unwrap();
         send_delete(&bed.relay, &community, &general, &msg_id, super::super::kind::MESSAGE).await.unwrap();
 
         let page = fetch_channel(&bed.relay, &community, &general, 50).await.unwrap();
@@ -19245,7 +19246,7 @@ mod tests {
         let entry = crate::community::v2::pins::build_pin_entry(&opened, &conv, &ch_hex).unwrap();
         publish_pin_list(&relay, &community, &ch, &[entry]).await.unwrap();
 
-        send_edit(&relay, &community, &general, &rumor_id, "second thoughts").await.unwrap();
+        send_edit(&relay, &community, &general, &rumor_id, "second thoughts", &[]).await.unwrap();
         let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
         let edit_opened = page
             .iter()
@@ -19281,7 +19282,7 @@ mod tests {
         let general = community.channels[0].id;
 
         let rumor_id = send_message(&relay, &community, &general, "before").await.unwrap();
-        send_edit(&relay, &community, &general, &rumor_id, "after").await.unwrap();
+        send_edit(&relay, &community, &general, &rumor_id, "after", &[]).await.unwrap();
         let page = fetch_channel(&relay, &community, &general, 10).await.unwrap();
         let edit_event = &page.iter().find(|f| matches!(&f.event, ChatEvent::Edit { .. })).expect("the edit reads back").event;
         let msg_event = &page.iter().find(|f| matches!(&f.event, ChatEvent::Message { .. })).expect("the message reads back").event;

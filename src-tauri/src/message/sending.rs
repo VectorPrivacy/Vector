@@ -486,6 +486,11 @@ pub async fn delete_failed_message(message_id: String) -> Result<(), String> {
         let remote_urls: Vec<String> = msg.attachments.iter()
             .flat_map(|a| a.all_urls().map(str::to_string))
             .collect();
+        // Smart-forward gate: a failed REUSING send points at a blob the
+        // original message still needs — scrub only what nothing else rides.
+        let remote_urls =
+            vector_core::db::attachments::urls_unreferenced_elsewhere(&remote_urls, &message_id)
+                .unwrap_or_default();
         if !remote_urls.is_empty() {
             // Best-effort blob cleanup — route through the active client
             // signer so bunker users sign auth events under their identity
@@ -644,6 +649,16 @@ pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
 /// Used by Android notification inline-reply (JNI).
 #[allow(dead_code)]
 pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<String, String> {
+    // A notification's chat id is an npub for a DM but a 64-hex CHANNEL id for
+    // a community message — route by form. The DM-only path made every
+    // community inline reply die on "Invalid npub" before it touched the wire.
+    if !chat_id.starts_with("npub1") {
+        crate::commands::community::send_community_message(
+            chat_id.to_string(), content.to_string(), None, None,
+        ).await?;
+        crate::chat::mark_as_read_headless(chat_id).await;
+        return Ok(String::new());
+    }
     let config = SendConfig {
         expiration: vector_core::self_destruct::resolve_send_expiry(chat_id),
         ..SendConfig::headless()

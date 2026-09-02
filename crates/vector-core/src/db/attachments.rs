@@ -220,3 +220,330 @@ pub fn rewrite_downloaded_paths(old_prefixes: &[String], new_dir: &std::path::Pa
     }
     Ok(affected)
 }
+
+/// A prior upload of this exact plaintext, reusable by reference: the blob is
+/// already on a Blossom server and `key`/`nonce` decrypt it.
+#[derive(Debug, Clone)]
+pub struct ReusableUpload {
+    pub url: String,
+    pub key: String,
+    pub nonce: String,
+    pub size: u64,
+    /// Whether the event that carried it was ours — a foreign blob's lifetime
+    /// belongs to its uploader, so a reuse of it wants a background mirror.
+    pub mine: bool,
+}
+
+/// The smart-forward ledger read: has this exact plaintext (by SHA-256) ever
+/// crossed this account with a decryptable blob behind it?
+///
+/// `downloaded = 1` is the trust gate: the download path hash-verifies the
+/// decrypted bytes against `hash` before setting it, so a row that merely
+/// CLAIMS this hash (a hostile sender's fabricated imeta) never qualifies —
+/// our own sends set it by construction. Own uploads win the ordering:
+/// their blobs live on our servers under our delete authority.
+/// The verified on-disk copy of a claimed attachment, if any: candidates are
+/// the ledger's recorded paths for the hash plus the download dir under the
+/// wire name, size-gated cheaply (wire size is ciphertext length, 16 AES-GCM
+/// bytes over the plaintext), then content-hashed on the blocking pool. The
+/// claim is never trusted without the hash passing — same bar as a download.
+pub async fn verify_local_copy(att: &crate::types::Attachment) -> Option<String> {
+    let expected = att.id.clone();
+    let mut candidates: Vec<std::path::PathBuf> = downloaded_paths_by_hash(&expected)
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    if !att.name.is_empty() {
+        candidates.push(crate::db::get_download_dir().join(&att.name));
+    }
+    let size = att.size;
+    candidates.retain(|p| match std::fs::metadata(p) {
+        Ok(m) => size == 0 || m.len() == size || m.len() + 16 == size,
+        Err(_) => false,
+    });
+    if candidates.is_empty() {
+        return None;
+    }
+    tokio::task::spawn_blocking(move || {
+        candidates.into_iter().find_map(|p| {
+            let bytes = std::fs::read(&p).ok()?;
+            (crate::crypto::sha256_hex(&bytes) == expected)
+                .then(|| p.to_string_lossy().to_string())
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Run [`verify_local_copy`] over a message's undownloaded attachments,
+/// converting verified claims in place. No-op for messages whose files are
+/// unknown (indexed probe misses) or already resident.
+///
+/// `chat_hint` also patches the already-ingested STATE copy (community folds
+/// put the message into STATE before this can run); pass `None` when the
+/// verified copy is the one still headed for STATE.
+pub async fn verify_message_attachments(msg: &mut crate::types::Message, chat_hint: Option<&str>) {
+    let mut converted: Vec<(String, String)> = Vec::new();
+    for att in &mut msg.attachments {
+        if !att.downloaded {
+            if let Some(path) = verify_local_copy(att).await {
+                att.downloaded = true;
+                att.path = path.clone();
+                converted.push((att.id.clone(), path));
+            }
+        }
+    }
+    if let Some(chat) = chat_hint {
+        if !converted.is_empty() {
+            let mut state = crate::state::STATE.lock().await;
+            for (att_id, path) in converted {
+                state.update_attachment(chat, &msg.id, &att_id, |a| {
+                    a.set_downloaded(true);
+                    a.path = path.into_boxed_str();
+                });
+            }
+        }
+    }
+}
+
+/// Paths where these bytes already landed: every `downloaded=1` row for the
+/// hash, wherever the file was saved (collision suffixes included — the name
+/// on the message says nothing about the name on disk). Rows are CLAIMS: the
+/// caller must hash-verify a path before treating it as the content.
+pub fn downloaded_paths_by_hash(hash: &str) -> Result<Vec<String>, String> {
+    let conn = crate::db::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT path FROM attachments WHERE hash = ?1 AND downloaded = 1 AND path != ''")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([hash], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+pub fn find_reusable_by_hash(hash: &str) -> Result<Option<ReusableUpload>, String> {
+    if hash.is_empty() {
+        return Ok(None);
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.url, a.key, a.nonce, a.size, COALESCE(e.mine, 0)
+             FROM attachments a JOIN events e ON e.id = a.event_id
+             WHERE a.hash = ?1 AND a.url <> '' AND a.key <> '' AND a.nonce <> '' AND a.downloaded = 1
+             ORDER BY COALESCE(e.mine, 0) DESC, a.id DESC LIMIT 1",
+        )
+        .map_err(|e| format!("find_reusable_by_hash prepare: {e}"))?;
+    let row = stmt
+        .query_row(rusqlite::params![hash], |r| {
+            Ok(ReusableUpload {
+                url: r.get(0)?,
+                key: r.get(1)?,
+                nonce: r.get(2)?,
+                size: r.get::<_, i64>(3)? as u64,
+                mine: r.get::<_, i64>(4)? != 0,
+            })
+        })
+        .ok();
+    Ok(row)
+}
+
+/// Of `urls`, the ones NO other event's attachment still points at — the only
+/// ones a delete may scrub from Blossom. One blob can back many messages
+/// (smart-forward), and the shared copy must outlive every send but the last.
+/// DB-backed on purpose: the in-memory STATE windows to recent messages, so a
+/// reference in an older message is invisible there.
+pub fn urls_unreferenced_elsewhere(urls: &[String], excluding_event_id: &str) -> Result<Vec<String>, String> {
+    if urls.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM attachments WHERE url = ?1 AND event_id <> ?2 LIMIT 1")
+        .map_err(|e| format!("urls_unreferenced prepare: {e}"))?;
+    let mut out = Vec::with_capacity(urls.len());
+    for url in urls {
+        let referenced = stmt.exists(rusqlite::params![url, excluding_event_id])
+            .map_err(|e| format!("urls_unreferenced query: {e}"))?;
+        if !referenced {
+            out.push(url.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Whether any OTHER event's attachment shares this plaintext hash — the local
+/// file half of the same refcount: the decrypted file on disk serves every
+/// message that names its hash, windowed out of memory or not.
+pub fn hash_referenced_elsewhere(hash: &str, excluding_event_id: &str) -> Result<bool, String> {
+    if hash.is_empty() {
+        return Ok(false);
+    }
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM attachments WHERE hash = ?1 AND event_id <> ?2 LIMIT 1")
+        .map_err(|e| format!("hash_referenced prepare: {e}"))?;
+    stmt.exists(rusqlite::params![hash, excluding_event_id])
+        .map_err(|e| format!("hash_referenced query: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Attachment, Message};
+
+    static TEST_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(74000);
+
+    fn make_test_npub(n: u32) -> String {
+        const BECH32: &[u8] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+        let mut payload = vec![b'q'; 58];
+        let mut x = n as u64;
+        let mut i = 58;
+        while x > 0 && i > 0 {
+            i -= 1;
+            payload[i] = BECH32[(x as usize) % 32];
+            x /= 32;
+        }
+        format!("npub1{}", std::str::from_utf8(&payload).unwrap())
+    }
+
+    fn init_test_db() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        let tmp = tempfile::tempdir().unwrap();
+        let n = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let account = make_test_npub(n);
+        std::fs::create_dir_all(tmp.path().join(&account)).unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+        (tmp, guard)
+    }
+
+    fn att(hash: &str, url: &str, keyed: bool, downloaded: bool) -> Attachment {
+        Attachment {
+            id: hash.to_string(),
+            key: if keyed { "k".into() } else { String::new() },
+            nonce: if keyed { "n".into() } else { String::new() },
+            url: url.to_string(),
+            size: 42,
+            downloaded,
+            ..Default::default()
+        }
+    }
+
+    async fn save(chat: &str, event_id: &str, mine: bool, a: Attachment) {
+        let msg = Message {
+            id: event_id.to_string(),
+            content: String::new(),
+            mine,
+            at: 1_000_000,
+            attachments: vec![a],
+            ..Default::default()
+        };
+        crate::db::events::save_message(chat, &msg).await.unwrap();
+    }
+
+    /// The smart-forward ledger: a verified prior send/download of the same
+    /// plaintext is reusable, our own upload wins over a foreign one, and a
+    /// row that never proved itself (undownloaded, or keyless) never qualifies.
+    #[tokio::test]
+    async fn the_ledger_finds_a_prior_upload_and_prefers_our_own() {
+        let (_tmp, _guard) = init_test_db();
+        save("chat_a", "evt_foreign", false, att("H1", "https://b.example/foreign", true, true)).await;
+        save("chat_b", "evt_mine", true, att("H1", "https://b.example/mine", true, true)).await;
+        save("chat_c", "evt_unverified", false, att("H2", "https://b.example/x", true, false)).await;
+        save("chat_d", "evt_keyless", true, att("H3", "https://b.example/y", false, true)).await;
+
+        let hit = find_reusable_by_hash("H1").unwrap().expect("H1 is reusable");
+        assert_eq!(hit.url, "https://b.example/mine", "own upload preferred");
+        assert!(hit.mine);
+        assert_eq!(hit.key, "k");
+        assert_eq!(hit.size, 42);
+
+        assert!(find_reusable_by_hash("H2").unwrap().is_none(), "unverified rows never qualify");
+        assert!(find_reusable_by_hash("H3").unwrap().is_none(), "keyless rows never qualify");
+        assert!(find_reusable_by_hash("H9").unwrap().is_none());
+    }
+
+    /// A re-received file must resolve to the copy already on disk, wherever
+    /// it landed — the ledger's path, not the message's display name, is the
+    /// authority. Undownloaded and pathless rows stay invisible.
+    #[tokio::test]
+    async fn the_ledger_knows_where_the_bytes_already_landed() {
+        let (_tmp, _guard) = init_test_db();
+        let mut on_disk = att("HP", "https://b.example/p", true, true);
+        on_disk.path = "/dl/counter-strike-1.xdc".to_string();
+        save("chat_a", "evt_disk", true, on_disk).await;
+        let mut ghost = att("HP", "https://b.example/p2", true, false);
+        ghost.path = "/dl/never-finished.xdc".to_string();
+        save("chat_b", "evt_ghost", false, ghost).await;
+        save("chat_c", "evt_pathless", true, att("HP", "https://b.example/p3", true, true)).await;
+
+        assert_eq!(
+            downloaded_paths_by_hash("HP").unwrap(),
+            vec!["/dl/counter-strike-1.xdc".to_string()],
+            "only the downloaded row with a real path answers"
+        );
+        assert!(downloaded_paths_by_hash("H9").unwrap().is_empty());
+    }
+
+    /// Arrival-time verification: a claimed hash resolves to the on-disk copy
+    /// only when the CONTENT matches — a ledger row pointing at the wrong
+    /// bytes (or nothing) never converts a claim into a download.
+    #[tokio::test]
+    async fn a_claim_verifies_against_real_bytes_or_not_at_all() {
+        let (_tmp, _guard) = init_test_db();
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("counter-strike.xdc");
+        std::fs::write(&good, b"the actual game bytes").unwrap();
+        let real_hash = crate::crypto::sha256_hex(b"the actual game bytes");
+
+        let mut row = att(&real_hash, "https://b.example/cs", true, true);
+        row.path = good.to_string_lossy().to_string();
+        save("chat_a", "evt_cs", true, row).await;
+
+        let claim = |hash: &str, size: u64| crate::types::Attachment {
+            id: hash.to_string(),
+            size,
+            ..Default::default()
+        };
+        // Exact plaintext size and ciphertext size (+16) both pass the gate.
+        let plain_len = b"the actual game bytes".len() as u64;
+        assert!(verify_local_copy(&claim(&real_hash, plain_len)).await.is_some());
+        assert!(verify_local_copy(&claim(&real_hash, plain_len + 16)).await.is_some());
+        assert!(verify_local_copy(&claim(&real_hash, 0)).await.is_some(), "sizeless claims still verify by content");
+        // Wrong size: cheap gate refuses before any read.
+        assert!(verify_local_copy(&claim(&real_hash, plain_len + 1)).await.is_none());
+
+        // A row whose file was swapped out from under it: hash fails, no trust.
+        std::fs::write(&good, b"not the game").unwrap();
+        assert!(verify_local_copy(&claim(&real_hash, plain_len)).await.is_none());
+    }
+
+    /// One blob, many messages: the shared copy must outlive every send but
+    /// the last. The gate answers from the DB, not memory — an old message
+    /// windowed out of STATE still holds its reference here.
+    #[tokio::test]
+    async fn a_shared_blob_survives_every_delete_but_the_last() {
+        let (_tmp, _guard) = init_test_db();
+        let url = "https://b.example/shared".to_string();
+        save("chat_a", "evt_first", true, att("HH", &url, true, true)).await;
+        save("chat_b", "evt_second", true, att("HH", &url, true, true)).await;
+
+        // Deleting either message alone: the other still rides the blob.
+        assert!(urls_unreferenced_elsewhere(&[url.clone()], "evt_first").unwrap().is_empty());
+        assert!(urls_unreferenced_elsewhere(&[url.clone()], "evt_second").unwrap().is_empty());
+        assert!(hash_referenced_elsewhere("HH", "evt_first").unwrap());
+
+        // The sibling's row goes (its event deleted) — NOW the last delete may scrub.
+        crate::db::events::delete_event("evt_second").await.unwrap();
+        assert_eq!(urls_unreferenced_elsewhere(&[url.clone()], "evt_first").unwrap(), vec![url]);
+        assert!(!hash_referenced_elsewhere("HH", "evt_first").unwrap());
+    }
+}

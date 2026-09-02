@@ -620,7 +620,13 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
     vector_core::db::scoped(async move {
         // v2: banlist edition + grant-strip + refound (CORD-04 §6), all in the facade.
         if is_v2_community(community_id) {
-            return vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string());
+            vector_core::VectorCore.set_member_banned(community_id, npub, banned).await.map_err(|e| e.to_string())?;
+            // Their messages stop rendering the moment they are banned, so a badge counting
+            // them sends the reader hunting for something the client will never show. The
+            // unread cache is maintained incrementally and cannot know a ban happened —
+            // recompute every channel they could have posted in, straight from the DB.
+            reconcile_community_unread(community_id).await;
+            return Ok(());
         }
         let hex = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| "invalid npub".to_string())?.to_hex();
         let id_bytes = hex_to_id32(community_id)?;
@@ -638,6 +644,7 @@ async fn set_member_banned(community_id: &str, npub: &str, banned: bool) -> Resu
         // (COMMUNITY_ROUTES froze each Channel at the last refresh — without this, a banned author's
         // LIVE messages keep flowing until reopen/restart).
         crate::services::subscription_handler::refresh_community_subscription().await;
+        reconcile_community_unread(community_id).await;
         Ok(())
     })
     .await
@@ -1223,6 +1230,9 @@ struct PreparedCommunityAttachment {
     attachment: vector_core::types::Attachment,
     /// Ciphertext to upload to Blossom.
     encrypted: Vec<u8>,
+    /// The reused blob belongs to another uploader — mirror it to our servers
+    /// in the background once the send is out.
+    reused_foreign: bool,
     /// Original MIME (servers reject `application/octet-stream` but accept the same bytes
     /// under their real type) — used for capability-aware server routing.
     mime: String,
@@ -1334,11 +1344,32 @@ async fn process_outbound_community_attachment_bytes(
         let _ = std::fs::write(&local_path, &bytes);
     }
 
+    // Smart-forward: a prior verified send/download of these exact bytes left a
+    // decryptable blob behind — reference it instead of re-encrypting and
+    // re-uploading. Liveness is proven (strict HEAD), never assumed.
+    let reused = match vector_core::db::attachments::find_reusable_by_hash(&plaintext_hash) {
+        Ok(Some(r)) if vector_core::blossom::blob_is_served(&r.url, Duration::from_secs(5)).await => {
+            vector_core::log_info!("[SmartForward] {} reused ({}, {} KB) — no upload", &plaintext_hash[..8], if r.mine { "own blob" } else { "foreign blob, mirroring in background" }, r.size / 1024);
+            Some(r)
+        }
+        _ => None,
+    };
+
     // Encrypt with a fresh key+nonce; the ciphertext is uploaded later (after the optimistic
-    // bubble is shown) so progress + cancel drive the sender's UI.
-    let params = vector_core::crypto::generate_encryption_params();
-    let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
-    let encrypted_size = encrypted.len() as u64;
+    // bubble is shown) so progress + cancel drive the sender's UI. On reuse the
+    // ciphertext is empty and the url pre-filled — the upload loop skips it.
+    let (key, nonce, url, encrypted, encrypted_size, reused_foreign) = match reused {
+        Some(r) => {
+            let size = r.size;
+            (r.key, r.nonce, r.url, Vec::new(), size, !r.mine)
+        }
+        None => {
+            let params = vector_core::crypto::generate_encryption_params();
+            let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
+            let size = encrypted.len() as u64;
+            (params.key, params.nonce, String::new(), encrypted, size, false)
+        }
+    };
     let mime = vector_core::crypto::mime_from_extension(&extension).to_string();
 
     // Mini Apps: mint the realtime topic at send time so every member joins the
@@ -1352,11 +1383,11 @@ async fn process_outbound_community_attachment_bytes(
 
     let attachment = Attachment {
         id: plaintext_hash.clone(),
-        key: params.key,
-        nonce: params.nonce,
+        key,
+        nonce,
         extension,
         name,
-        url: String::new(), // filled in once the upload completes
+        url, // pre-filled on reuse; filled in once the upload completes otherwise
         path: local_path.to_string_lossy().to_string(),
         size: encrypted_size,
         img_meta,
@@ -1367,7 +1398,7 @@ async fn process_outbound_community_attachment_bytes(
         original_hash: Some(plaintext_hash),
         fallback_urls: Vec::new(), // filled by the post-upload mirror fan-out
     };
-    Ok(PreparedCommunityAttachment { attachment, encrypted, mime })
+    Ok(PreparedCommunityAttachment { attachment, encrypted, mime, reused_foreign })
 }
 
 /// Post a Community message carrying a caption (`content`, may be empty) plus one or more
@@ -1573,7 +1604,26 @@ async fn dispatch_community_attachment_message(
         // Upload each attachment, driving the progress ring (keyed by pending_id) + filling URLs.
         let mut uploaded: Vec<vector_core::types::Attachment> = Vec::with_capacity(prepared.len());
         for prep in prepared {
-            let PreparedCommunityAttachment { mut attachment, encrypted, mime } = prep;
+            let PreparedCommunityAttachment { mut attachment, encrypted, mime, reused_foreign } = prep;
+            // Smart-forward: the attachment already references a live blob —
+            // no upload, no fan-out; the send is just the message. A foreign
+            // blob gets a background mirror as availability insurance.
+            if !attachment.url.is_empty() {
+                callback.on_upload_complete(&channel_id, &pending_id, &attachment.id, &attachment.url);
+                if reused_foreign {
+                    let signer_bg = signer.clone();
+                    let url_bg = attachment.url.clone();
+                    vector_core::db::spawn_bound(async move {
+                        let _ = vector_core::blossom::mirror_blob_to_servers(
+                            signer_bg, &url_bg,
+                            vector_core::blossom_servers::compute_enabled_servers(),
+                            1, Duration::from_secs(8),
+                        ).await;
+                    });
+                }
+                uploaded.push(attachment);
+                continue;
+            }
             let cb_for_progress = callback.clone();
             let pid_for_progress = pending_id.clone();
             let progress_cb: vector_core::blossom::ProgressCallback =
@@ -3421,7 +3471,11 @@ pub async fn delete_community_message(message_id: String) -> Result<(), String> 
         .await?;
 
         // Layer 3 — best-effort Blossom blob delete for attachments (signed by the active
-        // identity so bunker accounts authorize correctly).
+        // identity so bunker accounts authorize correctly). Smart-forward gate:
+        // only urls no OTHER message still references may be scrubbed.
+        let attachment_urls =
+            vector_core::db::attachments::urls_unreferenced_elsewhere(&attachment_urls, &message_id)
+                .unwrap_or_default();
         if !attachment_urls.is_empty() {
             if let Some(_client) = vector_core::state::nostr_client() {
                 if let Ok(signer) = vector_core::signer::active_signer() {

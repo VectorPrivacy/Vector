@@ -101,10 +101,24 @@ function initMentionSelector(textarea, candidatesFn, anchorEl) {
     function getFiltered() {
         if (!cachedCandidates) cachedCandidates = candidatesFn();
         const q = query.toLowerCase();
-        // Match display name OR npub — a member with no profile name yet (npub-stub
-        // entry) must still be findable by typing (part of) their npub.
+        // Tiered match: name prefix, then name substring, then npub. An npub
+        // is 58 chars of bech32 soup that matches almost any short query, so
+        // it only fills whatever slots real name matches leave open — a
+        // member with no profile name yet (npub-stub entry) is still findable
+        // by typing (part of) their npub. Sort is stable, so recency order
+        // from the candidate pool holds within each tier.
+        const tier = (c) => {
+            const n = c.name.toLowerCase();
+            if (!q || n.startsWith(q)) return 0;
+            if (n.includes(q)) return 1;
+            if (c.npub.toLowerCase().includes(q)) return 2;
+            return 3;
+        };
         return cachedCandidates
-            .filter(c => c.name.toLowerCase().includes(q) || c.npub.toLowerCase().includes(q))
+            .map(c => [tier(c), c])
+            .filter(([t]) => t < 3)
+            .sort((a, b) => a[0] - b[0])
+            .map(([, c]) => c)
             .slice(0, 5);
     }
 

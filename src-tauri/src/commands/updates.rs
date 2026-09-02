@@ -64,10 +64,18 @@ fn is_preview(version: &semver::Version) -> bool {
 /// that the release was flagged pre-release on GitHub. Mirrors the desktop
 /// comparator in `lib.rs`, so both platforms fail the same way.
 fn version_is_newer(latest: &str, current: &semver::Version) -> bool {
+    version_is_newer_opts(latest, current, !current.pre.is_empty())
+}
+
+/// `preview_channel` names the channel the user follows, not the build they
+/// run: `true` accepts anything newer (release candidates included), `false`
+/// accepts newer STABLE releases only — which is what lets a preview build
+/// opt back out and ride this RC until the official release lands.
+fn version_is_newer_opts(latest: &str, current: &semver::Version, preview_channel: bool) -> bool {
     let Ok(latest) = semver::Version::parse(latest.trim().trim_start_matches('v')) else {
         return false;
     };
-    if current.pre.is_empty() && !latest.pre.is_empty() {
+    if !latest.pre.is_empty() && !preview_channel {
         return false;
     }
     latest > *current
@@ -77,12 +85,20 @@ fn version_is_newer(latest: &str, current: &semver::Version) -> bool {
 /// Uses the shared Tor-aware HTTP client, so with Tor enabled the check
 /// routes through it (or fails closed while it bootstraps).
 #[tauri::command]
-pub async fn check_app_update<R: Runtime>(handle: AppHandle<R>) -> Result<AppUpdateInfo, String> {
+pub async fn check_app_update<R: Runtime>(
+    handle: AppHandle<R>,
+    beta: Option<bool>,
+) -> Result<AppUpdateInfo, String> {
     let current = handle.package_info().version.clone();
     let preview = is_preview(&current);
+    // `beta` names the channel to FOLLOW, defaulting to the build's native
+    // one. true from a stable build = offer release candidates (the pointer
+    // tracks both channels, so official releases still arrive). false from a
+    // preview build = the opt-out: stable manifest, stable versions only.
+    let beta = beta.unwrap_or(preview);
     let client = vector_core::net::shared_http_client();
     let mut resp = client
-        .get(if preview {
+        .get(if beta {
             PREVIEW_MANIFEST_URL
         } else {
             UPDATE_MANIFEST_URL
@@ -120,7 +136,7 @@ pub async fn check_app_update<R: Runtime>(handle: AppHandle<R>) -> Result<AppUpd
         .unwrap_or("")
         .to_string();
     Ok(AppUpdateInfo {
-        available: version_is_newer(&latest, &current),
+        available: version_is_newer_opts(&latest, &current, beta),
         current: current.to_string(),
         latest,
         notes,
@@ -236,7 +252,10 @@ const APK_ASSET: &str = {
 ///
 /// Emits `update_download_progress` ({ received, total }) while streaming.
 #[tauri::command]
-pub async fn download_and_install_update<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+pub async fn download_and_install_update<R: Runtime>(
+    app: AppHandle<R>,
+    beta: Option<bool>,
+) -> Result<String, String> {
     #[cfg(target_os = "android")]
     {
         use tauri::Emitter;
@@ -250,7 +269,7 @@ pub async fn download_and_install_update<R: Runtime>(app: AppHandle<R>) -> Resul
 
         let current = app.package_info().version.to_string();
         let preview = semver::Version::parse(&current).map(|v| is_preview(&v)).unwrap_or(false);
-        let url = if preview {
+        let url = if beta.unwrap_or(preview) {
             format!("https://github.com/VectorPrivacy/Vector/releases/download/preview/{APK_ASSET}")
         } else {
             format!("https://github.com/VectorPrivacy/Vector/releases/latest/download/{APK_ASSET}")
@@ -314,14 +333,138 @@ pub async fn download_and_install_update<R: Runtime>(app: AppHandle<R>) -> Resul
     }
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app;
+        let _ = (app, beta);
         Err("Desktop updates run through the updater plugin".to_string())
+    }
+}
+
+/// The update found by `check_channel_update`, held for the user's install
+/// click. Process-global by design: an update applies to the install, not to
+/// an account, so a swap must not drop it.
+#[cfg(desktop)]
+static PENDING_CHANNEL_UPDATE: std::sync::Mutex<Option<tauri_plugin_updater::Update>> =
+    std::sync::Mutex::new(None);
+
+/// Check a channel the baked updater config does NOT point at, by building a
+/// second updater at runtime. Two callers: a stable build opted into Beta
+/// Updates (`channel: "preview"` — the pointer, release candidates accepted),
+/// and a preview build opted back OUT (`channel: "stable"` — the stable
+/// manifest, stable versions only, so the build sits on its RC until the
+/// official release lands). Same manifest format, same signature check.
+///
+/// `proxy` carries the Tor SOCKS address when Tor is on — the updater plugin
+/// has its own HTTP client, so the frontend resolves transport exactly as it
+/// does for the plugin's JS `check`.
+#[tauri::command]
+pub async fn check_channel_update<R: Runtime>(
+    handle: AppHandle<R>,
+    channel: String,
+    proxy: Option<String>,
+) -> Result<AppUpdateInfo, String> {
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_updater::UpdaterExt;
+        let current = handle.package_info().version.clone();
+        let preview = is_preview(&current);
+        let (url, comparator): (_, fn(semver::Version, tauri_plugin_updater::RemoteRelease) -> bool) =
+            match channel.as_str() {
+                "preview" => (PREVIEW_MANIFEST_URL, |current, release| {
+                    release.version > current
+                }),
+                "stable" => (UPDATE_MANIFEST_URL, |current, release| {
+                    release.version.pre.is_empty() && release.version > current
+                }),
+                other => return Err(format!("Unknown update channel: {other}")),
+            };
+        let endpoint =
+            tauri::Url::parse(url).map_err(|e| format!("Bad update endpoint: {e}"))?;
+        let mut builder = handle
+            .updater_builder()
+            .endpoints(vec![endpoint])
+            .map_err(|e| format!("Update check failed: {e}"))?
+            .version_comparator(comparator);
+        if let Some(p) = proxy {
+            builder = builder.proxy(
+                tauri::Url::parse(&p).map_err(|e| format!("Bad proxy address: {e}"))?,
+            );
+        }
+        let updater = builder
+            .build()
+            .map_err(|e| format!("Update check failed: {e}"))?;
+        let found = updater
+            .check()
+            .await
+            .map_err(|e| format!("Update check failed: {e}"))?;
+        let info = AppUpdateInfo {
+            available: found.is_some(),
+            current: current.to_string(),
+            latest: found.as_ref().map(|u| u.version.clone()).unwrap_or_default(),
+            notes: found
+                .as_ref()
+                .and_then(|u| u.body.clone())
+                .unwrap_or_default(),
+            preview,
+        };
+        *PENDING_CHANNEL_UPDATE.lock().unwrap() = found;
+        Ok(info)
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (handle, channel, proxy);
+        Err("Channel checks run through the manifest on this platform".to_string())
+    }
+}
+
+/// Download and install the update stashed by `check_channel_update`.
+///
+/// Emits `update_download_progress` ({ received, total }) like the Android
+/// path; the frontend offers the restart once this returns. On Windows the
+/// installer may relaunch the app itself, so the caller must tolerate never
+/// seeing the result.
+#[tauri::command]
+pub async fn install_channel_update<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        use tauri::Emitter;
+        let update = PENDING_CHANNEL_UPDATE
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No pending update — check for updates first")?;
+        let mut received: u64 = 0;
+        let mut last_emit = 0u64;
+        let progress_app = app.clone();
+        update
+            .download_and_install(
+                move |chunk, total| {
+                    received += chunk as u64;
+                    let total = total.unwrap_or(0);
+                    // Throttle to ~256KiB steps; installers run tens of MB.
+                    if received - last_emit >= 256 * 1024 || received == total {
+                        last_emit = received;
+                        let _ = progress_app.emit(
+                            "update_download_progress",
+                            serde_json::json!({ "received": received, "total": total }),
+                        );
+                    }
+                },
+                || {},
+            )
+            .await
+            .map_err(|e| format!("Update install failed: {e}"))?;
+        *PENDING_CHANNEL_UPDATE.lock().unwrap() = None;
+        Ok(())
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+        Err("Desktop-only".to_string())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_preview, version_is_newer};
+    use super::{is_preview, version_is_newer, version_is_newer_opts};
 
     fn v(s: &str) -> semver::Version {
         semver::Version::parse(s).unwrap()
@@ -376,6 +519,31 @@ mod tests {
         // Previews still take previews, and the official release.
         assert!(version_is_newer("0.4.2-2", &v("0.4.2-1")));
         assert!(version_is_newer("0.4.2", &v("0.4.2-1")));
+    }
+
+    #[test]
+    fn beta_opt_in_accepts_release_candidates() {
+        // The one gate the preview channel lifts: a NEWER pre-release.
+        assert!(version_is_newer_opts("0.4.4-1", &v("0.4.3"), true));
+        assert!(!version_is_newer_opts("0.4.4-1", &v("0.4.3"), false));
+        // Ordering is untouched: no downgrades, no same-version churn.
+        assert!(!version_is_newer_opts("0.4.4-1", &v("0.4.4"), true));
+        assert!(!version_is_newer_opts("0.4.3-9", &v("0.4.3"), true));
+        // Stable releases still arrive with the flag on.
+        assert!(version_is_newer_opts("0.4.4", &v("0.4.3"), true));
+        // Garbage still fails closed.
+        assert!(!version_is_newer_opts("garbage", &v("0.4.3"), true));
+    }
+
+    #[test]
+    fn beta_opt_out_parks_an_rc_until_the_official_release() {
+        // A preview build following the STABLE channel: no further release
+        // candidates, but the official release still carries it home.
+        assert!(!version_is_newer_opts("0.4.4-2", &v("0.4.4-1"), false));
+        assert!(!version_is_newer_opts("0.4.5-1", &v("0.4.4-1"), false));
+        assert!(version_is_newer_opts("0.4.4", &v("0.4.4-1"), false));
+        // The default (no opt-out) keeps the preview ladder intact.
+        assert!(version_is_newer("0.4.4-2", &v("0.4.4-1")));
     }
 
     #[test]
