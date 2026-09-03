@@ -125,10 +125,14 @@ async function minifyJs(filePath) {
 
 // ── Step 3: Minify CSS with lightningcss ─────────────────────────────────
 
-const { transform } = await import('lightningcss');
+// lightningcss is a native binary. Without it (the F-Droid recipe removes it)
+// CSS ships as written: a few tens of KB inside a 60MB APK.
+const lightningcss = await import('lightningcss').catch(() => null);
+const transform = lightningcss ? lightningcss.transform : null;
 
 function minifyCss(filePath) {
     const code = readFileSync(filePath);
+    if (!transform) return { before: code.length, after: code.length };
     const result = transform({
         filename: filePath,
         code,

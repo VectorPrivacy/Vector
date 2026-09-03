@@ -30,6 +30,7 @@ npm run dev:bare         # Dev without default features — no whisper AND no to
 npm run build:bare       # Release without default features (no whisper, no tor)
 npm run android:dev      # Android dev (./scripts/android-dev.sh)
 npm run android:build    # Android release (tauri android build)
+scripts/fdroid-build.sh  # F-Droid flavour: source-only, unsigned, no in-app updater (docs/fdroid/)
 ```
 
 Frontend build: `node scripts/build-frontend.mjs` copies `src/` to `dist/` with optional minification (terser + lightningcss in release).

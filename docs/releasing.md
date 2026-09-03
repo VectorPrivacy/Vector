@@ -20,7 +20,9 @@ the same input rather than mint a versionCode that can't be ordered.
 
 ## Cutting a release
 
-1. Bump `version` in `src-tauri/Cargo.toml`, and `package.json` to match.
+1. Bump `version` in `src-tauri/Cargo.toml`, and `package.json` to match. Mirror the pair into
+   `src-tauri/gen/android/app/version.properties` (F-Droid reads it; Gradle and a test refuse a
+   stale one).
 2. Push to the `release` branch.
 3. CI builds every platform and derives the rest from the version string alone:
    - a `-N` suffix flags the GitHub release as a pre-release and builds against the preview
@@ -29,6 +31,10 @@ the same input rather than mint a versionCode that can't be ordered.
 4. Write the changelog on the draft release, then publish it.
 5. Publishing fires `preview-pointer.yaml`, which re-points the preview channel at whatever you
    just published.
+6. On a stable release, publishing also fires `distribute.yaml`, which publishes to Zapstore
+   through a bunker (`docs/zapstore-bunker.md`; a no-op until the secret is set). The
+   F-Droid flavour (`Vector-fdroid.apk`) was uploaded by CI alongside the store APKs; F-Droid
+   itself builds from the tag (`docs/fdroid/README.md`).
 
 Don't hand-edit the pre-release checkbox. It's derived so it can't drift from the endpoint the
 binary was compiled against.

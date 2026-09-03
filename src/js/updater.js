@@ -537,6 +537,34 @@ async function initializeUpdater() {
         return;
     }
 
+    // A store flavour (F-Droid) has no updater at all: the store notifies and
+    // installs, so the section only says where updates come from.
+    if (platformFeatures.self_update === false) {
+        versionInfo = parseVersion(await getCurrentVersion());
+        const render = async () => {
+            const versionElement = document.getElementById('current-version');
+            if (versionElement) versionElement.textContent = versionInfo.display;
+            let label = 'F-Droid';
+            try {
+                const source = await window.__TAURI__.core.invoke('get_install_source');
+                if (source.has_store) label = source.label;
+            } catch (_) { /* keep the flavour's own store */ }
+            const checkButton = document.getElementById('check-updates-btn');
+            if (checkButton) checkButton.style.display = 'none';
+            const statusText = document.getElementById('update-status-text');
+            if (statusText) {
+                statusText.textContent = `Updates arrive through ${label}`;
+                statusText.style.display = 'block';
+            }
+        };
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', render);
+        } else {
+            render();
+        }
+        return;
+    }
+
     // Resolve the channel before anything renders or checks: the endpoint,
     // the button label and the status copy all branch on it.
     versionInfo = parseVersion(await getCurrentVersion());

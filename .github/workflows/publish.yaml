@@ -259,3 +259,86 @@ jobs:
             src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-arm64-v8a.apk \
             src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-armeabi-v7a.apk \
             --clobber --repo "$GITHUB_REPOSITORY"
+
+  # The F-Droid flavour (Cargo feature `fdroid`: no in-app updater), built by
+  # the same script F-Droid's builders run, signed with the release key. This
+  # asset is what F-Droid verifies its own rebuild against for the reproducible
+  # tier (docs/fdroid/README.md).
+  publish-android-fdroid:
+    permissions:
+      contents: write
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-linux-android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Android NDK + build-tools
+        run: |
+          sdkmanager --install "ndk;29.0.14206865" "build-tools;34.0.0"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libclang-dev pkg-config
+
+      - name: Tauri CLI from source
+        run: cargo install tauri-cli --version 2.9.6 --locked
+
+      - name: Build the F-Droid flavour
+        run: scripts/fdroid-build.sh
+
+      # apksigner, not Gradle: F-Droid's verifier strips exactly this kind of
+      # signature before comparing bytes.
+      - name: Sign
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$HOME/upload-keystore.jks"
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          OUT=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          "$BT/zipalign" -p -f 4 "$OUT/app-universal-universal-release-unsigned.apk" "$OUT/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$HOME/upload-keystore.jks" \
+            --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --out "$OUT/Vector-fdroid.apk" "$OUT/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$OUT/Vector-fdroid.apk"
+
+      - name: Get version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          if [[ "$VERSION" == *-* ]]; then
+            echo "PRERELEASE=--prerelease" >> $GITHUB_OUTPUT
+          else
+            echo "PRERELEASE=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v${{ steps.get_version.outputs.VERSION }}"
+          if ! gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName --jq '.[].tagName' | grep -qx "$TAG"; then
+            gh release create "$TAG" --draft ${{ steps.get_version.outputs.PRERELEASE }} --title "Vector $TAG" --repo "$GITHUB_REPOSITORY"
+          fi
+          gh release upload "$TAG" \
+            src-tauri/gen/android/app/build/outputs/apk/universal/release/Vector-fdroid.apk \
+            --clobber --repo "$GITHUB_REPOSITORY"

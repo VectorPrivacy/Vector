@@ -32,6 +32,9 @@ pub struct PlatformFeatures {
     /// When set, the frontend uses this instead of `asset://` for media elements
     /// to get proper HTTP Range request support (seeking, streaming).
     pub media_url: Option<String>,
+    /// Whether this build looks for and installs its own updates. Off in the
+    /// F-Droid flavour, where the store owns updates.
+    pub self_update: bool,
 }
 
 // ============================================================================
@@ -74,6 +77,7 @@ pub async fn get_platform_features() -> PlatformFeatures {
         is_mobile,
         debug_mode: cfg!(debug_assertions),
         media_url,
+        self_update: !cfg!(feature = "fdroid"),
     }
 }
 

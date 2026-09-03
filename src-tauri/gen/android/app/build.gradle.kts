@@ -55,6 +55,20 @@ fun versionToCode(version: String): Int {
     return (major * 10000 + minor * 100 + patch) * 100 + slot
 }
 
+// version.properties mirrors the Cargo-derived pair for tools that can only
+// read a flat file (F-Droid's update checker). A stale mirror fails the build.
+val versionProperties = Properties().apply {
+    file("version.properties").inputStream().use { load(it) }
+}
+if (versionProperties.getProperty("versionName") != cargoVersion ||
+    versionProperties.getProperty("versionCode")?.toIntOrNull() != versionToCode(cargoVersion)
+) {
+    throw GradleException(
+        "app/version.properties is out of step with Cargo.toml: expected " +
+        "versionName=$cargoVersion versionCode=${versionToCode(cargoVersion)}"
+    )
+}
+
 android {
     compileSdk = 34
     namespace = "io.vectorapp"
@@ -66,18 +80,19 @@ android {
         versionCode = versionToCode(cargoVersion)
         versionName = cargoVersion
     }
+    // Signing is optional: F-Droid builds unsigned and signs on its own
+    // servers, so a missing keystore still yields a release APK.
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
     signingConfigs {
-        create("release") {
-            val keystorePropertiesFile = rootProject.file("keystore.properties")
-            val keystoreProperties = Properties()
-            if (keystorePropertiesFile.exists()) {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                val keystoreProperties = Properties()
                 keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["password"] as String
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["password"] as String
             }
-
-            keyAlias = keystoreProperties["keyAlias"] as String
-            keyPassword = keystoreProperties["password"] as String
-            storeFile = file(keystoreProperties["storeFile"] as String)
-            storePassword = keystoreProperties["password"] as String
         }
     }
     buildTypes {
@@ -93,7 +108,9 @@ android {
             }
         }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("release")
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }

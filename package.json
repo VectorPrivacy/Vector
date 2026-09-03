@@ -4,7 +4,7 @@
   "version": "0.4.4",
   "type": "module",
   "scripts": {
-    "tauri": "tauri",
+    "tauri": "node scripts/tauri.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:dev:bare": "tauri dev -- --no-default-features",
@@ -21,11 +21,14 @@
     "android:emu": "./scripts/android-emu.sh"
   },
   "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.3",
     "@tauri-apps/cli": "^2.9.6",
     "emojibase-data": "^17.0.0",
     "esbuild": "^0.28.1",
     "esbuild-svelte": "^0.9.5",
     "lightningcss": "^1.31.1",
+    "rollup": "^3.30.0",
+    "rollup-plugin-svelte": "^7.2.3",
     "svelte": "^5.56.7",
     "terser": "^5.46.0"
   },

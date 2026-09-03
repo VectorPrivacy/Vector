@@ -1,0 +1,69 @@
+# fdroiddata metadata for Vector. Submit as metadata/io.vectorapp.yml in a
+# merge request to https://gitlab.com/fdroid/fdroiddata; keep this copy in
+# step with what is merged there. See README.md alongside.
+Categories:
+  - Internet
+License: MIT
+AuthorName: Formless Labs
+AuthorEmail: hello@vectorapp.io
+WebSite: https://vectorapp.io
+SourceCode: https://github.com/VectorPrivacy/Vector
+IssueTracker: https://github.com/VectorPrivacy/Vector/issues
+Changelog: https://github.com/VectorPrivacy/Vector/releases
+
+Name: Vector
+Summary: Private messenger and communities on Nostr, with zero metadata leakage
+Description: |-
+  Vector is a decentralized, privacy-focused messenger on the Nostr protocol.
+
+  * End-to-end encrypted DMs (NIP-17)
+  * Encrypted Communities powered by the Concord protocol: channels, roles and moderation
+  * Built-in Tor
+  * Multi-device and multi-account
+  * Remote signing (NIP-46) and Amber (NIP-55) offline signing
+  * Self-destructing messages, voice messages, custom emoji packs
+  * Private on-device AI for transcription and translation (models downloaded on request)
+  * Photos strip EXIF and location metadata by default
+  * WebXDC mini apps
+
+RepoType: git
+Repo: https://github.com/VectorPrivacy/Vector.git
+
+# The F-Droid flavour compiles the in-app updater out (Cargo feature
+# `fdroid`) and is built by scripts/fdroid-build.sh, the same script CI runs to
+# produce the Vector-fdroid.apk release asset.
+Builds:
+  - versionName: 0.4.4
+    versionCode: 40499
+    commit: FIXME-full-commit-hash
+    subdir: src-tauri/gen/android/app
+    sudo:
+      - apt-get update
+      - apt-get install -y --no-install-recommends rustup cmake clang libclang-dev pkg-config nodejs npm
+    ndk: 29.0.14206865
+    prebuild:
+      - cd ../../../..
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      - rustup toolchain install 1.95.0 --profile minimal --target aarch64-linux-android
+      - rustup default 1.95.0
+      - cargo install tauri-cli --version 2.9.6 --locked
+      - scripts/fdroid-build.sh prepare
+    build:
+      - cd ../../../..
+      - export PATH="$HOME/.cargo/bin:$PATH"
+      - export ANDROID_HOME=$$SDK$$
+      - export NDK_HOME=$$NDK$$
+      - scripts/fdroid-build.sh build
+    output: build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
+
+# Once F-Droid's rebuild matches the CI-built asset byte for byte, publish
+# with Vector's own signature by uncommenting these two lines (README.md,
+# "Reproducible"). Fingerprint from `apksigner verify --print-certs`.
+# Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-fdroid.apk
+# AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9affc06461d
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags ^v\d+\.\d+\.\d+$
+UpdateCheckData: src-tauri/gen/android/app/version.properties|versionCode=(\d+)|.|versionName=(.*)
+CurrentVersion: 0.4.4
+CurrentVersionCode: 40499

@@ -11,6 +11,9 @@ edition = "2021"
 default = ["whisper", "tor"]
 whisper = ["dep:whisper-rs"]
 tor = ["vector-core/tor"]
+# F-Droid flavour: no in-app updater. The store owns updates, and F-Droid's
+# inclusion policy wants the download path absent, not merely gated.
+fdroid = []
 
 [profile.release]
 lto = true

@@ -1,0 +1,87 @@
+name: fdroid
+
+# Builds the F-Droid flavour exactly as F-Droid's builders will
+# (scripts/fdroid-build.sh, docs/fdroid/io.vectorapp.yml) and runs F-Droid's
+# own source scanner, so a recipe break or a stray prebuilt binary is caught
+# here instead of in their merge-request pipeline.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/fdroid-build.sh
+      - scripts/fdroid-scan.py
+      - scripts/build-svelte.mjs
+      - scripts/build-frontend.mjs
+      - scripts/tauri.mjs
+      - docs/fdroid/**
+      - package.json
+      - package-lock.json
+      - rust-toolchain.toml
+      - src-tauri/Cargo.toml
+      - src-tauri/Cargo.lock
+      - src-tauri/tauri.fdroid.conf.json
+      - src-tauri/gen/android/**
+      - .github/workflows/fdroid.yaml
+
+concurrency:
+  group: fdroid-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Reads rust-toolchain.toml, the same pin F-Droid's recipe installs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          targets: aarch64-linux-android
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Android NDK
+        run: |
+          sdkmanager --install "ndk;29.0.14206865"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libclang-dev pkg-config
+
+      - name: Tauri CLI from source
+        run: cargo install tauri-cli --version 2.9.6 --locked
+
+      - name: Prepare (network stage)
+        run: scripts/fdroid-build.sh prepare
+
+      - name: F-Droid source scanner
+        run: |
+          pip install --quiet fdroidserver
+          scripts/fdroid-scan.py
+
+      # After the scan: a restored target/ is build output the scanner would flag.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: fdroid
+
+      - name: Build (offline stage)
+        run: scripts/fdroid-build.sh build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vector-fdroid-unsigned
+          path: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
+          if-no-files-found: error

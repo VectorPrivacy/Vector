@@ -12,8 +12,36 @@
  *
  * build-frontend.mjs also imports buildSvelte() and runs it as step 0.
  */
-import esbuild from 'esbuild';
-import esbuildSvelte from 'esbuild-svelte';
+// esbuild is a native binary. Where prebuilt binaries are not allowed (the
+// F-Droid recipe removes the package) the same entry is bundled with rollup,
+// which is pure JS. Same IIFE, same global; only the bundler differs.
+async function loadEsbuild() {
+    try {
+        return (await import('esbuild')).default;
+    } catch {
+        return null;
+    }
+}
+const esbuild = await loadEsbuild();
+
+async function buildWithRollup(options, dev) {
+    const { rollup } = await import('rollup');
+    const svelte = (await import('rollup-plugin-svelte')).default;
+    const { nodeResolve } = await import('@rollup/plugin-node-resolve');
+    const bundle = await rollup({
+        input: options.entryPoints[0],
+        plugins: [
+            svelte({ compilerOptions: { css: 'injected', dev }, emitCss: false }),
+            nodeResolve({
+                browser: true,
+                exportConditions: options.conditions,
+                mainFields: options.mainFields,
+            }),
+        ],
+    });
+    await bundle.write({ file: options.outfile, format: 'iife', name: options.globalName });
+    await bundle.close();
+}
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -37,8 +65,16 @@ export async function buildSvelte({ watch = false, dev = true } = {}) {
         mainFields: ['svelte', 'browser', 'module', 'main'],
         conditions: [dev ? 'development' : 'production', 'svelte', 'browser'],
         logLevel: 'warning',
-        plugins: [esbuildSvelte({ compilerOptions: { css: 'injected', dev } })],
+        plugins: [],
     };
+    if (!esbuild) {
+        if (watch) throw new Error('[build-svelte] watch mode needs esbuild');
+        await buildWithRollup(options, dev);
+        console.log(`[build-svelte] → src/components.bundle.js via rollup (${dev ? 'dev' : 'production'})`);
+        return;
+    }
+    const esbuildSvelte = (await import('esbuild-svelte')).default;
+    options.plugins = [esbuildSvelte({ compilerOptions: { css: 'injected', dev } })];
     if (watch) {
         const ctx = await esbuild.context(options);
         await ctx.watch();
