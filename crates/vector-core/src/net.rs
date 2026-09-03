@@ -647,3 +647,61 @@ pub async fn get_remote_file_size(url: &str) -> Option<u64> {
 
     None
 }
+
+/// Lift the open-file ceiling to what the OS allows.
+///
+/// A relay pool authenticates every plane on its own socket and the SQLite pool
+/// holds dozens of handles, so a busy session idles near 200 descriptors. macOS
+/// launches GUI apps with a soft limit of 256; past it every socket, file and
+/// child process fails, and the first system UI to lazily load a resource
+/// bundle traps the process. Returns the new soft limit, `None` if unchanged.
+pub fn raise_fd_limit() -> Option<u64> {
+    #[cfg(not(unix))]
+    {
+        None
+    }
+    #[cfg(unix)]
+    {
+        // macOS refuses a soft limit above OPEN_MAX (sys/syslimits.h) even under
+        // an unlimited hard limit; Linux refuses one above nr_open.
+        #[cfg(target_os = "macos")]
+        const CEILING: libc::rlim_t = 10240;
+        #[cfg(not(target_os = "macos"))]
+        const CEILING: libc::rlim_t = 1 << 20;
+
+        let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: plain libc calls on a stack struct we own.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+            return None;
+        }
+        let target = lim.rlim_max.min(CEILING);
+        if target <= lim.rlim_cur {
+            return None;
+        }
+        lim.rlim_cur = target;
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lim) } != 0 {
+            return None;
+        }
+        Some(target as u64)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod fd_limit_tests {
+    #[test]
+    fn soft_limit_reaches_the_ceiling_and_is_never_lowered() {
+        let mut before = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut before) }, 0);
+
+        super::raise_fd_limit();
+
+        let mut after = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut after) }, 0);
+        #[cfg(target_os = "macos")]
+        let ceiling: libc::rlim_t = 10240;
+        #[cfg(not(target_os = "macos"))]
+        let ceiling: libc::rlim_t = 1 << 20;
+        assert!(after.rlim_cur >= before.rlim_cur);
+        assert!(after.rlim_cur >= after.rlim_max.min(ceiling));
+    }
+}
