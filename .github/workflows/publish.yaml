@@ -276,10 +276,9 @@ jobs:
         with:
           node-version: 20
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
-          targets: aarch64-linux-android
+      # Only rustup is needed here; scripts/fdroid-build.sh installs the
+      # toolchain it pins.
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-java@v4
         with:
@@ -297,9 +296,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev pkg-config
-
-      - name: Tauri CLI from source
-        run: cargo install tauri-cli --version 2.9.6 --locked
 
       - name: Build the F-Droid flavour
         run: scripts/fdroid-build.sh

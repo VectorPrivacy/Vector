@@ -17,7 +17,15 @@ export ANDROID_NDK_HOME="$NDK_HOME"
 export ANDROID_NDK="$NDK_HOME"   # cmake's Android toolchain (whisper.cpp)
 export PATH="$HOME/.cargo/bin:$PATH"
 
+# The one place the toolchain is pinned: F-Droid's rebuild has to compile
+# with the same rustc and Tauri CLI as the released flavour it is compared to.
+RUST_TOOLCHAIN=1.98.0
+TAURI_CLI_VERSION=2.9.6
+export RUSTUP_TOOLCHAIN="$RUST_TOOLCHAIN"
+
 prepare() {
+    rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-linux-android
+    cargo install tauri-cli --version "$TAURI_CLI_VERSION" --locked
     npm ci --ignore-scripts
     # Globs expand here, after npm ci: a fresh clone has no node_modules yet.
     rm -rf node_modules/@tauri-apps/cli node_modules/@tauri-apps/cli-* \

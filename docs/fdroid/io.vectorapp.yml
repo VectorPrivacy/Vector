@@ -43,10 +43,6 @@ Builds:
     ndk: 29.0.14206865
     prebuild:
       - cd ../../../..
-      - export PATH="$HOME/.cargo/bin:$PATH"
-      - rustup toolchain install 1.95.0 --profile minimal --target aarch64-linux-android
-      - rustup default 1.95.0
-      - cargo install tauri-cli --version 2.9.6 --locked
       - scripts/fdroid-build.sh prepare
     build:
       - cd ../../../..

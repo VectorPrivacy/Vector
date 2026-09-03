@@ -1,4 +1,0 @@
-# Pinned so the F-Droid rebuild of the `fdroid` flavour compiles with the
-# same toolchain as the released APK it is compared against. Bump deliberately.
-[toolchain]
-channel = "1.95.0"

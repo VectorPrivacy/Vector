@@ -16,7 +16,6 @@ on:
       - docs/fdroid/**
       - package.json
       - package-lock.json
-      - rust-toolchain.toml
       - src-tauri/Cargo.toml
       - src-tauri/Cargo.lock
       - src-tauri/tauri.fdroid.conf.json
@@ -37,11 +36,9 @@ jobs:
         with:
           node-version: 20
 
-      # Reads rust-toolchain.toml, the same pin F-Droid's recipe installs.
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
-          targets: aarch64-linux-android
+      # Only rustup is needed here; scripts/fdroid-build.sh installs the
+      # toolchain it pins.
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-java@v4
         with:
@@ -59,9 +56,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake clang libclang-dev pkg-config
-
-      - name: Tauri CLI from source
-        run: cargo install tauri-cli --version 2.9.6 --locked
 
       - name: Prepare (network stage)
         run: scripts/fdroid-build.sh prepare

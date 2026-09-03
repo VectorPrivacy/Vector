@@ -76,8 +76,8 @@ tag matches it (F-Droid strips both signatures and compares), uncomment `Binarie
 `AllowedAPKSigningKeys` in the metadata. From then on F-Droid publishes Vector's own signature, and
 the app carries the reproducible badge.
 
-What already holds the two builds together: the pinned Rust toolchain (`rust-toolchain.toml`), NDK
-`29.0.14206865`, `tauri-cli` 2.9.6, `--remap-path-prefix` on every path that differs between
+What already holds the two builds together: the Rust toolchain and `tauri-cli` versions pinned at
+the top of `scripts/fdroid-build.sh`, NDK `29.0.14206865`, `--remap-path-prefix` on every path that differs between
 machines, and `SOURCE_DATE_EPOCH` from the commit. What can still break it and has not been
 measured yet: whisper.cpp's cmake build, R8 output across JDK builds, and Gradle's APK packaging.
 The first F-Droid build of a tag will say which, in their `verification` log.
