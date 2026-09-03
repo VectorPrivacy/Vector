@@ -34,6 +34,13 @@ prepare() {
 
 build() {
     export TAURI_CLI="cargo tauri"
+    # The NDK ships only the llvm-* binutils. Vendored OpenSSL asks `cc` for an
+    # archiver and ranlib; without these it guesses the GNU-prefixed names.
+    local ndk_bin
+    ndk_bin=$(ls -d "$NDK_HOME"/toolchains/llvm/prebuilt/*/bin | head -1)
+    export PATH="$ndk_bin:$PATH"
+    export AR_aarch64_linux_android="$ndk_bin/llvm-ar"
+    export RANLIB_aarch64_linux_android="$ndk_bin/llvm-ranlib"
     export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git log -1 --pretty=%ct)}"
     # Reproducibility: no builder-specific paths in the binary. Setting
     # rustflags this way replaces the target flags the Tauri CLI would set, so
