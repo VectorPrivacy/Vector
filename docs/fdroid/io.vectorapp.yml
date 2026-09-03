@@ -1,6 +1,5 @@
-# fdroiddata metadata for Vector. Submit as metadata/io.vectorapp.yml in a
-# merge request to https://gitlab.com/fdroid/fdroiddata; keep this copy in
-# step with what is merged there. See README.md alongside.
+# fdroiddata metadata for Vector, kept in canonical `fdroid rewritemeta` form.
+# Submit as metadata/io.vectorapp.yml; see README.md alongside for the why.
 Categories:
   - Internet
 License: MIT
@@ -13,14 +12,10 @@ Changelog: https://github.com/VectorPrivacy/Vector/releases
 Donate: https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations
 Bitcoin: bc1q70zhkfuej2cl9nhrxwqcnvrzpwm9kqtrth3tmc
 
-# Name, Summary and Description come from fastlane/metadata in the repo.
-
 RepoType: git
 Repo: https://github.com/VectorPrivacy/Vector.git
+Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-fdroid.apk
 
-# The F-Droid flavour compiles the in-app updater out (Cargo feature
-# `fdroid`) and is built by scripts/fdroid-build.sh, the same script CI runs to
-# produce the Vector-fdroid.apk release asset.
 Builds:
   - versionName: 0.4.4
     versionCode: 40499
@@ -28,8 +23,9 @@ Builds:
     subdir: src-tauri/gen/android/app
     sudo:
       - apt-get update
-      - apt-get install -y --no-install-recommends rustup cmake clang libclang-dev pkg-config nodejs npm
-    ndk: 29.0.14206865
+      - apt-get install -y --no-install-recommends rustup cmake clang libclang-dev
+        pkg-config nodejs npm
+    output: build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
     prebuild:
       - cd ../../../..
       - scripts/fdroid-build.sh prepare
@@ -39,12 +35,8 @@ Builds:
       - export ANDROID_HOME=$$SDK$$
       - export NDK_HOME=$$NDK$$
       - scripts/fdroid-build.sh build
-    output: build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
+    ndk: 29.0.14206865
 
-# Reproducible from the start: F-Droid decides signing at inclusion and cannot
-# switch later. The asset is built by the same script and signed with the
-# release key; the fingerprint is the release certificate.
-Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-fdroid.apk
 AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9affc06461d
 
 AutoUpdateMode: Version
