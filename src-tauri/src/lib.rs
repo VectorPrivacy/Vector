@@ -113,6 +113,9 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the first socket or pool exists: GUI apps start with a 256 ceiling.
+    vector_core::net::raise_fd_limit();
+
     // Opt out of the modal "Bad Image" hard-error dialog: injected hooks and GPU
     // driver probes LoadLibrary optional DLLs that can be corrupt on user machines;
     // with these flags the load fails quietly instead of blocking on a dialog.

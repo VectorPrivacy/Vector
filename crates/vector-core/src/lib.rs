@@ -493,6 +493,8 @@ impl VectorCore {
         // Install rustls ring provider
         let _ = rustls::crypto::ring::default_provider().install_default();
 
+        net::raise_fd_limit();
+
         Ok(VectorCore)
     }
 
