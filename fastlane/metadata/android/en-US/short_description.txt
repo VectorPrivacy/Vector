@@ -1,0 +1,1 @@
+Private messenger and communities on Nostr, with zero metadata leakage

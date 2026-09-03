@@ -11,20 +11,7 @@ SourceCode: https://github.com/VectorPrivacy/Vector
 IssueTracker: https://github.com/VectorPrivacy/Vector/issues
 Changelog: https://github.com/VectorPrivacy/Vector/releases
 
-Name: Vector
-Summary: Private messenger and communities on Nostr, with zero metadata leakage
-Description: |-
-  Vector is a decentralized, privacy-focused messenger on the Nostr protocol.
-
-  * End-to-end encrypted DMs (NIP-17)
-  * Encrypted Communities powered by the Concord protocol: channels, roles and moderation
-  * Built-in Tor
-  * Multi-device and multi-account
-  * Remote signing (NIP-46) and Amber (NIP-55) offline signing
-  * Self-destructing messages, voice messages, custom emoji packs
-  * Private on-device AI for transcription and translation (models downloaded on request)
-  * Photos strip EXIF and location metadata by default
-  * WebXDC mini apps
+# Name, Summary and Description come from fastlane/metadata in the repo.
 
 RepoType: git
 Repo: https://github.com/VectorPrivacy/Vector.git

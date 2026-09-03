@@ -23,6 +23,8 @@ the same input rather than mint a versionCode that can't be ordered.
 1. Bump `version` in `src-tauri/Cargo.toml`, and `package.json` to match. Mirror the pair into
    `src-tauri/gen/android/app/version.properties` (F-Droid reads it; Gradle and a test refuse a
    stale one).
+   Add `fastlane/metadata/android/en-US/changelogs/<versionCode>.txt` (plain ASCII, 500 bytes max);
+   F-Droid and IzzyOnDroid show it as the release's what's-new.
 2. Push to the `release` branch.
 3. CI builds every platform and derives the rest from the version string alone:
    - a `-N` suffix flags the GitHub release as a pre-release and builds against the preview
