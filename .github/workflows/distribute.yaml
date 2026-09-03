@@ -1,0 +1,40 @@
+name: distribute
+
+# Store publishing, fired when a release is published (the draft is un-drafted
+# with its changelog written). Stable releases only: previews never go to
+# stores, and the pointer release carries no APK.
+on:
+  release:
+    types: [published]
+
+jobs:
+  zapstore:
+    if: github.event.release.tag_name != 'preview' && !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zsp
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download v0.4.17 --repo zapstore/zsp \
+            --pattern 'zsp-0.4.17-linux-amd64' --output zsp
+          chmod +x zsp
+
+      # zsp resolves the newest GitHub release itself; on a stable publish
+      # that is this one. zapstore.yaml picks the arm64 store build.
+      #
+      # SIGN_WITH should be a NIP-46 bunker URL, never the account's nsec:
+      # the key stays on the owner's device and the grant can be revoked.
+      # Without the secret this is a no-op, so a release never fails on it.
+      - name: Publish to Zapstore
+        env:
+          SIGN_WITH: ${{ secrets.ZAPSTORE_SIGN_WITH }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$SIGN_WITH" ]; then
+            echo "::notice::ZAPSTORE_SIGN_WITH not set; publish to Zapstore by hand (zsp publish)."
+            exit 0
+          fi
+          ./zsp publish --quiet zapstore.yaml

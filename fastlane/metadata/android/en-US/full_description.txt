@@ -1,0 +1,35 @@
+Vector is a decentralized, privacy-focused messenger built on the Nostr protocol. Privacy by principle: no phone number, no KYC, no metadata, no compromises.
+
+<b>Messaging</b>
+<ul>
+<li>End-to-end encrypted DMs (NIP-17)</li>
+<li>Voice messages, file sharing, image spoilers, rich link previews</li>
+<li>Self-destructing messages with per-chat timers</li>
+<li>Mentions, reactions, custom emoji packs and chat wallpapers</li>
+<li>Photos strip EXIF and location metadata by default</li>
+</ul>
+
+<b>Communities</b>
+<ul>
+<li>Encrypted Communities powered by the Concord protocol: channels, roles and moderation with zero metadata leakage</li>
+<li>Public invite links, pinned messages synced across devices</li>
+<li>Bots with slash commands</li>
+</ul>
+
+<b>Privacy and security</b>
+<ul>
+<li>Built-in Tor</li>
+<li>Multi-device and multi-account</li>
+<li>Remote signing (NIP-46 bunker) and Amber (NIP-55) offline signing</li>
+<li>Biometric unlock and local encryption</li>
+<li>Private notifications: hide sender and content from the notification shade</li>
+</ul>
+
+<b>More</b>
+<ul>
+<li>Private on-device AI for transcription and translation (models downloaded only on request)</li>
+<li>WebXDC mini apps, including multiplayer games over peer-to-peer connections</li>
+<li>Profile QR cards with in-app scanning</li>
+</ul>
+
+This F-Droid build has no in-app updater; updates arrive through F-Droid.

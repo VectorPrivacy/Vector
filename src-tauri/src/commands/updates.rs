@@ -5,6 +5,9 @@
 //! the build came from: a store-installed copy hands off to that store, which
 //! owns updates and holds the matching signing key, while a SIDELOADED copy
 //! downloads and installs the next release itself.
+//!
+//! The `fdroid` feature compiles both the check and the download out: that
+//! flavour is updated by F-Droid alone.
 
 use tauri::{AppHandle, Runtime};
 
@@ -37,6 +40,7 @@ const UPDATE_MANIFEST_URL: &str =
 const PREVIEW_MANIFEST_URL: &str =
     "https://github.com/VectorPrivacy/Vector/releases/download/preview/latest.json";
 
+#[cfg(not(feature = "fdroid"))]
 const MANIFEST_MAX_BYTES: usize = 1024 * 1024;
 
 /// A semver pre-release identifier marks a preview build (`0.4.2-1`). It has to
@@ -63,6 +67,7 @@ fn is_preview(version: &semver::Version) -> bool {
 /// A stable build additionally refuses previews outright, rather than trusting
 /// that the release was flagged pre-release on GitHub. Mirrors the desktop
 /// comparator in `lib.rs`, so both platforms fail the same way.
+#[cfg_attr(feature = "fdroid", allow(dead_code))]
 fn version_is_newer(latest: &str, current: &semver::Version) -> bool {
     version_is_newer_opts(latest, current, !current.pre.is_empty())
 }
@@ -89,59 +94,67 @@ pub async fn check_app_update<R: Runtime>(
     handle: AppHandle<R>,
     beta: Option<bool>,
 ) -> Result<AppUpdateInfo, String> {
-    let current = handle.package_info().version.clone();
-    let preview = is_preview(&current);
-    // `beta` names the channel to FOLLOW, defaulting to the build's native
-    // one. true from a stable build = offer release candidates (the pointer
-    // tracks both channels, so official releases still arrive). false from a
-    // preview build = the opt-out: stable manifest, stable versions only.
-    let beta = beta.unwrap_or(preview);
-    let client = vector_core::net::shared_http_client();
-    let mut resp = client
-        .get(if beta {
-            PREVIEW_MANIFEST_URL
-        } else {
-            UPDATE_MANIFEST_URL
-        })
-        .send()
-        .await
-        .map_err(|e| format!("Update check failed: {}", e))?;
-    if !resp.status().is_success() {
-        return Err(format!("Update check failed: HTTP {}", resp.status()));
-    }
-    let mut body: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Update check failed: {}", e))?
+    #[cfg(feature = "fdroid")]
     {
-        body.extend_from_slice(&chunk);
-        if body.len() > MANIFEST_MAX_BYTES {
-            return Err("Update manifest too large".to_string());
+        let _ = (handle, beta);
+        Err("This build is updated by F-Droid".to_string())
+    }
+    #[cfg(not(feature = "fdroid"))]
+    {
+        let current = handle.package_info().version.clone();
+        let preview = is_preview(&current);
+        // `beta` names the channel to FOLLOW, defaulting to the build's native
+        // one. true from a stable build = offer release candidates (the pointer
+        // tracks both channels, so official releases still arrive). false from a
+        // preview build = the opt-out: stable manifest, stable versions only.
+        let beta = beta.unwrap_or(preview);
+        let client = vector_core::net::shared_http_client();
+        let mut resp = client
+            .get(if beta {
+                PREVIEW_MANIFEST_URL
+            } else {
+                UPDATE_MANIFEST_URL
+            })
+            .send()
+            .await
+            .map_err(|e| format!("Update check failed: {}", e))?;
+        if !resp.status().is_success() {
+            return Err(format!("Update check failed: HTTP {}", resp.status()));
         }
+        let mut body: Vec<u8> = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("Update check failed: {}", e))?
+        {
+            body.extend_from_slice(&chunk);
+            if body.len() > MANIFEST_MAX_BYTES {
+                return Err("Update manifest too large".to_string());
+            }
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|e| format!("Update manifest parse failed: {}", e))?;
+        let latest = manifest
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(|v| v.trim().trim_start_matches('v').to_string())
+            .unwrap_or_default();
+        if latest.is_empty() {
+            return Err("Update manifest missing version".to_string());
+        }
+        let notes = manifest
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(AppUpdateInfo {
+            available: version_is_newer_opts(&latest, &current, beta),
+            current: current.to_string(),
+            latest,
+            notes,
+            preview,
+        })
     }
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&body).map_err(|e| format!("Update manifest parse failed: {}", e))?;
-    let latest = manifest
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(|v| v.trim().trim_start_matches('v').to_string())
-        .unwrap_or_default();
-    if latest.is_empty() {
-        return Err("Update manifest missing version".to_string());
-    }
-    let notes = manifest
-        .get("notes")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    Ok(AppUpdateInfo {
-        available: version_is_newer_opts(&latest, &current, beta),
-        current: current.to_string(),
-        latest,
-        notes,
-        preview,
-    })
 }
 
 /// Whether the account this build is about to open was written by a newer
@@ -227,7 +240,7 @@ pub fn open_update_source() -> Result<bool, String> {
 /// The release asset matching THIS build's ABI. The running binary is the
 /// authority on its own architecture, so no device probing is needed — and
 /// installing the wrong split would fail or ship dead native code.
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", not(feature = "fdroid")))]
 const APK_ASSET: &str = {
     #[cfg(target_arch = "aarch64")]
     {
@@ -256,7 +269,7 @@ pub async fn download_and_install_update<R: Runtime>(
     app: AppHandle<R>,
     beta: Option<bool>,
 ) -> Result<String, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(all(target_os = "android", not(feature = "fdroid")))]
     {
         use tauri::Emitter;
         use futures_util::StreamExt;
@@ -331,10 +344,10 @@ pub async fn download_and_install_update<R: Runtime>(
             other => Err(format!("update install failed ({other})")),
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(all(target_os = "android", not(feature = "fdroid"))))]
     {
         let _ = (app, beta);
-        Err("Desktop updates run through the updater plugin".to_string())
+        Err("No in-app updater in this build".to_string())
     }
 }
 
@@ -465,6 +478,50 @@ pub async fn install_channel_update<R: Runtime>(app: AppHandle<R>) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::{is_preview, version_is_newer, version_is_newer_opts};
+
+    /// build.gradle.kts's `versionToCode`, kept in step by the test below.
+    fn android_version_code(version: &str) -> Option<u32> {
+        let core = version.split(['-', '+']).next()?;
+        let mut parts = core.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
+        let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+        let slot = match version.split_once('-') {
+            None => 99,
+            Some((_, pre)) => match pre.split('+').next()?.parse::<u32>() {
+                Ok(n) if (1..=98).contains(&n) => n,
+                _ => return None,
+            },
+        };
+        Some((major * 10000 + minor * 100 + patch) * 100 + slot)
+    }
+
+    /// F-Droid's update checker reads versionName/versionCode from a flat
+    /// file, which must therefore track Cargo.toml release for release.
+    #[test]
+    fn android_version_properties_mirror_cargo() {
+        let props = include_str!("../../gen/android/app/version.properties");
+        let get = |key: &str| {
+            props
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(key)?.trim_start().strip_prefix('='))
+                .map(str::trim)
+        };
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(get("versionName"), Some(version), "version.properties versionName");
+        assert_eq!(
+            get("versionCode").and_then(|c| c.parse::<u32>().ok()),
+            android_version_code(version),
+            "version.properties versionCode"
+        );
+    }
+
+    #[test]
+    fn android_version_code_ranks_previews_below_release() {
+        assert_eq!(android_version_code("0.4.2"), Some(40299));
+        assert_eq!(android_version_code("0.4.2-1"), Some(40201));
+        assert!(android_version_code("0.4.2-1") < android_version_code("0.4.2"));
+        assert!(android_version_code("0.4.1") < android_version_code("0.4.2-1"));
+        assert_eq!(android_version_code("0.4.2-rc1"), None);
+    }
 
     fn v(s: &str) -> semver::Version {
         semver::Version::parse(s).unwrap()

@@ -1,0 +1,5 @@
+Stability release: the Concord community engine hardened end to end.
+- Smart forwarding reuses files you already hold
+- Raid recovery: owners can sever a raid outright
+- Faster boot sync, keys computed once for live events
+- Fixes: Android notification replies, bans that stick, key rotations, edits keep custom emojis, Windows multiplayer, Wayland titlebars
