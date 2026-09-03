@@ -17,16 +17,13 @@ export ANDROID_NDK_HOME="$NDK_HOME"
 export ANDROID_NDK="$NDK_HOME"   # cmake's Android toolchain (whisper.cpp)
 export PATH="$HOME/.cargo/bin:$PATH"
 
-NATIVE_NPM_PACKAGES=(
-    node_modules/@tauri-apps/cli node_modules/@tauri-apps/cli-*
-    node_modules/esbuild node_modules/@esbuild
-    node_modules/lightningcss node_modules/lightningcss-*
-    node_modules/fsevents
-)
-
 prepare() {
     npm ci --ignore-scripts
-    rm -rf "${NATIVE_NPM_PACKAGES[@]}"
+    # Globs expand here, after npm ci: a fresh clone has no node_modules yet.
+    rm -rf node_modules/@tauri-apps/cli node_modules/@tauri-apps/cli-* \
+           node_modules/esbuild node_modules/@esbuild \
+           node_modules/lightningcss node_modules/lightningcss-* \
+           node_modules/fsevents
     if find node_modules -name '*.node' -o -name '*.wasm' | grep -q .; then
         echo "prebuilt binaries remain in node_modules:" >&2
         find node_modules -name '*.node' -o -name '*.wasm' >&2
