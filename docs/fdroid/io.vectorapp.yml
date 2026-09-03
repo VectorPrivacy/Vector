@@ -35,7 +35,7 @@ Repo: https://github.com/VectorPrivacy/Vector.git
 Builds:
   - versionName: 0.4.4
     versionCode: 40499
-    commit: FIXME-full-commit-hash
+    commit: 4eb69192f580c2be68f90cc74c7953006f325d0f
     subdir: src-tauri/gen/android/app
     sudo:
       - apt-get update
