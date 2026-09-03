@@ -70,11 +70,13 @@ Once merged, `AutoUpdateMode: Version` makes their bot add a build entry for eve
 
 ## Reproducible
 
-The CI job `publish-android-fdroid` builds the same flavour with the same script, signs it with the
-release key using `apksigner`, and uploads it as `Vector-fdroid.apk`. When F-Droid's rebuild of a
-tag matches it (F-Droid strips both signatures and compares), uncomment `Binaries` and
-`AllowedAPKSigningKeys` in the metadata. From then on F-Droid publishes Vector's own signature, and
-the app carries the reproducible badge.
+F-Droid decides signing when an app is included and cannot switch afterwards, so `Binaries` and
+`AllowedAPKSigningKeys` are set from the first submission. The CI job `publish-android-fdroid`
+builds the flavour with the same script, signs it with the release key using `apksigner`, and
+uploads it as `Vector-fdroid.apk`; F-Droid rebuilds the tag, strips both signatures and compares.
+A match publishes with Vector's own signature and the reproducible badge. For a version released
+before that job existed, the `fdroid` workflow can be dispatched with the commit and the release
+tag to produce the asset.
 
 What already holds the two builds together: the Rust toolchain and `tauri-cli` versions pinned at
 the top of `scripts/fdroid-build.sh`, NDK `29.0.14206865`, `--remap-path-prefix` on every path that differs between

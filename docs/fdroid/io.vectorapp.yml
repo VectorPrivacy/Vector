@@ -41,11 +41,11 @@ Builds:
       - scripts/fdroid-build.sh build
     output: build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
 
-# Once F-Droid's rebuild matches the CI-built asset byte for byte, publish
-# with Vector's own signature by uncommenting these two lines (README.md,
-# "Reproducible"). Fingerprint from `apksigner verify --print-certs`.
-# Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-fdroid.apk
-# AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9affc06461d
+# Reproducible from the start: F-Droid decides signing at inclusion and cannot
+# switch later. The asset is built by the same script and signed with the
+# release key; the fingerprint is the release certificate.
+Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-fdroid.apk
+AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9affc06461d
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags ^v\d+\.\d+\.\d+$
