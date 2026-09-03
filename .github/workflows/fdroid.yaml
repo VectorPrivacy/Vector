@@ -6,6 +6,15 @@ name: fdroid
 # here instead of in their merge-request pipeline.
 on:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to build (the one named in the fdroiddata metadata)
+        required: false
+        default: ""
+      release_tag:
+        description: Sign with the release key and upload Vector-fdroid.apk to this release
+        required: false
+        default: ""
   pull_request:
     paths:
       - scripts/fdroid-build.sh
@@ -31,6 +40,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: actions/setup-node@v4
         with:
@@ -47,9 +58,9 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Android NDK
+      - name: Android NDK + build-tools
         run: |
-          sdkmanager --install "ndk;29.0.14206865"
+          sdkmanager --install "ndk;29.0.14206865" "build-tools;34.0.0"
           echo "NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: System dependencies
@@ -79,3 +90,23 @@ jobs:
           name: Vector-fdroid-unsigned
           path: src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
           if-no-files-found: error
+
+      # On demand: the asset F-Droid's verifier compares its rebuild against.
+      # apksigner, not Gradle: the verifier strips exactly this signature.
+      - name: Sign and upload to the release
+        if: inputs.release_tag != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$HOME/upload-keystore.jks"
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          OUT=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          "$BT/zipalign" -p -f 4 "$OUT/app-universal-universal-release-unsigned.apk" "$OUT/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$HOME/upload-keystore.jks" \
+            --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --out "$OUT/Vector-fdroid.apk" "$OUT/aligned.apk"
+          "$BT/apksigner" verify --print-certs "$OUT/Vector-fdroid.apk"
+          gh release upload "${{ inputs.release_tag }}" "$OUT/Vector-fdroid.apk" --clobber --repo "$GITHUB_REPOSITORY"
