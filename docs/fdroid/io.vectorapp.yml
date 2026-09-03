@@ -2,6 +2,7 @@
 # Submit as metadata/io.vectorapp.yml; see README.md alongside for the why.
 Categories:
   - Internet
+  - Messaging
 License: MIT
 AuthorName: Vector Privacy
 AuthorEmail: info@vectorapp.io
