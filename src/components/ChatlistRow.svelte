@@ -113,11 +113,20 @@
         return { update: (v) => { cur = v; } };
     }
 
-    // Nested channel list host. Keyed re-runs hand the fresh builder output over.
+    // Nested channel list host. Re-renders through `update` on key change — the
+    // key carries the channel set, expanded state and per-channel unreads (the
+    // same inputs the legacy state-hash gate used).
     function channelsInto(node, key) {
-        const sep = key.indexOf('\x00');
-        const communityId = key.slice(0, sep) || key;
-        node.replaceChildren(h.renderCommunityChannels(communityId) || []);
+        let cur = null;
+        const render = (k) => {
+            if (k === cur) return;
+            cur = k;
+            const sep = k.indexOf('\x00');
+            const communityId = sep === -1 ? k : k.slice(0, sep);
+            node.replaceChildren(h.renderCommunityChannels(communityId) || []);
+        };
+        render(key);
+        return { update: render };
     }
 </script>
 

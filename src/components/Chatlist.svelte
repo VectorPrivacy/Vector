@@ -99,9 +99,17 @@
         };
     }
 
+    // The pane re-renders through `update` — an action without one ignores param
+    // changes, which left the first-opened community's channels stuck in the pane.
     function paneInto(node, key) {
-        const communityId = key.split('\x00')[0];
-        node.replaceChildren(h.renderCommunityChannels(communityId, { pane: true }) || []);
+        let cur = null;
+        const render = (k) => {
+            if (k === cur) return;
+            cur = k;
+            node.replaceChildren(h.renderCommunityChannels(k.split('\x00')[0], { pane: true }) || []);
+        };
+        render(key);
+        return { update: render };
     }
 
     function builtInto(node, builder) {
