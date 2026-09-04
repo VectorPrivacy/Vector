@@ -2360,6 +2360,12 @@ function startMaintenanceLoop() {
     setInterval(() => {
         maintenanceTick++;
 
+        // Widescreen keeps the list pane on screen via CSS (`body.ws #chats { display:
+        // flex !important; }`) whatever the tab's inline display says — gate on the
+        // live layout, not the inline style, or the list never ticks in wide mode.
+        const listOnScreen = domChats.style.display !== 'none'
+            || (typeof wsActive === 'function' && wsActive());
+
         // Clear expired typing indicators (every tick)
         const now = Date.now() / 1000;
         arrChats.forEach(chat => {
@@ -2374,7 +2380,7 @@ function startMaintenanceLoop() {
                     }
 
                     // Refresh chat list (in-place; typing doesn't affect sort order)
-                    if (domChats.style.display !== 'none') {
+                    if (listOnScreen) {
                         updateChatlistPreview(chat.id);
                     }
                 }
@@ -2382,7 +2388,7 @@ function startMaintenanceLoop() {
         });
 
         // Update chatlist timestamps every 6th tick (~30 seconds)
-        if (maintenanceTick % 6 === 0 && domChats.style.display !== 'none') {
+        if (maintenanceTick % 6 === 0 && listOnScreen) {
             updateChatlistTimestamps();
         }
     }, 5000);
