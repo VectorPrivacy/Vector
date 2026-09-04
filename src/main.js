@@ -10873,7 +10873,7 @@ async function openCommunityInvitePanel(chat) {
     };
     // The footer CTA (#cmt-close) is wired below, after the contact picker mounts — its action
     // depends on whether anything is selected (Done = dismiss, Invite N = send).
-    box.querySelector('#cmt-close-x').onclick = () => { if (busy) return; VectorSvelte.unmountComponent(cl.instance); popBack('community-invite'); dismiss(); };
+    box.querySelector('#cmt-close-x').onclick = () => { if (busy) return; VectorSvelte.unmountComponent(cl); popBack('community-invite'); dismiss(); };
     // Lock the ENTIRE panel during a critical op: disable every control + block close/backdrop-dismiss, so a
     // link create / revoke (which re-keys) / direct invite can't be raced or interrupted half-applied. Restores
     // each control's prior disabled state on release (e.g. the Invite button stays disabled if nothing's picked).
@@ -11077,8 +11077,11 @@ async function openCommunityInvitePanel(chat) {
     for (const a of (chat.metadata?.admins || [])) memberSet.add(a);
 
     // Reactive contact picker (Svelte island — src/components/ContactList.svelte). The
-    // filter / strangers / selection / profiles stores are the vanilla<->component bridge;
-    // the paste handler + footer CTA below drive them, the component reactively renders.
+    // component owns its dialog-local state; this side drives it through the instance's
+    // exported methods (setFilter / addStranger / select / setProfiles / reset /
+    // getSelection) and morphs the footer CTA from the onSelectionChange callback.
+    const cta = box.querySelector('#cmt-close');
+    const ctaCount = box.querySelector('#cmt-cta-count');
     const cl = VectorSvelte.mountContactList(contactsDiv, {
         profiles: arrProfiles,
         myNpub,
@@ -11094,21 +11097,19 @@ async function openCommunityInvitePanel(chat) {
         // Plain hex+alpha gradient (like Create Group's mouseenter handler) — a cheap cached
         // layer. color-mix() here re-rasterized every frame under the opacity fade -> avatar flicker.
         hoverBg: 'rgba(255, 255, 255, 0.085)',
-    });
-    // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's picked,
-    // accent "Invite N" (send) once contacts are selected. The store drives its class + count.
-    const cta = box.querySelector('#cmt-close');
-    const ctaCount = box.querySelector('#cmt-cta-count');
-    cl.selection.subscribe((sel) => {
-        const n = sel.size;
-        cta.classList.toggle('has-selection', n > 0);
-        if (n > 0) ctaCount.textContent = n;
+        // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's
+        // picked, accent "Invite N" (send) once contacts are selected.
+        onSelectionChange: (sel) => {
+            const n = sel.size;
+            cta.classList.toggle('has-selection', n > 0);
+            if (n > 0) ctaCount.textContent = n;
+        },
     });
 
     // Typing filters; a pasted/typed valid npub gets added to the list and auto-selected — unless it's
     // me, a banned npub, or someone already in the community (can't invite any of them).
     npubInput.oninput = () => {
-        cl.filter.set(npubInput.value || '');
+        cl.setFilter(npubInput.value || '');
         const np = extractNpub(npubInput.value || '');
         if (np && np !== myNpub && !bannedSet.has(np) && !memberSet.has(np)) {
             // Strangers = anyone who isn't an existing DM contact; the contacts loop only
@@ -11116,21 +11117,22 @@ async function openCommunityInvitePanel(chat) {
             // path or it shows nowhere. Fetch the profile only when we don't already have it.
             const isDmContact = arrChats.some(c => c.chat_type === 'DirectMessage' && c.id === np);
             if (!isDmContact) {
-                cl.strangers.update(s => s.includes(np) ? s : [...s, np]);
+                cl.addStranger(np);
                 if (!arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
                     strangerProfileRequested.add(np);
-                    invoke('load_profile', { npub: np }).then(() => cl.profiles.set([...arrProfiles])).catch(() => {});
+                    invoke('load_profile', { npub: np }).then(() => cl.setProfiles([...arrProfiles])).catch(() => {});
                 }
+            } else {
+                cl.select(np);
             }
-            cl.selection.update(s => (s.add(np), s));
         }
     };
 
     cta.onclick = async () => {
         if (busy) return;
-        const targets = [...VectorSvelte.get(cl.selection)];
+        const targets = [...cl.getSelection()];
         if (!targets.length) {   // "Done" — nothing selected, just close the panel
-            VectorSvelte.unmountComponent(cl.instance); popBack('community-invite'); dismiss();
+            VectorSvelte.unmountComponent(cl); popBack('community-invite'); dismiss();
             return;
         }
         // "Invite N" — send; the cleared selection then morphs the button back to "Done".
@@ -11144,7 +11146,7 @@ async function openCommunityInvitePanel(chat) {
         cta.disabled = false;
         if (fail === 0) {
             setStatus(`Invited ${ok} ${ok === 1 ? 'person' : 'people'}!`);
-            cl.selection.set(new Set()); cl.strangers.set([]); npubInput.value = ''; cl.filter.set('');
+            cl.reset(); npubInput.value = '';
             statusTimer = setTimeout(() => setStatus(''), 3000);   // success toast collapses itself after 3s
         } else {
             setStatus(`Invited ${ok}, ${fail} failed.`, ok === 0);

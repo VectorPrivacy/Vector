@@ -1,9 +1,13 @@
 <script>
     // Reactive replacement for the vanilla renderContacts + buildContactRow. Renders the
     // filtered/sorted DM-contact picker into #cmt-contacts. Static data + vanilla DOM helpers
-    // come in as props; live shared state rides three writable stores (the bridge):
-    //   filter    (vanilla input  -> here)   strangers (vanilla paste -> here)
-    //   selection (both read+write: row clicks here, stranger-auto-select in vanilla)
+    // come in as props, exactly like the chatlist island (h-bundle convention).
+    //
+    // Dialog-local live state (filter, pasted strangers, selection) lives HERE as $state
+    // runes — no bridge stores. The vanilla side drives it through exported instance
+    // methods (setFilter / addStranger / select / setProfiles / reset / getSelection, callable
+    // on the object mountContactList returns) and listens through the onSelectionChange
+    // callback prop. Nothing svelte/store-shaped crosses the boundary.
     let {
         myNpub = '',
         banned = [],
@@ -16,16 +20,61 @@
         showTooltip = () => {},      // (text, anchorEl) => the app's global tooltip
         hideTooltip = () => {},
         hoverBg = '',                // precomputed plain-gradient string for the row hover overlay
-        profiles,   // store: reassigned when a pasted stranger's profile loads
-        filter,
-        strangers,
-        selection,
+        profiles = [],               // initial snapshot; later profile loads ride setProfiles()
+        onSelectionChange = () => {}, // (sel: Set) — fires with a copy on every selection change
     } = $props();
+
+    // Dialog-local reactive state. Raw discipline: profiles are shared by reference with
+    // the page's arrProfiles array — never deep-proxy them. The `profiles` prop is an
+    // INITIAL SNAPSHOT read once at mount by design; later profile loads ride setProfiles().
+    let filter = $state('');
+    let strangers = $state.raw([]);        // pasted npubs, rendered only while selected
+    let selection = $state.raw(new Set());
+    // svelte-ignore state_referenced_locally
+    let profilesList = $state.raw(profiles);
 
     const bannedSet = $derived(new Set(banned));
     const memberSet = $derived(new Set(members));
     const dmSet = $derived(new Set(dmNpubs));
-    const profileById = $derived(new Map($profiles.map((p) => [p.id, p])));
+    const profileById = $derived(new Map(profilesList.map((p) => [p.id, p])));
+
+    // ── instance exports: the vanilla<->island bridge ──
+
+    /** Typing in the dialog's npub input filters the list. */
+    export function setFilter(value) {
+        filter = String(value || '');
+    }
+
+    /** A profile load landed (stranger's profile fetched) — swap the snapshot. */
+    export function setProfiles(value) {
+        profilesList = value || [];
+    }
+
+    /** Paste-to-invite: a stranger npub enters the list pre-selected. */
+    export function addStranger(npub) {
+        if (!strangers.includes(npub)) strangers = [...strangers, npub];
+        select(npub);
+    }
+
+    /** Select from the paste path (no toggle: re-pasting an already-selected npub keeps it). */
+    export function select(npub) {
+        if (selection.has(npub)) return;
+        const next = new Set(selection);
+        next.add(npub);
+        selection = next;
+    }
+
+    /** Selection as of right now (a copy — the caller may mutate it freely). */
+    export function getSelection() {
+        return new Set(selection);
+    }
+
+    /** After a successful send: sweep selection, strangers and filter back to blank. */
+    export function reset() {
+        selection = new Set();
+        strangers = [];
+        filter = '';
+    }
 
     function displayName(p, npub) {
         const nm = p ? p.nickname || p.name || p.display_name || '' : '';
@@ -35,15 +84,15 @@
     // Strangers first (pasted npubs that got selected), then DM contacts: selected first,
     // then most-recent conversation. O(1) chatTsById lookup in the comparator.
     const rows = $derived.by(() => {
-        const f = ($filter || '').trim().toLowerCase();
-        const sel = $selection;
+        const f = filter.trim().toLowerCase();
+        const sel = selection;
         const out = [];
-        for (const npub of $strangers) {
+        for (const npub of strangers) {
             if (bannedSet.has(npub) || memberSet.has(npub) || !sel.has(npub)) continue;
             const profile = profileById.get(npub) || null;
             out.push({ npub, profile, src: avatarSrc(profile) });
         }
-        const contacts = $profiles
+        const contacts = profilesList
             .filter(
                 (p) =>
                     p && p.id && p.id !== myNpub && !p.is_blocked &&
@@ -64,11 +113,16 @@
     });
 
     function toggle(npub) {
-        selection.update((s) => {
-            s.has(npub) ? s.delete(npub) : s.add(npub);
-            return s;
-        });
+        const next = new Set(selection);
+        if (next.has(npub)) next.delete(npub);
+        else next.add(npub);
+        selection = next;
     }
+
+    // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's picked,
+    // accent "Invite N" (send) once contacts are selected. Fires with a copy so the caller
+    // can never mutate the live Set.
+    $effect(() => onSelectionChange(new Set(selection)));
 
     // Reuse the vanilla DOM helpers via actions: the reactive STRUCTURE is Svelte, the leaf
     // avatar/name widgets are the app's own battle-tested builders.
@@ -93,7 +147,7 @@
 
 {#if rows.length === 0}
     <p class="cmt-empty" style="text-align:center;">
-        {($filter || '').trim() ? 'No matches.' : 'No contacts yet. Paste an npub to invite someone.'}
+        {filter.trim() ? 'No matches.' : 'No contacts yet. Paste an npub to invite someone.'}
     </p>
 {:else}
     {#each rows as row (row.npub)}
@@ -127,7 +181,7 @@
                     ></span>
                 {/if}
             </div>
-            <div class="member-pick-indicator" class:selected={$selection.has(row.npub)}></div>
+            <div class="member-pick-indicator" class:selected={selection.has(row.npub)}></div>
         </div>
     {/each}
 {/if}
