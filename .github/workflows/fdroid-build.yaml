@@ -35,9 +35,9 @@ jobs:
     env:
       ANDROID_HOME: /opt/android-sdk
     steps:
+      # The metadata comes from the dispatching ref (master); the source F-Droid
+      # builds is inputs.ref, named in the metadata's commit field.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
 
       # Same fdroidserver their pipeline runs: the master tarball.
       - name: fdroidserver

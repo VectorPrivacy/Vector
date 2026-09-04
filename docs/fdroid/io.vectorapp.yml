@@ -37,6 +37,7 @@ Builds:
       - export PATH="$HOME/.cargo/bin:$PATH"
       - export ANDROID_HOME=$$SDK$$
       - export NDK_HOME=$$NDK$$
+      - export CARGO_PROFILE_RELEASE_STRIP=debuginfo
       - scripts/fdroid-build.sh build
     ndk: 29.0.14206865
 
