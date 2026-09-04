@@ -111,14 +111,15 @@ jobs:
 
       # apksigner on the unsigned APK exactly as built: F-Droid's verifier
       # copies this signature onto its own build, so the archive underneath
-      # must not be rewritten. v1 signing rewrites it; v2/v3 only append a
-      # block. Gradle already aligns it; only check.
+      # must not be rewritten: v2/v3 only, and alignment preserved so nothing
+      # is re-padded. Gradle already aligns it; only check.
       - name: Sign
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$HOME/upload-keystore.jks"
           IN=$(ls apk/io.vectorapp_*.apk)
           "$BT/zipalign" -c -p 4 "$IN"
           "$BT/apksigner" sign \
+            --alignment-preserved \
             --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
             --ks "$HOME/upload-keystore.jks" \
             --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
