@@ -2143,8 +2143,28 @@ let activeInviteModalRerender = null;
  * @param {string} npub - The user's npub
  * @returns {Profile|undefined} - The profile if it exists
  */
+// Profile lookup index. Every row, badge and rail derivation resolves profiles by id,
+// and a linear scan over thousands of profiles was the dominant cost of a list update.
+// Rebuilt when the array is swapped, extended in place when it grows; the one site
+// that replaces an entry (profile_update) re-points its key.
+let profileIndex = new Map();
+let profileIndexOf = null;
+let profileIndexLen = 0;
 function getProfile(npub) {
-    return arrProfiles.find(p => p.id === npub);
+    if (profileIndexOf !== arrProfiles) {
+        profileIndex = new Map();
+        profileIndexOf = arrProfiles;
+        profileIndexLen = 0;
+    }
+    if (profileIndexLen !== arrProfiles.length) {
+        if (profileIndexLen > arrProfiles.length) { profileIndex = new Map(); profileIndexLen = 0; }
+        for (let i = profileIndexLen; i < arrProfiles.length; i++) {
+            const p = arrProfiles[i];
+            if (p?.id) profileIndex.set(p.id, p);
+        }
+        profileIndexLen = arrProfiles.length;
+    }
+    return profileIndex.get(npub);
 }
 
 /**
@@ -4083,6 +4103,7 @@ async function setupRustListeners() {
 
             // Update our frontend memory
             arrProfiles[nProfileIdx] = evt.payload;
+            profileIndex.set(evt.payload.id, evt.payload);
 
             // If this is our profile, make sure to render it's changes
             if (arrProfiles[nProfileIdx].mine) {

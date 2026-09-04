@@ -13,11 +13,12 @@ import { mount, unmount } from 'svelte';
 import ContactPicker from './people/ContactPicker.svelte';
 import MemberRoster from './people/MemberRoster.svelte';
 import Chatlist from './chatlist/Chatlist.svelte';
+import RailShortcuts from './rail/RailShortcuts.svelte';
 
 // Shared store layer (Phase 0 of the Svelte migration — see SVELTE_MIGRATION_PLAN.md).
 export { chatlistVersion, invalidateChatlist, timeTickVersion, bumpTimeTick } from './lib/stores.js';
 // Per-key signals: touch one chat/profile/community, or re-diff the list order alone.
-export { touchChat, touchProfile, touchCommunity, reorderChatlist } from './lib/signals.svelte.js';
+export { touchChat, touchProfile, touchCommunity, reorderChatlist, setOpenChat } from './lib/signals.svelte.js';
 
 /**
  * Mount the contact picker into `target`. The component owns its dialog-local state;
@@ -57,4 +58,14 @@ export function unmountComponent(instance) {
 export function mountChatlist(target, { h, snapshot }) {
     target.replaceChildren();
     return mount(Chatlist, { target, props: { h, snapshot } });
+}
+
+/**
+ * Mount the widescreen rail shortcuts into `target` (#ws-rail-shortcuts). Derives from
+ * the chat list's order and each chat's own signal; the open chat comes through
+ * `setOpenChat`. `h.onUnreadDms(n)` reports the count the mail badge shows.
+ */
+export function mountRailShortcuts(target, { h, snapshot }) {
+    target.replaceChildren();
+    return mount(RailShortcuts, { target, props: { h, snapshot } });
 }

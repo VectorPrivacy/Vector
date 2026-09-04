@@ -58,3 +58,13 @@ export function listVersion() {
 export function reorderChatlist() {
     list.v++;
 }
+
+// Which chat is open: the rail's active shortcut and (later) the list's active row
+// derive from it instead of being re-stamped by hand.
+const ui = $state({ openChat: null });
+export function openChatId() {
+    return ui.openChat;
+}
+export function setOpenChat(id) {
+    ui.openChat = id || null;
+}
