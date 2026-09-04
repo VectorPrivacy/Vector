@@ -93,6 +93,11 @@ the `../crates/vendor/saturating-time` patch) by absolute path, and that hash la
 symbol of the crates depending on it. F-Droid's production builder, its CI and ours all check out to
 different directories, so the recipe copies the tree to `$HOME/vector-fdroid-build` and builds there.
 
+A third, fixed in a Tauri fork: `tauri-codegen` walks the asset directory in filesystem order and
+emits the CSP script hashes from hash maps, so the generated context differs per build. `[patch]`
+pins `tauri-codegen` and `tauri-utils` to `VectorPrivacy/tauri` branch `deterministic-codegen-2.6.3`,
+which sorts all three; upstreaming is the way to drop the patch.
+
 What already holds the two builds together: the Rust toolchain and `tauri-cli` versions pinned at
 the top of `scripts/fdroid-build.sh`, NDK `29.0.14206865`, `--remap-path-prefix` on every path that differs between
 machines, and `SOURCE_DATE_EPOCH` from the commit. What can still break it and has not been
