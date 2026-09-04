@@ -51,29 +51,38 @@ jobs:
 
       # Our metadata, building exactly the requested commit. Binaries is
       # dropped: this job PRODUCES the reference, it must not compare to one.
+      # Laid out and run as their pipeline does: /home/vagrant/fdroiddata, as
+      # user vagrant, source fetched first, then an --on-server build.
       - name: Metadata
         shell: bash
         run: |
-          mkdir -p fdroid/metadata
+          mkdir -p /home/vagrant/fdroiddata/metadata
           sed -e 's|^    commit: .*|    commit: ${{ inputs.ref }}|' \
               -e '/^Binaries:/d' \
-              docs/fdroid/io.vectorapp.yml > fdroid/metadata/io.vectorapp.yml
-          grep -n "commit:\|Binaries" fdroid/metadata/io.vectorapp.yml || true
-          echo "vercode=$(sed -n 's/^    versionCode: //p' fdroid/metadata/io.vectorapp.yml | tail -1)" >> "$GITHUB_ENV"
+              docs/fdroid/io.vectorapp.yml > /home/vagrant/fdroiddata/metadata/io.vectorapp.yml
+          grep -n "commit:\|Binaries" /home/vagrant/fdroiddata/metadata/io.vectorapp.yml || true
+          chown -R vagrant:vagrant /home/vagrant/fdroiddata "$fdroidserver"
+          echo "vercode=$(sed -n 's/^    versionCode: //p' /home/vagrant/fdroiddata/metadata/io.vectorapp.yml | tail -1)" >> "$GITHUB_ENV"
 
       - name: fdroid build
         shell: bash
-        working-directory: fdroid
+        working-directory: /home/vagrant/fdroiddata
         run: |
-          export PATH="$fdroidserver:$PATH"
-          git config --global --add safe.directory '*'
-          fdroid build --verbose --test --on-server --no-tarball "io.vectorapp:$vercode"
+          unset CI
+          run_as_vagrant() {
+            sudo --preserve-env --user vagrant \
+              env PATH="$fdroidserver:$PATH" \
+              env PYTHONPATH="$fdroidserver:$fdroidserver/examples" \
+              env PYTHONUNBUFFERED=true env TERM=dumb env HOME=/home/vagrant "$@"
+          }
+          run_as_vagrant fdroid fetchsrclibs "io.vectorapp:$vercode" --verbose
+          run_as_vagrant fdroid build --verbose --test --refresh-scanner --on-server --no-tarball "io.vectorapp:$vercode"
           ls -l tmp/*.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: Vector-fdroid-unsigned
-          path: fdroid/tmp/io.vectorapp_*.apk
+          path: /home/vagrant/fdroiddata/tmp/io.vectorapp_*.apk
           if-no-files-found: error
 
   sign:
