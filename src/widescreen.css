@@ -321,6 +321,17 @@ body.ws.ws-details .attachment-panel {
   right: calc(var(--ws-details-w) + 8px);
 }
 
+/* The Viktor welcome was anchored to the single-pane layout: fixed against the
+   VIEWPORT — left/right 18px spanning the whole window, bottom 82px clearing the
+   bottom navbar that no longer exists here. Re-anchor it to the list column:
+   left at the rail's edge, right at the conversation pane's, 18px off the pane's
+   own bottom. Var-based, so the collapsed rail tracks automatically. */
+body.ws .chatlist-intro {
+  left: calc(var(--ws-rail-w) + 18px);
+  right: calc(100vw - var(--ws-main-left) + 18px);
+  bottom: 18px;
+}
+
 body.ws.ws-details .pins-drawer {
   right: var(--ws-details-w);
 }
