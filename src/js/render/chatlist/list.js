@@ -163,12 +163,52 @@ function renderChatlistNow() {
 }
 
 /**
- * Invalidate the chat list through the shared store. The subscription below runs
- * synchronously (Svelte stores notify on set), so callers keep the old "DOM is
- * updated when renderChatlist() returns" contract.
+ * Invalidate the chat list through the shared store: every row re-derives. The
+ * subscription below runs synchronously (Svelte stores notify on set), so callers
+ * keep the old "DOM is updated when renderChatlist() returns" contract.
+ *
+ * Reach for `touchChatRow` + `reorderChatlist` instead when you know WHICH chat
+ * changed — that path re-derives one row and re-diffs the order, nothing else.
  */
 function renderChatlist() {
     VectorSvelte.invalidateChatlist();
+}
+
+/**
+ * One chat changed in place (a message, its unread, a typer, its name): re-derive
+ * its row only. A community channel also touches its community, whose single row
+ * aggregates every channel.
+ */
+function touchChatRow(chat) {
+    if (!chat) return;
+    VectorSvelte.touchChat(chat.id);
+    const communityId = chat.metadata?.custom_fields?.community_id;
+    if (communityId) VectorSvelte.touchCommunity(communityId);
+}
+
+/**
+ * Re-sort and re-diff the list's order and membership without re-deriving any row.
+ * Pair it with `touchChatRow` after a change that can move a chat (a new message,
+ * a first message making a DM visible).
+ */
+function reorderChatlist() {
+    if (fInit) return;
+    const before = listShapeKey();
+    sortChats();
+    updateChatBackNotification();
+    renderRailShortcuts();
+    // Most changes land in a chat that is already where it belongs (the top one, for a
+    // live conversation): nothing moved, so the touched row's own repaint was the whole
+    // job and the list keeps its derivation.
+    if (listShapeKey() === before) return;
+    VectorSvelte.reorderChatlist();
+}
+
+/** The list's order and membership as one string — what a reorder can change. */
+function listShapeKey() {
+    let key = '';
+    for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + ',';
+    return key;
 }
 
 // The first subscriber: every invalidation — from this file, main.js, or any
@@ -324,12 +364,15 @@ function bindViktor(img) {
 }
 
 /**
- * Legacy single-row preview refresh. The island patches rows at key granularity,
- * so the old in-place DOM surgery is just a full (row-fine) invalidation now.
- * @param {string} _chatId - unused; the island re-derives every row
+ * Single-row preview refresh: the row re-derives, the order re-diffs (a new last
+ * message can move the chat), every other row keeps its derivation.
+ * @param {string} chatId
  */
-function updateChatlistPreview(_chatId) {
-    renderChatlist();
+function updateChatlistPreview(chatId) {
+    const chat = arrChats.find(c => c.id === chatId);
+    if (!chat) return;
+    touchChatRow(chat);
+    reorderChatlist();
 }
 
 /**

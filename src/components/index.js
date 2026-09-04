@@ -16,6 +16,8 @@ import Chatlist from './chatlist/Chatlist.svelte';
 
 // Shared store layer (Phase 0 of the Svelte migration — see SVELTE_MIGRATION_PLAN.md).
 export { chatlistVersion, invalidateChatlist, timeTickVersion, bumpTimeTick } from './lib/stores.js';
+// Per-key signals: touch one chat/profile/community, or re-diff the list order alone.
+export { touchChat, touchProfile, touchCommunity, reorderChatlist } from './lib/signals.svelte.js';
 
 /**
  * Mount the contact picker into `target`. The component owns its dialog-local state;

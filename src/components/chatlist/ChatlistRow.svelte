@@ -8,15 +8,23 @@
     // keyed parent each keeps the DOM node itself alive across updates.
     let { h, chat, pinned, version, tick } = $props();
 
+    import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
+
     // COMMUNITY_UNREAD_PLUS_THRESHOLD (row.js): past one synced page the count is a
     // lower bound, so render "N+" rather than a false exact figure.
     const UNREAD_PLUS_THRESHOLD = 20;
 
-    // Row view-model. The bare `version`/`tick` reads are the dependency pins.
+    // Row view-model. The dependency pins: the coarse list version and clock tick, plus
+    // this row's OWN signals — its chat, its DM profile, its community (a community row
+    // aggregates every channel's unread). A touch on another chat leaves this row alone.
     const vm = $derived.by(() => {
         version;
         tick;
+        chatVersion(chat.id);
         const isGroup = h.chatIsGroup(chat);
+        const communityId = chat.metadata?.custom_fields?.community_id;
+        if (isGroup && communityId) communityVersion(communityId);
+        else profileVersion(chat.id);
         const profile = !isGroup ? h.getProfile(chat.id) : null;
         return {
             chat,
@@ -59,6 +67,8 @@
     // list rebuilds exactly when its own inputs changed, never on unrelated bumps.
     const channelsKey = $derived.by(() => {
         version;
+        const cid = chat.metadata?.custom_fields?.community_id;
+        if (cid) communityVersion(cid);
         const parts = [];
         h.channelStateHashParts(chat, parts);
         return parts.join('\x00');

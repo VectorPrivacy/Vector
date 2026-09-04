@@ -51,6 +51,9 @@ function syncRailFade() {
     new ResizeObserver(syncRailFade).observe(domRail);
 })();
 
+/** What the rail last painted, so an unchanged strip is never rebuilt. */
+let railShapeKey = null;
+
 function renderRailShortcuts() {
     const dms = document.getElementById('ws-rail-dms');
     const spaces = document.getElementById('ws-rail-spaces');
@@ -75,8 +78,21 @@ function renderRailShortcuts() {
         if (dmChats.length < WS_RAIL_DM_COUNT) dmChats.push(chat);
     }
 
-    fillRailGroup(dms, dmChats, false);
-    fillRailGroup(spaces, communityChats, true);
+    // Rebuild the strip only when something it shows changed: a touched row that
+    // moved nothing (a reply in the top chat) must not rebuild every rail item.
+    const key = [...dmChats, ...communityChats].map((c) => {
+        const isCommunity = chatIsGroup(c);
+        const profile = isCommunity ? null : getProfile(c.id);
+        const name = isCommunity ? (c.metadata?.custom_fields?.name || '') : getName(profile || c.id);
+        const src = isCommunity ? (c.metadata?.avatar_cached || '') : (getProfileAvatarSrc(profile) || '');
+        const badge = isCommunity ? computeListRowBadgeCount(c) : computeRowBadgeCount(c);
+        return `${c.id}|${name}|${src}|${badge}|${c.muted ? 1 : 0}`;
+    }).join('\n') + `\n#${dmChats.length}/${communityChats.length}`;
+    if (key !== railShapeKey) {
+        railShapeKey = key;
+        fillRailGroup(dms, dmChats, false);
+        fillRailGroup(spaces, communityChats, true);
+    }
     // New rows change what's below without moving the strip's own box, which is
     // the one case the ResizeObserver can't see.
     syncRailFade();

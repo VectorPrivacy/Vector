@@ -10,11 +10,15 @@
     let { h, snapshot } = $props();
 
     import { chatlistVersion, timeTickVersion } from '../lib/stores.js';
+    import { listVersion } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
 
-    // Snapshot re-pulls the raw page state on every invalidation.
+    // Snapshot re-pulls the raw page state on every invalidation: a coarse bump
+    // (everything may have changed) or a reorder (only order/membership did — rows
+    // keep their derivations).
     const snap = $derived.by(() => {
         $chatlistVersion;
+        listVersion();
         return snapshot();
     });
 

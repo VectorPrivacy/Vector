@@ -4103,10 +4103,8 @@ async function setupRustListeners() {
             }
         }
 
-        // Re-render chatlist if avatar cache changed (so cached images show up)
-        if (avatarCacheChanged && !strOpenChat) {
-            renderChatlist();
-        }
+        // A cached avatar landed: only this profile's DM row repaints.
+        if (avatarCacheChanged) VectorSvelte.touchProfile(evt.payload.id);
         
         // Update already-painted message rows authored by this npub — name + avatar — so chat
         // history reflects the resolved profile without needing a reopen (matches the system-event
@@ -4215,11 +4213,13 @@ async function setupRustListeners() {
         // alone wouldn't repaint it — patch the row directly.
         for (const chat of arrChats) {
             const se = latestPreviewSystemEvent(chat);
-            if (se && se.member_npub === evt.payload.id) updateChatlistPreview(chat.id);
+            if (se && se.member_npub === evt.payload.id) touchChatRow(chat);
         }
 
-        // Render the Chat List
-        renderChatlist();
+        // This profile's DM row re-derives (name, avatar, bot mark); the list re-diffs
+        // in case a block flag changed its membership. No other row is touched.
+        VectorSvelte.touchProfile(evt.payload.id);
+        reorderChatlist();
     });
 
     _on('chat_muted', (evt) => {
@@ -4288,10 +4288,8 @@ async function setupRustListeners() {
             updateChatHeaderSubtext(chat);
         }
 
-        // Update the chat list preview in-place (typing doesn't affect sort
-        // order, so a full renderChatlist() would just churn DOM and waste
-        // cycles on every keystroke from the other side).
-        updateChatlistPreview(conversation_id);
+        // Typing changes one row's preview and nothing about the order.
+        touchChatRow(chat);
     });
 
     // Listen for incoming DM messages
@@ -4340,7 +4338,7 @@ async function setupRustListeners() {
             const senderNpub = newMessage.npub || chat.id;
             chat.active_typers = chat.active_typers.filter(npub => npub !== senderNpub);
             if (strOpenChat === chat.id) updateChatHeaderSubtext(chat);
-            updateChatlistPreview(chat.id);
+            touchChatRow(chat);
         }
 
         if (!cacheInsertedIntoChatMessages) {
@@ -4483,8 +4481,10 @@ async function setupRustListeners() {
             if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
-        // Render the Chat List (only when user is viewing it)
-        if (!strOpenChat) renderChatlist();
+        // One row re-derives and the order re-diffs; cheap enough to run with a chat
+        // open too, which is what keeps the widescreen list live.
+        touchChatRow(chat);
+        reorderChatlist();
 
         // Re-derive unread badges from the DB (a new arrival, or an open-chat auto-read, both move
         // the count). Debounced so a burst of arrivals is one query.
