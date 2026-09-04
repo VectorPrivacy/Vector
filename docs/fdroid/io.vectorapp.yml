@@ -41,7 +41,8 @@ Builds:
 AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9affc06461d
 
 AutoUpdateMode: Version
-UpdateCheckMode: Tags ^v\d+\.\d+\.\d+$
-UpdateCheckData: src-tauri/gen/android/app/version.properties|versionCode=(\d+)|.|versionName=(.*)
+UpdateCheckMode: Tags ^v\d+\.\d+\.\d+(-fdroid)?$
+UpdateCheckData:
+  src-tauri/gen/android/app/version.properties|versionCode=(\d+)|.|versionName=(.*)
 CurrentVersion: 0.4.4
 CurrentVersionCode: 40499

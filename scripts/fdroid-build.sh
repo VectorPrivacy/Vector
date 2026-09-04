@@ -12,9 +12,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-: "${NDK_HOME:?NDK_HOME must point at the Android NDK}"
-export ANDROID_NDK_HOME="$NDK_HOME"
-export ANDROID_NDK="$NDK_HOME"   # cmake's Android toolchain (whisper.cpp)
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # The one place the toolchain is pinned: F-Droid's rebuild has to compile
@@ -41,6 +38,9 @@ prepare() {
 }
 
 build() {
+    : "${NDK_HOME:?NDK_HOME must point at the Android NDK}"
+    export ANDROID_NDK_HOME="$NDK_HOME"
+    export ANDROID_NDK="$NDK_HOME"   # cmake's Android toolchain (whisper.cpp)
     export TAURI_CLI="cargo tauri"
     # The NDK ships only the llvm-* binutils. Vendored OpenSSL asks `cc` for an
     # archiver and ranlib; without these it guesses the GNU-prefixed names.
