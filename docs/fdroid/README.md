@@ -88,6 +88,11 @@ One reproducibility trap already hit: Tauri keeps `plugins` in a hash map, so th
 order per build. The flavour config deletes `plugins.updater` (desktop-only anyway) so exactly one
 plugin config remains. Adding a second plugin config to `tauri.conf.json` reopens this.
 
+A second trap, also hit: cargo hashes a path dependency outside the workspace root (`../crates/vector-core`,
+the `../crates/vendor/saturating-time` patch) by absolute path, and that hash lands in every mangled
+symbol of the crates depending on it. F-Droid's production builder, its CI and ours all check out to
+different directories, so the recipe copies the tree to `$HOME/vector-fdroid-build` and builds there.
+
 What already holds the two builds together: the Rust toolchain and `tauri-cli` versions pinned at
 the top of `scripts/fdroid-build.sh`, NDK `29.0.14206865`, `--remap-path-prefix` on every path that differs between
 machines, and `SOURCE_DATE_EPOCH` from the commit. What can still break it and has not been

@@ -39,6 +39,18 @@ prepare() {
 
 build() {
     : "${NDK_HOME:?NDK_HOME must point at the Android NDK}"
+    # Cargo hashes a path dependency that lives outside the workspace root by
+    # its absolute path, and that hash ends up in every mangled symbol. So the
+    # build always runs from one fixed directory, whatever the checkout's own
+    # location, and the APK is copied back for the caller.
+    local build_root="$HOME/vector-fdroid-build" src_tree=""
+    if [ "$(pwd -P)" != "$build_root" ]; then
+        src_tree=$(pwd -P)
+        rm -rf "$build_root"
+        mkdir -p "$build_root"
+        cp -a . "$build_root/"
+        cd "$build_root"
+    fi
     export ANDROID_NDK_HOME="$NDK_HOME"
     export ANDROID_NDK="$NDK_HOME"   # cmake's Android toolchain (whisper.cpp)
     export TAURI_CLI="cargo tauri"
@@ -85,7 +97,12 @@ build() {
     export CXXFLAGS="$CFLAGS"
     cargo tauri android build --apk true --target aarch64 \
         --config src-tauri/tauri.fdroid.conf.json
-    ls -l src-tauri/gen/android/app/build/outputs/apk/universal/release/
+    local out=src-tauri/gen/android/app/build/outputs/apk/universal/release
+    ls -l "$out/"
+    if [ -n "$src_tree" ]; then
+        mkdir -p "$src_tree/$out"
+        cp -a "$out"/. "$src_tree/$out/"
+    fi
 }
 
 case "${1:-all}" in
