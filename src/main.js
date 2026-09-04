@@ -4838,13 +4838,8 @@ async function setupRustListeners() {
             // Re-derive the unread badge from the DB (the read just advanced, possibly to a
             // non-latest message on another device).
             scheduleUnreadRefresh();
-            // Re-render the chat preview element in-place (border, font color, etc. all depend on unread state)
-            const oldEl = document.getElementById(`chatlist-${chat_id}`);
-            if (oldEl) {
-                const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-                const newEl = renderChat(cChat, primaryColor);
-                oldEl.replaceWith(newEl);
-            }
+            // The chatlist island re-derives the row (border, font color, etc. all depend on unread state)
+            renderChatlist();
         }
     });
 

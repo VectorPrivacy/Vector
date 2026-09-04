@@ -26,3 +26,20 @@ export function unmountComponent(instance) {
 
 // Store helpers for the vanilla side (read a store synchronously, create ad-hoc stores).
 export { get, writable };
+
+// Shared store layer (Phase 0 of the Svelte migration — see SVELTE_MIGRATION_PLAN.md).
+export { chatlistVersion, invalidateChatlist, timeTickVersion, bumpTimeTick } from './stores.js';
+
+import Chatlist from './Chatlist.svelte';
+
+/**
+ * Mount the chat-list island into `target` (#chat-list). The vanilla side supplies
+ * every helper it still owns (list.js, row.js, channels.js, main.js globals) plus a
+ * snapshot() of the raw state arrays — the bundle is an IIFE and cannot see the page's
+ * global lexical bindings. The island owns #chat-list's children exclusively; its keyed
+ * {#each} reuses row nodes so single-chat changes patch single rows.
+ */
+export function mountChatlist(target, { h, snapshot }) {
+    target.replaceChildren();
+    return mount(Chatlist, { target, props: { h, snapshot } });
+}

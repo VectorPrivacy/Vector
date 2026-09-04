@@ -1,20 +1,18 @@
 /**
- * Chat list orchestration: state hashing, full re-render, partial updates,
- * and unread counting.
+ * Chat list orchestration: the Svelte island's mount host and legacy satellites.
  *
- * - `lastChatlistStateHash` — script-scoped state-hash gate so successive
- *   no-op renders short-circuit without rebuilding the DOM.
- * - `generateChatlistStateHash` / `renderChatlist` — gated full re-render path.
- * - `updateChatlistPreview` — single-row preview/timestamp refresh, falls back
- *   to full render if the row isn't in the DOM yet.
- * - `updateChatlistTimestamps` — periodic tick that refreshes "5m ago" labels
- *   and online/away status dots without rebuilding the row.
- * - `countUnreadMessages` — walks backwards from the tail until it hits the
- *   user's own message or `last_read`. Used by both row.js and the state hash.
+ * - `renderChatlist()` — invalidation pump; every mutation path bumps the shared
+ *   `chatlistVersion` store (src/components/stores.js). The island (src/components/
+ *   Chatlist.svelte) is the store's renderer: a keyed {#each} patches single rows
+ *   instead of rebuilding the list.
+ * - `renderChatlistNow` — the store's first subscriber: sorts (the one ordering
+ *   chokepoint), mounts the island once, then refreshes the store-blind satellites
+ *   (rail shortcuts, back-button dot) that later slices will migrate onto stores.
+ * - `updateChatlistPreview` / `updateChatlistTimestamps` — legacy call-site shims;
+ *   a store bump (full, but row-granular) and a clock tick respectively.
+ * - unread counting (`computeRowBadgeCount` & co.) — shared by the island via the
+ *   mount-time `h` helper bundle and by every unread indicator outside the list.
  */
-
-// Store a hash of the last rendered state to detect actual changes
-let lastChatlistStateHash = '';
 
 /**
  * Whether a Community chat is the one row its community gets in the list.
@@ -60,67 +58,84 @@ function chatIsVisibleInList(chat) {
 }
 
 /**
- * Generate a hash representing the current state of all chats
+ * The raw page state the island re-derives from. The bundle is an IIFE with its own
+ * scope, so it can't see the classic scripts' global lexical bindings (arrChats is
+ * REASSIGNED wholesale on init/hot-reload) — it re-pulls through this closure on every
+ * store bump instead.
  */
-function generateChatlistStateHash() {
-    // Build a simple array of state values (faster than creating objects)
-    const states = [];
-
-    // Which pane the list IS (a community's channels vs the DM list) changes every
-    // row without changing a single chat, so the gate has to see it or switching
-    // communities would repaint nothing.
-    if (typeof wsListCommunityId === 'function') states.push(wsListCommunityId());
-
-    // Add pending Community invite ids
-    for (const inv of arrCommunityInvites) {
-        states.push(inv.community_id, inv.name);
-    }
-
-    // Add chat states (including chat ID to capture order changes)
-    for (const chat of arrChats) {
-        const isGroup = chatIsGroup(chat);
-        const profile = !isGroup ? getProfile(chat.id) : null;
-        const cLastMsg = chat.messages[chat.messages.length - 1];
-        const nUnread = computeListRowBadgeCount(chat);
-        const activeTypers = chat.active_typers || [];
-
-        // Push values directly (faster than creating object)
-        // Include chat.id to ensure order changes are detected
-        states.push(
-            chat.id,
-            nUnread,
-            activeTypers.length,
-            // Message count so a REMOVAL re-renders even when the raw last array
-            // element is unchanged — a self-destruct purges the preview message
-            // while a later system event (presence/join) stays the last element.
-            chat.messages.length,
-            cLastMsg?.id,
-            cLastMsg?.pending,
-            profile?.nickname || profile?.name || profile?.display_name,
-            profile?.avatar,
-            profile?.avatar_cached,
-            chat.muted,
-            // Pin state, not just position: pinning the chat that already sits
-            // at the top changes no order, so without this the glyph would
-            // never paint (the hash would match and the render be skipped).
-            arrPinnedChats.includes(chatPinKey(chat)),
-            profile?.is_blocked,
-            isGroup ? chat.metadata?.avatar_cached : undefined,
-            isGroup ? chat.metadata?.custom_fields?.name : undefined,
-            chat._joining // so the "Joining…" lock clearing re-renders the row
-        );
-        // Channel set, expanded state and per-channel unread all repaint the row's
-        // nested channel list, so they belong in the gate.
-        if (isGroup) channelStateHashParts(chat, states);
-    }
-
-    return JSON.stringify(states);
+function chatlistSnapshot() {
+    const paneCommunityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
+    return {
+        chats: arrChats,
+        // Copy: invites are spliced in place, and an {#each} source needs a fresh
+        // reference per invalidation or additions/removals never re-diff.
+        invites: [...arrCommunityInvites],
+        pinned: arrPinnedChats,
+        paneCommunityId,
+        openChat: strOpenChat,
+        dmsOnly: !paneCommunityId && typeof wsActive === 'function' && wsActive(),
+    };
 }
 
 /**
- * A "thread" function dedicated to rendering the Chat UI in real-time
+ * Every page helper the island calls, handed over once at mount. Keeping the bundle
+ * prop-driven (rather than reaching for window.X) preserves one seam to audit when
+ * the island takes over more of the render tree.
  */
-function renderChatlist() {
+function chatlistHelpers() {
+    return {
+        // membership + row policy
+        chatIsVisibleInList,
+        chatIsGroup,
+        isPrimaryChannelChat,
+        getProfile,
+        getName,
+        chatPinKey,
+        computeListRowBadgeCount,
+        computeRowBadgeCount,
+        generateChatPreviewText,
+        // avatars + text finishing
+        convertFileSrc,
+        getProfileAvatarSrc,
+        createPlaceholderAvatar,
+        twemojify,
+        timeAgo,
+        renderCustomEmojiShortcodes,
+        // row chrome
+        attachLongPressContextMenu,
+        showChatRowContextMenu: _showChatRowContextMenu,
+        showGlobalTooltip,
+        hideGlobalTooltip,
+        // community channel lists (still vanilla builders; later slice)
+        renderCommunityChannels,
+        renderCommunityListHeader,
+        channelStateHashParts,
+        communityMemberSubtext,
+        getCommunityChannels,
+        communityHasChannelList,
+        communityChannelsShown,
+        communityCanAddChannels,
+        toggleCommunityExpanded,
+        renderCommunityInviteItem,
+        // empty state
+        buildChatlistEmptyState,
+        buildChatlistIntro,
+        // widescreen
+        wsMarkActiveRow,
+        // side-effectful loads
+        ensureCommunityPreviewActivity,
+    };
+}
+
+/** The mounted island instance (one per page life; session swaps reload the page). */
+let chatlistIsland = null;
+
+/**
+ * The chatlist render pass. Runs as chatlistVersion's FIRST subscriber (registered
+ * below, before the island mounts), so the sort always lands before the island
+ * derives its row order.
+ */
+function renderChatlistNow() {
     if (fInit) return;
 
     // Pinned first, then newest-first with a creation/join-time fallback for
@@ -130,97 +145,37 @@ function renderChatlist() {
     // other path is undone by the next render.
     sortChats();
 
-    // Generate a hash of the current RENDERABLE state
-    const currentStateHash = generateChatlistStateHash();
-
-    // If the renderable state hasn't changed, skip rendering entirely
-    if (currentStateHash === lastChatlistStateHash) return;
-    lastChatlistStateHash = currentStateHash;
-
-    // Cache the accent color once (getComputedStyle is expensive per-call)
-    const primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-
-    // Prep a fragment to re-render the full list in one sweep
-    const fragment = document.createDocumentFragment();
-
-    // Widescreen splits the pane in two: inside a community it IS that community's
-    // channel list, headed by the community itself; everywhere else it's the DM
-    // list, with communities living in the rail. The narrow layout has no rail, so
-    // it keeps the single index of everything.
-    const wsCommunityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
-    const wsDmsOnly = !wsCommunityId && typeof wsActive === 'function' && wsActive();
-
-    // The community's header lives OUTSIDE the scrolling list (its own host above
-    // it), so no scroll position — including the elastic overscroll, which moves the
-    // scrollport itself and takes `position: sticky` with it — can shift it.
-    const domCommunityHead = document.getElementById('ws-community-head');
-
-    if (wsCommunityId) {
-        if (domCommunityHead) domCommunityHead.replaceChildren(renderCommunityListHeader(wsCommunityId));
-        const channels = renderCommunityChannels(wsCommunityId, { pane: true });
-        if (channels) fragment.appendChild(channels);
-    } else {
-        if (domCommunityHead) domCommunityHead.replaceChildren();
-        // Invites head the DM list — a channel pane is one community's own
-        // contents, so an invite to a DIFFERENT community has no business there.
-        // The rail's home mark badges while you're away (js/render/rail.js).
-        for (const invite of arrCommunityInvites) {
-            fragment.appendChild(renderCommunityInviteItem(invite));
-        }
-
-        for (const chat of arrChats) {
-            // Visibility (own profile, bare anchors, sibling channels, empty or blocked DMs)
-            // is decided by `chatIsVisibleInList` so the unread indicators can share it.
-            if (!chatIsVisibleInList(chat)) continue;
-            if (wsDmsOnly && chatIsGroup(chat)) continue;
-
-            // Message-less community: lazy-load its latest membership event so the preview can show
-            // "X has joined" instead of "No messages yet" (cached onto chat.lastSystemEvent).
-            if (chatIsGroup(chat)) ensureCommunityPreviewActivity(chat);
-
-            const divContact = renderChat(chat, primaryColor);
-            fragment.appendChild(divContact);
-
-            // Nested channel list for a multi-channel community, directly under its row.
-            if (chatIsGroup(chat)) {
-                const channels = renderCommunityChannels(chat.metadata.custom_fields.community_id);
-                if (channels) fragment.appendChild(channels);
-            }
-        }
+    // The island owns #chat-list's children from here on; data flows through the
+    // store, so mounting once is enough for the page's lifetime.
+    if (!chatlistIsland) {
+        chatlistIsland = VectorSvelte.mountChatlist(domChatList, {
+            h: chatlistHelpers(),
+            snapshot: chatlistSnapshot,
+        });
     }
-
-    // Give the final element a bottom-margin boost to allow scrolling past the fadeout
-    if (fragment.lastElementChild) fragment.lastElementChild.style.marginBottom = `50px`;
-
-    // Empty-state intro for fresh accounts (no chats, no invites). The
-    // visible chat list normally only contains DMs with at least one
-    // message and groups the user has joined; if the fragment came out
-    // empty AND there are no pending invites, surface a friendly nudge
-    // so the user understands what to do next.
-    const fEmptyList = !fragment.firstElementChild && arrCommunityInvites.length === 0;
-    if (fEmptyList) {
-        fragment.appendChild(buildChatlistEmptyState());
-        fragment.appendChild(buildChatlistIntro());
-    }
-
-    // The bottom fadeout exists to soften a scrolling list; over the empty
-    // state it just washes out the intro.
-    const fadeout = document.querySelector('#chats .fadeout-bottom');
-    if (fadeout) fadeout.style.display = fEmptyList ? 'none' : '';
-
-    // Replace the existing list in one native call
-    domChatList.replaceChildren(fragment);
-
-    // Rows are rebuilt from scratch, so the widescreen selection has to be re-stamped.
-    wsMarkActiveRow();
 
     // The rail's shortcuts are the same data in a different shape, so they rebuild here
-    // and inherit this function's state-hash gate.
+    // until their own slice moves them onto the store.
     renderRailShortcuts();
 
     // Update the back button notification
     updateChatBackNotification();
 }
+
+/**
+ * Invalidate the chat list through the shared store. The subscription below runs
+ * synchronously (Svelte stores notify on set), so callers keep the old "DOM is
+ * updated when renderChatlist() returns" contract.
+ */
+function renderChatlist() {
+    VectorSvelte.invalidateChatlist();
+}
+
+// The first subscriber: every invalidation — from this file, main.js, or any
+// js/ module — sorts and mounts before the island's own subscription re-derives
+// (subscription order = registration order). The immediate subscribe-time run is
+// absorbed by the fInit guard while boot is still in flight.
+VectorSvelte.chatlistVersion.subscribe(() => renderChatlistNow());
 
 /**
  * Build the empty-state placeholder shown when the chat list has no
@@ -369,47 +324,12 @@ function bindViktor(img) {
 }
 
 /**
- * Update only the preview text and timestamp for a specific chat in the chatlist
- * This is more efficient than re-rendering the entire chatlist for a single message edit
- * @param {string} chatId - The chat ID to update
+ * Legacy single-row preview refresh. The island patches rows at key granularity,
+ * so the old in-place DOM surgery is just a full (row-fine) invalidation now.
+ * @param {string} _chatId - unused; the island re-derives every row
  */
-function updateChatlistPreview(chatId) {
-    const chatElement = document.getElementById(`chatlist-${chatId}`);
-    if (!chatElement) {
-        // Chat not in DOM - fallback to full render
-        renderChatlist();
-        return;
-    }
-
-    const cChat = getChat(chatId);
-    if (!cChat) return;
-
-    // Find the preview text element (p.cutoff inside the preview container)
-    const previewContainer = chatElement.querySelector('.chatlist-contact-preview');
-    if (!previewContainer) return;
-
-    const pChatPreview = previewContainer.querySelector('p.cutoff');
-    const pTimeAgo = chatElement.querySelector('.chatlist-contact-timestamp, .chatlist-contact-inline-time');
-
-    if (pChatPreview) {
-        const preview = generateChatPreviewText(cChat);
-        pChatPreview.classList.toggle('typing-indicator-text', preview.isTyping);
-        if (preview.isHtml) {
-            pChatPreview.innerHTML = preview.text;
-        } else {
-            pChatPreview.textContent = preview.text;
-        }
-        if (preview.needsTwemoji) twemojify(pChatPreview, { layoutHint: true });
-        if (preview.emojiTags && typeof renderCustomEmojiShortcodes === 'function') {
-            renderCustomEmojiShortcodes(pChatPreview, preview.emojiTags);
-        }
-    }
-
-    // Update timestamp
-    const cLastMsg = cChat.messages[cChat.messages.length - 1];
-    if (pTimeAgo && cLastMsg) {
-        pTimeAgo.textContent = timeAgo(cLastMsg.at);
-    }
+function updateChatlistPreview(_chatId) {
+    renderChatlist();
 }
 
 /**
@@ -558,70 +478,10 @@ function countPingMessages(chat) {
 }
 
 /**
- * Update the notification dot on the chat back button
- * Shows the dot if there are unread messages in OTHER chats (not the currently open one) OR unanswered invites
+ * Periodic tick for relative timestamps ("5m ago") and presence-dot recency, which
+ * drift with wall time instead of data. Bumps the clock store the island's rows
+ * already depend on — only strings that actually changed patch the DOM.
  */
 function updateChatlistTimestamps() {
-    // Get all chatlist items that are currently displayed
-    const chatListItems = document.querySelectorAll('.chatlist-contact');
-
-    // For each chat item, find and update the timestamp and status
-    chatListItems.forEach(item => {
-        // Extract chat ID from the item's ID (format: chatlist-{chatId})
-        const chatId = item.id.substring(9);
-
-        // Find the corresponding chat in our array
-        const chat = arrChats.find(c => c.id === chatId);
-
-        if (chat && chat.messages.length > 0) {
-            // Get the last message timestamp
-            const lastMessage = chat.messages[chat.messages.length - 1];
-
-            // Skip updating if the message is older than 1 week (for performance)
-            // Messages older than 1 week display as "1w", "2w", etc. and are unlikely to change
-            if (lastMessage?.at < Date.now() - 604800000) return;
-
-            // Tick whichever timestamp element this row has: right-side
-            // (read rows) or inline next to the name (unread rows).
-            const timestampElement = item.querySelector('.chatlist-contact-timestamp, .chatlist-contact-inline-time');
-            if (timestampElement) {
-                timestampElement.textContent = timeAgo(lastMessage.at);
-            }
-
-            // Update status indicator if needed (for DMs only)
-            const avatarContainer = item.querySelector('.avatar-status-icon')?.parentElement;
-            if (avatarContainer && !chatIsGroup(chat)) {
-                // Remove existing status icon if present
-                const existingStatusIcon = avatarContainer.querySelector('.avatar-status-icon');
-                if (existingStatusIcon) {
-                    existingStatusIcon.remove();
-                }
-
-                // Add new status icon based on last message time
-                const divStatusIcon = document.createElement('div');
-                divStatusIcon.classList.add('avatar-status-icon');
-
-                // Find the last message from the contact (not from the user)
-                let cLastContactMsg = null;
-                for (let i = chat.messages.length - 1; i >= 0; i--) {
-                    if (!chat.messages[i].mine) {
-                        cLastContactMsg = chat.messages[i];
-                        break;
-                    }
-                }
-
-                if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 5) {
-                    // set the divStatusIcon .backgroundColor to green (online)
-                    divStatusIcon.style.backgroundColor = '#59fcb3';
-                    avatarContainer.appendChild(divStatusIcon);
-                }
-                else if (cLastContactMsg && cLastContactMsg.at > Date.now() - 60000 * 30) {
-                    // set to orange (away)
-                    divStatusIcon.style.backgroundColor = '#fce459';
-                    avatarContainer.appendChild(divStatusIcon);
-                }
-                // offline... don't show status icon at all (no need to append the divStatusIcon)
-            }
-        }
-    });
+    VectorSvelte.bumpTimeTick();
 }
