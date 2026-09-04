@@ -1,0 +1,113 @@
+name: fdroid-build
+
+# The reference build for F-Droid's reproducible-builds check: `fdroid build`
+# run inside F-Droid's own buildserver image on our metadata, so every host
+# tool that feeds the native build (cmake, perl, JDK, NDK) is the one their
+# builder uses. Optionally signed with the release key and uploaded as the
+# Vector-fdroid.apk asset their verifier compares against.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build
+        required: true
+        type: string
+      release_tag:
+        description: Sign and upload Vector-fdroid.apk to this release ("" = artifact only)
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to build
+        required: true
+      release_tag:
+        description: Sign and upload Vector-fdroid.apk to this release ("" = artifact only)
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie
+    env:
+      ANDROID_HOME: /opt/android-sdk
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Same fdroidserver their pipeline runs: the master tarball.
+      - name: fdroidserver
+        shell: bash
+        run: |
+          test -n "$fdroidserver" || source /etc/profile.d/bsenv.sh
+          mkdir -p "$fdroidserver"
+          curl --silent https://gitlab.com/fdroid/fdroidserver/-/archive/master/fdroidserver-master.tar.gz \
+            | tar -xz --directory="$fdroidserver" --strip-components=1
+          echo "fdroidserver=$fdroidserver" >> "$GITHUB_ENV"
+
+      # Our metadata, building exactly the requested commit. Binaries is
+      # dropped: this job PRODUCES the reference, it must not compare to one.
+      - name: Metadata
+        shell: bash
+        run: |
+          mkdir -p fdroid/metadata
+          sed -e 's|^    commit: .*|    commit: ${{ inputs.ref }}|' \
+              -e '/^Binaries:/d' \
+              docs/fdroid/io.vectorapp.yml > fdroid/metadata/io.vectorapp.yml
+          grep -n "commit:\|Binaries" fdroid/metadata/io.vectorapp.yml || true
+          echo "vercode=$(sed -n 's/^    versionCode: //p' fdroid/metadata/io.vectorapp.yml | tail -1)" >> "$GITHUB_ENV"
+
+      - name: fdroid build
+        shell: bash
+        working-directory: fdroid
+        run: |
+          export PATH="$fdroidserver:$PATH"
+          git config --global --add safe.directory '*'
+          fdroid build --verbose --test --on-server --no-tarball "io.vectorapp:$vercode"
+          ls -l tmp/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vector-fdroid-unsigned
+          path: fdroid/tmp/io.vectorapp_*.apk
+          if-no-files-found: error
+
+  sign:
+    if: inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Vector-fdroid-unsigned
+          path: apk
+
+      - uses: android-actions/setup-android@v3
+      - name: build-tools
+        run: sdkmanager --install "build-tools;34.0.0"
+
+      # apksigner, not Gradle: the verifier strips exactly this signature.
+      - name: Sign
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$HOME/upload-keystore.jks"
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          IN=$(ls apk/io.vectorapp_*.apk)
+          "$BT/zipalign" -p -f 4 "$IN" apk/aligned.apk
+          "$BT/apksigner" sign \
+            --ks "$HOME/upload-keystore.jks" \
+            --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --out apk/Vector-fdroid.apk apk/aligned.apk
+          "$BT/apksigner" verify --print-certs apk/Vector-fdroid.apk
+
+      - name: Upload to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.release_tag }}" apk/Vector-fdroid.apk --clobber --repo "$GITHUB_REPOSITORY"

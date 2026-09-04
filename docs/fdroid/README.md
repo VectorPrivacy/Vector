@@ -75,12 +75,13 @@ Once merged, `AutoUpdateMode: Version` makes their bot add a build entry for eve
 ## Reproducible
 
 F-Droid decides signing when an app is included and cannot switch afterwards, so `Binaries` and
-`AllowedAPKSigningKeys` are set from the first submission. The CI job `publish-android-fdroid`
-builds the flavour with the same script, signs it with the release key using `apksigner`, and
-uploads it as `Vector-fdroid.apk`; F-Droid rebuilds the tag, strips both signatures and compares.
-A match publishes with Vector's own signature and the reproducible badge. For a version released
-before that job existed, the `fdroid` workflow can be dispatched with the commit and the release
-tag to produce the asset.
+`AllowedAPKSigningKeys` are set from the first submission. The reference asset is produced by
+`fdroid-build.yaml`: `fdroid build` run on our metadata inside F-Droid's own `buildserver-trixie`
+image, so every host tool feeding the native build is the one their builder uses, then signed with
+the release key using `apksigner` and uploaded as `Vector-fdroid.apk`. `publish.yaml` calls it for
+each release; it can also be dispatched by hand with a commit and a release tag. F-Droid rebuilds
+the tag, strips both signatures and compares; a match publishes with Vector's own signature and
+the reproducible badge.
 
 One reproducibility trap already hit: Tauri keeps `plugins` in a hash map, so the embedded
 `tauri.conf.json` (an APK asset, and compiled into the library) lists plugin configs in a random
