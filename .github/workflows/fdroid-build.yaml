@@ -56,19 +56,24 @@ jobs:
       - name: Metadata
         shell: bash
         run: |
-          mkdir -p /home/vagrant/fdroiddata/metadata
+          # Their CI checks fdroiddata out under /builds/<user>/fdroiddata and
+          # reaches it through a /home/vagrant/fdroiddata symlink. Same here,
+          # so canonicalised paths come out identical.
+          mkdir -p /builds/JSKitty/fdroiddata/metadata
+          ln -sfn /builds/JSKitty/fdroiddata /home/vagrant/fdroiddata
           sed -e 's|^    commit: .*|    commit: ${{ inputs.ref }}|' \
               -e '/^Binaries:/d' \
               docs/fdroid/io.vectorapp.yml > /home/vagrant/fdroiddata/metadata/io.vectorapp.yml
           grep -n "commit:\|Binaries" /home/vagrant/fdroiddata/metadata/io.vectorapp.yml || true
-          chown -R vagrant:vagrant /home/vagrant/fdroiddata "$fdroidserver"
+          chown -R vagrant:vagrant /builds/JSKitty /home/vagrant/fdroiddata "$fdroidserver"
           echo "vercode=$(sed -n 's/^    versionCode: //p' /home/vagrant/fdroiddata/metadata/io.vectorapp.yml | tail -1)" >> "$GITHUB_ENV"
 
       - name: fdroid build
         shell: bash
-        working-directory: /home/vagrant/fdroiddata
+        working-directory: /home/vagrant
         run: |
           unset CI
+          cd fdroiddata
           run_as_vagrant() {
             sudo --preserve-env --user vagrant \
               env PATH="$fdroidserver:$PATH" \
@@ -82,7 +87,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Vector-fdroid-unsigned
-          path: /home/vagrant/fdroiddata/tmp/io.vectorapp_*.apk
+          path: /builds/JSKitty/fdroiddata/tmp/io.vectorapp_*.apk
           if-no-files-found: error
 
   sign:

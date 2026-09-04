@@ -54,19 +54,34 @@ build() {
     # rustflags this way replaces the target flags the Tauri CLI would set, so
     # its three Android link libraries are carried along. The std sources map
     # to the same /rustc/<commit> form a toolchain without rust-src embeds.
-    local sysroot commit
+    # Cargo canonicalises paths, so a checkout reached through a symlink
+    # (F-Droid's CI) bakes in the physical path: remap both spellings, and
+    # both spellings of HOME for the cargo caches.
+    local sysroot commit repo_logical repo_physical home_physical
     sysroot=$(rustc --print sysroot)
     commit=$(rustc -vV | sed -n 's/^commit-hash: //p')
+    repo_logical=$PWD
+    repo_physical=$(pwd -P)
+    home_physical=$(cd "$HOME" && pwd -P)
+    local -a remaps=(
+        "--remap-path-prefix=$repo_physical=/vector"
+        "--remap-path-prefix=$home_physical/.cargo/registry/src=/cargo/registry/src"
+        "--remap-path-prefix=$home_physical/.cargo/git/checkouts=/cargo/git/checkouts"
+        "--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$commit"
+    )
+    if [ "$repo_logical" != "$repo_physical" ]; then
+        remaps+=("--remap-path-prefix=$repo_logical=/vector")
+    fi
+    if [ "$HOME" != "$home_physical" ]; then
+        remaps+=("--remap-path-prefix=$HOME/.cargo/registry/src=/cargo/registry/src"
+                 "--remap-path-prefix=$HOME/.cargo/git/checkouts=/cargo/git/checkouts")
+    fi
     export CARGO_ENCODED_RUSTFLAGS
     CARGO_ENCODED_RUSTFLAGS=$(printf '%s\x1f' \
-        "-Clink-arg=-landroid" "-Clink-arg=-llog" "-Clink-arg=-lOpenSLES" \
-        "--remap-path-prefix=$HOME/.cargo/registry/src=/cargo/registry/src" \
-        "--remap-path-prefix=$HOME/.cargo/git/checkouts=/cargo/git/checkouts" \
-        "--remap-path-prefix=$sysroot/lib/rustlib/src/rust=/rustc/$commit" \
-        "--remap-path-prefix=$PWD=/vector")
+        "-Clink-arg=-landroid" "-Clink-arg=-llog" "-Clink-arg=-lOpenSLES" "${remaps[@]}")
     CARGO_ENCODED_RUSTFLAGS="${CARGO_ENCODED_RUSTFLAGS%$'\x1f'}"
     # whisper.cpp is C/C++ built by cmake; its asserts embed __FILE__.
-    export CFLAGS="-ffile-prefix-map=$PWD=/vector"
+    export CFLAGS="-ffile-prefix-map=$repo_physical=/vector -ffile-prefix-map=$repo_logical=/vector"
     export CXXFLAGS="$CFLAGS"
     cargo tauri android build --apk true --target aarch64 \
         --config src-tauri/tauri.fdroid.conf.json
