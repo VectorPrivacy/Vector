@@ -2209,20 +2209,6 @@ function createAvatarImg(src, size, isGroup = false) {
     return img;
 }
 
-/**
- * The name cell of a member-style row (`.member-pick-row`): the display name plus any
- * inline markers. Shared by the community member list, the banlist and the invite
- * picker so all three truncate identically and mark bots the same way the chat list
- * and profile do.
- *
- * The cell — not the name — carries the row's flex growth, so the name can shrink and
- * ellipsize instead of pushing the row's trailing controls out of the container.
- *
- * @param {string} display - The text to show (a real name, or a shortened npub).
- * @param {Profile|null} profile - The member's profile, for the bot marker.
- * @param {boolean} twemoji - Whether `display` is a real name that may carry emoji.
- * @returns {{cell: HTMLDivElement, nameEl: HTMLDivElement}}
- */
 /* ── Member sections ───────────────────────────────────────────────────────
  * The same shape the channel pane uses: `{ id, label }` plus its rows, a head
  * that collapses it, and the closed set kept across restarts. Grouping is
@@ -2245,102 +2231,16 @@ function memberSectionClosed(communityId, sectionId) {
     return closedMemberSections.has(`${communityId}:${sectionId}`);
 }
 
-function buildMemberSection(communityId, section, rows, forceOpen = false) {
-    const wrap = document.createElement('div');
-    wrap.className = 'member-section';
-    if (!forceOpen && memberSectionClosed(communityId, section.id)) wrap.classList.add('is-closed');
-
-    const head = document.createElement('div');
-    head.className = 'member-section-head btn';
-    const label = document.createElement('span');
-    label.className = 'member-section-label';
-    label.textContent = section.label;
-    head.appendChild(label);
-    const count = document.createElement('span');
-    count.className = 'member-section-count';
-    count.textContent = String(rows.length);
-    head.appendChild(count);
-    const caret = document.createElement('span');
-    caret.className = 'member-section-caret';
-    caret.innerHTML = '<span class="icon icon-chevron-down"></span>';
-    head.appendChild(caret);
-    // Flipped in place: the member list is rebuilt from a fetch, and asking for a
-    // re-render to show a collapse would throw away scroll position for nothing.
-    head.onclick = () => {
-        const key = `${communityId}:${section.id}`;
-        const closing = !closedMemberSections.has(key);
-        if (closing) closedMemberSections.add(key);
-        else closedMemberSections.delete(key);
-        try {
-            localStorage.setItem(MEMBER_SECTION_KEY, JSON.stringify([...closedMemberSections]));
-        } catch { /* a full quota must not break the roster */ }
-        wrap.classList.toggle('is-closed', closing);
-    };
-    wrap.appendChild(head);
-
-    const body = document.createElement('div');
-    body.className = 'member-section-body';
-    for (const row of rows) body.appendChild(row);
-    wrap.appendChild(body);
-    return wrap;
+/** Remember a roster section's collapsed state per community (the island flips the DOM). */
+function setMemberSectionClosed(communityId, sectionId, closing) {
+    const key = `${communityId}:${sectionId}`;
+    if (closing) closedMemberSections.add(key);
+    else closedMemberSections.delete(key);
+    try {
+        localStorage.setItem(MEMBER_SECTION_KEY, JSON.stringify([...closedMemberSections]));
+    } catch { /* a full quota must not break the roster */ }
 }
 
-function buildMemberNameCell(display, profile, twemoji, rank = null, rankLabel = null) {
-    const cell = document.createElement('div');
-    cell.className = 'member-pick-identity';
-
-    // Name and its marks share one line; the status sits under them, so a row is
-    // a person rather than a name with decorations trailing off the end.
-    const line = document.createElement('div');
-    line.className = 'member-pick-nameline';
-    cell.appendChild(line);
-
-    const nameEl = document.createElement('div');
-    nameEl.className = 'compact-member-name';
-    nameEl.textContent = display;
-    if (twemoji) twemojify(nameEl);
-    line.appendChild(nameEl);
-
-    // Rank rides beside the NAME rather than out in a left gutter: it is a fact
-    // about the person, and a gutter slot spends a column on the rows that have
-    // nothing to say.
-    if (rank === 'owner' || rank === 'admin') {
-        const mark = document.createElement('span');
-        const isOwner = rank === 'owner';
-        mark.className = 'icon member-rank-mark '
-            + (isOwner ? 'icon-crown member-rank-owner' : 'icon-shield-filled member-rank-admin');
-        // Name the role they actually hold. The shield is raised by PERMISSION
-        // (any role carrying management bits), so calling every one of them
-        // "Admin" mislabels a Moderator who simply has the same powers.
-        const word = isOwner ? 'Owner' : (rankLabel || 'Admin');
-        mark.addEventListener('mouseenter', () => showGlobalTooltip(word, mark));
-        mark.addEventListener('mouseleave', hideGlobalTooltip);
-        line.appendChild(mark);
-    }
-
-    if (profile?.bot) {
-        const botIcon = document.createElement('span');
-        botIcon.className = 'icon icon-bot member-pick-bot';
-        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
-        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
-        line.appendChild(botIcon);
-    }
-
-    const status = profile?.status?.title || '';
-    if (status) {
-        const statusEl = document.createElement('div');
-        statusEl.className = 'member-pick-status cutoff';
-        // textContent: a status is attacker-controlled NIP-38 data, never HTML.
-        statusEl.textContent = status;
-        twemojify(statusEl);
-        // A status carries its own emoji tags; without this pass a community's
-        // custom :shortcodes: read as literal text.
-        renderCustomEmojiShortcodes(statusEl, profile.status.emoji_tags || []);
-        cell.appendChild(statusEl);
-    }
-
-    return { cell, nameEl };
-}
 
 /**
  * Tracks if we're in the initial chat open period for auto-scrolling
@@ -9998,6 +9898,10 @@ async function renderMigrationRow(communityId, name, chatId) {
     };
 }
 
+/** The mounted member-roster island and the community it shows (one per overview open). */
+let groupRoster = null;
+let groupRosterCommunityId = null;
+
 async function renderCommunityOverview(chat, preserveSearch = false) {
     const cf = chat.metadata?.custom_fields || {};
     const communityId = cf.community_id;
@@ -10184,382 +10088,60 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     // Community's channels. Lurkers and link-joiners who haven't spoken don't appear (membership
     // isn't authoritative). Join announcements (presence) surface here too once that ships.
     if (domGroupOverviewMembers) {
-        const membersEl = domGroupOverviewMembers;
         const searchEl = domGroupMemberSearchInput;
         const myNpub = arrProfiles.find(p => p.mine)?.id;
         const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
         // Cache-first: the last known roster paints instantly (no "Loading members…" flash
-        // on reopen); the authoritative fetches run AFTER that first render and re-render
-        // only on a real change. The loading state survives only for a community this
-        // session has never fetched.
+        // on reopen); the authoritative fetches run AFTER that first paint and land through
+        // setRoster only on a real change.
         const hadCache = communityMembersCache.has(communityId);
         let memberList = communityMembersCache.get(communityId) || [];
         // Admins ride the community's channel-chat metadata (applyCommunityAdmins) — the
         // same session cache the in-chat tags read.
         let adminNpubs = (chat.metadata?.admins || []).slice();
         let bannedList = [];
-        // The role hierarchy, once it lands. Sections fall back to Admin/Members
-        // until then, so a slow fetch never leaves the roster unrendered.
+        // The role hierarchy, once it lands. Sections fall back to Admin/Members until then.
         let roleGraph = communityRoleGraphCache.get(communityId) || null;
-        if (!hadCache) {
-            membersEl.innerHTML = '<p class="cmt-empty" style="text-align:center;">Loading members…</p>';
-        }
-        const iAmOwner = !!(myNpub && ownerNpub && myNpub === ownerNpub);
-        // Per-member outrank for moderation, expressed in role-engine POSITIONS (owner = pos 0 via
-        // ownerNpub, admin = pos 1 via adminNpubs, member = none). You may moderate a target you outrank:
-        // the owner outranks everyone; an admin outranks only non-admins. The backend re-verifies the real
-        // can_act_on_member, so this is just which buttons to show (best-effort, never authoritative).
-        const iOutrank = (npub) => {
-            if (npub === ownerNpub || npub === myNpub) return false;     // never the owner, never yourself
-            if (iAmOwner) return true;                                   // pos 0 outranks all
-            return !adminNpubs.includes(npub);                           // an admin outranks only non-admins
-        };
-
-        const renderMembers = (filterText = '') => {
-            const f = (filterText || '').trim().toLowerCase();
-            const frag = document.createDocumentFragment();
-            let shown = 0;
-            // Hoist tiers: owner → admins → members. Within a tier, sort alphabetically by display
-            // (nickname → name → npub), so rows read A→Z inside each tier.
-            // Index profiles + admins once so the sort comparator and render loop are O(1) lookups
-            // (arrProfiles.find / adminNpubs.includes per call made this O(members * profiles * log)).
-            const profileById = new Map(arrProfiles.map(p => [p.id, p]));
-            const adminSet = new Set(adminNpubs);
-            const tierOf = (npub) => npub === ownerNpub ? 0 : (adminSet.has(npub) ? 1 : 2);
-            const displayOf = (m) => {
-                const profile = profileById.get(m.npub) || null;
-                const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
-                return name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
-            };
-            const ordered = [...memberList].sort((a, b) =>
-                (tierOf(a.npub) - tierOf(b.npub)) ||
-                displayOf(a).toLowerCase().localeCompare(displayOf(b).toLowerCase()));
-
-            // Sections, in hierarchy order. Today the only ranks the frontend can
-            // see are owner, admin and bot — CORD's positioned roles live in core
-            // but no command surfaces them yet. `groupOf` is the single seam: when
-            // one does, it returns the member's highest-position role and the rest
-            // of this renderer needs no changes.
-            // Sections are ROLES, ordered by the hierarchy's own positions (lower =
-            // higher authority). A bot is an account type, not a rank — it sits in
-            // whatever role it holds, wearing its icon.
-            const roleById = new Map((roleGraph?.roles || []).map(r => [r.role_id, r]));
-            const heldBy = new Map();
-            for (const g of roleGraph?.grants || []) {
-                // A member's section is their HIGHEST role: the one that outranks
-                // the rest, which is the lowest position number.
-                let best = null;
-                for (const id of g.role_ids || []) {
-                    const role = roleById.get(id);
-                    if (role && (!best || role.position < best.position)) best = role;
-                }
-                if (best) heldBy.set(g.npub, best);
-            }
-            const groupOf = (npub) => heldBy.get(npub)?.role_id
-                || (npub === ownerNpub || adminSet.has(npub) ? 'admin' : 'members');
-
-            const SECTION_ORDER = [];
-            const seen = new Set();
-            for (const role of [...(roleGraph?.roles || [])].sort((a, b) => a.position - b.position)) {
-                SECTION_ORDER.push({ id: role.role_id, label: role.name });
-                seen.add(role.role_id);
-            }
-            // The fallback pair only appears when nothing else claims those people.
-            if (!seen.size) SECTION_ORDER.push({ id: 'admin', label: 'Admin' });
-            SECTION_ORDER.push({ id: 'members', label: 'Members' });
-            const buckets = new Map(SECTION_ORDER.map(x => [x.id, []]));
-            // A role a member holds that the graph no longer defines must not
-            // silently drop them off the roster.
-            const bucketFor = (npub) => buckets.get(groupOf(npub)) || buckets.get('members');
-
-            for (const m of ordered) {
-                const isCommunityOwner = m.npub === ownerNpub;
-                const profile = profileById.get(m.npub) || null;
-                const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
-                const display = name || (m.npub.substring(0, 10) + '...' + m.npub.substring(m.npub.length - 6));
-                if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
-                // Reuse the existing member-row design (display-only: no selection indicator).
-                const row = document.createElement('div');
-                row.className = 'member-pick-row';
-                const bg = document.createElement('div');
-                bg.className = 'member-pick-hover';
-                row.appendChild(bg);
-                row.addEventListener('mouseenter', () => {
-                    const c = getComputedStyle(document.documentElement).getPropertyValue('--icon-color-primary').trim();
-                    bg.style.background = `linear-gradient(to right, ${c}40, transparent)`;
-                });
-                // LEFT crown slot (fixed width so avatars always align): gold crown for the owner,
-                // green for admins (matches the in-chat tags); a promotable member shows a faint crown
-                // on row-hover; everyone else gets the empty spacer. Clicking toggles the Admin role.
-                const isAdminMember = adminNpubs.includes(m.npub);
-                // Pins this row's controls visible for the duration of an action (see the
-                // .is-acting rules): without it the hover-reveal swallows the only progress
-                // signal the moment the pointer moves away.
-                const markActing = (busy) => row.classList.toggle('is-acting', busy);
-                const crownSlot = document.createElement('div');
-                crownSlot.className = 'member-crown-slot';
-                const buildCrown = (active, promote) => {
-                    const c = document.createElement('div');
-                    c.className = 'member-pick-admin' + (active ? ' active' : '') + (promote ? ' promote' : '');
-                    c.innerHTML = '<span class="icon icon-crown"></span>';
-                    return c;
-                };
-                if (isCommunityOwner) {
-                    // Nothing to add: the crown beside the name already says it, and
-                    // ownership is not something anyone can toggle from here.
-                } else if (caps.manage_admin_role) {
-                    // Admin → green (someone who can manage the @admin role can click to demote). Plain
-                    // member → faint hover-crown they can click to promote. (manage_admin_role is the
-                    // position rule: outrank the @admin role; owner-only in the MVP, but not hardcoded.)
-                    const crown = buildCrown(isAdminMember, !isAdminMember && caps.manage_admin_role);
-                    if (caps.manage_admin_role) {
-                        crown.title = isAdminMember ? 'Remove admin' : 'Make admin';
-                        crown.style.cursor = 'pointer';
-                        crown.onclick = async (e) => {
-                            e.stopPropagation();
-                            const makeAdmin = !isAdminMember;
-                            const confirmed = await popupConfirm(
-                                makeAdmin ? 'Make Admin' : 'Remove Admin',
-                                makeAdmin
-                                    ? `Make <b>${escapeHtml(display)}</b> an admin? They'll be able to moderate this community (ban, hide messages, manage settings).`
-                                    : `Remove <b>${escapeHtml(display)}</b> as an admin? They'll lose all moderation powers.`,
-                                false, '', 'vector_warning.svg');
-                            if (!confirmed) return;
-                            // Spinner on the crown through the publish + broadcast wait.
-                            markActing(true);
-                            crown.classList.add('active');
-                            crown.style.pointerEvents = 'none';
-                            crown.innerHTML = '<span class="icon icon-loading spin"></span>';
-                            try {
-                                await invoke(makeAdmin ? 'grant_community_admin' : 'revoke_community_admin', { communityId, npub: m.npub });
-                                // Re-read the roster the backend settled on rather than assuming the
-                                // flip: a published edition the fold hasn't adopted yet would otherwise
-                                // show as done and silently revert on the next open.
-                                const settled = await invoke('get_community_admins', { communityId }).catch(() => null);
-                                if (settled) {
-                                    adminNpubs = settled;
-                                    if (settled.includes(m.npub) !== makeAdmin) {
-                                        showToast('Published, but not confirmed yet. It should apply shortly.');
-                                    }
-                                } else if (makeAdmin) {
-                                    if (!adminNpubs.includes(m.npub)) adminNpubs.push(m.npub);
-                                } else {
-                                    adminNpubs = adminNpubs.filter(n => n !== m.npub);
-                                }
-                                // Push the new set through the shared applier, not just this panel's
-                                // local copy: the in-chat tags read the cached roster, so a demote left
-                                // an "admin" badge sitting behind the overlay.
-                                applyCommunityAdmins(communityId, adminNpubs);
-                                renderMembers(searchEl?.value || '');
-                                // A rank change can flip moderation-hide verdicts — drop the toolbar cache.
-                                dmsgClearDeleteMetaCache();
-                            } catch (err) {
-                                markActing(false);
-                                crown.style.pointerEvents = '';
-                                crown.innerHTML = '<span class="icon icon-crown"></span>';
-                                crown.classList.toggle('active', isAdminMember);
-                                showToast(String(err));
-                            }
-                        };
-                    } else {
-                        crown.title = 'Admin';
-                        crown.style.cursor = 'default';
-                    }
-                    crownSlot.appendChild(crown);
-                }
-                // The left gutter only exists to hold a control: without one, the row
-                // starts at its avatar like every other list in the app.
-                if (crownSlot.childElementCount) row.appendChild(crownSlot);
-                const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 25, false);
-                avatar.className = 'member-pick-avatar';
-                row.appendChild(avatar);
-                row.appendChild(buildMemberNameCell(
-                    display, profile, !!name,
-                    isCommunityOwner ? 'owner' : (isAdminMember ? 'admin' : null),
-                    heldBy.get(m.npub)?.name || null,
-                ).cell);
-                // Role-engine moderation: shown to anyone who holds KICK/BAN AND outranks this member
-                // (the owner outranks all; an admin outranks non-admins — never the owner, never self).
-                // Two tiers (§7 escalation ladder): KICK is cooperative + soft (they self-remove, can
-                // rejoin with a new invite); BAN is forceful (suppressed + read-cut in a private community).
-                // Moderation lives on right-click (long-press on touch), not on a pair
-                // of buttons welded to every row: a member row is a person, and the
-                // actions are rare, destructive and outrank-gated. Same component the
-                // rest of the app uses, so it inherits dismissal + Android back.
-                if (iOutrank(m.npub) && (caps.kick || caps.ban)) {
-                    const items = [];
-                    if (caps.kick) {
-                        items.push({
-                            label: 'Kick',
-                            hint: 'can rejoin with an invite',
-                            icon: 'x',
-                            onClick: async () => {
-                                const confirmed = await popupConfirm('Kick member', `Kick <b>${escapeHtml(display)}</b>? They'll be removed from the community but can rejoin with a new invite.`, false, '', 'vector_warning.svg');
-                                if (!confirmed) return;
-                                markActing(true);
-                                try {
-                                    await invoke('kick_community_member', { communityId, npub: m.npub });
-                                    memberList = memberList.filter(x => x.npub !== m.npub);
-                                    renderMembers(searchEl?.value || '');
-                                    dmsgClearDeleteMetaCache();
-                                    // Sync the "N members" subtext (the backend recorded the leave).
-                                    refreshCommunityMemberCount(communityId, true);
-                                } catch (err) {
-                                    markActing(false);
-                                    showToast(String(err));
-                                }
-                            },
-                        });
-                    }
-                    if (caps.ban) {
-                        items.push({
-                            label: 'Ban',
-                            hint: 'cannot rejoin',
-                            icon: 'x-user',
-                            danger: true,
-                            onClick: async () => {
-                                const confirmed = await popupConfirm('Ban member', `Ban <b>${escapeHtml(display)}</b>? They'll be removed from the community and can't rejoin unless you unban them.`, false, '', 'vector_warning.svg');
-                                if (!confirmed) return;
-                                // Banning publishes + rebuilds the subscription (seconds), so the
-                                // row carries the progress now that the button isn't there to.
-                                markActing(true);
-                                try {
-                                    await invoke('ban_community_member', { communityId, npub: m.npub });
-                                    memberList = memberList.filter(x => x.npub !== m.npub);
-                                    renderMembers(searchEl?.value || '');
-                                    dmsgClearDeleteMetaCache();
-                                    refreshCommunityMemberCount(communityId, true);
-                                } catch (err) {
-                                    markActing(false);
-                                    // A private-community ban can fail with the (long, important)
-                                    // bunker read-cut explanation — a persistent notice, not a toast.
-                                    await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
-                                }
-                            },
-                        });
-                    }
-                    attachLongPressContextMenu(row, (x, y) => showContextMenu({ x, y, items }));
-
-                    // The same menu, with a handle. Right-click is invisible until
-                    // someone tells you it's there, so the row grows a "⋯" on hover
-                    // that opens the identical items — discoverable without welding
-                    // destructive buttons onto every row.
-                    const actions = document.createElement('div');
-                    actions.className = 'member-pick-actions';
-                    const moreBtn = document.createElement('div');
-                    // No `btn` class: its :hover drops opacity to 0.75, which fought the
-                    // brighten below — the handle appeared at full while the pointer was
-                    // still crossing the row, then dimmed the moment it landed.
-                    moreBtn.className = 'member-pick-more';
-                    moreBtn.title = 'Moderate';
-                    moreBtn.setAttribute('role', 'button');
-                    moreBtn.innerHTML = '<span class="icon icon-dots-horizontal"></span>';
-                    moreBtn.onclick = (e) => {
-                        // Not the row's mini-profile, and not the document-level
-                        // dismissal that would close the menu as it opens.
-                        e.stopPropagation();
-                        const r = moreBtn.getBoundingClientRect();
-                        showContextMenu({ x: r.left, y: r.bottom + 4, items });
-                    };
-                    actions.appendChild(moreBtn);
-                    row.appendChild(actions);
-                }
-                // Row → mini-profile (same popup as a chat name/avatar tap). The crown/kick/ban
-                // controls stopPropagation, so this only fires on the avatar/name/empty area.
-                // stopPropagation so the opening click doesn't reach the document-level
-                // outside-click handler that would instantly dismiss the just-opened popup.
-                row.style.cursor = 'pointer';
-                row.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(m.npub, avatar); });
-                bucketFor(m.npub).push(row);
-                shown++;
-            }
-
-            // Filtering keeps the headings: a section survives as long as anyone
-            // in it matches, so results stay anchored to a rank rather than
-            // collapsing into one undifferentiated list. Empty sections drop out
-            // on their own.
-            for (const section of SECTION_ORDER) {
-                const rows = buckets.get(section.id);
-                if (!rows.length) continue;
-                // A match inside a collapsed section would otherwise be invisible,
-                // so a search opens every section it found someone in.
-                frag.appendChild(buildMemberSection(communityId, section, rows, !!f));
-            }
-            membersEl.innerHTML = '';
-            if (!shown) {
-                const empty = document.createElement('p');
-                empty.className = 'group-placeholder';
-                empty.style.cssText = 'text-align:center;padding:14px;';
-                empty.textContent = f ? 'No matches.' : 'No one has spoken yet. Members appear here once they post.';
-                membersEl.appendChild(empty);
-            } else {
-                membersEl.appendChild(frag);
-            }
-
-            // Owner-only "Banned" section: the banlist isn't otherwise visible (banned members
-            // are excluded from the list above), so surface it here with an unban affordance.
-            if (caps.ban && bannedList.length && !f) {
-                const hdr = document.createElement('div');
-                hdr.textContent = `Banned (${bannedList.length})`;
-                hdr.style.cssText = 'font-size:12px;text-transform:uppercase;letter-spacing:0.06em;opacity:0.5;margin:16px 0 6px;padding-left:2px;';
-                membersEl.appendChild(hdr);
-                for (const bnpub of bannedList) {
-                    const p = arrProfiles.find(x => x.id === bnpub) || null;
-                    const nm = p ? (p.nickname || p.name || p.display_name || '') : '';
-                    const disp = nm || (bnpub.substring(0, 10) + '...' + bnpub.substring(bnpub.length - 6));
-                    const row = document.createElement('div');
-                    row.className = 'member-pick-row';
-                    const av = createAvatarImg(p ? getProfileAvatarSrc(p) : null, 25, false);
-                    av.className = 'member-pick-avatar';
-                    av.style.opacity = '0.5';
-                    row.appendChild(av);
-                    const banned = buildMemberNameCell(disp, p, !!nm);
-                    banned.cell.style.opacity = '0.6';
-                    row.appendChild(banned.cell);
-                    const unbanBtn = document.createElement('button');
-                    unbanBtn.className = 'cmt-btn cmt-btn-sm cmt-btn-secondary';
-                    unbanBtn.title = 'Unban';
-                    unbanBtn.style.marginLeft = 'auto';
-                    unbanBtn.innerHTML = '<span class="icon icon-add-user"></span>Unban';
-                    unbanBtn.onclick = async (e) => {
-                        e.stopPropagation();
-                        unbanBtn.disabled = true;
-                        unbanBtn.innerHTML = '<span class="icon icon-loading spin"></span>Unbanning';
-                        try {
-                            await invoke('unban_community_member', { communityId, npub: bnpub });
-                            bannedList = bannedList.filter(x => x !== bnpub);
-                            renderMembers(searchEl?.value || '');
-                            dmsgClearDeleteMetaCache();
-                        } catch (err) {
-                            unbanBtn.disabled = false;
-                            unbanBtn.innerHTML = '<span class="icon icon-add-user"></span>Unban';
-                            showToast(String(err));
-                        }
-                    };
-                    row.appendChild(unbanBtn);
-                    // Banned rows open the profile too (the Unban button stopPropagation's).
-                    // stopPropagation so the opening click doesn't trip the outside-click dismiss.
-                    row.style.cursor = 'pointer';
-                    row.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(bnpub, av); });
-                    membersEl.appendChild(row);
-                }
-            }
-        };
-        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start
-        // clean. The reset happens HERE (not after the fetches below) so every render in this
-        // pass reads a trustworthy filter value.
+        // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start clean.
         if (searchEl && !preserveSearch) searchEl.value = '';
-        if (hadCache) renderMembers(searchEl?.value || '');
+
+        // The roster island (src/components/people/MemberRoster.svelte) owns the member
+        // DOM; this side seeds it, feeds it the authoritative lists, and mirrors the
+        // member-driven changes it reports back into the session caches. A live refresh
+        // feeds the mounted island; a fresh open or another community remounts.
+        if (!groupRoster || groupRosterCommunityId !== communityId || !preserveSearch) {
+            if (groupRoster) VectorSvelte.unmountComponent(groupRoster);
+            groupRosterCommunityId = communityId;
+            groupRoster = VectorSvelte.mountMemberRoster(domGroupOverviewMembers, {
+                communityId, myNpub, ownerNpub, caps,
+                profiles: [...arrProfiles],
+                members: memberList, admins: adminNpubs, banned: bannedList, roleGraph,
+                loading: !hadCache,
+                h: {
+                    invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
+                    attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc,
+                    createPlaceholderAvatar, twemojify, showGlobalTooltip, hideGlobalTooltip,
+                    applyCommunityAdmins, dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
+                    memberSectionClosed, setMemberSectionClosed,
+                },
+                onChange: ({ members }) => {
+                    communityMembersCache.set(communityId, members);
+                    communityMemberCounts.set(communityId, members.length);
+                    if (domGroupOverview.getAttribute('data-group-id') === communityId) {
+                        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+                    }
+                },
+            });
+            if (searchEl) groupRoster.setFilter(searchEl.value || '');
+        }
+        const roster = groupRoster;
 
         // Authoritative fetches — AFTER the cached paint, so the panel opens fully rendered.
-        // A re-render fires only when the roster/admins/banlist actually differ from the
-        // cached paint (re-rendering identical rows would just flicker them).
+        // The island re-derives only when the roster/admins/banlist/graph actually differ.
         const rosterPrint = () => JSON.stringify([
             memberList.map(m => m.npub).sort(),
             [...adminNpubs].sort(),
             [...bannedList].sort(),
-            // The sections are part of what's on screen, so a role rename or a
-            // re-grant has to count as a change or the roster keeps the old shape.
             roleGraph,
         ]);
         const cachedPrint = rosterPrint();
@@ -10568,35 +10150,32 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         communityMembersCache.set(communityId, memberList);
         communityMemberCounts.set(communityId, memberList.length);
         _communityCountLastFetch.set(communityId, Date.now());
-        // Admins (members holding a management role) drive the gold crown. MVP: the OWNER elects /
-        // removes admins (no role hierarchy yet, so that's the only real promotion path). The
-        // backend authorizes on the MANAGE_ROLES permission (futureproof — `can_manage_community_roles`);
-        // the UI just exposes the toggle to the owner for now.
         try { adminNpubs = await invoke('get_community_admins', { communityId }); } catch (_) {}
-        // The hierarchy the member list groups on. Best-effort: without it the
-        // sections fall back to Admin/Members rather than the roster failing.
         try {
             roleGraph = await invoke('get_community_role_graph', { communityId });
             communityRoleGraphCache.set(communityId, roleGraph);
         } catch (_) {}
-        // Cache admins onto this community's channel chats so message rendering can chip @everyone
-        // from admin senders (owner is handled separately via owner_npub). Mirrors the group design.
+        // Cache admins onto this community's channel chats so message rendering can chip
+        // @everyone from admin senders (owner is handled separately via owner_npub).
         applyCommunityAdmins(communityId, adminNpubs);
         // The banlist (for the unban list), shown to anyone who can BAN.
         if (caps.ban) { try { bannedList = await invoke('get_community_banlist', { communityId }); } catch (_) {} }
         // The user may have switched to another community's overview mid-fetch — don't
         // paint this one's roster (or subtext) over it. The panel carries the COMMUNITY
         // id (re-tagged right after open for the realtime listener), never chat.id here.
-        if (domGroupOverview.getAttribute('data-group-id') !== communityId) return;
+        if (domGroupOverview.getAttribute('data-group-id') !== communityId || groupRoster !== roster) return;
         domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
-        if (!hadCache || rosterPrint() !== cachedPrint) renderMembers(searchEl?.value || '');
+        if (!hadCache || rosterPrint() !== cachedPrint) {
+            roster.setRoster({ members: memberList, admins: adminNpubs, banned: bannedList, roleGraph });
+        }
 
-        // Resolve unknown member + banned-member profiles (name/avatar), then re-render once.
+        // Resolve unknown member + banned-member profiles (name/avatar), then push the
+        // new snapshot once.
         const unknowns = [...memberList.map(m => m.npub), ...bannedList].filter(np => !arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np));
         unknowns.forEach(np => strangerProfileRequested.add(np));
         if (unknowns.length) {
             Promise.allSettled(unknowns.map(np => invoke('load_profile', { npub: np }))).then(() => {
-                if (domGroupOverview.getAttribute('data-group-id') === communityId) renderMembers(searchEl?.value || '');
+                if (groupRoster === roster) roster.setProfiles([...arrProfiles]);
             });
         }
 
@@ -10605,7 +10184,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             // hovers orphaned above an empty member list.
             const searchContainer = searchEl.parentElement;
             if (searchContainer) searchContainer.style.display = memberList.length ? '' : 'none';
-            searchEl.oninput = () => renderMembers(searchEl.value || '');
+            searchEl.oninput = () => roster.setFilter(searchEl.value || '');
         }
     }
 

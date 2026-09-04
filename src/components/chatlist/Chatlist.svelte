@@ -9,7 +9,7 @@
     // does not share the classic scripts' global lexical scope.
     let { h, snapshot } = $props();
 
-    import { chatlistVersion, timeTickVersion } from './stores.js';
+    import { chatlistVersion, timeTickVersion } from '../lib/stores.js';
     import ChatlistRow from './ChatlistRow.svelte';
 
     // Snapshot re-pulls the raw page state on every invalidation.
