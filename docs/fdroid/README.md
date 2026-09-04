@@ -45,6 +45,10 @@ from `Cargo.toml`. `src-tauri/gen/android/app/version.properties` mirrors the pa
 to build when it is stale and `android_version_properties_mirror_cargo` in `updates.rs` fails
 before that. Bump it with every version.
 
+The bot only looks at tags, and no tag before v0.4.5 carries the file, so the v0.4.4 submission
+builds from a `v0.4.4-fdroid` tag on the metadata's commit; the tag regex allows that suffix.
+From v0.4.5 on the ordinary release tags are enough.
+
 ## IzzyOnDroid
 
 Open an issue at https://gitlab.com/IzzyOnDroid/repo/-/issues with the repository URL. Their bot
