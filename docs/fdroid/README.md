@@ -82,6 +82,11 @@ A match publishes with Vector's own signature and the reproducible badge. For a 
 before that job existed, the `fdroid` workflow can be dispatched with the commit and the release
 tag to produce the asset.
 
+One reproducibility trap already hit: Tauri keeps `plugins` in a hash map, so the embedded
+`tauri.conf.json` (an APK asset, and compiled into the library) lists plugin configs in a random
+order per build. The flavour config deletes `plugins.updater` (desktop-only anyway) so exactly one
+plugin config remains. Adding a second plugin config to `tauri.conf.json` reopens this.
+
 What already holds the two builds together: the Rust toolchain and `tauri-cli` versions pinned at
 the top of `scripts/fdroid-build.sh`, NDK `29.0.14206865`, `--remap-path-prefix` on every path that differs between
 machines, and `SOURCE_DATE_EPOCH` from the commit. What can still break it and has not been

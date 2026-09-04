@@ -13,6 +13,8 @@ Changelog: https://github.com/VectorPrivacy/Vector/releases
 Donate: https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations
 Bitcoin: bc1q70zhkfuej2cl9nhrxwqcnvrzpwm9kqtrth3tmc
 
+AutoName: Vector
+
 RepoType: git
 Repo: https://github.com/VectorPrivacy/Vector.git
 Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-fdroid.apk
@@ -20,11 +22,11 @@ Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-f
 Builds:
   - versionName: 0.4.4
     versionCode: 40499
-    commit: 1fa3283521e4c112398351b773c3a6e87a6864d6
+    commit: v0.4.4-fdroid
     subdir: src-tauri/gen/android/app
     sudo:
       - apt-get update
-      - apt-get install -y --no-install-recommends rustup cmake clang libclang-dev
+      - apt-get install -y --no-install-recommends rustup cmake make clang libclang-dev
         pkg-config nodejs npm
     output: build/outputs/apk/universal/release/app-universal-universal-release-unsigned.apk
     prebuild:
@@ -42,7 +44,7 @@ AllowedAPKSigningKeys: 89bc6c8f6188d26e8a650acbcebd30be72705a05c384651ddb05f9aff
 
 AutoUpdateMode: Version
 UpdateCheckMode: Tags ^v\d+\.\d+\.\d+(-fdroid)?$
-UpdateCheckData:
+UpdateCheckData: 
   src-tauri/gen/android/app/version.properties|versionCode=(\d+)|.|versionName=(.*)
 CurrentVersion: 0.4.4
 CurrentVersionCode: 40499

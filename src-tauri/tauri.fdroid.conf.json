@@ -4,5 +4,8 @@
     "features": [
       "fdroid"
     ]
+  },
+  "plugins": {
+    "updater": null
   }
 }
