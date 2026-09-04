@@ -81,6 +81,7 @@
     "allow-get-messages-around",
     "allow-get-system-events",
     "allow-get-chat-message-count",
+    "allow-get-dm-contacts",
     "allow-evict-chat-messages",
     "allow-generate-thumbhash-preview",
     "allow-decode-thumbhash",

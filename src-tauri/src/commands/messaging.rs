@@ -68,6 +68,11 @@ pub async fn get_chat_messages_paginated<R: Runtime>(
 
 /// Get the total message count for a chat
 #[tauri::command]
+pub async fn get_dm_contacts() -> Result<Vec<String>, String> {
+    vector_core::db::events::get_dm_contact_npubs()
+}
+
+#[tauri::command]
 pub async fn get_chat_message_count<R: Runtime>(
     _handle: AppHandle<R>,
     chat_id: String,

@@ -4301,9 +4301,10 @@ async function setupRustListeners() {
             }
         }
 
-        // Re-render create group or invite modal if a stranger npub's profile resolved
-        if (arrSelectedGroupMembers.includes(evt.payload.id) && domCreateGroup?.style.display !== 'none') {
-            renderCreateGroupList(domCreateGroupFilter?.value || '');
+        // Refresh the Create Group picker if a stranger npub's profile resolved while the
+        // panel is open (the island re-derives its rows off the new snapshot).
+        if (cgContactList && domCreateGroup?.style.display !== 'none') {
+            cgContactList.setProfiles([...arrProfiles]);
         }
         if (activeInviteModalRerender) {
             activeInviteModalRerender();
@@ -11087,7 +11088,7 @@ async function openCommunityInvitePanel(chat) {
         myNpub,
         banned: [...bannedSet],
         members: [...memberSet],
-        dmNpubs: arrChats.filter(c => c.chat_type === 'DirectMessage').map(c => c.id),
+        dmNpubs: await fetchDmContacts(),
         chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
         avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
         makePlaceholder: () => createPlaceholderAvatar(false, 25),
@@ -14407,157 +14408,55 @@ window.onresize = adjustSize;
  * Keep this decoupled from arrChats.
  */
 let arrSelectedGroupMembers = [];
-let arrSelectedGroupAdmins = [];
 /** Path to the selected group avatar image file (null if none selected) */
 let strCreateGroupAvatarPath = null;
 
 
 /**
- * Render the filterable, scrollable contact list with checkboxes.
- * Reuses arrProfiles as the source of truth.
+ * The Create Group contact picker is the SAME Svelte island the community invite panel
+ * uses (src/components/ContactList.svelte) — one module, two mounts. This side owns the
+ * instance for the panel's lifetime and syncs `arrSelectedGroupMembers` from the
+ * onSelectionChange callback (the create-button click and the pill both read it).
+ * Listable = people you've written to (fetchDmContacts); anyone else rides the paste path.
  */
-function renderCreateGroupList(filterText = '') {
-    if (!domCreateGroupList) return;
-    domCreateGroupList.innerHTML = '';
-
-    const f = (filterText || '').trim().toLowerCase();
-
-    // Exclude our own profile from selection
-    const mine = arrProfiles.find(p => p.mine)?.id;
-
-    // Build a fragment for performance
-    const frag = document.createDocumentFragment();
-
-    // Collect stranger npubs: selected npubs that are NOT in arrProfiles
-    const knownIds = new Set(arrProfiles.map(p => p.id));
-    const strangerNpubs = arrSelectedGroupMembers.filter(id => !knownIds.has(id));
-
-    // Check if the filter text itself is a valid stranger npub
-    const filterNpub = extractNpub(filterText);
-    if (filterNpub && filterNpub !== mine && !knownIds.has(filterNpub) && !strangerNpubs.includes(filterNpub)) {
-        strangerNpubs.push(filterNpub);
+/**
+ * The contact pickers list the people you've sent at least one DM to, not every profile
+ * ever seen (a profile store holds thousands of community passers-by). The frontend only
+ * carries each chat's last message, so the DB answers this.
+ */
+async function fetchDmContacts() {
+    try {
+        return await invoke('get_dm_contacts');
+    } catch (_) {
+        return arrChats.filter(c => c.chat_type === 'DirectMessage').map(c => c.id);
     }
-
-    // Sort profiles: selected members first (by selection order), then unselected by last message time
-    // Pre-index selection order + chat timestamps so the comparator is O(1) per lookup — `indexOf`
-    // + `arrChats.find` per comparison made this O(profiles * (members + chats) * log).
-    const selIndexById = new Map(arrSelectedGroupMembers.map((id, i) => [id, i]));
-    const chatTsById = new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)]));
-    const sortedProfiles = [...arrProfiles].sort((a, b) => {
-        const aSelectedIndex = selIndexById.get(a?.id) ?? -1;
-        const bSelectedIndex = selIndexById.get(b?.id) ?? -1;
-        const aSelected = aSelectedIndex !== -1;
-        const bSelected = bSelectedIndex !== -1;
-
-        // Selected members come first
-        if (aSelected && !bSelected) return -1;
-        if (!aSelected && bSelected) return 1;
-
-        // For selected members: sort by selection order (first selected = first in list)
-        if (aSelected && bSelected) {
-            return aSelectedIndex - bSelectedIndex;
-        }
-
-        // For unselected members: sort by last message time (most recent first)
-        const aChatTimestamp = chatTsById.get(a?.id) || 0;
-        const bChatTimestamp = chatTsById.get(b?.id) || 0;
-
-        // If both have timestamps, sort by most recent
-        if (aChatTimestamp && bChatTimestamp) {
-            return bChatTimestamp - aChatTimestamp;
-        }
-        // Contacts with messages come before those without
-        if (aChatTimestamp && !bChatTimestamp) return -1;
-        if (!aChatTimestamp && bChatTimestamp) return 1;
-
-        // Fallback: sort alphabetically
-        const aName = (a?.nickname || a?.name || a?.display_name || '').toLowerCase();
-        const bName = (b?.nickname || b?.name || b?.display_name || '').toLowerCase();
-        return aName.localeCompare(bName);
-    });
-
-    // Helper to build a member-pick row
-    const buildRow = (npub, profile) => {
-        const name = profile ? (profile.nickname || profile.name || profile.display_name || '') : '';
-        const isSelected = arrSelectedGroupMembers.includes(npub);
-
-        const row = document.createElement('div');
-        row.id = `cg-${npub}`;
-        row.className = 'member-pick-row';
-
-        const bgDiv = document.createElement('div');
-        bgDiv.className = 'member-pick-hover';
-        row.appendChild(bgDiv);
-
-        const avatarSrc = profile ? getProfileAvatarSrc(profile) : null;
-        const avatar = createAvatarImg(avatarSrc, 25, false);
-        avatar.className = 'member-pick-avatar';
-        row.appendChild(avatar);
-
-        const display = name || (npub.substring(0, 10) + '...' + npub.substring(npub.length - 6));
-        row.appendChild(buildMemberNameCell(display, profile, !!name).cell);
-
-        // No admin toggle at create: invitees haven't joined yet, so a role grant has no
-        // member to bind to (you promote them from Group Info after they accept).
-
-        const indicator = document.createElement('div');
-        indicator.className = 'member-pick-indicator' + (isSelected ? ' selected' : '');
-        row.appendChild(indicator);
-
-        row.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (arrSelectedGroupMembers.includes(npub)) {
-                arrSelectedGroupMembers = arrSelectedGroupMembers.filter(n => n !== npub);
-                arrSelectedGroupAdmins = arrSelectedGroupAdmins.filter(n => n !== npub);
-            } else {
-                arrSelectedGroupMembers.push(npub);
-            }
-            updateCreateGroupValidation();
+}
+let cgContactList = null;
+async function mountCreateGroupList() {
+    // Fresh mount per open (like the invite panel): props are mount-time snapshots, so
+    // re-mounting keeps profiles/chat timestamps fresh without prop-update plumbing.
+    if (cgContactList) { VectorSvelte.unmountComponent(cgContactList); cgContactList = null; }
+    const dmNpubs = await fetchDmContacts();
+    if (domCreateGroup?.style.display === 'none') return null;   // closed while fetching
+    cgContactList = VectorSvelte.mountContactList(domCreateGroupList, {
+        profiles: [...arrProfiles],
+        myNpub: arrProfiles.find(p => p.mine)?.id,
+        banned: [],
+        members: [],
+        dmNpubs,
+        chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
+        avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
+        makePlaceholder: () => createPlaceholderAvatar(false, 25),
+        twemojify: (el) => twemojify(el),
+        showTooltip: (text, el) => showGlobalTooltip(text, el),
+        hideTooltip: () => hideGlobalTooltip(),
+        hoverBg: '',   // #create-group-list .member-pick-hover already paints this in styles.css
+        onSelectionChange: (sel) => {
+            arrSelectedGroupMembers = [...sel];
             updateCreateGroupSelectionStatus();
-            const currentFilter = domCreateGroupFilter?.value || '';
-            renderCreateGroupList(currentFilter);
-        });
-
-        return row;
-    };
-
-    // Render stranger npubs (selected ones first, then filter-matched)
-    for (const npub of strangerNpubs) {
-        const isSelected = arrSelectedGroupMembers.includes(npub);
-        // Show if selected (always) or if it matches the current filter npub
-        if (!isSelected && filterNpub !== npub) continue;
-        frag.appendChild(buildRow(npub, null));
-        // Fire-and-forget relay lookup
-        if (!strangerProfileRequested.has(npub)) {
-            strangerProfileRequested.add(npub);
-            invoke('load_profile', { npub }).catch(() => {});
-        }
-    }
-
-    for (const p of sortedProfiles) {
-        if (!p || !p.id) continue;
-        if (p.id === mine) continue;
-        if (p.is_blocked) continue;
-
-        // Filter by nickname/name/npub (use extracted npub if input is a profile URL)
-        const name = p.nickname || p.name || p.display_name || '';
-        const hay = (name + ' ' + p.id).toLowerCase();
-        if (f && !hay.includes(filterNpub || f)) continue;
-
-        frag.appendChild(buildRow(p.id, p));
-    }
-
-    // If no matches
-    if (!frag.childElementCount) {
-        const empty = document.createElement('p');
-        empty.style.textAlign = 'center';
-        empty.style.opacity = '0.7';
-        empty.textContent = f ? 'No matches' : 'No contacts found';
-        domCreateGroupList.appendChild(empty);
-    } else {
-        domCreateGroupList.appendChild(frag);
-    }
+        },
+    });
+    return cgContactList;
 }
 
 /**
@@ -14611,7 +14510,6 @@ function openCreateGroup() {
 
     // Reset state
     arrSelectedGroupMembers = [];
-    arrSelectedGroupAdmins = [];
     strCreateGroupAvatarPath = null;
     if (domCreateGroupName) domCreateGroupName.value = '';
     if (domCreateGroupFilter) domCreateGroupFilter.value = '';
@@ -14628,7 +14526,7 @@ function openCreateGroup() {
     // send a private invite to once the Community is created (a name is still all that's required).
     if (domCreateGroupFilter) domCreateGroupFilter.style.display = '';
     if (domCreateGroupList) domCreateGroupList.style.display = '';
-    renderCreateGroupList('');
+    mountCreateGroupList();   // fresh island: selection cleared, profiles/ts snapshot current
     updateCreateGroupValidation(false);
 
     // Focus name
@@ -14641,6 +14539,7 @@ function openCreateGroup() {
 async function closeCreateGroup() {
     popBack('create-group');
     domCreateGroup.style.display = 'none';
+    if (cgContactList) { VectorSvelte.unmountComponent(cgContactList); cgContactList = null; }
 
     // Restore navbar to follow the same flow as "Start New Chat" close (see closeChat())
     domNavbar.style.display = '';
@@ -14664,7 +14563,29 @@ async function closeCreateGroup() {
     domCreateGroupCancelBtn.onclick = closeCreateGroup;
 
     domCreateGroupName.oninput = () => updateCreateGroupValidation();
-    domCreateGroupFilter.oninput = (e) => renderCreateGroupList(e.target.value || '');
+    // Typing filters; a pasted/typed valid npub is added to the list and auto-selected —
+    // same paste-to-pick behavior as the invite panel (npub URLs work too via extractNpub).
+    domCreateGroupFilter.oninput = () => {
+        const v = domCreateGroupFilter?.value || '';
+        cgContactList?.setFilter(v);
+        const np = extractNpub(v);
+        if (!np) return;
+        const myNpub = arrProfiles.find(p => p.mine)?.id;
+        if (np === myNpub) return;
+        if (arrProfiles.some(p => p.id === np)) {
+            cgContactList?.select(np);   // a known profile: it's already in the list, just pick it
+        } else {
+            // Stranger: rides the stranger path (rendered while selected), profile fetched so
+            // the name resolves; setProfiles swaps the snapshot when it lands.
+            cgContactList?.addStranger(np);
+            if (!strangerProfileRequested.has(np)) {
+                strangerProfileRequested.add(np);
+                invoke('load_profile', { npub: np })
+                    .then(() => cgContactList?.setProfiles([...arrProfiles]))
+                    .catch(() => {});
+            }
+        }
+    };
 
     // Avatar picker: open file dialog on click
     if (domCreateGroupAvatarPicker) {

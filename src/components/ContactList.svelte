@@ -1,7 +1,7 @@
 <script>
-    // Reactive replacement for the vanilla renderContacts + buildContactRow. Renders the
-    // filtered/sorted DM-contact picker into #cmt-contacts. Static data + vanilla DOM helpers
-    // come in as props, exactly like the chatlist island (h-bundle convention).
+    // Reactive contact picker island, mounted in two places: the community invite panel
+    // (#cmt-contacts) and the Create Group tab (#create-group-list) — one module, two
+    // mounts. Static data + vanilla DOM helpers come in as props (h-bundle convention).
     //
     // Dialog-local live state (filter, pasted strangers, selection) lives HERE as $state
     // runes — no bridge stores. The vanilla side drives it through exported instance
@@ -12,7 +12,9 @@
         myNpub = '',
         banned = [],
         members = [],
-        dmNpubs = [],
+        // null = every profile is listable (Create Group); an array = restrict to those ids
+        // (the invite panel passes its DM contacts).
+        dmNpubs = null,
         chatTsById = new Map(),
         avatarSrc = () => null,      // (profile) => url | null
         makePlaceholder = () => document.createElement('div'), // () => the default-avatar element
@@ -35,7 +37,7 @@
 
     const bannedSet = $derived(new Set(banned));
     const memberSet = $derived(new Set(members));
-    const dmSet = $derived(new Set(dmNpubs));
+    const dmSet = $derived(dmNpubs === null ? null : new Set(dmNpubs));
     const profileById = $derived(new Map(profilesList.map((p) => [p.id, p])));
 
     // ── instance exports: the vanilla<->island bridge ──
@@ -96,7 +98,8 @@
             .filter(
                 (p) =>
                     p && p.id && p.id !== myNpub && !p.is_blocked &&
-                    !bannedSet.has(p.id) && !memberSet.has(p.id) && dmSet.has(p.id),
+                    !bannedSet.has(p.id) && !memberSet.has(p.id) &&
+                    (dmSet === null || dmSet.has(p.id)),
             )
             .filter((p) => {
                 if (!f) return true;
@@ -106,7 +109,11 @@
             .sort((a, b) => {
                 const aSel = sel.has(a.id), bSel = sel.has(b.id);
                 if (aSel !== bSel) return aSel ? -1 : 1;
-                return (chatTsById.get(b.id) || 0) - (chatTsById.get(a.id) || 0);
+                const d = (chatTsById.get(b.id) || 0) - (chatTsById.get(a.id) || 0);
+                if (d) return d;
+                // Tie-break by name (Create Group lists every profile — many have no chat, all-ties
+                // would otherwise fall back to arrProfiles load order).
+                return displayName(a, a.id).localeCompare(displayName(b, b.id));
             });
         for (const p of contacts) out.push({ npub: p.id, profile: p, src: avatarSrc(p) });
         return out;

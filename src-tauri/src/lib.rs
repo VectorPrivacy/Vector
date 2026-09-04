@@ -659,6 +659,7 @@ pub fn run() {
             commands::messaging::get_messages_around,
             commands::messaging::get_system_events,
             commands::messaging::get_chat_message_count,
+            commands::messaging::get_dm_contacts,
             commands::messaging::evict_chat_messages,
             commands::self_destruct::get_self_destruct_timer,
             commands::self_destruct::set_self_destruct_timer,

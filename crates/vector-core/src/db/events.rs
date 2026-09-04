@@ -708,6 +708,21 @@ pub fn get_chat_message_count(chat_id: i64) -> Result<usize, String> {
     Ok(count as usize)
 }
 
+/// DM peers the user has actually written to: chat identifiers of DirectMessage chats holding
+/// at least one own message. The contact pickers list these, not every profile ever seen.
+pub fn get_dm_contact_npubs() -> Result<Vec<String>, String> {
+    let conn = super::get_db_connection_guard_static()?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.chat_identifier FROM chats c \
+         WHERE c.chat_type = 0 AND EXISTS (\
+             SELECT 1 FROM events e WHERE e.chat_id = c.id AND e.mine = 1 AND e.kind IN ({}, {}))",
+        event_kind::PRIVATE_DIRECT_MESSAGE, event_kind::FILE_ATTACHMENT
+    )).map_err(|e| format!("Failed to prepare DM contact query: {}", e))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to query DM contacts: {}", e))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 /// Get PIVX payment events for a chat.
 pub fn get_pivx_payments_for_chat(conversation_id: &str) -> Result<Vec<StoredEvent>, String> {
     let conn = super::get_db_connection_guard_static()?;
