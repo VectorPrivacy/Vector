@@ -14,6 +14,7 @@ import ContactPicker from './people/ContactPicker.svelte';
 import MemberRoster from './people/MemberRoster.svelte';
 import Chatlist from './chatlist/Chatlist.svelte';
 import RailShortcuts from './rail/RailShortcuts.svelte';
+import MessageRow from './chat/MessageRow.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -74,4 +75,17 @@ export function mountChatlist(target, { h, snapshot }) {
 export function mountRailShortcuts(target, { h, snapshot }) {
     target.replaceChildren();
     return mount(RailShortcuts, { target, props: { h, snapshot } });
+}
+
+/**
+ * Build one message row (Phase 2a). Returns the `.dmsg` element for the vanilla list
+ * to place, plus the instance to unmount when the element leaves the list. Mounted
+ * into a scratch host and flushed synchronously so the content builders have run
+ * before the caller looks at the row.
+ */
+export function mountMessageRow(props) {
+    const host = document.createElement('div');
+    const instance = mount(MessageRow, { target: host, props });
+    flushSync();
+    return { el: host.firstElementChild, instance };
 }

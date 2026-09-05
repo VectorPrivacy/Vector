@@ -42,158 +42,141 @@ const MAX_DISPLAYED_REACTIONS = 12;
  * @returns {HTMLElement} The constructed `.dmsg` row, ready for the caller to
  *                        insert into `domChatMessages`.
  */
+/** The row island builds normal message rows; false = every row through the vanilla builder
+ *  (a `let` so a debug session can A/B the two builders live). */
+let CHAT_ROW_ISLAND = true;
+
+/** Svelte instance per row element; rows leave the DOM through many paths, so the
+ *  observer below unmounts whatever left rather than every path knowing about it. */
+const _dmsgRowInstances = new WeakMap();
+let _dmsgRowObserver = null;
+/** Rows unmounted so far (a debug counter: the registry itself is a WeakMap). */
+let _dmsgRowUnmounts = 0;
+function _dmsgEnsureRowObserver() {
+    if (_dmsgRowObserver || typeof domChatMessages === 'undefined' || !domChatMessages) return;
+    _dmsgRowObserver = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+            for (const node of m.removedNodes) {
+                if (node.nodeType !== 1) continue;
+                const instance = _dmsgRowInstances.get(node);
+                if (!instance) continue;
+                // A node re-inserted in the same tick was moved, not removed.
+                queueMicrotask(() => {
+                    if (node.isConnected || !_dmsgRowInstances.has(node)) return;
+                    _dmsgRowInstances.delete(node);
+                    _dmsgRowUnmounts++;
+                    VectorSvelte.unmountComponent(instance);
+                });
+            }
+        }
+    });
+    _dmsgRowObserver.observe(domChatMessages, { childList: true });
+}
+
+/** Helpers the row island calls; the leaf builders stay here. */
+const _dmsgRowHelpers = {
+    getProfile: (npub) => getProfile(npub),
+    getName: (x) => getName(x),
+    getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
+    twemojify: (el) => twemojify(el),
+    showTooltip: (text, el) => showGlobalTooltip(text, el),
+    hideTooltip: () => hideGlobalTooltip(),
+    formatHourMinute: (at) => _dmsgFormatHourMinute(at),
+    fillContent: (node, msg, sender, ctx) =>
+        _dmsgFillContent(node, msg, sender, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked),
+    fillReactions: (node, msg) => _dmsgFillReactions(node, msg),
+};
+
+/**
+ * Build a message row. Normal rows are the Svelte row island (src/components/chat/
+ * MessageRow.svelte): the shell, avatar and header derive from signals, the content
+ * and reactions come from the builders below. System events, PIVX bubbles and
+ * blocked placeholders keep the vanilla builder.
+ */
 function renderMessage(msg, sender, editID = '', contextElement = null) {
-    // Lazy-init the floating toolbar on first row render.
-    initMessageToolbar();
-
-    const row = document.createElement('div');
-    row.classList.add('dmsg');
-    row.id = msg.id;
-    // Cache the message ref directly on the row so consumers (toolbar, streak
-    // recomputation) can read it in O(1) instead of scanning chat.messages.
-    row._dmsgMsg = msg;
-
-    // ---- Sender / mine flag --------------------------------------------------
-    const otherFullId = msg.npub || sender?.id || '';
-    const authorFullId = msg.mine ? strPubkey : otherFullId;
-    const strShortSenderID = (msg.mine ? strPubkey : (sender?.id || msg.npub || '')).substring(0, 8);
-    row.dataset.sender = strShortSenderID;
-    row.dataset.mine = msg.mine ? 'true' : 'false';
-
-    // ---- Status --------------------------------------------------------------
-    if (msg.failed) row.dataset.status = 'failed';
-    else if (msg.pending) row.dataset.status = 'pending';
-    else row.dataset.status = 'sent';
-
-    // ---- Timestamp (used by streak comparison, debugging) -------------------
-    if (msg.at) row.dataset.at = String(msg.at);
-
-    // ---- Streak: compute based on the row that will sit immediately above us.
-    // Mirrors legacy lookup: editID → previous-of-existing; contextElement →
-    // previous-of-context; otherwise the last current child of chat-messages.
-    let streakAnchor;
-    if (editID) {
-        streakAnchor = document.getElementById(editID)?.previousElementSibling || null;
-    } else if (contextElement) {
-        streakAnchor = contextElement.previousElementSibling || null;
-    } else {
-        streakAnchor = domChatMessages?.lastElementChild || null;
+    if (!CHAT_ROW_ISLAND || msg.pivx_payment || msg.system_event) {
+        return renderMessageVanilla(msg, sender, editID, contextElement);
     }
-    row.dataset.streak = _dmsgComputeStreakAttr(msg, streakAnchor);
-    // Command invocations render as a passive line whose sentence names the
-    // author — the row never needs its own header/avatar.
-    if (_dmsgCommandInfo(msg)) row.dataset.streak = 'continuation';
-
-    // ---- Replying-to highlight (CSS uses [data-replying-to] selector) -------
-    if (strCurrentReplyReference === msg.id) row.dataset.replyingTo = 'true';
-
-    // (Pinged highlight is set later, after currentChat/isGroupChat are computed.)
-
-    // ---- PIVX payment short-circuit -----------------------------------------
-    if (msg.pivx_payment) {
-        const body = document.createElement('div');
-        body.classList.add('dmsg-body');
-        const pivxBubble = renderPivxPaymentBubble(
-            msg.pivx_payment.gift_code,
-            msg.pivx_payment.amount_piv,
-            msg.mine,
-            msg.pivx_payment.address
-        );
-        body.appendChild(pivxBubble);
-        row.appendChild(_dmsgBuildGutter(authorFullId, _dmsgResolveProfile(authorFullId, sender, msg), msg));
-        row.appendChild(body);
-        return row;
-    }
-
-    // ---- System event (centered timestamp-style line) -----------------------
-    if (msg.system_event) {
-        const el = insertSystemEvent(msg.content, null, msg.system_event.member_npub, msg.system_event.event_type);
-        // Tag with msg.id so updateChat's `document.getElementById(msg.id)`
-        // dedup guard skips re-rendering it on the openChat pre-paint pass.
-        // Without this, system events rendered twice on every chat reopen.
-        el.id = msg.id;
-        // Carry `at` so the date-divider rebuild treats a system event as
-        // day content (a divider should head it, not float below it).
-        el.dataset.at = msg.at;
-        return el;
-    }
-
-    // ---- Chat / group context -----------------------------------------------
     const currentChat = arrChats.find(c => c.id === strOpenChat);
     const isGroupChat = chatIsGroup(currentChat);
-
-    // ---- Pinged highlight (mention of self, a reply to me, or @everyone from a group admin).
-    // msg.mentions_me() is a Rust method on the backend Message type and does
-    // NOT survive Tauri IPC serialization — we have to detect mentions on the
-    // raw content here. Mentions are stamped as `@npub1...` in the content
-    // (the frontend resolves @display-name → @npub before sending), so a
-    // simple substring match is reliable.
-    if (!msg.mine) {
-        const mentionedMe = strPubkey && msg.content && msg.content.includes('@' + strPubkey);
-        const senderNpub = msg.npub || '';
-        const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
-        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
-        const mentionedEveryone = senderIsAdmin && msg.content && /@everyone\b/.test(msg.content);
-        // A reply to one of my own messages is an implicit ping. Prefer the in-memory
-        // target's `mine` flag (DMs don't populate replied_to_npub); fall back to the
-        // backend-resolved reply author for history not held in memory.
-        let repliedToMe = false;
-        if (msg.replied_to) {
-            const tgt = currentChat?.messages?.find(m => m.id === msg.replied_to);
-            repliedToMe = tgt ? !!tgt.mine : (msg.replied_to_npub === strPubkey);
-        }
-        if (mentionedMe || mentionedEveryone || repliedToMe) row.dataset.pinged = 'true';
+    const otherFullId = msg.npub || sender?.id || '';
+    const authorFullId = msg.mine ? strPubkey : otherFullId;
+    const blockedAuthorProfile = isGroupChat && !msg.mine && otherFullId ? getProfile(otherFullId) : null;
+    if (blockedAuthorProfile?.is_blocked && !revealedBlockedMessages.has(msg.id)) {
+        return renderMessageVanilla(msg, sender, editID, contextElement);
     }
+    initMessageToolbar();
+    _dmsgEnsureRowObserver();
 
-    // ---- Author profile ------------------------------------------------------
+    // Streak: the row that will sit immediately above us (vanilla owns streaks).
+    let streakAnchor;
+    if (editID) streakAnchor = document.getElementById(editID)?.previousElementSibling || null;
+    else if (contextElement) streakAnchor = contextElement.previousElementSibling || null;
+    else streakAnchor = domChatMessages?.lastElementChild || null;
+    let streak = _dmsgComputeStreakAttr(msg, streakAnchor);
+    if (_dmsgCommandInfo(msg)) streak = 'continuation';
+
     const authorProfile = _dmsgResolveProfile(authorFullId, sender, msg);
     if (!authorProfile && authorFullId) {
-        invoke('queue_profile_sync', {
-            npub: authorFullId,
-            priority: 'critical',
-            forceRefresh: false,
-        });
+        invoke('queue_profile_sync', { npub: authorFullId, priority: 'critical', forceRefresh: false });
     }
 
-    // ---- Gutter (avatar) -----------------------------------------------------
-    const gutter = _dmsgBuildGutter(authorFullId, authorProfile, msg);
+    const replyEl = msg.replied_to ? _dmsgBuildReplyContext(msg, sender) : null;
+    const { el, instance } = VectorSvelte.mountMessageRow({
+        msg,
+        sender,
+        streak,
+        replyEl,
+        replyPending: msg.replied_to && !replyEl ? msg.replied_to : '',
+        ctx: {
+            myNpub: strPubkey,
+            isGroupChat,
+            currentChat,
+            pinged: _dmsgIsPinged(msg, currentChat, isGroupChat),
+            replyingTo: strCurrentReplyReference === msg.id,
+            revealedBlocked: !!(blockedAuthorProfile?.is_blocked && revealedBlockedMessages.has(msg.id)),
+        },
+        h: _dmsgRowHelpers,
+    });
+    _dmsgRowInstances.set(el, instance);
 
-    // ---- Body (header + content + reactions) --------------------------------
-    const body = document.createElement('div');
-    body.classList.add('dmsg-body');
+    // Post-insertion fixups (streak boundary + last-sent visibility), once the caller
+    // has placed the row and DOM adjacency is final.
+    setTimeout(() => {
+        if (!domChatMessages || !domChatMessages.contains(el)) return;
+        recomputeStreakBoundary(el);
+        if (msg.mine) _dmsgUpdateLastSentVisibility();
+    }, 0);
+    return el;
+}
 
-    body.appendChild(_dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, currentChat));
-
-    const content = document.createElement('div');
-    content.classList.add('dmsg-content');
-
-    // ---- Blocked-author short-circuit ---------------------------------------
-    const blockedAuthorNpub = isGroupChat && !msg.mine ? otherFullId : '';
-    const blockedAuthorProfile = blockedAuthorNpub ? getProfile(blockedAuthorNpub) : null;
-    const isRevealedBlockedMsg = !!(blockedAuthorProfile?.is_blocked && revealedBlockedMessages.has(msg.id));
-    if (blockedAuthorProfile?.is_blocked && !revealedBlockedMessages.has(msg.id)) {
-        content.appendChild(_dmsgBuildBlockedPlaceholder(msg));
-        body.appendChild(content);
-        row.appendChild(gutter);
-        row.appendChild(body);
-        return row;
-    }
-
-    // ---- Reply context (Discord-style: above the header, elbow into the avatar) --
+/** Whether a message pings the reader: a mention of them, an authorised @everyone, or a reply to their own message. */
+function _dmsgIsPinged(msg, currentChat, isGroupChat) {
+    if (msg.mine) return false;
+    // msg.mentions_me() is a Rust method that does not survive IPC; mentions are
+    // stamped as `@npub1...` in the content, so a substring match is reliable.
+    const mentionedMe = strPubkey && msg.content && msg.content.includes('@' + strPubkey);
+    const senderNpub = msg.npub || '';
+    const senderIsAdmin = isGroupChat && (currentChat?.metadata?.admins?.includes(senderNpub)
+        || currentChat?.metadata?.custom_fields?.owner_npub === senderNpub);
+    const mentionedEveryone = senderIsAdmin && msg.content && /@everyone\b/.test(msg.content);
+    // A reply to one of my own messages is an implicit ping. Prefer the in-memory
+    // target's `mine` flag (DMs don't populate replied_to_npub); fall back to the
+    // backend-resolved reply author for history not held in memory.
+    let repliedToMe = false;
     if (msg.replied_to) {
-        const replyDiv = _dmsgBuildReplyContext(msg, sender);
-        if (replyDiv) {
-            // Above the name (body's first child). The row class shifts the big avatar down so it
-            // aligns with the name rather than floating up to the reply line.
-            body.insertBefore(replyDiv, body.firstChild);
-            row.classList.add('dmsg--has-reply');
-        } else {
-            // The parent hasn't arrived yet — a recency-first sync can deliver a reply
-            // before the message it quotes. Marked so its arrival can fill the strip in.
-            row.dataset.replyPending = msg.replied_to;
-        }
+        const tgt = currentChat?.messages?.find(m => m.id === msg.replied_to);
+        repliedToMe = tgt ? !!tgt.mine : (msg.replied_to_npub === strPubkey);
     }
+    return !!(mentionedMe || mentionedEveryone || repliedToMe);
+}
 
+/**
+ * Fill a `.dmsg-content` element: text, attachments, crypto address, pack and invite
+ * previews, mini-app card, link preview, edited mark, status and self-destruct glyph,
+ * in that order. Shared by the vanilla builder and the row island.
+ */
+function _dmsgFillContent(content, msg, sender, isGroupChat, currentChat, isRevealedBlockedMsg) {
     // ---- Text content -------------------------------------------------------
     // Defensive against null/undefined content (attachment-only messages from
     // some clients can omit content entirely).
@@ -304,6 +287,141 @@ function renderMessage(msg, sender, editID = '', contextElement = null) {
     if (msg.expiration) {
         content.appendChild(_dmsgBuildSelfDestruct(msg));
     }
+
+}
+
+function renderMessageVanilla(msg, sender, editID = '', contextElement = null) {
+    // Lazy-init the floating toolbar on first row render.
+    initMessageToolbar();
+
+    const row = document.createElement('div');
+    row.classList.add('dmsg');
+    row.id = msg.id;
+    // Cache the message ref directly on the row so consumers (toolbar, streak
+    // recomputation) can read it in O(1) instead of scanning chat.messages.
+    row._dmsgMsg = msg;
+
+    // ---- Sender / mine flag --------------------------------------------------
+    const otherFullId = msg.npub || sender?.id || '';
+    const authorFullId = msg.mine ? strPubkey : otherFullId;
+    const strShortSenderID = (msg.mine ? strPubkey : (sender?.id || msg.npub || '')).substring(0, 8);
+    row.dataset.sender = strShortSenderID;
+    row.dataset.mine = msg.mine ? 'true' : 'false';
+
+    // ---- Status --------------------------------------------------------------
+    if (msg.failed) row.dataset.status = 'failed';
+    else if (msg.pending) row.dataset.status = 'pending';
+    else row.dataset.status = 'sent';
+
+    // ---- Timestamp (used by streak comparison, debugging) -------------------
+    if (msg.at) row.dataset.at = String(msg.at);
+
+    // ---- Streak: compute based on the row that will sit immediately above us.
+    // Mirrors legacy lookup: editID → previous-of-existing; contextElement →
+    // previous-of-context; otherwise the last current child of chat-messages.
+    let streakAnchor;
+    if (editID) {
+        streakAnchor = document.getElementById(editID)?.previousElementSibling || null;
+    } else if (contextElement) {
+        streakAnchor = contextElement.previousElementSibling || null;
+    } else {
+        streakAnchor = domChatMessages?.lastElementChild || null;
+    }
+    row.dataset.streak = _dmsgComputeStreakAttr(msg, streakAnchor);
+    // Command invocations render as a passive line whose sentence names the
+    // author — the row never needs its own header/avatar.
+    if (_dmsgCommandInfo(msg)) row.dataset.streak = 'continuation';
+
+    // ---- Replying-to highlight (CSS uses [data-replying-to] selector) -------
+    if (strCurrentReplyReference === msg.id) row.dataset.replyingTo = 'true';
+
+    // (Pinged highlight is set later, after currentChat/isGroupChat are computed.)
+
+    // ---- PIVX payment short-circuit -----------------------------------------
+    if (msg.pivx_payment) {
+        const body = document.createElement('div');
+        body.classList.add('dmsg-body');
+        const pivxBubble = renderPivxPaymentBubble(
+            msg.pivx_payment.gift_code,
+            msg.pivx_payment.amount_piv,
+            msg.mine,
+            msg.pivx_payment.address
+        );
+        body.appendChild(pivxBubble);
+        row.appendChild(_dmsgBuildGutter(authorFullId, _dmsgResolveProfile(authorFullId, sender, msg), msg));
+        row.appendChild(body);
+        return row;
+    }
+
+    // ---- System event (centered timestamp-style line) -----------------------
+    if (msg.system_event) {
+        const el = insertSystemEvent(msg.content, null, msg.system_event.member_npub, msg.system_event.event_type);
+        // Tag with msg.id so updateChat's `document.getElementById(msg.id)`
+        // dedup guard skips re-rendering it on the openChat pre-paint pass.
+        // Without this, system events rendered twice on every chat reopen.
+        el.id = msg.id;
+        // Carry `at` so the date-divider rebuild treats a system event as
+        // day content (a divider should head it, not float below it).
+        el.dataset.at = msg.at;
+        return el;
+    }
+
+    // ---- Chat / group context -----------------------------------------------
+    const currentChat = arrChats.find(c => c.id === strOpenChat);
+    const isGroupChat = chatIsGroup(currentChat);
+
+    if (_dmsgIsPinged(msg, currentChat, isGroupChat)) row.dataset.pinged = 'true';
+
+    // ---- Author profile ------------------------------------------------------
+    const authorProfile = _dmsgResolveProfile(authorFullId, sender, msg);
+    if (!authorProfile && authorFullId) {
+        invoke('queue_profile_sync', {
+            npub: authorFullId,
+            priority: 'critical',
+            forceRefresh: false,
+        });
+    }
+
+    // ---- Gutter (avatar) -----------------------------------------------------
+    const gutter = _dmsgBuildGutter(authorFullId, authorProfile, msg);
+
+    // ---- Body (header + content + reactions) --------------------------------
+    const body = document.createElement('div');
+    body.classList.add('dmsg-body');
+
+    body.appendChild(_dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, currentChat));
+
+    const content = document.createElement('div');
+    content.classList.add('dmsg-content');
+
+    // ---- Blocked-author short-circuit ---------------------------------------
+    const blockedAuthorNpub = isGroupChat && !msg.mine ? otherFullId : '';
+    const blockedAuthorProfile = blockedAuthorNpub ? getProfile(blockedAuthorNpub) : null;
+    const isRevealedBlockedMsg = !!(blockedAuthorProfile?.is_blocked && revealedBlockedMessages.has(msg.id));
+    if (blockedAuthorProfile?.is_blocked && !revealedBlockedMessages.has(msg.id)) {
+        content.appendChild(_dmsgBuildBlockedPlaceholder(msg));
+        body.appendChild(content);
+        row.appendChild(gutter);
+        row.appendChild(body);
+        return row;
+    }
+
+    // ---- Reply context (Discord-style: above the header, elbow into the avatar) --
+    if (msg.replied_to) {
+        const replyDiv = _dmsgBuildReplyContext(msg, sender);
+        if (replyDiv) {
+            // Above the name (body's first child). The row class shifts the big avatar down so it
+            // aligns with the name rather than floating up to the reply line.
+            body.insertBefore(replyDiv, body.firstChild);
+            row.classList.add('dmsg--has-reply');
+        } else {
+            // The parent hasn't arrived yet — a recency-first sync can deliver a reply
+            // before the message it quotes. Marked so its arrival can fill the strip in.
+            row.dataset.replyPending = msg.replied_to;
+        }
+    }
+
+    _dmsgFillContent(content, msg, sender, isGroupChat, currentChat, isRevealedBlockedMsg);
 
     body.appendChild(content);
 
@@ -1508,9 +1626,15 @@ function _dmsgBuildReactionsAddButton(msgId) {
 
 function _dmsgBuildReactions(msg) {
     if (!msg.reactions || !msg.reactions.length) return null;
-    const groups = _dmsgAggregateReactions(msg);
     const reactionsRow = document.createElement('div');
     reactionsRow.classList.add('dmsg-reactions');
+    _dmsgFillReactions(reactionsRow, msg);
+    return reactionsRow;
+}
+
+/** Fill a `.dmsg-reactions` row with the message's chips (shared with the row island). */
+function _dmsgFillReactions(reactionsRow, msg) {
+    const groups = _dmsgAggregateReactions(msg);
     for (const [emoji, g] of groups) {
         reactionsRow.appendChild(_dmsgBuildReactionChip(emoji, g, msg.id));
     }
@@ -1520,7 +1644,6 @@ function _dmsgBuildReactions(msg) {
     if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg)) {
         reactionsRow.appendChild(_dmsgBuildReactionsAddButton(msg.id));
     }
-    return reactionsRow;
 }
 
 /** Current displayed count of a reaction chip (from its `.rc-value` roller). */
