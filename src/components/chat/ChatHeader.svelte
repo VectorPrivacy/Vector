@@ -4,9 +4,9 @@
     // derives their content from the open chat and its signals: the peer's profile
     // landing, a typer, a member count or a renamed channel repaints the header
     // with no retro-resolve code.
-    import { openChatId, chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
+    import { openChatId, chatVersion, profileVersion, communityVersion, listVersion, invitesVersion } from '../lib/signals.svelte.js';
 
-    let { els, h } = $props();   // els: avatar, name, status, menu
+    let { els, h } = $props();   // els: avatar, name, status, menu, backDot
 
     const vm = $derived.by(() => {
         const id = openChatId();
@@ -111,6 +111,19 @@
                 hideTimer = null;
             }, 300);
         }
+    });
+
+    // ── back dot: another chat has unread, or an invite waits ──
+    // Reads every chat's version: any row's unread moving is what changes the answer.
+    const backDot = $derived.by(() => {
+        if (!openChatId()) return false;
+        listVersion();
+        invitesVersion();
+        for (const c of h.chats()) chatVersion(c.id);
+        return h.backDotWanted();
+    });
+    $effect(() => {
+        if (els.backDot) els.backDot.style.display = backDot ? '' : 'none';
     });
 
     // ── overflow menu: hidden when the chat has no options ──

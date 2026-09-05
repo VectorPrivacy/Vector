@@ -2378,7 +2378,6 @@ async function loadCommunityInvites() {
             } catch (_) {}
             return { community_id: inv.community_id, name, inviter_npub: inv.inviter_npub, channels, icon };
         });
-        updateChatBackNotification();
     } catch (e) {
         console.error('Failed to load community invites:', e);
     }
@@ -2960,18 +2959,8 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     if (openChat && openChat.metadata?.custom_fields?.community_id === communityId) {
         updateChatHeaderSubtext(openChat);
     }
-    // The channel pane's own header carries the same count. Painting it here, beside
-    // the chat header, is what makes the two land together: the chat list is
-    // hash-gated on chat state, which a member count is not part of, so left to that
-    // render the count sat empty until something unrelated moved.
-    if (typeof wsListCommunityId === 'function' && wsListCommunityId() === communityId) {
-        // Write the TEXT span, not the row: the row also holds the people glyph,
-        // and textContent on it would take the icon with the old count.
-        const domHeadMembers = document.querySelector(
-            '#chatlist-community-head .chatlist-community-head-members > span:not(.icon)'
-        );
-        if (domHeadMembers) domHeadMembers.textContent = communityMemberSubtext(communityId);
-    }
+    // The channel pane's head derives its count from the community signal.
+    VectorSvelte.touchCommunity(communityId);
     if (domGroupOverview.getAttribute('data-group-id') === communityId) {
         domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
         // The member SET changed while the overview is open — re-render the rows live so a
@@ -3008,34 +2997,14 @@ function resolveMentionText(text) {
     });
 }
 
-function updateChatBackNotification() {
-    if (!domChatBackNotificationDot) return;
-    
-    // Check if we're currently in a chat
-    if (!strOpenChat) {
-        domChatBackNotificationDot.style.display = 'none';
-        return;
-    }
-    
-    // Check if there are any unanswered MLS invites
-    const hasUnansweredInvites = arrCommunityInvites.length > 0;
-    
-    // Check if any OTHER chat has unread messages
-    const hasOtherUnreads = arrChats.some(chat => {
-        // Skip the currently open chat
-        if (chat.id === strOpenChat) return false;
-        // Only chats the user can actually SEE and open count. `chatIsVisibleInList` is the
-        // list's own row test (bare anchors, sibling channels, empty DMs, blocked senders,
-        // own profile), so the dot can't light for something with no row to visit and clear.
-        if (!chatIsVisibleInList(chat)) return false;
-        // Use the SAME badge count as the chatlist rows (computeRowBadgeCount: DB-authoritative
-        // chat.unread, muted-aware) so the back dot can't light for a chat whose row shows nothing.
-        // The raw countUnreadMessages walk can diverge from chat.unread on a windowed cache.
-        return computeRowBadgeCount(chat) > 0;
-    });
-    
-    // Show or hide the notification dot (show if there are unread messages OR unanswered invites)
-    domChatBackNotificationDot.style.display = (hasOtherUnreads || hasUnansweredInvites) ? '' : 'none';
+/** Whether the chat header's back dot lights: another visible chat has unread, or an
+ *  invite waits. The header derives it from the list, invite and chat signals. */
+function chatBackDotWanted() {
+    if (!strOpenChat) return false;
+    if (arrCommunityInvites.length > 0) return true;
+    // Only chats the user can actually SEE and open count, with the SAME badge count as
+    // the chatlist rows, so the dot can't light for something with no row to visit.
+    return arrChats.some(chat => chat.id !== strOpenChat && chatIsVisibleInList(chat) && computeRowBadgeCount(chat) > 0);
 }
 
 /**
@@ -4388,7 +4357,6 @@ async function setupRustListeners() {
         scheduleUnreadRefresh();
 
         // Update the back button notification dot (for unread messages in other chats)
-        updateChatBackNotification();
     });
 
     // Listen for existing message updates (works for both DMs and MLS groups)
@@ -7343,7 +7311,6 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
     adjustSize();
     
     // Update the back button notification dot after chat updates
-    updateChatBackNotification();
 }
 
 /**
@@ -8983,7 +8950,6 @@ async function openChat(contact) {
     // / onFocusChanged are the catch-up signals.
 
     // Update the back button notification dot
-    updateChatBackNotification();
 
     // Focus chat input on desktop (mobile keyboards are intrusive)
     if (!platformFeatures.is_mobile && !isBlockedChat && !isDissolvedChat) {
@@ -9164,7 +9130,6 @@ async function closeChat() {
     resetProceduralScroll();
     
     // Hide the back button notification dot when closing chat
-    updateChatBackNotification();
 
     // Display the Navbar
     domNavbar.style.display = ``;
@@ -10891,7 +10856,7 @@ VectorSvelte.mountCommandComposer({
     onCancel: () => { if (commandCtrl) commandCtrl.exitComposer(); },
 });
 VectorSvelte.mountChatHeader({
-    els: { avatar: domChatHeaderAvatarContainer, name: domChatContact, status: domChatContactStatus, menu: document.getElementById('chat-menu-btn') },
+    els: { avatar: domChatHeaderAvatarContainer, name: domChatContact, status: domChatContactStatus, menu: document.getElementById('chat-menu-btn'), backDot: domChatBackNotificationDot },
     // Lazy: the helpers live in scripts that load after this one evaluates.
     h: {
         myNpub: () => strPubkey,
@@ -10910,6 +10875,8 @@ VectorSvelte.mountChatHeader({
         menuCount: (chat) => buildChatMenuItems(chat).length,
         openProfile: (profile) => { previousChatBeforeProfile = strOpenChat; openProfile(profile); },
         openCommunity: (chat) => openCommunityDetails(chat),
+        chats: () => arrChats,
+        backDotWanted: () => chatBackDotWanted(),
     },
 });
 VectorSvelte.mountComposerPopups({

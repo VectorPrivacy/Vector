@@ -290,64 +290,6 @@ function renderCommunityChannels(communityId, { pane = false } = {}) {
     return wrap;
 }
 
-/**
- * The community's identity at the top of its channel pane: icon, name, member
- * count. Clicking it opens the details sidebar, which is where the roster and
- * the community's actions already live.
- */
-function renderCommunityListHeader(communityId) {
-    const primary = arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c))
-        || arrChats.find(c => communityIdOfChat(c) === communityId);
-    const cf = primary?.metadata?.custom_fields || {};
-
-    const head = document.createElement('div');
-    head.className = 'chatlist-community-head btn';
-    head.id = 'chatlist-community-head';
-
-    const avatarSrc = primary?.metadata?.avatar_cached ? convertFileSrc(primary.metadata.avatar_cached) : null;
-    const avatar = avatarSrc ? createAvatarImg(avatarSrc, 36, true) : createPlaceholderAvatar(true, 36);
-    avatar.classList.add('chatlist-community-head-avatar');
-    head.appendChild(avatar);
-
-    const meta = document.createElement('div');
-    meta.className = 'chatlist-community-head-meta';
-
-    const name = document.createElement('span');
-    name.className = 'chatlist-community-head-name cutoff';
-    name.textContent = cf.name || 'Community';
-    twemojify(name);
-    meta.appendChild(name);
-
-    const members = document.createElement('span');
-    members.className = 'chatlist-community-head-members';
-    // The glyph says "people" before the number is read, and holds the line's
-    // height while the count is still empty.
-    const membersIcon = document.createElement('span');
-    membersIcon.className = 'icon icon-users-multi chatlist-community-head-members-icon';
-    members.appendChild(membersIcon);
-    const membersText = document.createElement('span');
-    // Empty until the count lands; the fetch refreshes the header when it does.
-    membersText.textContent = communityMemberSubtext(communityId);
-    members.appendChild(membersText);
-    meta.appendChild(members);
-    head.appendChild(meta);
-
-    // `.icon` is absolutely positioned to fill its parent, so it needs a box of its
-    // own — dropped straight into the (sticky, therefore positioned) header it
-    // spans the whole thing and lands over the title.
-    const caretBox = document.createElement('div');
-    caretBox.className = 'chatlist-community-head-caret';
-    const caret = document.createElement('span');
-    caret.className = 'icon icon-chevron-down';
-    caretBox.appendChild(caret);
-    head.appendChild(caretBox);
-
-    refreshCommunityMemberCount(communityId);
-    if (primary?.metadata?.custom_fields?.proto_version === '2') refreshCommunityRaidAlert(communityId, head);
-    head.onclick = (e) => openCommunityMenu(primary, e);
-    return head;
-}
-
 /// Last raid verdict per community, so the menu can escalate its Moderation entry
 /// without waiting on a round-trip while the user is already looking at the menu.
 const communityRaidAlerts = new Map();
@@ -356,27 +298,26 @@ const communityRaidAlerts = new Map();
 /// stale entry leaves the menu quoting a count from before the action ran.
 function clearCommunityRaidAlert(communityId) {
     communityRaidAlerts.delete(communityId);
-    for (const pip of document.querySelectorAll('.chatlist-community-head-alert')) pip.remove();
+    VectorSvelte.touchCommunity(communityId);
 }
 
 /**
- * Paint the header's raid pip. Asynchronous by design: the assessment reads a window of
- * message history, so it must never sit in front of the chat list rendering.
+ * Refresh the community's raid verdict (the pane head's pip and the menu read it).
+ * Asynchronous by design: the assessment reads a window of message history, so it
+ * must never sit in front of the chat list rendering.
  */
-async function refreshCommunityRaidAlert(communityId, head) {
+async function refreshCommunityRaidAlert(communityId) {
     let verdict = null;
     try {
         verdict = await invoke('check_community_raid', { communityId });
     } catch (_) {
         return;
     }
+    const before = communityRaidAlerts.get(communityId);
     communityRaidAlerts.set(communityId, verdict);
-    if (!verdict?.detected || !head.isConnected) return;
-    if (head.querySelector('.chatlist-community-head-alert')) return;
-    const pip = document.createElement('span');
-    pip.className = 'chatlist-community-head-alert';
-    pip.title = `${verdict.suspects} accounts flagged as a raid \u2014 open Moderation`;
-    head.insertBefore(pip, head.querySelector('.chatlist-community-head-caret'));
+    if (!!before?.detected !== !!verdict?.detected || before?.suspects !== verdict?.suspects) {
+        VectorSvelte.touchCommunity(communityId);
+    }
 }
 
 /**

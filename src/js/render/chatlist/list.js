@@ -101,7 +101,6 @@ function chatlistHelpers() {
         hideGlobalTooltip,
         // community channel lists (still vanilla builders; later slice)
         renderCommunityChannels,
-        renderCommunityListHeader,
         channelStateHashParts,
         communityMemberSubtext,
         getCommunityChannels,
@@ -136,10 +135,27 @@ function mountChatlist() {
         h: chatlistHelpers(),
         snapshot: chatlistSnapshot,
     });
+    const head = document.getElementById('ws-community-head');
+    if (head) {
+        VectorSvelte.mountCommunityHead(head, {
+            h: {
+                primaryChat: (id) => arrChats.find(c => communityIdOfChat(c) === id && isPrimaryChannelChat(c))
+                    || arrChats.find(c => communityIdOfChat(c) === id),
+                convertFileSrc,
+                createAvatarImg,
+                createPlaceholderAvatar,
+                twemojify,
+                communityMemberSubtext,
+                raidAlert: (id) => communityRaidAlerts.get(id) || null,
+                refreshMemberCount: (id) => refreshCommunityMemberCount(id),
+                refreshRaidAlert: (id) => refreshCommunityRaidAlert(id),
+                openCommunityMenu: (chat, e) => openCommunityMenu(chat, e),
+            },
+        });
+    }
     paneChanged();
     VectorSvelte.setOpenChat(strOpenChat);
     renderRailShortcuts();
-    updateChatBackNotification();
 }
 
 // ── mutators: the vanilla side names WHAT changed ──
@@ -194,13 +210,11 @@ function listChanged() {
     sortChats();
     VectorSvelte.reorderChatlist();
     renderRailShortcuts();
-    updateChatBackNotification();
 }
 
 /** Pending community invites arrived, were accepted, declined or purged. */
 function invitesChanged() {
     VectorSvelte.touchInvites();
-    updateChatBackNotification();
 }
 
 /** The open chat changed: the active row, the rail's shortcut and the pane mode derive from it. */
@@ -238,7 +252,6 @@ function reorderChatlist() {
     ensureListSignals();
     const before = listShapeKey();
     sortChats();
-    updateChatBackNotification();
     renderRailShortcuts();
     if (listShapeKey() === before) return;
     VectorSvelte.reorderChatlist();

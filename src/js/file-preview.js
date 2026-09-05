@@ -1,49 +1,21 @@
 /**
  * File Preview Overlay
- * Shows a preview of files before sending with options like compression for images
+ * Shows a preview of files before sending with options like compression for images.
+ * The overlay itself is a Svelte island (components/files/FilePreview.svelte) over
+ * VectorSvelte's file preview state; this module owns the SOURCE (a path, cached
+ * bytes, a File object, a zip in progress) and the send.
  */
 
-// Build the image send-options markup. Compress is offered only when it's worth
-// it (size-gated by the caller); Keep Metadata is offered for any image, since
-// stripping location/camera/date now happens by default regardless of size.
-function filePreviewOptionsHTML(showCompress, showMetadata) {
-    const compress = showCompress ? `
-            <label class="file-preview-option">
-                <div>
-                    <div class="file-preview-option-label">Compress Image</div>
-                    <div class="file-preview-option-sublabel" id="file-preview-compress-info">Compressing...</div>
-                </div>
-                <input type="checkbox" id="file-preview-compress" checked>
-                <span class="neon-toggle"></span>
-            </label>` : '';
-    // Rendered hidden; revealMetadataOptionIfPresent() shows it only when the
-    // image actually carries strip-worthy EXIF (screenshots/memes have none).
-    const metadata = showMetadata ? `
-            <label class="file-preview-option" id="file-preview-metadata-option" style="display: none;">
-                <div>
-                    <div class="file-preview-option-label">Keep Metadata <img class="warning-icon" id="file-preview-metadata-warning" alt="" style="display: none; vertical-align: middle; margin-left: 4px; height: 14px; width: 14px;"></div>
-                    <div class="file-preview-option-sublabel">Includes location, camera & date</div>
-                </div>
-                <input type="checkbox" id="file-preview-metadata">
-                <span class="neon-toggle"></span>
-            </label>` : '';
-    return compress + metadata;
-}
-
-// Reveal the Keep Metadata toggle only when the image carries strip-worthy EXIF.
-// filePath empty => check the JS-cached bytes (clipboard / File-object sends).
+// Reveal the Keep Metadata toggle only when the image carries strip-worthy EXIF
+// (screenshots/memes have none). filePath empty => check the JS-cached bytes.
 async function revealMetadataOptionIfPresent(filePath) {
     try {
         const has = await invoke('file_has_metadata', { filePath: filePath || '' });
-        if (!has) return;
-        const opt = document.getElementById('file-preview-metadata-option');
-        if (opt) opt.style.display = '';
+        if (has) VectorSvelte.fpPatch({ metadata: true });
     } catch (_) { /* leave hidden on error */ }
 }
 
-let filePreviewOverlay = null;
-let filePreviewNameEl = null; // Persistent reference to #file-preview-name (survives hotswap)
-let filePreviewExtEl = null;  // Reference to #file-preview-ext badge
+let filePreviewMounted = false;
 let pendingFile = null;
 let pendingFileBytes = null; // For Android: flag indicating bytes mode
 let pendingFileObject = null; // For Android: stores the File object directly
@@ -54,13 +26,30 @@ let pendingReplyRef = null;
 let compressionInProgress = false;
 let compressionComplete = false;
 let compressionPollingInterval = null;
-let pendingEditedName = null; // User-edited filename (null = use original)
 let pendingMiniAppInfo = null; // For marketplace publishing: stores Mini App info
 let pendingZipPath = null; // For folder zip: temp zip path for cleanup
 let zipInProgress = false; // For folder zip: compression in progress
 let pendingZipUnlisten = null; // For folder zip: unlisten function for zip_progress events
-let filePreviewGeneration = 0; // Guards against setTimeout race on rapid close+reopen
-let pendingSpoiler = false; // Spoiler mode: prepends SPOILER_ to filename on send
+let pendingBlobUrl = null; // A video preview's object URL, revoked on close
+let filePreviewGeneration = 0; // Guards against async results landing on a newer preview
+
+/** Mount the overlay island once; the vanilla side hands it its actions. */
+function ensureFilePreview() {
+    if (filePreviewMounted) return;
+    filePreviewMounted = true;
+    VectorSvelte.mountFilePreview({
+        h: {
+            close: () => closeFilePreview(),
+            send: () => sendPreviewedFile(),
+            publish: () => openPublishDialog(),
+            readImagePreview: (path) => invoke('read_image_preview', { path }),
+            thumbhash: (path) => invoke('generate_thumbhash_for_preview', { filePath: path || '' }),
+            buildFileListHtml: (files, total) => buildFileListHtml(files, total),
+            initFileTreeToggles: () => initFileTreeToggles(),
+            sanitizeStem: (str) => sanitizeFilenameStem(str),
+        },
+    });
+}
 
 // Image extensions supported by the image crate
 const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
@@ -85,155 +74,18 @@ function validateImageSrc(src) {
 }
 
 /**
- * Create and append a spoiler toggle button to an image container in the file preview.
- * Toggles pendingSpoiler state and swaps the preview between real image and thumbhash.
- * @param {HTMLElement} container - The .file-preview-image-container element
- */
-function appendSpoilerToggle(container, autoActivate = false) {
-    const btn = document.createElement('button');
-    btn.className = 'spoiler-toggle';
-    btn.type = 'button';
-    // Cache the original src so we can restore on toggle-off
-    let originalSrc = null;
-    let thumbhashSrc = null;
-
-    function activateSpoiler() {
-        const icon = btn.querySelector('.icon');
-        const img = container.querySelector('.file-preview-image');
-        icon.className = 'icon icon-eye-off';
-        btn.title = 'Remove spoiler';
-        if (img) {
-            originalSrc = img.src;
-            // Freeze rendered size so thumbhash displays at same dimensions
-            const rect = img.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) {
-                img.style.width = rect.width + 'px';
-                img.style.height = rect.height + 'px';
-            } else {
-                // Image not painted yet (auto-activate) — use natural dimensions
-                img.width = img.naturalWidth;
-                img.height = img.naturalHeight;
-                img.style.height = 'auto';
-            }
-            img.style.maxWidth = 'none';
-            img.style.maxHeight = 'none';
-            img.style.objectFit = 'fill';
-            if (thumbhashSrc) {
-                img.src = thumbhashSrc;
-            } else {
-                invoke('generate_thumbhash_for_preview', { filePath: pendingFile || '' })
-                    .then(dataUrl => {
-                        thumbhashSrc = dataUrl;
-                        if (pendingSpoiler) img.src = dataUrl;
-                    })
-                    .catch(() => {
-                        img.classList.add('spoiler-blur');
-                    });
-            }
-            // Add "Spoiler" label overlay if the image is large enough
-            const w = rect.width || img.naturalWidth;
-            const h = rect.height || img.naturalHeight;
-            if (w >= 80 && h >= 60) {
-                const overlay = document.createElement('div');
-                overlay.className = 'spoiler-overlay';
-                overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
-                container.appendChild(overlay);
-            }
-        }
-    }
-
-    function deactivateSpoiler() {
-        const icon = btn.querySelector('.icon');
-        const img = container.querySelector('.file-preview-image');
-        icon.className = 'icon icon-eye';
-        btn.title = 'Mark as spoiler';
-        if (img) {
-            img.classList.remove('spoiler-blur');
-            if (originalSrc) img.src = originalSrc;
-            img.style.width = '';
-            img.style.height = '';
-            img.style.maxWidth = '';
-            img.style.maxHeight = '';
-            img.style.objectFit = '';
-            img.removeAttribute('width');
-            img.removeAttribute('height');
-        }
-        const overlay = container.querySelector('.spoiler-overlay');
-        if (overlay) overlay.remove();
-    }
-
-    btn.title = autoActivate ? 'Remove spoiler' : 'Mark as spoiler';
-    btn.innerHTML = autoActivate
-        ? '<span class="icon icon-eye-off"></span>'
-        : '<span class="icon icon-eye"></span>';
-
-    btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        pendingSpoiler = !pendingSpoiler;
-        if (pendingSpoiler) {
-            activateSpoiler();
-        } else {
-            deactivateSpoiler();
-        }
-    });
-    container.appendChild(btn);
-
-    // Auto-activate: set state and fetch thumbhash immediately
-    if (autoActivate) {
-        pendingSpoiler = true;
-        const img = container.querySelector('.file-preview-image');
-        if (img) {
-            originalSrc = img.src;
-            invoke('generate_thumbhash_for_preview', { filePath: pendingFile || '' })
-                .then(dataUrl => {
-                    thumbhashSrc = dataUrl;
-                    if (pendingSpoiler) {
-                        // Set dimensions from current state
-                        const rect = img.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            img.style.width = rect.width + 'px';
-                            img.style.height = rect.height + 'px';
-                        } else {
-                            img.width = img.naturalWidth;
-                            img.height = img.naturalHeight;
-                            img.style.height = 'auto';
-                        }
-                        img.style.maxWidth = 'none';
-                        img.style.maxHeight = 'none';
-                        img.style.objectFit = 'fill';
-                        img.src = dataUrl;
-                        // Add overlay
-                        const w = rect.width || img.naturalWidth;
-                        const h = rect.height || img.naturalHeight;
-                        if (w >= 80 && h >= 60 && !container.querySelector('.spoiler-overlay')) {
-                            const overlay = document.createElement('div');
-                            overlay.className = 'spoiler-overlay';
-                            overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
-                            container.appendChild(overlay);
-                        }
-                    }
-                })
-                .catch(() => {
-                    if (pendingSpoiler) img.classList.add('spoiler-blur');
-                });
-        }
-    }
-}
-
-/**
- * Detect SPOILER_ prefix in filename, auto-enable pendingSpoiler, and return the clean name.
+ * Detect a SPOILER_ prefix: returns the clean name and whether the preview opens spoilered.
  * @param {string} name - The filename (with or without extension)
- * @returns {string} The filename with SPOILER_ prefix stripped (if present)
+ * @returns {{ name: string, spoiler: boolean }}
  */
 function detectAndStripSpoilerPrefix(name) {
     const stem = getFileStem(name);
     if (stem.toUpperCase().startsWith('SPOILER_')) {
-        pendingSpoiler = true;
         const cleanStem = stem.substring(8); // strip "SPOILER_"
         const ext = getFileExtension(name);
-        return ext ? `${cleanStem}.${ext}` : cleanStem;
+        return { name: ext ? `${cleanStem}.${ext}` : cleanStem, spoiler: true };
     }
-    return name;
+    return { name, spoiler: false };
 }
 
 /**
@@ -250,18 +102,6 @@ function formatFileSize(bytes) {
 }
 
 /**
- * Ensure the file-preview-name element is in the DOM (not swapped for an input).
- * If editing was active, restores the original element.
- */
-function restoreFilePreviewName() {
-    if (!filePreviewNameEl) return;
-    const activeInput = filePreviewOverlay?.querySelector('.file-preview-name-input');
-    if (activeInput) {
-        activeInput.replaceWith(filePreviewNameEl);
-    }
-}
-
-/**
  * Strip dangerous characters from a filename stem.
  * Permissive: allows spaces, accents, parentheses, etc. — only blocks
  * path separators, null bytes, and chars that break common filesystems.
@@ -269,50 +109,6 @@ function restoreFilePreviewName() {
 function sanitizeFilenameStem(str) {
     // eslint-disable-next-line no-control-regex
     return str.replace(/[\/\\:\*\?"<>\|\x00]/g, '');
-}
-
-/**
- * Set up click-to-edit behavior on the file preview name element.
- * Uses the same text-input hotswap mechanic as Group Chat Overview editing.
- */
-function setupEditableFileName() {
-    const nameEl = filePreviewNameEl;
-    if (!nameEl) return;
-    nameEl.onclick = () => {
-        const input = document.createElement('input');
-        input.type = 'text';
-        input.className = 'file-preview-name-input';
-        input.value = nameEl.textContent;
-        input.maxLength = 64;
-        nameEl.replaceWith(input);
-        input.focus();
-        input.select();
-        // Live-filter: strip disallowed chars as the user types
-        input.oninput = () => {
-            const pos = input.selectionStart;
-            const before = input.value;
-            input.value = sanitizeFilenameStem(before);
-            // Preserve cursor position (adjust if chars were removed before cursor)
-            const diff = before.length - input.value.length;
-            input.setSelectionRange(pos - diff, pos - diff);
-        };
-        let saved = false;
-        const save = () => {
-            if (saved) return;
-            saved = true;
-            const newName = input.value.trim();
-            input.replaceWith(nameEl);
-            if (newName) {
-                nameEl.textContent = newName;
-                pendingEditedName = newName;
-            }
-        };
-        input.onblur = save;
-        input.onkeydown = (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); input.blur(); }
-            if (e.key === 'Escape') { e.stopPropagation(); saved = true; input.replaceWith(nameEl); }
-        };
-    };
 }
 
 /**
@@ -417,101 +213,10 @@ function isMiniAppExtension(ext) {
     return ext === 'xdc';
 }
 
-/**
- * Display Mini App preview in the content area
- * @param {HTMLElement} contentArea - The content area element
- * @param {object} miniAppInfo - Mini App info from loadMiniAppInfo
- * @param {string} fileName - Fallback file name if no Mini App info
- */
-function displayMiniAppPreview(contentArea, miniAppInfo, fileName) {
+/** The Mini App preview's content model: its icon when the manifest carries one. */
+function miniAppPreviewContent(miniAppInfo) {
     const validatedIcon = miniAppInfo ? validateImageSrc(miniAppInfo.icon_data) : null;
-    if (validatedIcon) {
-        // Show Mini App icon
-        contentArea.innerHTML = `
-            <div class="file-preview-image-container file-preview-miniapp">
-                <img src="${validatedIcon}" class="file-preview-image file-preview-miniapp-icon" alt="${escapeHtml(miniAppInfo.name || 'Mini App')}">
-            </div>
-        `;
-    } else {
-        // Show generic Mini App icon
-        contentArea.innerHTML = `
-            <div class="file-preview-icon-container file-preview-miniapp">
-                <div class="icon icon-file file-preview-icon"></div>
-                <span class="file-preview-miniapp-badge">Mini App</span>
-            </div>
-        `;
-    }
-}
-
-/**
- * Create the file preview overlay element
- */
-function createFilePreviewOverlay() {
-    filePreviewOverlay = document.createElement('div');
-    filePreviewOverlay.className = 'file-preview-overlay';
-    filePreviewOverlay.innerHTML = `
-        <div class="file-preview-container">
-            <div class="file-preview-inner">
-                <div id="file-preview-content"></div>
-                <div class="file-preview-info">
-                    <div class="file-preview-name-row">
-                        <div class="file-preview-name" id="file-preview-name"></div>
-                        <span class="file-preview-ext-badge" id="file-preview-ext"></span>
-                    </div>
-                    <div class="file-preview-details">
-                        <span class="file-preview-detail" id="file-preview-size"></span>
-                    </div>
-                </div>
-                <div class="file-preview-options" id="file-preview-options"></div>
-            </div>
-            <div class="file-preview-buttons">
-                <button class="file-preview-btn file-preview-btn-publish" id="file-preview-publish" style="display: none;">
-                    <span class="icon icon-star"></span> Publish
-                </button>
-                <button class="file-preview-btn file-preview-btn-cancel" id="file-preview-cancel">Cancel</button>
-                <button class="file-preview-btn file-preview-btn-send" id="file-preview-send">Send</button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(filePreviewOverlay);
-    filePreviewNameEl = document.getElementById('file-preview-name');
-    filePreviewExtEl = document.getElementById('file-preview-ext');
-
-    // Event listeners
-    document.getElementById('file-preview-cancel').addEventListener('click', closeFilePreview);
-    document.getElementById('file-preview-send').addEventListener('click', sendPreviewedFile);
-    document.getElementById('file-preview-publish').addEventListener('click', openPublishDialog);
-
-    // Surface the privacy warning while Keep Metadata is on (location/camera/date
-    // leave the device). Delegated because the options markup is re-rendered per file.
-    document.getElementById('file-preview-options').addEventListener('change', (e) => {
-        if (e.target && e.target.id === 'file-preview-metadata') {
-            const warn = document.getElementById('file-preview-metadata-warning');
-            if (warn) warn.style.display = e.target.checked ? 'inline-block' : 'none';
-        }
-    });
-    
-    // Close on background click
-    filePreviewOverlay.addEventListener('click', (e) => {
-        if (e.target === filePreviewOverlay) {
-            closeFilePreview();
-        }
-    });
-    
-    // Keyboard shortcuts
-    document.addEventListener('keydown', (e) => {
-        if (!filePreviewOverlay || !filePreviewOverlay.classList.contains('active')) return;
-
-        if (e.key === 'Escape') {
-            closeFilePreview();
-        } else if (e.key === 'Enter') {
-            const sendBtn = document.getElementById('file-preview-send');
-            if (sendBtn && sendBtn.disabled) return;
-            e.preventDefault();
-            sendPreviewedFile();
-        }
-    });
+    return { kind: 'miniapp', icon: validatedIcon, name: miniAppInfo?.name || 'Mini App' };
 }
 
 /**
@@ -533,12 +238,6 @@ async function openPublishDialog() {
     await showPublishAppDialog(filePath, miniAppInfo);
 }
 
-/**
- * Open file preview overlay
- * @param {string} filepath - Path to the file
- * @param {string} receiver - Receiver pubkey or group ID
- * @param {string} replyRef - Reply reference (optional)
- */
 /**
  * Pre-flight: returns true (and shows a popup) only when every enabled
  * server is known to size-reject this magnitude or MIME-reject this type.
@@ -568,20 +267,21 @@ async function checkUploadBlocked(fileSize, extension) {
 }
 
 async function openFilePreview(filepath, receiver, replyRef = '') {
-    if (!filePreviewOverlay) {
-        createFilePreviewOverlay();
-    }
-    
+    ensureFilePreview();
+    const myGeneration = ++filePreviewGeneration;
+    releasePendingVideo();
+
     pendingFile = filepath;
     pendingFileBytes = null; // Clear bytes mode since we're using file path
     pendingFileObject = null; // Clear File object since we're using file path
-    pendingSpoiler = false; // Reset spoiler toggle for new preview
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     pendingFileExt = null; // Will be set after extension is resolved
-    
+    pendingZipPath = null;
+    zipInProgress = false;
+
     const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-    
+
     // Get file info from backend
     // On Android, use cache_android_file which reads and caches the file bytes immediately
     // This is critical because Android content URI permissions expire quickly
@@ -590,205 +290,134 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     let fileName = getFileName(filepath);
     let ext = getFileExtension(filepath);
     let androidPreview = null; // Base64 preview from Android backend
-    
+
     try {
         // On Android, cache the file bytes immediately while we still have permission
         // On other platforms, this just returns file info without caching
         const fileInfo = await invoke('cache_android_file', { filePath: filepath });
-        console.log('File info from backend:', fileInfo);
         fileSize = fileInfo.size;
-        
+
         if (await checkUploadBlocked(fileSize, ext)) return;
         // On Android, use the backend's filename and extension since URI doesn't contain them
-        if (isAndroid && fileInfo.name) {
-            fileName = fileInfo.name;
-            console.log('Using backend filename:', fileName);
-        }
-        if (isAndroid && fileInfo.extension) {
-            ext = fileInfo.extension;
-            console.log('Using backend extension:', ext);
-        }
+        if (isAndroid && fileInfo.name) fileName = fileInfo.name;
+        if (isAndroid && fileInfo.extension) ext = fileInfo.extension;
         // On Android, use the preview from backend if available
-        if (isAndroid && fileInfo.preview) {
-            androidPreview = fileInfo.preview;
-            console.log('Got preview from backend');
-        }
+        if (isAndroid && fileInfo.preview) androidPreview = fileInfo.preview;
     } catch (e) {
         console.error('Failed to get/cache file info:', e);
     }
-    
+    if (filePreviewGeneration !== myGeneration) return;
+
     // Determine file type using the resolved extension
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
     const isMiniApp = isMiniAppExtension(ext);
-    
+
     // For Mini Apps, try to load the app info to get name and icon
     let miniAppInfo = null;
     if (isMiniApp) {
         try {
             miniAppInfo = await loadMiniAppInfo(filepath);
-            console.log('Mini App info:', miniAppInfo);
         } catch (e) {
             console.error('Failed to load Mini App info:', e);
         }
+        if (filePreviewGeneration !== myGeneration) return;
     }
-    
+
     // Detect SPOILER_ prefix and strip from display name
-    fileName = detectAndStripSpoilerPrefix(fileName);
-
-    // Update file name — show stem (editable) + extension badge (read-only)
-    pendingEditedName = null;
+    const detected = detectAndStripSpoilerPrefix(fileName);
+    fileName = detected.name;
     pendingFileExt = ext;
-    restoreFilePreviewName();
+    pendingMiniAppInfo = miniAppInfo;
+
     const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
-    filePreviewNameEl.textContent = getFileStem(displayName) || displayName;
-    filePreviewExtEl.textContent = ext ? `.${ext}` : '';
-    filePreviewExtEl.style.display = ext ? '' : 'none';
-    setupEditableFileName();
 
-    // Update file size
-    document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
-
-    // Update content area
-    const contentArea = document.getElementById('file-preview-content');
-
+    let content;
     if (isMiniApp) {
-        // Show Mini App preview with icon
-        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
+        content = miniAppPreviewContent(miniAppInfo);
     } else if (isImage) {
-        // Show image preview
-        const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-
         const validatedAndroidPreview = validateImageSrc(androidPreview);
         if (isAndroid && validatedAndroidPreview) {
             // On Android, use the base64 preview we already got from cache_android_file
-            contentArea.innerHTML = `
-                <div class="file-preview-image-container">
-                    <img src="${validatedAndroidPreview}" class="file-preview-image" alt="Preview">
-                </div>
-            `;
+            content = { kind: 'image', src: validatedAndroidPreview, path: filepath };
         } else if (isAndroid) {
             // Fallback: On Android without preview, show icon
-            contentArea.innerHTML = `
-                <div class="file-preview-icon-container">
-                    <div class="icon icon-image file-preview-icon"></div>
-                </div>
-            `;
+            content = { kind: 'icon', icon: 'icon-image' };
         } else {
-            const imgSrc = convertFileSrc(filepath);
-            contentArea.innerHTML = `
-                <div class="file-preview-image-container">
-                    <img src="${imgSrc}" class="file-preview-image" alt="Preview">
-                </div>
-            `;
-            // The asset protocol serves only its scoped dirs — a file pasted from a
-            // clipboard manager or dragged from an arbitrary folder is refused and
-            // the img errors. Fall back to an inline (image-only, size-capped)
-            // backend read so the thumbnail still renders.
-            const previewImg = contentArea.querySelector('.file-preview-image');
-            previewImg.onerror = async () => {
-                previewImg.onerror = null;
-                try { previewImg.src = await invoke('read_image_preview', { path: filepath }); }
-                catch (_) { /* leave the browser's broken-image state; Send still works */ }
-            };
-        }
-        // Add spoiler toggle to whichever image container was created
-        const imgCont = contentArea.querySelector('.file-preview-image-container');
-        if (imgCont) {
-            const shouldAutoSpoiler = pendingSpoiler;
-            if (shouldAutoSpoiler) pendingSpoiler = false;
-            appendSpoilerToggle(imgCont, shouldAutoSpoiler);
+            // The asset protocol serves only its scoped dirs; the island falls back to
+            // an inline backend read when the img errors.
+            content = { kind: 'image', src: convertFileSrc(filepath), path: filepath };
         }
     } else if (isVideo) {
-        if (isAndroid) {
-            // Video preview is unreliable on Android; show a generic film icon.
-            contentArea.innerHTML = `
-                <div class="file-preview-icon-container">
-                    <div class="icon icon-film file-preview-icon"></div>
-                </div>
-            `;
-        } else {
-            const videoSrc = mediaUrl(filepath);
-            contentArea.innerHTML = `
-                <div class="file-preview-video-container">
-                    <video src="${videoSrc}" class="file-preview-video" controls muted></video>
-                </div>
-            `;
-        }
+        // Video preview is unreliable on Android; show a generic film icon.
+        content = isAndroid ? { kind: 'icon', icon: 'icon-film' } : { kind: 'video', src: mediaUrl(filepath) };
     } else {
-        // Show file icon
-        const iconClass = getFileIcon(filepath);
-        contentArea.innerHTML = `
-            <div class="file-preview-icon-container">
-                <div class="icon ${iconClass} file-preview-icon"></div>
-            </div>
-        `;
+        content = { kind: 'icon', icon: getFileIcon(filepath) };
     }
-    
-    // Update options area
-    const optionsArea = document.getElementById('file-preview-options');
-    
+
     // Reset compression state
     compressionInProgress = false;
     compressionComplete = false;
-    if (compressionPollingInterval) {
-        clearInterval(compressionPollingInterval);
-        compressionPollingInterval = null;
-    }
-    
+    stopCompressionPolling();
+
     // Keep Metadata shows for any non-GIF image; Compress only above 25KB.
     // Mini Apps don't get either option.
     const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
     const isGif = ext === 'gif';
-    if (isImage && !isGif && !isMiniApp) {
-        const showCompress = fileSize > MIN_COMPRESS_SIZE;
-        optionsArea.innerHTML = filePreviewOptionsHTML(showCompress, true);
+    const offerOptions = isImage && !isGif && !isMiniApp;
+    const showCompress = offerOptions && fileSize > MIN_COMPRESS_SIZE;
+
+    VectorSvelte.fpOpen({
+        stem: getFileStem(displayName) || displayName,
+        ext,
+        size: formatFileSize(fileSize),
+        spoiler: content.kind === 'image' && detected.spoiler,
+        compress: showCompress,
+    });
+    VectorSvelte.fpContent(content);
+
+    if (offerOptions) {
         // Start pre-compression in background (only when compression is offered)
         if (showCompress) startPrecompression(filepath);
         revealMetadataOptionIfPresent(filepath);
-    } else {
-        optionsArea.innerHTML = '';
     }
-    
-    // Store Mini App info for potential publishing
-    pendingMiniAppInfo = miniAppInfo;
-    
     // Show/hide publish button for trusted publishers with Mini Apps
-    const publishBtn = document.getElementById('file-preview-publish');
-    if (publishBtn) {
-        if (isMiniApp) {
-            // Check if current user is a trusted publisher
-            checkAndShowPublishButton(publishBtn);
-        } else {
-            publishBtn.style.display = 'none';
-        }
-    }
-    
-    // Show overlay
-    filePreviewOverlay.style.display = 'flex';
-    setTimeout(() => filePreviewOverlay.classList.add('active'), 10);
+    if (isMiniApp) checkAndShowPublishButton();
 }
 
-/**
- * Check if current user is trusted publisher and show publish button
- * @param {HTMLElement} publishBtn - The publish button element
- */
-async function checkAndShowPublishButton(publishBtn) {
-    console.log('[FilePreview] Checking if user is trusted publisher...');
+/** Check if current user is trusted publisher and show publish button */
+async function checkAndShowPublishButton() {
     try {
-        // Check if isCurrentUserTrustedPublisher is available from marketplace.js
-        if (typeof isCurrentUserTrustedPublisher === 'function') {
-            const isTrusted = await isCurrentUserTrustedPublisher();
-            console.log('[FilePreview] isTrusted:', isTrusted);
-            publishBtn.style.display = isTrusted ? 'flex' : 'none';
-        } else {
-            console.log('[FilePreview] isCurrentUserTrustedPublisher function not available');
-            publishBtn.style.display = 'none';
-        }
+        // isCurrentUserTrustedPublisher is provided by marketplace.js
+        const isTrusted = typeof isCurrentUserTrustedPublisher === 'function'
+            ? await isCurrentUserTrustedPublisher()
+            : false;
+        VectorSvelte.fpPatch({ publish: !!isTrusted });
     } catch (e) {
         console.error('Failed to check trusted publisher status:', e);
-        publishBtn.style.display = 'none';
+        VectorSvelte.fpPatch({ publish: false });
     }
+}
+
+function stopCompressionPolling() {
+    if (compressionPollingInterval) {
+        clearInterval(compressionPollingInterval);
+        compressionPollingInterval = null;
+    }
+}
+
+/** A video preview's object URL is released once it is off screen. */
+function releasePendingVideo() {
+    if (pendingBlobUrl) {
+        URL.revokeObjectURL(pendingBlobUrl);
+        pendingBlobUrl = null;
+    }
+}
+
+function compressionInfoText(status) {
+    return status.savings_percent > 0
+        ? `~${formatFileSize(status.estimated_size)} (${status.savings_percent}% smaller)`
+        : 'No significant savings';
 }
 
 /**
@@ -796,45 +425,31 @@ async function checkAndShowPublishButton(publishBtn) {
  * @param {string} filepath - Path to the image file
  */
 async function startPrecompression(filepath) {
-    const infoElement = document.getElementById('file-preview-compress-info');
-    
     try {
         // Start the pre-compression
         compressionInProgress = true;
         compressionComplete = false;
         await invoke('start_image_precompression', { filePath: filepath });
-        
+
         // Poll for completion
         compressionPollingInterval = setInterval(async () => {
             try {
                 const status = await invoke('get_compression_status', { filePath: filepath });
-                
                 if (status !== null) {
                     // Compression complete
                     compressionInProgress = false;
                     compressionComplete = true;
-                    clearInterval(compressionPollingInterval);
-                    compressionPollingInterval = null;
-                    
-                    if (infoElement) {
-                        if (status.savings_percent > 0) {
-                            infoElement.textContent = `~${formatFileSize(status.estimated_size)} (${status.savings_percent}% smaller)`;
-                        } else {
-                            infoElement.textContent = 'No significant savings';
-                        }
-                    }
+                    stopCompressionPolling();
+                    VectorSvelte.fpPatch({ compressInfo: compressionInfoText(status) });
                 }
             } catch (e) {
                 // File might have been cancelled
-                clearInterval(compressionPollingInterval);
-                compressionPollingInterval = null;
+                stopCompressionPolling();
             }
         }, 200);
     } catch (e) {
         console.error('Failed to start compression:', e);
-        if (infoElement) {
-            infoElement.textContent = 'Compression failed';
-        }
+        VectorSvelte.fpPatch({ compressInfo: 'Compression failed' });
         compressionInProgress = false;
     }
 }
@@ -856,16 +471,15 @@ function _b64utf8(str) {
  */
 async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver, replyRef = '') {
     if (await checkUploadBlocked(fileSize, ext)) return;
-    
-    if (!filePreviewOverlay) {
-        createFilePreviewOverlay();
-    }
-    
+    ensureFilePreview();
+    const myGeneration = ++filePreviewGeneration;
+    releasePendingVideo();
+
     // Determine file type
     const isImage = SUPPORTED_IMAGE_EXTENSIONS.includes(ext);
     const isVideo = SUPPORTED_VIDEO_EXTENSIONS.includes(ext);
     const isMiniApp = isMiniAppExtension(ext);
-    
+
     // Cache bytes in Rust immediately - Rust will generate a thumbnail preview for images
     let preview = null;
     try {
@@ -876,160 +490,89 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
             }
         });
         // Rust returns a preview for images
-        if (result.preview) {
-            preview = result.preview;
-        }
+        if (result.preview) preview = result.preview;
     } catch (e) {
         console.error('Failed to cache file bytes:', e);
         return;
     }
-    
+    if (filePreviewGeneration !== myGeneration) return;
+
     // For Mini Apps, try to load the app info directly from bytes (no temp file needed)
     let miniAppInfo = null;
     if (isMiniApp) {
         try {
             miniAppInfo = await loadMiniAppInfoFromBytes(bytes, fileName);
-            console.log('Mini App info:', miniAppInfo);
         } catch (e) {
             console.error('Failed to load Mini App info:', e);
         }
+        if (filePreviewGeneration !== myGeneration) return;
     }
-    
+
     // Mark that we're using bytes mode (no file path)
     pendingFileBytes = true; // Flag to indicate bytes mode
     pendingFileObject = null; // Clear File object since we're using cached bytes
-    pendingSpoiler = false; // Reset spoiler toggle for new preview
-    fileName = detectAndStripSpoilerPrefix(fileName);
+    const detected = detectAndStripSpoilerPrefix(fileName);
+    fileName = detected.name;
     pendingFileName = fileName;
     pendingFileExt = ext;
     pendingFile = null; // Clear file path since we're using bytes
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
-    
-    // Update file name — show stem (editable) + extension badge (read-only)
-    pendingEditedName = null;
-    restoreFilePreviewName();
-    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
-    filePreviewNameEl.textContent = getFileStem(displayName) || displayName;
-    filePreviewExtEl.textContent = ext ? `.${ext}` : '';
-    filePreviewExtEl.style.display = ext ? '' : 'none';
-    setupEditableFileName();
+    pendingZipPath = null;
+    zipInProgress = false;
+    pendingMiniAppInfo = miniAppInfo;
 
-    // Update file size
-    document.getElementById('file-preview-size').textContent = formatFileSize(fileSize);
-    
-    // Update content area
-    const contentArea = document.getElementById('file-preview-content');
-    
-    // Update options area
-    const optionsArea = document.getElementById('file-preview-options');
-    
+    const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
+    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
+
     // Reset compression state
     compressionInProgress = false;
     compressionComplete = false;
-    if (compressionPollingInterval) {
-        clearInterval(compressionPollingInterval);
-        compressionPollingInterval = null;
-    }
-    
-    if (isMiniApp) {
-        // Show Mini App preview with icon
-        displayMiniAppPreview(contentArea, miniAppInfo, fileName);
-        optionsArea.innerHTML = '';
-    } else if (isImage) {
-        // Use the preview from Rust (already a base64 data URL)
-        const validatedPreview = validateImageSrc(preview);
-        if (validatedPreview) {
-            contentArea.innerHTML = `
-                <div class="file-preview-image-container">
-                    <img src="${validatedPreview}" class="file-preview-image" alt="Preview">
-                </div>
-            `;
-            // Add spoiler toggle for clipboard-pasted images
-            const imgCont3 = contentArea.querySelector('.file-preview-image-container');
-            if (imgCont3) {
-                const shouldAutoSpoiler3 = pendingSpoiler;
-                if (shouldAutoSpoiler3) pendingSpoiler = false;
-                appendSpoilerToggle(imgCont3, shouldAutoSpoiler3);
-            }
-        } else {
-            // Fallback: show image icon if no preview
-            contentArea.innerHTML = `
-                <div class="file-preview-icon-container">
-                    <div class="icon icon-image file-preview-icon"></div>
-                </div>
-            `;
-        }
+    stopCompressionPolling();
 
+    let content;
+    let offerOptions = false;
+    let showCompress = false;
+    if (isMiniApp) {
+        content = miniAppPreviewContent(miniAppInfo);
+    } else if (isImage) {
+        // Use the preview from Rust (already a base64 data URL); an image icon without one.
+        const validatedPreview = validateImageSrc(preview);
+        content = validatedPreview ? { kind: 'image', src: validatedPreview, path: '' } : { kind: 'icon', icon: 'icon-image' };
         // Compress above 25KB; Keep Metadata for any non-GIF image.
         const MIN_COMPRESS_SIZE = 25 * 1024; // 25KB
-        if (ext !== 'gif') {
-            const showCompress = fileSize > MIN_COMPRESS_SIZE;
-            optionsArea.innerHTML = filePreviewOptionsHTML(showCompress, true);
-            // Start pre-compression in background (only when compression is offered)
-            if (showCompress) startCachedBytesCompression();
-            // Bytes were cached above via cache_file_bytes.
-            revealMetadataOptionIfPresent('');
-        } else {
-            optionsArea.innerHTML = '';
-        }
+        offerOptions = ext !== 'gif';
+        showCompress = offerOptions && fileSize > MIN_COMPRESS_SIZE;
     } else if (isVideo) {
-        // For video, we still need blob URL as data URLs don't work well for video
-        // But we'll keep it simple and just show an icon on Android
-        const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
-        
         if (isAndroid) {
-            // On Android, just show video icon - video preview is unreliable
-            contentArea.innerHTML = `
-                <div class="file-preview-icon-container">
-                    <div class="icon icon-film file-preview-icon"></div>
-                </div>
-            `;
+            // Video preview is unreliable on Android; show a film icon.
+            content = { kind: 'icon', icon: 'icon-film' };
         } else {
-            // On desktop, use blob URL for video preview
+            // A data URL does not work well for video: an object URL, released on close.
             const blob = new Blob([bytes], { type: `video/${ext}` });
-            const blobUrl = URL.createObjectURL(blob);
-            contentArea.dataset.blobUrl = blobUrl;
-            
-            contentArea.innerHTML = `
-                <div class="file-preview-video-container">
-                    <video src="${blobUrl}" class="file-preview-video" controls muted></video>
-                </div>
-            `;
+            pendingBlobUrl = URL.createObjectURL(blob);
+            content = { kind: 'video', src: pendingBlobUrl };
         }
-        
-        optionsArea.innerHTML = '';
     } else {
-        // Show file icon for other types
-        const iconClass = getFileIcon(fileName);
-        contentArea.innerHTML = `
-            <div class="file-preview-icon-container">
-                <span class="icon ${iconClass} file-preview-icon"></span>
-            </div>
-        `;
-
-        optionsArea.innerHTML = '';
+        content = { kind: 'icon', icon: getFileIcon(fileName) };
     }
 
-    // Store Mini App info for potential publishing
-    pendingMiniAppInfo = miniAppInfo;
-
-    // Show/hide publish button for trusted publishers with Mini Apps
-    const publishBtn = document.getElementById('file-preview-publish');
-    if (publishBtn) {
-        if (isMiniApp) {
-            // Check if current user is a trusted publisher
-            checkAndShowPublishButton(publishBtn);
-        } else {
-            publishBtn.style.display = 'none';
-        }
-    }
-
-    // Show overlay
-    filePreviewOverlay.style.display = 'flex';
-    requestAnimationFrame(() => {
-        filePreviewOverlay.classList.add('active');
+    VectorSvelte.fpOpen({
+        stem: getFileStem(displayName) || displayName,
+        ext,
+        size: formatFileSize(fileSize),
+        spoiler: content.kind === 'image' && detected.spoiler,
+        compress: showCompress,
     });
+    VectorSvelte.fpContent(content);
+
+    if (offerOptions) {
+        // Start pre-compression in background (only when compression is offered)
+        if (showCompress) startCachedBytesCompression();
+        // Bytes were cached above via cache_file_bytes.
+        revealMetadataOptionIfPresent('');
+    }
+    if (isMiniApp) checkAndShowPublishButton();
 }
 
 /**
@@ -1038,31 +581,19 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
 async function startCachedBytesCompression() {
     compressionInProgress = true;
     compressionComplete = false;
-    
-    const infoElement = document.getElementById('file-preview-compress-info');
-    
     try {
         // Start compression in Rust
         await invoke('start_cached_bytes_compression');
-        
+
         // Poll for completion
         compressionPollingInterval = setInterval(async () => {
             try {
                 const status = await invoke('get_cached_bytes_compression_status');
                 if (status) {
-                    clearInterval(compressionPollingInterval);
-                    compressionPollingInterval = null;
+                    stopCompressionPolling();
                     compressionComplete = true;
                     compressionInProgress = false;
-                    
-                    // Update UI with compression info
-                    if (infoElement) {
-                        if (status.savings_percent > 0) {
-                            infoElement.textContent = `~${formatFileSize(status.estimated_size)} (${status.savings_percent}% smaller)`;
-                        } else {
-                            infoElement.textContent = 'No significant savings';
-                        }
-                    }
+                    VectorSvelte.fpPatch({ compressInfo: compressionInfoText(status) });
                 }
             } catch (e) {
                 // Still compressing or error
@@ -1070,9 +601,7 @@ async function startCachedBytesCompression() {
         }, 200);
     } catch (e) {
         console.error('Failed to start compression:', e);
-        if (infoElement) {
-            infoElement.textContent = 'Compression failed';
-        }
+        VectorSvelte.fpPatch({ compressInfo: 'Compression failed' });
         compressionInProgress = false;
     }
 }
@@ -1229,9 +758,8 @@ function initFileTreeToggles() {
  * @param {string} replyRef - Reply reference (optional)
  */
 async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
-    if (!filePreviewOverlay) {
-        createFilePreviewOverlay();
-    }
+    ensureFilePreview();
+    releasePendingVideo();
 
     // Clean up any previous zip state (e.g., drag-drop while overlay is already open)
     if (pendingZipUnlisten) { pendingZipUnlisten(); pendingZipUnlisten = null; }
@@ -1245,55 +773,34 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
     pendingReceiver = receiver;
     pendingReplyRef = replyRef;
     pendingZipPath = null;
+    pendingFileExt = 'zip';
+    pendingMiniAppInfo = null;
     zipInProgress = true;
+    compressionInProgress = false;
+    compressionComplete = false;
+    stopCompressionPolling();
 
-    // Track generation so stale catch blocks don't touch DOM
+    // Track generation so stale results don't land on a newer preview
     const myGeneration = ++filePreviewGeneration;
 
     const folderName = dirPath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'folder';
 
-    // Show overlay immediately with spinner
-    const contentArea = document.getElementById('file-preview-content');
-    contentArea.innerHTML = `
-        <div class="file-preview-icon-container">
-            <div class="zip-progress-spinner" id="zip-progress-spinner"></div>
-        </div>
-        <div class="file-preview-zip-label" id="zip-progress-label">Compressing...</div>
-    `;
-
-    pendingEditedName = null;
-    pendingFileExt = 'zip';
-    restoreFilePreviewName();
-    filePreviewNameEl.textContent = folderName;
-    filePreviewExtEl.textContent = '.zip';
-    filePreviewExtEl.style.display = '';
-    setupEditableFileName();
-    document.getElementById('file-preview-size').textContent = 'Compressing...';
-
-    const optionsArea = document.getElementById('file-preview-options');
-    optionsArea.innerHTML = '';
-
-    // Disable send button during compression
-    const sendBtn = document.getElementById('file-preview-send');
-    sendBtn.disabled = true;
-    sendBtn.textContent = 'Compressing...';
-
-    // Hide publish button
-    const publishBtn = document.getElementById('file-preview-publish');
-    if (publishBtn) publishBtn.style.display = 'none';
-
-    // Show overlay
-    filePreviewOverlay.style.display = 'flex';
-    setTimeout(() => filePreviewOverlay.classList.add('active'), 10);
+    // Show the overlay immediately with the progress spinner; the send waits for the zip.
+    VectorSvelte.fpOpen({
+        stem: folderName,
+        edited: true,   // the attachment takes the folder's name, not the temp file's
+        ext: 'zip',
+        size: 'Compressing...',
+        sendDisabled: true,
+        sendLabel: 'Compressing...',
+    });
+    VectorSvelte.fpContent({ kind: 'zip-progress', percent: 0 });
 
     // Listen for progress events (stored for cleanup in closeFilePreview)
     const { listen } = window.__TAURI__.event;
     pendingZipUnlisten = await listen('zip_progress', (event) => {
-        const { percent } = event.payload;
-        const spinner = document.getElementById('zip-progress-spinner');
-        const label = document.getElementById('zip-progress-label');
-        if (spinner) spinner.style.setProperty('--progress', percent + '%');
-        if (label) label.textContent = `Compressing... ${percent}%`;
+        if (filePreviewGeneration !== myGeneration) return;
+        VectorSvelte.fpContent({ kind: 'zip-progress', percent: event.payload.percent });
     });
 
     try {
@@ -1305,16 +812,6 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
 
         pendingFile = result.zip_path;
         pendingZipPath = result.zip_path;
-        // Use the clean folder name so the attachment isn't named after the temp file
-        pendingEditedName = folderName;
-
-        // Build file list HTML (shared by both branches)
-        const fileTreeHtml = `
-            <div class="file-preview-icon-container">
-                <div class="icon icon-folder file-preview-icon"></div>
-            </div>
-            ${buildFileListHtml(result.file_list, result.file_count + result.dir_count)}
-        `;
 
         // Same pre-flight as `checkUploadBlocked`, scoped to .zip.
         let tooLarge = false;
@@ -1326,23 +823,19 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
             });
             tooLarge = !likely;
         } catch (_) { /* fall open */ }
+        if (filePreviewGeneration !== myGeneration) return;
 
+        VectorSvelte.fpContent({ kind: 'zip', files: result.file_list, total: result.file_count + result.dir_count });
         if (tooLarge) {
-            document.getElementById('file-preview-size').textContent =
-                `${formatFileSize(result.compressed_size)} — Too Large`;
-            sendBtn.disabled = true;
-            sendBtn.textContent = 'Too Large';
-            contentArea.innerHTML = fileTreeHtml;
+            VectorSvelte.fpPatch({
+                size: `${formatFileSize(result.compressed_size)} — Too Large`,
+                sendDisabled: true,
+                sendLabel: 'Too Large',
+            });
         } else {
             const sizeLabel = `${formatFileSize(result.compressed_size)} (${result.file_count} file${result.file_count !== 1 ? 's' : ''}${result.dir_count > 0 ? `, ${result.dir_count} folder${result.dir_count !== 1 ? 's' : ''}` : ''})`;
-            document.getElementById('file-preview-size').textContent = sizeLabel;
-            sendBtn.disabled = false;
-            sendBtn.textContent = 'Send';
-            contentArea.innerHTML = fileTreeHtml;
+            VectorSvelte.fpPatch({ size: sizeLabel, sendDisabled: false, sendLabel: 'Send' });
         }
-
-        // Init collapsible tree toggles
-        initFileTreeToggles();
     } catch (e) {
         // If a newer preview was opened while we were compressing, discard silently
         if (filePreviewGeneration !== myGeneration) return;
@@ -1352,17 +845,9 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
 
         // "Cancelled" is expected when user hits Cancel during compression — no error popup
         const errStr = String(e);
-        if (errStr.includes('Cancelled')) {
-            console.log('Zip compression cancelled by user');
-        } else {
+        if (!errStr.includes('Cancelled')) {
             console.error('Failed to zip directory:', e);
-
-            // Close the overlay and show error
-            filePreviewOverlay.classList.remove('active');
-            setTimeout(() => {
-                filePreviewOverlay.style.display = 'none';
-            }, 200);
-
+            VectorSvelte.fpClose();
             popupConfirm('Folder Compression Failed', escapeHtml(errStr), true, '', 'vector_warning.svg');
         }
 
@@ -1371,8 +856,7 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
         pendingReceiver = null;
         pendingReplyRef = null;
         pendingZipPath = null;
-        sendBtn.disabled = false;
-        sendBtn.textContent = 'Send';
+        VectorSvelte.fpPatch({ sendDisabled: false, sendLabel: 'Send' });
     }
 }
 
@@ -1380,27 +864,19 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
  * Close file preview overlay
  */
 function closeFilePreview() {
-    if (!filePreviewOverlay) return;
-    
-    // Stop compression polling
-    if (compressionPollingInterval) {
-        clearInterval(compressionPollingInterval);
-        compressionPollingInterval = null;
-    }
-    
-    // Clean up blob URLs if any
-    const contentArea = document.getElementById('file-preview-content');
-    if (contentArea && contentArea.dataset.blobUrl) {
-        URL.revokeObjectURL(contentArea.dataset.blobUrl);
-        delete contentArea.dataset.blobUrl;
-    }
-    
+    if (!filePreviewMounted) return;
+
+    stopCompressionPolling();
+    releasePendingVideo();
+
     // Cancel any pending compression
     if (pendingFile) {
         invoke('cancel_compression', { filePath: pendingFile }).catch(() => {});
     }
+    // A cancelled paste must not leave its bytes behind: the byte-cache commands
+    // would serve them to the next preview.
     if (pendingFileBytes) {
-        invoke('cancel_cached_bytes_compression').catch(() => {});
+        invoke('clear_cached_file').catch(() => {});
     }
 
     // Clean up pending zip file or cancel in-progress zip
@@ -1414,34 +890,22 @@ function closeFilePreview() {
         pendingZipUnlisten = null;
     }
 
-    // Clear state immediately (not in setTimeout) to prevent race with rapid reopen
-    const closeGeneration = ++filePreviewGeneration;
+    // Clear state immediately to prevent a race with a rapid reopen
+    ++filePreviewGeneration;
     pendingFile = null;
     pendingFileBytes = null;
     pendingFileObject = null;
     pendingFileName = null;
     pendingFileExt = null;
-    pendingEditedName = null;
     pendingReceiver = null;
     pendingReplyRef = null;
     compressionInProgress = false;
     compressionComplete = false;
-    pendingSpoiler = false;
     pendingZipPath = null;
     zipInProgress = false;
+    pendingMiniAppInfo = null;
 
-    filePreviewOverlay.classList.remove('active');
-    setTimeout(() => {
-        // Only clear DOM if no new preview was opened during the animation
-        if (filePreviewGeneration !== closeGeneration) return;
-        filePreviewOverlay.style.display = 'none';
-
-        const contentArea = document.getElementById('file-preview-content');
-        if (contentArea) contentArea.innerHTML = '';
-
-        const optionsArea = document.getElementById('file-preview-options');
-        if (optionsArea) optionsArea.innerHTML = '';
-    }, 200);
+    VectorSvelte.fpClose();
 }
 
 /**
@@ -1462,8 +926,9 @@ async function sendPreviewedFile() {
     const fileObject = pendingFileObject;
     const fileName = pendingFileName;
     const ext = pendingFileExt;
-    const editedStem = pendingEditedName;
-    const isSpoiler = pendingSpoiler;
+    const fp = VectorSvelte.filePreview();
+    const editedStem = fp.edited ? fp.stem : null;
+    const isSpoiler = fp.spoiler;
     // Build nameOverride: if spoiler, always ensure SPOILER_ prefix (requires a name)
     let nameOverride;
     if (isSpoiler) {
@@ -1483,55 +948,33 @@ async function sendPreviewedFile() {
     const isImage = (usingBytes || fileObject)
         ? SUPPORTED_IMAGE_EXTENSIONS.includes(ext)
         : isSupportedImage(filePath);
-    const compressCheckbox = document.getElementById('file-preview-compress');
-    const shouldCompress = !!(isImage && compressCheckbox && compressCheckbox.checked && ext !== 'gif');
+    const shouldCompress = !!(isImage && fp.compress && fp.compressChecked && ext !== 'gif');
     // Default off = strip EXIF (location, camera, timestamps). When on, metadata
     // is preserved (re-attached onto compressed images, kept as-is otherwise).
-    const metadataCheckbox = document.getElementById('file-preview-metadata');
-    const keepMetadata = !!(isImage && metadataCheckbox && metadataCheckbox.checked);
+    const keepMetadata = !!(isImage && fp.metadata && fp.metadataChecked);
     // Check if compression was started (bytes are cached in Rust)
     const compressionWasStarted = compressionInProgress || compressionComplete;
     
-    // Stop polling but don't clear cache yet (we'll use it)
-    if (compressionPollingInterval) {
-        clearInterval(compressionPollingInterval);
-        compressionPollingInterval = null;
-    }
-    
-    // Close dialog immediately (without clearing cache since we're sending)
-    if (filePreviewOverlay) {
-        // Stop and clean up any video element
-        const video = filePreviewOverlay.querySelector('video');
-        if (video) {
-            video.pause();
-            video.src = '';
-            video.load();
-        }
-        
-        filePreviewOverlay.classList.remove('active');
-        setTimeout(() => {
-            filePreviewOverlay.style.display = 'none';
-            const contentArea = document.getElementById('file-preview-content');
-            if (contentArea) {
-                contentArea.innerHTML = '';
-            }
-        }, 200);
-    }
-    
+    // Stop polling but don't clear the cache (the send uses it); the overlay closes
+    // now and the island stops any video.
+    stopCompressionPolling();
+    releasePendingVideo();
+    ++filePreviewGeneration;
+    VectorSvelte.fpClose();
+
     // Clear pending state (but not the cache)
     pendingFile = null;
     pendingFileBytes = null;
     pendingFileObject = null;
     pendingFileName = null;
     pendingFileExt = null;
-    pendingEditedName = null;
-    pendingSpoiler = false;
     pendingReceiver = null;
     pendingReplyRef = null;
     compressionInProgress = false;
     compressionComplete = false;
     pendingZipPath = null;
     zipInProgress = false;
+    pendingMiniAppInfo = null;
     
     // Determine if this is a group or DM
     const isGroup = receiver.startsWith('group:');

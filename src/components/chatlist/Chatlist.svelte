@@ -65,24 +65,6 @@
         return parts.join('\x00');
     });
 
-    // Rebuild key for the pane header: identity-relevant fields only, so member
-    // counts landing (or a rename) rebuild it but unrelated bumps don't — the
-    // builder's avatar would otherwise reload on every message anywhere.
-    const headKey = $derived.by(() => {
-        const id = paneCommunityId;
-        if (!id) return '';
-        communityVersion(id);
-        let primary = null;
-        for (const c of snap.chats) {
-            if (c.metadata?.custom_fields?.community_id !== id) continue;
-            if (!primary) primary = c;
-            if (h.isPrimaryChannelChat(c)) { primary = c; break; }
-        }
-        if (!primary) return id;
-        const cf = primary.metadata.custom_fields;
-        return [id, cf.name || '', primary.metadata.avatar_cached || '', cf.proto_version || '', h.communityMemberSubtext(id)].join('\x00');
-    });
-
     // ── actions: leaf widgets stay the vanilla builders / DOM disciplines ──
 
     function inviteKey(inv) {
@@ -120,22 +102,6 @@
     function builtInto(node, builder) {
         node.replaceChildren(builder());
     }
-
-    // The community pane's header lives OUTSIDE the mount target (#ws-community-head
-    // is a sibling of #chat-list, above the scrollport) — stamped from here, rebuilt
-    // only when its key changes.
-    let prevHeadKey = '\x01';
-    $effect(() => {
-        const key = headKey;
-        const head = document.getElementById('ws-community-head');
-        if (!head) return;
-        if (key === prevHeadKey) return;
-        prevHeadKey = key;
-        if (!key) head.replaceChildren();
-        // Bare id (community with no primary chat row yet): the builder handles
-        // the null-primary fallback itself.
-        else head.replaceChildren(h.renderCommunityListHeader(key.split('\x00')[0]));
-    });
 
     // Message-less communities lazy-load their latest membership event so the preview
     // can say "X has joined" — a side effect, so it lives in an effect (the helper's

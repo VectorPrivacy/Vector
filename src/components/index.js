@@ -21,6 +21,8 @@ import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
 import CommandStrip from './composer/CommandStrip.svelte';
 import ChatHeader from './chat/ChatHeader.svelte';
+import CommunityHead from './chatlist/CommunityHead.svelte';
+import FilePreview from './files/FilePreview.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -36,6 +38,11 @@ export { flushSync };
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider } from './lib/chatview.svelte.js';
+// The send-file preview overlay's state.
+export {
+    filePreview, filePreviewContent, openFilePreview as fpOpen, closeFilePreview as fpClose,
+    setFilePreviewContent as fpContent, patchFilePreview as fpPatch,
+} from './lib/filepreview.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
     startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock,
@@ -147,4 +154,15 @@ export function mountChatHeader({ els, h }) {
     host.hidden = true;
     document.body.appendChild(host);
     return mount(ChatHeader, { target: host, props: { els, h } });
+}
+
+/** Mount the community pane's head into `target` (#ws-community-head). */
+export function mountCommunityHead(target, { h }) {
+    target.replaceChildren();
+    return mount(CommunityHead, { target, props: { h } });
+}
+
+/** Mount the send-file preview overlay at body level; it shows itself from `fpOpen`. */
+export function mountFilePreview({ h }) {
+    return mount(FilePreview, { target: document.body, props: { h } });
 }
