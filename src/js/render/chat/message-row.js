@@ -100,6 +100,7 @@ function updateMessageRow(domMsg, msg, profile, oldId = '') {
         if (windowBottomId === oldId) windowBottomId = msg.id;
         VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
     }
+    VectorSvelte.touchMessage(msg.id);
     VectorSvelte.touchWindow();
     VectorSvelte.flushSync();
     const el = document.getElementById(msg.id);

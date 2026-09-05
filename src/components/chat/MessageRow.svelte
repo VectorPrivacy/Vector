@@ -14,6 +14,7 @@
     // transforms, the has-reply class after an update) are deliberately not re-bound
     // here, so those writes persist.
     import { profileVersion, communityVersion } from '../lib/signals.svelte.js';
+    import { messageVersion } from '../lib/chatview.svelte.js';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -31,6 +32,8 @@
     // shell re-derives from `current` and the content refills whole.
     let override = $state.raw(null);
     const current = $derived(override || msg);
+    // The same object edited in place keeps its identity; its version is what moves.
+    const rev = $derived(messageVersion(current.id));
 
     /** The message changed (edit, status, attachment, id swap): re-derive and refill. */
     export function update(next) {
@@ -61,8 +64,8 @@
     // svelte-ignore state_referenced_locally
     const pendingReply = replyPending || (replyEl === undefined && msg.replied_to && !reply ? msg.replied_to : '');
 
-    const status = $derived(current.failed ? 'failed' : current.pending ? 'pending' : 'sent');
-    const hourMinute = $derived(h.formatHourMinute(current.at));
+    const status = $derived.by(() => { rev; return current.failed ? 'failed' : current.pending ? 'pending' : 'sent'; });
+    const hourMinute = $derived.by(() => { rev; return h.formatHourMinute(current.at); });
 
     // The author as the profile store knows them now. `sender` is the mount-time
     // snapshot; the signal read is what repaints the row when the profile lands.
@@ -126,13 +129,14 @@
     }
 
     // Content: exactly renderMessage's builders; refilled whole when the message changes.
-    function contentInto(node, m) {
-        let cur = m;
+    function contentInto(node, { m, rev: r }) {
+        let cur = m, curRev = r;
         h.fillContent(node, cur, sender, ctx);
         return {
-            update: (next) => {
-                if (next === cur) return;
+            update: ({ m: next, rev: nextRev }) => {
+                if (next === cur && nextRev === curRev) return;
                 cur = next;
+                curRev = nextRev;
                 node.replaceChildren();
                 h.fillContent(node, cur, sender, ctx);
             },
@@ -219,7 +223,7 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
-        <div class="dmsg-content" use:contentInto={current}></div>
+        <div class="dmsg-content" use:contentInto={{ m: current, rev }}></div>
         {#if hadReactions}
             <div class="dmsg-reactions" use:reactionsInto></div>
         {/if}

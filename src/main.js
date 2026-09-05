@@ -1779,12 +1779,8 @@ function rowIsInDissolvedCommunity() {
  * the open view) so a realtime dissolution updates the live UI, not just the cached flag.
  */
 function applyDissolvedChatUI(chat) {
-    domChatMessageInput.disabled = true;
-    domChatMessageInput.placeholder = 'This community has been dissolved.';
-    domChatMessageInput.style.paddingLeft = '15px';
-    domChatMessageInputFile.style.display = 'none';
-    domChatMessageInputVoice.style.display = 'none';
-    domChatMessageInputEmoji.style.display = 'none';
+    VectorSvelte.setLock('dissolved', 'This community has been dissolved.');
+    VectorSvelte.flushSync();
     if (!document.getElementById('dissolved-notice')) {
         const communityName = chat?.metadata?.custom_fields?.name || 'This community';
         const dissolvedNotice = insertSystemEvent(`${communityName} was dissolved by the owner.`);
@@ -3608,12 +3604,8 @@ async function setupRustListeners() {
                 // event. The room is ALIVE on v2, so fully RESTORE the composer — mirror
                 // openChat's live-chat branch, not just the placeholder.
                 document.getElementById('dissolved-notice')?.remove();
-                domChatMessageInput.disabled = false;
-                domChatMessageInput.placeholder = 'Enter message...';
-                domChatMessageInput.style.paddingLeft = '';
-                domChatMessageInputFile.style.display = '';
-                domChatMessageInputVoice.style.display = '';
-                domChatMessageInputEmoji.style.display = '';
+                VectorSvelte.setLock(null);
+                VectorSvelte.flushSync();
                 if (!document.getElementById('migrated-notice')) {
                     // insertSystemEvent only appends when given a parent — attach explicitly
                     // (same pattern as the dissolved notice).
@@ -8518,18 +8510,8 @@ function jumpToMessage(targetMsgId) {
  * chat open and reply/draft transition re-syncs through here.
  */
 function syncSendMicToInput() {
-    const hasText = domChatMessageInput.value.trim().length > 0;
-    domChatMessageInputSend.classList.remove('button-swap-in', 'button-swap-out');
-    domChatMessageInputVoice.classList.remove('button-swap-in', 'button-swap-out');
-    if (hasText) {
-        domChatMessageInputSend.classList.add('active');
-        domChatMessageInputSend.style.display = '';
-        domChatMessageInputVoice.style.display = 'none';
-    } else {
-        domChatMessageInputSend.classList.remove('active');
-        domChatMessageInputSend.style.display = 'none';
-        domChatMessageInputVoice.style.display = '';
-    }
+    VectorSvelte.setDraftEmpty(domChatMessageInput.value.trim().length === 0, false);
+    VectorSvelte.flushSync();
 }
 
 /** Per-chat composer drafts, runtime-only (chat id → unsent text). */
@@ -8551,9 +8533,8 @@ function stashComposerDraft() {
 }
 
 function cancelReply() {
-    // Hide the reply bar. Its content is left in place so the collapse
-    // animation doesn't slide out an empty shell; the next reply overwrites it
-    domChatMessageBox.classList.remove('replying');
+    VectorSvelte.cancelReply();
+    VectorSvelte.flushSync();
 
     // Focus the message input (desktop only - mobile keyboards are disruptive)
     if (!platformFeatures.is_mobile) {
@@ -8596,20 +8577,12 @@ function startEditMessage(messageId, content) {
     strCurrentEditMessageId = messageId;
     strCurrentEditOriginalContent = content;
 
-    // Populate the input with the message content
+    // Populate the input with the message content; the chrome (cancel button,
+    // placeholder, send button) follows the edit mode.
     domChatMessageInput.value = content;
-
-    // Show the cancel button, hide file button
-    domChatMessageInputFile.style.display = 'none';
-    domChatMessageInputCancel.style.display = '';
-
-    // Update placeholder
-    domChatMessageInput.setAttribute('placeholder', 'Editing message...');
-
-    // Show the send button (since we have text)
-    domChatMessageInputSend.classList.add('active');
-    domChatMessageInputSend.style.display = '';
-    domChatMessageInputVoice.style.display = 'none';
+    VectorSvelte.startEdit(messageId, content);
+    VectorSvelte.setDraftEmpty(false, false);
+    VectorSvelte.flushSync();
 
     // Focus the input and move cursor to end
     domChatMessageInput.focus();
@@ -8627,18 +8600,11 @@ function cancelEdit() {
     strCurrentEditMessageId = '';
     strCurrentEditOriginalContent = '';
 
-    // Clear the input
+    // Clear the input; the chrome follows the mode back to idle.
     domChatMessageInput.value = '';
-
-    // Reset the message UI
-    domChatMessageInputFile.style.display = '';
-    domChatMessageInputCancel.style.display = 'none';
-    domChatMessageInput.setAttribute('placeholder', strOriginalInputPlaceholder);
-
-    // Reset send button state
-    domChatMessageInputSend.classList.remove('active');
-    domChatMessageInputSend.style.display = 'none';
-    domChatMessageInputVoice.style.display = '';
+    VectorSvelte.cancelEdit();
+    VectorSvelte.setDraftEmpty(true, false);
+    VectorSvelte.flushSync();
 
     // Focus the input (desktop only)
     if (!platformFeatures.is_mobile) {
@@ -9189,12 +9155,8 @@ async function openChat(contact) {
     document.getElementById('blocked-notice')?.remove();
     document.getElementById('dissolved-notice')?.remove();
     if (isBlockedChat) {
-        domChatMessageInput.disabled = true;
-        domChatMessageInput.placeholder = 'Unblock to send messages';
-        domChatMessageInput.style.paddingLeft = '15px';
-        domChatMessageInputFile.style.display = 'none';
-        domChatMessageInputVoice.style.display = 'none';
-        domChatMessageInputEmoji.style.display = 'none';
+        VectorSvelte.setLock('blocked', 'Unblock to send messages');
+        VectorSvelte.flushSync();
         // Append a system-style blocked notice at the bottom of the chat
         const blockedNotice = insertSystemEvent('Blocked — You won\'t receive new messages from them');
         blockedNotice.id = 'blocked-notice';
@@ -9203,12 +9165,8 @@ async function openChat(contact) {
     } else if (isDissolvedChat) {
         applyDissolvedChatUI(chat);
     } else {
-        domChatMessageInput.disabled = false;
-        domChatMessageInput.placeholder = 'Enter message...';
-        domChatMessageInput.style.paddingLeft = '';
-        domChatMessageInputFile.style.display = '';
-        domChatMessageInputVoice.style.display = '';
-        domChatMessageInputEmoji.style.display = '';
+        VectorSvelte.setLock(null);
+        VectorSvelte.flushSync();
         // Restore this chat's draft (runtime-only). Skip when the input still
         // holds live text — a same-chat re-open must not clobber typing.
         if (domChatMessageInput.value === '') {
@@ -9244,11 +9202,8 @@ async function openChat(contact) {
             openFilePreview(share.uris[0], contact, '').catch(e => console.error('[Share] preview failed:', e));
         } else if (share.text) {
             domChatMessageInput.value = share.text;
-            // A programmatic value set doesn't fire 'input', so reveal Send manually (mirrors the
-            // edit path); otherwise the mic stays until the user types a character.
-            domChatMessageInputSend.classList.add('active');
-            domChatMessageInputSend.style.display = '';
-            domChatMessageInputVoice.style.display = 'none';
+            // A programmatic value set doesn't fire 'input', so derive mic/send here.
+            syncSendMicToInput();
             autoResizeChatInput();
             domChatMessageInput.focus();
         }
@@ -11120,6 +11075,22 @@ let strPubkey;
 let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
+// The composer's chrome is one reconciler over these elements (index.html keeps the
+// markup, the editor is never touched); modules set state instead of poking buttons.
+VectorSvelte.mountComposerChrome({
+    els: {
+        box: domChatMessageBox, input: domChatMessageInput,
+        file: domChatMessageInputFile, cancel: domChatMessageInputCancel, emoji: domChatMessageInputEmoji,
+        voice: domChatMessageInputVoice, send: domChatMessageInputSend,
+        replyName: domChatReplyBarName, replySnippet: domChatReplyBarSnippet, replyCancel: domChatReplyBarCancel,
+    },
+    // Lazy: the helpers live in scripts that load after this one evaluates.
+    h: {
+        twemojify: (el) => twemojify(el),
+        renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
+        placeholder: strOriginalInputPlaceholder || 'Enter message...',
+    },
+});
 
 /**
  * Auto-resize the chat input textarea based on content.
@@ -12472,7 +12443,7 @@ async function sendMessage(messageText) {
         domChatMessageInput.value = '';
         resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
         resetChatInputSize();
-        domChatMessageInput.setAttribute('placeholder', 'Saving edit...');
+        domChatMessageInput.placeholder = 'Saving edit...';
 
         try {
             const editMsgId = strCurrentEditMessageId;
@@ -12543,7 +12514,7 @@ async function sendMessage(messageText) {
     domChatMessageInput.value = '';
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
     resetChatInputSize();
-    domChatMessageInput.setAttribute('placeholder', 'Sending...');
+    domChatMessageInput.placeholder = 'Sending...';
 
     try {
         const replyRef = strCurrentReplyReference;
@@ -12561,7 +12532,7 @@ async function sendMessage(messageText) {
     } catch(e) {
         console.error('Failed to send message:', e);
     } finally {
-        domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+        domChatMessageInput.placeholder = 'Enter message...';
     }
 }
 
@@ -12732,13 +12703,10 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
         // routeForSend inside sendMessage).
         submit: (text) => sendMessage(text),
         composerToggled: (active) => {
-            if (active) {
-                domChatMessageInputVoice.style.display = 'none';
-                domChatMessageInputSend.style.display = '';
-                domChatMessageInputSend.classList.add('active');
-            } else {
-                resetSendMicButtons();
-            }
+            // The structured composer submits through the send button, so it stays shown.
+            VectorSvelte.setCommandActive(active);
+            VectorSvelte.setDraftEmpty(!active, false);
+            VectorSvelte.flushSync();
             // BOTH directions. The command composer grows the input area as it
             // slides in and shrinks it as it slides out, and a bottom-pinned
             // reader has to stay glued to the live tail through either — the
@@ -12774,12 +12742,8 @@ function followPinThroughComposerResize() {
  * Used after sending messages to avoid animation race conditions
  */
 function resetSendMicButtons() {
-    // Clear any animation classes
-    domChatMessageInputSend.classList.remove('active', 'button-swap-in', 'button-swap-out');
-    domChatMessageInputVoice.classList.remove('button-swap-in', 'button-swap-out');
-    // Set correct display states
-    domChatMessageInputSend.style.display = 'none';
-    domChatMessageInputVoice.style.display = '';
+    VectorSvelte.setDraftEmpty(true, false);
+    VectorSvelte.flushSync();
 }
 
     // Hook up an 'input' listener on the Message Box for typing indicators
@@ -12787,39 +12751,8 @@ domChatMessageInput.oninput = async (e) => {
     // Auto-resize the textarea based on content
     autoResizeChatInput();
     
-    // Toggle send button active state based on text content
-    const hasText = domChatMessageInput.value.trim().length > 0;
-    if (hasText) {
-        // Swap: Hide mic, show send button with animation
-        if (domChatMessageInputVoice.style.display !== 'none') {
-            domChatMessageInputVoice.classList.add('button-swap-out');
-            domChatMessageInputVoice.addEventListener('animationend', () => {
-                domChatMessageInputVoice.style.display = 'none';
-                domChatMessageInputVoice.classList.remove('button-swap-out');
-                domChatMessageInputSend.style.display = '';
-                domChatMessageInputSend.classList.add('button-swap-in');
-                domChatMessageInputSend.addEventListener('animationend', () => {
-                    domChatMessageInputSend.classList.remove('button-swap-in');
-                }, { once: true });
-            }, { once: true });
-        }
-        domChatMessageInputSend.classList.add('active');
-    } else {
-        // Swap: Hide send, show mic button with animation
-        if (domChatMessageInputSend.style.display !== 'none') {
-            domChatMessageInputSend.classList.add('button-swap-out');
-            domChatMessageInputSend.classList.remove('active');
-            domChatMessageInputSend.addEventListener('animationend', () => {
-                domChatMessageInputSend.style.display = 'none';
-                domChatMessageInputSend.classList.remove('button-swap-out');
-                domChatMessageInputVoice.style.display = '';
-                domChatMessageInputVoice.classList.add('button-swap-in');
-                domChatMessageInputVoice.addEventListener('animationend', () => {
-                    domChatMessageInputVoice.classList.remove('button-swap-in');
-                }, { once: true });
-            }, { once: true });
-        }
-    }
+    // Mic ↔ send follows the draft; a typed change animates the swap.
+    VectorSvelte.setDraftEmpty(domChatMessageInput.value.trim().length === 0, true);
 
     // Send a Typing Indicator only when content actually changes and setting is enabled.
     // Don't send while editing (not a new message), while the draft is a `/` command
@@ -12846,7 +12779,7 @@ domChatMessageInput.oninput = async (e) => {
         if (recorder.isInPreview) {
             const sent = recorder.send();
             if (sent && strOpenChat) {
-                domChatMessageInput.setAttribute('placeholder', 'Sending...');
+                domChatMessageInput.placeholder = 'Sending...';
                 try {
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
@@ -12859,7 +12792,7 @@ domChatMessageInput.oninput = async (e) => {
                         popupConfirm(e, '', true, '', 'vector_warning.svg');
                     }
                 }
-                domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+                domChatMessageInput.placeholder = 'Enter message...';
                 nLastTypingIndicator = 0;
             }
             return;
@@ -12948,7 +12881,7 @@ domChatMessageInput.oninput = async (e) => {
     recorder.onStateChange = (newState, oldState) => {
         if (newState === 'idle') {
             // Reset placeholder when returning to idle
-            domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+            domChatMessageInput.placeholder = 'Enter message...';
         } else if (newState === 'recording' || newState === 'locked') {
             // Clear input and show recording status
             domChatMessageInput.value = '';
@@ -12958,7 +12891,7 @@ domChatMessageInput.oninput = async (e) => {
     
     // Handle cancel callback
     recorder.onCancel = () => {
-        domChatMessageInput.setAttribute('placeholder', 'Enter message...');
+        domChatMessageInput.placeholder = 'Enter message...';
         cancelReply();
     };
 

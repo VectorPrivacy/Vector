@@ -16,6 +16,7 @@ import Chatlist from './chatlist/Chatlist.svelte';
 import RailShortcuts from './rail/RailShortcuts.svelte';
 import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
+import ComposerChrome from './composer/ComposerChrome.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -30,7 +31,9 @@ export { flushSync };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
-export { setWindow, clearWindow, touchWindow, setDivider, clearDivider } from './lib/chatview.svelte.js';
+export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider } from './lib/chatview.svelte.js';
+// The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
+export { startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setCommandActive } from './lib/composer.svelte.js';
 
 /**
  * Mount the contact picker into `target`. The component owns its dialog-local state;
@@ -90,4 +93,15 @@ export function mountRailShortcuts(target, { h, snapshot }) {
 export function mountMessageList(target, { h }) {
     target.replaceChildren();
     return mount(MessageList, { target, props: { h } });
+}
+
+/**
+ * Mount the composer's chrome reconciler over the existing elements (index.html keeps
+ * the markup; the editor is never touched). Renderless: `target` only hosts the effects.
+ */
+export function mountComposerChrome({ els, h }) {
+    const host = document.createElement('div');
+    host.hidden = true;
+    document.body.appendChild(host);
+    return mount(ComposerChrome, { target: host, props: { els, h } });
 }

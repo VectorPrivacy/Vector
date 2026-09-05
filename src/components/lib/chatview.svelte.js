@@ -5,8 +5,13 @@
 // The window is anchored by message IDS, like the engine's own anchors: the array
 // mutates underneath (prepends, mid-inserts), and ids survive that where indices do
 // not. `rev` says "the slice's contents changed in place" (an edit, a splice).
+import { SvelteMap } from 'svelte/reactivity';
+
 const win = $state({ chatId: null, topId: null, bottomId: null, rev: 0 });
 const divider = $state({ targetId: null, after: false });
+// Per-message versions: messages are mutated in place (an edit, a failed flag), so
+// the row cannot see the change through its prop; this is what refills it.
+const messages = new SvelteMap();
 
 export function windowState() {
     return win;
@@ -30,6 +35,15 @@ export function clearWindow() {
 /** The array changed under the window (insert, splice, edit): re-derive. */
 export function touchWindow() {
     win.rev++;
+}
+
+/** Read: a message's version (its row refills when it changes). */
+export function messageVersion(id) {
+    return messages.get(id) ?? 0;
+}
+/** Write: this message object changed in place. */
+export function touchMessage(id) {
+    messages.set(id, (messages.get(id) ?? 0) + 1);
 }
 
 /** The "New" divider sits before `targetId` (or after it, when `after`). */

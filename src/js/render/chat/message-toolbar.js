@@ -600,18 +600,13 @@ function _dmsgSelectReply(targetMsgId) {
     if (cMsg?.mine) cProfile = getProfile(strPubkey);
     else if (cMsg?.npub) cProfile = getProfile(cMsg.npub);
     else cProfile = getProfile(strOpenChat);
-    domChatReplyBarName.textContent = cProfile?.nickname || cProfile?.name || cProfile?.display_name
+    const name = cProfile?.nickname || cProfile?.name || cProfile?.display_name
         || (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : 'Unknown');
-    twemojify(domChatReplyBarName);
-
-    domChatReplyBarSnippet.textContent = '';
-    if (cMsg?.content) {
-        domChatReplyBarSnippet.innerHTML = buildReplyPreviewHtml(cMsg.content);
-        twemojify(domChatReplyBarSnippet);
-        if (cMsg.emoji_tags?.length) renderCustomEmojiShortcodes(domChatReplyBarSnippet, cMsg.emoji_tags);
-    } else if (cMsg?.attachments?.length) {
+    let snippet = null;
+    if (cMsg?.content) snippet = { html: buildReplyPreviewHtml(cMsg.content), emojiTags: cMsg.emoji_tags || [] };
+    else if (cMsg?.attachments?.length) {
         const ext = cMsg.attachments[0].extension;
-        domChatReplyBarSnippet.textContent = ext ? getFileTypeInfo(ext).description : 'Attachment';
+        snippet = { text: ext ? getFileTypeInfo(ext).description : 'Attachment' };
     }
 
     // Showing the bar shrinks the chat viewport as it slides in; a user pinned
@@ -622,18 +617,9 @@ function _dmsgSelectReply(targetMsgId) {
     const fBarWasHidden = !domChatMessageBox.classList.contains('replying');
     const fRepin = fBarWasHidden && chatPinnedToBottom
         && (!CHAT_WINDOW_ENABLED || isAtDataBottom());
-    // Center the cancel icon over the mic/send column: those buttons
-    // flex-shrink with window width, so the offset is measured, not assumed
-    const slotBtn = domChatMessageInputVoice.offsetParent ? domChatMessageInputVoice : domChatMessageInputSend;
-    const slotRect = slotBtn.getBoundingClientRect();
-    if (slotRect.width > 0) {
-        const barRect = domChatReplyBarCancel.parentElement.getBoundingClientRect();
-        // 11.6 = half the 24px button minus a 0.4px optical correction (the
-        // glyphs' visual centers sit a hair off their geometric boxes)
-        domChatReplyBarCancel.style.right = `${(barRect.right - slotRect.left - slotRect.width / 2 - 11.6).toFixed(1)}px`;
-    }
-
-    domChatMessageBox.classList.add('replying');
+    // The chrome renders the bar (name, snippet, cancel offset) from the reply state.
+    VectorSvelte.startReply(targetMsgId, name, snippet);
+    VectorSvelte.flushSync();
     if (fRepin) {
         const start = performance.now();
         const followPin = () => {
