@@ -8,17 +8,23 @@
 //   people/    everything that lists persons: the row, the picker, the roster
 //   chatlist/  the chat list island
 //   chat/ composer/ settings/ ...   later phases, one directory per screen
-import { mount, unmount } from 'svelte';
+import { mount, unmount, flushSync } from 'svelte';
 
 import ContactPicker from './people/ContactPicker.svelte';
 import MemberRoster from './people/MemberRoster.svelte';
 import Chatlist from './chatlist/Chatlist.svelte';
 import RailShortcuts from './rail/RailShortcuts.svelte';
 
-// Shared store layer (Phase 0 of the Svelte migration — see SVELTE_MIGRATION_PLAN.md).
-export { chatlistVersion, invalidateChatlist, timeTickVersion, bumpTimeTick } from './lib/stores.js';
-// Per-key signals: touch one chat/profile/community, or re-diff the list order alone.
-export { touchChat, touchProfile, touchCommunity, reorderChatlist, setOpenChat } from './lib/signals.svelte.js';
+// Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
+// Nothing here says "render": the vanilla side names WHAT changed and the islands
+// re-derive exactly the DOM that depends on it.
+export { timeTickVersion, bumpTimeTick } from './lib/stores.js';
+export {
+    ensureSignals, touchChat, touchProfile, touchCommunity, touchInvites,
+    reorderChatlist, setOpenChat, setPane,
+} from './lib/signals.svelte.js';
+/** Apply pending updates synchronously (for the rare caller that reads the DOM right after). */
+export { flushSync };
 
 /**
  * Mount the contact picker into `target`. The component owns its dialog-local state;

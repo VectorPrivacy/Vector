@@ -1,15 +1,12 @@
 /**
  * Chat list orchestration: the Svelte island's mount host and legacy satellites.
  *
- * - `renderChatlist()` — invalidation pump; every mutation path bumps the shared
- *   `chatlistVersion` store (src/components/stores.js). The island (src/components/
- *   Chatlist.svelte) is the store's renderer: a keyed {#each} patches single rows
- *   instead of rebuilding the list.
- * - `renderChatlistNow` — the store's first subscriber: sorts (the one ordering
- *   chokepoint), mounts the island once, then refreshes the store-blind satellites
- *   (rail shortcuts, back-button dot) that later slices will migrate onto stores.
- * - `updateChatlistPreview` / `updateChatlistTimestamps` — legacy call-site shims;
- *   a store bump (full, but row-granular) and a clock tick respectively.
+ * - `mountChatlist()` — mounts the island (src/components/chatlist/) once at boot.
+ * - the mutators (`chatChanged`, `communityChanged`, `profileChanged`, `listChanged`,
+ *   `invitesChanged`, `openChatChanged`, `paneChanged`) — the vanilla side names WHAT
+ *   changed; each touches the matching signal and the island re-derives only the
+ *   DOM that depends on it. Nothing calls "render" any more.
+ * - `updateChatlistPreview` / `updateChatlistTimestamps` — legacy call-site shims.
  * - unread counting (`computeRowBadgeCount` & co.) — shared by the island via the
  *   mount-time `h` helper bundle and by every unread indicator outside the list.
  */
@@ -64,16 +61,12 @@ function chatIsVisibleInList(chat) {
  * store bump instead.
  */
 function chatlistSnapshot() {
-    const paneCommunityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
     return {
         chats: arrChats,
         // Copy: invites are spliced in place, and an {#each} source needs a fresh
         // reference per invalidation or additions/removals never re-diff.
         invites: [...arrCommunityInvites],
         pinned: arrPinnedChats,
-        paneCommunityId,
-        openChat: strOpenChat,
-        dmsOnly: !paneCommunityId && typeof wsActive === 'function' && wsActive(),
     };
 }
 
@@ -131,53 +124,101 @@ function chatlistHelpers() {
 let chatlistIsland = null;
 
 /**
- * The chatlist render pass. Runs as chatlistVersion's FIRST subscriber (registered
- * below, before the island mounts), so the sort always lands before the island
- * derives its row order.
+ * Mount the chat-list island once boot has the state ready. From here on nothing
+ * "renders" the list: the mutators below name what changed and the island
+ * re-derives exactly the rows that depend on it.
  */
-function renderChatlistNow() {
-    if (fInit) return;
-
-    // Pinned first, then newest-first with a creation/join-time fallback for
-    // message-less communities — the one chokepoint that guarantees order no
-    // matter which path added a chat (create, join, boot, message). Without it a
-    // freshly-surfaced chat stays wherever it was appended, and a pin set by any
-    // other path is undone by the next render.
+function mountChatlist() {
+    if (chatlistIsland || fInit) return;
+    ensureListSignals();
     sortChats();
-
-    // The island owns #chat-list's children from here on; data flows through the
-    // store, so mounting once is enough for the page's lifetime.
-    if (!chatlistIsland) {
-        chatlistIsland = VectorSvelte.mountChatlist(domChatList, {
-            h: chatlistHelpers(),
-            snapshot: chatlistSnapshot,
-        });
-    }
-
-    // The rail's shortcuts are the same data in a different shape, so they rebuild here
-    // until their own slice moves them onto the store.
+    chatlistIsland = VectorSvelte.mountChatlist(domChatList, {
+        h: chatlistHelpers(),
+        snapshot: chatlistSnapshot,
+    });
+    paneChanged();
+    VectorSvelte.setOpenChat(strOpenChat);
     renderRailShortcuts();
-
-    // Update the back button notification
     updateChatBackNotification();
 }
 
+// ── mutators: the vanilla side names WHAT changed ──
+
 /**
- * Invalidate the chat list through the shared store: every row re-derives. The
- * subscription below runs synchronously (Svelte stores notify on set), so callers
- * keep the old "DOM is updated when renderChatlist() returns" contract.
- *
- * Reach for `touchChatRow` + `reorderChatlist` instead when you know WHICH chat
- * changed — that path re-derives one row and re-diffs the order, nothing else.
+ * One chat changed in place (a message, its unread, a typer, its name, its mute):
+ * its row re-derives and the order re-diffs if it moved. A community channel also
+ * touches its community, whose single row aggregates every channel.
  */
-function renderChatlist() {
-    VectorSvelte.invalidateChatlist();
+function chatChanged(chatOrId) {
+    const chat = typeof chatOrId === 'string' ? arrChats.find(c => c.id === chatOrId) : chatOrId;
+    if (!chat) return;
+    touchChatRow(chat);
+    reorderChatlist();
+}
+
+/** A community's identity, channels, caps or expansion changed: its row and every channel row. */
+function communityChanged(communityId) {
+    if (!communityId) return;
+    VectorSvelte.touchCommunity(communityId);
+    for (const c of arrChats) {
+        if (c.metadata?.custom_fields?.community_id === communityId) VectorSvelte.touchChat(c.id);
+    }
+    reorderChatlist();
+}
+
+/** Something that feeds every community's badge changed (a sender mute or block). */
+function communitiesChanged() {
+    const seen = new Set();
+    for (const c of arrChats) {
+        const id = c.metadata?.custom_fields?.community_id;
+        if (id && !seen.has(id)) { seen.add(id); VectorSvelte.touchCommunity(id); }
+    }
+    reorderChatlist();
 }
 
 /**
- * One chat changed in place (a message, its unread, a typer, its name): re-derive
- * its row only. A community channel also touches its community, whose single row
- * aggregates every channel.
+ * A profile changed (name, avatar, block flag): its DM row re-derives, the list
+ * re-diffs in case the block flag changed its membership, and community badges
+ * re-count since blocked authors are excluded.
+ */
+function profileChanged(npub) {
+    if (!npub) return;
+    VectorSvelte.touchProfile(npub);
+    communitiesChanged();
+}
+
+/** Chats were added, removed, pinned or unpinned: the list's shape re-diffs unconditionally. */
+function listChanged() {
+    if (fInit) return;
+    ensureListSignals();
+    sortChats();
+    VectorSvelte.reorderChatlist();
+    renderRailShortcuts();
+    updateChatBackNotification();
+}
+
+/** Pending community invites arrived, were accepted, declined or purged. */
+function invitesChanged() {
+    VectorSvelte.touchInvites();
+    updateChatBackNotification();
+}
+
+/** The open chat changed: the active row, the rail's shortcut and the pane mode derive from it. */
+function openChatChanged() {
+    VectorSvelte.setOpenChat(strOpenChat);
+    paneChanged();
+}
+
+/** The list pane's mode changed (widescreen entered/left, or the open community changed). */
+function paneChanged() {
+    const communityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
+    const dmsOnly = !communityId && typeof wsActive === 'function' && wsActive();
+    VectorSvelte.setPane(communityId, dmsOnly);
+}
+
+/**
+ * One chat changed in place: re-derive its row only (no order check). Prefer
+ * `chatChanged` unless you know the change cannot move the chat.
  */
 function touchChatRow(chat) {
     if (!chat) return;
@@ -188,20 +229,36 @@ function touchChatRow(chat) {
 
 /**
  * Re-sort and re-diff the list's order and membership without re-deriving any row.
- * Pair it with `touchChatRow` after a change that can move a chat (a new message,
- * a first message making a DM visible).
+ * Most changes land in a chat that is already where it belongs (the top one, for a
+ * live conversation): nothing moved, so the touched row's own repaint was the whole
+ * job and the list keeps its derivation.
  */
 function reorderChatlist() {
     if (fInit) return;
+    ensureListSignals();
     const before = listShapeKey();
     sortChats();
     updateChatBackNotification();
     renderRailShortcuts();
-    // Most changes land in a chat that is already where it belongs (the top one, for a
-    // live conversation): nothing moved, so the touched row's own repaint was the whole
-    // job and the list keeps its derivation.
     if (listShapeKey() === before) return;
     VectorSvelte.reorderChatlist();
+}
+
+/**
+ * Register every chat, DM profile and community key with the signal layer before a
+ * row can read it: a key that is first read inside a derived would not be tracked.
+ */
+function ensureListSignals() {
+    const chatIds = [];
+    const profileIds = [];
+    const communityIds = new Set();
+    for (const c of arrChats) {
+        chatIds.push(c.id);
+        const cid = c.metadata?.custom_fields?.community_id;
+        if (cid) communityIds.add(cid);
+        else profileIds.push(c.id);
+    }
+    VectorSvelte.ensureSignals({ chats: chatIds, profiles: profileIds, communities: [...communityIds] });
 }
 
 /** The list's order and membership as one string — what a reorder can change. */
@@ -210,12 +267,6 @@ function listShapeKey() {
     for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + ',';
     return key;
 }
-
-// The first subscriber: every invalidation — from this file, main.js, or any
-// js/ module — sorts and mounts before the island's own subscription re-derives
-// (subscription order = registration order). The immediate subscribe-time run is
-// absorbed by the fInit guard while boot is still in flight.
-VectorSvelte.chatlistVersion.subscribe(() => renderChatlistNow());
 
 /**
  * Build the empty-state placeholder shown when the chat list has no
@@ -369,10 +420,7 @@ function bindViktor(img) {
  * @param {string} chatId
  */
 function updateChatlistPreview(chatId) {
-    const chat = arrChats.find(c => c.id === chatId);
-    if (!chat) return;
-    touchChatRow(chat);
-    reorderChatlist();
+    chatChanged(chatId);
 }
 
 /**

@@ -2307,7 +2307,7 @@ async function loadBlockedUsersList() {
                 if (!confirmed) return;
                 await invoke('unblock_user', { npub: profile.id });
                 showToast('User unblocked');
-                renderChatlist();
+                profileChanged(profile.id);
                 await loadBlockedUsersList();
             };
 

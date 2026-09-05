@@ -1,14 +1,12 @@
 <script>
     // One rail shortcut. Reads its own chat/profile/community signals, so a change in
     // any other chat leaves this node untouched.
-    import { chatlistVersion } from '../lib/stores.js';
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     let { h, chat, isCommunity, active = false } = $props();
 
     const vm = $derived.by(() => {
-        $chatlistVersion;
         chatVersion(chat.id);
         const communityId = isCommunity ? chat.metadata?.custom_fields?.community_id : null;
         if (communityId) communityVersion(communityId);

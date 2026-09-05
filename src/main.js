@@ -1816,7 +1816,7 @@ function resolveCommunityAvatars() {
                 .then(path => {
                     if (path) {
                         chat.metadata.avatar_cached = path;
-                        if (!fInit) renderChatlist();
+                        communityChanged(cf.community_id);
                     }
                 })
                 .catch(() => {})
@@ -1942,7 +1942,7 @@ let fSyncing = false;
  */
 function refreshRenderedName(npub) {
     if (!npub) return;
-    renderChatlist();
+    profileChanged(npub);
 
     const cProfile = getProfile(npub);
     const strName = getName(cProfile || npub);
@@ -1991,8 +1991,7 @@ async function ensurePinnedLoaded() {
     _pinnedLoaded = true;
     try {
         arrPinnedChats = await invoke('get_pinned_chats') || [];
-        sortChats();
-        renderChatlist();
+        listChanged();
     } catch (e) {
         _pinnedLoaded = false; // a failed load must be retryable, not latched
         console.error('Failed to load pinned chats:', e);
@@ -2442,14 +2441,14 @@ async function surfaceCommunitySummary(summary) {
     }
     loadCommunityRoles(summary.community_id);
     resolveCommunityAvatars();
-    renderChatlist();
+    listChanged();
     // If a warmed preload was promoted on Accept, the chat is ALREADY populated (its messages were
     // emitted by the backend), so open immediately — the first sync trues it up in the background.
     // Only await the sync when NOT preloaded (a cold join would otherwise open to an empty chat).
     const openChannel = firstChannel || fallbackChannel;
     const openSync = firstChannel ? firstSync : fallbackSync;
     if (openSync && !summary.preloaded) await openSync;
-    renderChatlist();
+    communityChanged(summary.community_id);
     return openChannel;
 }
 
@@ -2524,8 +2523,8 @@ async function acceptCommunityInvite(communityId) {
         // renders arrChats in order; the new chat was pushed to the end).
         sortChats();
     }
-    updateChatBackNotification();
-    renderChatlist();
+    listChanged();
+    invitesChanged();
     adjustSize();
 
     try {
@@ -2542,7 +2541,7 @@ async function acceptCommunityInvite(communityId) {
             // chat row is gone or never materialized). Surface a short notice rather than silently
             // bailing the open and leaving the user wondering why the join did nothing.
             showToast('You were removed from this community by an admin');
-            renderChatlist();
+            listChanged();
         }
     } catch (e) {
         console.error('Failed to accept community invite:', e);
@@ -2552,8 +2551,8 @@ async function acceptCommunityInvite(communityId) {
             if (idx !== -1) arrChats.splice(idx, 1);
         }
         arrCommunityInvites = snapshot;
-        updateChatBackNotification();
-        renderChatlist();
+        listChanged();
+        invitesChanged();
         adjustSize();
         popupConfirm('Error', 'Failed to join Community: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
@@ -2568,10 +2567,9 @@ function clearCommunityJoining(communityId) {
     for (const c of arrChats) {
         if (c._joining && c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId) {
             c._joining = false;
-            changed = true;
+            chatChanged(c);
         }
     }
-    if (changed) renderChatlist();
 }
 
 /**
@@ -2580,8 +2578,7 @@ function clearCommunityJoining(communityId) {
 async function declineCommunityInvite(communityId) {
     const snapshot = arrCommunityInvites;
     arrCommunityInvites = arrCommunityInvites.filter(i => i.community_id !== communityId);
-    updateChatBackNotification();
-    renderChatlist();
+    invitesChanged();
     adjustSize();
     try {
         await invoke('decline_community_invite', { communityId });
@@ -2590,8 +2587,7 @@ async function declineCommunityInvite(communityId) {
         // parked in the backend, and silently reappears on the next invite refresh.
         console.error('Failed to decline community invite:', e);
         arrCommunityInvites = snapshot;
-        updateChatBackNotification();
-        renderChatlist();
+        invitesChanged();
         adjustSize();
         popupConfirm('Error', 'Failed to decline invite: ' + escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
@@ -3178,8 +3174,8 @@ function markAsRead(chat, message, explicit = false) {
         // Widescreen keeps the list, its channels and the rail mounted beside the
         // open chat, so the optimistic clear has to repaint NOW: the refresh below
         // compares against the value we just set, finds no change, and repaints
-        // nothing. Hash-gated, so a burst of marks still costs one render.
-        if (wsActive()) renderChatlist();
+        // nothing.
+        chatChanged(chat);
 
         // The read advanced — re-derive this chat's unread from the DB (authoritative).
         scheduleUnreadRefresh();
@@ -3223,7 +3219,7 @@ async function markChatUnread(chat) {
     // list repaints / window-focus sweeps, which would instantly undo it. The
     // latch clears the moment the user actually opens the chat.
     setChatUnreadLatch(chat.id);
-    renderChatlist();
+    chatChanged(chat);
     refreshUnreadCounts();
 }
 
@@ -3251,7 +3247,7 @@ async function leaveCommunityFromList(chat) {
             await closeChat();
         }
         arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
-        renderChatlist();
+        listChanged();
     } catch (e) {
         await popupConfirm('Failed to Leave', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
@@ -3270,19 +3266,13 @@ async function refreshUnreadCounts() {
     } catch (e) {
         return; // keep prior chat.unread on failure
     }
+    // Only the rows whose count moved re-derive.
     let changed = false;
     for (const chat of arrChats) {
         const n = counts[chat.id] || 0;
-        if (chat.unread !== n) { chat.unread = n; changed = true; }
+        if (chat.unread !== n) { chat.unread = n; touchChatRow(chat); changed = true; }
     }
-    if (changed) {
-        // A chat is open → the chatlist is hidden, so refresh the in-chat back-chevron unread dot
-        // (it reads the chat.unread we just updated); otherwise refresh the visible rows.
-        if (strOpenChat) updateChatBackNotification();
-        // "Open" stops meaning "list hidden" in widescreen — the rows sit in the
-        // next column over, so they repaint either way.
-        if (!strOpenChat || wsActive()) renderChatlist();
-    }
+    if (changed) reorderChatlist();
 }
 
 let _unreadRefreshTimer = null;
@@ -3450,7 +3440,7 @@ async function setupRustListeners() {
     // A Community invite (npub gift-wrap) was parked → surface it as a pending slot.
     _on('community_invite_received', async (evt) => {
         await loadCommunityInvites();
-        renderChatlist();
+        invitesChanged();
         adjustSize();
     });
 
@@ -3458,7 +3448,7 @@ async function setupRustListeners() {
     // Re-pull the (now-pruned) list so those stale invite rows vanish without a restart.
     _on('community_invites_purged', async () => {
         await loadCommunityInvites();
-        renderChatlist();
+        invitesChanged();
         adjustSize();
     });
 
@@ -3482,8 +3472,7 @@ async function setupRustListeners() {
     // lookup simply finds it when it arrives.
     _on('pinned_chats_updated', (evt) => {
         arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];
-        sortChats();
-        renderChatlist();
+        listChanged();
     });
 
     // The boot DM-relay-list sync adopted/retired relays; repaint the Network
@@ -3540,7 +3529,7 @@ async function setupRustListeners() {
         // source. Deliberately NOT a JS-side banlist filter: the rule lives in one
         // place, in SQL, and a second copy here would be the one that goes stale.
         purgeCommunityMessageCache(communityId);
-        renderChatlist();
+        communityChanged(communityId);
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
         if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
             const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
@@ -3608,7 +3597,7 @@ async function setupRustListeners() {
                 if (summary.owner_npub) f.owner_npub = summary.owner_npub;
             }
         } catch (_) {}
-        renderChatlist();
+        communityChanged(communityId);
         if (strOpenChat) {
             const open = arrChats.find(c => c.id === strOpenChat);
             if (open && open.metadata?.custom_fields?.community_id === v2Id) {
@@ -3729,8 +3718,7 @@ async function setupRustListeners() {
                 refreshChatEmptyState(); // a "X joined" landed in the open chat → drop the start marker
             }
 
-            // Re-render chatlist
-            renderChatlist();
+            chatChanged(chat);
 
             // A member join/leave moved the roster — refresh this community's cached member count.
             const evCommunityId = chat?.metadata?.custom_fields?.community_id;
@@ -4268,9 +4256,10 @@ async function setupRustListeners() {
             domGrpMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
         }
 
-        // Re-render the chat list to immediately reflect glow/badge changes, then pull
-        // fresh DB counts: a sender mute changes OTHER chats' (community) badges too.
-        renderChatlist();
+        // Reflect glow/badge changes now, then pull fresh DB counts. A sender mute
+        // changes OTHER chats' (community) badges too.
+        chatChanged(chat);
+        if (!chatIsGroup(chat)) communitiesChanged();
         scheduleUnreadRefresh();
     });
 
@@ -4726,11 +4715,9 @@ async function setupRustListeners() {
             showToast('Upload Cancelled');
         }
 
-        // Re-render the chatlist (not just the preview) so the unread glow
-        // recomputes — when an unread message is deleted the chat may flip
-        // back to a fully-read state, which an in-place preview update can't
-        // express. Deletions are rare enough that a full render is fine.
-        renderChatlist();
+        // The row re-derives whole (unread glow included): deleting an unread message
+        // can flip the chat back to fully read.
+        chatChanged(evt.payload.chat_id);
         // The in-app chat-list badge is DB-sourced (chat.unread); re-derive it so deleting an unread
         // message drops the badge too. renderChatlist alone repaints the stale pre-deletion count.
         scheduleUnreadRefresh();
@@ -4766,8 +4753,8 @@ async function setupRustListeners() {
             // Re-derive the unread badge from the DB (the read just advanced, possibly to a
             // non-latest message on another device).
             scheduleUnreadRefresh();
-            // The chatlist island re-derives the row (border, font color, etc. all depend on unread state)
-            renderChatlist();
+            // The row re-derives (border, font color and badge all depend on unread state).
+            chatChanged(chat);
         }
     });
 
@@ -5875,10 +5862,10 @@ async function login(skipAnimations = false) {
                 // fInit gated the live listener.
                 invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
-                // Render the chatlist
-                console.time('[Boot] showMainUI:renderChatlist');
-                renderChatlist();
-                console.timeEnd('[Boot] showMainUI:renderChatlist');
+                // Mount the chatlist island; from here every change flows through the signals.
+                console.time('[Boot] showMainUI:mountChatlist');
+                mountChatlist();
+                console.timeEnd('[Boot] showMainUI:mountChatlist');
 
                 // Show the New Chat buttons
                 if (domChatNewDM) {
@@ -6364,13 +6351,13 @@ function renderProfileTab(cProfile) {
             if (isBlocked) {
                 await invoke('unblock_user', { npub: cProfile.id });
                 showToast('User Unblocked');
-                renderChatlist();
+                profileChanged(cProfile.id);
             } else {
                 const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: cProfile.id });
                 showToast('User Blocked');
-                renderChatlist();
+                profileChanged(cProfile.id);
             }
         };
 
@@ -7314,7 +7301,7 @@ function derezMessageLocally(id, chatId) {
         const domMsg = document.getElementById(id);
         if (domMsg) _derezRowDom(domMsg);
     }
-    renderChatlist();
+    chatChanged(chatId);
     scheduleUnreadRefresh();
 }
 
@@ -9685,8 +9672,7 @@ async function closeChat() {
     // Navigate back to chat list with animation
     await openChatlist();
 
-    // Update the Chat List
-    renderChatlist();
+    openChatChanged();
 
     // Ensure the chat list re-adjusts to fit
     adjustSize();
@@ -9839,7 +9825,7 @@ async function removeCommunityFromUI(communityId) {
         domGroupOverview.removeAttribute('data-group-id');
     }
     arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
-    renderChatlist();
+    listChanged();
     if (wasViewing) openChatlist();
 }
 
@@ -10011,7 +9997,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 if (unlisten) unlisten();
             }
             await renderCommunityOverview(chat);
-            renderChatlist();
+            communityChanged(communityId);
         };
         // Whole icon is the tap target (friendlier on touch than the small pencil); the pencil overlay
         // stays as the visual cue and its tap just bubbles up to this same handler.
@@ -10053,7 +10039,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     domGroupOverviewNameSecondary.textContent = newName;
                     domGroupOverviewName.textContent = newName;
                     cf.name = newName;
-                    try { await invoke('update_community_metadata', { communityId, name: newName, description: null }); renderChatlist(); }
+                    try { await invoke('update_community_metadata', { communityId, name: newName, description: null }); communityChanged(communityId); }
                     catch (e) {
                         console.error('Failed to rename community:', e);
                         // Revert the optimistic header text.
@@ -10345,7 +10331,7 @@ async function tearDownCommunityLocally(communityId) {
     arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
     domGroupOverview.style.display = 'none';
     domGroupOverview.removeAttribute('data-group-id');
-    renderChatlist();
+    listChanged();
     openChatlist();
 }
 
@@ -11821,9 +11807,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // fInit gated the live listener.
                 invoke('get_pending_deep_link').then(a => { if (a) executeDeepLinkAction(a); }).catch(() => {});
 
-                // Render the chatlist
-                renderChatlist();
-                
+                mountChatlist();
+
                 // Show the New Chat buttons (same as normal login flow)
                 if (domChatNewDM) {
                     domChatNewDM.style.display = '';
@@ -14259,7 +14244,7 @@ async function closeCreateGroup() {
                 // no broken/default-then-flip). (The old convertFileSrc here double-converted → broken.)
                 if (platformFeatures.os !== 'android') chat.metadata.avatar_cached = strCreateGroupAvatarPath;
             }
-            renderChatlist();
+            listChanged();
 
             // Navigate to the new channel + hide the panel.
             openChat(channelId);
@@ -14276,7 +14261,7 @@ async function closeCreateGroup() {
                         const path = await invoke('cache_community_image', { communityId, isBanner: false });
                         if (path) {
                             chat.metadata.avatar_cached = path;
-                            renderChatlist();
+                            communityChanged(communityId);
                             // Refresh the open channel header so the icon shows without a manual back-out/
                             // re-enter (renderChatlist only updates the list row, not the open top bar).
                             if (strOpenChat === channelId) setChatHeader(chat, null, true, false);

@@ -3,10 +3,10 @@
     //
     // Chat objects are RAW (shared by reference with eventCache and mutated in
     // place), so the row cannot rely on reference identity for change detection:
-    // `version` (chatlistVersion) and `tick` (timeTickVersion) are read inside the
-    // vm derivation to re-derive on every invalidation or clock tick, while the
-    // keyed parent each keeps the DOM node itself alive across updates.
-    let { h, chat, pinned, version, tick } = $props();
+    // its own signals (chat, DM profile, community) and the clock `tick` are read
+    // inside the vm derivation, while the keyed parent each keeps the DOM node
+    // itself alive across updates.
+    let { h, chat, pinned, tick } = $props();
 
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
 
@@ -14,11 +14,10 @@
     // lower bound, so render "N+" rather than a false exact figure.
     const UNREAD_PLUS_THRESHOLD = 20;
 
-    // Row view-model. The dependency pins: the coarse list version and clock tick, plus
-    // this row's OWN signals — its chat, its DM profile, its community (a community row
-    // aggregates every channel's unread). A touch on another chat leaves this row alone.
+    // Row view-model. The dependency pins: the clock tick plus this row's OWN signals —
+    // its chat, its DM profile, its community (a community row aggregates every
+    // channel's unread). A touch on another chat leaves this row alone.
     const vm = $derived.by(() => {
-        version;
         tick;
         chatVersion(chat.id);
         const isGroup = h.chatIsGroup(chat);
@@ -66,7 +65,6 @@
     // channel set, expanded state, caps flag, per-channel name/unread — so the nested
     // list rebuilds exactly when its own inputs changed, never on unrelated bumps.
     const channelsKey = $derived.by(() => {
-        version;
         const cid = chat.metadata?.custom_fields?.community_id;
         if (cid) communityVersion(cid);
         const parts = [];
@@ -180,7 +178,7 @@
         {#if vm.presence}
             <div
                 class="avatar-status-icon"
-                style:backgroundColor={vm.presence === 'online' ? '#59fcb3' : '#fce459'}
+                style:background-color={vm.presence === 'online' ? '#59fcb3' : '#fce459'}
             ></div>
         {/if}
     </div>

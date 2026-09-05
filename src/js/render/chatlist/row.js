@@ -27,7 +27,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         items.push({
             label: 'Mark as Read',
             icon: 'check',
-            onClick: () => { markChatCaughtUp(chat, /* explicit */ true); renderChatlist(); },
+            onClick: () => { markChatCaughtUp(chat, /* explicit */ true); chatChanged(chat); },
         });
     } else if (!chat.muted && chatCanMarkUnread(chat)) {
         // Muted chats never show an unread badge, so offering it there would be a silent no-op.
@@ -43,7 +43,9 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         onClick: async () => {
             if (blockedBySync()) return;
             chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
-            renderChatlist();
+            chatChanged(chat);
+            // A muted sender is silent in every community too.
+            if (!isGroup) communitiesChanged();
         },
     });
     // Pin/Unpin. Keyed by chatPinKey, so a Community pins as the COMMUNITY —
@@ -57,8 +59,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
             if (blockedBySync()) return;
             try {
                 arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: strPinKey });
-                sortChats();
-                renderChatlist();
+                listChanged();
             } catch (e) {
                 showToast(e);
             }
@@ -76,7 +77,7 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
                 if (!confirmed) return;
                 await invoke('block_user', { npub: chat.id });
                 showToast('User Blocked');
-                renderChatlist();
+                profileChanged(chat.id);
             },
         });
     } else if (chat.metadata?.custom_fields?.is_owner !== 'true' && chat.metadata?.custom_fields?.community_id) {

@@ -169,15 +169,12 @@ function wsSyncOpenChat() {
     document.body.classList.toggle('ws-chat-open', !!strOpenChat);
     wsRememberOpenChat();
     wsSyncPaneMode();
-    if (wsActive()) {
-        // The pane's mode follows the open chat, so the render IS the switch
-        // between a community's channels and the DM list. Hash-gated, so moving
-        // between channels of one community costs nothing.
-        renderChatlist();
-    } else if (ensureOpenChannelVisible()) {
-        // Narrow: entering a multi-channel community unfolds it under its row.
-        renderChatlist();
-    }
+    // The pane's mode follows the open chat (widescreen), and the active row and rail
+    // shortcut derive from it. Narrow: entering a multi-channel community unfolds it
+    // under its row.
+    const unfolded = !wsActive() && ensureOpenChannelVisible();
+    openChatChanged();
+    if (unfolded) communityChanged(communityIdOfChat(arrChats.find(c => c.id === strOpenChat)));
     wsSyncMembersPane();
     wsMarkActiveRow();
 }
@@ -217,6 +214,7 @@ function wsUpdate() {
     if (want === have) return;
 
     document.body.classList.toggle('ws', want);
+    paneChanged();
     wsMoveAccountRow(want);
     wsDockMemberSearch();
     wsSyncPaneMode();

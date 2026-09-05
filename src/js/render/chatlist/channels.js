@@ -34,7 +34,7 @@ function loadCommunityChannels() {
                         id: c.channel_id, name: c.name, private: !!c.private, readable: c.readable !== false,
                     })));
             }
-            renderChatlist();
+            for (const community of list || []) communityChanged(community.community_id);
         })
         .catch(() => {})
         .finally(() => { communityChannelsLoading = false; });
@@ -115,7 +115,7 @@ function communityCanAddChannels(communityId) {
 function toggleCommunityExpanded(communityId) {
     if (expandedCommunities.has(communityId)) expandedCommunities.delete(communityId);
     else expandedCommunities.add(communityId);
-    renderChatlist();
+    communityChanged(communityId);
 }
 
 /** Whether a community's channel list is currently showing. */
@@ -149,7 +149,7 @@ function communityCanManageChannels(communityId) {
         .then(caps => {
             if (!caps?.manage_channels) return;
             communityChannelCaps.set(communityId, true);
-            renderChatlist();
+            communityChanged(communityId);
         })
         .catch(() => {});
     return false;
@@ -403,7 +403,7 @@ async function openCommunityMenu(chat, ev) {
         icon: chat.muted ? 'volume-max' : 'volume-mute',
         onClick: async () => {
             chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
-            renderChatlist();
+            chatChanged(chat);
         },
     });
     items.push({

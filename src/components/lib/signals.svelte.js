@@ -7,46 +7,56 @@
 // mutates the chat. One message arriving re-derives one row; the list's order and
 // membership have a signal of their own, so a reorder re-diffs the keyed each
 // without touching any row's derivation.
-//
-// Signals are created on first read (a plain Map write, allowed inside a derived).
 
-const chats = new Map();
-const profiles = new Map();
-const communities = new Map();
+import { SvelteMap } from 'svelte/reactivity';
 
-function sig(map, key) {
-    let s = map.get(key);
-    if (!s) {
-        const fresh = $state({ v: 0 });
-        map.set(key, fresh);
-        s = fresh;
-    }
-    return s;
+// One reactive map per entity kind. SvelteMap creates each key's source the way the
+// runtime expects: a plain `$state` minted inside the derived that first reads it is
+// deliberately NOT tracked by that derived (Svelte's `current_sources` rule), which
+// is why the per-key sources cannot be hand-rolled. Keys are pre-registered at the
+// list chokepoints (`ensureSignals`) so a first touch never has to invalidate every
+// reader of a still-missing key.
+const chats = new SvelteMap();
+const profiles = new SvelteMap();
+const communities = new SvelteMap();
+
+function read(map, key) {
+    return map.get(key) ?? 0;
+}
+function bump(map, key) {
+    map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+/** Register keys ahead of their first read. Call outside reactions (vanilla side). */
+export function ensureSignals({ chats: c = [], profiles: p = [], communities: m = [] } = {}) {
+    for (const id of c) if (!chats.has(id)) chats.set(id, 0);
+    for (const id of p) if (!profiles.has(id)) profiles.set(id, 0);
+    for (const id of m) if (!communities.has(id)) communities.set(id, 0);
 }
 
 /** Read: a chat's version (the row re-derives when it changes). */
 export function chatVersion(id) {
-    return sig(chats, id).v;
+    return read(chats, id);
 }
 /** Write: this chat changed in place (message, unread, typing, name, mute). */
 export function touchChat(id) {
-    sig(chats, id).v++;
+    bump(chats, id);
 }
 
 /** Read/write for a profile: DM rows show its name and avatar. */
 export function profileVersion(npub) {
-    return sig(profiles, npub).v;
+    return read(profiles, npub);
 }
 export function touchProfile(npub) {
-    sig(profiles, npub).v++;
+    bump(profiles, npub);
 }
 
 /** Read/write for a community: its single row aggregates every channel chat. */
 export function communityVersion(id) {
-    return sig(communities, id).v;
+    return read(communities, id);
 }
 export function touchCommunity(id) {
-    sig(communities, id).v++;
+    bump(communities, id);
 }
 
 // The list's own shape: order and membership. Bumped after a sort, never for a
@@ -67,4 +77,25 @@ export function openChatId() {
 }
 export function setOpenChat(id) {
     ui.openChat = id || null;
+}
+
+// Pending community invites are spliced into the list above the chats; they have
+// their own signal because they are not chats and never touch a chat's row.
+const invites = $state({ v: 0 });
+export function invitesVersion() {
+    return invites.v;
+}
+export function touchInvites() {
+    invites.v++;
+}
+
+// The list pane's mode (widescreen): inside a community the list IS that
+// community's channel list; outside it, optionally DMs only.
+const pane = $state({ communityId: null, dmsOnly: false });
+export function paneState() {
+    return pane;
+}
+export function setPane(communityId, dmsOnly) {
+    pane.communityId = communityId || null;
+    pane.dmsOnly = !!dmsOnly;
 }

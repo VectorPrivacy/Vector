@@ -1110,8 +1110,7 @@ function handlePivxPaymentReceived(evt) {
         chat.messages.splice(insertIdx, 0, pivxMsg);
     }
 
-    // Update chatlist
-    renderChatlist();
+    chatChanged(chat);
 }
 
 /**

@@ -4,7 +4,6 @@
     // order (listVersion) and from each candidate chat's own signal, so a reply in one
     // chat re-derives the DM selection (a cheap scan) and patches one item; a rename
     // or avatar touches one item; nothing rebuilds the strip.
-    import { chatlistVersion } from '../lib/stores.js';
     import { listVersion, chatVersion, openChatId } from '../lib/signals.svelte.js';
     import RailItem from './RailItem.svelte';
 
@@ -14,7 +13,6 @@
     const DM_COUNT = 3;
 
     const groups = $derived.by(() => {
-        $chatlistVersion;
         listVersion();
         const { chats, myNpub } = snapshot();
         const dms = [];

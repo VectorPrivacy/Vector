@@ -9,17 +9,18 @@
     // does not share the classic scripts' global lexical scope.
     let { h, snapshot } = $props();
 
-    import { chatlistVersion, timeTickVersion } from '../lib/stores.js';
-    import { listVersion } from '../lib/signals.svelte.js';
+    import { timeTickVersion } from '../lib/stores.js';
+    import { listVersion, invitesVersion, paneState, openChatId, communityVersion } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
 
-    // Snapshot re-pulls the raw page state on every invalidation: a coarse bump
-    // (everything may have changed) or a reorder (only order/membership did — rows
-    // keep their derivations).
+    // Snapshot re-pulls the raw page state when the list's shape, the invites, the
+    // pane or the open chat change. Rows keep their own derivations through all of it.
     const snap = $derived.by(() => {
-        $chatlistVersion;
         listVersion();
-        return snapshot();
+        invitesVersion();
+        const pane = paneState();
+        const raw = snapshot();
+        return { ...raw, paneCommunityId: pane.communityId, dmsOnly: pane.dmsOnly, openChat: openChatId() };
     });
 
     // Visible chats in list order — the wrapper's subscriber runs sortChats() before
@@ -42,10 +43,8 @@
     const openChat = $derived(snap.openChat);
     const empty = $derived(chats.length === 0 && invites.length === 0);
 
-    // Clock tick for relative timestamps and presence-dot recency, and the list's
-    // own invalidation version — both flow into the rows as props.
+    // Clock tick for relative timestamps and presence-dot recency, into the rows as a prop.
     const tick = $derived($timeTickVersion);
-    const version = $derived($chatlistVersion);
 
     // Rebuild key for the community pane (widescreen: inside a community the list IS
     // that community's channel list). Same input set the legacy state-hash gate used,
@@ -53,6 +52,7 @@
     const paneKey = $derived.by(() => {
         const id = paneCommunityId;
         if (!id) return '';
+        communityVersion(id);
         let primary = null;
         for (const c of snap.chats) {
             if (c.metadata?.custom_fields?.community_id !== id) continue;
@@ -71,6 +71,7 @@
     const headKey = $derived.by(() => {
         const id = paneCommunityId;
         if (!id) return '';
+        communityVersion(id);
         let primary = null;
         for (const c of snap.chats) {
             if (c.metadata?.custom_fields?.community_id !== id) continue;
@@ -197,7 +198,6 @@
             {h}
             {chat}
             pinned={snap.pinned.includes(h.chatPinKey(chat))}
-            {version}
             {tick}
         />
     {/each}
