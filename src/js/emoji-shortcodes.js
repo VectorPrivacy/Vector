@@ -3,7 +3,7 @@
  * Discord/Slack-inspired :emoji autocomplete for chat input.
  *
  * Usage:
- *   const ctrl = initEmojiShortcodeSelector(textarea, anchorEl);
+ *   const ctrl = initEmojiShortcodeSelector(textarea);
  *   // ctrl.isOpen()  → true if panel is visible
  *   // ctrl.destroy() → remove DOM + listeners
  */
@@ -23,59 +23,41 @@ const EMOTICON_MAP = {
     '*': '😘', '-*': '😘',
 };
 
+// Twemoji URL for a stock emoji (delegates to twemoji's own parsing, cached).
+const _twemojiUrlCache = {};
+function emojiToTwemojiUrl(emoji) {
+    if (_twemojiUrlCache[emoji]) return _twemojiUrlCache[emoji];
+    const span = document.createElement('span');
+    span.textContent = emoji;
+    twemoji.parse(span, { callback: (icon) => '/twemoji/svg/' + icon + '.svg' });
+    const img = span.querySelector('img');
+    const url = img ? img.getAttribute('src') : null;
+    if (url) _twemojiUrlCache[emoji] = url;
+    return url;
+}
+
 // eslint-disable-next-line no-unused-vars
-function initEmojiShortcodeSelector(textarea, anchorEl) {
+function initEmojiShortcodeSelector(textarea) {
     // --- State ---
     let activeIndex = 0;
     let query = '';
     let colonStart = -1;       // caret position of the ':' trigger
-    let panel = null;
+    let open = false;
     let skipNextInput = false;
     let cachedResults = {};    // query → results cache
     let lastItems = [];        // exact list currently rendered (keyboard nav + Enter use this,
                                // since the emoticon path renders a different list than getFiltered)
 
-    // --- Twemoji URL helper (delegates to twemoji's own parsing, cached) ---
-    const twemojiUrlCache = {};
-    function emojiToTwemojiUrl(emoji) {
-        if (twemojiUrlCache[emoji]) return twemojiUrlCache[emoji];
-        const span = document.createElement('span');
-        span.textContent = emoji;
-        twemoji.parse(span, { callback: (icon) => '/twemoji/svg/' + icon + '.svg' });
-        const img = span.querySelector('img');
-        const url = img ? img.getAttribute('src') : null;
-        if (url) twemojiUrlCache[emoji] = url;
-        return url;
-    }
-
-    // --- Short label from full name ---
-    function shortLabel(name) {
-        const words = name.split(' ');
-        return words.slice(0, 3).join(' ');
-    }
-
-    // --- Create selector panel ---
-    function createPanel() {
-        const el = document.createElement('div');
-        el.className = 'emoji-shortcode-selector';
-        document.body.appendChild(el);
-        return el;
-    }
-    panel = createPanel();
-
     // --- Helpers ---
     function isVisible() {
-        return panel.classList.contains('visible');
-    }
-
-    function show() {
-        if (!isVisible()) {
-            panel.classList.add('visible');
-        }
+        return open;
     }
 
     function hide() {
-        panel.classList.remove('visible');
+        if (open) {
+            open = false;
+            VectorSvelte.closePopup('shortcode');
+        }
         query = '';
         colonStart = -1;
         activeIndex = 0;
@@ -83,75 +65,16 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
         lastItems = [];
     }
 
-    function position() {
-        const rect = anchorEl.getBoundingClientRect();
-        const margin = 10;
-        const width = Math.min(rect.width, 340);
-        const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
-        panel.style.left = left + 'px';
-        panel.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
-        panel.style.width = width + 'px';
-    }
-
     function renderItems(items) {
         lastItems = items;
-        panel.innerHTML = '';
         if (!items.length) { hide(); return; }
-
-        // Header
-        const header = document.createElement('div');
-        header.className = 'emoji-shortcode-header';
-        header.textContent = query.length ? 'Emojis' : 'Recently Used';
-        panel.appendChild(header);
-
-        // Items with staggered animation
-        items.forEach((item, i) => {
-            const row = document.createElement('div');
-            row.className = 'emoji-shortcode-item' + (i === activeIndex ? ' active' : '');
-            row.style.animationDelay = (i * 30) + 'ms';
-
-            if (item.isCustom) {
-                // Route through the cached-image pipeline (downloads via the backend, serves the
-                // bytes from a local `asset://` path the CSP allows). A raw remote `https://` src
-                // is blocked / fails to load in the WebView — which is why custom emojis rendered
-                // blank here while the picker + panel search (both cached) showed them fine.
-                const img = document.createElement('img');
-                img.className = 'emoji-shortcode-item-custom';
-                img.alt = `:${item.shortcode}:`;
-                // Cached pipeline only — never a raw remote src (that would fetch outside Tor).
-                bindCachedEmojiImg(img, item.url, 'emoji');
-                row.appendChild(img);
-            } else {
-                const twemojiSrc = emojiToTwemojiUrl(item.emoji);
-                if (twemojiSrc) {
-                    const img = document.createElement('img');
-                    img.src = twemojiSrc;
-                    img.alt = item.emoji;
-                    row.appendChild(img);
-                } else {
-                    const fallback = document.createElement('span');
-                    fallback.className = 'emoji-shortcode-item-fallback';
-                    fallback.textContent = item.emoji;
-                    row.appendChild(fallback);
-                }
-            }
-
-            const label = document.createElement('span');
-            label.className = 'emoji-shortcode-item-label';
-            label.textContent = item.shortcode
-                ? `:${item.shortcode}:`
-                : shortLabel(item.name);
-            row.appendChild(label);
-
-            row.addEventListener('mousedown', (e) => {
-                e.preventDefault(); // keep textarea focus
-                selectItem(item);
-            });
-            panel.appendChild(row);
+        open = true;
+        VectorSvelte.openPopup('shortcode', {
+            header: query.length ? 'Emojis' : 'Recently Used',
+            items,
+            active: activeIndex,
+            pick: (i) => selectItem(items[i]),
         });
-
-        position();
-        show();
     }
 
     function getFiltered() {
@@ -305,7 +228,7 @@ function initEmojiShortcodeSelector(textarea, anchorEl) {
             textarea.removeEventListener('input', onInput);
             textarea.removeEventListener('keydown', onKeyDown);
             textarea.removeEventListener('blur', onBlur);
-            if (panel.parentNode) panel.parentNode.removeChild(panel);
+            hide();
         }
     };
 }

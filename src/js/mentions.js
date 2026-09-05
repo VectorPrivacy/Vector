@@ -3,96 +3,42 @@
  * Discord-inspired @mention autocomplete for chat input.
  *
  * Usage:
- *   const ctrl = initMentionSelector(textarea, candidatesFn, anchorEl);
+ *   const ctrl = initMentionSelector(textarea, candidatesFn);
  *   // ctrl.getMentions()   → [{name, npub}]
  *   // ctrl.clearMentions() → reset tracked mentions
  *   // ctrl.destroy()       → remove DOM + listeners
  */
 
 // eslint-disable-next-line no-unused-vars
-function initMentionSelector(textarea, candidatesFn, anchorEl) {
+function initMentionSelector(textarea, candidatesFn) {
     // --- State ---
     let mentions = [];       // [{name, npub}] tracked for current draft
     let activeIndex = 0;     // keyboard-highlighted row
     let query = '';          // text typed after '@'
     let atStart = -1;        // caret position of the '@' trigger
-    let panel = null;        // DOM element
+    let open = false;
     let skipNextInput = false; // suppress re-open after selection
-
-    // --- Create selector panel ---
-    function createPanel() {
-        const el = document.createElement('div');
-        el.className = 'mention-selector';
-        document.body.appendChild(el);
-        return el;
-    }
-    panel = createPanel();
 
     // --- Helpers ---
     function isVisible() {
-        return panel.classList.contains('visible');
-    }
-
-    function show() {
-        if (!isVisible()) {
-            panel.classList.add('visible');
-        }
+        return open;
     }
 
     function hide() {
-        panel.classList.remove('visible');
+        if (open) {
+            open = false;
+            VectorSvelte.closePopup('mention');
+        }
         query = '';
         atStart = -1;
         activeIndex = 0;
         cachedCandidates = null;
     }
 
-    function position() {
-        const rect = anchorEl.getBoundingClientRect();
-        const margin = 10;
-        const width = Math.min(rect.width, 340);
-        // Clamp horizontally so it never touches the edges
-        const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
-        panel.style.left = left + 'px';
-        panel.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
-        panel.style.width = width + 'px';
-    }
-
     function renderItems(items) {
-        panel.innerHTML = '';
         if (!items.length) { hide(); return; }
-
-        // Header
-        const header = document.createElement('div');
-        header.className = 'mention-selector-header';
-        header.textContent = 'Members';
-        panel.appendChild(header);
-
-        // Items with staggered animation
-        items.forEach((item, i) => {
-            const row = document.createElement('div');
-            row.className = 'mention-item' + (i === activeIndex ? ' active' : '');
-            row.style.animationDelay = (i * 30) + 'ms';
-
-            const img = document.createElement('img');
-            img.src = item.avatarSrc || 'icons/user-placeholder.svg';
-            img.alt = '';
-            row.appendChild(img);
-
-            const name = document.createElement('span');
-            name.className = 'mention-item-name';
-            name.textContent = item.name;
-            row.appendChild(name);
-
-            row.addEventListener('mousedown', (e) => {
-                e.preventDefault(); // keep textarea focus
-                selectItem(item);
-            });
-            panel.appendChild(row);
-        });
-
-        position();
-        show();
+        open = true;
+        VectorSvelte.openPopup('mention', { items, active: activeIndex, pick: (i) => selectItem(items[i]) });
     }
 
     // Cache candidates per selector-open to avoid rebuilding on every keystroke
@@ -218,7 +164,7 @@ function initMentionSelector(textarea, candidatesFn, anchorEl) {
             textarea.removeEventListener('input', onInput);
             textarea.removeEventListener('keydown', onKeyDown);
             textarea.removeEventListener('blur', onBlur);
-            if (panel.parentNode) panel.parentNode.removeChild(panel);
+            hide();
         }
     };
 }

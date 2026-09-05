@@ -2477,23 +2477,8 @@ function applyCommunityAdmins(communityId, adminNpubs) {
     const open = arrChats.find(c => c.id === strOpenChat);
     if (!open || open.metadata?.custom_fields?.community_id !== communityId) return;
     const adminSet = new Set(adminNpubs);
-    // Island rows derive their badges from the community signal.
+    // Rows derive their badges from the community signal.
     communityChanged(communityId);
-    for (const author of domChatMessages.querySelectorAll('.dmsg-author[data-npub]')) {
-        const header = author.parentElement;
-        if (!header || _dmsgIsIslandRow(author.closest('.dmsg'))) continue;
-        const existing = header.querySelector('.dmsg-author-badge.admin');
-        if (!adminSet.has(author.dataset.npub)) {
-            if (existing) existing.remove();
-            continue;
-        }
-        if (existing) continue;
-        const badge = document.createElement('span');
-        badge.classList.add('dmsg-author-badge', 'admin');
-        badge.textContent = 'admin';
-        // Same slot the renderer uses: after the name + bot marker, before the owner badge and time.
-        header.insertBefore(badge, header.querySelector('.dmsg-author-badge.owner, .dmsg-time'));
-    }
 }
 
 /**
@@ -4110,31 +4095,14 @@ async function setupRustListeners() {
             const id = evt.payload.id;
             const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
             const newAvatarSrc = getProfileAvatarSrc(evt.payload);
-            // One DOM traversal for every element type keyed on this npub (was 5 separate
-            // querySelectorAll scans). The grouped selector matches all five in a single pass;
-            // classes are mutually exclusive so each node is handled exactly once, and the static
-            // NodeList keeps the replaceWith calls safe mid-iteration.
+            // Rows derive their author and avatar from the profile signal; reply
+            // quotes and mention chips are vanilla leaves patched here. One grouped
+            // scan; the static NodeList keeps replaceWith safe mid-iteration.
             document.querySelectorAll(
-                `.dmsg-author[data-npub="${id}"], .dmsg-avatar[data-npub="${id}"], ` +
                 `.dmsg-reply-name[data-npub="${id}"], .dmsg-reply-avatar[data-npub="${id}"], ` +
                 `.mention[data-npub="${id}"]`
             ).forEach(el => {
-                // Island rows derive their author and avatar from the profile signal.
-                if ((el.classList.contains('dmsg-author') || el.classList.contains('dmsg-avatar'))
-                    && _dmsgIsIslandRow(el.closest('.dmsg'))) return;
-                if (el.classList.contains('dmsg-author')) {
-                    // .dmsg-author holds ONLY the name — bot/admin/owner badges are siblings in the parent
-                    // .dmsg-header — so reset + re-twemojify the whole element. (Patching the first text node
-                    // left the original twemoji <img>s behind, duplicating emoji as raw text + image.)
-                    el.textContent = newName;
-                    twemojify(el);
-                } else if (el.classList.contains('dmsg-avatar')) {
-                    const fresh = createAvatarImg(newAvatarSrc, 40, false);
-                    fresh.classList.add('dmsg-avatar', 'btn');
-                    fresh.dataset.npub = id;
-                    fresh.style.margin = '0';
-                    el.replaceWith(fresh);
-                } else if (el.classList.contains('dmsg-reply-name')) {
+                if (el.classList.contains('dmsg-reply-name')) {
                     // Reply-quote name resolves the same as the author name.
                     el.textContent = newName;
                     twemojify(el);
@@ -11091,6 +11059,14 @@ VectorSvelte.mountComposerChrome({
         placeholder: strOriginalInputPlaceholder || 'Enter message...',
     },
 });
+VectorSvelte.mountComposerPopups({
+    anchor: domChatMessageBox,
+    // Lazy: the helpers live in scripts that load after this one evaluates.
+    h: {
+        bindCachedEmojiImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
+        twemojiUrl: (emoji) => emojiToTwemojiUrl(emoji),
+    },
+});
 
 /**
  * Auto-resize the chat input textarea based on content.
@@ -12638,8 +12614,7 @@ const getMentionCandidates = (includeSelf = false) => {
 
 const mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelector(
     domChatMessageInput,
-    getMentionCandidates,
-    document.getElementById('chat-box')
+    getMentionCandidates
 ) : null;
 
 // Hand the composer its mention source now that one exists, so an inserted
@@ -12648,7 +12623,7 @@ composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionC
 
 // --- Emoji Shortcode Selector ---
 const emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
-    ? initEmojiShortcodeSelector(domChatMessageInput, document.getElementById('chat-box'))
+    ? initEmojiShortcodeSelector(domChatMessageInput)
     : null;
 
 /**

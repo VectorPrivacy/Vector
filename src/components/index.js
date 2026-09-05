@@ -17,6 +17,7 @@ import RailShortcuts from './rail/RailShortcuts.svelte';
 import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
 import ComposerChrome from './composer/ComposerChrome.svelte';
+import ComposerPopups from './composer/ComposerPopups.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -33,7 +34,10 @@ export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider } from './lib/chatview.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
-export { startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setCommandActive } from './lib/composer.svelte.js';
+export {
+    startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setCommandActive,
+    openPopup, closePopup,
+} from './lib/composer.svelte.js';
 
 /**
  * Mount the contact picker into `target`. The component owns its dialog-local state;
@@ -104,4 +108,12 @@ export function mountComposerChrome({ els, h }) {
     host.hidden = true;
     document.body.appendChild(host);
     return mount(ComposerChrome, { target: host, props: { els, h } });
+}
+
+/**
+ * Mount the composer's autocomplete popups (mention, shortcode, command) at body
+ * level. The controllers publish views through `openPopup`/`closePopup`.
+ */
+export function mountComposerPopups({ anchor, h }) {
+    return mount(ComposerPopups, { target: document.body, props: { anchor, h } });
 }

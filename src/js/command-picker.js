@@ -29,38 +29,26 @@ function initCommandSelector(textarea, io, anchorEl) {
     let mode = 'closed';        // closed | loading | list | hint
     let activeIndex = 0;        // keyboard-highlighted row (list mode)
     let query = '';             // text typed after '/'
-    let panel = null;
+    let open = false;
+    let flatRows = [];          // keyboard order = render order (recents, then sections)
     let armedPick = null;       // {chatId, bot, name} — the explicitly chosen row
     let hintSuppressedFor = null; // draft value the user Esc'd the hint away for
     let blurTimer = null;       // pending blur-hide; cancelled if input re-engages
     const snapshots = new Map(); // chatId → {bots, commands}
     const loading = new Set();   // chatIds with a load() in flight
 
-    function createPanel() {
-        const el = document.createElement('div');
-        el.className = 'command-selector';
-        document.body.appendChild(el);
-        return el;
+    function isVisible() { return open; }
+    function show(view) {
+        open = true;
+        VectorSvelte.openPopup('command', view);
     }
-    panel = createPanel();
-
-    function isVisible() { return panel.classList.contains('visible'); }
-    function show() { panel.classList.add('visible'); }
     function hide() {
-        panel.classList.remove('visible');
+        if (open) {
+            open = false;
+            VectorSvelte.closePopup('command');
+        }
         mode = 'closed';
         activeIndex = 0;
-    }
-
-    function position() {
-        const rect = anchorEl.getBoundingClientRect();
-        const margin = 10;
-        // Never wider than the viewport itself — small windows and phones.
-        const width = Math.min(rect.width, 420, window.innerWidth - margin * 2);
-        const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
-        panel.style.left = left + 'px';
-        panel.style.bottom = (window.innerHeight - rect.top + 6) + 'px';
-        panel.style.width = width + 'px';
     }
 
     // --- Recents (per account, most-recent-first, "<bot>:<name>" keys) ---
@@ -242,94 +230,33 @@ function initCommandSelector(textarea, io, anchorEl) {
     }
 
     function commandRow(cmd, flatIndex, showBot) {
-        const row = document.createElement('div');
-        row.className = 'command-item' + (flatIndex === activeIndex ? ' active' : '');
-        if (showBot) {
-            // Recents mix bots, so each row wears its owner's face — two bots'
-            // /roll entries are distinct commands that would otherwise look
-            // like duplicates.
-            const profile = io.botProfile(cmd.bot) || {};
-            const img = document.createElement('img');
-            img.className = 'command-item-bot';
-            img.src = profile.avatarSrc || 'icons/user-placeholder.svg';
-            img.alt = '';
-            row.appendChild(img);
-            row.title = profile.name || cmd.bot.slice(0, 12) + '…';
-        }
-        const name = document.createElement('span');
-        name.className = 'command-item-name';
-        name.textContent = '/' + cmd.name;
-        row.appendChild(name);
-        for (const a of cmd.args) {
-            const chip = document.createElement('span');
-            chip.className = 'command-item-arg' + (a.required ? '' : ' optional');
-            chip.textContent = argSignature(a);
-            row.appendChild(chip);
-        }
-        if (cmd.description) {
-            const desc = document.createElement('span');
-            desc.className = 'command-item-desc';
-            desc.textContent = cmd.description;
-            row.appendChild(desc);
-        }
-        row.addEventListener('mousedown', (e) => {
-            e.preventDefault(); // keep textarea focus
-            selectCommand(cmd);
-        });
-        return row;
-    }
-
-    function sectionHeader(text, avatarSrc, refreshing) {
-        const header = document.createElement('div');
-        header.className = 'command-section-header';
-        if (avatarSrc) {
-            const img = document.createElement('img');
-            img.src = avatarSrc;
-            img.alt = '';
-            header.appendChild(img);
-        }
-        const label = document.createElement('span');
-        label.textContent = text;
-        header.appendChild(label);
-        // Manifest REQ still in flight for this list: show the status inline on
-        // the header's right instead of a footer row that shifts the whole panel.
-        if (refreshing) {
-            const status = document.createElement('span');
-            status.className = 'command-section-refresh';
-            const spin = document.createElement('span');
-            spin.className = 'command-spinner';
-            status.appendChild(spin);
-            const txt = document.createElement('span');
-            txt.textContent = 'Checking for Updates';
-            status.appendChild(txt);
-            header.appendChild(status);
-        }
-        return header;
+        // Recents mix bots, so each row wears its owner's face — two bots'
+        // /roll entries are distinct commands that would otherwise look
+        // like duplicates.
+        const profile = showBot ? (io.botProfile(cmd.bot) || {}) : null;
+        return {
+            key: cmd.bot + ':' + cmd.name,
+            index: flatIndex,
+            name: cmd.name,
+            args: cmd.args.map(a => ({ label: argSignature(a), optional: !a.required })),
+            description: cmd.description || '',
+            bot: profile ? { name: profile.name || cmd.bot.slice(0, 12) + '…', avatarSrc: profile.avatarSrc || null } : null,
+        };
     }
 
     function render() {
         const chatId = io.chatId();
         const snap = snapshots.get(chatId);
-        panel.innerHTML = '';
-        panel.classList.remove('command-selector--message');
 
         // Still fetching and nothing known: the loading state ("Loading N bots").
         if (!snap || (loading.has(chatId) && !allCommands().length)) {
             const n = snap ? snap.bots : 0;
             if (snap && n === 0) { hide(); return; } // known: no bots here
             mode = 'loading';
-            panel.classList.add('command-selector--message');
-            const row = document.createElement('div');
-            row.className = 'command-loading';
-            const spin = document.createElement('span');
-            spin.className = 'command-spinner';
-            row.appendChild(spin);
-            const label = document.createElement('span');
-            label.textContent = n > 0 ? ('Loading ' + n + ' bot' + (n === 1 ? '' : 's') + '…') : 'Looking for bots…';
-            row.appendChild(label);
-            panel.appendChild(row);
-            position();
-            show();
+            show({
+                mode: 'loading',
+                label: n > 0 ? ('Loading ' + n + ' bot' + (n === 1 ? '' : 's') + '…') : 'Looking for bots…',
+            });
             return;
         }
 
@@ -339,25 +266,11 @@ function initCommandSelector(textarea, io, anchorEl) {
             // rather than silently hiding a deliberately-opened picker; if a
             // manifest is still converging, show that instead of a false empty.
             mode = 'list';
-            panel._flat = [];
+            flatRows = [];
             activeIndex = 0;
-            panel.classList.add('command-selector--message');
-            const row = document.createElement('div');
-            if (snap.fresh === false) {
-                row.className = 'command-loading command-refreshing';
-                const spin = document.createElement('span');
-                spin.className = 'command-spinner';
-                row.appendChild(spin);
-                const label = document.createElement('span');
-                label.textContent = 'Checking for commands…';
-                row.appendChild(label);
-            } else {
-                row.className = 'command-empty';
-                row.textContent = 'No commands available';
-            }
-            panel.appendChild(row);
-            position();
-            show();
+            show(snap.fresh === false
+                ? { mode: 'message', variant: 'refreshing', label: 'Checking for commands…' }
+                : { mode: 'message', variant: 'empty', label: 'No commands available' });
             return;
         }
 
@@ -366,26 +279,22 @@ function initCommandSelector(textarea, io, anchorEl) {
         mode = 'list';
 
         // Flat keyboard order = exactly the render order (recents, then sections).
-        // Each section wraps its header + rows so the header can STICK to the
-        // panel top while its rows scroll, then get pushed away by the next
-        // section's header (sticky is clamped to its own wrapper).
+        // A stale-served list is still converging (manifest REQ in flight): each
+        // bot header carries the status inline so a bot that pops in later isn't
+        // a surprise.
         const flat = [];
-        // A stale-served list is still converging (manifest REQ in flight). Rather
-        // than a footer that shifts layout, each bot header carries the status
-        // inline (see sectionHeader) so a bot that pops in later isn't a surprise.
+        const sections = [];
         const refreshing = snap.fresh === false;
-        const section = (headerText, avatarSrc, cmds, showBot, refresh) => {
-            const wrap = document.createElement('div');
-            wrap.className = 'command-section';
-            wrap.appendChild(sectionHeader(headerText, avatarSrc, refresh));
+        const section = (key, title, avatarSrc, cmds, showBot, refresh) => {
+            const rows = [];
             for (const cmd of cmds) {
-                wrap.appendChild(commandRow(cmd, flat.length, showBot));
+                rows.push(commandRow(cmd, flat.length, showBot));
                 flat.push(cmd);
             }
-            panel.appendChild(wrap);
+            sections.push({ key, title, avatarSrc, refreshing: refresh, rows });
         };
         if (recent.length) {
-            section('Recently Used', null, recent, true, false);
+            section('recent', 'Recently Used', null, recent, true, false);
         }
         const byBot = new Map();
         for (const cmd of matches) {
@@ -394,24 +303,17 @@ function initCommandSelector(textarea, io, anchorEl) {
         }
         for (const [bot, cmds] of byBot) {
             const profile = io.botProfile(bot) || {};
-            section(profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds, false, refreshing);
+            section(bot, profile.name || (bot.slice(0, 12) + '…'), profile.avatarSrc || null, cmds, false, refreshing);
         }
-        panel._flat = flat;
+        flatRows = flat;
         if (activeIndex >= flat.length) activeIndex = 0;
-        position();
-        show();
-        // Rebuilding innerHTML resets scrollTop; bring the keyboard-active row
-        // back into view (scroll-margin keeps it clear of the stuck header).
-        const activeEl = panel.querySelector('.command-item.active');
-        if (activeEl) activeEl.scrollIntoView({ block: 'nearest' });
+        show({ mode: 'list', sections, active: activeIndex, pick: (i) => selectCommand(flat[i]) });
     }
 
     /** The armed-command hint bar: signature with the CURRENT arg highlighted;
      *  a Choice arg additionally offers its values as clickable chips. */
     function renderHint(cmd, typedRest) {
         mode = 'hint';
-        panel.innerHTML = '';
-        panel.classList.remove('command-selector--message');
 
         // Which arg is the caret conceptually on: completed tokens = args filled.
         let filled = 0;
@@ -425,46 +327,20 @@ function initCommandSelector(textarea, io, anchorEl) {
             filled++;
         }
         const currentIdx = Math.min(filled, Math.max(cmd.args.length - 1, 0));
-
-        const row = document.createElement('div');
-        row.className = 'command-hint';
-        const name = document.createElement('span');
-        name.className = 'command-item-name';
-        name.textContent = '/' + cmd.name;
-        row.appendChild(name);
-        cmd.args.forEach((a, i) => {
-            const chip = document.createElement('span');
-            chip.className = 'command-item-arg' + (a.required ? '' : ' optional') + (i === currentIdx && cmd.args.length ? ' current' : '');
-            chip.textContent = argSignature(a);
-            chip.title = a.description || '';
-            row.appendChild(chip);
-        });
-        panel.appendChild(row);
-
         const current = cmd.args[currentIdx];
-        if (current && current.description) {
-            const desc = document.createElement('div');
-            desc.className = 'command-hint-desc';
-            desc.textContent = current.description;
-            panel.appendChild(desc);
-        }
-        if (current && current.type === 'choice' && (current.choices || []).length) {
-            const choices = document.createElement('div');
-            choices.className = 'command-hint-choices';
-            for (const ch of current.choices) {
-                const chip = document.createElement('span');
-                chip.className = 'command-choice';
-                chip.textContent = ch;
-                chip.addEventListener('mousedown', (e) => {
-                    e.preventDefault();
-                    insertChoice(ch);
-                });
-                choices.appendChild(chip);
-            }
-            panel.appendChild(choices);
-        }
-        position();
-        show();
+        show({
+            mode: 'hint',
+            name: cmd.name,
+            args: cmd.args.map((a, i) => ({
+                label: argSignature(a),
+                optional: !a.required,
+                current: i === currentIdx && cmd.args.length > 0,
+                title: a.description || '',
+            })),
+            desc: (current && current.description) || '',
+            choices: current && current.type === 'choice' ? (current.choices || []) : [],
+            pickChoice: (v) => insertChoice(v),
+        });
     }
 
     // --- Selection → the structured command composer ---
@@ -1106,7 +982,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             return;
         }
         if (mode !== 'list' && mode !== 'loading') return;
-        const flat = panel._flat || [];
+        const flat = flatRows;
         if (e.key === 'ArrowDown' && flat.length) {
             e.preventDefault();
             activeIndex = (activeIndex + 1) % flat.length;
@@ -1194,7 +1070,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             textarea.removeEventListener('input', onInput);
             textarea.removeEventListener('keydown', onKeyDown);
             textarea.removeEventListener('blur', onBlur);
-            if (panel.parentNode) panel.parentNode.removeChild(panel);
+            hide();
             if (choiceMenu && choiceMenu.parentNode) choiceMenu.parentNode.removeChild(choiceMenu);
         }
     };

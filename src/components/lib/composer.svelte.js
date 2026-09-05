@@ -56,3 +56,19 @@ export function setLock(reason, placeholder = '') {
 export function setCommandActive(active) {
     command.active = !!active;
 }
+
+// The autocomplete popup: at most one open at a time. The view is RAW (a fresh
+// snapshot per open, so the panel re-derives from the object's identity) and keeps
+// its handler: the controller that parsed the trigger is the one that inserts.
+let popup = $state.raw({ kind: null });
+
+export function composerPopup() { return popup; }
+
+/** Open (or re-render) the `kind` popup with `view`; the previous kind closes. */
+export function openPopup(kind, view) {
+    popup = { kind, ...view };
+}
+/** Close the popup if it is `kind` (a stale close from another controller is a no-op). */
+export function closePopup(kind) {
+    if (popup.kind === kind) popup = { kind: null };
+}
