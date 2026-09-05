@@ -21004,6 +21004,8 @@ body.profile-switcher-editing .profile-switcher-add {
 .chatlist-community-head-name,
 .dmsg-author,
 #chat-contact,
+#profile-name,
+#group-overview-name,
 .chat-contact {
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
 }

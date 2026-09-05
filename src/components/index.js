@@ -20,6 +20,7 @@ import ComposerChrome from './composer/ComposerChrome.svelte';
 import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
 import CommandStrip from './composer/CommandStrip.svelte';
+import ChatHeader from './chat/ChatHeader.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -135,4 +136,15 @@ export function mountCommandComposer({ editor, strip, onCancel }) {
     strip.replaceChildren();
     const bar = mount(CommandStrip, { target: strip, props: { onCancel } });
     return { pills, bar };
+}
+
+/**
+ * Mount the chat header reconciler over the existing header elements (renderless).
+ * It derives name, avatar, subtext and menu visibility from the open chat's signals.
+ */
+export function mountChatHeader({ els, h }) {
+    const host = document.createElement('div');
+    host.hidden = true;
+    document.body.appendChild(host);
+    return mount(ChatHeader, { target: host, props: { els, h } });
 }

@@ -1961,7 +1961,7 @@ function refreshRenderedName(npub) {
     if (strOpenChat) {
         const cOpen = arrChats.find(c => c.id === strOpenChat);
         if (cOpen && !chatIsGroup(cOpen) && cOpen.id === npub) {
-            setChatHeader(cOpen, cProfile, false, false);
+            setChatHeader(cOpen);
         }
     }
 }
@@ -2918,12 +2918,6 @@ async function fetchProfiles() {
 }
 
 // Track pending status hide timeout
-let statusHideTimeout = null;
-
-/**
- * Update the chat header subtext (status/typing indicator) for the currently open chat
- * @param {Object} chat - The chat object
- */
 // Cached member count per community id, for the chat-header subtext + overview status. Membership is
 // derived from observed activity (best-effort), so this is refreshed live as people join/speak.
 const communityMemberCounts = new Map();
@@ -2989,77 +2983,12 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     }
 }
 
+/** The header subtext (status, typing, member count) derives from the chat's signal. */
 function updateChatHeaderSubtext(chat) {
     if (!chat) return;
-
-    // Clear any pending hide timeout
-    if (statusHideTimeout) {
-        clearTimeout(statusHideTimeout);
-        statusHideTimeout = null;
-    }
-
-    let newStatusText = '';
-    let newStatusEmojiTags = [];
-    let shouldAddGradient = false;
-
-    const isCommunity = chat.chat_type === 'Community';
-    const fNotes = chat.id === strPubkey;
-
-    // Check for typing indicators first (shared logic)
-    const typingText = generateTypingText(chat);
-
-    if (fNotes) {
-        newStatusText = 'Encrypted Notes to Self';
-        shouldAddGradient = false;
-    } else if (typingText) {
-        // Someone is typing - use shared helper
-        newStatusText = typingText;
-        shouldAddGradient = true;
-    } else if (isCommunity) {
-        // Show the member count as the subtext (typing, handled above, takes priority). The count is
-        // per-community (a channel chat carries its community_id in custom_fields). Throttled refresh
-        // keeps it live and re-renders this line when the count changes.
-        const communityId = chat.metadata?.custom_fields?.community_id;
-        newStatusText = communityMemberSubtext(communityId);
-        shouldAddGradient = false;
-        refreshCommunityMemberCount(communityId);
-    } else {
-        // DM - not typing, show profile status
-        const profile = getProfile(chat.id);
-        newStatusText = profile?.status?.title || '';
-        newStatusEmojiTags = profile?.status?.emoji_tags || [];
-        shouldAddGradient = false;
-    }
-    
-    const currentHasStatus = !!domChatContactStatus.textContent && !domChatContactStatus.classList.contains('status-hidden');
-    const newHasStatus = !!newStatusText;
-    
-    if (newHasStatus) {
-        // Show status: remove hidden class, update content, ensure visible
-        domChatContactStatus.classList.remove('status-hidden');
-        domChatContactStatus.style.display = ''; // Reset display in case it was hidden by else branch
-        domChatContactStatus.textContent = newStatusText;
-        domChatContactStatus.classList.toggle('typing-indicator-text', shouldAddGradient);
-        if (!shouldAddGradient) {
-            twemojify(domChatContactStatus);
-            renderCustomEmojiShortcodes(domChatContactStatus, newStatusEmojiTags);
-        }
-        domChatContact.classList.remove('chat-contact');
-        domChatContact.classList.add('chat-contact-with-status');
-    } else if (currentHasStatus) {
-        // Hide status: add hidden class, wait for animation, then clear content
-        domChatContactStatus.classList.add('status-hidden');
-        domChatContact.classList.remove('chat-contact-with-status');
-        domChatContact.classList.add('chat-contact');
-        
-        // Clear content after animation completes (300ms matches CSS transition)
-        statusHideTimeout = setTimeout(() => {
-            domChatContactStatus.textContent = '';
-            domChatContactStatus.classList.remove('typing-indicator-text');
-            statusHideTimeout = null;
-        }, 300);
-    }
-    // If both are false (no status before, no status now), do nothing
+    touchChatRow(chat);
+    const communityId = chat.metadata?.custom_fields?.community_id;
+    if (communityId) refreshCommunityMemberCount(communityId);
 }
 
 /**
@@ -3524,8 +3453,7 @@ async function setupRustListeners() {
         if (strOpenChat) {
             const open = arrChats.find(c => c.id === strOpenChat);
             if (open && open.metadata?.custom_fields?.community_id === communityId) {
-                const isGroup = chatIsGroup(open);
-                setChatHeader(open, isGroup ? null : getProfile(open.id), isGroup, open.id === strPubkey);
+                setChatHeader(open);
                 // A community that seals WHILE it's the open view: openChat won't re-run, so lock the
                 // composer + drop the end divider live here (the flag was refreshed above).
                 if (chatIsDissolved(open)) applyDissolvedChatUI(open);
@@ -7302,64 +7230,16 @@ function buildChatMenuItems(chat) {
     return items;
 }
 
-function setChatHeader(chat, profile, isGroup, fNotes) {
-    domChatHeaderAvatarContainer.innerHTML = '';
-    let domChatAvatar;
-    if (fNotes) {
-        domChatAvatar = null;
-    } else if (isGroup) {
-        const groupAvatarSrc = chat?.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-        domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
-        domChatAvatar.classList.add('btn');
-        domChatAvatar.onclick = () => {
-            openCommunityDetails(chat);
-        };
-    } else {
-        const chatAvatarSrc = getProfileAvatarSrc(profile);
-        domChatAvatar = createAvatarImg(chatAvatarSrc, 22, false);
-        domChatAvatar.classList.add('btn');
-        domChatAvatar.onclick = () => {
-            previousChatBeforeProfile = strOpenChat;
-            openProfile(profile);
-        };
-    }
-    if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
-
-    if (fNotes) {
-        domChatContact.textContent = 'Notes';
-        domChatContact.classList.remove('btn');
-        domChatContact.onclick = null;
-    } else if (isGroup) {
-        domChatContact.textContent = communityChatTitle(chat) || `Group ${strOpenChat.substring(0, 10)}...`;
-        domChatContact.onclick = () => {
-            openCommunityDetails(chat);
-        };
-        domChatContact.classList.add('btn');
-    } else {
-        domChatContact.textContent = getName(profile);
-        if (profile?.nickname || profile?.name) twemojify(domChatContact);
-        domChatContact.onclick = () => {
-            previousChatBeforeProfile = strOpenChat;
-            openProfile(profile);
-        };
-        domChatContact.classList.add('btn');
-    }
-
+/** The header derives from the open chat's signals; this paints it synchronously
+ *  for the open path and warms a community's member count. */
+function setChatHeader(chat) {
+    VectorSvelte.setOpenChat(strOpenChat);
     if (chat) {
-        updateChatHeaderSubtext(chat);
-    } else {
-        // Clear stale subtext from a previously-open chat when switching to a
-        // contact that hasn't been synced yet (no entry in arrChats).
-        domChatContactStatus.textContent = '';
-        domChatContactStatus.classList.remove('typing-indicator-text');
-        domChatContactStatus.classList.add('status-hidden');
+        touchChatRow(chat);
+        const communityId = chat.metadata?.custom_fields?.community_id;
+        if (communityId) refreshCommunityMemberCount(communityId);
     }
-
-    // Hide the overflow menu button when the chat has no menu options.
-    const domChatMenuBtn = document.getElementById('chat-menu-btn');
-    if (domChatMenuBtn) {
-        domChatMenuBtn.style.display = buildChatMenuItems(chat).length ? '' : 'none';
-    }
+    VectorSvelte.flushSync();
 }
 
 async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
@@ -7387,7 +7267,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 
     // Header is set synchronously by openChat before this runs, but call it
     // again here in case profile data has changed while the chat was open.
-    setChatHeader(chat, profile, isGroup, fNotes);
+    setChatHeader(chat);
 
     if (chat?.messages.length || arrMessages.length) {
 
@@ -7447,59 +7327,17 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             }
         }
     } else {
-        // Probably a 'New Chat', as such, we'll mostly render an empty chat
-        // Clear existing messages when opening a new chat (fClicked = true)
-        // This prevents messages from the previous chat from showing
+        // Probably a 'New Chat': an empty window. Never wipe the container itself,
+        // the list island lives in it.
         if (fClicked) {
-            domChatMessages.innerHTML = '';
-        }
-        
-        // Render chat header avatar
-        domChatHeaderAvatarContainer.innerHTML = '';
-        let domChatAvatar;
-        if (fNotes) {
-            // Notes: no avatar icon
-            domChatAvatar = null;
-        } else if (isGroup) {
-            const groupAvatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-            domChatAvatar = createAvatarImg(groupAvatarSrc, 22, true);
-            domChatAvatar.classList.add('btn');
-            domChatAvatar.onclick = () => {
-                openCommunityDetails(chat);
-            };
-        } else {
-            // DM: use profile avatar or placeholder
-            const dmAvatarSrc = getProfileAvatarSrc(profile);
-            domChatAvatar = createAvatarImg(dmAvatarSrc, 22, false);
-        }
-        if (domChatAvatar) domChatHeaderAvatarContainer.appendChild(domChatAvatar);
-
-        if (fNotes) {
-            domChatContact.textContent = 'Notes';
-            domChatContact.onclick = null;
-            domChatContact.classList.remove('btn');
-            domChatContactStatus.textContent = 'Encrypted Notes to Self';
-            domChatContactStatus.classList.remove('typing-indicator-text');
-        } else if (isGroup) {
-            domChatContact.textContent = communityChatTitle(chat) || `Group ${strOpenChat.substring(0, 10)}...`;
-            domChatContact.onclick = () => {
-                openCommunityDetails(chat);
-            };
-            domChatContact.classList.add('btn');
-
-            // Ensure the member count/status renders even before the first message
-            updateChatHeaderSubtext(chat);
-        } else {
-            domChatContact.textContent = getName(profile);
-            domChatContact.onclick = null;
-            domChatContact.classList.remove('btn');
-            domChatContactStatus.textContent = '';
-            domChatContactStatus.classList.remove('typing-indicator-text');
+            ensureMessageList();
+            VectorSvelte.clearWindow();
+            VectorSvelte.flushSync();
+            windowTopId = windowBottomId = null;
         }
 
-        domChatContact.classList.toggle('chat-contact', !domChatContactStatus.textContent);
-        domChatContact.classList.toggle('chat-contact-with-status', !!domChatContactStatus.textContent);
-        domChatContactStatus.style.display = !domChatContactStatus.textContent ? 'none' : '';
+        // The header derives from the open chat id even without a chat entry yet.
+        setChatHeader(chat);
     }
 
     adjustSize();
@@ -8929,7 +8767,7 @@ async function openChat(contact) {
     // Render the header SYNCHRONOUSLY using whatever in-memory data we have,
     // so the user sees the contact name + avatar the instant the chat panel
     // appears — no more black flash while async cache/DB loads run.
-    setChatHeader(chat, profile, isGroup, contact === strPubkey);
+    setChatHeader(chat);
 
     // Pre-paint: synchronously render in-memory messages so the chat has
     // content the moment the panel reveals. The subsequent eventCache load
@@ -9321,13 +9159,6 @@ async function closeChat() {
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
     syncBackendActiveChat();
-    
-    // Clear the chat header to prevent flicker when opening next chat
-    domChatContact.textContent = '';
-    domChatContactStatus.textContent = '';
-    domChatContactStatus.classList.add('status-hidden');
-    domChatContactStatus.classList.remove('typing-indicator-text');
-    domChatHeaderAvatarContainer.innerHTML = '';
     
     // Reset procedural scroll state
     resetProceduralScroll();
@@ -11058,6 +10889,28 @@ VectorSvelte.mountCommandComposer({
     editor: domChatMessageInput,
     strip: document.getElementById('chat-command-bar'),
     onCancel: () => { if (commandCtrl) commandCtrl.exitComposer(); },
+});
+VectorSvelte.mountChatHeader({
+    els: { avatar: domChatHeaderAvatarContainer, name: domChatContact, status: domChatContactStatus, menu: document.getElementById('chat-menu-btn') },
+    // Lazy: the helpers live in scripts that load after this one evaluates.
+    h: {
+        myNpub: () => strPubkey,
+        getChat: (id) => arrChats.find(c => c.id === id),
+        getProfile: (npub) => getProfile(npub),
+        getName: (x) => getName(x),
+        getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
+        createAvatarImg: (src, size, group) => createAvatarImg(src, size, group),
+        twemojify: (el) => twemojify(el),
+        renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
+        convertFileSrc: (p) => convertFileSrc(p),
+        isGroup: (chat) => chatIsGroup(chat),
+        communityChatTitle: (chat) => communityChatTitle(chat),
+        typingText: (chat) => generateTypingText(chat),
+        memberSubtext: (cid) => communityMemberSubtext(cid),
+        menuCount: (chat) => buildChatMenuItems(chat).length,
+        openProfile: (profile) => { previousChatBeforeProfile = strOpenChat; openProfile(profile); },
+        openCommunity: (chat) => openCommunityDetails(chat),
+    },
 });
 VectorSvelte.mountComposerPopups({
     anchor: domChatMessageBox,
@@ -13877,7 +13730,7 @@ async function closeCreateGroup() {
                             communityChanged(communityId);
                             // Refresh the open channel header so the icon shows without a manual back-out/
                             // re-enter (renderChatlist only updates the list row, not the open top bar).
-                            if (strOpenChat === channelId) setChatHeader(chat, null, true, false);
+                            if (strOpenChat === channelId) setChatHeader(chat);
                         }
                     } catch (err) { console.error('Set community avatar failed:', err); showToast('Community created, but the avatar upload failed'); }
                 }
