@@ -73,6 +73,49 @@ function _dmsgEnsureRowObserver() {
     _dmsgRowObserver.observe(domChatMessages, { childList: true });
 }
 
+/** Whether `el` is a row the island built (so vanilla must not rewrite its shell). */
+function _dmsgIsIslandRow(el) {
+    return !!el && _dmsgRowInstances.has(el);
+}
+
+/**
+ * Update a rendered row to `msg` in place: the island re-derives its shell and
+ * refills its content on the same element, so the toolbar target, jump highlight,
+ * streak state and scroll position all survive. Vanilla-built rows (system events,
+ * PIVX, blocked) fall back to a full replace.
+ */
+function updateMessageRow(domMsg, msg, profile, oldId = '') {
+    const instance = domMsg && _dmsgRowInstances.get(domMsg);
+    if (!instance) {
+        replaceMessageRow(domMsg, renderMessage(msg, profile, oldId || msg.id));
+        return document.getElementById(msg.id) || domMsg;
+    }
+    instance.update(msg);
+    VectorSvelte.flushSync();
+    // The quoted parent and the reactions are vanilla-owned; rebuild the quote from
+    // the new message and reconcile the chips in place (counts roll, images stay).
+    const body = domMsg.querySelector(':scope > .dmsg-body');
+    if (body) {
+        body.querySelector(':scope > .dmsg-reply')?.remove();
+        const replyEl = msg.replied_to ? _dmsgBuildReplyContext(msg, profile) : null;
+        if (replyEl) {
+            body.insertBefore(replyEl, body.firstChild);
+            domMsg.classList.add('dmsg--has-reply');
+            delete domMsg.dataset.replyPending;
+        } else {
+            domMsg.classList.remove('dmsg--has-reply');
+            if (msg.replied_to) domMsg.dataset.replyPending = msg.replied_to;
+        }
+    }
+    _dmsgReplaceReactions(domMsg, msg);
+    const currentChat = arrChats.find(c => c.id === strOpenChat);
+    if (_dmsgIsPinged(msg, currentChat, chatIsGroup(currentChat))) domMsg.dataset.pinged = 'true';
+    else delete domMsg.dataset.pinged;
+    recomputeStreakBoundary(domMsg);
+    if (msg.mine) _dmsgUpdateLastSentVisibility();
+    return domMsg;
+}
+
 /** Helpers the row island calls; the leaf builders stay here. */
 const _dmsgRowHelpers = {
     getProfile: (npub) => getProfile(npub),

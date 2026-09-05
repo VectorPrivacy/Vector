@@ -1879,7 +1879,7 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
         const domMsg = document.getElementById(oldId);
         if (domMsg) {
             const profile = getProfile(chatId);
-            replaceMessageRow(domMsg, renderMessage(msg, profile, oldId));
+            updateMessageRow(domMsg, msg, profile, oldId);
         }
         strLastMsgID = eventId;
         softChatScroll();
@@ -2481,9 +2481,11 @@ function applyCommunityAdmins(communityId, adminNpubs) {
     const open = arrChats.find(c => c.id === strOpenChat);
     if (!open || open.metadata?.custom_fields?.community_id !== communityId) return;
     const adminSet = new Set(adminNpubs);
+    // Island rows derive their badges from the community signal.
+    communityChanged(communityId);
     for (const author of domChatMessages.querySelectorAll('.dmsg-author[data-npub]')) {
         const header = author.parentElement;
-        if (!header) continue;
+        if (!header || _dmsgIsIslandRow(author.closest('.dmsg'))) continue;
         const existing = header.querySelector('.dmsg-author-badge.admin');
         if (!adminSet.has(author.dataset.npub)) {
             if (existing) existing.remove();
@@ -4025,8 +4027,7 @@ async function setupRustListeners() {
                                 sp.style.scale = '0.5';
                             }
                             setTimeout(() => {
-                                const newEl = renderMessage(memMsg, profile, msgId);
-                                replaceMessageRow(domMsg, newEl);
+                                const newEl = updateMessageRow(domMsg, memMsg, profile, msgId);
                                 // Grow + fade in the new icon
                                 const icon = newEl.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
                                 if (icon) {
@@ -4038,7 +4039,7 @@ async function setupRustListeners() {
                                 softChatScroll();
                             }, 200);
                         } else {
-                            replaceMessageRow(domMsg, renderMessage(memMsg, profile, msgId));
+                            updateMessageRow(domMsg, memMsg, profile, msgId);
                         }
                     }
                 }
@@ -4073,7 +4074,7 @@ async function setupRustListeners() {
                     const domMsg = document.getElementById(msgId);
                     const memMsg = cChat.messages.find(m => m.id === msgId);
                     if (domMsg && memMsg) {
-                        replaceMessageRow(domMsg, renderMessage(memMsg, profile, msgId));
+                        updateMessageRow(domMsg, memMsg, profile, msgId);
                     }
                 }
             }
@@ -4112,8 +4113,8 @@ async function setupRustListeners() {
             }
         }
 
-        // A cached avatar landed: only this profile's DM row repaints.
-        if (avatarCacheChanged) VectorSvelte.touchProfile(evt.payload.id);
+        // Every row and list entry showing this profile re-derives (name, avatar, bot mark).
+        VectorSvelte.touchProfile(evt.payload.id);
         
         // Update already-painted message rows authored by this npub — name + avatar — so chat
         // history reflects the resolved profile without needing a reopen (matches the system-event
@@ -4131,6 +4132,9 @@ async function setupRustListeners() {
                 `.dmsg-reply-name[data-npub="${id}"], .dmsg-reply-avatar[data-npub="${id}"], ` +
                 `.mention[data-npub="${id}"]`
             ).forEach(el => {
+                // Island rows derive their author and avatar from the profile signal.
+                if ((el.classList.contains('dmsg-author') || el.classList.contains('dmsg-avatar'))
+                    && _dmsgIsIslandRow(el.closest('.dmsg'))) return;
                 if (el.classList.contains('dmsg-author')) {
                     // .dmsg-author holds ONLY the name — bot/admin/owner badges are siblings in the parent
                     // .dmsg-header — so reset + re-twemojify the whole element. (Patching the first text node
@@ -4576,9 +4580,9 @@ async function setupRustListeners() {
             // still rebuilds the whole row.
             if (domMsg && _dmsgIsReactionOnlyChange(domMsg._dmsgMsg, evt.payload.message)) {
                 _dmsgReplaceReactions(domMsg, evt.payload.message);
-            } else {
+            } else if (domMsg) {
                 const profile = getProfile(evt.payload.chat_id);
-                domMsg?.replaceWith(renderMessage(evt.payload.message, profile, evt.payload.old_id));
+                updateMessageRow(domMsg, evt.payload.message, profile, evt.payload.old_id);
             }
 
             // The row may have grown after its initial layout (a reaction chip added in
@@ -4808,7 +4812,7 @@ async function setupRustListeners() {
                 const domMsg = document.getElementById(message_id);
                 if (domMsg) {
                     const profile = getProfile(chat_id);
-                    domMsg.replaceWith(renderMessage(msg, profile, message_id));
+                    updateMessageRow(domMsg, msg, profile, message_id);
                 }
             }
         }
@@ -8667,7 +8671,7 @@ async function retryFailedMessage(msg) {
             }
             if (strOpenChat === chatId) {
                 const dom = document.getElementById(msg.id);
-                if (dom) dom.replaceWith(renderMessage(local, getProfile(chatId), msg.id));
+                if (dom) updateMessageRow(dom, local, getProfile(chatId), msg.id);
             }
         };
         setSendState(false, true);
@@ -12723,34 +12727,7 @@ async function sendMessage(messageText) {
             const originalContent = strCurrentEditOriginalContent;
             cancelEdit();
 
-            // Instantly update the message in the DOM for responsive UX
-            const msgElement = document.getElementById(editMsgId);
-            if (msgElement) {
-                const spanMessage = msgElement.querySelector('.dmsg-text');
-                if (spanMessage) {
-                    spanMessage.innerHTML = parseMarkdown(cleanedText.trim());
-                    linkifyUrls(spanMessage);
-                    processInlineImages(spanMessage);
-                    renderMentions(spanMessage, false, { allowBare: true, queueSync: true });
-                    // Resolve custom emoji optimistically (before twemoji, mirroring
-                    // the render path) so the edit doesn't flash `:shortcode:` while
-                    // the backend's authoritative message_update is in flight.
-                    renderCustomEmojiShortcodes(spanMessage, equippedEmojiTags());
-                    twemojify(spanMessage);
-                }
-                // Add edited indicator if not already present
-                const dmsgContent = msgElement.querySelector('.dmsg-content');
-                if (dmsgContent && !dmsgContent.querySelector('.dmsg-edited')) {
-                    const spanEdited = document.createElement('span');
-                    spanEdited.classList.add('dmsg-edited', 'btn');
-                    spanEdited.textContent = '(edited)';
-                    spanEdited.setAttribute('data-msg-id', editMsgId);
-                    spanEdited.title = 'Click to view edit history';
-                    dmsgContent.appendChild(spanEdited);
-                }
-            }
-
-            // Update in cache as well
+            // Update the in-memory message first; the row re-derives from it below.
             const chat = arrChats.find(c => c.id === strOpenChat);
             if (chat) {
                 const msg = chat.messages.find(m => m.id === editMsgId);
@@ -12771,6 +12748,10 @@ async function sendMessage(messageText) {
                     });
                     msg.content = cleanedText;
                     msg.edited = true;
+                    // Instant repaint for responsive UX; the backend's authoritative
+                    // message_update lands on the same row afterwards.
+                    const msgElement = document.getElementById(editMsgId);
+                    if (msgElement) updateMessageRow(msgElement, msg, getProfile(strOpenChat), editMsgId);
                 }
             }
 
@@ -12973,7 +12954,7 @@ function _upgradeCommandRows(chatId) {
         // position for nothing. This runs on every command-set load, so
         // without the check a row churns every time.
         if (domMsg.querySelector('.dmsg-command-line')) continue;
-        replaceMessageRow(domMsg, renderMessage(msg, profile, msg.id));
+        updateMessageRow(domMsg, msg, profile, msg.id);
     }
 }
 

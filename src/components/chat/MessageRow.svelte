@@ -1,16 +1,18 @@
 <script>
-    // One message row (Phase 2a, CHAT_VIEW_ISLAND_DESIGN.md). The row owns its SHELL:
+    // One message row (Phase 2, CHAT_VIEW_ISLAND_DESIGN.md). The row owns its SHELL:
     // root attributes, gutter avatar, header (author, bot mark, badges, time) and the
     // body layout. Those derive from the message plus the author's profile signal and
     // the community signal, so a resolved profile or a granted role repaints them with
-    // no retro-resolve code. The content (text, attachments, previews, status) and the
-    // reactions row are filled by the vanilla builders through actions, byte-identical
-    // to renderMessage, and are replaced whole when the row is re-rendered.
+    // no retro-resolve code. The content (text, attachments, previews, status) is
+    // filled by the vanilla builders through an action, byte-identical to
+    // renderMessage, and re-filled whole by `update(msg)`; the reactions row is filled
+    // once here and reconciled in place by the vanilla reconciler afterwards.
     //
     // The list container, the windowing engine and every scroll measurement stay
     // vanilla: they only need a child element whose id is the message id. Attributes
     // vanilla writes after render (data-streak, data-derezzing, data-jumped, swipe
-    // transforms) are deliberately unbound here, so those writes persist.
+    // transforms, the has-reply class after an update) are deliberately not re-bound
+    // here, so those writes persist.
     import { profileVersion, communityVersion } from '../lib/signals.svelte.js';
 
     let {
@@ -19,20 +21,38 @@
         streak = 'first',  // computed by the caller from the row above (vanilla owns streaks)
         replyEl = null,    // prebuilt .dmsg-reply element, or null
         replyPending = '', // replied_to id when the quoted parent has not arrived yet
-        ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked, isCommand }
+        ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
         h,                 // vanilla helpers: getProfile, getName, getProfileAvatarSrc, twemojify,
                            //   showTooltip, hideTooltip, formatHourMinute, fillContent, fillReactions
     } = $props();
 
-    // Props are mount-time constants: a changed message re-renders as a new row.
+    // The live message. A message_update swaps the raw object (pending → sent even
+    // changes its id), so the shell re-derives from `current` and the content refills.
+    // svelte-ignore state_referenced_locally
+    let current = $state.raw(msg);
+    let rev = $state(0);
+
+    /** The message changed (edit, status, attachment, id swap): re-derive and refill. */
+    export function update(next) {
+        current = next;
+        rev++;
+    }
+
+    // Mount-time constants. Authorship never changes for a row; a changed message
+    // keeps its author.
     // svelte-ignore state_referenced_locally
     const authorFullId = msg.mine ? ctx.myNpub : (msg.npub || sender?.id || '');
     // svelte-ignore state_referenced_locally
     const shortSender = (msg.mine ? ctx.myNpub : (sender?.id || msg.npub || '')).substring(0, 8);
     // svelte-ignore state_referenced_locally
-    const status = msg.failed ? 'failed' : msg.pending ? 'pending' : 'sent';
-    // svelte-ignore state_referenced_locally
     const communityId = ctx.currentChat?.metadata?.custom_fields?.community_id || null;
+    // The reactions row exists from mount only if the message had reactions then;
+    // the vanilla reconciler adds and removes it afterwards.
+    // svelte-ignore state_referenced_locally
+    const hadReactions = !!msg.reactions?.length;
+
+    const status = $derived(current.failed ? 'failed' : current.pending ? 'pending' : 'sent');
+    const hourMinute = $derived(h.formatHourMinute(current.at));
 
     // The author as the profile store knows them now. `sender` is the mount-time
     // snapshot; the signal read is what repaints the row when the profile lands.
@@ -63,14 +83,12 @@
         return { admin, owner };
     });
 
-    // svelte-ignore state_referenced_locally
-    const hourMinute = h.formatHourMinute(msg.at);
-
     // ── actions: the vanilla leaf builders ──
 
-    // O(1) back-reference the toolbar, streak and reaction paths read.
-    function expando(node) {
-        node._dmsgMsg = msg;
+    // O(1) back-reference the toolbar, streak and reaction paths read; follows updates.
+    function expando(node, m) {
+        node._dmsgMsg = m;
+        return { update: (next) => { node._dmsgMsg = next; } };
     }
 
     // Name text + twemoji. Keyed on the string so a re-derive that yields the same
@@ -97,9 +115,18 @@
         if (replyEl) node.insertBefore(replyEl, node.firstChild);
     }
 
-    // Content and reactions: exactly renderMessage's builders, once per mount.
-    function contentInto(node) {
-        h.fillContent(node, msg, sender, ctx);
+    // Content: exactly renderMessage's builders; refilled whole on update.
+    function contentInto(node, r) {
+        h.fillContent(node, current, sender, ctx);
+        let cur = r;
+        return {
+            update: (next) => {
+                if (next === cur) return;
+                cur = next;
+                node.replaceChildren();
+                h.fillContent(node, current, sender, ctx);
+            },
+        };
     }
     function reactionsInto(node) {
         h.fillReactions(node, msg);
@@ -109,17 +136,17 @@
 <div
     class="dmsg"
     class:dmsg--has-reply={!!replyEl}
-    id={msg.id}
+    id={current.id}
     data-sender={shortSender}
     data-mine={msg.mine ? 'true' : 'false'}
     data-status={status}
-    data-at={msg.at ? String(msg.at) : undefined}
+    data-at={current.at ? String(current.at) : undefined}
     data-streak={streak}
     data-pinged={ctx.pinged ? 'true' : undefined}
     data-replying-to={ctx.replyingTo ? 'true' : undefined}
     data-reply-pending={replyPending || undefined}
     style:opacity={ctx.revealedBlocked ? '0.4' : null}
-    use:expando
+    use:expando={current}
 >
     <div class="dmsg-gutter">
         {#if avatarSrc && !avatarFailed}
@@ -159,8 +186,8 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
-        <div class="dmsg-content" use:contentInto></div>
-        {#if msg.reactions?.length}
+        <div class="dmsg-content" use:contentInto={rev}></div>
+        {#if hadReactions}
             <div class="dmsg-reactions" use:reactionsInto></div>
         {/if}
     </div>
