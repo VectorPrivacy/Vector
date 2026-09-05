@@ -12210,6 +12210,16 @@ select:disabled:hover {
     z-index: 1;
 }
 
+/* Name and its marks (rank, bot) share one line; the identity cell stacks this over
+   any status line. Without it the marks wrap under the name. */
+.member-pick-nameline {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+}
+
 .compact-member-name {
     color: #f7f4f4;
     font-size: 14px;
