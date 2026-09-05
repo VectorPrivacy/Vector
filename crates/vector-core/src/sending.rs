@@ -761,11 +761,13 @@ pub async fn send_file_dm(
     filename: &str,
     extension: &str,
     content: Option<&str>,
+    reply_to: Option<&str>,
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
     let client = nostr_client().ok_or("Not logged in")?;
     let my_pk = my_public_key().ok_or("Public key not set")?;
+    let reply_to = reply_to.filter(|r| !r.is_empty());
     // Sign the Blossom auth event via the active client signer so bunker
     // accounts route through NostrConnect (the user's identity key lives on
     // the remote signer; MY_SECRET_KEY only holds the NIP-46 client key).
@@ -852,6 +854,7 @@ pub async fn send_file_dm(
     };
     let msg = Message {
         id: pending_id.clone(), content: content.unwrap_or("").to_string(),
+        replied_to: reply_to.unwrap_or("").to_string(),
         at: now.as_millis() as u64, pending: true, mine: true,
         npub: my_pk.to_bech32().ok(), attachments: vec![attachment],
         expiration: config.expiration,
@@ -963,6 +966,12 @@ pub async fn send_file_dm(
         .tag(Tag::custom("decryption-key", [att_key.as_str()]))
         .tag(Tag::custom("decryption-nonce", [att_nonce.as_str()]))
         .tag(Tag::custom("ox", [file_hash.clone()]));
+    if let Some(reply_id) = reply_to {
+        file_rumor = file_rumor.tag(Tag::custom(
+            "e",
+            [reply_id.to_string(), String::new(), "reply".to_string()],
+        ));
+    }
     for fb in &mirror_urls {
         file_rumor = file_rumor.tag(Tag::custom("fallback", [fb.as_str()]));
     }

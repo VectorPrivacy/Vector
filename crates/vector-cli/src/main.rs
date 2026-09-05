@@ -127,7 +127,7 @@ async fn main() {
             println!("Sending {} to {}...", filename, &npub[..20.min(npub.len())]);
             let config = SendConfig { self_send: true, ..Default::default() };
             match vector_core::sending::send_file_dm(
-                npub, Arc::new(bytes), filename, extension, None,
+                npub, Arc::new(bytes), filename, extension, None, None,
                 &config, Arc::new(CliSendCallback),
             ).await {
                 Ok(_) => {}

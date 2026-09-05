@@ -701,6 +701,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
                 &receiver, Arc::clone(&attached_file.bytes),
                 &attached_file.name, &attached_file.extension,
                 if content.is_empty() { None } else { Some(&content) },
+                if replied_to.is_empty() { None } else { Some(&replied_to) },
                 &config, callback.clone(),
             ).await?;
             Ok(MessageSendResult { pending_id: result.pending_id, event_id: result.event_id })

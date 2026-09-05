@@ -747,6 +747,7 @@ impl VectorCore {
             filename,
             extension,
             None,
+            None,
             &SendConfig::default(),
             Arc::new(NoOpSendCallback),
         ).await.map_err(|e| VectorError::Other(e))
