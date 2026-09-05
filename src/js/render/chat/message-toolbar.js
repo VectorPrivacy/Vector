@@ -282,7 +282,7 @@ function showMessageToolbar(rowEl) {
     const dissolved = rowIsInDissolvedCommunity();
 
     // React: hidden once the message hits the unique-emoji ceiling (matches the
-    // inline "+" shortcut gating in _dmsgBuildReactions).
+    // inline "+" shortcut gating in _dmsgCanAddReactionGroup).
     const uniqueEmojiCount = msg && msg.reactions
         ? new Set(msg.reactions.map(r => r.emoji)).size
         : 0;

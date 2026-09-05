@@ -10,7 +10,7 @@
  * row with the argument signature; Choice args offer clickable values.
  *
  * Usage:
- *   const ctrl = initCommandSelector(textarea, io, anchorEl);
+ *   const ctrl = initCommandSelector(textarea, io);
  *   io = {
  *     load(chatId)      → Promise<{bots, commands, fresh}> backend snapshot
  *     chatId()          → the currently open chat id
@@ -23,7 +23,7 @@
  */
 
 // eslint-disable-next-line no-unused-vars
-function initCommandSelector(textarea, io, anchorEl) {
+function initCommandSelector(textarea, io) {
     const RECENTS_CAP = 8;
 
     let mode = 'closed';        // closed | loading | list | hint
@@ -350,38 +350,10 @@ function initCommandSelector(textarea, io, anchorEl) {
     // commands send instantly. Typing manually stays the plain-text path.
     let composing = null; // { cmd, chatId, bar, parts: [{arg, el}] }
 
-    // The context strip (a sibling of the reply bar, same tuck design).
-    const ctxBar = {
-        cmd: document.getElementById('chat-command-bar-cmd'),
-        bot: document.getElementById('chat-command-bar-bot'),
-        hint: document.getElementById('chat-command-bar-hint'),
-        cancel: document.getElementById('chat-command-bar-cancel')
-    };
-    if (ctxBar.cancel) ctxBar.cancel.addEventListener('click', () => exitComposer(false));
-
     /** The focused param's manifest description, shown in the strip (the
-     *  visible twin of the hover tooltip — mobile has no hover). Bare — the
-     *  focused pill's own label already names the param. */
+     *  visible twin of the hover tooltip — mobile has no hover). */
     function setContextHint(arg) {
-        if (!ctxBar.hint) return;
-        ctxBar.hint.textContent = (arg && arg.description) || '';
-    }
-
-    function showContextBar(cmd) {
-        if (!ctxBar.cmd) return;
-        ctxBar.cmd.textContent = '/' + cmd.name;
-        ctxBar.bot.innerHTML = '';
-        const profile = io.botProfile(cmd.bot) || {};
-        if (profile.avatarSrc) {
-            const img = document.createElement('img');
-            img.src = profile.avatarSrc;
-            img.alt = '';
-            ctxBar.bot.appendChild(img);
-        }
-        const name = document.createElement('span');
-        name.textContent = profile.name || cmd.bot.slice(0, 12) + '…';
-        ctxBar.bot.appendChild(name);
-        anchorEl.classList.add('commanding');
+        VectorSvelte.setCommandHint((arg && arg.description) || '');
     }
 
     function selectCommand(cmd) {
@@ -396,16 +368,14 @@ function initCommandSelector(textarea, io, anchorEl) {
     }
 
     function exitComposer(keepPick) {
-        anchorEl.classList.remove('commanding');
         closeChoiceMenu();
-        setContextHint(null);
         if (!composing) return;
         // Keep the Android back stack in sync when we close via our own paths
         // (Esc, cancel, send, chat switch); no-op after a hardware back pop.
         popBack('command-composer');
-        composing.bar.remove();
-        textarea.style.display = '';
         composing = null;
+        VectorSvelte.clearCommand();
+        VectorSvelte.flushSync();   // the editor is back before it takes focus
         if (!keepPick) armedPick = null;
         io.composerToggled(false);
         textarea.focus();
@@ -422,160 +392,111 @@ function initCommandSelector(textarea, io, anchorEl) {
             return;
         }
 
-        const bar = document.createElement('div');
-        bar.className = 'command-composer';
-
-        const parts = [];
-        for (const a of cmd.args) {
-            const wrap = document.createElement('label');
-            wrap.className = 'command-part' + (a.required ? ' required' : '');
-            const tag = document.createElement('span');
-            tag.className = 'command-part-name';
-            tag.textContent = a.name;
-            wrap.appendChild(tag);
-            let el;
-            if (a.type === 'choice' || a.type === 'bool') {
-                // A custom trigger + drop-up, NOT a native select: those render
-                // inconsistently per platform (Android opens an OS modal) and
-                // can't match the composer's keyboard flow. The button quacks
-                // like a field (.value, focus, empty-backspace walking).
-                el = document.createElement('button');
-                el.type = 'button';
-                el.classList.add('command-choice-trigger');
-                // Just an "unset" glyph: the pill's name label carries the
-                // semantics and the chevron says "pick" — text would only
-                // widen the trigger. The menu's "(skip)" row still names the
-                // empty option for optional params.
-                el.dataset.placeholder = '…';
-                el.value = '';
-                const label = document.createElement('span');
-                label.textContent = el.dataset.placeholder;
-                el.classList.add('placeholder');
-                el.appendChild(label);
-                el.addEventListener('mousedown', (e) => {
-                    e.preventDefault();
-                    el.focus();
-                    // `idx` is this part's slot, declared just below (closure
-                    // runs long after initialization).
-                    if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
-                    else openChoiceMenu(el, idx, a);
-                });
-                // Instant: menu rows preventDefault their mousedown (focus never
-                // leaves for a pick), so blur only means a REAL focus move.
-                el.addEventListener('blur', () => {
-                    if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
-                });
-            } else if (a.type === 'string') {
-                // Free text can be arbitrarily long: a 1-row textarea grows WIDE
-                // with its content until the composer's width stops it, then
-                // wraps and grows DOWN (scrollHeight) — the label stays pinned
-                // at the pill's top once it goes multi-line.
-                el = document.createElement('textarea');
-                el.rows = 1;
-                el.maxLength = 1024; // the wire's per-value cap
-                el.autocomplete = 'off';
-                el.spellcheck = true;
-            } else {
-                el = document.createElement('input');
-                el.type = 'text';
-                if (a.type === 'int' || a.type === 'number') {
-                    // inputMode only picks the MOBILE keypad — desktops can
-                    // type anything, so filter illegal characters live
-                    // (digits, one leading minus, one dot for Number).
-                    el.inputMode = 'decimal';
-                    el.addEventListener('input', () => {
-                        const caret = el.selectionStart;
-                        let s = el.value.replace(a.type === 'int' ? /[^\d-]/g : /[^\d.\-]/g, '')
-                            .replace(/(?!^)-/g, '');
-                        const dot = s.indexOf('.');
-                        if (dot !== -1) s = s.slice(0, dot + 1) + s.slice(dot + 1).replace(/\./g, '');
-                        if (s !== el.value) {
-                            const removed = el.value.length - s.length;
-                            el.value = s;
-                            const pos = Math.max(0, (caret || 0) - removed);
-                            el.setSelectionRange(pos, pos);
-                        }
-                    });
-                }
-                if (a.type === 'user') el.placeholder = 'npub1…';
-                el.maxLength = a.type === 'user' ? 70 : 1024;
-                el.autocomplete = 'off';
-                el.spellcheck = false;
-            }
-            // add, don't assign — the choice branch already carries its
-            // trigger class and an assignment would wipe it.
-            el.classList.add('command-part-input');
-            el.title = a.description || '';
-            const idx = parts.length;
-            // The trailing free-text arg (the greedy tail on the wire) starts
-            // at the rest of its row; other fields grow with their content
-            // (JS-sized: field-sizing isn't in WKWebView).
-            const grows = a.type === 'string' && idx === cmd.args.length - 1;
-            if (grows) wrap.classList.add('grow');
-            const autoSize = () => {
-                // Width = MEASURED text pixels (ch-guessing undershoots on
-                // wide glyphs like m/w and wraps too early) + padding + caret
-                // slack; border-box, so the CSS max-width still does the
-                // wide-then-wrap clamp.
-                if (el.tagName === 'TEXTAREA') {
-                    if (!grows) el.style.width = Math.max(72, Math.ceil(measureFieldText(el)) + 26) + 'px';
-                    el.style.height = 'auto';
-                    el.style.height = el.scrollHeight + 'px';
-                    wrap.classList.toggle('multiline', el.offsetHeight > 30);
-                } else if (el.tagName === 'INPUT') {
-                    el.style.width = Math.min(300, Math.max(72, Math.ceil(measureFieldText(el)) + 26)) + 'px';
-                }
-            };
-            el.addEventListener('focus', () => setContextHint(a));
-            if (el.tagName === 'BUTTON') {
-                el.addEventListener('keydown', (e) => onChoiceKey(e, idx, a));
-            } else if (a.type === 'user') {
-                el.addEventListener('keydown', (e) => onUserKey(e, idx));
-                el.addEventListener('focus', () => openUserMenu(el, idx));
-                el.addEventListener('input', () => {
-                    // Typing dissolves a picked member back to raw text.
-                    delete el.dataset.npub;
-                    el.classList.remove('user-resolved');
-                    openUserMenu(el, idx);
-                });
-                // Instant: row picks preventDefault their mousedown, so blur
-                // only means a REAL focus move (arrow-walking included).
-                el.addEventListener('blur', () => {
-                    if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
-                });
-            } else {
-                el.addEventListener('keydown', (e) => onPartKey(e, idx));
-            }
-            el.addEventListener('input', () => {
-                wrap.classList.remove('invalid');
-                autoSize();
-            });
-            el.addEventListener('change', () => wrap.classList.remove('invalid'));
-            wrap.appendChild(el);
-            bar.appendChild(wrap);
-            parts.push({ arg: a, el, autoSize });
-        }
         textarea.value = '';
-        // `before` rather than `parentElement.insertBefore(bar, textarea)`:
-        // the composer is a Proxy wearing the textarea's face, not a Node, so
-        // it cannot BE insertBefore's reference argument — that threw, and
-        // because the throw landed after the input was hidden and before
-        // `composing` was set, `exitComposer`'s `if (!composing) return` left
-        // the composer invisible with no way back.
-        //
-        // Mounted first, hidden second, for the same reason: never take away
-        // what the user is typing into until its replacement is really there.
-        textarea.before(bar);
-        textarea.style.display = 'none';
-        // Size the fields once mounted (scrollHeight needs layout): a fresh
-        // rows=1 textarea is otherwise UA-default tall, floating its text high.
+        const parts = cmd.args.map(a => ({ arg: a, el: null, autoSize: () => {} }));
+        composing = { cmd, chatId: io.chatId(), parts };
+        const profile = io.botProfile(cmd.bot) || {};
+        VectorSvelte.setCommand({
+            name: cmd.name,
+            bot: { name: profile.name || cmd.bot.slice(0, 12) + '…', avatarSrc: profile.avatarSrc || null },
+            args: cmd.args.map((a, i) => ({
+                name: a.name,
+                type: a.type,
+                required: !!a.required,
+                description: a.description || '',
+                // The trailing free-text arg (the greedy tail on the wire) takes the row's rest.
+                grow: a.type === 'string' && i === cmd.args.length - 1,
+            })),
+            attach: attachPart,
+        });
+        // Mount the pills now: the fields need layout to size, and the first needs focus.
+        VectorSvelte.flushSync();
         for (const p of parts) p.autoSize();
-        composing = { cmd, chatId: io.chatId(), bar, parts };
-        showContextBar(cmd);
         io.composerToggled(true);
         // Android hardware back closes the composer first, like Esc on desktop.
         pushBack('command-composer', () => exitComposer(false));
         focusPart(0);
+    }
+
+    /** A mounted field: wire its behaviour and register it as `idx`'s part. */
+    function attachPart(el, idx) {
+        if (!composing || !composing.parts[idx]) return null;
+        const part = composing.parts[idx];
+        const a = part.arg;
+        const wrap = el.closest('.command-part');
+        const grows = a.type === 'string' && idx === composing.parts.length - 1;
+        if (a.type === 'choice' || a.type === 'bool') {
+            el.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                el.focus();
+                if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+                else openChoiceMenu(el, idx, a);
+            });
+            // Instant: menu rows preventDefault their mousedown (focus never
+            // leaves for a pick), so blur only means a REAL focus move.
+            el.addEventListener('blur', () => {
+                if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+            });
+        } else if (a.type === 'int' || a.type === 'number') {
+            // inputMode only picks the MOBILE keypad — desktops can type
+            // anything, so filter illegal characters live (digits, one leading
+            // minus, one dot for Number).
+            el.addEventListener('input', () => {
+                const caret = el.selectionStart;
+                let v = el.value.replace(a.type === 'int' ? /[^\d-]/g : /[^\d.\-]/g, '')
+                    .replace(/(?!^)-/g, '');
+                const dot = v.indexOf('.');
+                if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, '');
+                if (v !== el.value) {
+                    const removed = el.value.length - v.length;
+                    el.value = v;
+                    const pos = Math.max(0, (caret || 0) - removed);
+                    el.setSelectionRange(pos, pos);
+                }
+            });
+        }
+        // Width = MEASURED text pixels (ch-guessing undershoots on wide glyphs
+        // like m/w and wraps too early) + padding + caret slack; border-box, so
+        // the CSS max-width still does the wide-then-wrap clamp. field-sizing
+        // isn't in WKWebView.
+        const autoSize = () => {
+            if (el.tagName === 'TEXTAREA') {
+                if (!grows) el.style.width = Math.max(72, Math.ceil(measureFieldText(el)) + 26) + 'px';
+                el.style.height = 'auto';
+                el.style.height = el.scrollHeight + 'px';
+                if (wrap) wrap.classList.toggle('multiline', el.offsetHeight > 30);
+            } else if (el.tagName === 'INPUT') {
+                el.style.width = Math.max(72, Math.ceil(measureFieldText(el)) + 26) + 'px';
+            }
+        };
+        if (a.type === 'choice' || a.type === 'bool') {
+            el.addEventListener('keydown', (e) => onChoiceKey(e, idx, a));
+        } else if (a.type === 'user') {
+            el.addEventListener('keydown', (e) => onUserKey(e, idx));
+            el.addEventListener('focus', () => openUserMenu(el, idx));
+            el.addEventListener('input', () => {
+                // Typing dissolves a picked member back to raw text.
+                delete el.dataset.npub;
+                el.classList.remove('user-resolved');
+                openUserMenu(el, idx);
+            });
+            // Instant: row picks preventDefault their mousedown, so blur
+            // only means a REAL focus move (arrow-walking included).
+            el.addEventListener('blur', () => {
+                if (choiceOpenFor && choiceOpenFor.el === el) closeChoiceMenu();
+            });
+        } else {
+            el.addEventListener('keydown', (e) => onPartKey(e, idx));
+        }
+        el.addEventListener('focus', () => setContextHint(a));
+        el.addEventListener('input', () => {
+            VectorSvelte.setCommandInvalid(-1);
+            autoSize();
+        });
+        el.addEventListener('change', () => VectorSvelte.setCommandInvalid(-1));
+        part.el = el;
+        part.autoSize = autoSize;
+        return null;
     }
 
     // Advancing INTO a picker (choice/bool/user) via Enter auto-opens its menu,
@@ -645,18 +566,8 @@ function initCommandSelector(textarea, io, anchorEl) {
         return _measureCtx.measureText(el.value || el.placeholder || '').width;
     }
 
-    // ── The Choice drop-up (one floating menu, reused per trigger) ──────────
-    let choiceMenu = null;
+    // ── The Choice drop-up (one menu, anchored to the focused trigger) ──────
     let choiceOpenFor = null; // { el: trigger, idx, options: [{v, label}], active }
-
-    function ensureChoiceMenu() {
-        if (!choiceMenu) {
-            choiceMenu = document.createElement('div');
-            choiceMenu.className = 'command-choice-menu';
-            document.body.appendChild(choiceMenu);
-        }
-        return choiceMenu;
-    }
 
     function openChoiceMenu(trigger, idx, arg) {
         const options = [];
@@ -673,56 +584,19 @@ function initCommandSelector(textarea, io, anchorEl) {
     function renderChoiceMenu() {
         if (!choiceOpenFor) return;
         const { el, options, active } = choiceOpenFor;
-        const menu = ensureChoiceMenu();
-        menu.innerHTML = '';
-        for (let i = 0; i < options.length; i++) {
-            const row = document.createElement('div');
-            row.className = 'command-choice-option'
-                + (i === active ? ' active' : '')
-                + (options[i].v === '' ? ' skip' : '');
-            if (options[i].avatarSrc) {
-                const img = document.createElement('img');
-                img.src = options[i].avatarSrc;
-                img.alt = '';
-                row.appendChild(img);
-            }
-            const label = document.createElement('span');
-            label.textContent = options[i].label;
-            row.appendChild(label);
-            row.title = options[i].label;
-            const opt = options[i];
-            row.addEventListener('mousedown', (ev) => {
-                ev.preventDefault();
-                pickChoice(opt);
-            });
-            menu.appendChild(row);
-        }
-        const r = el.getBoundingClientRect();
-        const margin = 8;
-        menu.style.minWidth = Math.max(Math.ceil(r.width), 110) + 'px';
-        menu.style.bottom = (window.innerHeight - r.top + 4) + 'px';
-        menu.classList.add('visible');
-        // Clamp with the menu's REAL width — long option labels grow it well
-        // past the trigger, and clamping by trigger width would let the menu
-        // hang off the right edge.
-        menu.style.left = Math.max(margin, Math.min(r.left, window.innerWidth - menu.offsetWidth - margin)) + 'px';
-        const act = menu.querySelector('.command-choice-option.active');
-        if (act) act.scrollIntoView({ block: 'nearest' });
+        VectorSvelte.openChoiceMenu({ anchor: el, options, active, pick: pickChoice });
     }
 
     function closeChoiceMenu() {
         choiceOpenFor = null;
-        if (choiceMenu) choiceMenu.classList.remove('visible');
+        VectorSvelte.closeChoiceMenu();
     }
 
     function setChoiceValue(el, v) {
         el.value = v;
-        el.querySelector('span').textContent = v || el.dataset.placeholder;
-        el.classList.toggle('placeholder', !v);
-        // A long picked value truncates in the 22ch trigger — hover reveals it.
-        if (v) el.title = v;
-        const pill = el.closest('.command-part');
-        if (pill) pill.classList.remove('invalid');
+        const idx = composing ? composing.parts.findIndex(p => p.el === el) : -1;
+        VectorSvelte.setCommandValue(idx, v);
+        VectorSvelte.setCommandInvalid(-1);
     }
 
     function pickChoice(opt) {
@@ -737,8 +611,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             el.value = opt.label;
             el.dataset.npub = opt.v;
             el.classList.add('user-resolved');
-            const pill = el.closest('.command-part');
-            if (pill) pill.classList.remove('invalid');
+            VectorSvelte.setCommandInvalid(-1);
             const part = composing && composing.parts[idx];
             if (part) part.autoSize();
         }
@@ -907,7 +780,7 @@ function initCommandSelector(textarea, io, anchorEl) {
             if (v !== '') lastFilled = i;
         });
         const markInvalid = (i) => {
-            parts[i].el.closest('.command-part').classList.add('invalid');
+            VectorSvelte.setCommandInvalid(i);
             parts[i].el.focus();
         };
         // Positional wire format: every required part present, every provided
@@ -1071,7 +944,6 @@ function initCommandSelector(textarea, io, anchorEl) {
             textarea.removeEventListener('keydown', onKeyDown);
             textarea.removeEventListener('blur', onBlur);
             hide();
-            if (choiceMenu && choiceMenu.parentNode) choiceMenu.parentNode.removeChild(choiceMenu);
         }
     };
 }

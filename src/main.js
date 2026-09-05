@@ -4493,7 +4493,7 @@ async function setupRustListeners() {
                 !evt.payload.message.reactions.some(r => r.author_id === p.author_id && r.emoji === p.emoji)
             );
             for (const p of still) {
-                evt.payload.message.reactions.push({ id: p.id, reference_id: evt.payload.message.id, author_id: p.author_id, emoji: p.emoji });
+                evt.payload.message.reactions.push({ id: p.id, reference_id: evt.payload.message.id, author_id: p.author_id, emoji: p.emoji, emoji_url: p.emoji_url || null });
             }
             if (still.length) pendingReactions.set(evt.payload.old_id, still);
             else pendingReactions.delete(evt.payload.old_id);
@@ -4528,14 +4528,9 @@ async function setupRustListeners() {
             // `message_new` will render the up-to-date message from chat.messages,
             // so missing the surgical update here is safe.
             const domMsg = document.getElementById(evt.payload.old_id);
-
-            // Reaction-only updates (the common case) skip the full rebuild so
-            // video playback, audio playhead, and spoiler reveal aren't reset.
-            // Anything else (edits, pending→sent, attachment downloaded, etc.)
-            // still rebuilds the whole row.
-            if (domMsg && _dmsgIsReactionOnlyChange(domMsg._dmsgMsg, evt.payload.message)) {
-                _dmsgReplaceReactions(domMsg, evt.payload.message);
-            } else if (domMsg) {
+            // The row refills its body only when the content signature changes, so a
+            // reaction echo leaves video playback and spoiler reveals alone.
+            if (domMsg) {
                 const profile = getProfile(evt.payload.chat_id);
                 updateMessageRow(domMsg, evt.payload.message, profile, evt.payload.old_id);
             }
@@ -11059,6 +11054,11 @@ VectorSvelte.mountComposerChrome({
         placeholder: strOriginalInputPlaceholder || 'Enter message...',
     },
 });
+VectorSvelte.mountCommandComposer({
+    editor: domChatMessageInput,
+    strip: document.getElementById('chat-command-bar'),
+    onCancel: () => { if (commandCtrl) commandCtrl.exitComposer(); },
+});
 VectorSvelte.mountComposerPopups({
     anchor: domChatMessageBox,
     // Lazy: the helpers live in scripts that load after this one evaluates.
@@ -12679,7 +12679,6 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
         submit: (text) => sendMessage(text),
         composerToggled: (active) => {
             // The structured composer submits through the send button, so it stays shown.
-            VectorSvelte.setCommandActive(active);
             VectorSvelte.setDraftEmpty(!active, false);
             VectorSvelte.flushSync();
             // BOTH directions. The command composer grows the input area as it
@@ -12692,8 +12691,7 @@ commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
         // The command manifest loads async, often after the timeline painted;
         // upgrade any untagged `/cmd args` rows once it is known (DM invocations).
         commandsReady: (chatId) => _upgradeCommandRows(chatId)
-    },
-    document.getElementById('chat-box')
+    }
 ) : null;
 
 /** Glue a bottom-pinned reader to the live tail across a composer resize.
@@ -13324,27 +13322,10 @@ document.addEventListener('click', (e) => {
                             .catch(err => console.error('revoke_reaction failed:', err));
                     }
                 } else {
-                    // Not yet reacted → add. Mark + optimistic count roll to debounce double-clicks.
-                    clickedReaction.setAttribute('data-reacted', 'true');
-                    _dmsgRollReactionCount(clickedReaction, _dmsgReactionCount(clickedReaction) + 1);
-                    // Mirror the bump into STATE as a provisional: during a rapid spree the
-                    // echo for an EARLIER click re-renders this row from a snapshot that
-                    // predates this click, and without the provisional that repaint visibly
-                    // un-reacts the chip until our own echo lands.
-                    const provisional = { id: `pending-react-${Date.now()}`, reference_id: msgId, author_id: strPubkey, emoji, at: Date.now() };
-                    cMsg.reactions.push({ id: provisional.id, reference_id: msgId, author_id: strPubkey, emoji });
-                    const inflight = pendingReactions.get(msgId) || [];
-                    inflight.push(provisional);
-                    pendingReactions.set(msgId, inflight);
-                    reactToMessageRouted(msgId, cChat.id, emoji).catch(() => {
-                        // The send failed: retract the provisional and the chip bump.
-                        const l = (pendingReactions.get(msgId) || []).filter(p => p.id !== provisional.id);
-                        if (l.length) pendingReactions.set(msgId, l); else pendingReactions.delete(msgId);
-                        const i = cMsg.reactions.findIndex(r => r.id === provisional.id);
-                        if (i !== -1) cMsg.reactions.splice(i, 1);
-                        clickedReaction.removeAttribute('data-reacted');
-                        _dmsgRollReactionCount(clickedReaction, Math.max(0, _dmsgReactionCount(clickedReaction) - 1));
-                    });
+                    // Not yet reacted → add. The provisional debounces double-clicks and
+                    // keeps the chip reacted through an earlier click's echo.
+                    const retract = dmsgReactOptimistic(msgId, emoji, null);
+                    reactToMessageRouted(msgId, cChat.id, emoji).catch(() => { if (retract) retract(); });
                 }
                 break;
             }

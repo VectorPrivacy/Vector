@@ -3,13 +3,14 @@
     // index.html and five modules keep their cached element references, so this adopts
     // those elements and derives their state from lib/composer.svelte.js instead of six
     // modules writing to them. The editor element is never touched.
-    import { composerMode, composerDraft, composerLock } from '../lib/composer.svelte.js';
+    import { composerMode, composerDraft, composerLock, composerCommand } from '../lib/composer.svelte.js';
 
     let { els, h } = $props();   // els: box, input, file, cancel, emoji, voice, send, replyName, replySnippet, replyCancel
 
     const mode = composerMode();
     const draft = composerDraft();
     const lock = composerLock();
+    const command = composerCommand();
 
     const isReply = $derived(mode.kind === 'reply');
     const isEdit = $derived(mode.kind === 'edit');
@@ -44,6 +45,14 @@
             // 11.6 = half the 24px button minus a 0.4px optical correction.
             els.replyCancel.style.right = `${(barRect.right - slotRect.left - slotRect.width / 2 - 11.6).toFixed(1)}px`;
         }
+    });
+
+    // ── the command composer replaces the editor while it is up ──
+    // Its pills mount in the same flush this runs after, so the editor is never
+    // taken away before its replacement is there.
+    $effect(() => {
+        els.box.classList.toggle('commanding', command.active);
+        els.input.style.display = command.active ? 'none' : '';
     });
 
     // ── file ↔ cancel, placeholder, lock ──

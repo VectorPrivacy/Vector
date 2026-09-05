@@ -104,7 +104,6 @@ function updateMessageRow(domMsg, msg, profile, oldId = '') {
     VectorSvelte.touchWindow();
     VectorSvelte.flushSync();
     const el = document.getElementById(msg.id);
-    if (el) _dmsgReplaceReactions(el, msg);
     if (msg.mine) _dmsgUpdateLastSentVisibility();
     return el || domMsg;
 }
@@ -120,7 +119,14 @@ const _dmsgRowHelpers = {
     formatHourMinute: (at) => _dmsgFormatHourMinute(at),
     fillContent: (node, msg, sender, ctx) =>
         _dmsgFillContent(node, msg, sender, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked),
-    fillReactions: (node, msg) => _dmsgFillReactions(node, msg),
+    contentSig: (msg) => _dmsgContentSig(msg),
+    reactionGroups: (msg) => Array.from(_dmsgAggregateReactions(msg), ([emoji, g]) => ({ emoji, ...g })),
+    canAddReactionGroup: (msg, n) => _dmsgCanAddReactionGroup(msg, n),
+    fillReactionGlyph: (span, emoji, url) => _dmsgFillReactionGlyph(span, emoji, url),
+    rollReactionCount: (chip, count) => _dmsgRollReactionCount(chip, count),
+    // A hover tip anchored to a chip that just left would float forever (mouseout
+    // owns dismissal, and a removed anchor never fires it).
+    reactionChipRemoved: () => { if (reactionHoverEl && !reactionHoverEl.isConnected) hideReactionHoverTip(); },
     buildReply: (msg, sender) => _dmsgBuildReplyContext(msg, sender),
     buildPivxBubble: (msg) => renderPivxPaymentBubble(
         msg.pivx_payment.gift_code, msg.pivx_payment.amount_piv, msg.mine, msg.pivx_payment.address),
@@ -1361,22 +1367,12 @@ function _dmsgBuildReactionCountEl(count) {
     return countEl;
 }
 
-// Build a single reaction chip. Shared by the initial render, the reconcile,
-// and the picker's optimistic decoys so the DOM shape can never drift.
-function _dmsgBuildReactionChip(emoji, group, msgId) {
-    const { count, mine, url } = group;
-    const span = document.createElement('span');
-    span.classList.add('reaction');  // Kept for the global '.reaction' click delegate (toggle-reaction handler in main.js).
-    span.setAttribute('data-emoji', emoji);
-    span.setAttribute('data-msg-id', msgId);
-    if (mine) {
-        span.setAttribute('data-reacted', 'true');
-        span.title = 'Click to remove your reaction';
-    }
-
-    // NIP-30 custom-emoji rendering — prefer the URL persisted on the reaction
-    // itself (survives reload + unsubscribe), fall back to a live lookup against
-    // subscribed packs, then to the literal `:shortcode:` text if neither knows it.
+// Fill a reaction chip's glyph: a NIP-30 custom-emoji image or the text emoji.
+// The chip element itself (attributes, count roller) belongs to the row island.
+function _dmsgFillReactionGlyph(span, emoji, url) {
+    // Prefer the URL persisted on the reaction itself (survives reload + unsubscribe),
+    // fall back to a live lookup against subscribed packs, then to the literal
+    // `:shortcode:` text if neither knows it.
     let customUrl = url || null;
     if (!customUrl) {
         const m = /^:([a-zA-Z0-9_~-]+):$/.exec(emoji);
@@ -1425,43 +1421,6 @@ function _dmsgBuildReactionChip(emoji, group, msgId) {
         span.appendChild(glyph);
         twemojify(glyph);
     }
-    span.appendChild(_dmsgBuildReactionCountEl(count));
-    return span;
-}
-
-// Inline "add reaction" shortcut chip (Discord-style + at end of the row).
-function _dmsgBuildReactionsAddButton(msgId) {
-    const addBtn = document.createElement('button');
-    addBtn.type = 'button';
-    addBtn.classList.add('dmsg-reactions-add');
-    addBtn.setAttribute('data-msg-id', msgId);
-    addBtn.setAttribute('aria-label', 'Add reaction');
-    addBtn.title = 'Add reaction';
-    addBtn.innerHTML = '<span class="icon icon-smile-face"></span>';
-    // onclick handled by the delegated listener at the bottom of this file.
-    return addBtn;
-}
-
-function _dmsgBuildReactions(msg) {
-    if (!msg.reactions || !msg.reactions.length) return null;
-    const reactionsRow = document.createElement('div');
-    reactionsRow.classList.add('dmsg-reactions');
-    _dmsgFillReactions(reactionsRow, msg);
-    return reactionsRow;
-}
-
-/** Fill a `.dmsg-reactions` row with the message's chips (shared with the row island). */
-function _dmsgFillReactions(reactionsRow, msg) {
-    const groups = _dmsgAggregateReactions(msg);
-    for (const [emoji, g] of groups) {
-        reactionsRow.appendChild(_dmsgBuildReactionChip(emoji, g, msg.id));
-    }
-    // The "+" only shows while there's at least one reaction and the user can
-    // still open a new group (unique-emoji ceiling AND their personal fresh
-    // allowance) — the floating toolbar's 😀 starts the first thread.
-    if (groups.size > 0 && groups.size < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg)) {
-        reactionsRow.appendChild(_dmsgBuildReactionsAddButton(msg.id));
-    }
 }
 
 /** Current displayed count of a reaction chip (from its `.rc-value` roller). */
@@ -1509,118 +1468,21 @@ function _dmsgRollReactionCount(chip, toCount) {
         { duration, easing });
 }
 
-// Ensure the "+" shortcut exists (and sits last) below the unique-emoji ceiling
-// and the user's personal fresh allowance, and is gone at/above either.
-function _dmsgSyncReactionsAddButton(row, msgId, uniqueCount) {
-    let addBtn = row.querySelector(':scope > .dmsg-reactions-add');
-    const cMsg = _dmsgLookupMessage(document.getElementById(msgId));
-    const wantBtn = uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS
-        && !newReactionGroupBlockReason(cMsg);
-    if (wantBtn) {
-        if (!addBtn) addBtn = _dmsgBuildReactionsAddButton(msgId);
-        row.appendChild(addBtn);  // append = keep it last (moves it if it existed)
-    } else if (addBtn) {
-        addBtn.remove();
-    }
+/** Whether the row can open one more reaction group (the inline "+" shows then). */
+function _dmsgCanAddReactionGroup(msg, uniqueCount) {
+    return uniqueCount > 0 && uniqueCount < MAX_DISPLAYED_REACTIONS && !newReactionGroupBlockReason(msg);
 }
 
-// Reconcile an existing reactions row against `msg` in place (keyed by emoji)
-// rather than rebuilding it: count deltas roll, new chips pop in, gone chips
-// drop. This is what gives the counter continuity for inbound + revoke updates,
-// and it stops re-fetching every custom-emoji image on each reaction event.
-function _dmsgReconcileReactions(row, msg) {
-    const groups = _dmsgAggregateReactions(msg);
-    const chips = new Map();
-    for (const ch of row.querySelectorAll(':scope > .reaction')) {
-        chips.set(ch.getAttribute('data-emoji'), ch);
-    }
-    // Drop chips whose emoji is gone.
-    for (const [emoji, ch] of chips) {
-        if (!groups.has(emoji)) { ch.remove(); chips.delete(emoji); }
-    }
-    const addBtn = row.querySelector(':scope > .dmsg-reactions-add');
-    // Upsert in desired order — inserting each before the "+" appends it in
-    // iteration order (and moves an existing chip into place).
-    for (const [emoji, g] of groups) {
-        let ch = chips.get(emoji);
-        if (ch) {
-            if (g.mine) {
-                ch.setAttribute('data-reacted', 'true');
-                ch.title = 'Click to remove your reaction';
-            } else {
-                ch.removeAttribute('data-reacted');
-                ch.removeAttribute('title');
-            }
-            _dmsgRollReactionCount(ch, g.count);
-            row.insertBefore(ch, addBtn);
-        } else {
-            ch = _dmsgBuildReactionChip(emoji, g, msg.id);
-            ch.classList.add('reaction-enter');
-            ch.addEventListener('animationend', () => ch.classList.remove('reaction-enter'), { once: true });
-            row.insertBefore(ch, addBtn);
-        }
-    }
-    _dmsgSyncReactionsAddButton(row, msg.id, groups.size);
-}
-
-/**
- * Surgically swap the reactions row of a message without touching the rest of
- * the DOM. Preserves transient state on the body — video playback position,
- * audio playhead, spoiler reveal, image load — which a full row re-render
- * would otherwise reset. Reconciles in place when a row already exists so
- * counts animate and custom-emoji images aren't re-fetched.
- */
-function _dmsgReplaceReactions(rowEl, msg) {
-    if (!rowEl) return;
-    rowEl._dmsgMsg = msg;
-    const body = rowEl.querySelector('.dmsg-body');
-    if (!body) return;
-    const existing = body.querySelector(':scope > .dmsg-reactions');
-    const hasReactions = !!(msg.reactions && msg.reactions.length);
-    if (!existing) {
-        if (hasReactions) body.appendChild(_dmsgBuildReactions(msg));
-    } else if (!hasReactions) {
-        existing.remove();
-    } else {
-        _dmsgReconcileReactions(existing, msg);
-    }
-    // A hover tip anchored to a chip this swap just removed would float forever
-    // (mouseout owns dismissal, and a removed anchor never fires it).
-    if (reactionHoverEl && !reactionHoverEl.isConnected) hideReactionHoverTip();
-}
-
-/**
- * Does `newMsg` differ from `oldMsg` only in reactions? When true, callers
- * can use `_dmsgReplaceReactions` and avoid a full row rebuild. Conservative:
- * any field that affects the rendered body falls back to false.
- */
-function _dmsgIsReactionOnlyChange(oldMsg, newMsg) {
-    if (!oldMsg || !newMsg) return false;
-    if (oldMsg.id !== newMsg.id) return false;          // pending→sent ID swap
-    if (oldMsg.content !== newMsg.content) return false; // edit
-    if (oldMsg.replied_to !== newMsg.replied_to) return false;
-    if (oldMsg.at !== newMsg.at) return false;
-    if (!!oldMsg.pending !== !!newMsg.pending) return false;
-    if (!!oldMsg.failed !== !!newMsg.failed) return false;
-    if (!!oldMsg.edited !== !!newMsg.edited) return false;
-    const oa = oldMsg.attachments || [];
-    const na = newMsg.attachments || [];
-    if (oa.length !== na.length) return false;
-    for (let i = 0; i < oa.length; i++) {
-        if (oa[i].id !== na[i].id) return false;
-        if (!!oa[i].downloaded !== !!na[i].downloaded) return false;
-        if (oa[i].path !== na[i].path) return false;
-    }
-    // Link-preview metadata arrives async via message_update. Compare by
-    // identity / shallow keys so the preview card actually renders.
-    const op = oldMsg.preview_metadata, np = newMsg.preview_metadata;
-    if (!!op !== !!np) return false;
-    if (op && np && (op.og_title !== np.og_title
-        || op.og_image !== np.og_image
-        || op.og_description !== np.og_description
-        || op.title !== np.title
-        || op.description !== np.description)) return false;
-    return true;
+/** The fields the content builders render from, as one comparable string. A
+ *  message whose signature is unchanged (a reaction, a profile) keeps its body:
+ *  a refill would reset video playback, audio playhead and spoiler reveals. */
+function _dmsgContentSig(msg) {
+    const parts = [msg.id, msg.content, msg.replied_to, msg.at, !!msg.pending, !!msg.failed, !!msg.edited];
+    for (const a of (msg.attachments || [])) parts.push(a.id, !!a.downloaded, a.path);
+    // Link-preview metadata arrives async via message_update.
+    const pm = msg.preview_metadata;
+    if (pm) parts.push(pm.og_title, pm.og_image, pm.og_description, pm.title, pm.description);
+    return parts.join('\u0000');
 }
 
 function _dmsgUpdateLastSentVisibility() {
@@ -1645,71 +1507,38 @@ function _dmsgFormatHourMinute(at) {
 }
 
 /**
- * Surgically inject a reaction chip into a message row.
- *
- * - If the row has no `.dmsg-reactions` yet (no prior reactions), create the
- *   row and append the chip.
- * - If a chip with the same emoji exists, bump its count + mark `data-reacted`.
- * - Otherwise insert the new chip BEFORE the trailing `+` add-reaction
- *   shortcut so it lands in its eventual final position immediately.
- *
- * Used by the optimistic "decoy reaction" path when the user adds a reaction.
- * After the backend confirms, the full message_update event re-renders the
- * row through the normal pipeline.
+ * React optimistically: a provisional entry lands in the message's reactions
+ * (the row re-derives its chips) and rides `pendingReactions` until the echo
+ * confirms it. Returns a retraction for a failed send, or null when the user
+ * already holds this emoji (the set is keyed by author + emoji, so a repeat
+ * adds nothing and the send would be refused as a duplicate).
  */
-function _dmsgInjectReaction(rowEl, spanReaction) {
-    if (!rowEl) return;
-    const emoji = spanReaction.dataset.emoji;
-    let reactionsRow = rowEl.querySelector('.dmsg-reactions');
-    if (!reactionsRow) {
-        // First reaction on this message — create the row + append.
-        reactionsRow = document.createElement('div');
-        reactionsRow.classList.add('dmsg-reactions');
-        reactionsRow.appendChild(spanReaction);
-        const body = rowEl.querySelector('.dmsg-body') || rowEl;
-        body.appendChild(reactionsRow);
-    } else {
-        // If a chip for this emoji already exists, bump its count + mark reacted
-        // (don't replace — replacing with the decoy chip's count of 1 would lose
-        // any prior count from other users reacting with the same emoji).
-        const existing = emoji
-            ? reactionsRow.querySelector(`.reaction[data-emoji="${CSS.escape(emoji)}"]`)
-            : null;
-        if (existing) {
-            // Already ours: the set is keyed by (author, emoji), so picking the same
-            // emoji again adds nothing. Bumping would strand a wrong count — the send
-            // is refused as a duplicate, so no update comes back to correct it.
-            if (existing.getAttribute('data-reacted') !== 'true') {
-                // Roll the count up (don't replace — replacing with the decoy's count
-                // of 1 would lose any prior count from other users' reactions).
-                _dmsgRollReactionCount(existing, _dmsgReactionCount(existing) + 1);
-                existing.setAttribute('data-reacted', 'true');
-            }
-        } else {
-            // New emoji — insert BEFORE the trailing "+" add-reaction shortcut so the
-            // chip lands in the same slot it'll occupy after the upcoming message_update
-            // re-render (no visual snap from right-of-+ to left-of-+).
-            const addBtn = reactionsRow.querySelector('.dmsg-reactions-add');
-            if (addBtn) reactionsRow.insertBefore(spanReaction, addBtn);
-            else reactionsRow.appendChild(spanReaction);
-            spanReaction.classList.add('reaction-enter');
-            spanReaction.addEventListener('animationend', () => spanReaction.classList.remove('reaction-enter'), { once: true });
-        }
+function dmsgReactOptimistic(msgId, emoji, url = null) {
+    let cMsg = null;
+    for (const cChat of arrChats) {
+        cMsg = cChat.messages.find(m => m.id === msgId);
+        if (cMsg) break;
     }
-    // The "+" tracks what's on screen, not what has been confirmed: a decoy chip
-    // is a visible reaction, so the shortcut belongs beside it right away rather
-    // than a publish round-trip later. Same helper the reconcile uses, so the
-    // appear/disappear rule can't drift between the two paths.
-    _dmsgSyncReactionsAddButton(
-        reactionsRow,
-        spanReaction.dataset.msgId || rowEl.id,
-        reactionsRow.querySelectorAll(':scope > .reaction').length,
-    );
-    // Reaction chips can grow the row's height (first chip adds a whole
-    // row, wrapped chips bump to a new line). Honour the user's
-    // pinned-to-bottom state — softChatScroll no-ops if they've scrolled
-    // up so this can't snatch focus from someone reading history.
+    if (!cMsg) return null;
+    cMsg.reactions = cMsg.reactions || [];
+    if (cMsg.reactions.some(r => r.emoji === emoji && r.author_id === strPubkey)) return null;
+    const provisional = { id: `pending-react-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, reference_id: msgId, author_id: strPubkey, emoji, emoji_url: url, at: Date.now() };
+    cMsg.reactions.push({ id: provisional.id, reference_id: msgId, author_id: strPubkey, emoji, emoji_url: url });
+    const inflight = pendingReactions.get(msgId) || [];
+    inflight.push(provisional);
+    pendingReactions.set(msgId, inflight);
+    VectorSvelte.touchMessage(msgId);
+    VectorSvelte.flushSync();
+    // A chip can grow the row; a bottom-pinned reader stays pinned (softChatScroll
+    // no-ops when they have scrolled up).
     if (typeof softChatScroll === 'function') softChatScroll();
+    return () => {
+        const l = (pendingReactions.get(msgId) || []).filter(p => p.id !== provisional.id);
+        if (l.length) pendingReactions.set(msgId, l); else pendingReactions.delete(msgId);
+        const i = cMsg.reactions.findIndex(r => r.id === provisional.id);
+        if (i !== -1) cMsg.reactions.splice(i, 1);
+        VectorSvelte.touchMessage(msgId);
+    };
 }
 
 /** True once no more reactions can be added to a message — the row holds the

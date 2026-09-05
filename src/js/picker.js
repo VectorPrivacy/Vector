@@ -19,7 +19,7 @@
  *                  domAttachmentPanel, domMiniAppLaunchOverlay,
  *                  closeAttachmentPanel, platformFeatures, arrChats
  *   - miniapps-panel.js — closeMiniAppLaunchDialog
- *   - message-row.js    — _dmsgInjectReaction
+ *   - message-row.js    — dmsgReactOptimistic
  */
 
 const picker = document.querySelector('.emoji-picker');
@@ -4794,15 +4794,10 @@ function _sendCustomEmojiReaction(shortcode, url) {
         if (!cMsg) continue;
         const strReceiverPubkey = cChat.id;
 
-        // Local decoy chip — shows the image right away. The renderer
-        // for inbound reactions picks up the `emoji` tag and replaces
-        // the `:shortcode:` text similarly.
-        const spanReaction = _dmsgBuildReactionChip(`:${shortcode}:`, { count: 1, mine: true, url }, strCurrentReactionReference);
-
-        const divMessage = document.getElementById(cMsg.id);
-        _dmsgInjectReaction(divMessage, spanReaction);
-
-        reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, `:${shortcode}:`, url);
+        // Provisional first: the chip shows the image right away.
+        const retract = dmsgReactOptimistic(cMsg.id, `:${shortcode}:`, url);
+        reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, `:${shortcode}:`, url)
+            .catch(() => { if (retract) retract(); });
     }
 }
 
@@ -5474,11 +5469,9 @@ picker.addEventListener('click', (e) => {
                         if (!cMsg) continue;
 
                         const strReceiverPubkey = cChat.id;
-                        const spanReaction = _dmsgBuildReactionChip(cEmoji.emoji, { count: 1, mine: true, url: null }, strCurrentReactionReference);
-
-                        const divMessage = document.getElementById(cMsg.id);
-                        _dmsgInjectReaction(divMessage, spanReaction);
-                        reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji);
+                        const retract = dmsgReactOptimistic(cMsg.id, cEmoji.emoji, null);
+                        reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji)
+                            .catch(() => { if (retract) retract(); });
                     }
                 }
             } else {
@@ -5564,16 +5557,11 @@ emojiSearch.onkeydown = async (e) => {
                 // Found the message!
                 const strReceiverPubkey = cChat.id;
 
-                // Decoy chip for instant feedback (no wait for the network echo).
-                const spanReaction = _dmsgBuildReactionChip(cEmoji.emoji, { count: 1, mine: true, url: null }, strCurrentReactionReference);
-
-                // Inject the decoy chip into .dmsg-reactions, bumping count if the emoji
-                // already exists or appending a new chip otherwise.
-                const divMessage = document.getElementById(cMsg.id);
-                _dmsgInjectReaction(divMessage, spanReaction);
-
+                // Provisional first: instant feedback, no wait for the network echo.
+                const retract = dmsgReactOptimistic(cMsg.id, cEmoji.emoji, null);
                 // Send the Reaction to the network (protocol-agnostic)
-                reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji);
+                reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji)
+                    .catch(() => { if (retract) retract(); });
             }
         } else {
             // Add to message input at cursor position (with auto-spacing)
@@ -5637,16 +5625,11 @@ picker.addEventListener('click', (e) => {
                 // Found the message!
                 const strReceiverPubkey = cChat.id;
 
-                // Decoy chip for instant feedback (no wait for the network echo).
-                const spanReaction = _dmsgBuildReactionChip(cEmoji.emoji, { count: 1, mine: true, url: null }, strCurrentReactionReference);
-
-                // Inject the decoy chip into .dmsg-reactions, bumping count if the emoji
-                // already exists or appending a new chip otherwise.
-                const divMessage = document.getElementById(cMsg.id);
-                _dmsgInjectReaction(divMessage, spanReaction);
-
+                // Provisional first: instant feedback, no wait for the network echo.
+                const retract = dmsgReactOptimistic(cMsg.id, cEmoji.emoji, null);
                 // Send the Reaction to the network (protocol-agnostic)
-                reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji);
+                reactToMessageRouted(strCurrentReactionReference, strReceiverPubkey, cEmoji.emoji)
+                    .catch(() => { if (retract) retract(); });
             }
         }
     }

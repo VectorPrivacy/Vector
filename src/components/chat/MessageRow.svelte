@@ -4,9 +4,9 @@
     // body layout. Those derive from the message plus the author's profile signal and
     // the community signal, so a resolved profile or a granted role repaints them with
     // no retro-resolve code. The content (text, attachments, previews, status) is
-    // filled by the vanilla builders through an action, byte-identical to
-    // renderMessage, and re-filled whole by `update(msg)`; the reactions row is filled
-    // once here and reconciled in place by the vanilla reconciler afterwards.
+    // filled by the vanilla builders through an action and refilled whole when its
+    // content signature changes; the reactions row is a keyed list over the message's
+    // reactions, so a reaction lands or rolls its count without touching the body.
     //
     // The list container, the windowing engine and every scroll measurement stay
     // vanilla: they only need a child element whose id is the message id. Attributes
@@ -54,10 +54,6 @@
     const shortSender = (msg.mine ? ctx.myNpub : (sender?.id || msg.npub || '')).substring(0, 8);
     // svelte-ignore state_referenced_locally
     const communityId = ctx.currentChat?.metadata?.custom_fields?.community_id || null;
-    // The reactions row exists from mount only if the message had reactions then;
-    // the vanilla reconciler adds and removes it afterwards.
-    // svelte-ignore state_referenced_locally
-    const hadReactions = !!msg.reactions?.length;
     // The quoted parent: prebuilt by the caller, or built here (list island).
     // svelte-ignore state_referenced_locally
     const reply = replyEl !== undefined ? replyEl : (msg.replied_to && h.buildReply ? h.buildReply(msg, sender) : null);
@@ -65,6 +61,13 @@
     const pendingReply = replyPending || (replyEl === undefined && msg.replied_to && !reply ? msg.replied_to : '');
 
     const status = $derived.by(() => { rev; return current.failed ? 'failed' : current.pending ? 'pending' : 'sent'; });
+    // The body refills only when what it renders from changes: a reaction echo hands
+    // the row a NEW object with the same content, and a refill would reset video
+    // playback, the audio playhead and spoiler reveals.
+    const contentSig = $derived.by(() => { rev; return h.contentSig(current); });
+    // Reactions grouped by emoji, in first-seen order.
+    const reactions = $derived.by(() => { rev; return h.reactionGroups(current); });
+    const showAddReaction = $derived(h.canAddReactionGroup(current, reactions.length));
     const hourMinute = $derived.by(() => { rev; return h.formatHourMinute(current.at); });
 
     // The author as the profile store knows them now. `sender` is the mount-time
@@ -128,22 +131,41 @@
         if (reply) node.insertBefore(reply, node.firstChild);
     }
 
-    // Content: exactly renderMessage's builders; refilled whole when the message changes.
-    function contentInto(node, { m, rev: r }) {
-        let cur = m, curRev = r;
-        h.fillContent(node, cur, sender, ctx);
+    // Content: exactly renderMessage's builders; refilled whole when the signature changes.
+    function contentInto(node, { m, sig }) {
+        let cur = sig;
+        h.fillContent(node, m, sender, ctx);
         return {
-            update: ({ m: next, rev: nextRev }) => {
-                if (next === cur && nextRev === curRev) return;
-                cur = next;
-                curRev = nextRev;
+            update: ({ m: next, sig: nextSig }) => {
+                if (nextSig === cur) return;
+                cur = nextSig;
                 node.replaceChildren();
-                h.fillContent(node, cur, sender, ctx);
+                h.fillContent(node, next, sender, ctx);
             },
         };
     }
-    function reactionsInto(node) {
-        h.fillReactions(node, msg);
+
+    // A reaction chip: the glyph is filled once, the count rolls on change. Chips
+    // arriving after the row's first paint pop in.
+    let painted = false;
+    $effect(() => { painted = true; });
+    function chip(node, g) {
+        h.fillReactionGlyph(node, g.emoji, g.url);
+        const countEl = document.createElement('span');
+        countEl.className = 'reaction-count';
+        const valEl = document.createElement('span');
+        valEl.className = 'rc-value';
+        valEl.textContent = String(g.count);
+        countEl.appendChild(valEl);
+        node.appendChild(countEl);
+        if (painted) {
+            node.classList.add('reaction-enter');
+            node.addEventListener('animationend', () => node.classList.remove('reaction-enter'), { once: true });
+        }
+        return {
+            update: (next) => h.rollReactionCount(node, next.count),
+            destroy: () => h.reactionChipRemoved(),
+        };
     }
     function pivxInto(node) {
         node.replaceChildren(h.buildPivxBubble(msg));
@@ -223,9 +245,25 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
-        <div class="dmsg-content" use:contentInto={{ m: current, rev }}></div>
-        {#if hadReactions}
-            <div class="dmsg-reactions" use:reactionsInto></div>
+        <div class="dmsg-content" use:contentInto={{ m: current, sig: contentSig }}></div>
+        {#if reactions.length}
+            <div class="dmsg-reactions">
+                {#each reactions as g (g.emoji)}
+                    <!-- The global '.reaction' click delegate toggles the reaction. -->
+                    <span
+                        class="reaction"
+                        data-emoji={g.emoji}
+                        data-msg-id={current.id}
+                        data-reacted={g.mine ? 'true' : undefined}
+                        title={g.mine ? 'Click to remove your reaction' : undefined}
+                        use:chip={g}
+                    ></span>
+                {/each}
+                {#if showAddReaction}
+                    <!-- Discord-style "+" at the row's end; the delegated click listener opens the picker. -->
+                    <button type="button" class="dmsg-reactions-add" data-msg-id={current.id} aria-label="Add reaction" title="Add reaction"><span class="icon icon-smile-face"></span></button>
+                {/if}
+            </div>
         {/if}
     </div>
     {/if}

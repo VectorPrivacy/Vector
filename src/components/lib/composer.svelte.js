@@ -5,7 +5,13 @@
 const mode = $state({ kind: 'idle', id: '', name: '', snippet: null, original: '' });
 const draft = $state({ empty: true, animate: false, seq: 0 });
 const lock = $state({ reason: null, placeholder: '' });
-const command = $state({ active: false });
+// The structured command composer: the picked command's argument pills replace
+// the editor while they are filled. `values` holds the picker-typed args (choice,
+// bool); free-text fields own their text in the DOM. `attach` wires a mounted
+// field to the controller that walks focus between parts.
+const command = $state({
+    active: false, seq: 0, name: '', bot: null, hint: '', args: [], values: [], invalid: -1, attach: null,
+});
 
 export function composerMode() { return mode; }
 export function composerDraft() { return draft; }
@@ -53,8 +59,46 @@ export function setLock(reason, placeholder = '') {
     lock.placeholder = placeholder || '';
 }
 
-export function setCommandActive(active) {
-    command.active = !!active;
+/** Enter the command composer for `name` with `args` [{ name, type, required, description, grow }]. */
+export function setCommand({ name, bot, args, attach }) {
+    command.active = true;
+    command.seq++;
+    command.name = name;
+    command.bot = bot || null;
+    command.hint = '';
+    command.args = args;
+    command.values = args.map(() => '');
+    command.invalid = -1;
+    command.attach = attach;
+}
+/** Leave the composer. Name and bot stay for the strip's collapse animation. */
+export function clearCommand() {
+    command.active = false;
+    command.args = [];
+    command.values = [];
+    command.invalid = -1;
+    command.hint = '';
+    command.attach = null;
+}
+export function setCommandHint(text) {
+    command.hint = text || '';
+}
+export function setCommandInvalid(idx) {
+    command.invalid = idx;
+}
+export function setCommandValue(idx, value) {
+    if (idx >= 0 && idx < command.values.length) command.values[idx] = value || '';
+}
+
+// The choice drop-up for a picker part: options anchored to their trigger.
+let choice = $state.raw({ open: false });
+
+export function choiceMenu() { return choice; }
+export function openChoiceMenu(view) {
+    choice = { open: true, ...view };
+}
+export function closeChoiceMenu() {
+    if (choice.open) choice = { open: false };
 }
 
 // The autocomplete popup: at most one open at a time. The view is RAW (a fresh

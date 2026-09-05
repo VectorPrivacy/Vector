@@ -18,6 +18,8 @@ import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
 import ComposerChrome from './composer/ComposerChrome.svelte';
 import ComposerPopups from './composer/ComposerPopups.svelte';
+import CommandComposer from './composer/CommandComposer.svelte';
+import CommandStrip from './composer/CommandStrip.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -35,8 +37,9 @@ export { deriveWindow } from './lib/chatwindow.js';
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider } from './lib/chatview.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
-    startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setCommandActive,
+    startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock,
     openPopup, closePopup,
+    setCommand, clearCommand, setCommandHint, setCommandInvalid, setCommandValue, openChoiceMenu, closeChoiceMenu,
 } from './lib/composer.svelte.js';
 
 /**
@@ -116,4 +119,20 @@ export function mountComposerChrome({ els, h }) {
  */
 export function mountComposerPopups({ anchor, h }) {
     return mount(ComposerPopups, { target: document.body, props: { anchor, h } });
+}
+
+/**
+ * Mount the structured command composer: its argument pills render in a host placed
+ * before the editor (display: contents, so they are the row's flex children), and
+ * the context strip fills `strip` (#chat-command-bar). `onCancel` is the strip's
+ * cancel button.
+ */
+export function mountCommandComposer({ editor, strip, onCancel }) {
+    const host = document.createElement('div');
+    host.style.display = 'contents';
+    editor.before(host);
+    const pills = mount(CommandComposer, { target: host });
+    strip.replaceChildren();
+    const bar = mount(CommandStrip, { target: strip, props: { onCancel } });
+    return { pills, bar };
 }
