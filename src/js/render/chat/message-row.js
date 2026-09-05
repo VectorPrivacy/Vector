@@ -34,7 +34,9 @@ function ensureMessageList() {
 
 /** Everything the list island derives from and hands to its rows. */
 const _dmsgListHelpers = {
-    messages: (chatId) => eventCache.getEventsRef(chatId) || arrChats.find(c => c.id === chatId)?.messages || [],
+    // The chat's own array is the complete one: the cache entry can be a fresh
+    // post-eviction stub holding only the newest arrival.
+    messages: (chatId) => arrChats.find(c => c.id === chatId)?.messages || eventCache.getEventsRef(chatId) || [],
     rules: {
         collapse: (prev, curr) => shouldCollapseStreak(prev, curr),
         differentDay: (a, b) => _dmsgIsDifferentDay(a, b),
@@ -825,7 +827,8 @@ function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachmen
                     overlay.addEventListener('click', () => {
                         const realUrl = convertFileSrc(cAttachment.path);
                         imgPreview.src = realUrl;
-                        imgPreview.classList.remove('spoiler-img');
+                        // The revealed image is an ordinary attachment: same 450×350 clamp.
+                        imgPreview.classList.replace('spoiler-img', 'dmsg-image-attachment');
                         imgPreview.style.aspectRatio = '';
                         overlay.remove();
                         attachImagePreview(imgPreview);
@@ -835,6 +838,7 @@ function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachmen
             .catch(() => {
                 if (!target.isConnected) return;
                 const imgPreview = document.createElement('img');
+                imgPreview.classList.add('dmsg-image-attachment');
                 imgPreview.style.maxWidth = '100%';
                 imgPreview.style.height = 'auto';
                 imgPreview.style.borderRadius = '8px';

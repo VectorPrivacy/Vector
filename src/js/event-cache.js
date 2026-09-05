@@ -710,10 +710,21 @@ class EventCache {
      * @private
      */
     _evictIfNeeded() {
+        let spared = false;
         while (this.cache.size > EVENT_CACHE_CONFIG.maxCachedConversations) {
             // Get the first entry (oldest/least recently used)
             const oldestKey = this.cache.keys().next().value;
             const oldestEntry = this.cache.get(oldestKey);
+
+            // The open chat is what the user is reading: never its entry. Move it to
+            // the recent end once and evict the next-oldest instead.
+            if (typeof strOpenChat !== 'undefined' && oldestKey === strOpenChat) {
+                if (spared) break;
+                spared = true;
+                this.cache.delete(oldestKey);
+                this.cache.set(oldestKey, oldestEntry);
+                continue;
+            }
 
             // Keep only the last event(s) for preview. slice(-N) keeps the NEWEST
             // rows = the tail, so the chat-list preview stays correct, and the
