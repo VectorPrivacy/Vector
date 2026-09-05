@@ -22,7 +22,7 @@ Binaries: https://github.com/VectorPrivacy/Vector/releases/download/v%v/Vector-f
 Builds:
   - versionName: 0.4.4
     versionCode: 40499
-    commit: v0.4.4-fdroid
+    commit: 59a0ff3d7711615b0bc3e1cf2b4d378da0aa88fc
     subdir: src-tauri/gen/android/app
     sudo:
       - apt-get update
