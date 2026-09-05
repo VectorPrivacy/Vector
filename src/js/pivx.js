@@ -1093,8 +1093,7 @@ function handlePivxPaymentReceived(evt) {
         // If this chat is currently open, append to DOM and scroll
         if (strOpenChat === conversation_id) {
             const profile = getProfile(conversation_id);
-            const msgEl = renderMessage(pivxMsg, profile);
-            domChatMessages.appendChild(msgEl);
+            updateChat(chat, [pivxMsg], profile, false);
             softChatScroll();
         }
     } else {

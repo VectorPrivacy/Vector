@@ -140,7 +140,10 @@ function initMessageToolbar() {
         // content automatically (no per-frame reposition on scroll = no lag).
         // Requires .chat-messages { position: relative } for absolute children to
         // anchor to its scroll content — that rule lives in the .dmsg CSS section.
-        domChatMessages.appendChild(_dmsgToolbarEl);
+        // First child, not last: the list's bottom clearance rides `> *:last-child`,
+        // which must stay on the newest row. The toolbar is absolutely positioned,
+        // so its place in the order is invisible.
+        domChatMessages.prepend(_dmsgToolbarEl);
 
         // Listeners that hang off the toolbar element itself must be re-attached
         // every rebuild (the previous instance is gone).

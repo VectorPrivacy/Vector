@@ -46,6 +46,71 @@ const MAX_DISPLAYED_REACTIONS = 12;
  *  (a `let` so a debug session can A/B the two builders live). */
 let CHAT_ROW_ISLAND = true;
 
+/** The list island owns #chat-messages (Phase 2c): rows, separators, the unread divider
+ *  and system events derive from the window state the engine sets. false = the vanilla
+ *  list with row islands (Phase 2a/2b). A `let` for a live A/B. */
+let CHAT_LIST_ISLAND = true;
+
+/** The mounted list island, one per page life (re-mounted if its target was replaced). */
+let _dmsgListIsland = null;
+function ensureMessageList() {
+    if (!CHAT_LIST_ISLAND || typeof domChatMessages === 'undefined' || !domChatMessages) return false;
+    if (_dmsgListIsland && _dmsgListIsland._target === domChatMessages) return true;
+    _dmsgListIsland = VectorSvelte.mountMessageList(domChatMessages, { h: _dmsgListHelpers });
+    _dmsgListIsland._target = domChatMessages;
+    // The mount cleared the container; the toolbar is re-created on demand.
+    initMessageToolbar();
+    return true;
+}
+
+/** Everything the list island derives from and hands to its rows. */
+const _dmsgListHelpers = {
+    messages: (chatId) => eventCache.getEventsRef(chatId) || arrChats.find(c => c.id === chatId)?.messages || [],
+    rules: {
+        collapse: (prev, curr) => shouldCollapseStreak(prev, curr),
+        differentDay: (a, b) => _dmsgIsDifferentDay(a, b),
+        isCommand: (m) => !!_dmsgCommandInfo(m),
+        mergeable: (t) => MERGEABLE_SYSTEM_EVENTS.has(t),
+    },
+    dayLabel: (at) => dayDividerHtml(at),
+    get maxRows() { return typeof MAX_WINDOW_ROWS === 'number' ? MAX_WINDOW_ROWS : 80; },
+    senderFor: (msg) => {
+        if (msg.mine) return getProfile(strPubkey) || null;
+        const chat = arrChats.find(c => c.id === strOpenChat);
+        return chatIsGroup(chat) ? (msg.npub ? getProfile(msg.npub) : null) : getProfile(chat?.id);
+    },
+    // Render-time facts about a row, the way the vanilla builder read them once per
+    // render: cached per message object so a re-derive of 80 rows costs 80 lookups,
+    // not 80 scans. A changed message is a new object and gets a fresh context.
+    ctxFor: (msg) => {
+        let ctx = _dmsgRowCtxCache.get(msg);
+        if (ctx && ctx.currentChat?.id === strOpenChat) return ctx;
+        ctx = _dmsgRowCtx(msg);
+        _dmsgRowCtxCache.set(msg, ctx);
+        return ctx;
+    },
+    get row() { return _dmsgRowHelpers; },
+};
+const _dmsgRowCtxCache = new WeakMap();
+function _dmsgRowCtx(msg) {
+    {
+        const currentChat = arrChats.find(c => c.id === strOpenChat);
+        const isGroupChat = chatIsGroup(currentChat);
+        const otherFullId = msg.npub || (!isGroupChat ? currentChat?.id : '') || '';
+        const blockedAuthorProfile = isGroupChat && !msg.mine && otherFullId ? getProfile(otherFullId) : null;
+        const blocked = !!blockedAuthorProfile?.is_blocked;
+        return {
+            myNpub: strPubkey,
+            isGroupChat,
+            currentChat,
+            pinged: _dmsgIsPinged(msg, currentChat, isGroupChat),
+            replyingTo: strCurrentReplyReference === msg.id,
+            blocked: blocked && !revealedBlockedMessages.has(msg.id),
+            revealedBlocked: blocked && revealedBlockedMessages.has(msg.id),
+        };
+    }
+}
+
 /** Svelte instance per row element; rows leave the DOM through many paths, so the
  *  observer below unmounts whatever left rather than every path knowing about it. */
 const _dmsgRowInstances = new WeakMap();
@@ -85,6 +150,25 @@ function _dmsgIsIslandRow(el) {
  * PIVX, blocked) fall back to a full replace.
  */
 function updateMessageRow(domMsg, msg, profile, oldId = '') {
+    if (CHAT_LIST_ISLAND && _dmsgListIsland) {
+        // The list derives from the array: make sure it holds `msg`, then re-derive.
+        // Same id → the row's prop changes and it refills in place; a new id (pending →
+        // sent) is a new keyed row, as a replace was.
+        const msgs = _dmsgListHelpers.messages(strOpenChat);
+        const idx = msgs.findIndex(m => m === msg || m.id === msg.id || (oldId && m.id === oldId));
+        if (idx !== -1 && msgs[idx] !== msg) msgs[idx] = msg;
+        // An id swap must carry the window anchor with it.
+        if (oldId && oldId !== msg.id) {
+            if (windowTopId === oldId) windowTopId = msg.id;
+            if (windowBottomId === oldId) windowBottomId = msg.id;
+            VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
+        }
+        VectorSvelte.touchWindow();
+        VectorSvelte.flushSync();
+        const el = document.getElementById(msg.id);
+        if (el) _dmsgReplaceReactions(el, msg);
+        return el || domMsg;
+    }
     const instance = domMsg && _dmsgRowInstances.get(domMsg);
     if (!instance) {
         replaceMessageRow(domMsg, renderMessage(msg, profile, oldId || msg.id));
@@ -128,6 +212,13 @@ const _dmsgRowHelpers = {
     fillContent: (node, msg, sender, ctx) =>
         _dmsgFillContent(node, msg, sender, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked),
     fillReactions: (node, msg) => _dmsgFillReactions(node, msg),
+    buildReply: (msg, sender) => _dmsgBuildReplyContext(msg, sender),
+    buildPivxBubble: (msg) => renderPivxPaymentBubble(
+        msg.pivx_payment.gift_code, msg.pivx_payment.amount_piv, msg.mine, msg.pivx_payment.address),
+    buildBlockedPlaceholder: (msg) => _dmsgBuildBlockedPlaceholder(msg),
+    systemEventName: (npub) => systemEventName(npub),
+    systemEventSuffix: (type) => systemEventSuffix(type),
+    showMiniProfile: (npub, el) => showMiniProfile(npub, el),
 };
 
 /**

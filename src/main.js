@@ -4696,6 +4696,7 @@ async function setupRustListeners() {
                         domMsg.style.paddingBottom = '0';
                     });
                     setTimeout(() => {
+                        if (CHAT_LIST_ISLAND && _dmsgListIsland) { _windowReleaseAnchor(id); VectorSvelte.touchWindow(); VectorSvelte.flushSync(); return; }
                         domMsg.remove();
                         // Remove trailing timestamp if it's now the last element in the chat
                         const lastChild = domChatMessages.lastElementChild;
@@ -7275,6 +7276,7 @@ function _derezRowDom(domMsg, followingRow) {
     }
     // No animation for now — remove instantly, then heal date dividers so an
     // orphan left by this removal is dropped (and nothing left misplaced).
+    if (CHAT_LIST_ISLAND && _dmsgListIsland) { _windowReleaseAnchor(domMsg.id); VectorSvelte.touchWindow(); VectorSvelte.flushSync(); return; }
     domMsg.remove();
     _dedupeAdjacentDaySeparators();
     _mergeAdjacentSystemEvents();
@@ -7494,6 +7496,9 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (metaIds.length) dmsgQueueDeleteMeta(metaIds);
         }
 
+        if (CHAT_LIST_ISLAND && ensureMessageList()) {
+            _updateChatWindow(chat, sortedMessages, arrMessages.length === 1 ? sortedMessages[0] : null);
+        } else {
         // Track last message time for timestamp insertion
         let nLastMsgTime = null;
 
@@ -7671,6 +7676,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // are read off the final order, dividers included).
         _dedupeAdjacentDaySeparators();
         _mergeAdjacentSystemEvents();
+        }
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open).
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
@@ -7754,6 +7760,65 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
 }
 
 /**
+ * The list island's half of updateChat: the messages are already in the chat's array,
+ * so widen the window to cover them, flush synchronously (the callers measure right
+ * after), and apply the single-arrival extras the vanilla append branch had (entry
+ * animation, unread badge and divider, snap on an own send).
+ */
+function _updateChatWindow(chat, sortedMessages, single) {
+    initMessageToolbar();   // lives inside the container; the vanilla row builder used to init it
+    const msgs = _dmsgListHelpers.messages(chat.id);
+    let lo = Infinity, hi = -1;
+    for (const m of sortedMessages) {
+        const i = msgs.findIndex(x => x === m || x.id === m.id);
+        if (i === -1) continue;
+        if (i < lo) lo = i;
+        if (i > hi) hi = i;
+    }
+    if (hi === -1) return;
+    const cur = _currentWindowRange();
+    // Only a window that is still on screen extends; a stale one (another chat, a
+    // cleared list) is replaced.
+    const sameChat = cur && document.getElementById(windowTopId);
+    const start = sameChat ? Math.min(cur[0], lo) : lo;
+    const end = sameChat ? Math.max(cur[1], hi + 1) : hi + 1;
+    windowTopId = msgs[start].id;
+    windowBottomId = msgs[end - 1].id;
+    VectorSvelte.setWindow(chat.id, windowTopId, windowBottomId);
+    VectorSvelte.flushSync();
+
+    if (single && !single.mine && single.id === windowBottomId && hi === msgs.length - 1) {
+        const domMsg = document.getElementById(single.id);
+        if (domMsg) {
+            domMsg.classList.add('new-anim');
+            domMsg.addEventListener('animationend', () => domMsg.classList.remove('new-anim'), { once: true });
+            // Bump the scroll-down badge if the user is reading above; drop a divider
+            // when the window is inactive (pinned but tabbed out, so unseen).
+            if (!chatPinnedToBottom) {
+                incrementUnreadBelow();
+                insertUnreadDivider(domMsg);
+            } else if (!isWindowActive()) {
+                insertUnreadDivider(domMsg);
+            }
+        }
+    }
+    if (single && single.mine && single.pending) {
+        // Sending counts as "read up to here".
+        scrollToBottom(domChatMessages, false);
+        clearUnreadDivider();
+    }
+}
+
+/** The inner HTML of a day divider for `timestamp` ("Today, 4:08 pm"). */
+function dayDividerHtml(timestamp) {
+    const messageDate = new Date(timestamp);
+    const timeStr = _insertTimestampTimeFmt.format(messageDate);
+    if (isToday(messageDate)) return `<strong>Today</strong>, ${timeStr}`;
+    if (isYesterday(messageDate)) return `<strong>Yesterday</strong>, ${timeStr}`;
+    return `<strong>${_insertTimestampDateFmt.format(messageDate)}</strong>, ${timeStr}`;
+}
+
+/**
  * Helper function to create and insert a timestamp
  * @param {number} timestamp - Unix timestamp in seconds
  * @param {HTMLElement} parent - Optional parent to append to
@@ -7772,6 +7837,7 @@ const _insertTimestampDateFmt = new Intl.DateTimeFormat();
  */
 function _dedupeAdjacentDaySeparators() {
     if (!domChatMessages) return;
+    if (CHAT_LIST_ISLAND && _dmsgListIsland) return;   // derived by the list island
 
     // Drop every existing date divider (system events and the "New" divider
     // share `.msg-inline-timestamp` styling but are NOT date dividers, so
@@ -7822,6 +7888,7 @@ const MERGEABLE_SYSTEM_EVENTS = new Set([
  */
 function _mergeAdjacentSystemEvents(container = domChatMessages) {
     if (!container) return;
+    if (CHAT_LIST_ISLAND && _dmsgListIsland && container === domChatMessages) return;   // derived by the list island
     let run = [];
     const flush = () => {
         if (!run.length) return;
@@ -9201,7 +9268,8 @@ async function openChat(contact) {
     domNavbar.style.display = `none`;
 
     // Clear existing messages so they're fully re-rendered (picks up state changes like blocking)
-    domChatMessages.innerHTML = '';
+    if (CHAT_LIST_ISLAND && ensureMessageList()) { VectorSvelte.clearWindow(); VectorSvelte.flushSync(); windowTopId = windowBottomId = null; }
+    else domChatMessages.innerHTML = '';
     // Only reset revealed blocked messages when switching to a different chat
     if (strOpenChat !== contact) revealedBlockedMessages.clear();
 
@@ -13851,6 +13919,13 @@ const domChatScrollReturnBadge = document.getElementById('chat-scroll-return-bad
  */
 function insertUnreadDivider(anchorEl, anchorAfter = false) {
     if (unreadDividerEl || !anchorEl?.parentNode) return;
+    if (CHAT_LIST_ISLAND && _dmsgListIsland && anchorEl.id) {
+        VectorSvelte.setDivider(anchorEl.id, anchorAfter);
+        VectorSvelte.flushSync();
+        const p = domChatMessages.querySelector(':scope > .unread-divider');
+        if (p) { p._targetId = anchorEl.id; p._anchorAfter = anchorAfter; unreadDividerEl = p; }
+        return;
+    }
     const p = document.createElement('p');
     p.classList.add('msg-inline-timestamp', 'unread-divider');
     p.textContent = 'New';
@@ -13867,6 +13942,12 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
     unreadDividerEl = p;
 }
 function clearUnreadDivider() {
+    if (CHAT_LIST_ISLAND && _dmsgListIsland) {
+        VectorSvelte.clearDivider();
+        VectorSvelte.flushSync();
+        unreadDividerEl = null;
+        return;
+    }
     if (unreadDividerEl) {
         unreadDividerEl.remove();
         unreadDividerEl = null;
