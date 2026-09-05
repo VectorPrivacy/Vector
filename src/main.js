@@ -3706,14 +3706,9 @@ async function setupRustListeners() {
                     ? (isAtDataBottom() && (bottomIdx === -1 || newIdx === bottomIdx + 1))
                     : (atMs >= (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0) && isAtDataBottom());
                 if (!frozen && tailAppend) {
-                    const systemElement = insertSystemEvent(content, null, member_pubkey, event_type);
-                    // Tag with the event id so the profile_update retro-resolver can
-                    // find + repaint this line in place when a stranger's name lands.
-                    systemElement.id = event_id;
-                    domChatMessages.appendChild(systemElement);
-                    // A repeat of the line above folds into its count instead of
-                    // stacking a new row.
-                    _mergeAdjacentSystemEvents();
+                    // The list island renders it (and folds a repeat into its run's head).
+                    ensureMessageList();
+                    _updateChatWindow(chat, [systemMsg], null);
                     softChatScroll();
                     if (CHAT_WINDOW_ENABLED) { _windowReseatAnchorsFromDom(); windowTrimTopIfOver(); }
                 }
@@ -4677,13 +4672,9 @@ async function setupRustListeners() {
 
                 // Remember the row that follows ours so we can re-evaluate its
                 // streak attribute after removal (it may flip first ↔ continuation).
-                const followingRow = domMsg.classList.contains('dmsg')
-                    ? _dmsgWalkForwardToRow(domMsg.nextElementSibling)
-                    : null;
-
                 if (reason === 'self-destruct') {
                     // Self-Destruct expiry → Tron "derez" dissolve, not the plain fade.
-                    _derezRowDom(domMsg, followingRow);
+                    _derezRowDom(domMsg);
                 } else {
                     domMsg.style.transition = 'opacity 0.2s ease, max-height 0.3s ease';
                     domMsg.style.opacity = '0';
@@ -4696,18 +4687,12 @@ async function setupRustListeners() {
                         domMsg.style.paddingBottom = '0';
                     });
                     setTimeout(() => {
-                        if (CHAT_LIST_ISLAND && _dmsgListIsland) { _windowReleaseAnchor(id); VectorSvelte.touchWindow(); VectorSvelte.flushSync(); return; }
-                        domMsg.remove();
-                        // Remove trailing timestamp if it's now the last element in the chat
-                        const lastChild = domChatMessages.lastElementChild;
-                        if (lastChild && lastChild.classList.contains('msg-inline-timestamp')) {
-                            lastChild.remove();
-                        }
-                        // Re-evaluate streak on the row that now succeeds the gap.
-                        if (followingRow) {
-                            const msg = _dmsgLookupMessage(followingRow);
-                            if (msg) followingRow.dataset.streak = _dmsgComputeStreakAttr(msg, followingRow.previousElementSibling);
-                        }
+                        // The array was spliced above; the list re-derives (streaks, separators,
+                        // merged runs included) once the fade has played.
+                        _windowReleaseAnchor(id);
+                        VectorSvelte.touchWindow();
+                        VectorSvelte.flushSync();
+                        _dmsgUpdateLastSentVisibility();
                     }, 100);
                 }
             }
@@ -7257,29 +7242,15 @@ function _syncSelfDestructBadge() {
 }
 
 /** Play the Tron "derez" dissolve on a message row, then remove it. Idempotent. */
-function _derezRowDom(domMsg, followingRow) {
+function _derezRowDom(domMsg) {
     if (!domMsg || domMsg.dataset.derezzing) return;
     domMsg.dataset.derezzing = '1';
     if (_dmsgToolbarTarget === domMsg) hideMessageToolbar();
-    if (followingRow === undefined) {
-        followingRow = domMsg.classList.contains('dmsg')
-            ? _dmsgWalkForwardToRow(domMsg.nextElementSibling)
-            : null;
-    }
-    // Promote the next row to its post-removal streak state NOW (anchored on the
-    // dissolving row's predecessor, i.e. its future previous sibling) so a
-    // top-of-streak dissolve hands its avatar to the next message instead of
-    // blinking it out for a frame while the row fades.
-    if (followingRow) {
-        const nmsg = _dmsgLookupMessage(followingRow);
-        if (nmsg) followingRow.dataset.streak = _dmsgComputeStreakAttr(nmsg, domMsg.previousElementSibling);
-    }
-    // No animation for now — remove instantly, then heal date dividers so an
-    // orphan left by this removal is dropped (and nothing left misplaced).
-    if (CHAT_LIST_ISLAND && _dmsgListIsland) { _windowReleaseAnchor(domMsg.id); VectorSvelte.touchWindow(); VectorSvelte.flushSync(); return; }
-    domMsg.remove();
-    _dedupeAdjacentDaySeparators();
-    _mergeAdjacentSystemEvents();
+    // The array was already spliced; the list re-derives (the next row's streak with it).
+    _windowReleaseAnchor(domMsg.id);
+    VectorSvelte.touchWindow();
+    VectorSvelte.flushSync();
+    _dmsgUpdateLastSentVisibility();
 }
 
 /** A message just vanished (deletion or self-destruct) — bail out of any UI
@@ -7496,187 +7467,10 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
             if (metaIds.length) dmsgQueueDeleteMeta(metaIds);
         }
 
-        if (CHAT_LIST_ISLAND && ensureMessageList()) {
-            _updateChatWindow(chat, sortedMessages, arrMessages.length === 1 ? sortedMessages[0] : null);
-        } else {
-        // Track last message time for timestamp insertion
-        let nLastMsgTime = null;
-
-        /* Dedup guard: skip any message already present in the DOM by ID */
-         // Process each message for insertion
-        for (const msg of sortedMessages) {
-            // Guard against duplicate insertions if the DOM already contains this message ID
-            if (document.getElementById(msg.id)) {
-                continue;
-            }
-            // Quick check for empty chat - simple append (with leading day separator).
-            if (domChatMessages.children.length === 0) {
-                insertTimestamp(msg.at, domChatMessages);
-                nLastMsgTime = msg.at;
-                domChatMessages.appendChild(renderMessage(msg, profile));
-                continue;
-            }
-
-            // Messages are managed by the procedural scroll system
-
-            // Direct comparison with newest and oldest messages (most common cases)
-            // This avoids expensive DOM operations for the common cases
-
-            // Get the newest message in the DOM
-            const newestMsgElement = domChatMessages.lastElementChild;
-            const newestMsg = chat.messages.find(m => m.id === newestMsgElement.id);
-            if (newestMsg && msg.at > newestMsg.at) {
-                // It's the newest message, append it
-
-                // Day-boundary separator (e.g. crossing midnight while chat is open).
-                if (nLastMsgTime === null) {
-                    nLastMsgTime = newestMsg.at;
-                }
-
-                if (_dmsgIsDifferentDay(nLastMsgTime, msg.at)) {
-                    insertTimestamp(msg.at, domChatMessages);
-                    nLastMsgTime = msg.at;
-                }
-
-                // Render message post-time-insert for improved message rendering context
-                const domMsg = renderMessage(msg, profile);
-                if (!msg.mine && arrMessages.length === 1) {
-                    domMsg.classList.add('new-anim');
-                    domMsg.addEventListener('animationend', () => {
-                        // Remove the animation class once it finishes
-                        domMsg?.classList?.remove('new-anim');
-                    }, { once: true });
-                    // Bump the scroll-down badge if the user is reading
-                    // above; softChatScroll is a no-op for them, so this is
-                    // the only signal that something new arrived. Also drop
-                    // a divider when the window is inactive — they're pinned
-                    // but tabbed out, so they haven't actually seen it.
-                    if (!chatPinnedToBottom) {
-                        incrementUnreadBelow();
-                        insertUnreadDivider(domMsg);
-                    } else if (!isWindowActive()) {
-                        insertUnreadDivider(domMsg);
-                    }
-                }
-
-                domChatMessages.appendChild(domMsg);
-
-                // If this was our pending message, then snap the view to the bottom
-                // and clear the unread divider — sending counts as "I've read up
-                // to here". Covers every send path (text/file/voice/miniapp) with
-                // a single hook since they all funnel through this rendering.
-                if (msg.mine && msg.pending) {
-                    scrollToBottom(domChatMessages, false);
-                    clearUnreadDivider();
-                }
-                continue;
-            }
-
-            // Get the oldest message in the DOM. Match any rendered element
-            // that maps to a message — including system events (which render
-            // as .msg-inline-timestamp, not .dmsg). Anchoring only to .dmsg
-            // would let older prepended messages slip BELOW a system event
-            // stranded at the top, pinning it there out of chronological order.
-            let oldestMsgElement = null;
-            for (let i = 0; i < domChatMessages.children.length; i++) {
-                const child = domChatMessages.children[i];
-                if (child.id && chat.messages.some(m => m.id === child.id)) {
-                    oldestMsgElement = child;
-                    break;
-                }
-            }
-
-            if (oldestMsgElement) {
-                const oldestMsg = chat.messages.find(m => m.id === oldestMsgElement.id);
-                if (oldestMsg && msg.at < oldestMsg.at) {
-                    // Prepend the new oldest. The existing day-separator above
-                    // old_oldest must stay glued to it (it labels old_oldest's
-                    // day) — otherwise each different-day prepend leaves a
-                    // stale separator stranded at the top of the chat.
-                    const domMsg = renderMessage(msg, profile, '', oldestMsgElement);
-                    const existingSep = oldestMsgElement.previousElementSibling;
-                    const existingSepIsDate = existingSep
-                        && existingSep.classList?.contains('msg-inline-timestamp')
-                        && !existingSep.classList.contains('unread-divider');
-
-                    domChatMessages.insertBefore(domMsg, oldestMsgElement);
-                    if (_dmsgIsDifferentDay(msg.at, oldestMsg.at)) {
-                        if (existingSepIsDate) {
-                            // Reseat the existing sep between the new oldest
-                            // and old_oldest, where it still labels old_oldest's day.
-                            domChatMessages.insertBefore(existingSep, oldestMsgElement);
-                        }
-                        const newSep = insertTimestamp(msg.at);
-                        domChatMessages.insertBefore(newSep, domMsg);
-                    }
-                    // Same-day case: the existing sep now correctly sits above
-                    // both X and old_oldest, no work needed.
-                    continue;
-                }
-            }
-
-            // If we get here, the message belongs somewhere in the middle
-            // This is a less common case, so we'll do a linear scan
-            let inserted = false;
-
-            // Get the message elements sorted by time (oldest to newest).
-            // Include system events (.msg-inline-timestamp with an id) so a
-            // mid-list insert lands in true chronological order relative to
-            // them, not just relative to .dmsg rows.
-            let messageNodes = [];
-            for (let i = 0; i < domChatMessages.children.length; i++) {
-                const child = domChatMessages.children[i];
-                if (child.id) {
-                    const childMsg = chat.messages.find(m => m.id === child.id);
-                    if (childMsg) {
-                        messageNodes.push({ element: child, message: childMsg });
-                    }
-                }
-            }
-
-            // Sort by timestamp if needed (they might not be in order in the DOM)
-            messageNodes.sort((a, b) => a.message.at - b.message.at);
-
-            // Find the correct position to insert
-            for (let i = 0; i < messageNodes.length - 1; i++) {
-                const currentNode = messageNodes[i];
-                const nextNode = messageNodes[i + 1];
-
-                if (currentNode.message.at <= msg.at && msg.at <= nextNode.message.at) {
-                    // Day-boundary separator if the inserted message is on a new day vs. the previous one.
-                    if (_dmsgIsDifferentDay(currentNode.message.at, msg.at)) {
-                        const timestamp = insertTimestamp(msg.at);
-                        domChatMessages.insertBefore(timestamp, nextNode.element);
-                    }
-
-                    // Insert between these two messages
-                    const domMsg = renderMessage(msg, profile, '', nextNode.element);
-                    domChatMessages.insertBefore(domMsg, nextNode.element);
-                    inserted = true;
-                    break;
-                }
-            }
-
-            // If somehow not inserted by the above logic, append as fallback
-            if (!inserted) {
-                // Day-boundary separator vs. the last existing message.
-                const lastMsg = messageNodes[messageNodes.length - 1]?.message;
-                if (lastMsg && _dmsgIsDifferentDay(lastMsg.at, msg.at)) {
-                    insertTimestamp(msg.at, domChatMessages);
-                }
-
-                const domMsg = renderMessage(msg, profile);
-                domChatMessages.appendChild(domMsg);
-            }
-        }
-
-        // Rebuild date separators from the final `.dmsg` order so any
-        // orphans or misplaced separators from per-message inserts get
-        // healed in one pass, then collapse repeated system events (runs
-        // are read off the final order, dividers included).
-        _dedupeAdjacentDaySeparators();
-        _mergeAdjacentSystemEvents();
-        }
+        // The list island derives rows, separators and system events from the window;
+        // widen it to cover the batch (a single arrival also gets the entry extras).
+        ensureMessageList();
+        _updateChatWindow(chat, sortedMessages, arrMessages.length === 1 ? sortedMessages[0] : null);
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open).
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
@@ -7787,7 +7581,9 @@ function _updateChatWindow(chat, sortedMessages, single) {
     VectorSvelte.setWindow(chat.id, windowTopId, windowBottomId);
     VectorSvelte.flushSync();
 
-    if (single && !single.mine && single.id === windowBottomId && hi === msgs.length - 1) {
+    // A cold open pre-paints a chat that holds only its last message: that is a first
+    // render, not an arrival, so the entry extras need a window that was already on screen.
+    if (single && sameChat && !single.mine && single.id === windowBottomId && hi === msgs.length - 1) {
         const domMsg = document.getElementById(single.id);
         if (domMsg) {
             domMsg.classList.add('new-anim');
@@ -7807,6 +7603,8 @@ function _updateChatWindow(chat, sortedMessages, single) {
         scrollToBottom(domChatMessages, false);
         clearUnreadDivider();
     }
+    // Only the newest own message shows its "Sent" mark.
+    _dmsgUpdateLastSentVisibility();
 }
 
 /** The inner HTML of a day divider for `timestamp` ("Today, 4:08 pm"). */
@@ -7818,54 +7616,9 @@ function dayDividerHtml(timestamp) {
     return `<strong>${_insertTimestampDateFmt.format(messageDate)}</strong>, ${timeStr}`;
 }
 
-/**
- * Helper function to create and insert a timestamp
- * @param {number} timestamp - Unix timestamp in seconds
- * @param {HTMLElement} parent - Optional parent to append to
- * @returns {HTMLElement} - The created timestamp element
- */
 // Cached formatters — Intl.DateTimeFormat construction is expensive vs. .format()
 const _insertTimestampTimeFmt = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit', hour12: true });
 const _insertTimestampDateFmt = new Intl.DateTimeFormat();
-
-/**
- * Wipe and rebuild date separators from the current `.dmsg` order. Runs
- * after batch operations (procedural scroll prepends) so any orphans or
- * misplaced separators left by the per-message insert paths get healed
- * in a single O(N) sweep. Skips `.unread-divider` so the "New" marker
- * survives untouched.
- */
-function _dedupeAdjacentDaySeparators() {
-    if (!domChatMessages) return;
-    if (CHAT_LIST_ISLAND && _dmsgListIsland) return;   // derived by the list island
-
-    // Drop every existing date divider (system events and the "New" divider
-    // share `.msg-inline-timestamp` styling but are NOT date dividers, so
-    // the dedicated `.date-divider` class scopes this pass safely).
-    const stale = [];
-    for (const child of domChatMessages.children) {
-        if (child.classList?.contains('date-divider')) stale.push(child);
-    }
-    for (const sep of stale) sep.remove();
-
-    // Re-insert one date divider above the first day-content element (a
-    // `.dmsg` row OR a system event — both carry `dataset.at`) that starts a
-    // new day. The "New" divider and stale separators have no `at`, so the
-    // Number.isFinite guard skips them.
-    let prevAt = null;
-    const inserts = [];
-    for (const child of domChatMessages.children) {
-        const at = parseInt(child.dataset?.at, 10);
-        if (!Number.isFinite(at)) continue;
-        if (prevAt === null || _dmsgIsDifferentDay(prevAt, at)) {
-            inserts.push({ before: child, at });
-        }
-        prevAt = at;
-    }
-    for (const { before, at } of inserts) {
-        domChatMessages.insertBefore(insertTimestamp(at), before);
-    }
-}
 
 /** System events that collapse when they repeat back-to-back. Membership is
  *  deliberately absent: WHO joined or left is the content, so those never merge. */
@@ -7874,77 +7627,6 @@ const MERGEABLE_SYSTEM_EVENTS = new Set([
     SystemEventType.WallpaperRemoved,
     SystemEventType.PinsModified,
 ]);
-
-/**
- * Collapse a run of the same system event by the same person into one line
- * ("JSKitty modified the Pins 4 times"). Every repeat keeps its row — ids stay
- * addressable for the dedup guard, window bookkeeping and the profile
- * retro-resolver — so the extras are hidden rather than removed. Anything else
- * between two events (a message, a date divider, a different actor) breaks the
- * run, which is also what keeps a merge inside one day.
- *
- * Recomputed from scratch each call, so a run that later splits restores its
- * individual lines.
- */
-function _mergeAdjacentSystemEvents(container = domChatMessages) {
-    if (!container) return;
-    if (CHAT_LIST_ISLAND && _dmsgListIsland && container === domChatMessages) return;   // derived by the list island
-    let run = [];
-    const flush = () => {
-        if (!run.length) return;
-        const suffix = run[0].querySelector('.system-event-suffix');
-        if (suffix) {
-            const type = parseInt(run[0].dataset.systemEventType, 10);
-            suffix.textContent = systemEventSuffix(type) + (run.length > 1 ? ` ${run.length} times` : '');
-        }
-        for (let i = 1; i < run.length; i++) run[i].classList.add('system-event-merged');
-        run = [];
-    };
-    for (const child of container.children) {
-        const type = parseInt(child.dataset?.systemEventType, 10);
-        if (!Number.isFinite(type) || !MERGEABLE_SYSTEM_EVENTS.has(type)) {
-            flush();
-            continue;
-        }
-        child.classList.remove('system-event-merged'); // recompute from a clean slate
-        const head = run[0];
-        if (head
-            && head.dataset.systemEventType === child.dataset.systemEventType
-            && head.dataset.systemEventNpub === child.dataset.systemEventNpub) {
-            run.push(child);
-        } else {
-            flush();
-            run = [child];
-        }
-    }
-    flush();
-}
-
-function insertTimestamp(timestamp, parent = null) {
-    const pTimestamp = document.createElement('p');
-    // `.date-divider` distinguishes day-boundary timestamps from system
-    // events (which reuse `msg-inline-timestamp` styling) so the rebuild
-    // pass below only touches date dividers.
-    pTimestamp.classList.add('msg-inline-timestamp', 'date-divider');
-    const messageDate = new Date(timestamp);
-    const timeStr = _insertTimestampTimeFmt.format(messageDate);
-
-    // Render the time contextually (day/date in bold)
-    if (isToday(messageDate)) {
-        pTimestamp.innerHTML = `<strong>Today</strong>, ${timeStr}`;
-    } else if (isYesterday(messageDate)) {
-        pTimestamp.innerHTML = `<strong>Yesterday</strong>, ${timeStr}`;
-    } else {
-        const dateStr = _insertTimestampDateFmt.format(messageDate);
-        pTimestamp.innerHTML = `<strong>${dateStr}</strong>, ${timeStr}`;
-    }
-
-    if (parent) {
-        parent.appendChild(pTimestamp);
-    }
-
-    return pTimestamp;
-}
 
 /**
  * Helper function to create and insert a system event (member joined/left, etc.)
@@ -9268,8 +8950,10 @@ async function openChat(contact) {
     domNavbar.style.display = `none`;
 
     // Clear existing messages so they're fully re-rendered (picks up state changes like blocking)
-    if (CHAT_LIST_ISLAND && ensureMessageList()) { VectorSvelte.clearWindow(); VectorSvelte.flushSync(); windowTopId = windowBottomId = null; }
-    else domChatMessages.innerHTML = '';
+    ensureMessageList();
+    VectorSvelte.clearWindow();
+    VectorSvelte.flushSync();
+    windowTopId = windowBottomId = null;
     // Only reset revealed blocked messages when switching to a different chat
     if (strOpenChat !== contact) revealedBlockedMessages.clear();
 
@@ -13918,40 +13602,18 @@ const domChatScrollReturnBadge = document.getElementById('chat-scroll-return-bad
  * = "above the first new message" regardless of who sent it.
  */
 function insertUnreadDivider(anchorEl, anchorAfter = false) {
-    if (unreadDividerEl || !anchorEl?.parentNode) return;
-    if (CHAT_LIST_ISLAND && _dmsgListIsland && anchorEl.id) {
-        VectorSvelte.setDivider(anchorEl.id, anchorAfter);
-        VectorSvelte.flushSync();
-        const p = domChatMessages.querySelector(':scope > .unread-divider');
-        if (p) { p._targetId = anchorEl.id; p._anchorAfter = anchorAfter; unreadDividerEl = p; }
-        return;
-    }
-    const p = document.createElement('p');
-    p.classList.add('msg-inline-timestamp', 'unread-divider');
-    p.textContent = 'New';
-    // Remember the anchor row + mode so a window re-render (renderWindow) can
-    // re-insert it consistently when its target lands in the slice.
-    p._targetId = anchorEl.id || null;
-    p._anchorAfter = anchorAfter;
-    if (anchorAfter) {
-        // Insert below the anchor (before its next sibling, or append if last).
-        anchorEl.parentNode.insertBefore(p, anchorEl.nextElementSibling);
-    } else {
-        anchorEl.parentNode.insertBefore(p, anchorEl);
-    }
-    unreadDividerEl = p;
+    if (unreadDividerEl || !anchorEl?.parentNode || !anchorEl.id) return;
+    // The list island renders the divider beside its target row; the element and
+    // its anchor mode are kept for the callers that measure it.
+    VectorSvelte.setDivider(anchorEl.id, anchorAfter);
+    VectorSvelte.flushSync();
+    const p = domChatMessages.querySelector(':scope > .unread-divider');
+    if (p) { p._targetId = anchorEl.id; p._anchorAfter = anchorAfter; unreadDividerEl = p; }
 }
 function clearUnreadDivider() {
-    if (CHAT_LIST_ISLAND && _dmsgListIsland) {
-        VectorSvelte.clearDivider();
-        VectorSvelte.flushSync();
-        unreadDividerEl = null;
-        return;
-    }
-    if (unreadDividerEl) {
-        unreadDividerEl.remove();
-        unreadDividerEl = null;
-    }
+    VectorSvelte.clearDivider();
+    VectorSvelte.flushSync();
+    unreadDividerEl = null;
 }
 function setUnreadBelow(n) {
     unreadBelowCount = Math.max(0, n);

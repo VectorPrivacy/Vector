@@ -83,19 +83,6 @@ export function mountRailShortcuts(target, { h, snapshot }) {
 }
 
 /**
- * Build one message row (Phase 2a). Returns the `.dmsg` element for the vanilla list
- * to place, plus the instance to unmount when the element leaves the list. Mounted
- * into a scratch host and flushed synchronously so the content builders have run
- * before the caller looks at the row.
- */
-export function mountMessageRow(props) {
-    const host = document.createElement('div');
-    const instance = mount(MessageRow, { target: host, props });
-    flushSync();
-    return { el: host.firstElementChild, instance };
-}
-
-/**
  * Mount the message-list island into `target` (#chat-messages). Rows, separators, the
  * unread divider and system events derive from the window state; the vanilla engine
  * sets that state and flushes synchronously before it measures.

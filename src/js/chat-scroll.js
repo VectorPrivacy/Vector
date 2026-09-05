@@ -109,7 +109,7 @@ function isAtDataBottom() {
  * Render a fresh contiguous slice [startIdx, endIdx) of chat.messages into
  * #chat-messages, clearing whatever is there. Records the window anchors.
  *
- * Reuses updateChat's renderer (day-separators via _dedupeAdjacentDaySeparators,
+ * The list island renders the slice (day separators, streaks, merged system events
  * streak, reactions). The unread divider is re-inserted if its target lands in
  * the slice (caller may also re-insert). Returns the rendered slice array.
  */
@@ -152,8 +152,8 @@ async function renderWindow(startIdx, endIdx) {
     clearUnreadDivider();
     // The list island replaces the window in ONE flush: rows the new slice shares with
     // the old one are kept by the keyed each instead of being rebuilt.
-    if (CHAT_LIST_ISLAND && ensureMessageList()) { windowTopId = windowBottomId = null; }
-    else while (domChatMessages.firstElementChild) domChatMessages.firstElementChild.remove();
+    ensureMessageList();
+    windowTopId = windowBottomId = null;
     _windowSuppressAutoScroll = true;
     try {
         await updateChat(chat, slice, profile, false);
@@ -197,27 +197,12 @@ function _windowDropBottom(count) {
     if (newEnd >= end) return 0;
     const msgs = _windowMessages();
 
-    // Ids to keep = the new slice [start, newEnd). Anything rendered (with an id)
-    // that ISN'T kept is dropped. O(window) Set build + O(children) walk.
-    const keep = new Set();
-    for (let i = start; i < newEnd; i++) if (msgs[i]) keep.add(msgs[i].id);
-
-    let removed = 0;
-    if (CHAT_LIST_ISLAND && _dmsgListIsland) {
-        removed = end - newEnd;
-        windowBottomId = msgs[newEnd - 1]?.id || windowBottomId;
-        VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
-        VectorSvelte.flushSync();
-    } else {
-    const children = Array.from(domChatMessages.children);
-    for (const child of children) {
-        if (!child.id) continue;                       // overlays, dividers w/o id
-        if (!keep.has(child.id)) { child.remove(); removed++; }
-    }
+    // The list island re-derives from the new bottom anchor; separators and merged
+    // runs come with it.
+    const removed = end - newEnd;
     windowBottomId = msgs[newEnd - 1]?.id || windowBottomId;
-    }
-    _dedupeAdjacentDaySeparators();
-    _mergeAdjacentSystemEvents();
+    VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
+    VectorSvelte.flushSync();
     return removed;
 }
 
@@ -248,27 +233,13 @@ function _windowDropTop(count) {
     // can't be measured, so sum the removed nodes' heights BEFORE removal instead
     // (else the caller skips scrollTop compensation and the viewport jumps).
     let droppedHeightSum = 0;
-    if (CHAT_LIST_ISLAND && _dmsgListIsland) {
-        if (!firstKept) {
-            for (const id of drop) droppedHeightSum += document.getElementById(id)?.offsetHeight || 0;
-        }
-        windowTopId = firstKeptId || windowTopId;
-        VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
-        VectorSvelte.flushSync();
-    } else {
-    const children = Array.from(domChatMessages.children);
-    for (const child of children) {
-        if (child.id && drop.has(child.id)) {
-            if (!firstKept) droppedHeightSum += child.offsetHeight;
-            child.remove();
-        }
+    if (!firstKept) {
+        for (const id of drop) droppedHeightSum += document.getElementById(id)?.offsetHeight || 0;
     }
     windowTopId = firstKeptId || windowTopId;
-    }
-    // Rebuild date dividers (a dropped row may have orphaned a leading divider),
-    // then recompute system-event runs the drop may have split or joined.
-    _dedupeAdjacentDaySeparators();
-    _mergeAdjacentSystemEvents();
+    // The list island re-derives from the new top anchor, in this frame.
+    VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
+    VectorSvelte.flushSync();
 
     if (!firstKept) return droppedHeightSum;
     // Exact removed height from the kept row's offsetTop delta.
@@ -402,7 +373,7 @@ function _windowReleaseAnchor(id) {
     };
     if (windowTopId === id) windowTopId = (el && next(el, 'next')) || null;
     if (windowBottomId === id) windowBottomId = (el && next(el, 'prev')) || null;
-    if (CHAT_LIST_ISLAND && _dmsgListIsland) VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
+    VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
 }
 
 /** Re-seat window anchors from the current DOM's first/last rendered message
