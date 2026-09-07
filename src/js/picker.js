@@ -4907,8 +4907,6 @@ let gifSearchTimeout = null;
 /** Track if trending GIFs have been loaded */
 let trendingGifsLoaded = false;
 
-/** IntersectionObserver for lazy loading GIF previews */
-let gifLazyLoadObserver = null;
 
 /** Cached trending GIFs data and timestamp */
 let cachedTrendingGifs = null;
@@ -4950,14 +4948,18 @@ let gifFetchController = null;
  * @param {number} count - Number of skeleton items to show
  */
 function showGifSkeletons(count) {
-    gifGrid.innerHTML = '';
-    const fragment = document.createDocumentFragment();
-    for (let i = 0; i < count; i++) {
-        const skeleton = document.createElement('div');
-        skeleton.className = 'gif-item gif-skeleton';
-        fragment.appendChild(skeleton);
-    }
-    gifGrid.appendChild(fragment);
+    _ensureGifGrid();
+    VectorSvelte.gifLoading(count);
+}
+
+// The grid is an island over lib/gifs.svelte.js; fetching and the format fallback stay here.
+let _gifGridMounted = false;
+function _ensureGifGrid() {
+    if (_gifGridMounted) return;
+    _gifGridMounted = true;
+    VectorSvelte.mountGifGrid(gifGrid, {
+        h: { loadMedia: (item, el, placeholder) => loadGifWithFallback(el, `${GIF_API_BASE}/media`, item.id, item.title, placeholder, 0) },
+    });
 }
 
 /**
@@ -5125,7 +5127,6 @@ async function loadTrendingGifs() {
 
     // Use cached data if fresh (only for first page)
     if (cachedTrendingGifs && Date.now() - cachedTrendingTimestamp < GIF_CACHE_TTL) {
-        gifGrid.innerHTML = '';
         // Thumbhashes should already be cached, but ensure they are
         await predecodeThumbhashes(cachedTrendingGifs);
         if (signal.aborted) return;
@@ -5202,7 +5203,6 @@ async function searchGifs(query) {
         // Move to end (most recently used)
         gifSearchCache.delete(cacheKey);
         gifSearchCache.set(cacheKey, cached);
-        gifGrid.innerHTML = '';
         // Thumbhashes should already be cached, but ensure they are
         await predecodeThumbhashes(cached);
         if (signal.aborted) return;
@@ -5265,14 +5265,7 @@ async function loadMoreGifs() {
     if (!gifFetchController) gifFetchController = new AbortController();
     const signal = gifFetchController.signal;
 
-    // Show skeleton placeholders for the new batch
-    const fragment = document.createDocumentFragment();
-    for (let i = 0; i < gifPageSize; i++) {
-        const skeleton = document.createElement('div');
-        skeleton.className = 'gif-item gif-skeleton gif-loading-more';
-        fragment.appendChild(skeleton);
-    }
-    gifGrid.appendChild(fragment);
+    VectorSvelte.gifLoadingMore(true);
 
     try {
         let url;
@@ -5287,9 +5280,6 @@ async function loadMoreGifs() {
         const data = await response.json();
         if (signal.aborted) return;
 
-        // Remove skeleton placeholders
-        gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
-
         if (data.results && data.results.length > 0) {
             // Pre-decode thumbhashes before rendering
             await predecodeThumbhashes(data.results);
@@ -5299,12 +5289,12 @@ async function loadMoreGifs() {
             gifHasMore = data.results.length >= gifPageSize;
         } else {
             gifHasMore = false;
+            VectorSvelte.gifLoadingMore(false);
         }
     } catch (error) {
         if (error.name === 'AbortError' || signal.aborted) return;
         console.error('[GIF] Failed to load more:', error);
-        // Remove skeleton placeholders on error
-        gifGrid.querySelectorAll('.gif-loading-more').forEach(el => el.remove());
+        VectorSvelte.gifLoadingMore(false);
         gifHasMore = false;
     } finally {
         gifIsLoadingMore = false;
@@ -5318,92 +5308,8 @@ async function loadMoreGifs() {
  * @param {boolean} append - If true, append to existing grid instead of replacing
  */
 function renderGifs(gifs, append = false) {
-    const mediaUrl = `${GIF_API_BASE}/media`;
-
-    if (!append) {
-        // Clean up previous observer when replacing content
-        if (gifLazyLoadObserver) {
-            gifLazyLoadObserver.disconnect();
-        }
-
-        gifGrid.innerHTML = '';
-
-        // Create IntersectionObserver for lazy loading AND play/pause management
-        // Keep observing to handle play/pause when items scroll in/out of view
-        gifLazyLoadObserver = new IntersectionObserver((entries) => {
-            for (const entry of entries) {
-                const gifItem = entry.target;
-
-                // Load media if visible and not yet loaded
-                if (entry.isIntersecting && !gifItem.dataset.mediaLoaded) {
-                    loadGifMedia(gifItem, mediaUrl);
-                }
-
-                // Play/pause video based on visibility
-                // Only manage videos that have already initialized (data-ready set by canplay)
-                const video = gifItem.querySelector('video');
-                if (video && video.dataset.ready) {
-                    if (entry.isIntersecting) {
-                        video.play().catch(() => {});
-                    } else {
-                        video.pause();
-                    }
-                }
-            }
-        }, {
-            root: gifGrid,
-            rootMargin: '0px 0px 200px 0px',
-            threshold: 0.1
-        });
-    }
-
-    const fragment = document.createDocumentFragment();
-
-    for (const gif of gifs) {
-        const gifItem = document.createElement('div');
-        gifItem.className = 'gif-item';
-        gifItem.dataset.gifId = gif.i;
-        gifItem.dataset.gifTitle = gif.ti || '';
-
-        // Create placeholder with thumbhash background
-        const placeholder = document.createElement('div');
-        placeholder.className = 'gif-placeholder';
-
-        // Apply cached thumbhash as background (pre-decoded via Rust backend)
-        if (gif.th) {
-            const cachedThumbhash = getCachedThumbhash(gif.th);
-            if (cachedThumbhash) {
-                placeholder.style.backgroundImage = `url(${cachedThumbhash})`;
-                placeholder.style.backgroundSize = 'cover';
-            }
-        }
-        placeholder.innerHTML = '<span class="loading-spinner"></span>';
-        gifItem.appendChild(placeholder);
-
-        fragment.appendChild(gifItem);
-
-        // Observe for lazy loading (after appending to fragment)
-        gifLazyLoadObserver.observe(gifItem);
-    }
-
-    gifGrid.appendChild(fragment);
-}
-
-/**
- * Loads the media (video or image) for a GIF item when it becomes visible
- * @param {HTMLElement} gifItem - The GIF item container
- * @param {string} mediaUrl - Base URL for media
- */
-function loadGifMedia(gifItem, mediaUrl) {
-    // Mark as loaded to prevent re-loading
-    gifItem.dataset.mediaLoaded = 'true';
-
-    const gifId = gifItem.dataset.gifId;
-    const gifTitle = gifItem.dataset.gifTitle;
-    const placeholder = gifItem.querySelector('.gif-placeholder');
-
-    // Try loading with fallback chain
-    loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, 0);
+    _ensureGifGrid();
+    VectorSvelte.gifResults(gifs.map(gif => ({ id: gif.i, title: gif.ti || '', thumb: gif.th ? getCachedThumbhash(gif.th) : null })), append);
 }
 
 /**
@@ -5483,17 +5389,8 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
  * @param {string} message - The message to display
  */
 function showGifEmptyState(message) {
-    const div = document.createElement('div');
-    div.className = 'gif-empty-state';
-    div.style.gridColumn = '1 / -1';
-    const icon = document.createElement('span');
-    icon.className = 'icon icon-image';
-    const text = document.createElement('span');
-    text.textContent = message;
-    div.appendChild(icon);
-    div.appendChild(text);
-    gifGrid.innerHTML = '';
-    gifGrid.appendChild(div);
+    _ensureGifGrid();
+    VectorSvelte.gifEmpty(message);
 }
 
 /**

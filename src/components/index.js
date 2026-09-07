@@ -40,6 +40,8 @@ import PackSections from './picker/PackSections.svelte';
 import PackCreator from './picker/PackCreator.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
 import PackDetailsModal from './picker/PackDetailsModal.svelte';
+import GifGrid from './picker/GifGrid.svelte';
+import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
 import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken } from './lib/packcreator.svelte.js';
 import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome } from './lib/picker.svelte.js';
@@ -78,6 +80,7 @@ export { uploadProgressed, downloadProgressed, transferDone, transferFailed, set
 export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome };
 export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken };
 export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
+export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -349,4 +352,10 @@ export function mountPackPreviewCard(target, props) {
 export function mountPackDetails(body, { overlay, h }) {
     body.replaceChildren();
     return mount(PackDetailsModal, { target: body, props: { overlay, h } });
+}
+
+/** Mount the GIF grid into `grid` (#gif-grid). */
+export function mountGifGrid(grid, { h }) {
+    grid.replaceChildren();
+    return mount(GifGrid, { target: grid, props: { grid, h } });
 }
