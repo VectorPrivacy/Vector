@@ -34,10 +34,13 @@
     function badge(img) { h.attachFileExtBadge(img, container, att.extension); }
     function badgeOnly(node) { h.attachFileExtBadge(null, container, att.extension); }
     // Uploading media pins its wrapper to the rendered width so the ring centres on it.
-    function pin(img) {
-        const set = () => { if (img.offsetWidth) container.style.width = img.offsetWidth + 'px'; };
-        set();
-        img.addEventListener('load', set, { once: true });
+    // The ring centres on the media, not the row: the wrapper follows the media's rendered
+    // width for as long as it is on screen (the clamp settles after metadata, and resizes).
+    function pin(media) {
+        const set = () => { if (media.offsetWidth) container.style.width = media.offsetWidth + 'px'; };
+        const ro = new ResizeObserver(set);
+        ro.observe(media);
+        return { destroy: () => ro.disconnect() };
     }
 </script>
 

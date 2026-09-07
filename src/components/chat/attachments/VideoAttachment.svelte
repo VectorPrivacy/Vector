@@ -5,10 +5,13 @@
     let { att, msg, h } = $props();   // h: mediaUrl(path), onVideoMeta(video), cancelUpload
     const uploading = $derived(msg.mine && msg.pending);
     let container = $state(null);
-    function pin(video) {
-        const set = () => { if (video.offsetWidth) container.style.width = video.offsetWidth + 'px'; };
-        set();
-        video.addEventListener('loadedmetadata', set, { once: true });
+    // The ring centres on the media, not the row: the wrapper follows the media's rendered
+    // width for as long as it is on screen (the clamp settles after metadata, and resizes).
+    function pin(media) {
+        const set = () => { if (media.offsetWidth) container.style.width = media.offsetWidth + 'px'; };
+        const ro = new ResizeObserver(set);
+        ro.observe(media);
+        return { destroy: () => ro.disconnect() };
     }
 </script>
 
