@@ -91,7 +91,7 @@
         <input type="text" class="group-name-input" maxlength="32" bind:value={draft} use:focus
                onblur={commit} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } if (e.key === 'Escape') cancel(); }}>
     {:else}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
         <h3 id="group-overview-secondary-name" class="chat-contact-with-status btn cutoff" class:group-editable={manage}
             style="max-width: 90%; margin-left: auto; margin-right: auto;" onclick={() => startEdit('name')}>{ov.name}</h3>
     {/if}

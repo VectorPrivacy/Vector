@@ -17,11 +17,11 @@
     }
 </script>
 
-<label class="profile-edit-label">Username</label>
+<label class="profile-edit-label" for="profile-edit-name-input">Username</label>
 <div class="profile-edit-field-wrapper" style="position: relative;">
-    <div id="profile-edit-name" class="profile-edit-field-text"><input type="text" maxlength="50" style={field} bind:value={edit.draft.name}></div>
+    <div id="profile-edit-name" class="profile-edit-field-text"><input id="profile-edit-name-input" type="text" maxlength="50" style={field} bind:value={edit.draft.name}></div>
 </div>
-<label class="profile-edit-label">Bio</label>
+<label class="profile-edit-label" for="profile-edit-bio-input">Bio</label>
 <div class="profile-edit-field-wrapper profile-edit-field-bio">
-    <div id="profile-edit-bio" class="profile-edit-field-text"><textarea style="{field} resize: none; min-height: 60px;" bind:value={edit.draft.about} use:autosize={[edit.draft.about, edit.active]}></textarea></div>
+    <div id="profile-edit-bio" class="profile-edit-field-text"><textarea id="profile-edit-bio-input" style="{field} resize: none; min-height: 60px;" bind:value={edit.draft.about} use:autosize={[edit.draft.about, edit.active]}></textarea></div>
 </div>

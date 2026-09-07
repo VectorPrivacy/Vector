@@ -8,6 +8,7 @@
     // itself alive across updates.
     let { h, chat, pinned, tick } = $props();
 
+    import ChannelList from './ChannelList.svelte';
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
 
     // COMMUNITY_UNREAD_PLUS_THRESHOLD (row.js): past one synced page the count is a
@@ -60,18 +61,6 @@
         return String(vm.nUnread);
     }
 
-    // Rebuild key for the nested channel list (still the vanilla builder, channels.js).
-    // `channelStateHashParts` is the same input set the legacy state-hash gate used —
-    // channel set, expanded state, caps flag, per-channel name/unread — so the nested
-    // list rebuilds exactly when its own inputs changed, never on unrelated bumps.
-    const channelsKey = $derived.by(() => {
-        const cid = chat.metadata?.custom_fields?.community_id;
-        if (cid) communityVersion(cid);
-        const parts = [];
-        h.channelStateHashParts(chat, parts);
-        return parts.join('\x00');
-    });
-
     // ── actions: leaf widgets stay the vanilla builders / DOM disciplines ──
 
     function placeholderInto(node, isGroup) {
@@ -121,21 +110,6 @@
         return { update: (v) => { cur = v; } };
     }
 
-    // Nested channel list host. Re-renders through `update` on key change — the
-    // key carries the channel set, expanded state and per-channel unreads (the
-    // same inputs the legacy state-hash gate used).
-    function channelsInto(node, key) {
-        let cur = null;
-        const render = (k) => {
-            if (k === cur) return;
-            cur = k;
-            const sep = k.indexOf('\x00');
-            const communityId = sep === -1 ? k : k.slice(0, sep);
-            node.replaceChildren(h.renderCommunityChannels(communityId) || []);
-        };
-        render(key);
-        return { update: render };
-    }
 </script>
 
 <div
@@ -231,7 +205,7 @@
     {/if}
 </div>
 {#if vm.isGroup && vm.communityId}
-    <div style="display:contents;" use:channelsInto={channelsKey}></div>
+    <ChannelList communityId={vm.communityId} {h} />
 {/if}
 
 <!-- No <style>: global styles.css cascades; the DOM is byte-identical to the vanilla

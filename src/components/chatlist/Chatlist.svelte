@@ -9,6 +9,7 @@
     // does not share the classic scripts' global lexical scope.
     let { h, snapshot } = $props();
 
+    import ChannelList from './ChannelList.svelte';
     import { timeTickVersion } from '../lib/stores.js';
     import { listVersion, invitesVersion, paneState, openChatId, communityVersion } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
@@ -46,25 +47,6 @@
     // Clock tick for relative timestamps and presence-dot recency, into the rows as a prop.
     const tick = $derived($timeTickVersion);
 
-    // Rebuild key for the community pane (widescreen: inside a community the list IS
-    // that community's channel list). Same input set the legacy state-hash gate used,
-    // scoped to the pane's community — read fresh on every invalidation.
-    const paneKey = $derived.by(() => {
-        const id = paneCommunityId;
-        if (!id) return '';
-        communityVersion(id);
-        let primary = null;
-        for (const c of snap.chats) {
-            if (c.metadata?.custom_fields?.community_id !== id) continue;
-            if (!primary) primary = c;
-            if (h.isPrimaryChannelChat(c)) { primary = c; break; }
-        }
-        if (!primary) return id;
-        const parts = [];
-        h.channelStateHashParts(primary, parts);
-        return parts.join('\x00');
-    });
-
     // ── actions: leaf widgets stay the vanilla builders / DOM disciplines ──
 
     function inviteKey(inv) {
@@ -84,19 +66,6 @@
                 node.replaceChildren(h.renderCommunityInviteItem(inv));
             },
         };
-    }
-
-    // The pane re-renders through `update` — an action without one ignores param
-    // changes, which left the first-opened community's channels stuck in the pane.
-    function paneInto(node, key) {
-        let cur = null;
-        const render = (k) => {
-            if (k === cur) return;
-            cur = k;
-            node.replaceChildren(h.renderCommunityChannels(k.split('\x00')[0], { pane: true }) || []);
-        };
-        render(key);
-        return { update: render };
     }
 
     function builtInto(node, builder) {
@@ -150,7 +119,7 @@
 </script>
 
 {#if paneCommunityId}
-    <div use:paneInto={paneKey}></div>
+    <ChannelList communityId={paneCommunityId} pane {h} />
 {:else}
     {#each invites as invite (invite.community_id)}
         <div

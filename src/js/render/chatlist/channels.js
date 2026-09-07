@@ -62,24 +62,6 @@ function refreshCommunityChannels() {
     loadCommunityChannels();
 }
 
-/**
- * Values the chat list's state hash needs so channel changes actually repaint: the channel
- * set per community, its expanded state, and each channel's unread count.
- */
-function channelStateHashParts(chat, states) {
-    const communityId = communityIdOfChat(chat);
-    if (!communityId) return;
-    const channels = communityChannelsCache.get(communityId);
-    // The caps flag lands asynchronously and gates both the expander and the "Add
-    // channel" row, so the gate has to see it or that first repaint is a no-op.
-    states.push(communityId, expandedCommunities.has(communityId),
-        communityChannelCaps.get(communityId) === true, channels ? channels.length : -1);
-    for (const channel of channels || []) {
-        const channelChat = arrChats.find(c => c.id === channel.id);
-        states.push(channel.id, channel.name, channelChat ? computeRowBadgeCount(channelChat) : 0);
-    }
-}
-
 /** The community id a chat row belongs to, or null for anything that isn't a channel. */
 function communityIdOfChat(chat) {
     return chat?.metadata?.custom_fields?.community_id || null;
@@ -161,10 +143,6 @@ function communityIsV2(communityId) {
         communityIdOfChat(c) === communityId && c.metadata?.custom_fields?.proto_version === '2');
 }
 
-/**
- * Rows for a community's channels, or null when there's nothing worth showing.
- * Rendered directly after the community's own row in the list.
- */
 /* ── Sections ──────────────────────────────────────────────────────────────
  * A section is `{ id, label, channels, canAdd }` and nothing more, so the day
  * the backend grows user-defined sections this file only has to change where
@@ -193,101 +171,14 @@ function channelSectionClosed(communityId, sectionId) {
     return closedChannelSections.has(sectionKey(communityId, sectionId));
 }
 
-/**
- * Flip the section in place rather than asking for a re-render: `renderChatlist`
- * is gated on a hash of CHAT state, which a collapsed section is not part of, so
- * a render request here is a no-op and the section could never reopen.
- */
-function toggleChannelSection(communityId, sectionId, wrap) {
+/** Persist a section fold; the channel list island flips the fold itself. */
+function toggleChannelSection(communityId, sectionId) {
     const key = sectionKey(communityId, sectionId);
-    const closing = !closedChannelSections.has(key);
-    if (closing) closedChannelSections.add(key);
-    else closedChannelSections.delete(key);
+    if (closedChannelSections.has(key)) closedChannelSections.delete(key);
+    else closedChannelSections.add(key);
     try {
         localStorage.setItem(CHANNEL_SECTION_KEY, JSON.stringify([...closedChannelSections]));
     } catch { /* a full quota must not break navigation */ }
-    wrap?.classList.toggle('is-closed', closing);
-}
-
-/**
- * Group a community's channels into sections. A section with no channels is not
- * rendered at all, so a community with nothing private never sees the word.
- */
-function buildChannelSections(channels, canManage) {
-    const out = [];
-    const open = channels.filter(c => !c.private);
-    const shut = channels.filter(c => c.private);
-    if (open.length) out.push({ id: 'public', label: 'Public', channels: open, canAdd: canManage });
-    if (shut.length) out.push({ id: 'private', label: 'Private', channels: shut, canAdd: canManage });
-    // Nothing at all yet: still offer the one section you can add into.
-    if (!out.length && canManage) out.push({ id: 'public', label: 'Public', channels: [], canAdd: true });
-    return out;
-}
-
-function renderChannelSection(communityId, section) {
-    const wrap = document.createElement('div');
-    wrap.className = 'chatlist-channel-section';
-    const closed = channelSectionClosed(communityId, section.id);
-    if (closed) wrap.classList.add('is-closed');
-
-    const head = document.createElement('div');
-    head.className = 'chatlist-channel-section-head';
-
-    const toggle = document.createElement('div');
-    toggle.className = 'chatlist-channel-section-toggle btn';
-    const label = document.createElement('span');
-    label.className = 'chatlist-channel-section-label';
-    label.textContent = section.label;
-    toggle.appendChild(label);
-    const caret = document.createElement('span');
-    caret.className = 'chatlist-channel-section-caret';
-    caret.innerHTML = '<span class="icon icon-chevron-down"></span>';
-    toggle.appendChild(caret);
-    toggle.onclick = () => toggleChannelSection(communityId, section.id, wrap);
-    head.appendChild(toggle);
-
-    if (section.canAdd) {
-        const add = document.createElement('div');
-        add.className = 'chatlist-channel-section-add btn';
-        add.title = `Add a ${section.label.toLowerCase()} channel`;
-        add.innerHTML = '<span class="icon icon-plus"></span>';
-        add.onclick = (e) => { e.stopPropagation(); promptCreateChannel(communityId, section.id === 'private'); };
-        head.appendChild(add);
-    }
-    wrap.appendChild(head);
-
-    const body = document.createElement('div');
-    body.className = 'chatlist-channel-section-body';
-    for (const channel of section.channels) {
-        body.appendChild(renderChannelRow(communityId, channel, section.canAdd));
-    }
-    wrap.appendChild(body);
-    return wrap;
-}
-
-function renderCommunityChannels(communityId, { pane = false } = {}) {
-    const channels = getCommunityChannels(communityId);
-    if (!channels) return null;
-    const canManage = communityCanAddChannels(communityId);
-    // Nested under a row, the list is an optional disclosure: it hides when
-    // collapsed, and a lone channel isn't worth unfolding. As the pane it IS the
-    // navigation — a single-channel community still has to show that channel.
-    if (!pane && (!communityChannelsShown(communityId) || (channels.length < 2 && !canManage))) return null;
-    const wrap = document.createElement('div');
-    wrap.className = pane ? 'chatlist-channels chatlist-channels-pane' : 'chatlist-channels';
-    // Nested under a community row the list is a quick disclosure, so it stays a
-    // flat set; the pane is the navigation and gets the sections.
-    if (!pane) {
-        for (const channel of channels) {
-            wrap.appendChild(renderChannelRow(communityId, channel, canManage));
-        }
-        if (canManage) wrap.appendChild(renderAddChannelRow(communityId));
-        return wrap;
-    }
-    for (const section of buildChannelSections(channels, canManage)) {
-        wrap.appendChild(renderChannelSection(communityId, section));
-    }
-    return wrap;
 }
 
 /// Last raid verdict per community, so the menu can escalate its Moderation entry
@@ -382,18 +273,6 @@ async function openCommunityMenu(chat, ev) {
     showContextMenu({ x: rect.left, y: rect.bottom + 4, items });
 }
 
-function renderAddChannelRow(communityId) {
-    const row = document.createElement('div');
-    row.className = 'chatlist-channel chatlist-channel-add';
-    row.innerHTML = '<span class="chatlist-channel-hash">+</span>';
-    const name = document.createElement('span');
-    name.className = 'chatlist-channel-name';
-    name.textContent = 'Add channel';
-    row.appendChild(name);
-    row.onclick = () => promptCreateChannel(communityId);
-    return row;
-}
-
 async function promptCreateChannel(communityId, isPrivate = false) {
     const name = await popupConfirm(isPrivate ? 'New private channel' : 'New channel',
         isPrivate
@@ -423,57 +302,6 @@ async function promptDeleteChannel(communityId, channel) {
     } catch (e) {
         await popupConfirm("Couldn't delete the channel", escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
-}
-
-function renderChannelRow(communityId, channel, canManage) {
-    const row = document.createElement('div');
-    row.className = 'chatlist-channel';
-    row.id = `chatlist-channel-${channel.id}`;
-    if (channel.id === strOpenChat) row.classList.add('active');
-
-    const hash = document.createElement('span');
-    hash.className = 'chatlist-channel-hash';
-    hash.innerHTML = '<span class="icon icon-channel-hash"></span>';
-    row.appendChild(hash);
-
-    const name = document.createElement('span');
-    name.className = 'chatlist-channel-name cutoff';
-    name.textContent = channel.name;
-    row.appendChild(name);
-
-    // Three tiers, loudest first: something to read, nothing to read, and a room
-    // you asked to be quiet. Muted wins outright — it is a standing instruction,
-    // not a state that unread can override.
-    const chat = arrChats.find(c => c.id === channel.id);
-    if (chat?.muted) row.classList.add('is-muted');
-    else if (chat && computeRowBadgeCount(chat) > 0) row.classList.add('has-unread');
-    else row.classList.add('is-read');
-
-    // A NUMBER only for someone calling your name. Ordinary unread is carried by
-    // the row's own weight, so the list stays scannable at a glance.
-    const pings = chat ? countPingMessages(chat) : 0;
-    if (pings) {
-        const badge = document.createElement('span');
-        badge.className = 'chatlist-channel-badge';
-        badge.textContent = pings > 99 ? '99+' : String(pings);
-        row.appendChild(badge);
-    }
-
-    // The primary channel anchors the community's list row and its history — the backend
-    // refuses to tombstone it, so no affordance for it here either.
-    const isPrimary = arrChats.some(c =>
-        c.id === channel.id && c.metadata?.custom_fields?.primary_channel === channel.id);
-    if (canManage && !isPrimary) {
-        const remove = document.createElement('div');
-        remove.className = 'chatlist-channel-delete btn';
-        remove.title = 'Delete channel';
-        remove.innerHTML = '<span class="icon icon-x"></span>';
-        remove.onclick = (e) => { e.stopPropagation(); promptDeleteChannel(communityId, channel); };
-        row.appendChild(remove);
-    }
-
-    row.onclick = () => openCommunityChannel(communityId, channel);
-    return row;
 }
 
 /**
