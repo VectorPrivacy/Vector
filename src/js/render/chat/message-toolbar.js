@@ -109,6 +109,8 @@ function dmsgClearDeleteMetaCache() {
     if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected) showMessageToolbar(_dmsgToolbarTarget);
 }
 
+let _dmsgToolbarIsland = null;
+
 function initMessageToolbar() {
     if (typeof domChatMessages === 'undefined' || !domChatMessages) return;
 
@@ -126,16 +128,9 @@ function initMessageToolbar() {
         _dmsgToolbarEl = document.createElement('div');
         _dmsgToolbarEl.id = 'dmsg-toolbar';
         _dmsgToolbarEl.hidden = true;
-        _dmsgToolbarEl.innerHTML = `
-            <button class="dmsg-toolbar-btn btn" data-action="react" aria-label="Add reaction" title="Add reaction"><span class="icon icon-smile-face"></span></button>
-            <button class="dmsg-toolbar-btn btn" data-action="reply" aria-label="Reply" title="Reply"><span class="icon icon-reply"></span></button>
-            <button class="dmsg-toolbar-btn btn" data-action="edit" aria-label="Edit" title="Edit" hidden><span class="icon icon-edit"></span></button>
-            <button class="dmsg-toolbar-btn btn" data-action="reveal-file" aria-label="Reveal in folder" title="Reveal in folder" hidden><span class="icon icon-file-search"></span></button>
-            <button class="dmsg-toolbar-btn btn" data-action="copy-file" aria-label="Copy" title="Copy" hidden><span class="icon icon-copy"></span></button>
-            <button class="dmsg-toolbar-btn btn" data-action="retry" aria-label="Retry send" title="Retry send" hidden><span class="icon icon-refresh"></span></button>
-            <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="cancel-upload" aria-label="Cancel upload" title="Cancel upload" hidden><span class="icon icon-x"></span></button>
-            <button class="dmsg-toolbar-btn btn dmsg-toolbar-btn-danger" data-action="delete" aria-label="Delete message" title="Delete message" hidden><span class="icon icon-trash"></span></button>
-        `;
+        // The buttons are an island; the host is the app's (placement, hover, clicks).
+        if (_dmsgToolbarIsland) VectorSvelte.unmountComponent(_dmsgToolbarIsland);
+        _dmsgToolbarIsland = VectorSvelte.mountMessageToolbar(_dmsgToolbarEl);
         // Append INSIDE the scrolling container so the toolbar moves with the message
         // content automatically (no per-frame reposition on scroll = no lag).
         // Requires .chat-messages { position: relative } for absolute children to
@@ -204,168 +199,85 @@ function initMessageToolbar() {
 }
 
 function showMessageToolbar(rowEl) {
-    // Mobile has no hover — taps would otherwise pop this corner toolbar.
-    // Touch surfaces use press-and-hold (context menu) + swipe (reply) instead.
+    // Mobile has no hover: taps would otherwise pop this corner toolbar. Touch
+    // surfaces use press-and-hold (context menu) + swipe (reply) instead.
     if (platformFeatures?.is_mobile) return;
-    // Idempotent — re-creates the element if it was detached on a chat switch.
     initMessageToolbar();
     if (!_dmsgToolbarEl) return;
 
     _dmsgToolbarTarget = rowEl;
     _dmsgCancelToolbarHide();
 
-    // Pending messages aren't on the wire yet. Attachment uploads get a single cancel action;
-    // plain text sends have no cancel path, so their toolbar stays suppressed.
-    const status = rowEl.dataset.status;
-    if (status === 'pending') {
-        const pmsg = _dmsgLookupMessage(rowEl);
-        const cancelBtn = _dmsgToolbarEl.querySelector('[data-action="cancel-upload"]');
-        if (pmsg && pmsg.attachments && pmsg.attachments.length && cancelBtn) {
-            _dmsgToolbarEl.hidden = false;
-            _dmsgToolbarEl.dataset.target = rowEl.id;
-            for (const b of _dmsgToolbarEl.querySelectorAll('.dmsg-toolbar-btn')) b.hidden = (b !== cancelBtn);
-            _dmsgPositionToolbar(rowEl);
-        } else {
-            _dmsgToolbarEl.hidden = true;
-        }
-        return;
-    }
-
-    const mine = rowEl.dataset.mine === 'true';
-
-    // Dissolved community: the backend drops every new event (react/reply/edit). Only
-    // own-message delete still works (data ownership), so suppress the toolbar entirely
-    // for others' messages and offer nothing here for own ones — delete lives in the
-    // right-click / long-press menu, which is gated to the same single action.
-    if (rowIsInDissolvedCommunity() && !mine) {
+    const view = _dmsgToolbarView(rowEl);
+    if (!view) {
         _dmsgToolbarEl.hidden = true;
         return;
     }
-
+    VectorSvelte.setMessageToolbar(view);
+    VectorSvelte.flushSync();
     _dmsgToolbarEl.hidden = false;
     _dmsgToolbarEl.dataset.target = rowEl.id;
-    const reactBtn = _dmsgToolbarEl.querySelector('[data-action="react"]');
-    const replyBtn = _dmsgToolbarEl.querySelector('[data-action="reply"]');
-    const editBtn = _dmsgToolbarEl.querySelector('[data-action="edit"]');
-    const revealBtn = _dmsgToolbarEl.querySelector('[data-action="reveal-file"]');
-    const copyFileBtn = _dmsgToolbarEl.querySelector('[data-action="copy-file"]');
-    const retryBtn = _dmsgToolbarEl.querySelector('[data-action="retry"]');
-    const deleteBtn = _dmsgToolbarEl.querySelector('[data-action="delete"]');
-    // Cancel-upload only applies to pending uploads (handled in the early return); never here.
-    _dmsgToolbarEl.querySelector('[data-action="cancel-upload"]').hidden = true;
+    _dmsgPositionToolbar(rowEl);
+}
 
-    // Failed sends: only retry + delete make sense (the message isn't on
-    // the wire, so react/reply/edit/reveal don't apply).
-    if (status === 'failed') {
-        reactBtn.hidden = true;
-        replyBtn.hidden = true;
-        editBtn.hidden = true;
-        revealBtn.hidden = true;
-        copyFileBtn.hidden = true;
-        retryBtn.hidden = false;
-        deleteBtn.hidden = false;
-        deleteBtn.dataset.mode = 'failed';
-        deleteBtn.setAttribute('aria-label', 'Delete failed message');
-        deleteBtn.setAttribute('title', 'Delete failed message');
-        _dmsgPositionToolbar(rowEl);
-        return;
-    }
-    retryBtn.hidden = true;
-    replyBtn.hidden = false;
-
+/** Which actions the toolbar offers for `rowEl`, or null to offer none. */
+function _dmsgToolbarView(rowEl) {
+    const status = rowEl.dataset.status;
+    const mine = rowEl.dataset.mine === 'true';
     const msg = _dmsgLookupMessage(rowEl);
+
+    // Pending messages aren't on the wire yet. An attachment upload gets a single cancel;
+    // a plain text send has no cancel path, so its toolbar stays suppressed.
+    if (status === 'pending') {
+        if (!(msg && msg.attachments && msg.attachments.length)) return null;
+        return { show: { cancel: true }, path: null, del: null };
+    }
+
+    // Dissolved community: the backend drops every new event. Only own-message delete
+    // still works, and that lives in the right-click / long-press menu.
+    const dissolved = rowIsInDissolvedCommunity();
+    if (dissolved && !mine) return null;
+
+    // A failed send isn't on the wire: only retry and delete make sense.
+    if (status === 'failed') {
+        return { show: { retry: true, delete: true }, path: null, del: { mode: 'failed', label: 'Delete failed message' } };
+    }
+
     const hasContent = !!(msg && msg.content);
     const hasAttachments = !!(msg && msg.attachments && msg.attachments.length);
+    // Hidden once the message hits the unique-emoji ceiling (matches the inline "+" gate).
+    const uniqueEmojiCount = msg && msg.reactions ? new Set(msg.reactions.map(r => r.emoji)).size : 0;
+    // Any message with a downloaded attachment can be revealed or copied as a file,
+    // not only own ones: in groups this is the primary path to media you saved.
+    const downloadedPath = (msg && msg.attachments) ? (msg.attachments.find(a => a.downloaded) || {}).path : null;
 
-    // Dissolved community: react/reply/edit all produce events the backend drops, so
-    // offering them would lie. Own-message delete still works and is handled below.
-    const dissolved = rowIsInDissolvedCommunity();
+    const show = {
+        react: !dissolved && uniqueEmojiCount < 8,
+        reply: !dissolved,
+        // Own text-only messages; a command invocation is a passive render line.
+        edit: !dissolved && !_dmsgCommandInfo(msg) && mine && hasContent && !hasAttachments,
+        reveal: !!downloadedPath,
+        copy: !!downloadedPath,
+    };
 
-    // React: hidden once the message hits the unique-emoji ceiling (matches the
-    // inline "+" shortcut gating in _dmsgCanAddReactionGroup).
-    const uniqueEmojiCount = msg && msg.reactions
-        ? new Set(msg.reactions.map(r => r.emoji)).size
-        : 0;
-    reactBtn.hidden = dissolved || uniqueEmojiCount >= 8;
-    replyBtn.hidden = dissolved;
-
-    // Edit: own text-only messages (parity with legacy edit gate). A command
-    // invocation is a passive render line, not editable text.
-    editBtn.hidden = dissolved || !!_dmsgCommandInfo(msg) || !(mine && hasContent && !hasAttachments);
-
-    // Reveal-file: any message with at least one downloaded attachment.
-    // Mirrors legacy behavior — the reveal button isn't restricted to own
-    // messages; you can open downloaded files received from others (esp. in
-    // group chats where this is the primary path to media you've saved).
-    const downloadedPath = (msg && msg.attachments)
-        ? (msg.attachments.find(a => a.downloaded) || {}).path
-        : null;
-    revealBtn.hidden = !downloadedPath;
-    if (downloadedPath) {
-        revealBtn.dataset.path = downloadedPath;
-    } else {
-        delete revealBtn.dataset.path;
-    }
-
-    // Copy-file: put the downloaded attachment on the OS clipboard as a real file
-    // (paste into Finder/Explorer/Files or another chat). Same gating as reveal —
-    // the file must exist on disk. Desktop only (the backend errors on mobile).
-    copyFileBtn.hidden = !downloadedPath;
-    if (downloadedPath) {
-        copyFileBtn.dataset.path = downloadedPath;
-    } else {
-        delete copyFileBtn.dataset.path;
-    }
-
-    // Delete / Hide button visibility:
-    //   - Own messages: SYNC reveal at full opacity (always actionable).
-    //     The click always does something useful — relay nuke if we
-    //     hold retained keys, otherwise cooperative-hide + Blossom
-    //     blob delete on attachments + local hide. The popup explains
-    //     what will happen.
-    //   - Others' group messages: ASYNC reveal only if the user is an
-    //     admin (admin-hide flow). Costs one round-trip per hover for
-    //     non-mine rows; cached via the data-mode attribute so repeats
-    //     don't re-fetch.
-    // Pending/failed are handled by the early-return above — those rows
-    // have their own cancel-upload / delete-failed UI on the row itself.
-    deleteBtn.hidden = true;
-    delete deleteBtn.dataset.mode;
-    delete deleteBtn.dataset.partial;
-    delete deleteBtn.dataset.hasAttachments;
-    deleteBtn.style.opacity = '';
-
-    // Volatile bits are read live off the msg; the two backend-derived flags
-    // (retained keys, admin-hide authority) come from the cache. A miss queues a
-    // coalesced bulk fetch (no per-hover IPC) and refreshes this toolbar when it
-    // lands; until then own rows render optimistically full-delete.
+    // Delete / Hide: own messages always (relay nuke with retained keys, else a limited
+    // cooperative hide); others' community messages only with admin-hide authority. The
+    // two backend flags come from a cache; a miss queues a coalesced fetch that re-shows
+    // this toolbar when it lands. Until then own rows render optimistically full-delete.
     const hasDeletableAttachment = !!(msg && msg.attachments && msg.attachments.some(a => a.url));
     const meta = _dmsgDeleteMeta.get(rowEl.id);
-    // Only the cases that can actually show a delete/hide button need the backend
-    // flags: own messages (retained keys) and any community message (admin-hide).
-    // A received DM never shows one, so don't fetch for it.
     const inCommunity = arrChats.find(c => c.id === strOpenChat)?.chat_type === 'Community';
     if (meta === undefined && (mine || inCommunity)) dmsgQueueDeleteMeta([rowEl.id]);
 
+    let del = null;
     if (mine) {
         const fullyDeletable = meta ? meta.has_retained_keys : true;
-        deleteBtn.dataset.mode = 'delete';
-        deleteBtn.setAttribute('aria-label', 'Delete message');
-        deleteBtn.setAttribute('title', fullyDeletable ? 'Delete message' : 'Delete message (limited)');
-        deleteBtn.style.opacity = fullyDeletable ? '' : '0.45';
-        deleteBtn.dataset.partial = fullyDeletable ? '' : '1';
-        deleteBtn.dataset.hasAttachments = hasDeletableAttachment ? '1' : '';
-        deleteBtn.hidden = false;
+        del = { mode: 'delete', label: fullyDeletable ? 'Delete message' : 'Delete message (limited)', partial: !fullyDeletable, hasAttachments: hasDeletableAttachment };
     } else if (meta && meta.can_admin_hide) {
-        // Not ours but we hold moderation authority over the author (the early
-        // return above already suppressed the toolbar in a dissolved community).
-        deleteBtn.dataset.mode = 'hide';
-        deleteBtn.setAttribute('aria-label', 'Hide message');
-        deleteBtn.setAttribute('title', 'Hide message');
-        deleteBtn.hidden = false;
+        del = { mode: 'hide', label: 'Hide message' };
     }
-
-    _dmsgPositionToolbar(rowEl);
+    show.delete = !!del;
+    return { show, path: downloadedPath, del };
 }
 
 function hideMessageToolbar() {
