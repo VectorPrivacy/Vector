@@ -52,6 +52,8 @@ import InviteLinks from './community/InviteLinks.svelte';
 import BlossomCaps from './settings/BlossomCaps.svelte';
 import RelayLogs from './settings/RelayLogs.svelte';
 import AccountRows from './people/AccountRows.svelte';
+import EditHistory from './chat/EditHistory.svelte';
+export { setEditHistory, setEditHistoryBelow, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 import Marketplace from './marketplace/Marketplace.svelte';
@@ -441,4 +443,10 @@ export function mountRelayLogs(list) {
 export function mountAccountRows(host, props) {
     host.replaceChildren();
     return mount(AccountRows, { target: host, props });
+}
+
+/** Mount the edit-history popup's entries into `content` (#edit-history-content). */
+export function mountEditHistory(content, { h }) {
+    content.replaceChildren();
+    return mount(EditHistory, { target: content, props: { h } });
 }

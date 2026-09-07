@@ -7296,70 +7296,15 @@ function showEditHistory(messageId, targetElement) {
         return;
     }
 
-    // Track which message's history is open
     strCurrentEditHistoryMsgId = messageId;
-
-    // Clear previous content
-    content.innerHTML = '';
-
-    // Format date/time
-    const formatTime = (timestamp) => {
-        const date = new Date(timestamp);
-        return date.toLocaleString(undefined, {
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
-    };
 
     // Custom-emoji tags for the history. The live message only carries the
     // CURRENT revision's tags, so older revisions (which may use a different
     // `:shortcode:`) are filled from the equipped packs — same source the
     // picker/autocomplete resolve against.
-    const historyEmojiTags = mergeEmojiTags(msg.emoji_tags, equippedEmojiTags());
-
-    // Build edit history entries (oldest to newest)
-    const totalEntries = msg.edit_history.length;
-    const entryElements = [];
-    msg.edit_history.forEach((entry, index) => {
-        const div = document.createElement('div');
-        div.classList.add('edit-history-entry');
-
-        // Mark original and current
-        const isOriginal = index === 0;
-        const isCurrent = index === totalEntries - 1;
-        if (isOriginal) div.classList.add('original');
-        if (isCurrent) div.classList.add('current');
-
-        // Time and label
-        const timeDiv = document.createElement('div');
-        timeDiv.classList.add('edit-history-time');
-        timeDiv.textContent = formatTime(entry.edited_at);
-        if (isOriginal) {
-            const label = document.createElement('span');
-            label.classList.add('edit-history-label');
-            label.textContent = 'Original';
-            timeDiv.appendChild(label);
-        } else if (isCurrent) {
-            const label = document.createElement('span');
-            label.classList.add('edit-history-label');
-            label.textContent = 'Current';
-            timeDiv.appendChild(label);
-        }
-
-        // Content
-        const textDiv = document.createElement('div');
-        textDiv.classList.add('edit-history-text');
-        textDiv.textContent = entry.content;
-        renderCustomEmojiShortcodes(textDiv, historyEmojiTags);
-        twemojify(textDiv);
-
-        div.appendChild(timeDiv);
-        div.appendChild(textDiv);
-        content.appendChild(div);
-        entryElements.push(div);
-    });
+    editHistoryEnsureMounted();
+    VectorSvelte.setEditHistory(messageId, msg.edit_history, mergeEmojiTags(msg.emoji_tags, equippedEmojiTags()));
+    VectorSvelte.flushSync();
 
     // Find the message bubble (p element) for positioning
     const msgBubble = targetElement.closest('.dmsg');
@@ -7382,13 +7327,8 @@ function showEditHistory(messageId, targetElement) {
         top = rect.bottom + 4;
     }
 
-    // Apply staggered animation delays based on position
-    // Above: latest (bottom) fades first, oldest (top) last
-    // Below: oldest (top) fades first, latest (bottom) last
-    entryElements.forEach((el, index) => {
-        const delay = showBelow ? index * 50 : (totalEntries - 1 - index) * 50;
-        el.style.animationDelay = `${delay}ms`;
-    });
+    // Above: latest (bottom) fades first, oldest (top) last; below: the reverse.
+    VectorSvelte.setEditHistoryBelow(showBelow);
 
     // Align horizontally with the bubble edge, keep within viewport
     let left = rect.left;
@@ -7411,6 +7351,16 @@ function hideEditHistory() {
         popup.style.display = 'none';
     }
     strCurrentEditHistoryMsgId = '';
+    VectorSvelte.clearEditHistory();
+}
+
+let editHistoryMounted = false;
+function editHistoryEnsureMounted() {
+    if (editHistoryMounted) return;
+    editHistoryMounted = true;
+    VectorSvelte.mountEditHistory(document.getElementById('edit-history-content'), {
+        h: { renderEmoji: (node, tags) => { renderCustomEmojiShortcodes(node, tags); twemojify(node); } },
+    });
 }
 
 /**
