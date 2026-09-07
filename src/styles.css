@@ -9204,6 +9204,16 @@ select {
 
 /* Notification Content Privacy row: label left, dropdown right (matches the
    toggle rows). Stacks vertically on narrow screens so the label can't squash. */
+/* The (i) explainer beside a notification row's label */
+.notif-info {
+  width: 18px;
+  height: 18px;
+  position: relative;
+  display: inline-block;
+  vertical-align: text-top;
+  margin-left: 5px;
+}
+
 #notif-privacy-group {
   display: flex;
   align-items: center;

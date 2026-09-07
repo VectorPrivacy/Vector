@@ -1655,194 +1655,69 @@ async function confirmStorageDelete(cat, sizeText) {
 // Notification Sound Settings
 // ============================================================================
 
-/** @type {Object|null} Current notification settings */
-let currentNotificationSettings = null;
-
-/** @type {string|null} Path to custom sound file */
-let customSoundPath = null;
-
-/**
- * Initialize the Mute @Everyone toggle (works on both desktop and mobile).
- * On desktop, piggybacks on currentNotificationSettings + saveCurrentNotificationSettings.
- * On mobile, reads/writes the DB setting directly via set_sql_setting/get_sql_setting.
- */
-async function initMuteEveryoneSetting(useDirect = false) {
-    const muteEveryoneToggle = document.getElementById('notif-mute-everyone-toggle');
-    if (!muteEveryoneToggle) return;
-    if (useDirect) {
-        // Mobile: read/write the DB setting directly
-        try {
-            const val = await invoke('get_sql_setting', { key: 'notif_mute_everyone' });
-            muteEveryoneToggle.checked = val === 'true';
-        } catch (_) {
-            muteEveryoneToggle.checked = false;
-        }
-        muteEveryoneToggle.addEventListener('change', async (e) => {
-            await invoke('set_sql_setting', { key: 'notif_mute_everyone', value: e.target.checked ? 'true' : 'false' });
-        });
-    } else {
-        // Desktop: use NotificationSettings
-        muteEveryoneToggle.checked = currentNotificationSettings?.mute_everyone || false;
-        muteEveryoneToggle.addEventListener('change', async (e) => {
-            if (!currentNotificationSettings) currentNotificationSettings = {};
-            currentNotificationSettings.mute_everyone = e.target.checked;
-            await saveCurrentNotificationSettings();
-        });
-    }
-}
+const NOTIF_EXPLAINERS = {
+    mute: ['Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.'],
+    everyone: ['Mute @everyone Pings', 'When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.'],
+    privacy: ['Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.'],
+};
 
 /**
- * Initialize the notification Content Privacy dropdown (all platforms). Reads
- * and writes the per-account `notif_content_privacy` setting directly; the
- * backend reads the same key at notify time. Values: full | hide_content | hide_all.
- */
-async function initNotifContentPrivacy() {
-    const select = document.getElementById('notif-privacy-select');
-    if (!select) return;
-    try {
-        const val = await invoke('get_sql_setting', { key: 'notif_content_privacy' });
-        select.value = (val === 'hide_content' || val === 'hide_all') ? val : 'full';
-    } catch (_) {
-        select.value = 'full';
-    }
-    select.addEventListener('change', async (e) => {
-        await invoke('set_sql_setting', { key: 'notif_content_privacy', value: e.target.value });
-    });
-}
-
-/**
- * Initialize notification sound settings UI
+ * Mount the Notifications section and load its state. Sound preferences live in the
+ * desktop-only settings blob; the @everyone mute and content privacy are per-key
+ * settings the backend reads at notify time (values: full | hide_content | hide_all).
  */
 async function initNotificationSettings() {
-    // Load current settings
-    try {
-        currentNotificationSettings = await loadNotificationSettings();
-    } catch (e) {
-        console.error('Failed to load notification settings:', e);
-        currentNotificationSettings = { global_mute: false, sound: { type: 'Default' }, mute_everyone: false };
-    }
+    const sounds = !!platformFeatures.notification_sounds;
+    VectorSvelte.mountNotifications(document.getElementById('settings-notifications-body'), {
+        h: {
+            saveSounds: ({ globalMute, muteEveryone, sound }) =>
+                saveNotificationSettings({ global_mute: globalMute, mute_everyone: muteEveryone, sound: sound.type === 'Custom' ? { type: 'Custom', path: sound.path } : { type: sound.type } })
+                    .catch((e) => console.error('Failed to save notification settings:', e)),
+            saveMuteEveryone: (on) => invoke('set_sql_setting', { key: 'notif_mute_everyone', value: on ? 'true' : 'false' }),
+            savePrivacy: (value) => invoke('set_sql_setting', { key: 'notif_content_privacy', value }),
+            pickCustom: async () => {
+                try {
+                    return await selectCustomNotificationSound();
+                } catch (e) {
+                    if (e === 'FILE_TOO_LARGE') {
+                        popupConfirm('File Too Large', 'Notification sounds must be under 1MB. Please choose a shorter audio clip.', true);
+                    } else if (e === 'AUDIO_TOO_LONG') {
+                        popupConfirm('Audio Too Long', 'Notification sounds must be 10 seconds or less.', true);
+                    } else if (e !== 'No file selected') {
+                        console.error('Failed to select custom sound:', e);
+                    }
+                    return null;
+                }
+            },
+            preview: (sound) => previewNotificationSound(sound).catch((e) => console.error('Failed to preview sound:', e)),
+            explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
+        },
+    });
 
-    const muteToggle = document.getElementById('notif-mute-toggle');
-    const soundSelect = document.getElementById('notif-sound-select');
-    const customGroup = document.getElementById('notif-custom-group');
-    const customFilename = document.getElementById('notif-custom-filename');
-    const customSelectBtn = document.getElementById('notif-custom-select-btn');
-    const previewBtn = document.getElementById('notif-preview-btn');
-
-    // Set initial mute toggle state
-    muteToggle.checked = currentNotificationSettings.global_mute;
-
-    // Determine current sound selection
-    const sound = currentNotificationSettings.sound;
-    if (sound && sound.type === 'Custom' && sound.path) {
-        customSoundPath = sound.path;
-        soundSelect.value = 'custom';
-        customGroup.style.display = 'block';
-        updateCustomFilename(sound.path);
-    } else if (sound && sound.type === 'None') {
-        soundSelect.value = 'none';
-    } else if (sound && sound.type === 'Techno') {
-        soundSelect.value = 'techno';
+    let blob = { global_mute: false, sound: { type: 'Default' }, mute_everyone: false };
+    if (sounds) {
+        try {
+            blob = await loadNotificationSettings();
+        } catch (e) {
+            console.error('Failed to load notification settings:', e);
+        }
     } else {
-        soundSelect.value = 'default';
+        try {
+            blob.mute_everyone = (await invoke('get_sql_setting', { key: 'notif_mute_everyone' })) === 'true';
+        } catch (_) { /* default off */ }
     }
-
-    // Mute @everyone toggle (shared with mobile via initMuteEveryoneSetting)
-    await initMuteEveryoneSetting();
-
-    // Mute toggle handler
-    muteToggle.addEventListener('change', async (e) => {
-        currentNotificationSettings.global_mute = e.target.checked;
-        await saveCurrentNotificationSettings();
-    });
-
-    // Sound selection handler
-    soundSelect.addEventListener('change', async (e) => {
-        const value = e.target.value;
-
-        if (value === 'custom') {
-            customGroup.style.display = 'block';
-            if (customSoundPath) {
-                updateCustomFilename(customSoundPath);
-                currentNotificationSettings.sound = { type: 'Custom', path: customSoundPath };
-                await saveCurrentNotificationSettings();
-            } else {
-                // No custom path yet - show placeholder
-                customFilename.textContent = 'No file selected';
-            }
-        } else {
-            customGroup.style.display = 'none';
-            if (value === 'none') {
-                currentNotificationSettings.sound = { type: 'None' };
-            } else if (value === 'techno') {
-                currentNotificationSettings.sound = { type: 'Techno' };
-            } else {
-                currentNotificationSettings.sound = { type: 'Default' };
-            }
-            await saveCurrentNotificationSettings();
-        }
-    });
-
-    // Custom sound file selection handler
-    customSelectBtn.addEventListener('click', async () => {
-        try {
-            const path = await selectCustomNotificationSound();
-            customSoundPath = path;
-            currentNotificationSettings.sound = { type: 'Custom', path: path };
-            updateCustomFilename(path);
-            await saveCurrentNotificationSettings();
-        } catch (e) {
-            if (e === 'FILE_TOO_LARGE') {
-                popupConfirm('File Too Large', 'Notification sounds must be under 1MB. Please choose a shorter audio clip.', true);
-            } else if (e === 'AUDIO_TOO_LONG') {
-                popupConfirm('Audio Too Long', 'Notification sounds must be 10 seconds or less.', true);
-            } else if (e !== 'No file selected') {
-                console.error('Failed to select custom sound:', e);
-            }
-        }
-    });
-
-    // Clear custom sound handler
-    const clearBtn = document.getElementById('notif-custom-clear');
-    clearBtn.addEventListener('click', async (e) => {
-        e.stopPropagation(); // Prevent triggering the chip click (file picker)
-        customSoundPath = null;
-        currentNotificationSettings.sound = { type: 'Default' };
-        soundSelect.value = 'default';
-        customGroup.style.display = 'none';
-        await saveCurrentNotificationSettings();
-    });
-
-    // Preview button handler
-    previewBtn.addEventListener('click', async () => {
-        try {
-            await previewNotificationSound(currentNotificationSettings.sound);
-        } catch (e) {
-            console.error('Failed to preview sound:', e);
-        }
-    });
-}
-
-/**
- * Update the custom filename display
- * @param {string} path - Full path to the sound file (may be cache format: name_RATE.raw)
- */
-function updateCustomFilename(path) {
-    const filename = path.split(/[/\\]/).pop() || 'Unknown file';
-    // Extract friendly name from cache format (e.g., "discord_ping_48000.raw" -> "discord_ping")
-    const friendlyName = filename.replace(/_\d+\.raw$/, '');
-    document.getElementById('notif-custom-filename').textContent = friendlyName;
-}
-
-/**
- * Save current notification settings to backend
- */
-async function saveCurrentNotificationSettings() {
+    let privacy = 'full';
     try {
-        await saveNotificationSettings(currentNotificationSettings);
-    } catch (e) {
-        console.error('Failed to save notification settings:', e);
-    }
+        const val = await invoke('get_sql_setting', { key: 'notif_content_privacy' });
+        if (val === 'hide_content' || val === 'hide_all') privacy = val;
+    } catch (_) { /* default full */ }
+    VectorSvelte.setNotifSettings({
+        sounds,
+        globalMute: blob.global_mute,
+        muteEveryone: blob.mute_everyone,
+        sound: { type: blob.sound?.type || 'Default', path: blob.sound?.path || null },
+        privacy,
+    });
 }
 
 /**
@@ -2070,23 +1945,7 @@ async function initSettings() {
         });
     }
 
-    // Initialize notification sound settings (desktop only) + @everyone toggle (all platforms)
-    if (platformFeatures.notification_sounds) {
-        await initNotificationSettings();
-    } else {
-        // Mobile: hide desktop-only notification controls, but keep the section visible
-        const muteGroup = document.getElementById('notif-mute-group');
-        const soundGroup = document.getElementById('notif-sound-group');
-        const customGroup = document.getElementById('notif-custom-group');
-        if (muteGroup) muteGroup.style.display = 'none';
-        if (soundGroup) soundGroup.style.display = 'none';
-        if (customGroup) customGroup.style.display = 'none';
-        // Init @everyone toggle on mobile (direct DB read/write since notification commands are desktop-only)
-        await initMuteEveryoneSetting(true);
-    }
-
-    // Content Privacy dropdown is cross-platform (direct DB read/write).
-    await initNotifContentPrivacy();
+    await initNotificationSettings();
 
     // Set up clear storage button
     const clearStorageBtn = document.getElementById('clear-storage-btn');

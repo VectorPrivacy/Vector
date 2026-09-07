@@ -1222,9 +1222,6 @@ const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-t
 const domSettingsPrivacyTorInfo = document.getElementById('privacy-tor-info');
 const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
 const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
-const domSettingsNotifMuteInfo = document.getElementById('notif-mute-info');
-const domSettingsNotifMuteEveryoneInfo = document.getElementById('notif-mute-everyone-info');
-const domSettingsNotifPrivacyInfo = document.getElementById('notif-privacy-info');
 const domSettingsStorageGalleryInfo = document.getElementById('storage-gallery-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
@@ -12803,21 +12800,6 @@ domChatMessageInput.oninput = async (e) => {
             popupConfirm('Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.', true);
         };
     }
-    domSettingsNotifMuteInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Mute Notification Sounds', 'When enabled, Vector will <b>not play any notification sounds</b> for incoming messages.<br><br>You will still receive visual notifications and badges.', true);
-    };
-    domSettingsNotifMuteEveryoneInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Mute @everyone Pings', 'When enabled, <b>@everyone</b> mentions from group admins will <b>not bypass</b> your group mute setting.<br><br>By default, @everyone pings from admins will notify you even if the group is muted.', true);
-    };
-    if (domSettingsNotifPrivacyInfo) domSettingsNotifPrivacyInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.', true);
-    };
     if (domSettingsStorageGalleryInfo) domSettingsStorageGalleryInfo.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();

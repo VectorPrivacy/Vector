@@ -32,3 +32,21 @@ export function setStorageDistribution(distribution) {
     storage.distribution = distribution || {};
     storage.v++;
 }
+
+// Notifications: the account's sound preferences plus the cross-platform toggles.
+// `sounds` is false on mobile, where only the @everyone mute and content privacy apply.
+const notif = $state({
+    loaded: false, sounds: true,
+    globalMute: false, muteEveryone: false,
+    sound: { type: 'Default', path: null },
+    privacy: 'full',
+});
+export function notifState() { return notif; }
+export function setNotifSettings({ sounds, globalMute, muteEveryone, sound, privacy }) {
+    notif.sounds = !!sounds;
+    notif.globalMute = !!globalMute;
+    notif.muteEveryone = !!muteEveryone;
+    notif.sound = sound || { type: 'Default', path: null };
+    notif.privacy = privacy || 'full';
+    notif.loaded = true;
+}
