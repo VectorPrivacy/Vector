@@ -9669,6 +9669,187 @@ mod tests {
         assert_eq!(migration::drive_migration(&bed.relay, &v1).await.unwrap(), None);
     }
 
+    /// The member half of a migration, for a member who already holds the twin. Every
+    /// piece of the flip test bed except the pointer: owner runs the wizard (stitched
+    /// twin), member holds the same v1 plus the twin via an ordinary save, which the
+    /// hijack guard leaves channel-less because the stitched channel id is still v1-owned.
+    async fn held_twin_bed(
+        relay: &MemoryRelay,
+        bed: &TestBed,
+        owner: &Actor,
+        member: &Actor,
+    ) -> (crate::community::Community, String, String, String, CommunityV2) {
+        use crate::community::migration;
+        bed.swap_to(owner);
+        let mut v1 = crate::community::Community::create("Guild", "general", bed.relays.clone());
+        let v1_cid = v1.id.to_hex();
+        let v1_channel = v1.channels[0].id.to_hex();
+        v1.owner_attestation = Some({
+            crate::community::owner::build_owner_attestation_unsigned(owner.keys.public_key(), &v1_cid)
+                .finalize(&owner.keys).unwrap().as_json()
+        });
+        crate::db::community::save_community(&v1).unwrap();
+        let v2_hex = migration::migrate_community_to_v2(relay, &v1, migration::MIGRATION_UNLOCK_AT + 1).await.unwrap();
+        let v2_id = crate::community::CommunityId(crate::simd::hex::hex_to_bytes_32(&v2_hex));
+        let twin = crate::db::community::load_community_v2(&v2_id).unwrap().expect("owner holds the twin");
+
+        bed.swap_to(member);
+        let mut m_v1 = crate::community::Community::create("Guild", "general", bed.relays.clone());
+        m_v1.id = v1.id;
+        m_v1.server_root_key = v1.server_root_key.clone();
+        m_v1.channels[0].id = v1.channels[0].id;
+        m_v1.owner_attestation = v1.owner_attestation.clone();
+        crate::db::community::save_community(&m_v1).unwrap();
+        crate::db::community::save_community_v2(&twin).unwrap();
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&v1_channel).unwrap().as_deref(),
+            Some(v1_cid.as_str()),
+            "precondition: the stitched channel is still v1-owned (channel-less twin)"
+        );
+        (m_v1, v1_cid, v1_channel, v2_hex, twin)
+    }
+
+    fn signpost_for(twin: &CommunityV2, v2_hex: &str, owner_xonly: String, salt: [u8; 32], primary: &str, relays: Vec<String>) -> crate::community::migration::MigrationSignpost {
+        let _ = twin;
+        crate::community::migration::MigrationSignpost {
+            v2_community_id: v2_hex.to_string(),
+            owner_xonly,
+            owner_salt: crate::simd::hex::bytes_to_hex_32(&salt),
+            relays,
+            name: "Guild".into(),
+            primary_channel: primary.to_string(),
+            root_epoch: 0,
+        }
+    }
+
+    /// `m` only carries join material. A member who already holds the twin has nothing to
+    /// join, so join material that will never open (sealed under a root this member does
+    /// not hold) must not stop the flip. The flip is DB-only: nothing is published and no
+    /// key changes; the stitched channel simply moves to the twin and becomes visible.
+    #[tokio::test]
+    async fn a_held_twin_flips_without_opening_m() {
+        use crate::community::migration;
+        let (bed, owner, member) = TestBed::new();
+        let (m_v1, v1_cid, v1_channel, v2_hex, twin) = held_twin_bed(&bed.relay, &bed, &owner, &member).await;
+        let v2_id = twin.identity.community_id;
+
+        // Sealed under a root nobody holds: a real read-cut / lost-DB shape.
+        let m = migration::seal_m(&[7u8; 32], &serde_json::to_vec(&join_material(&twin)).unwrap()).unwrap();
+        let signpost = signpost_for(&twin, &v2_hex, owner.keys.public_key().to_hex(), twin.identity.owner_salt, &v1_channel, bed.relays.clone());
+        crate::db::community::set_migration_pointer(&v1_cid, &migration::build_migration_content(&signpost, Some(m)).unwrap()).unwrap();
+
+        let published_before = bed.relay.stored_count();
+        let roots_before = crate::db::community::held_epoch_keys(&v2_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap();
+
+        let flipped = migration::drive_migration(&bed.relay, &m_v1).await.unwrap();
+        assert_eq!(flipped.as_deref(), Some(v2_hex.as_str()), "a held twin flips even though m cannot open");
+
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&v1_channel).unwrap().as_deref(),
+            Some(v2_hex.as_str()),
+            "the stitched channel moved to the twin"
+        );
+        assert!(
+            crate::db::community::load_community_v2(&v2_id).unwrap().unwrap().channels.iter().any(|c| c.id.0 == m_v1.channels[0].id.0),
+            "the twin now lists the channel (what a member actually sees)"
+        );
+        assert_eq!(crate::db::community::get_migrated_to(&v1_cid).unwrap().as_deref(), Some(v2_hex.as_str()));
+        assert!(crate::db::community::get_community_dissolved(&v1_cid).unwrap(), "fence layer 0 set");
+        assert_eq!(bed.relay.stored_count(), published_before, "a held flip publishes nothing");
+        assert_eq!(
+            crate::db::community::held_epoch_keys(&v2_hex, crate::community::SERVER_ROOT_SCOPE_HEX).unwrap(),
+            roots_before,
+            "a held flip touches no keys"
+        );
+        assert_eq!(migration::drive_migration(&bed.relay, &m_v1).await.unwrap(), None, "idempotent");
+    }
+
+    /// The held-twin shortcut sits BEHIND owner continuity: a pointer whose owner is not
+    /// this v1's proven owner must not flip, even when the account holds a twin that the
+    /// signpost describes perfectly. Built so that ONLY the continuity gate refuses: the
+    /// member owns the named twin, so self-cert and the held-owner check both pass, and
+    /// the reparent would move the v1 channel if the gate were skipped.
+    #[tokio::test]
+    async fn a_held_twin_still_refuses_an_owner_discontinuity() {
+        use crate::community::migration;
+        let (bed, owner, member) = TestBed::new();
+        let (m_v1, v1_cid, v1_channel, _v2_hex, _twin) = held_twin_bed(&bed.relay, &bed, &owner, &member).await;
+
+        // The member's OWN v2 community: a twin the signpost can describe consistently.
+        let mine = create_community(&bed.relay, "Mine", bed.relays.clone(), None).await.unwrap();
+        let mine_hex = crate::simd::hex::bytes_to_hex_32(&mine.identity.community_id.0);
+        let signpost = signpost_for(&mine, &mine_hex, member.keys.public_key().to_hex(), mine.identity.owner_salt, &v1_channel, bed.relays.clone());
+        crate::db::community::set_migration_pointer(&v1_cid, &migration::build_migration_content(&signpost, None).unwrap()).unwrap();
+
+        assert_eq!(migration::drive_migration(&bed.relay, &m_v1).await.unwrap(), None, "refused");
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&v1_channel).unwrap().as_deref(),
+            Some(v1_cid.as_str()),
+            "nothing moved"
+        );
+        assert!(crate::db::community::get_migrated_to(&v1_cid).unwrap().is_none(), "no fence");
+    }
+
+    /// The held-twin shortcut sits BEHIND the self-cert check: a signpost naming the real,
+    /// held twin under the real owner but a wrong salt must not flip. Only self-cert
+    /// refuses here (continuity and the held-owner check both pass).
+    #[tokio::test]
+    async fn a_held_twin_still_refuses_a_forged_self_cert() {
+        use crate::community::migration;
+        let (bed, owner, member) = TestBed::new();
+        let (m_v1, v1_cid, v1_channel, v2_hex, twin) = held_twin_bed(&bed.relay, &bed, &owner, &member).await;
+
+        let signpost = signpost_for(&twin, &v2_hex, owner.keys.public_key().to_hex(), [9u8; 32], &v1_channel, bed.relays.clone());
+        crate::db::community::set_migration_pointer(&v1_cid, &migration::build_migration_content(&signpost, None).unwrap()).unwrap();
+
+        assert_eq!(migration::drive_migration(&bed.relay, &m_v1).await.unwrap(), None, "refused");
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&v1_channel).unwrap().as_deref(),
+            Some(v1_cid.as_str()),
+            "nothing moved"
+        );
+        assert!(crate::db::community::get_migrated_to(&v1_cid).unwrap().is_none(), "no fence");
+    }
+
+    /// The held-twin flip runs under the twin's follow lock, like every other flip: a
+    /// follow pass mid-flight holds a channel-less view whose whole-row save would prune
+    /// the row the flip just moved.
+    #[tokio::test]
+    async fn a_held_twin_flip_waits_for_an_in_flight_follow_pass() {
+        use crate::community::migration;
+        let (bed, owner, member) = TestBed::new();
+        let relay = std::sync::Arc::new(MemoryRelay::new());
+        let (m_v1, v1_cid, v1_channel, v2_hex, twin) = held_twin_bed(&relay, &bed, &owner, &member).await;
+        let v2_id = twin.identity.community_id;
+
+        let signpost = signpost_for(&twin, &v2_hex, owner.keys.public_key().to_hex(), twin.identity.owner_salt, &v1_channel, bed.relays.clone());
+        crate::db::community::set_migration_pointer(&v1_cid, &migration::build_migration_content(&signpost, None).unwrap()).unwrap();
+
+        let held = crate::community::v2::realtime::follow_lock(&v2_id).lock_owned().await;
+        let drive = tokio::spawn({
+            let relay = relay.clone();
+            let m_v1 = m_v1.clone();
+            async move { migration::drive_migration(&*relay, &m_v1).await }
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!drive.is_finished(), "the flip must wait for the in-flight follow pass");
+        assert!(crate::db::community::get_migrated_to(&v1_cid).unwrap().is_none(), "no fence while the lock is held");
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&v1_channel).unwrap().as_deref(),
+            Some(v1_cid.as_str()),
+            "no reparent while the lock is held"
+        );
+
+        drop(held);
+        assert_eq!(drive.await.unwrap().unwrap().as_deref(), Some(v2_hex.as_str()), "the flip completes once released");
+        assert_eq!(
+            crate::db::community::community_id_for_channel(&v1_channel).unwrap().as_deref(),
+            Some(v2_hex.as_str()),
+            "the channel row is stitched to the twin"
+        );
+    }
+
     /// The OWNER wizard end-to-end: build the twin (primary channel reuses the v1 id),
     /// seal + publish the carrier, flip the owner. Then a MEMBER holding the v1 community
     /// folds the same carrier and stitches — proving the channel-STITCH the earlier test

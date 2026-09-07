@@ -279,6 +279,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
     // Without this, two channel-less v2 saves can interleave a prune after the other's
     // re-parent. The claim is released on ANY exit (RAII).
     let Some(_claim) = DriveClaim::take(&cid) else {
+        crate::log_debug!("[migration] {cid}: another drive is in flight");
         return Ok(None);
     };
 
@@ -291,6 +292,7 @@ pub async fn drive_migration<T: Transport + ?Sized>(
     };
     let Some(payload) = parse_migration_payload(&raw) else {
         // A stored-but-unparseable pointer is inert; mark checked so the sweep converges.
+        crate::log_debug!("[migration] {cid}: pointer unparseable, marked checked");
         let _ = crate::db::community::set_migration_checked(&cid);
         return Ok(None);
     };
@@ -301,9 +303,14 @@ pub async fn drive_migration<T: Transport + ?Sized>(
     // join — identity continuity is the whole basis for skipping consent. Fail-closed: no
     // proven owner ⇒ no continuity ⇒ no auto-join. (check 3 — the v2 self-cert recompute — runs
     // inside accept_bundle.)
-    let Some(owner) = super::service::proven_owner_hex(community) else { return Ok(None) };
+    let Some(owner) = super::service::proven_owner_hex(community) else {
+        crate::log_debug!("[migration] {cid}: no proven owner, cannot verify continuity");
+        return Ok(None);
+    };
     if payload.signpost.owner_xonly != owner {
-        return Ok(None); // owner discontinuity → not a consent-free migration
+        // Owner discontinuity → not a consent-free migration.
+        crate::log_info!("[migration] {cid}: signpost names a different owner; not followed automatically");
+        return Ok(None);
     }
     // Bind the v2 self-cert id to the signpost's own owner/salt before the network join.
     if !super::v2::derive::verify_community_id(
@@ -311,11 +318,31 @@ pub async fn drive_migration<T: Transport + ?Sized>(
         &crate::simd::hex::hex_to_bytes_32(&payload.signpost.owner_xonly),
         &crate::simd::hex::hex_to_bytes_32(&payload.signpost.owner_salt),
     ) {
-        return Ok(None); // the v2 id is not a commitment to this owner+salt
+        crate::log_warn!("[migration] {cid}: signpost v2 id is not a commitment to its owner+salt; ignored");
+        return Ok(None);
+    }
+
+    let v2_id = CommunityId(crate::simd::hex::hex_to_bytes_32(&payload.signpost.v2_community_id));
+    let v2_hex = payload.signpost.v2_community_id.clone();
+
+    // Held-twin shortcut, BEFORE `m` is needed. `m` only carries join material; an account
+    // that already holds the twin (list adoption, an ordinary invite, another device) has
+    // nothing to open, and an unopenable `m` must not strand a flip that needs no keys.
+    // The twin's id is a self-cert of the signpost's owner+salt (verified above), so the
+    // held row's owner is re-checked only as a corruption guard.
+    if let Some(held) = crate::db::community::load_community_v2(&v2_id)? {
+        if held.owner()?.to_hex() != payload.signpost.owner_xonly {
+            crate::log_warn!("[migration] {cid}: held twin {} has a different owner than the signpost; refusing", &v2_hex[..8]);
+            return Ok(None);
+        }
+        return flip_to_twin(&session, &cid, &v2_id, &v2_hex).await.map(Some);
     }
 
     let Some(m_b64) = payload.m.as_deref() else {
-        return Ok(None); // signpost-only pointer → straggler CTA, no keys to open
+        // Signpost-only pointer: no keys to open, and the twin is not held. Loud on
+        // purpose: this state is invisible otherwise, and only a join to the twin ends it.
+        crate::log_warn!("[migration] {cid}: flip pending, twin {} not held and the signpost carries no keys; joining the twin lets the next drive flip", &v2_hex[..8]);
+        return Ok(None);
     };
 
     // Open `m` under any held root; if none opens and we're stale vs the publish epoch,
@@ -331,7 +358,10 @@ pub async fn drive_migration<T: Transport + ?Sized>(
         plain = open_m(&held_roots(&cid), m_b64);
     }
     let Some(plain) = plain else {
-        return Ok(None); // unopenable (read-cut or lost-DB) → straggler CTA
+        // Unopenable (read-cut or lost DB) and the twin is not held. Loud on purpose:
+        // this state is invisible otherwise, and only a join to the twin ends it.
+        crate::log_warn!("[migration] {cid}: flip pending, twin {} not held and the join material does not open under any held root; joining the twin lets the next drive flip", &v2_hex[..8]);
+        return Ok(None);
     };
 
     // Verify the JoinMaterial's owner matches the pointer's owner continuity claim before
@@ -342,40 +372,40 @@ pub async fn drive_migration<T: Transport + ?Sized>(
         return Err("migration payload keys disagree with the signpost".to_string());
     }
 
-    // held-v2 dedup: if this account ALREADY holds the v2 twin, do NOT network-join
-    // it again — flip only. Covers the idempotent double-trigger, a multi-device peer that
-    // synced the twin via the Community List first, and the OWNER's own client (the wizard
-    // created the twin, so the owner holds it — accept_bundle must never try to "join" it).
-    let v2_id = CommunityId(crate::simd::hex::hex_to_bytes_32(&payload.signpost.v2_community_id));
-    let v2_hex = payload.signpost.v2_community_id.clone();
-    if crate::db::community::load_community_v2(&v2_id)?.is_none() {
-        // Join the v2 twin (ban-gated, owner-root-verified). A refusal (banned / forged
-        // root) leaves the community sealed — never a half-flip.
-        let v2 = super::v2::service::accept_migration_material(transport, &jm).await?;
-        if crate::simd::hex::bytes_to_hex_32(&v2.identity.community_id.0) != v2_hex {
-            return Err("joined community id disagrees with the migration pointer".to_string());
-        }
-        if !session.is_live() {
-            return Err("account changed during migration join".to_string());
-        }
+    // Not held (the shortcut above returned otherwise): join the v2 twin (ban-gated,
+    // owner-root-verified). A refusal (banned / forged root) leaves the community sealed —
+    // never a half-flip.
+    let v2 = super::v2::service::accept_migration_material(transport, &jm).await?;
+    if crate::simd::hex::bytes_to_hex_32(&v2.identity.community_id.0) != v2_hex {
+        return Err("joined community id disagrees with the migration pointer".to_string());
     }
+    if !session.is_live() {
+        return Err("account changed during migration join".to_string());
+    }
+    flip_to_twin(&session, &cid, &v2_id, &v2_hex).await.map(Some)
+}
 
-    // The flip: re-parent the stitched channel rows + stamp the fence (one txn). The v2
-    // community ROW already exists (accept saved it, or this account already held it); NO
-    // save_community_v2 here — the v2 view is channel-less (its channel ids were v1-owned →
-    // skipped by the hijack guard), so a re-save would PRUNE the just-re-parented rows.
-    // Public channels fold from the control plane; the re-parented rows carry the history.
-    // Under the twin's follow lock: the follow worker's whole-row save deletes channel rows
-    // absent from a pre-flip-loaded (channel-less) struct, so the flip must not straddle it.
-    // Guard IMMEDIATELY before the most destructive write in the feature — the held-v2
-    // path above skips the join branch (and its check), so this is the one that counts.
-    let flock = super::v2::realtime::follow_lock(&v2_id);
+/// The flip: re-parent the stitched channel rows + stamp the fence (one txn). The v2
+/// community ROW already exists (accept saved it, or this account already held it); NO
+/// save_community_v2 here — the v2 view is channel-less (its channel ids were v1-owned →
+/// skipped by the hijack guard), so a re-save would PRUNE the just-re-parented rows.
+/// Public channels fold from the control plane; the re-parented rows carry the history.
+/// Under the twin's follow lock: the follow worker's whole-row save deletes channel rows
+/// absent from a pre-flip-loaded (channel-less) struct, so the flip must not straddle it.
+/// The session check sits immediately before the most destructive write in the feature.
+async fn flip_to_twin(
+    session: &std::sync::Arc<crate::db::Session>,
+    v1_cid: &str,
+    v2_id: &CommunityId,
+    v2_hex: &str,
+) -> Result<String, String> {
+    let flock = super::v2::realtime::follow_lock(v2_id);
     let _fguard = flock.lock().await;
     if !session.is_live() {
         return Err("account changed during migration flip".to_string());
     }
-    crate::db::community::reparent_channels_and_fence(&cid, &v2_hex)?;
-    Ok(Some(v2_hex))
+    crate::db::community::reparent_channels_and_fence(v1_cid, v2_hex)?;
+    Ok(v2_hex.to_string())
 }
 
 // ── Owner flow: the migration wizard ─────────────────────────────────────────────────────
@@ -747,7 +777,8 @@ pub async fn run_migration_maintenance<T: Transport + ?Sized>(transport: &T) -> 
                 spawn_finalize_migration(cid, v2.clone());
                 flipped.push(v2);
             }
-            Ok(None) => {}
+            // The reason is logged at the exit that knows it, inside drive_migration.
+            Ok(None) => crate::log_debug!("[migration] {cid}: not flipped this pass"),
             Err(e) => crate::log_warn!("migration retry for {cid}: {e}"),
         }
     }

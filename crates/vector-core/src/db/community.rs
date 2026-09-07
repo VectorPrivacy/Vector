@@ -2848,12 +2848,20 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
             .query_row("SELECT community_id FROM community_channels WHERE channel_id=?1", params![ch_hex], |r| r.get(0))
             .optional()
             .map_err(|e| format!("channel ownership check: {e}"))?;
-        if owner_of.is_some_and(|existing| existing != id_hex) {
+        if let Some(existing) = owner_of.filter(|existing| *existing != id_hex) {
             // SKIP the foreign-owned channel rather than fail the whole save: a
             // single replayed phantom (a same-owner cross-community vsk-2 edition)
             // would otherwise wedge ALL of this community's control-plane persistence
             // on every fold. The foreign row stays untouched; this community just
-            // never acquires a row for that id.
+            // never acquires a row for that id. Loud on purpose: a stitched migration
+            // twin whose flip never ran hits this on every fold and is otherwise deaf
+            // with no trace.
+            crate::log_warn!(
+                "[v2:{}] channel {} not saved: its row belongs to community {} (unflipped migration, or a hijack attempt)",
+                &id_hex[..8],
+                &ch_hex[..8],
+                &existing[..8.min(existing.len())]
+            );
             continue;
         }
         // A public channel has no independent key; store the community_root as a
