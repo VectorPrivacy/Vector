@@ -730,11 +730,10 @@ pub async fn migrate_community_to_v2<T: Transport + ?Sized>(
 /// v1 row is sealed) and tell the UI. Spawned (std::sync::Arc<crate::db::Session> captured BEFORE the spawn, per
 /// the multi-account contract) so no caller's lock context can deadlock the STATE lock.
 pub fn spawn_finalize_migration(v1_cid: String, v2_hex: String) {
-    let session = crate::db::current_session();
-    tokio::spawn(async move {
+    crate::db::spawn_bound(async move {
         let v2_id = CommunityId(crate::simd::hex::hex_to_bytes_32(&v2_hex));
         let Ok(Some(twin)) = crate::db::community::load_community_v2(&v2_id) else { return };
-        if !session.is_live() {
+        if !crate::db::current_session().is_live() {
             return;
         }
         crate::register_v2_chats_inner(&twin).await;

@@ -53,15 +53,27 @@ pub fn has_unbound_spawn(src: &str) -> bool {
 /// The unbound spawn lines in one file's shipping code, as `(line, 1-based no)`.
 ///
 /// Tests spawn freely — only shipping code is bound — so everything from the
-/// first `#[cfg(test)]` onward is ignored.
+/// test MODULE onward is ignored. The cut is the first `#[cfg(test)]` that
+/// introduces a `mod`, not the first `#[cfg(test)]` anywhere: a test-only hook
+/// function early in a file would otherwise hide every line after it.
+// Assembled at compile time so this file never contains the text it searches for.
+const NEEDLE: &str = concat!("tokio::", "spawn(");
+
 fn unbound_lines(src: &str) -> impl Iterator<Item = (&str, usize)> {
-    let prod = src.split("#[cfg(test)]").next().unwrap_or("");
-    let lines: Vec<&str> = prod.lines().collect();
+    let all: Vec<&str> = src.lines().collect();
+    let cut = all
+        .windows(2)
+        .position(|w| {
+            w[0].trim() == "#[cfg(test)]"
+                && matches!(w[1].trim_start(), l if l.starts_with("mod ") || l.starts_with("pub mod ") || l.starts_with("pub(crate) mod "))
+        })
+        .unwrap_or(all.len());
+    let lines: Vec<&str> = all[..cut].to_vec();
     let owned: Vec<(&str, usize)> = lines
         .iter()
         .enumerate()
         .filter(|(i, line)| {
-            line.contains("tokio::spawn(")
+            line.contains(NEEDLE)
                 && !line.trim_start().starts_with("//")
                 && !line.contains("spawn-detached:")
                 && !lines[..*i].iter().rev().take(4).any(|p| p.contains("spawn-detached:"))
