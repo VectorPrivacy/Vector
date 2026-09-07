@@ -129,7 +129,9 @@ const _dmsgRowHelpers = {
     // A hover tip anchored to a chip that just left would float forever (mouseout
     // owns dismissal, and a removed anchor never fires it).
     reactionChipRemoved: () => { if (reactionHoverEl && !reactionHoverEl.isConnected) hideReactionHoverTip(); },
-    buildReply: (msg, sender) => _dmsgBuildReplyContext(msg, sender),
+    replyView: (msg, sender) => _dmsgReplyView(msg, sender),
+    renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
+    createPlaceholderAvatar: (g, size) => createPlaceholderAvatar(g, size),
     buildPivxBubble: (msg) => renderPivxPaymentBubble(
         msg.pivx_payment.gift_code, msg.pivx_payment.amount_piv, msg.mine, msg.pivx_payment.address),
     buildBlockedPlaceholder: (msg) => _dmsgBuildBlockedPlaceholder(msg),
@@ -400,165 +402,69 @@ function _selfDestructTooltipEnd() {
     hideGlobalTooltip();
 }
 
-/** Format a countdown: mm:ss under an hour, else Hh Mm / Dd Hh. */
-function _fmtCountdown(secs) {
-    if (secs >= 86400) { const d = Math.floor(secs / 86400); const h = Math.floor((secs % 86400) / 3600); return d + 'd ' + h + 'h'; }
-    if (secs >= 3600)  { const h = Math.floor(secs / 3600);  const m = Math.floor((secs % 3600) / 60);   return h + 'h ' + m + 'm'; }
-    const m = Math.floor(secs / 60), s = secs % 60;
-    return m + ':' + String(s).padStart(2, '0');
-}
-
-function _dmsgBuildReplyContext(msg, sender) {
+/**
+ * The quoted parent of a reply as data for the row's ReplyQuote, or null when nothing
+ * is known about it yet (neither the backend's context fields nor the parent in memory).
+ */
+function _dmsgReplyView(msg, sender) {
     const hasBackendContext = msg.replied_to_content !== undefined || msg.replied_to_has_attachment;
-    // The quoted message lives in the chat being rendered. `sender` is the row's
-    // author, so a DM lookup by their npub finds nothing in a Community and the
-    // quote loses its in-memory fallback entirely.
+    // The quoted message lives in the chat being rendered. `sender` is the row's author,
+    // so a DM lookup by their npub finds nothing in a Community.
     const chat = getChat(strOpenChat) || (sender ? getDMChat(sender.id) : undefined);
     const cMsg = chat?.messages.find(m => m.id === msg.replied_to);
-
     if (!hasBackendContext && !cMsg) return null;
 
-    const divRef = document.createElement('div');
-    divRef.classList.add('dmsg-reply', 'btn');
+    const mine = cMsg?.mine ?? (msg.replied_to_npub === strPubkey);
+    // In DMs the backend leaves `replied_to_npub` empty, so `cMsg.mine` is the one signal
+    // the target was me rather than the counterpart; otherwise the chat names them.
+    let profile;
+    if (mine) profile = getProfile(strPubkey);
+    else if (msg.replied_to_npub) profile = getProfile(msg.replied_to_npub);
+    else if (cMsg?.npub) profile = getProfile(cMsg.npub);
+    else profile = (chat && !chatIsGroup(chat) ? getProfile(chat.id) : null) || sender;
+    const npub = mine ? strPubkey : (msg.replied_to_npub || cMsg?.npub || profile?.id || '');
 
-    const repliedToMine = cMsg?.mine ?? (msg.replied_to_npub === strPubkey);
-    if (!repliedToMine) divRef.classList.add('dmsg-reply-them');
-    divRef.id = `r-${msg.replied_to}`;
-
-    const spanName = document.createElement('span');
-    spanName.style.color = `rgba(255, 255, 255, 0.7)`;
-
-    // Resolve the replied-to sender's profile. In DMs the backend doesn't
-    // populate `replied_to_npub`, so the only signal that the reply target was
-    // the current user (vs. the counterpart) is `cMsg.mine` from the in-memory
-    // message. Reuse the `repliedToMine` decision computed above instead of
-    // falling through to `sender` (which is the counterpart, not me).
-    let cSenderProfile;
-    if (repliedToMine) {
-        cSenderProfile = getProfile(strPubkey);
-    } else if (msg.replied_to_npub) {
-        cSenderProfile = getProfile(msg.replied_to_npub);
-    } else if (cMsg && cMsg.npub) {
-        cSenderProfile = getProfile(cMsg.npub);
-    } else {
-        // DM, replying to the counterpart's message: the chat names them. The row's
-        // `sender` is its own author, which for an own row is me.
-        cSenderProfile = (chat && !chatIsGroup(chat) ? getProfile(chat.id) : null) || sender;
+    let name = profile?.nickname || profile?.name || profile?.display_name;
+    if (!name) {
+        const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || profile?.id || '';
+        name = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
     }
 
-    // npub of the replied-to author — drives the small avatar + lets the profile_update handler
-    // retro-resolve both name and avatar once the profile lands.
-    const repliedToNpub = repliedToMine ? strPubkey
-        : (msg.replied_to_npub || cMsg?.npub || cSenderProfile?.id || '');
-    spanName.classList.add('dmsg-reply-name');
-    if (repliedToNpub) spanName.dataset.npub = repliedToNpub;
-
-    if (cSenderProfile?.nickname || cSenderProfile?.name || cSenderProfile?.display_name) {
-        spanName.textContent = cSenderProfile.nickname || cSenderProfile.name || cSenderProfile.display_name;
-        twemojify(spanName);
-    } else {
-        const fallbackId = (hasBackendContext ? msg.replied_to_npub : cMsg?.npub) || cSenderProfile?.id || '';
-        spanName.textContent = fallbackId ? fallbackId.substring(0, 10) + '…' : 'Unknown';
-    }
-
-    let spanRef;
-    const replyContent = hasBackendContext ? msg.replied_to_content : cMsg?.content;
+    const content = hasBackendContext ? msg.replied_to_content : cMsg?.content;
     const hasAttachment = hasBackendContext ? msg.replied_to_has_attachment : cMsg?.attachments?.length > 0;
-
-    if (replyContent) {
-        spanRef = document.createElement('span');
-        spanRef.classList.add('dmsg-reply-text');
-        spanRef.style.color = `rgba(255, 255, 255, 0.45)`;
-        spanRef.innerHTML = buildReplyPreviewHtml(replyContent);
-        twemojify(spanRef);
-        // Inline custom emojis in the quoted reply, matching in-chat rendering.
-        // The message's tags can lose a hydration race on first paint and a
-        // painted row never self-corrects, so the user's own equipped packs
-        // backstop them. Message tags come LAST: the renderer's map keeps the
-        // last entry per shortcode, so the sender's mapping wins conflicts.
-        const msgTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null)
-            || msg.replied_to_emoji_tags || [];
+    let html = '';
+    let emojiTags = [];
+    let attachment = null;
+    if (content) {
+        html = buildReplyPreviewHtml(content);
+        // The parent's tags can lose a hydration race on first paint, so the reader's own
+        // equipped packs backstop them; the parent's come last so the sender's mapping wins.
+        const msgTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null) || msg.replied_to_emoji_tags || [];
         const equipped = (typeof equippedEmojiTags === 'function') ? equippedEmojiTags() : [];
-        const replyEmojiTags = [...equipped, ...msgTags];
-        if (replyEmojiTags.length && typeof renderCustomEmojiShortcodes === 'function') {
-            renderCustomEmojiShortcodes(spanRef, replyEmojiTags);
-        }
+        emojiTags = [...equipped, ...msgTags];
     } else if (hasAttachment) {
-        spanRef = document.createElement('div');
-        spanRef.style.display = 'flex';
-        spanRef.style.alignItems = 'center';   // vertically center the type icon with its label
-        // Prefer the backend-resolved extension for off-screen targets (cMsg is null then).
-        const attachmentExt = (hasBackendContext ? msg.replied_to_attachment_extension : null) || cMsg?.attachments?.[0]?.extension;
-        const cFileType = attachmentExt ? getFileTypeInfo(attachmentExt) : { icon: 'attachment', description: 'Attachment' };
-
-        const spanIcon = document.createElement('span');
-        spanIcon.classList.add('icon', 'icon-' + cFileType.icon);
-        spanIcon.style.position = 'relative';
-        spanIcon.style.backgroundColor = 'rgba(255, 255, 255, 0.45)';
-        spanIcon.style.width = '18px';
-        spanIcon.style.height = '18px';
-        spanIcon.style.margin = '0px';
-
-        const spanDesc = document.createElement('span');
-        spanDesc.style.color = 'rgba(255, 255, 255, 0.45)';
-        spanDesc.style.marginLeft = '5px';
-        spanDesc.textContent = cFileType.description;
-
-        spanRef.append(spanIcon, spanDesc);
+        // The backend-resolved extension covers an off-screen parent (no cMsg then).
+        const ext = (hasBackendContext ? msg.replied_to_attachment_extension : null) || cMsg?.attachments?.[0]?.extension;
+        attachment = ext ? getFileTypeInfo(ext) : { icon: 'attachment', description: 'Attachment' };
     }
-
-    // Avatar + name + snippet on ONE line (Discord-style one-liner). The snippet ellipsis-truncates
-    // to the message width; see .dmsg-reply / .dmsg-reply-snippet. Cached/asset-only avatar src; the
-    // profile_update handler swaps in the real one when the image lands.
-    const replyAvatar = createAvatarImg(getProfileAvatarSrc(cSenderProfile), 16);
-    replyAvatar.classList.add('dmsg-reply-avatar');
-    if (repliedToNpub) replyAvatar.dataset.npub = repliedToNpub;
-    if (spanRef) spanRef.classList.add('dmsg-reply-snippet');
-
-    // Name + avatar open the replied-to author's mini profile; clicking anywhere else on the quote
-    // (elbow, snippet) bubbles to the row's jump-to-message handler.
-    if (repliedToNpub) {
-        const openReplyProfile = (e) => { e.stopPropagation(); showMiniProfile(repliedToNpub, e.currentTarget); };
-        spanName.addEventListener('click', openReplyProfile);
-        replyAvatar.addEventListener('click', openReplyProfile);
-    }
-
-    divRef.appendChild(replyAvatar);
-    divRef.appendChild(spanName);
-    if (spanRef) divRef.appendChild(spanRef);
-
-    return divRef;
+    return { parentId: msg.replied_to, mine, npub, name, avatarSrc: getProfileAvatarSrc(profile), html, emojiTags, attachment };
 }
 
 /**
- * Fill in the reply strips of rows that quote `parentId`, now that it has arrived.
- * Rows render their quote once and never retry, so without this a reply delivered
- * ahead of its parent stays context-less until the chat is reopened.
+ * The parent of pending replies has arrived: their quotes re-derive from its version.
+ * A quote is a row that grew after layout, so the scroll compensator runs as for a
+ * media load, only when a row was actually waiting.
  */
 function backfillReplyContext(parentId) {
     if (!parentId) return;
-    const rows = document.querySelectorAll(`[data-reply-pending="${CSS.escape(parentId)}"]`);
-    if (!rows.length) return;
-    const chat = getChat(strOpenChat);
-    let inserted = false;
-    for (const row of rows) {
-        const msg = chat?.messages.find(m => m.id === row.id);
-        if (!msg) continue;
-        const replyDiv = _dmsgBuildReplyContext(msg, getProfile(msg.npub));
-        if (!replyDiv) continue;
-        const body = row.querySelector('.dmsg-body');
-        if (!body) continue;
-        body.insertBefore(replyDiv, body.firstChild);
-        row.classList.add('dmsg--has-reply');
-        delete row.dataset.replyPending;
-        inserted = true;
+    const waiting = document.querySelectorAll(`[data-reply-pending="${CSS.escape(parentId)}"]`).length;
+    VectorSvelte.touchMessage(parentId);
+    if (waiting) {
+        VectorSvelte.flushSync();
+        compensateChatScrollForResize();
     }
-    // A strip is a row that grew after layout — same class as a media load or the
-    // unread divider, so it goes through the same compensator or the view drifts
-    // off the bottom. Only when something actually landed: an unconditional call
-    // would soft-scroll on every arriving message.
-    if (inserted) compensateChatScrollForResize();
 }
+
 
 function _dmsgBuildBlockedPlaceholder(msg) {
     const blockedSpan = document.createElement('span');

@@ -15,16 +15,15 @@
     // here, so those writes persist.
     import { profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import { messageVersion } from '../lib/chatview.svelte.js';
+    import ReplyQuote from './ReplyQuote.svelte';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
         sender = null,     // the row author's profile as the caller resolved it
         streak = 'first',  // computed by the caller from the row above (vanilla owns streaks)
-        replyEl = undefined, // prebuilt .dmsg-reply element, null, or undefined = build it here
-        replyPending = '',   // replied_to id when the quoted parent has not arrived yet
         ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
         h,                 // vanilla helpers: getProfile, getName, getProfileAvatarSrc, twemojify,
-                           //   showTooltip, hideTooltip, formatHourMinute, fillContent, fillReactions
+                           //   showTooltip, hideTooltip, formatHourMinute, fillContent, replyView
     } = $props();
 
     // The live message. In the list island the `msg` prop itself changes (the array
@@ -54,11 +53,18 @@
     const shortSender = (msg.mine ? ctx.myNpub : (sender?.id || msg.npub || '')).substring(0, 8);
     // svelte-ignore state_referenced_locally
     const communityId = ctx.currentChat?.metadata?.custom_fields?.community_id || null;
-    // The quoted parent: prebuilt by the caller, or built here (list island).
-    // svelte-ignore state_referenced_locally
-    const reply = replyEl !== undefined ? replyEl : (msg.replied_to && h.buildReply ? h.buildReply(msg, sender) : null);
-    // svelte-ignore state_referenced_locally
-    const pendingReply = replyPending || (replyEl === undefined && msg.replied_to && !reply ? msg.replied_to : '');
+    // The quoted parent: resolved from the parent message (its version moves when it
+    // arrives or is edited) and the quoted author's profile. Null until context exists;
+    // the row then carries the parent id so a late arrival can be compensated for.
+    const quote = $derived.by(() => {
+        const parentId = current.replied_to;
+        if (!parentId) return null;
+        messageVersion(parentId);
+        const v = h.replyView(current, sender);
+        if (v?.npub) profileVersion(v.npub);
+        return v;
+    });
+    const pendingReply = $derived(current.replied_to && !quote ? current.replied_to : '');
 
     const status = $derived.by(() => { rev; return current.failed ? 'failed' : current.pending ? 'pending' : 'sent'; });
     // The body refills only when what it renders from changes: a reaction echo hands
@@ -126,11 +132,6 @@
     let avatarFailed = $state(false);
     $effect(() => { avatarSrc; avatarFailed = false; });
 
-    // The quoted parent sits ABOVE the header as the body's first child.
-    function replyInto(node) {
-        if (reply) node.insertBefore(reply, node.firstChild);
-    }
-
     // Content: exactly renderMessage's builders; refilled whole when the signature changes.
     function contentInto(node, { m, sig }) {
         let cur = sig;
@@ -177,7 +178,7 @@
 
 <div
     class="dmsg"
-    class:dmsg--has-reply={!!reply}
+    class:dmsg--has-reply={!!quote}
     id={current.id}
     data-sender={shortSender}
     data-mine={msg.mine ? 'true' : 'false'}
@@ -226,7 +227,10 @@
             <div class="dmsg-content" use:blockedInto></div>
         </div>
     {:else}
-    <div class="dmsg-body" use:replyInto>
+    <div class="dmsg-body">
+        {#if quote}
+            <ReplyQuote view={quote} {h} />
+        {/if}
         <div class="dmsg-header">
             <span class="dmsg-author btn" data-npub={authorFullId || undefined} use:name={displayName}></span>
             {#if isBot}
