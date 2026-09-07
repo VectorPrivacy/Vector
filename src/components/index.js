@@ -32,6 +32,11 @@ import { setMessageToolbar } from './lib/toolbar.svelte.js';
 import { uploadProgressed, downloadProgressed, transferDone, transferFailed } from './lib/attachments.svelte.js';
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
+import PackSidebar from './picker/PackSidebar.svelte';
+import RecentsGrid from './picker/RecentsGrid.svelte';
+import AllGrid from './picker/AllGrid.svelte';
+import SearchGrid from './picker/SearchGrid.svelte';
+import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
@@ -64,6 +69,7 @@ export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
 export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
+export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -304,4 +310,16 @@ export function mountFileBox(target, props) {
     const inst = mount(FileBox, { target, props });
     fileBoxHosts.set(target, inst);
     return inst;
+}
+
+/** Mount the emoji picker's rail and its three stock grids into their static hosts. */
+export function mountEmojiPicker({ sidebar, recents, all, results, resultsSection, h }) {
+    sidebar.replaceChildren();
+    recents.replaceChildren();
+    all.replaceChildren();
+    results.replaceChildren();
+    mount(PackSidebar, { target: sidebar, props: { h } });
+    mount(RecentsGrid, { target: recents, props: { h } });
+    mount(AllGrid, { target: all, props: { grid: all, h } });
+    mount(SearchGrid, { target: results, props: { section: resultsSection, h } });
 }

@@ -239,8 +239,6 @@ function closeEmojiPanel() {
     domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
 }
 
-let emojiLazyLoadObserver = null;
-const EMOJI_CHUNK_SIZE = 36; // 6 columns x 6 rows
 
 /**
  * Subscribed + owned NIP-30 emoji packs hydrated from vector-core, plus the
@@ -444,13 +442,8 @@ function _composeAndRenderPacks() {
     arrEmojiPacks = combined;
     _assignEmojiDisambig(arrEmojiPacks);
     emojiPacksLoaded = true;
-    const activeAddr = document.querySelector('.emoji-pack-tab.active')?.dataset.packId;
     renderEmojiPackSidebar();
     renderEmojiPackSections();
-    if (activeAddr) {
-        const tab = document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(activeAddr)}"]`);
-        if (tab) tab.classList.add('active');
-    }
     _refreshPackPreviewButtons();
 }
 
@@ -1028,56 +1021,38 @@ function _showPackTabMenu(pack, x, y) {
 }
 
 function renderEmojiPackSidebar() {
-    const sidebar = document.querySelector('.emoji-sidebar');
-    if (!sidebar) return;
-    sidebar.querySelectorAll('.emoji-pack-tab, .emoji-pack-tab-create').forEach(el => el.remove());
+    _ensureEmojiPickerIslands();
+    VectorSvelte.setPickerPacks(arrEmojiPacks);
+}
 
-    for (const pack of arrEmojiPacks) {
-        const btn = document.createElement('button');
-        btn.className = 'emoji-category-btn emoji-pack-tab';
-        if (packIsDead(pack)) btn.classList.add('emoji-pack-tab-dead');
-        btn.dataset.packId = pack.id;
-        // The pinned (non-subscribed) theme pack drags as the synced marker,
-        // not as a real subscription.
-        if (pack._isThemeSlot) btn.dataset.themeSlot = '1';
-        btn.title = pack.title || pack.identifier;
-        if (pack.image_url) {
-            const tabImg = document.createElement('img');
-            tabImg.alt = '';
-            // Kill the browser's native image drag — otherwise a slow press
-            // grabs the raw icon instead of starting our tab reorder.
-            tabImg.draggable = false;
-            bindCachedEmojiImg(tabImg, pack.image_url, 'emoji_pack_icon');
-            btn.appendChild(tabImg);
-        } else {
-            btn.classList.add('emoji-pack-tab-letter');
-            // <div> not <span>: the `.emoji-picker span` rule (line 3401 of
-            // styles.css) forces every span in the picker to a 30x30 circle,
-            // which destroys our inner plate dimensions.
-            const plate = document.createElement('div');
-            plate.className = 'emoji-pack-tab-letter-plate';
-            plate.textContent = _packTitleInitial(pack);
-            btn.appendChild(plate);
-        }
-        // Reorder-drag, long-press menu and rail scrolling all start as the same
-        // press, so ONE arbiter owns them — two independent handlers each with
-        // their own timers can't agree on who claimed the gesture. Right-click
-        // is wired inside it too.
-        _installPackTabGestures(btn, pack);
-        sidebar.appendChild(btn);
-    }
-
-    // "+" creator slot — always last so it stays the natural "add another"
-    // affordance regardless of how many packs the user has.
-    const createBtn = document.createElement('button');
-    createBtn.className = 'emoji-category-btn emoji-pack-tab-create';
-    createBtn.title = 'Create new pack';
-    createBtn.innerHTML = '<span class="icon icon-plus-circle"></span>';
-    createBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openEmojiPackCreator();
+// The rail and the three stock grids are islands over lib/picker.svelte.js; the pack
+// sections (canvas grids) and every gesture stay here.
+let _emojiPickerIslandsMounted = false;
+function _ensureEmojiPickerIslands() {
+    if (_emojiPickerIslandsMounted) return;
+    _emojiPickerIslandsMounted = true;
+    VectorSvelte.mountEmojiPicker({
+        sidebar: document.querySelector('.emoji-sidebar'),
+        recents: document.getElementById('emoji-recents-grid'),
+        all: document.getElementById('emoji-all-grid'),
+        results: document.getElementById('emoji-search-results'),
+        resultsSection: document.getElementById('emoji-search-results-container'),
+        h: {
+            bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
+            installTabGestures: (tab, pack) => _installPackTabGestures(tab, pack),
+            packIsDead: (pack) => packIsDead(pack),
+            packInitial: (pack) => _packTitleInitial(pack),
+            openCreator: () => openEmojiPackCreator(),
+            twemojify: (el) => twemojify(el),
+            stockTitle: (e) => stockEmojiTitle(e),
+            scrollRoot: () => document.querySelector('.emoji-main'),
+            recents: () => getMostUsedEmojis().slice(0, 24).concat(getMostUsedCustomEmojis(24))
+                .sort((a, b) => (b.used || 0) - (a.used || 0)).slice(0, 24),
+            all: () => arrEmojis,
+            search: (q) => searchEmojis(q).filter(e => e.name.toLowerCase().includes(q))
+                .concat(searchCustomEmojis(q)).sort((a, b) => (a.score || 0) - (b.score || 0)).slice(0, 48),
+        },
     });
-    sidebar.appendChild(createBtn);
 }
 
 // Vertical drag-to-reorder for the equipped-pack sidebar tabs. Same pointer-
@@ -1390,13 +1365,8 @@ function _applyPackTabReorder(draggedTab, target) {
 
     arrEmojiPacks = arr;
     _lastPacksSignature = null;   // force a repaint past the idempotence guard
-    const activeAddr = document.querySelector('.emoji-pack-tab.active')?.dataset.packId;
     renderEmojiPackSidebar();
     renderEmojiPackSections();
-    if (activeAddr) {
-        const t = document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(activeAddr)}"]`);
-        if (t) t.classList.add('active');
-    }
 
     const orderedIds = arrEmojiPacks.map(p => (p._isThemeSlot ? 'theme_slot' : p.id));
     invoke('reorder_emoji_packs', { orderedIds })
@@ -4962,125 +4932,10 @@ function stockEmojiTitle(e) {
     return e.shortcode ? `:${e.shortcode}:` : (e.display || e.name || '');
 }
 
-/**
- * Renders the Recently Used emojis immediately, then renders
- * the All Emojis grid after the last recent emoji image loads.
- */
+/** Recents re-derive from usage; the full grid rendered once at mount. */
 function renderEmojiPanel() {
-    const recentsGrid = document.getElementById('emoji-recents-grid');
-    const allGrid = document.getElementById('emoji-all-grid');
-
-    recentsGrid.innerHTML = '';
-    allGrid.innerHTML = '';
-
-    // Build Recently Used with DocumentFragment. Stock + custom merge
-    // by `.used` — frequent picks on either side rise together.
-    const recentsFragment = document.createDocumentFragment();
-    const stockRecents = getMostUsedEmojis().slice(0, 24);
-    const customRecents = getMostUsedCustomEmojis(24);
-    const mergedRecents = stockRecents.concat(customRecents)
-        .sort((a, b) => (b.used || 0) - (a.used || 0))
-        .slice(0, 24);
-
-    mergedRecents.forEach(item => {
-        if (item.isCustom) {
-            const span = document.createElement('span');
-            span.className = 'emoji-pack-emoji';
-            span.dataset.packShortcode = item.shortcode;
-            span.dataset.packUrl = item.url;
-            span.dataset.emojiTooltip = `:${item.shortcode}:`;
-            const img = document.createElement('img');
-            bindCachedEmojiImg(img, item.url, 'emoji');
-            img.alt = `:${item.shortcode}:`;
-            span.appendChild(img);
-            recentsFragment.appendChild(span);
-        } else {
-            const span = document.createElement('span');
-            span.textContent = item.emoji;
-            span.dataset.emoji = item.emoji;
-            span.dataset.emojiTooltip = stockEmojiTitle(item);
-            recentsFragment.appendChild(span);
-        }
-    });
-
-    recentsGrid.appendChild(recentsFragment);
-    twemojify(recentsGrid);
-
-    // Find the last <img> in recents and wait for it to load
-    const lastRecentImage = recentsGrid.lastElementChild?.querySelector('img');
-
-    if (lastRecentImage) {
-        lastRecentImage.addEventListener('load', () => {
-            renderAllEmojisGrid(allGrid);
-        }, { once: true });
-    } else {
-        // No recent emojis, render all grid immediately
-        renderAllEmojisGrid(allGrid);
-    }
-}
-
-/**
- * Renders the full All Emojis grid with lazy twemojification.
- * All spans are created upfront (cheap text nodes) to preserve scroll height,
- * but twemojify() is only called on chunks as they scroll into view.
- * The first span of each chunk is observed — no sentinel elements needed.
- */
-function renderAllEmojisGrid(allGrid) {
-    // Disconnect any previous observer (handles re-opens)
-    if (emojiLazyLoadObserver) {
-        emojiLazyLoadObserver.disconnect();
-        emojiLazyLoadObserver = null;
-    }
-
-    const allFragment = document.createDocumentFragment();
-    const chunkLeaders = [];
-
-    arrEmojis.forEach((emoji, i) => {
-        const span = document.createElement('span');
-        span.textContent = emoji.emoji;
-        span.dataset.emoji = emoji.emoji;
-        span.dataset.emojiTooltip = stockEmojiTitle(emoji);
-        allFragment.appendChild(span);
-
-        // Mark the first span of each chunk as the observation target
-        if (i % EMOJI_CHUNK_SIZE === 0) {
-            span.dataset.chunkIndex = chunkLeaders.length;
-            chunkLeaders.push(span);
-        }
-    });
-
-    allGrid.appendChild(allFragment);
-
-    // Build an array of all emoji spans (excluding non-emoji children) for slicing
-    const allSpans = Array.from(allGrid.querySelectorAll('span[data-emoji]'));
-
-    // Set up IntersectionObserver on the scroll container
-    const scrollContainer = document.querySelector('.emoji-main');
-    emojiLazyLoadObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const leader = entry.target;
-                if (!leader.dataset.twemojified) {
-                    leader.dataset.twemojified = '1';
-                    const idx = Number(leader.dataset.chunkIndex);
-                    const start = idx * EMOJI_CHUNK_SIZE;
-                    const end = Math.min(start + EMOJI_CHUNK_SIZE, allSpans.length);
-                    for (let i = start; i < end; i++) {
-                        twemojify(allSpans[i]);
-                    }
-                }
-                emojiLazyLoadObserver.unobserve(leader);
-            }
-        });
-    }, {
-        root: scrollContainer,
-        rootMargin: '0px 0px 200px 0px'
-    });
-
-    // Observe the first span of each chunk
-    chunkLeaders.forEach(leader => {
-        emojiLazyLoadObserver.observe(leader);
-    });
+    _ensureEmojiPickerIslands();
+    VectorSvelte.bumpPickerRecents();
 }
 
 function loadEmojiSections() {
@@ -5120,88 +4975,18 @@ function resetEmojiPicker() {
         section.style.display = 'block';
     });
 
-    // Remove search results container
-    const existingResults = document.getElementById('emoji-search-results-container');
-    if (existingResults) {
-        existingResults.remove();
-    }
+    VectorSvelte.setPickerQuery('');
 }
 
-// Update the emoji search event listener
+// Emoji search: the results grid derives from the query; the sections step aside.
 emojiSearch.addEventListener('input', (e) => {
-    // Skip emoji search if in GIF mode (GIF search is handled separately)
     if (pickerMode === PICKER_MODE_GIF) return;
-
     const search = e.target.value.toLowerCase();
-
     if (search) {
-        // Hide all sections and show search results
-        document.querySelectorAll('.emoji-section').forEach(section => {
+        document.querySelectorAll('.emoji-section:not(#emoji-search-results-container)').forEach(section => {
             section.style.display = 'none';
         });
-
-        // Unified merge: both searchEmojis and searchCustomEmojis return
-        // `score` baked-in with personal usage. Sort all by score so a
-        // heavily-used stock or custom emoji rises identically.
-        const stockResults = searchEmojis(search).filter(emoji =>
-            emoji.name.toLowerCase().includes(search)
-        );
-        const allCustom = searchCustomEmojis(search);
-
-        const resultsContainer = document.createElement('div');
-        resultsContainer.className = 'emoji-section';
-        resultsContainer.id = 'emoji-search-results-container';
-        resultsContainer.innerHTML = `
-            <div class="emoji-section-header">
-                <span class="header-text">Search Results</span>
-            </div>
-            <div class="emoji-grid" id="emoji-search-results"></div>
-        `;
-
-        const existingResults = document.getElementById('emoji-search-results-container');
-        if (existingResults) {
-            existingResults.remove();
-        }
-
-        document.querySelector('.emoji-main').prepend(resultsContainer);
-
-        const resultsGrid = document.getElementById('emoji-search-results');
-        resultsGrid.innerHTML = '';
-
-        const totalCap = 48;
-        const merged = stockResults.concat(allCustom)
-            .sort((a, b) => (a.score || 0) - (b.score || 0))
-            .slice(0, totalCap);
-
-        const renderCustomCell = (item) => {
-            // `.emoji-pack-emoji` re-uses the existing pack-emoji click
-            // handler, which inserts `:shortcode:` literal into the input.
-            const span = document.createElement('span');
-            span.className = 'emoji-pack-emoji';
-            span.dataset.packShortcode = item.shortcode;
-            span.dataset.packUrl = item.url;
-            span.dataset.emojiTooltip = `:${item.shortcode}:`;
-            const img = document.createElement('img');
-            bindCachedEmojiImg(img, item.url, 'emoji');
-            img.alt = `:${item.shortcode}:`;
-            span.appendChild(img);
-            return span;
-        };
-        const renderStockCell = (emoji) => {
-            const span = document.createElement('span');
-            span.textContent = emoji.emoji;
-            span.dataset.emoji = emoji.emoji;
-            span.dataset.emojiTooltip = stockEmojiTitle(emoji);
-            return span;
-        };
-
-        for (const item of merged) {
-            resultsGrid.appendChild(
-                item.isCustom ? renderCustomCell(item) : renderStockCell(item),
-            );
-        }
-
-        twemojify(resultsGrid);
+        VectorSvelte.setPickerQuery(search);
     } else {
         resetEmojiPicker();
     }
@@ -5313,10 +5098,10 @@ function _syncActiveSectionTab() {
     }
 
     const tab = _tabForSection(current);
-    if (!tab || tab.classList.contains('active')) return;
-    document.querySelectorAll('.emoji-category-btn').forEach(b => {
-        b.classList.toggle('active', b === tab);
-    });
+    if (!tab) return;
+    const key = tab.dataset.category || tab.dataset.packId;
+    if (!key || VectorSvelte.pickerState().active === key) return;
+    VectorSvelte.setPickerActive(key);
     // The rail scrolls too, so a pack scrolled past off-rail would highlight
     // invisibly. Only moves when the tab isn't comfortably in view.
     _railFollow(tab);
@@ -5358,9 +5143,7 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
     // creator open (emojis preserved), so don't switch tabs out from under it.
     if (_pc.open && !(await closeEmojiPackCreator())) return;
 
-    document.querySelectorAll('.emoji-category-btn').forEach(b => {
-        b.classList.toggle('active', b === btn);
-    });
+    VectorSvelte.setPickerActive(btn.dataset.category || btn.dataset.packId);
 
     let section = null;
     if (btn.dataset.category) {
