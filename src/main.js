@@ -8884,17 +8884,7 @@ async function openCommunityInvitePanel(chat) {
         </div>
 
         <div class="cmt-body">
-            <section class="cmt-section">
-                <div class="cmt-section-head">
-                    <span class="icon icon-share"></span>
-                    <div>
-                        <p class="cmt-section-title">Invite Links <span id="cmt-mode" class="cmt-mode-pill"></span></p>
-                        <p class="cmt-section-desc">Anyone with a link can join. Revoke every link to go private again.</p>
-                    </div>
-                </div>
-                <div id="cmt-links"></div>
-                <button id="cmt-new-link" class="cmt-btn cmt-btn-secondary"><span class="icon icon-plus"></span>Create invite link</button>
-            </section>
+            <div id="cmt-links"></div>
 
             <section class="cmt-section">
                 <div class="cmt-section-head">
@@ -8931,7 +8921,6 @@ async function openCommunityInvitePanel(chat) {
     // cascade of reflows as each fetch lands.
 
     const status = box.querySelector('#cmt-status');
-    const linksDiv = box.querySelector('#cmt-links');
     let statusTimer = null;
     const setStatus = (msg, isError) => {
         clearTimeout(statusTimer);   // a new message cancels any pending auto-dismiss
@@ -8948,7 +8937,9 @@ async function openCommunityInvitePanel(chat) {
     const setBusy = (on) => {
         busy = on;
         box.classList.toggle('cmt-busy', on);
+        VectorSvelte.ilSetBusy(on);
         box.querySelectorAll('button, input').forEach(el => {
+            if (el.closest('#cmt-links')) return;   // the link section reads the lock from its store
             if (on) { el.dataset.cmtPrev = el.disabled ? '1' : '0'; el.disabled = true; }
             else if (el.dataset.cmtPrev !== undefined) { el.disabled = el.dataset.cmtPrev === '1'; delete el.dataset.cmtPrev; }
         });
@@ -8961,7 +8952,6 @@ async function openCommunityInvitePanel(chat) {
     let otherCreatorLinkCount = 0; // OTHER creators' links per the folded registry (the remote part)
     let communityIsPublic = false; // the folded mode itself — the ONLY thing the Public⇄Private confirm may gate on
     const renderLinks = async () => {
-        linksDiv.innerHTML = '';
         let links = [];
         try { links = await invoke('list_public_invites', { communityId }); } catch (_) {}
         currentLinkCount = links.length;
@@ -8972,138 +8962,52 @@ async function openCommunityInvitePanel(chat) {
             .filter(c => c.npub !== strPubkey)
             .reduce((n, c) => n + (c.count || 0), 0);
         communityIsPublic = !!summary.is_public;
-        const modeEl = box.querySelector('#cmt-mode');
-        if (modeEl) {
-            const pub = !!summary.is_public;
-            modeEl.textContent = pub ? 'Public' : 'Private';
-            modeEl.classList.toggle('is-public', pub);
-            modeEl.title = pub ? 'Anyone with a link can join' : 'Invite-only — no public links';
+        VectorSvelte.ilSet(links, summary);
+    };
+
+    const revokeLink = async (link) => {
+        // Revoking the last GLOBAL link (across every creator) flips the community back to Private —
+        // a re-founding rekey that cuts off link-joined lurkers. Confirm + warn (it's slow). If
+        // another creator still has a link, this revoke is a quiet, instant edit (mode stays Public).
+        // Mirror the backend's would_empty_aggregate: my-last-link is LOCAL truth (currentLinkCount,
+        // never lags a fresh create), others' links are the folded-registry remote part — predicting
+        // off the registry's count of MY OWN links would miss the modal when the fold lags my create.
+        const wouldPrivatize = currentLinkCount === 1 && otherCreatorLinkCount === 0;
+        if (wouldPrivatize) {
+            const ok = await popupConfirm('Make community private?',
+                'Revoking the last invite link makes this community <b>private</b> again. This can take a few seconds.',
+                false, '', 'vector_warning.svg', '', 'Make private');
+            if (!ok) return;
         }
-        // Other creators' active links (mine are listed individually below). Surfaces the multi-creator
-        // reality: "Alice has 2 active invite links" — so the mode isn't a mystery when I hold no links.
-        const others = (summary.creators || []).filter(c => c.npub !== strPubkey && (c.count || 0) > 0);
-        if (others.length) {
-            const note = document.createElement('div');
-            note.className = 'cmt-others';
-            const expandLines = () => {
-                for (const c of others) {
-                    const line = document.createElement('p');
-                    line.className = 'cmt-other-line';
-                    line.textContent = `${systemEventName(c.npub)} has ${c.count} active invite link${c.count === 1 ? '' : 's'}`;
-                    note.appendChild(line);
-                }
-            };
-            if (others.length > 1) {
-                // Space-frugal for large communities: 2+ other creators collapse to one
-                // accent line; the per-creator breakdown appears on tap.
-                const total = others.reduce((n, c) => n + (c.count || 0), 0);
-                note.classList.add('collapsed');
-                const toggle = document.createElement('p');
-                toggle.className = 'cmt-other-line cmt-others-toggle';
-                toggle.textContent = `View ${total} other invite${total === 1 ? '' : 's'}`;
-                toggle.onclick = () => {
-                    toggle.remove();
-                    note.classList.remove('collapsed');
-                    expandLines();
-                };
-                note.appendChild(toggle);
+        setBusy(true); // lock the whole panel — revoking the last link re-keys, a critical op
+        VectorSvelte.ilSetRevoking(link.token);
+        // Privatizing re-keys (multi-second): show the guided progress ring. A plain revoke is quick.
+        const prog = wouldPrivatize ? await showRekeyProgressModal('Making community private') : null;
+        if (!wouldPrivatize) setStatus('Revoking…');
+        try {
+            await invoke('revoke_public_invite', { communityId, token: link.token });
+            if (prog) await prog.finish('Community is now private');
+            setStatus('');
+            setBusy(false);
+            if (prog) prog.close();
+            await renderLinks();
+        } catch (e) {
+            setBusy(false);
+            if (prog) prog.close();
+            setStatus('');
+            if (wouldPrivatize) {
+                // Privatizing re-keys; on a bunker account that fails with a long explanation —
+                // show it as a persistent notice rather than a one-line status that scrolls away.
+                await popupConfirm("Couldn't make private", escapeHtml(String(e)), true, '', 'vector_warning.svg');
             } else {
-                expandLines();
+                setStatus(String(e), true);
             }
-            linksDiv.appendChild(note);
-        }
-        if (!links.length) {
-            if (!others.length) linksDiv.innerHTML = '<p class="cmt-empty">No active links yet. Create one to start inviting.</p>';
-            else linksDiv.insertAdjacentHTML('beforeend', '<p class="cmt-empty">You have no links of your own yet. Create one to start inviting.</p>');
-            return;
-        }
-        for (const link of links) {
-            const row = document.createElement('div');
-            row.className = 'cmt-link-row';
-            const url = document.createElement('span');
-            url.className = 'cmt-link-url';
-            // Labeled chip: glyph + the link's label (e.g. "Twitter"), falling back to a short id when no
-            // label was set. A bare token tail looked like gibberish. Full URL stays for copy + hover.
-            url.innerHTML = '<span class="icon icon-share cmt-link-glyph"></span>';
-            const lbl = (link.label || '').trim();
-            url.append(lbl || `Invite · ${(link.token || link.url).slice(-8)}`);
-            url.title = link.url;
-            // Join counter: distinct members who joined via this link.
-            const joins = link.join_count || 0;
-            const count = document.createElement('span');
-            count.className = 'cmt-link-count';
-            count.title = `${joins} member${joins === 1 ? '' : 's'} joined via this link`;
-            // The base .icon is position:absolute and fills its nearest positioned box at 65% — so it
-            // needs a sized, relative container or it escapes to the panel corner.
-            count.innerHTML = '<span class="cmt-link-count-ico"><span class="icon icon-users-multi"></span></span>';
-            count.append(String(joins));
-            const copyBtn = document.createElement('button');
-            copyBtn.className = 'cmt-icon-btn'; copyBtn.title = 'Copy link';
-            copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-            copyBtn.onclick = () => {
-                navigator.clipboard.writeText(link.url);
-                copyBtn.classList.add('cmt-copied');
-                copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                setTimeout(() => { copyBtn.classList.remove('cmt-copied'); copyBtn.innerHTML = '<span class="icon icon-copy"></span>'; }, 1200);
-            };
-            const revokeBtn = document.createElement('button');
-            revokeBtn.className = 'cmt-icon-btn cmt-icon-btn-danger'; revokeBtn.title = 'Revoke link';
-            revokeBtn.innerHTML = '<span class="icon icon-trash"></span>';
-            revokeBtn.onclick = async () => {
-                // Revoking the last GLOBAL link (across every creator) flips the community back to Private —
-                // a re-founding rekey that cuts off link-joined lurkers. Confirm + warn (it's slow). If
-                // another creator still has a link, this revoke is a quiet, instant edit (mode stays Public).
-                // Mirror the backend's would_empty_aggregate: my-last-link is LOCAL truth (currentLinkCount,
-                // never lags a fresh create), others' links are the folded-registry remote part — predicting
-                // off the registry's count of MY OWN links would miss the modal when the fold lags my create.
-                const wouldPrivatize = currentLinkCount === 1 && otherCreatorLinkCount === 0;
-                if (wouldPrivatize) {
-                    const ok = await popupConfirm('Make community private?',
-                        'Revoking the last invite link makes this community <b>private</b> again. This can take a few seconds.',
-                        false, '', 'vector_warning.svg', '', 'Make private');
-                    if (!ok) return;
-                }
-                setBusy(true); // lock the whole panel — revoking the last link re-keys, a critical op
-                revokeBtn.innerHTML = '<span class="icon icon-loading spin"></span>';
-                // Privatizing re-keys (multi-second): show the guided progress ring. A plain revoke is quick.
-                const prog = wouldPrivatize ? await showRekeyProgressModal('Making community private') : null;
-                if (!wouldPrivatize) setStatus('Revoking…');
-                try {
-                    await invoke('revoke_public_invite', { communityId, token: link.token });
-                    if (prog) await prog.finish('Community is now private');
-                    setStatus('');
-                    setBusy(false);
-                    if (prog) prog.close();
-                    await renderLinks();
-                } catch (e) {
-                    setBusy(false);
-                    if (prog) prog.close();
-                    revokeBtn.innerHTML = '<span class="icon icon-trash"></span>';
-                    setStatus('');
-                    if (wouldPrivatize) {
-                        // Privatizing re-keys; on a bunker account that fails with a long explanation —
-                        // show it as a persistent notice rather than a one-line status that scrolls away.
-                        await popupConfirm("Couldn't make private", escapeHtml(String(e)), true, '', 'vector_warning.svg');
-                    } else {
-                        setStatus(String(e), true);
-                    }
-                }
-            };
-            row.append(url, count, copyBtn, revokeBtn);
-            linksDiv.appendChild(row);
+        } finally {
+            VectorSvelte.ilSetRevoking(null);
         }
     };
-    await renderLinks();
-    // Live-refresh when a control change folds in (a remote create/revoke by another admin, or our own
-    // privatize re-founding), so the mode pill + per-creator counts update without a manual close/reopen.
-    // Skipped while a local critical op is in flight (its own handler re-renders on completion).
-    unlistenRefresh = await listen('community_refreshed', (evt) => {
-        const cid = evt.payload?.community_id || evt.payload;
-        if (cid === communityId && !busy) renderLinks();
-    });
 
-    box.querySelector('#cmt-new-link').onclick = async (e) => {
-        const btn = e.currentTarget; // capture before await — currentTarget is null after it
+    const createLink = async () => {
         // The FIRST link ANYWHERE (across all creators) flips a private community to Public (anyone with the
         // link can join). Confirm that boundary crossing; if it's already Public (someone holds a link), a
         // new link doesn't change the mode, so skip the warning. Gate on the folded MODE, never on a derived
@@ -9120,11 +9024,24 @@ async function openCommunityInvitePanel(chat) {
         if (labelInput === false) return; // cancelled
         const label = (typeof labelInput === 'string' && labelInput.trim()) ? labelInput.trim() : null;
         setBusy(true); // lock the panel — the FIRST link flips public + the publish is a critical op
-        btn.innerHTML = '<span class="icon icon-loading spin"></span>Creating…'; setStatus('Creating link...');
+        VectorSvelte.ilSetCreating(true); setStatus('Creating link...');
         try { await invoke('create_public_invite', { communityId, expiresInSecs: null, label }); setStatus(''); }
         catch (err) { setStatus(String(err), true); }
-        finally { setBusy(false); btn.innerHTML = '<span class="icon icon-plus"></span>Create invite link'; await renderLinks(); }
+        finally { setBusy(false); VectorSvelte.ilSetCreating(false); await renderLinks(); }
     };
+
+    VectorSvelte.ilReset();
+    VectorSvelte.mountInviteLinks(box.querySelector('#cmt-links'), {
+        h: { myNpub: strPubkey, name: systemEventName, create: createLink, revoke: revokeLink },
+    });
+    await renderLinks();
+    // Live-refresh when a control change folds in (a remote create/revoke by another admin, or our own
+    // privatize re-founding), so the mode pill + per-creator counts update without a manual close/reopen.
+    // Skipped while a local critical op is in flight (its own handler re-renders on completion).
+    unlistenRefresh = await listen('community_refreshed', (evt) => {
+        const cid = evt.payload?.community_id || evt.payload;
+        if (cid === communityId && !busy) renderLinks();
+    });
 
     // ── Direct Invites: a multi-select contact list (DM contacts) with paste-to-add ──
     const npubInput = box.querySelector('#cmt-npub');

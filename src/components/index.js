@@ -48,6 +48,8 @@ import ModStats from './moderation/ModStats.svelte';
 import ModChrome from './moderation/ModChrome.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
 import MiniAppsGrid from './miniapps/MiniAppsGrid.svelte';
+import InviteLinks from './community/InviteLinks.svelte';
+export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 import Marketplace from './marketplace/Marketplace.svelte';
 import MarketplaceFilters from './marketplace/Filters.svelte';
 import AppDetails from './marketplace/AppDetails.svelte';
@@ -411,4 +413,10 @@ export function mountMarketplace({ body, filters, details, h }) {
     mount(Marketplace, { target: body, props: { h } });
     mount(MarketplaceFilters, { target: filters, props: {} });
     mount(AppDetails, { target: details, props: { h } });
+}
+
+/** Mount the invite panel's link section into `host` (#cmt-links); the panel is built per open. */
+export function mountInviteLinks(host, { h }) {
+    host.replaceChildren();
+    return mount(InviteLinks, { target: host, props: { h } });
 }
