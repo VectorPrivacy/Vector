@@ -34,11 +34,15 @@
         if (end <= start) return [];
         return deriveWindow(msgs, start, end, h.rules);
     });
+    // A row's key outlives its id: a send swaps the pending id for the real one, and the
+    // same row must carry on (the media inside it keeps playing) rather than remount.
+    function rowKey(m) { return m._key || (m._key = m.id); }
+
     const dividerId = $derived(divider.targetId);
     const dividerAfter = $derived(divider.after);
 </script>
 
-{#each items as it (it.msg.id)}
+{#each items as it (rowKey(it.msg))}
     {#if it.dayBreak}
         <p class="msg-inline-timestamp date-divider">{@html h.dayLabel(it.msg.at)}</p>
     {/if}

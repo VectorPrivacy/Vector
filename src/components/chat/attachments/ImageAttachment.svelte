@@ -66,18 +66,15 @@
             {/if}
         {/if}
     </div>
-{:else if uploading}
-    <div style="position: relative; display: block; line-height: 0; max-width: 100%;" bind:this={container}>
-        <img class="dmsg-image-attachment" src={real} alt="" style="max-width: 100%; height: auto; border-radius: 8px; opacity: 0.25;"
-             onload={() => h.onImageLoad()} use:preview use:pin>
-        <UploadOverlay pendingId={msg.id} {h} />
-    </div>
 {:else}
-    <div style="position: relative; display: inline-block;" bind:this={container}>
+    <div style="position: relative; display: inline-block; line-height: 0; max-width: 100%;" bind:this={container}>
         {#if att.extension === 'svg'}
-            <img data-attachment-type="svg" src={real} alt="" style="width: 25vw; height: auto; border-radius: 8px;" onload={() => h.onImageLoad()} use:preview use:badge>
+            <img data-attachment-type="svg" src={real} alt="" style="width: 25vw; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
         {:else}
-            <img class="dmsg-image-attachment" src={real} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" onload={() => h.onImageLoad()} use:preview use:badge>
+            <img class="dmsg-image-attachment" src={real} alt="" style="max-width: 100%; height: auto; border-radius: 8px;" style:opacity={uploading ? '0.25' : null} onload={() => h.onImageLoad()} use:preview use:badge use:pin>
+        {/if}
+        {#if uploading}
+            <UploadOverlay pendingId={msg.id} {h} />
         {/if}
     </div>
 {/if}

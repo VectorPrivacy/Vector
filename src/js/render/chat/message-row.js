@@ -941,9 +941,13 @@ function _dmsgCanAddReactionGroup(msg, uniqueCount) {
 /** The fields the content builders render from, as one comparable string. A
  *  message whose signature is unchanged (a reaction, a profile) keeps its body:
  *  a refill would reset video playback, audio playhead and spoiler reveals. */
+/**
+ * What the body's leaves are built from. Deliberately NOT the id, the send state or the
+ * attachments: a send swaps the id and clears pending, and the attachments derive on their
+ * own, so none of that may rebuild the text and the cards.
+ */
 function _dmsgContentSig(msg) {
-    const parts = [msg.id, msg.content, msg.replied_to, msg.at, !!msg.pending, !!msg.failed, !!msg.edited];
-    for (const a of (msg.attachments || [])) parts.push(a.id, !!a.downloaded, a.path);
+    const parts = [msg.content, msg.replied_to, !!msg.edited];
     // Link-preview metadata arrives async via message_update.
     const pm = msg.preview_metadata;
     if (pm) parts.push(pm.og_title, pm.og_image, pm.og_description, pm.title, pm.description);

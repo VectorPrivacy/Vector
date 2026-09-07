@@ -34,9 +34,12 @@
     {#if text}
         <span style="display:contents" use:leaf={text}></span>
     {/if}
-    {#if msg.attachments?.length}
-        <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} {h} /></div>
-    {/if}
+{/key}
+<!-- Outside the key: attachments derive on their own, so a send finishing keeps its media. -->
+{#if msg.attachments?.length}
+    <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} {h} /></div>
+{/if}
+{#key sig}
     {#if crypto}
         <span style="display:contents" use:leaf={crypto}></span>
     {/if}

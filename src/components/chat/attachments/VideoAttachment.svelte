@@ -19,17 +19,12 @@
     }
 </script>
 
-{#if uploading}
-    <div style="position: relative; display: block; line-height: 0; max-width: 100%;" bind:this={container}>
-        <!-- svelte-ignore a11y_media_has_caption -->
-        <video controlsList="nodownload" preload="metadata" playsinline src={h.mediaUrl(att.path)}
-               style="height: auto; border-radius: 8px; cursor: pointer; opacity: 0.25;"
-               onloadedmetadata={(e) => h.onVideoMeta(e.currentTarget)} use:pin></video>
-        <UploadOverlay pendingId={msg.id} {h} />
-    </div>
-{:else}
+<div style="position: relative; display: block; line-height: 0; max-width: 100%;" bind:this={container}>
     <!-- svelte-ignore a11y_media_has_caption -->
-    <video controlsList="nodownload" controls preload="metadata" playsinline src={h.mediaUrl(att.path)}
-           style="height: auto; border-radius: 8px; cursor: pointer;"
-           onloadedmetadata={(e) => h.onVideoMeta(e.currentTarget)}></video>
-{/if}
+    <video controlsList="nodownload" controls={!uploading} preload="metadata" playsinline src={h.mediaUrl(att.path)}
+           style="height: auto; border-radius: 8px; cursor: pointer;" style:opacity={uploading ? '0.25' : null}
+           onloadedmetadata={(e) => h.onVideoMeta(e.currentTarget)} use:pin></video>
+    {#if uploading}
+        <UploadOverlay pendingId={msg.id} {h} />
+    {/if}
+</div>

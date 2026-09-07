@@ -4222,7 +4222,8 @@ async function setupRustListeners() {
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
 
-        // Update it
+        // Update it. The row's key rides along, so the finalized message keeps its row.
+        evt.payload.message._key = cChat.messages[nMsgIdx]._key || evt.payload.old_id;
         cChat.messages[nMsgIdx] = evt.payload.message;
 
         // Re-apply in-flight optimistic reactions this echo predates: during a

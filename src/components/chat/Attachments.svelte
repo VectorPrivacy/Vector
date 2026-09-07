@@ -24,7 +24,8 @@
     });
 </script>
 
-{#each msg.attachments || [] as att (att.id)}
+<!-- By position, not id: an upload's id changes when it lands, and its picture must not remount. -->
+{#each msg.attachments || [] as att, i (i)}
     {#if att.downloaded}
         {#if h.isImage(att.extension)}
             <ImageAttachment {att} {msg} {ctx} {sender} {h} />
