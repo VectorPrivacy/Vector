@@ -132,8 +132,12 @@ const _dmsgRowHelpers = {
     autoDownload: (att, msg, sender) => _dmsgStartDownload(att, msg, sender),
     startDownload: (att, msg, sender) => _dmsgStartDownload(att, msg, sender),
     renderAudio: (node, att, msg) => handleAudioAttachment(att, node, msg),
-    fileBox: (node, att, state, opts) => _dmsgFileBoxLeaf(node, att, state, opts || {}),
     attachUploadProgress: (node, msg) => _dmsgAttachUploadProgress(node, msg),
+    fileTypeInfo: (ext) => getFileTypeInfo(ext),
+    loadMiniAppInfo: (path) => loadMiniAppInfo(path),
+    marketplaceApp: (hash) => invoke('marketplace_get_app_by_hash', { fileHash: hash }),
+    backendCachedImg: (img, url) => bindBackendCachedImg(img, url),
+    openFile: (att, msg) => _dmsgOpenFile(att, msg),
     assetUrl: (path) => convertFileSrc(path),
     mediaUrl: (path) => mediaUrl(path),
     isSpoiler: (att) => isSpoilerAttachment(att),
@@ -145,7 +149,7 @@ const _dmsgRowHelpers = {
     attachFileExtBadge: (img, container, ext) => attachFileExtBadge(img, container, ext),
     cancelUpload: (pendingId) => invoke('cancel_upload', { pendingId }),
     openChat: () => strOpenChat,
-    formatBytes: (n) => formatBytes(n),
+    formatBytes: (n, dec, short) => formatBytes(n, dec, short),
     buildCryptoAddress: (msg) => { const c = detectCryptoAddress(msg.content); return c ? renderCryptoAddress(c) : null; },
     renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
     renderCommunityInvitePreviews: (node, text) => renderCommunityInvitePreviews(node, text),
@@ -556,63 +560,37 @@ function _dmsgStartDownload(att, msg, sender) {
         .catch(() => downloadingAttachmentIds.delete(att.id));
 }
 
-/** A file box in `node`: a downloaded file (opens / reveals), or a download / downloading state. */
-function _dmsgFileBoxLeaf(node, att, state, opts) {
-    if (state === 'downloaded') {
-        _dmsgRenderFileAttachment(node, opts.msg, att);
-        return;
-    }
-    const { fileDiv, statusSpan } = createFileBox(att, state);
-    if (opts.failed && statusSpan) {
-        const reason = (att.download_error || '').slice(0, 64);
-        statusSpan.innerText = reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
-    }
-    if (opts.onClick) fileDiv.addEventListener('click', opts.onClick, { once: true });
-    node.appendChild(fileDiv);
-}
-
-function _dmsgRenderFileAttachment(target, msg, cAttachment) {
-    const { fileDiv, isMiniApp } = createFileBox(cAttachment, 'downloaded');
-    fileDiv.addEventListener('click', async (e) => {
-        const path = e.currentTarget.getAttribute('filepath');
-        if (!path) return;
-
-        if (isMiniApp) {
-            try {
-                // URL-shared Mini Apps pass a synthetic attachment that is not
-                // in msg.attachments — fall back to the one we rendered from
-                const attachment = msg.attachments.find(a => a.path === path) || cAttachment;
-                const topicId = attachment?.webxdc_topic || null;
-                const shouldOpen = await checkChatMiniAppPermissions(path);
-                if (!shouldOpen) return;
-                // A declined Tor consent opens nothing — the optimistic
-                // "Playing" below must not paint over a cancelled launch.
-                const opened = await openMiniApp(path, strOpenChat, msg.id, null, topicId);
-                if (opened === false) return;
-                if (fileDiv._updateMiniAppStatus) {
-                    if (topicId) {
-                        invoke('miniapp_get_realtime_status', { topicId })
-                            .then(status => fileDiv._updateMiniAppStatus(true, status?.peer_count || 0, status?.peers))
-                            .catch(() => fileDiv._updateMiniAppStatus(true, 0, []));
-                    } else {
-                        fileDiv._updateMiniAppStatus(true, 0);
-                    }
-                }
-            } catch (err) {
-                console.error('Failed to open Mini App:', err);
-                // Surface WHY (e.g. "Invalid Mini App package: Missing index.html") instead of a silent
-                // no-op — the open threw before any optimistic status, so the card stays "Click to Play".
-                showToast(String(err));
+/** Open a downloaded file: a Mini App launches (and reports its session), a file reveals or opens. */
+async function _dmsgOpenFile(att, msg) {
+    const path = att.path;
+    if (!path) return;
+    if (getFileTypeInfo((att.extension || '').toLowerCase()).isMiniApp) {
+        try {
+            const topicId = att.webxdc_topic || null;
+            const shouldOpen = await checkChatMiniAppPermissions(path);
+            if (!shouldOpen) return;
+            // A declined Tor consent opens nothing; "Playing" must not paint over a cancelled launch.
+            const opened = await openMiniApp(path, strOpenChat, msg.id, null, topicId);
+            if (opened === false) return;
+            const key = topicId || `att:${att.id}`;
+            if (topicId) {
+                invoke('miniapp_get_realtime_status', { topicId })
+                    .then(status => VectorSvelte.setMiniappStatus(key, { active: true, peerCount: status?.peer_count || 0, peers: status?.peers }))
+                    .catch(() => VectorSvelte.setMiniappStatus(key, { active: true, peerCount: 0, peers: [] }));
+            } else {
+                VectorSvelte.setMiniappStatus(key, { active: true, peerCount: 0 });
             }
-        } else if (platformFeatures.os === 'android') {
-            // No file manager to reveal into — open the file itself
-            // (an .apk routes through the system installer flow)
-            openAndroidAttachment(path);
-        } else {
-            revealItemInDir(path);
+        } catch (err) {
+            console.error('Failed to open Mini App:', err);
+            // Say WHY (e.g. a package missing index.html) rather than a silent no-op.
+            showToast(String(err));
         }
-    });
-    target.appendChild(fileDiv);
+    } else if (platformFeatures.os === 'android') {
+        // No file manager to reveal into: open the file itself (an .apk routes through the installer).
+        openAndroidAttachment(path);
+    } else {
+        revealItemInDir(path);
+    }
 }
 
 function _dmsgAttachUploadProgress(target, msg) {

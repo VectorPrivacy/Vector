@@ -3656,89 +3656,11 @@ async function setupRustListeners() {
     // Record the latest progress per pending_id so renderMessage can pick it up on creation.
     _on('attachment_upload_progress', async (evt) => {
         pendingUploadProgress.set(evt.payload.id, evt.payload.progress);
-        VectorSvelte.setUploadProgress(evt.payload.id, evt.payload.progress);
+        VectorSvelte.uploadProgressed(evt.payload.id, evt.payload.progress, evt.payload.bytesSent);
+        // The audio player's upload ring is still the app's element.
         const divUpload = document.getElementById(evt.payload.id + '_file');
-        if (divUpload) {
-            divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
-        }
-        // Upload speed: derive bytes/sec from the cumulative bytesSent deltas, with the same adaptive
-        // lerp as the download speed so the displayed rate animates smoothly between chunks.
-        const bytes = evt.payload.bytesSent;
-        if (bytes != null) {
-            const now = performance.now();
-            let st = uploadSpeedState.get(evt.payload.id);
-            if (!st) {
-                st = { display: 0, target: 0, factor: 0.05, lastBytes: bytes, lastTime: now, raf: null };
-                uploadSpeedState.set(evt.payload.id, st);
-            } else {
-                const dtSec = (now - st.lastTime) / 1000;
-                if (dtSec > 0.05) {
-                    const bps = (bytes - st.lastBytes) / dtSec;
-                    if (bps >= 0) st.target = bps;
-                    st.factor = Math.min(0.15, Math.max(0.008, 3.0 / (dtSec * 60)));
-                    st.lastBytes = bytes;
-                    st.lastTime = now;
-                }
-            }
-            if (!st.raf) st.raf = requestAnimationFrame(() => updateUploadSpeedDisplay(evt.payload.id));
-        }
-        if (evt.payload.progress >= 100) {
-            const st = uploadSpeedState.get(evt.payload.id);
-            if (st && st.raf) cancelAnimationFrame(st.raf);
-            uploadSpeedState.delete(evt.payload.id);
-        }
+        if (divUpload) divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
     });
-
-    // Smoothly interpolated download speed display: id → { display, target, factor, lastUpdate, raf }
-    const downloadSpeedLerp = new Map();
-
-    function updateSpeedDisplay(attachId) {
-        const lerp = downloadSpeedLerp.get(attachId);
-        if (!lerp) return;
-
-        // Adaptive lerp: factor is tuned so animation spans ~1 chunk interval
-        lerp.display += (lerp.target - lerp.display) * lerp.factor;
-
-        // Snap when close enough (within 0.5 KB/s)
-        if (Math.abs(lerp.target - lerp.display) < 500) lerp.display = lerp.target;
-
-        const escapedId = CSS.escape(attachId);
-        const speedDecimals = lerp.display >= 1048576 ? 2 : 0;
-        const speedText = lerp.display > 0 ? ` · ${formatBytes(lerp.display, speedDecimals, true)}/s` : '';
-        const statusEls = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
-        for (const spinner of statusEls) {
-            const fileBox = spinner.closest('.custom-audio-player');
-            if (!fileBox) continue;
-            const status = fileBox.querySelector('.file-status');
-            if (status) status.innerText = `Downloading${speedText}`;
-        }
-
-        // Keep animating if not settled
-        if (lerp.display !== lerp.target) {
-            lerp.raf = requestAnimationFrame(() => updateSpeedDisplay(attachId));
-        } else {
-            lerp.raf = null;
-        }
-    }
-
-    // Smoothly interpolated UPLOAD speed display (mirror of the download speed): id → { display,
-    // target, factor, lastBytes, lastTime, raf }. Computed from the cumulative bytesSent deltas.
-    const uploadSpeedState = new Map();
-    function updateUploadSpeedDisplay(pendingId) {
-        const st = uploadSpeedState.get(pendingId);
-        if (!st) return;
-        const spinner = document.getElementById(pendingId + '_file');
-        const sizeEl = spinner && spinner.closest('.custom-audio-player')?.querySelector('.file-attach-size');
-        // No rate target (image/video/audio upload has no file-box size text, or the spinner hasn't
-        // rendered yet): pause the loop so it doesn't spin doing nothing. The next progress event re-arms.
-        if (!sizeEl) { st.raf = null; return; }
-        st.display += (st.target - st.display) * st.factor;
-        if (Math.abs(st.target - st.display) < 500) st.display = st.target;
-        const dec = st.display >= 1048576 ? 2 : 0;
-        sizeEl.innerText = st.display > 0 ? `Uploading · ${formatBytes(st.display, dec, true)}/s` : 'Uploading';
-        if (st.display !== st.target) st.raf = requestAnimationFrame(() => updateUploadSpeedDisplay(pendingId));
-        else st.raf = null;
-    }
 
     // Listen for backend error toasts
     _on('show_toast', (evt) => {
@@ -3748,57 +3670,7 @@ async function setupRustListeners() {
     // Listen for Attachment Download Progress events
     _on('attachment_download_progress', async (evt) => {
         if (!strOpenChat) return;
-        const attachId = evt.payload.id;
-        const escapedId = CSS.escape(attachId);
-
-        // Update speed lerp target from backend
-        if (evt.payload.bytesPerSec != null && evt.payload.bytesPerSec > 0) {
-            const now = performance.now();
-            let lerp = downloadSpeedLerp.get(attachId);
-            if (!lerp) {
-                lerp = { display: evt.payload.bytesPerSec, target: evt.payload.bytesPerSec, factor: 0.05, lastUpdate: now, raf: null };
-                downloadSpeedLerp.set(attachId, lerp);
-            } else {
-                // Adapt lerp factor based on time between chunks
-                // factor = 3 / (dt_seconds * 60) → animation reaches ~95% in ~dt seconds
-                const dtSec = (now - lerp.lastUpdate) / 1000;
-                if (dtSec > 0.05) {
-                    lerp.factor = Math.min(0.15, Math.max(0.008, 3.0 / (dtSec * 60)));
-                }
-                lerp.target = evt.payload.bytesPerSec;
-                lerp.lastUpdate = now;
-            }
-            if (!lerp.raf) {
-                lerp.raf = requestAnimationFrame(() => updateSpeedDisplay(attachId));
-            }
-        }
-
-        // Clean up on completion
-        if (evt.payload.progress >= 100) {
-            const lerp = downloadSpeedLerp.get(attachId);
-            if (lerp && lerp.raf) cancelAnimationFrame(lerp.raf);
-            downloadSpeedLerp.delete(attachId);
-        }
-
-        VectorSvelte.setDownloadProgress(attachId, evt.payload.progress);
-        // Update ALL conical progress spinners with this attachment ID (handles deduplication)
-        const spinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
-        if (spinners.length) {
-            for (const spinner of spinners) {
-                spinner.style.setProperty('--progress', `${evt.payload.progress}%`);
-            }
-        }
-
-        // Update file-status text (initial update before lerp kicks in)
-        if (!downloadSpeedLerp.has(attachId)) {
-            const statusEls = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
-            for (const spinner of statusEls) {
-                const fileBox = spinner.closest('.custom-audio-player');
-                if (!fileBox) continue;
-                const status = fileBox.querySelector('.file-status');
-                if (status) status.innerText = 'Downloading';
-            }
-        }
+        VectorSvelte.downloadProgressed(evt.payload.id, evt.payload.progress, evt.payload.bytesPerSec);
     });
 
     // Listen for Attachment Download Results
@@ -3812,12 +3684,8 @@ async function setupRustListeners() {
         // this attachment for the rest of the session.
         downloadingAttachmentIds.delete(matchId);
         downloadingAttachmentIds.delete(evt.payload.id);
-        VectorSvelte.clearDownloadProgress(matchId);
-        VectorSvelte.clearDownloadProgress(evt.payload.id);
-        for (const id of [matchId, evt.payload.id]) {
-            const lerp = downloadSpeedLerp.get(id);
-            if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
-        }
+        VectorSvelte.transferDone(matchId);
+        VectorSvelte.transferDone(evt.payload.id);
 
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);
@@ -4345,9 +4213,7 @@ async function setupRustListeners() {
         // Drop any buffered upload progress + speed tracker for this pending id (the upload finished
         // or failed; the spinner is gone after re-render, and a 100% frame isn't always emitted).
         pendingUploadProgress.delete(evt.payload.old_id);
-        VectorSvelte.clearUploadProgress(evt.payload.old_id);
-        const stUpd = uploadSpeedState.get(evt.payload.old_id);
-        if (stUpd) { if (stUpd.raf) cancelAnimationFrame(stUpd.raf); uploadSpeedState.delete(evt.payload.old_id); }
+        VectorSvelte.transferDone(evt.payload.old_id);
 
         // Find the message we're updating
         const cChat = getChat(evt.payload.chat_id);
@@ -4464,9 +4330,7 @@ async function setupRustListeners() {
         _exitModesForRemovedMessage(id);
         // Drop any buffered upload progress + speed tracker (e.g. on cancel)
         pendingUploadProgress.delete(id);
-        VectorSvelte.clearUploadProgress(id);
-        const stUp = uploadSpeedState.get(id);
-        if (stUp) { if (stUp.raf) cancelAnimationFrame(stUp.raf); uploadSpeedState.delete(id); }
+        VectorSvelte.transferDone(id);
         const cChat = getChat(chat_id);
         if (!cChat) return;
 
@@ -4695,14 +4559,7 @@ async function setupRustListeners() {
         const { topic, peer_count, is_active, has_pending_peers, peers } = evt.payload;
         console.log('[MINIAPP] Realtime status update:', topic, 'peers:', peer_count, 'active:', is_active, 'npubs:', peers);
 
-        // Find all Mini App attachments with this topic and update their status
-        const attachments = document.querySelectorAll(`.miniapp-attachment[data-webxdc-topic="${topic}"]`);
-
-        attachments.forEach(attachment => {
-            if (attachment._updateMiniAppStatus) {
-                attachment._updateMiniAppStatus(is_active, peer_count, peers);
-            }
-        });
+        VectorSvelte.setMiniappStatus(topic, { active: is_active, peerCount: peer_count, peers });
     });
 
     // Listen for Mini App crashes (Android renderer process crash)
@@ -7443,317 +7300,7 @@ function isSpoilerAttachment(attachment) {
     return fileName.toUpperCase().startsWith('SPOILER_');
 }
 
-function createFileBox(cAttachment, state = 'downloaded') {
-    const ext = (cAttachment.extension || '').toLowerCase();
-    const fileTypeInfo = getFileTypeInfo(ext);
-    const isMiniApp = fileTypeInfo.isMiniApp === true;
 
-    const fileDiv = document.createElement('div');
-    if (cAttachment.path) {
-        fileDiv.setAttribute('filepath', cAttachment.path);
-    }
-    if (isMiniApp) {
-        fileDiv.classList.add('miniapp-attachment');
-    }
-
-    // Create the main container
-    const btnDiv = document.createElement('div');
-    btnDiv.className = isMiniApp ? 'custom-audio-player' : 'btn custom-audio-player';
-    btnDiv.style.display = 'flex';
-    btnDiv.style.alignItems = 'center';
-    btnDiv.style.padding = '10px';
-    btnDiv.style.paddingRight = '15px';
-
-    // Create the icon element (span for regular files, img for Mini Apps with icons)
-    let iconElement;
-    if (isMiniApp) {
-        iconElement = document.createElement('img');
-        iconElement.style.marginLeft = '5px';
-        iconElement.style.width = '40px';
-        iconElement.style.height = '40px';
-        iconElement.style.borderRadius = '8px';
-        iconElement.style.objectFit = 'cover';
-        iconElement.style.backgroundColor = 'transparent';
-        iconElement.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23fff"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>';
-    } else {
-        iconElement = document.createElement('span');
-        iconElement.className = `icon icon-${fileTypeInfo.icon}`;
-        iconElement.style.marginLeft = '5px';
-        iconElement.style.width = '50px';
-        iconElement.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
-    }
-
-    // Create the text container span
-    const textContainerSpan = document.createElement('span');
-    textContainerSpan.style.color = 'rgba(255, 255, 255, 0.85)';
-    textContainerSpan.style.marginLeft = isMiniApp ? '15px' : '60px';
-    textContainerSpan.style.lineHeight = '1.2';
-    textContainerSpan.style.minWidth = '0';
-
-    // Create the description span
-    const descriptionSpan = document.createElement('span');
-    descriptionSpan.className = 'cutoff';
-    descriptionSpan.style.color = 'var(--icon-color-primary)';
-    descriptionSpan.style.fontWeight = '400';
-    descriptionSpan.innerText = cAttachment.name || fileTypeInfo.description;
-
-    // Create the small element for file details
-    const smallElement = document.createElement('small');
-
-    let updateMiniAppStatus = null;
-    let statusSpan = null;
-
-    if (state === 'downloaded' && isMiniApp) {
-        // Downloaded Mini App: full UI with realtime, peer badge, etc.
-        smallElement.style.display = 'flex';
-        smallElement.style.alignItems = 'center';
-        smallElement.style.gap = '10px';
-
-        const playSpan = document.createElement('span');
-        playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-        playSpan.style.fontWeight = '400';
-        playSpan.innerText = 'Click to Play';
-        smallElement.appendChild(playSpan);
-
-        // Create peer count badge (hidden by default)
-        const peerBadge = document.createElement('span');
-        peerBadge.style.padding = '2px 8px';
-        peerBadge.style.borderRadius = '10px';
-        peerBadge.style.backgroundColor = 'rgba(46, 213, 115, 0.15)';
-        peerBadge.style.color = 'rgb(46, 213, 115)';
-        peerBadge.style.fontSize = '0.85em';
-        peerBadge.style.fontWeight = '500';
-        peerBadge.style.border = '0.5px solid rgba(46, 213, 115, 0.3)';
-        peerBadge.style.display = 'none';
-        smallElement.appendChild(peerBadge);
-
-        // Store topic for event updates
-        const topicId = cAttachment.webxdc_topic;
-        if (topicId) {
-            fileDiv.setAttribute('data-webxdc-topic', topicId);
-        }
-
-        // Helper function to update the peer badge with avatar stack
-        const updatePeerBadge = (peerCount, isPlaying, peerNpubs) => {
-            // session_peers is the single source of truth — its length is the count (it already includes
-            // self once we've joined a realtime channel). A solo app (no channel) has no session peers, so
-            // it shows no "online" badge — do NOT fabricate self+1 from `isPlaying`, which is just "window open".
-            const totalPlayers = (peerNpubs && peerNpubs.length > 0) ? peerNpubs.length : peerCount;
-            if (totalPlayers > 0) {
-                peerBadge.innerHTML = '';
-
-                // Avatar stack — show up to 5 tiny overlapping profile pictures
-                const npubs = (peerNpubs || []).sort(); // deterministic order
-                const shown = npubs.slice(0, 5);
-                if (shown.length > 0) {
-                    const stack = document.createElement('span');
-                    stack.style.display = 'inline-flex';
-                    stack.style.alignItems = 'center';
-                    stack.style.marginRight = '4px';
-                    shown.forEach((npub, i) => {
-                        const wrapper = document.createElement('span');
-                        wrapper.style.position = 'relative';
-                        wrapper.style.zIndex = String(shown.length - i);
-                        if (i > 0) wrapper.style.marginLeft = '-5px';
-                        const img = document.createElement('img');
-                        const profile = getProfile(npub);
-                        const src = getProfileAvatarSrc(profile);
-                        const displayName = profile?.nickname || profile?.name || profile?.display_name;
-                        if (displayName) {
-                            wrapper.addEventListener('mouseenter', () => showGlobalTooltip(displayName, wrapper));
-                            wrapper.addEventListener('mouseleave', hideGlobalTooltip);
-                        }
-                        img.onerror = function() { this.onerror = null; this.src = 'icons/user-placeholder.svg'; };
-                        img.src = src || 'icons/user-placeholder.svg';
-                        img.style.width = '14px';
-                        img.style.height = '14px';
-                        img.style.borderRadius = '50%';
-                        img.style.border = '1px solid #1a1a2e';
-                        img.style.objectFit = 'cover';
-                        img.style.display = 'block';
-                        wrapper.appendChild(img);
-                        stack.appendChild(wrapper);
-                    });
-                    peerBadge.appendChild(stack);
-                } else {
-                    const groupIcon = document.createElement('img');
-                    groupIcon.src = 'icons/group-placeholder.svg';
-                    groupIcon.style.width = '14px';
-                    groupIcon.style.height = '14px';
-                    groupIcon.style.verticalAlign = 'middle';
-                    groupIcon.style.marginRight = '4px';
-                    peerBadge.appendChild(groupIcon);
-                }
-
-                peerBadge.appendChild(document.createTextNode(`${totalPlayers} online`));
-                peerBadge.style.display = 'inline-flex';
-                peerBadge.style.alignItems = 'center';
-            } else {
-                peerBadge.style.display = 'none';
-            }
-        };
-
-        // Track last known peer npubs (preserved across status updates that omit it)
-        let lastPeerNpubs = [];
-
-        // Helper function to update the UI based on status
-        updateMiniAppStatus = (isPlaying, peerCount, peerNpubs) => {
-            if (peerNpubs) lastPeerNpubs = peerNpubs;
-            if (isPlaying) {
-                playSpan.innerText = 'Playing';
-                playSpan.style.color = '#2ed573';
-                fileDiv.style.cursor = 'default';
-                fileDiv.setAttribute('data-playing', 'true');
-            } else if (peerCount > 0) {
-                playSpan.innerText = 'Click to Join';
-                playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-                fileDiv.style.cursor = 'pointer';
-                fileDiv.removeAttribute('data-playing');
-            } else {
-                playSpan.innerText = 'Click to Play';
-                playSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-                fileDiv.style.cursor = 'pointer';
-                fileDiv.removeAttribute('data-playing');
-            }
-            updatePeerBadge(peerCount, isPlaying, lastPeerNpubs);
-        };
-
-        // Load Mini App info asynchronously to get name and icon
-        const miniAppPath = cAttachment.path;
-        if (miniAppPath) {
-            loadMiniAppInfo(miniAppPath).then(info => {
-                if (info) {
-                    descriptionSpan.innerText = info.name || 'Mini App';
-                    if (info.icon_data) {
-                        iconElement.src = info.icon_data;
-                    }
-                }
-            }).catch(err => {
-                console.warn('Failed to load Mini App info from path:', miniAppPath, err);
-            });
-        }
-
-        // Check for realtime channel status if we have a topic
-        if (topicId) {
-            invoke('miniapp_get_realtime_status', { topicId })
-                .then(status => {
-                    console.log('[MiniApp] Realtime status:', status);
-                    const peerCount = (status?.peer_count || 0) > 0
-                        ? status.peer_count
-                        : (status?.pending_peer_count || 0);
-                    updateMiniAppStatus(status?.active || false, peerCount, status?.peers);
-                })
-                .catch(err => {
-                    console.debug('Could not get realtime status:', err);
-                });
-
-            fileDiv._updateMiniAppStatus = updateMiniAppStatus;
-        }
-    } else if (state === 'downloaded') {
-        // Downloaded regular file: show extension and size
-        if (cAttachment.name) {
-            // Name already includes extension, just show size
-            const sizeSpan = document.createElement('span');
-            sizeSpan.className = 'file-attach-size';
-            sizeSpan.innerText = formatBytes(cAttachment.size);
-            smallElement.appendChild(sizeSpan);
-        } else {
-            const extSpan = document.createElement('span');
-            extSpan.style.color = 'white';
-            extSpan.style.fontWeight = '400';
-            extSpan.innerText = `.${ext}`;
-
-            const sizeSpan = document.createElement('span');
-            sizeSpan.className = 'file-attach-size';
-            sizeSpan.innerText = ` — ${formatBytes(cAttachment.size)}`;
-
-            smallElement.appendChild(extSpan);
-            smallElement.appendChild(sizeSpan);
-        }
-    } else {
-        // Non-downloaded states: 'download' or 'downloading'
-        statusSpan = document.createElement('span');
-        statusSpan.className = 'file-status';
-        statusSpan.style.color = 'rgba(255, 255, 255, 0.7)';
-        statusSpan.style.fontWeight = '400';
-
-        if (state === 'downloading') {
-            statusSpan.innerText = 'Downloading';
-            fileDiv.style.cursor = 'default';
-
-            // Replace icon with conical progress spinner
-            iconElement = createFileBoxSpinner(null, { attachmentId: cAttachment.id });
-            // Spinner is absolute-positioned (left:10px, width:40px) — push text past it
-            textContainerSpan.style.marginLeft = '60px';
-        } else {
-            // 'download' — waiting for user to click
-            let strSize = '';
-            if (cAttachment.size > 0) {
-                strSize = ` · ${formatBytes(cAttachment.size)}`;
-            }
-            statusSpan.innerText = `Click to Download${strSize}`;
-
-            // Tag the icon so click handlers can swap it for a spinner
-            iconElement.setAttribute('data-attachment-id', cAttachment.id);
-        }
-        smallElement.appendChild(statusSpan);
-
-        // For undownloaded Mini Apps, try to resolve name and icon from the Nexus Marketplace cache
-        if (isMiniApp) {
-            const iconRef = iconElement; // capture before possible spinner swap
-            invoke('marketplace_get_app_by_hash', { fileHash: cAttachment.id })
-                .then(app => {
-                    if (!app) return;
-                    if (app.name) descriptionSpan.innerText = app.name;
-                    if (iconRef.tagName === 'IMG') {
-                        if (app.icon_cached) {
-                            iconRef.src = convertFileSrc(app.icon_cached);
-                        } else if (app.icon_url) {
-                            // Remote icon → backend cache (never a WebView fetch)
-                            bindBackendCachedImg(iconRef, app.icon_url);
-                        }
-                    }
-                })
-                .catch(() => { /* Marketplace lookup is best-effort */ });
-        }
-    }
-
-    // Assemble the structure
-    textContainerSpan.appendChild(descriptionSpan);
-    textContainerSpan.appendChild(smallElement);
-    btnDiv.appendChild(iconElement);
-    btnDiv.appendChild(textContainerSpan);
-    fileDiv.appendChild(btnDiv);
-
-    return { fileDiv, isMiniApp, descriptionSpan, iconElement, updateMiniAppStatus, statusSpan };
-}
-
-/**
- * Start downloading an attachment and update all deduped file boxes in the DOM.
- * Shared by thumbhash-fallback and non-image click handlers.
- */
-function startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender) {
-    if (downloadingAttachmentIds.has(cAttachment.id)) return;
-    downloadingAttachmentIds.add(cAttachment.id);
-    cAttachment.download_failed = false;
-    cAttachment.download_error = '';
-    const downloadNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-    invoke('download_attachment', { npub: downloadNpub, msgId: msg.id, attachmentId: cAttachment.id })
-        .catch(() => downloadingAttachmentIds.delete(cAttachment.id));
-    // Update ALL file boxes with the same attachment ID (dedup support)
-    const escapedId = CSS.escape(cAttachment.id);
-    const allIcons = document.querySelectorAll(`[data-attachment-id="${escapedId}"]`);
-    for (const oldIcon of allIcons) {
-        if (oldIcon.classList.contains('miniapp-downloading-spinner')) continue;
-        const parentBox = oldIcon.closest('.custom-audio-player');
-        if (parentBox) {
-            const status = parentBox.querySelector('.file-status');
-            if (status) status.innerText = 'Downloading';
-            parentBox.style.cursor = 'default';
-        }
-        createFileBoxSpinner(oldIcon, { attachmentId: cAttachment.id });
-    }
-}
 
 async function retryFailedMessage(msg) {
     const chatId = strOpenChat;

@@ -29,7 +29,9 @@ import MessageToolbar from './chat/MessageToolbar.svelte';
 import ReactionPopups from './chat/ReactionPopups.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
-import { setUploadProgress, clearUploadProgress, setDownloadProgress, clearDownloadProgress } from './lib/attachments.svelte.js';
+import { uploadProgressed, downloadProgressed, transferDone, transferFailed } from './lib/attachments.svelte.js';
+import { setMiniappStatus } from './lib/miniapps.svelte.js';
+import FileBox from './chat/attachments/FileBox.svelte';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
@@ -61,7 +63,7 @@ export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, p
 export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
-export { setUploadProgress, clearUploadProgress, setDownloadProgress, clearDownloadProgress };
+export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -291,4 +293,15 @@ export function mountMessageToolbar(host) {
 /** Mount the reaction hover tip + details popups at body level. */
 export function mountReactionPopups({ h }) {
     return mount(ReactionPopups, { target: document.body, props: { h } });
+}
+
+/** Mount one file box into `target`, replacing whatever box it held (URL-shared Mini App cards). */
+const fileBoxHosts = new WeakMap();
+export function mountFileBox(target, props) {
+    const prev = fileBoxHosts.get(target);
+    if (prev) unmount(prev);
+    target.replaceChildren();
+    const inst = mount(FileBox, { target, props });
+    fileBoxHosts.set(target, inst);
+    return inst;
 }

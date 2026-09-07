@@ -53,44 +53,40 @@ async function renderXdcUrlCard(target, msg, url) {
         info = await invoke('miniapp_resolve_url_xdc', { url, msgId: msg.id, download: false }).catch(() => null);
         xdcUrlResolved.set(cacheKey, info);
     }
-    // No isConnected guard: rows are built detached and attached after — a
-    // cache hit resolves before attachment, and painting a dead row is harmless.
+    // No isConnected guard: rows are built detached and attached after; a cache hit
+    // resolves before attachment, and painting a dead row is harmless.
     if (info) {
-        // Full parity: the downloaded card IS the attachment renderer
-        _dmsgRenderFileAttachment(target, msg, xdcUrlSyntheticAttachment(url, info));
+        // Full parity: the downloaded card IS the attachment box.
+        VectorSvelte.mountFileBox(target, { att: xdcUrlSyntheticAttachment(url, info), msg, phase: 'downloaded', h: _dmsgRowHelpers });
         return;
     }
-    const synth = xdcUrlSyntheticAttachment(url, null);
-    const { fileDiv, statusSpan } = createFileBox(synth, 'download');
-    if (statusSpan) statusSpan.innerText = `Tap to Load · ${xdcUrlHost(url)}`;
-    fileDiv.addEventListener('click', () => startXdcUrlDownload(target, msg, url), { once: true });
-    target.appendChild(fileDiv);
+    VectorSvelte.mountFileBox(target, {
+        att: xdcUrlSyntheticAttachment(url, null), msg, phase: 'download', h: _dmsgRowHelpers,
+        label: `Tap to Load · ${xdcUrlHost(url)}`, onActivate: () => startXdcUrlDownload(target, msg, url),
+    });
 }
 
 async function startXdcUrlDownload(target, msg, url) {
     const synth = xdcUrlSyntheticAttachment(url, null);
-    target.replaceChildren(createFileBox(synth, 'downloading').fileDiv);
+    VectorSvelte.mountFileBox(target, { att: synth, msg, phase: 'downloading', h: _dmsgRowHelpers });
     try {
         const info = await invoke('miniapp_resolve_url_xdc', { url, msgId: msg.id, download: true });
         xdcUrlResolved.set(xdcUrlCacheKey(msg, url), info);
-        target.replaceChildren();
-        _dmsgRenderFileAttachment(target, msg, xdcUrlSyntheticAttachment(url, info));
+        VectorSvelte.transferDone(url);
+        VectorSvelte.mountFileBox(target, { att: xdcUrlSyntheticAttachment(url, info), msg, phase: 'downloaded', h: _dmsgRowHelpers });
     } catch (e) {
         xdcUrlResolved.delete(xdcUrlCacheKey(msg, url));
-        const { fileDiv, statusSpan } = createFileBox(synth, 'download');
-        if (statusSpan) statusSpan.innerText = `Failed: ${String(e).slice(0, 48)} · Tap to Retry`;
-        fileDiv.addEventListener('click', () => startXdcUrlDownload(target, msg, url), { once: true });
-        target.replaceChildren(fileDiv);
+        VectorSvelte.transferDone(url);
+        VectorSvelte.mountFileBox(target, {
+            att: synth, msg, phase: 'download', h: _dmsgRowHelpers,
+            label: `Failed: ${String(e).slice(0, 48)} · Tap to Retry`, onActivate: () => startXdcUrlDownload(target, msg, url),
+        });
     }
 }
 
-// Drive the conical spinner exactly like attachment downloads do — the
-// synthetic attachment's pre-download id is the URL, so it keys the lookup
+// The synthetic attachment's pre-download id is the URL, so it keys the transfer.
 listen('webxdc_url_progress', (evt) => {
     const { url, progress } = evt.payload || {};
     if (!url) return;
-    const spinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${CSS.escape(url)}"]`);
-    for (const spinner of spinners) {
-        spinner.style.setProperty('--progress', `${progress}%`);
-    }
+    VectorSvelte.downloadProgressed(url, progress);
 });

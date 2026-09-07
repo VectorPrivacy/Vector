@@ -5,17 +5,16 @@
     import ImageAttachment from './attachments/ImageAttachment.svelte';
     import VideoAttachment from './attachments/VideoAttachment.svelte';
     import ThumbhashAttachment from './attachments/ThumbhashAttachment.svelte';
+    import FileBox from './attachments/FileBox.svelte';
 
     let { msg, sender, ctx, h } = $props();
     // h (beyond the leaves'): isImage(ext), isAudio(ext), isVideo(ext), willAutoDownload(att, ctx), isDownloading(att),
-    //    renderAudio(node, att, msg), fileBox(node, att, state, opts), attachUploadProgress(node, msg), autoDownload(att, msg, sender)
+    //    renderAudio(node, att, msg), attachUploadProgress(node, msg), autoDownload(att, msg, sender), and FileBox's
 
     const IMAGE_BLUR = ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
 
+    // The audio player is the app's leaf, its upload ring included.
     function audio(node, att) { h.renderAudio(node, att, msg); if (msg.mine && msg.pending) h.attachUploadProgress(node, msg); }
-    function file(node, att) { h.fileBox(node, att, 'downloaded', { msg }); if (msg.mine && msg.pending) h.attachUploadProgress(node, msg); }
-    function fileDownloading(node, att) { h.fileBox(node, att, 'downloading', {}); }
-    function fileDownload(node, att) { h.fileBox(node, att, 'download', { failed: att.download_failed, onClick: () => h.startDownload(att, msg, sender) }); }
 
     // Auto-download: a side effect, once per attachment id (the app dedupes across renders).
     $effect(() => {
@@ -34,22 +33,20 @@
         {:else if h.isVideo(att.extension)}
             <VideoAttachment {att} {msg} {h} />
         {:else}
-            <span style="display:contents" use:file={att}></span>
+            <FileBox {att} {msg} {sender} phase="downloaded" {h} />
         {/if}
     {:else if h.isDownloading(att)}
         {#if IMAGE_BLUR.includes(att.extension)}
             <ThumbhashAttachment {att} {msg} {ctx} {sender} auto={false} {h} />
         {:else}
-            <span style="display:contents" use:fileDownloading={att}></span>
+            <FileBox {att} {msg} {sender} phase="downloading" {h} />
         {/if}
     {:else}
         {@const auto = h.willAutoDownload(att, ctx)}
         {#if IMAGE_BLUR.includes(att.extension)}
             <ThumbhashAttachment {att} {msg} {ctx} {sender} {auto} {h} />
-        {:else if auto}
-            <span style="display:contents" use:fileDownloading={att}></span>
         {:else}
-            <span style="display:contents" use:fileDownload={att}></span>
+            <FileBox {att} {msg} {sender} phase={auto ? 'downloading' : 'download'} {h} />
         {/if}
     {/if}
 {/each}

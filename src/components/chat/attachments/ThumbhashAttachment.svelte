@@ -3,8 +3,9 @@
     // take, under a download ring (downloading or auto-download) or a Download button.
     // A missing blur falls back to the file box leaf.
     import { downloadProgress } from '../../lib/attachments.svelte.js';
+    import FileBox from './FileBox.svelte';
     let { att, msg, ctx, sender, auto, h } = $props();
-    // h: thumbhash(npub, msgId), onThumbLoad(), formatBytes, startDownload(att, msg, sender), fileBox(node, att, state, opts), openChat()
+    // h: thumbhash(npub, msgId), onThumbLoad(), formatBytes, startDownload(att, msg, sender), openChat(), and FileBox's
 
     // Mount-time: a row's chat and author never change under it.
     // svelte-ignore state_referenced_locally
@@ -38,13 +39,10 @@
         started = true;
         h.startDownload(att, msg, sender);
     }
-    function fallback(node) {
-        h.fileBox(node, att, downloading ? 'downloading' : 'download', { failed: att.download_failed, onClick: downloading ? null : () => h.startDownload(att, msg, sender) });
-    }
 </script>
 
 {#if blurFailed}
-    <span style="display:contents" use:fallback></span>
+    <FileBox {att} {msg} {sender} phase={downloading ? 'downloading' : 'download'} {h} />
 {:else if blur}
     <div style="position: relative; display: inline-block;" style:line-height={downloading ? '0' : null}>
         <img src={blur} alt="" width={fit?.w} height={fit?.h}
