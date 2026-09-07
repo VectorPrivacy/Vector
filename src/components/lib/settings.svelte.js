@@ -74,3 +74,20 @@ export function setDisplaySettings(values) {
     Object.assign(display, values);
     display.loaded = true;
 }
+
+// Updates: the running build, the updater's phase and what it found. The section
+// renders from here; updater.js drives the phase and owns the checks.
+const updates = $state({
+    version: '',           // display form of the running build
+    preview: false,        // a preview build: shows the notice, changes the copy
+    phase: 'idle',         // idle | checking | available | downloading | ready | error | no-updates | store
+    message: '',           // status line for error / store / an available-with-hint
+    progress: 0,
+    newVersion: '',
+    changelog: '',
+    downloadLabel: 'Download Update',
+    betaRow: false,        // the Beta Updates toggle is offered on this install
+    beta: false,
+});
+export function updatesState() { return updates; }
+export function setUpdates(values) { Object.assign(updates, values); }

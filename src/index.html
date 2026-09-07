@@ -1464,48 +1464,7 @@
         <div id="settings-updates" class="settings-section">
           <hr class="divider settings-divider">
           <h2>Updates</h2>
-          <div class="update-info">
-            <p><span style="opacity: 0.7;">Current Version: </span><span id="current-version"></span></p>
-            <div id="update-preview-notice" class="update-preview-notice" style="display: none;">
-              <p>
-                <img class="warning-icon" alt=""><strong>This is a Preview build.</strong>
-                It ships ahead of the official release, so expect rough edges.
-              </p>
-              <p>
-                Updates come from the preview channel, and you'll be moved onto the official
-                build the moment it releases.
-              </p>
-            </div>
-            <p id="new-version-display" style="display: none;">New Version: <span id="new-version"></span></p>
-            
-            <!-- Changelog -->
-            <div id="update-changelog" style="display: none; margin-top: 20px; margin-bottom: 20px;">
-              <h3 style="font-size: 16px; margin-bottom: 10px;">What's New:</h3>
-              <div id="changelog-content"></div>
-            </div>
-            
-            <div id="beta-updates-row" class="form-group" style="display: none; margin-bottom: 15px;">
-              <label class="toggle-container">
-                <span><span id="beta-updates-info" class="icon icon-info btn" style="width: 18px; height: 18px; position: relative; display: inline-block; vertical-align: text-top; margin-left: 5px;"></span>Beta Updates</span>
-                <input type="checkbox" id="beta-updates-toggle">
-                <span class="neon-toggle"></span>
-              </label>
-            </div>
-
-            <button id="check-updates-btn" class="btn accept-btn btn-bounce">Check for Updates</button>
-            <p id="update-status-text" style="display: none; margin-top: 10px;"></p>
-            
-            <!-- Progress bar for downloads -->
-            <div id="update-progress-container" style="display: none; margin-top: 20px;">
-              <div class="progress-bar-track">
-                <div id="update-progress-bar" class="progress-bar-fill"></div>
-                <div class="progress-text" id="update-progress-text">0%</div>
-              </div>
-            </div>
-
-            <!-- Dangerzone (Irreversible Actions) buttons -->
-            <button id="restart-update-btn" class="btn" style="display: none; margin-top: 10px; background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);">Restart Now</button>
-          </div>
+          <div id="settings-updates-body"></div>
         </div>
 
         <!-- Security Settings Section -->

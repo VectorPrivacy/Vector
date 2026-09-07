@@ -75,62 +75,35 @@ function followPreviewChannel() {
 // Android build — RCs included, where OFF means "sit on this build until the
 // official release". Store builds hide it.
 function updateBetaRowVisibility() {
-    const row = document.getElementById('beta-updates-row');
-    if (!row) return;
-    const eligible = platformFeatures.os !== 'android' || !androidInstallSource.has_store;
-    row.style.display = eligible ? '' : 'none';
+    VectorSvelte.setUpdates({ betaRow: platformFeatures.os !== 'android' || !androidInstallSource.has_store });
 }
 
 // Initialize updater UI elements
 function initializeUpdaterUI() {
-    const updateSection = document.getElementById('settings-updates');
-    if (!updateSection) return;
-    
-    // Update current version display
-    const versionElement = document.getElementById('current-version');
-    if (versionElement) {
-        versionElement.textContent = versionInfo.display;
-    }
-    const previewNotice = document.getElementById('update-preview-notice');
-    if (previewNotice) {
-        previewNotice.style.display = versionInfo.preview === null ? 'none' : 'block';
-    }
-
-    // Add click handler for check updates button
-    const checkButton = document.getElementById('check-updates-btn');
-    if (checkButton) {
-        checkButton.addEventListener('click', handleButtonClick);
-    }
-    
-    // Add click handler for restart button
-    const restartButton = document.getElementById('restart-update-btn');
-    if (restartButton) {
-        restartButton.addEventListener('click', () => window.__TAURI__.process.relaunch());
-    }
-
-    const betaInfo = document.getElementById('beta-updates-info');
-    if (betaInfo) {
-        betaInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm('Beta Updates', 'Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you\'ll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there.', true);
-        };
-    }
-
-    // Beta opt-in toggle: flipping it re-checks immediately on the newly
-    // chosen channel, and flipping it OFF withdraws an offered RC.
-    const betaToggle = document.getElementById('beta-updates-toggle');
-    if (betaToggle) {
-        betaToggle.checked = updateChannel() === 'preview';
-        betaToggle.addEventListener('change', () => {
-            try { localStorage.setItem('beta_updates', betaToggle.checked ? 'true' : 'false'); } catch (_) {}
-            currentUpdate = null;
-            const updateDot = document.getElementById('settings-update-dot');
-            if (updateDot) updateDot.style.display = 'none';
-            updateUI('idle');
-            checkForUpdates(false);
-        });
-    }
+    const body = document.getElementById('settings-updates-body');
+    if (!body) return;
+    VectorSvelte.mountUpdates(body, {
+        h: {
+            check: handleButtonClick,
+            restart: () => window.__TAURI__.process.relaunch(),
+            explainBeta: () => popupConfirm('Beta Updates', 'Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you\'ll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there.', true),
+            // Flipping re-checks on the new channel; OFF withdraws an offered RC.
+            setBeta: (on) => {
+                try { localStorage.setItem('beta_updates', on ? 'true' : 'false'); } catch (_) {}
+                VectorSvelte.setUpdates({ beta: on });
+                currentUpdate = null;
+                const updateDot = document.getElementById('settings-update-dot');
+                if (updateDot) updateDot.style.display = 'none';
+                updateUI('idle');
+                checkForUpdates(false);
+            },
+        },
+    });
+    VectorSvelte.setUpdates({
+        version: versionInfo.display,
+        preview: versionInfo.preview !== null,
+        beta: updateChannel() === 'preview',
+    });
     updateBetaRowVisibility();
 }
 
@@ -203,160 +176,24 @@ async function openAndroidUpdateSource() {
     }
 }
 
-// Update UI state
+// Update UI state. Transient outcomes (error, no-updates) fall back to idle on a timer.
+let updateUiTimer = null;
 function updateUI(state, message = '', progress = 0) {
     updateState = state;
-    
-    const statusText = document.getElementById('update-status-text');
-    const progressContainer = document.getElementById('update-progress-container');
-    const progressBar = document.getElementById('update-progress-bar');
-    const progressText = document.getElementById('update-progress-text');
-    const checkButton = document.getElementById('check-updates-btn');
-    const restartButton = document.getElementById('restart-update-btn');
-    const newVersionDisplay = document.getElementById('new-version-display');
-    const newVersionText = document.getElementById('new-version');
-    const changelogContainer = document.getElementById('update-changelog');
-    const changelogContent = document.getElementById('changelog-content');
+    clearTimeout(updateUiTimer);
     const updateDot = document.getElementById('settings-update-dot');
-    
-    // Hide all action buttons by default
-    if (restartButton) restartButton.style.display = 'none';
-    
-    switch (state) {
-        case 'idle':
-            if (statusText) {
-                statusText.textContent = message || 'Click to check for updates';
-                statusText.style.display = 'none';
-            }
-            if (progressContainer) progressContainer.style.display = 'none';
-            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
-            if (changelogContainer) changelogContainer.style.display = 'none';
-            if (checkButton) {
-                checkButton.disabled = false;
-                checkButton.textContent = 'Check for Updates';
-                checkButton.style.display = 'block';
-            }
-            break;
-            
-        case 'checking':
-            if (statusText) {
-                statusText.textContent = 'Checking for updates...';
-                statusText.style.display = 'block';
-            }
-            if (progressContainer) progressContainer.style.display = 'none';
-            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
-            if (changelogContainer) changelogContainer.style.display = 'none';
-            if (checkButton) {
-                checkButton.disabled = true;
-                checkButton.textContent = 'Checking...';
-            }
-            break;
-            
-        case 'available':
-            if (statusText) {
-                statusText.style.display = 'none';
-            }
-            if (progressContainer) progressContainer.style.display = 'none';
-            if (currentUpdate && newVersionDisplay && newVersionText) {
-                newVersionText.textContent = parseVersion(currentUpdate.version).display;
-                newVersionDisplay.style.display = 'block';
-            }
-            if (currentUpdate && currentUpdate.body && changelogContainer && changelogContent) {
-                // Convert line breaks to HTML and escape HTML entities
-                const escapedBody = currentUpdate.body
-                    .replace(/&/g, '&amp;')
-                    .replace(/</g, '&lt;')
-                    .replace(/>/g, '&gt;')
-                    .replace(/"/g, '&quot;')
-                    .replace(/'/g, '&#039;')
-                    .replace(/\n/g, '<br>');
-                changelogContent.innerHTML = escapedBody;
-                changelogContainer.style.display = 'block';
-            }
-            if (checkButton) {
-                checkButton.disabled = false;
-                checkButton.textContent = (platformFeatures.os === 'android')
-                    ? androidUpdateButtonLabel()
-                    : 'Download Update';
-                checkButton.style.background = '';
-                checkButton.style.display = 'block';
-            }
-            // Show notification dot on settings button
-            if (updateDot) updateDot.style.display = 'block';
-            break;
-            
-        case 'downloading':
-            if (statusText) {
-                statusText.style.display = 'none';
-            }
-            if (progressContainer) progressContainer.style.display = 'block';
-            if (progressBar) progressBar.style.width = `${progress}%`;
-            if (progressText) progressText.textContent = `${progress}%`;
-            if (checkButton) {
-                checkButton.disabled = true;
-                checkButton.textContent = 'Downloading...';
-            }
-            // Hide notification dot when downloading
-            if (updateDot) updateDot.style.display = 'none';
-            break;
-            
-        case 'ready':
-            if (statusText) {
-                statusText.textContent = 'Update ready! Restart to apply.';
-                statusText.style.display = 'block';
-            }
-            if (progressContainer) progressContainer.style.display = 'none';
-            if (checkButton) {
-                checkButton.style.display = 'none';
-            }
-            if (restartButton) restartButton.style.display = 'block';
-            // Hide notification dot when ready
-            if (updateDot) updateDot.style.display = 'none';
-            break;
-            
-        case 'error':
-            if (statusText) {
-                statusText.textContent = message;
-                statusText.style.display = 'block';
-                statusText.style.color = '#ff5252';
-            }
-            if (progressContainer) progressContainer.style.display = 'none';
-            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
-            if (changelogContainer) changelogContainer.style.display = 'none';
-            if (checkButton) {
-                checkButton.disabled = false;
-                checkButton.textContent = 'Check for Updates';
-                checkButton.style.background = '';
-                checkButton.style.display = 'block';
-            }
-            setTimeout(() => {
-                if (statusText) statusText.style.color = '';
-                updateUI('idle');
-            }, 5000);
-            break;
-            
-        case 'no-updates':
-            if (statusText) {
-                statusText.textContent = versionInfo.preview === null
-                    ? 'You are running the latest version'
-                    : "No newer build yet. You'll be offered the official build as soon as it releases.";
-                statusText.style.display = 'block';
-                statusText.style.color = '#59fcb3';
-            }
-            if (progressContainer) progressContainer.style.display = 'none';
-            if (newVersionDisplay) newVersionDisplay.style.display = 'none';
-            if (changelogContainer) changelogContainer.style.display = 'none';
-            if (checkButton) {
-                checkButton.disabled = false;
-                checkButton.textContent = 'Check for Updates';
-                checkButton.style.background = '';
-                checkButton.style.display = 'block';
-            }
-            setTimeout(() => {
-                if (statusText) statusText.style.color = '';
-                updateUI('idle');
-            }, 3000);
-            break;
+    const found = state === 'available' && currentUpdate;
+    VectorSvelte.setUpdates({
+        phase: state,
+        message,
+        progress,
+        newVersion: found ? parseVersion(currentUpdate.version).display : '',
+        changelog: found ? (currentUpdate.body || '') : '',
+        downloadLabel: platformFeatures.os === 'android' ? androidUpdateButtonLabel() : 'Download Update',
+    });
+    if (updateDot) updateDot.style.display = state === 'available' ? 'block' : (state === 'downloading' || state === 'ready') ? 'none' : updateDot.style.display;
+    if (state === 'error' || state === 'no-updates') {
+        updateUiTimer = setTimeout(() => updateUI('idle'), state === 'error' ? 5000 : 3000);
     }
 }
 
@@ -542,20 +379,14 @@ async function initializeUpdater() {
     if (platformFeatures.self_update === false) {
         versionInfo = parseVersion(await getCurrentVersion());
         const render = async () => {
-            const versionElement = document.getElementById('current-version');
-            if (versionElement) versionElement.textContent = versionInfo.display;
             let label = 'F-Droid';
             try {
                 const source = await window.__TAURI__.core.invoke('get_install_source');
                 if (source.has_store) label = source.label;
             } catch (_) { /* keep the flavour's own store */ }
-            const checkButton = document.getElementById('check-updates-btn');
-            if (checkButton) checkButton.style.display = 'none';
-            const statusText = document.getElementById('update-status-text');
-            if (statusText) {
-                statusText.textContent = `Updates arrive through ${label}`;
-                statusText.style.display = 'block';
-            }
+            const body = document.getElementById('settings-updates-body');
+            if (body) VectorSvelte.mountUpdates(body, { h: {} });
+            VectorSvelte.setUpdates({ version: versionInfo.display, preview: versionInfo.preview !== null, phase: 'store', message: `Updates arrive through ${label}` });
         };
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', render);
