@@ -48,12 +48,10 @@ function reactionTierGate(cMsg, emoji) {
     return newReactionGroupBlockReason(cMsg);
 }
 
-let reactionDetailsPopup = null;
 let reactionLongPressTimer = null;
 let reactionLongPressed = false;
 
 // Hover summary (desktop only — mobile uses long-press for the full popup).
-let reactionHoverTip = null;
 let reactionHoverTimer = null;
 let reactionHoverEl = null; // currently armed reaction; null when nothing hovered
 let reactionTipWatchdog = null; // liveness interval while a tip is on screen
@@ -89,23 +87,34 @@ function _startReactionTipWatchdog(reactionEl) {
     }, 250);
 }
 const REACTION_HOVER_DELAY_MS = 500;
-const REACTION_HOVER_NAMES_VISIBLE = 3;
 
-/**
- * Build the inline names string for a hover tip:
- *   1 → "Alice"
- *   2 → "Alice and Bob"
- *   3 → "Alice, Bob, and Charlie"
- *   4+ → "Alice, Bob, Charlie, and N others"
- */
-function _formatReactorNames(names) {
-    if (names.length === 1) return names[0];
-    if (names.length === 2) return `${names[0]} and ${names[1]}`;
-    if (names.length === 3) return `${names[0]}, ${names[1]}, and ${names[2]}`;
-    const shown = names.slice(0, REACTION_HOVER_NAMES_VISIBLE);
-    const others = names.length - REACTION_HOVER_NAMES_VISIBLE;
-    return `${shown.join(', ')}, and ${others} other${others === 1 ? '' : 's'}`;
+// Both popups are one island; this side opens and closes them and owns the gestures.
+let _reactionPopupsMounted = false;
+function _mountReactionPopups() {
+    _reactionPopupsMounted = true;
+    VectorSvelte.mountReactionPopups({
+        h: {
+            findMessage: (msgId) => {
+                for (const chat of arrChats) {
+                    const m = chat.messages.find(x => x.id === msgId);
+                    if (m) return m;
+                }
+                return null;
+            },
+            getProfile,
+            getProfileAvatarSrc,
+            createPlaceholderAvatar,
+            twemojify,
+            // The dataset's canonical `display` (CLDR tts); `name` for entries predating it.
+            emojiLabel: (emoji) => {
+                const entry = typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === emoji);
+                return entry ? (entry.display || entry.name) : '';
+            },
+        },
+    });
 }
+const _reactionTipEl = () => document.querySelector('.reaction-hover-tip');
+const _reactionDetailsEl = () => document.querySelector('.reaction-details-popup');
 
 /**
  * Show the hover summary above a reaction chip. Self-contained — does its own
@@ -114,55 +123,20 @@ function _formatReactorNames(names) {
  */
 function showReactionHoverTip(reactionEl) {
     hideReactionHoverTip();
-
     const emoji = reactionEl.getAttribute('data-emoji');
     const msgId = reactionEl.getAttribute('data-msg-id');
     if (!emoji || !msgId) return;
-
     let msg = null;
     for (const chat of arrChats) {
         msg = chat.messages.find(m => m.id === msgId);
         if (msg) break;
     }
     if (!msg) return;
-
-    const matchingReactions = msg.reactions.filter(r => r.emoji === emoji);
-    if (matchingReactions.length === 0) return;
-
-    const names = matchingReactions.map(r => getName(r.author_id));
-
-    const tip = document.createElement('div');
-    tip.className = 'reaction-hover-tip';
-
-    const emojiSpan = document.createElement('span');
-    emojiSpan.className = 'reaction-hover-tip-emoji';
-    emojiSpan.textContent = emoji;
-    twemojify(emojiSpan);
-    tip.appendChild(emojiSpan);
-
-    const text = document.createElement('span');
-    text.className = 'reaction-hover-tip-text';
-    text.textContent = `reacted by ${_formatReactorNames(names)}`;
-    tip.appendChild(text);
-
-    const hint = document.createElement('span');
-    hint.className = 'reaction-hover-tip-hint';
-    hint.textContent = 'Right-click for details';
-    tip.appendChild(hint);
-
-    document.body.appendChild(tip);
-    reactionHoverTip = tip;
+    const matching = msg.reactions.filter(r => r.emoji === emoji);
+    if (!matching.length) return;
+    if (!_reactionPopupsMounted) _mountReactionPopups();
+    VectorSvelte.openReactionTip({ emoji, names: matching.map(r => getName(r.author_id)), anchor: reactionEl });
     _startReactionTipWatchdog(reactionEl);
-
-    // Position above the chip, fall to below if no room. Clamp horizontally.
-    const rect = reactionEl.getBoundingClientRect();
-    const tipRect = tip.getBoundingClientRect();
-    let top = rect.top - tipRect.height - 6;
-    if (top < 10) top = rect.bottom + 6;
-    let left = rect.left + (rect.width / 2) - (tipRect.width / 2);
-    left = Math.max(10, Math.min(left, window.innerWidth - tipRect.width - 10));
-    tip.style.left = `${left}px`;
-    tip.style.top = `${top}px`;
 }
 
 function hideReactionHoverTip() {
@@ -170,10 +144,7 @@ function hideReactionHoverTip() {
         clearInterval(reactionTipWatchdog);
         reactionTipWatchdog = null;
     }
-    if (reactionHoverTip) {
-        reactionHoverTip.remove();
-        reactionHoverTip = null;
-    }
+    VectorSvelte.closeReactionTip();
     if (reactionHoverTimer) {
         clearTimeout(reactionHoverTimer);
         reactionHoverTimer = null;
@@ -194,103 +165,18 @@ function showReactionDetails(reactionEl) {
     hideReactionDetails();
     // Right-click / long-press supersedes the lightweight hover tip.
     hideReactionHoverTip();
-
     const emoji = reactionEl.getAttribute('data-emoji');
     const msgId = reactionEl.getAttribute('data-msg-id');
     if (!emoji || !msgId) return;
-
-    // Find the message across all chats
-    let msg = null;
-    for (const chat of arrChats) {
-        msg = chat.messages.find(m => m.id === msgId);
-        if (msg) break;
-    }
-    if (!msg) return;
-
-    // Filter reactions for this emoji
-    const matchingReactions = msg.reactions.filter(r => r.emoji === emoji);
-    if (matchingReactions.length === 0) return;
-
-    // Build popup
-    const popup = document.createElement('div');
-    popup.className = 'reaction-details-popup';
-
-    // Header: count + emoji + first keyword
-    const header = document.createElement('div');
-    header.className = 'reaction-details-header';
-    // Use the dataset's canonical `display` field (CLDR tts, e.g.
-    // "thumbs up", "rolling on the floor laughing"). Falls back to the
-    // search-keyword `name` for ancient entries that pre-date `display`.
-    const emojiEntry = typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === emoji);
-    const emojiName = emojiEntry ? (emojiEntry.display || emojiEntry.name) : '';
-    const countSpan = document.createElement('span');
-    countSpan.className = 'reaction-details-count';
-    countSpan.textContent = matchingReactions.length;
-    const emojiSpan = document.createElement('span');
-    emojiSpan.className = 'reaction-details-emoji';
-    emojiSpan.textContent = emoji;
-    twemojify(emojiSpan);
-    header.appendChild(countSpan);
-    header.appendChild(emojiSpan);
-    if (emojiName) {
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'reaction-details-label';
-        nameSpan.textContent = emojiName.charAt(0).toUpperCase() + emojiName.slice(1);
-        header.appendChild(nameSpan);
-    }
-    popup.appendChild(header);
-
-    // Reactor rows
-    const body = document.createElement('div');
-    body.className = 'reaction-details-body';
-    for (const reaction of matchingReactions) {
-        const row = document.createElement('div');
-        row.className = 'reaction-detail-row';
-
-        const profile = getProfile(reaction.author_id);
-        const avatarSrc = getProfileAvatarSrc(profile);
-        const avatarEl = createAvatarImg(avatarSrc, 25);
-        avatarEl.classList.add('reaction-avatar');
-        row.appendChild(avatarEl);
-
-        const name = document.createElement('span');
-        name.className = 'reaction-detail-name';
-        name.textContent = profile?.name || profile?.display_name || reaction.author_id.slice(0, 12) + '...';
-        row.appendChild(name);
-
-        body.appendChild(row);
-    }
-    popup.appendChild(body);
-
-    document.body.appendChild(popup);
-    reactionDetailsPopup = popup;
-
-    // Position relative to the reaction element (similar to edit history popup)
-    const rect = reactionEl.getBoundingClientRect();
-    const popupRect = popup.getBoundingClientRect();
-
-    // Try above first, fall below if no space
-    let top = rect.top - popupRect.height - 4;
-    if (top < 10) {
-        top = rect.bottom + 4;
-    }
-
-    // Align horizontally, clamp to viewport
-    let left = rect.left;
-    left = Math.max(10, Math.min(left, window.innerWidth - popupRect.width - 10));
-
-    popup.style.left = `${left}px`;
-    popup.style.top = `${top}px`;
+    if (!_reactionPopupsMounted) _mountReactionPopups();
+    VectorSvelte.openReactionDetails({ emoji, msgId, anchor: reactionEl });
 }
 
 /**
  * Hide the reaction details popup
  */
 function hideReactionDetails() {
-    if (reactionDetailsPopup) {
-        reactionDetailsPopup.remove();
-        reactionDetailsPopup = null;
-    }
+    VectorSvelte.closeReactionDetails();
 }
 
 /**
@@ -321,7 +207,7 @@ document.addEventListener('mouseover', (e) => {
     if (!reactionEl) return;
     // Skip only if this exact chip already has a live timer or shown tip — a
     // bare tracker without either means stale state we should refresh through.
-    if (reactionEl === reactionHoverEl && (reactionHoverTimer || reactionHoverTip)) return;
+    if (reactionEl === reactionHoverEl && (reactionHoverTimer || _reactionTipEl())) return;
 
     if (reactionHoverTimer) clearTimeout(reactionHoverTimer);
     hideReactionHoverTip();
@@ -390,23 +276,19 @@ document.addEventListener('contextmenu', (e) => {
 
 // Dismiss on click outside
 document.addEventListener('click', (e) => {
-    if (reactionDetailsPopup && !reactionDetailsPopup.contains(e.target)) {
-        hideReactionDetails();
-    }
+    const popup = _reactionDetailsEl();
+    if (popup && !popup.contains(e.target)) hideReactionDetails();
 });
 
 // Dismiss on Escape
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && reactionDetailsPopup) {
-        hideReactionDetails();
-    }
+    if (e.key === 'Escape') hideReactionDetails();
 });
 
 // Dismiss on chat scroll (but not when scrolling inside the popup itself)
 document.addEventListener('scroll', (e) => {
-    if (reactionDetailsPopup && !reactionDetailsPopup.contains(e.target)) {
-        hideReactionDetails();
-    }
+    const popup = _reactionDetailsEl();
+    if (popup && !popup.contains(e.target)) hideReactionDetails();
     // Hover tip is anchored to chip geometry — drop it on any scroll.
     hideReactionHoverTip();
 }, true);

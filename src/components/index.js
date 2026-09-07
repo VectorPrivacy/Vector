@@ -26,6 +26,8 @@ import ProfileEditFields from './profile/ProfileEditFields.svelte';
 import CommunityOverview from './community/CommunityOverview.svelte';
 import MiniProfile from './people/MiniProfile.svelte';
 import MessageToolbar from './chat/MessageToolbar.svelte';
+import ReactionPopups from './chat/ReactionPopups.svelte';
+import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
@@ -58,6 +60,7 @@ export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, p
 export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
+export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
@@ -281,4 +284,9 @@ export function mountMiniProfile({ h }) {
 export function mountMessageToolbar(host) {
     host.replaceChildren();
     return mount(MessageToolbar, { target: host });
+}
+
+/** Mount the reaction hover tip + details popups at body level. */
+export function mountReactionPopups({ h }) {
+    return mount(ReactionPopups, { target: document.body, props: { h } });
 }
