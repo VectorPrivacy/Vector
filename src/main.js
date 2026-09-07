@@ -4005,10 +4005,8 @@ async function setupRustListeners() {
             }
         }
 
-        // Refresh the mini profile popup if it's open for this npub.
-        if (typeof refreshMiniProfileIfMatches === 'function') {
-            refreshMiniProfileIfMatches(evt.payload.id);
-        }
+        // Everything derived from this profile (the mini profile popup included) repaints.
+        VectorSvelte.touchProfile(evt.payload.id);
 
         // Retro-resolve system events (join/leave lines) that rendered with this
         // npub's stub before the profile loaded — both the cached content and any

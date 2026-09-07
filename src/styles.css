@@ -3264,10 +3264,21 @@ body.mobile #chat-new-scan-btn { display: block; }
   font-weight: 500;
 }
 
+/* The channel glyph, drawn at the row's text colour in every layout. */
 .chatlist-channel-hash {
+  position: relative;
   flex-shrink: 0;
-  font-size: 15px;
+  width: 18px;
+  height: 18px;
+  font-size: 0;
   opacity: 0.55;
+}
+
+.chatlist-channel-hash .icon {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background-color: currentColor;
 }
 
 .chatlist-channel-name {
@@ -3321,6 +3332,8 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 
 .chatlist-channel-add .chatlist-channel-hash {
+  width: auto;
+  height: auto;
   font-size: 16px;
 }
 

@@ -752,21 +752,7 @@ body.ws .chatlist-channel-section-add:hover .icon {
 /* ── Row tiers ─────────────────────────────────────────────────────────── */
 
 body.ws .chatlist-channels-pane .chatlist-channel-hash {
-  position: relative;
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  font-size: 0;
   opacity: 1;
-}
-
-/* `.icon` draws at 65% of its box to leave room inside a button. This glyph IS
-   the box, so it fills it — at 65% an 18px slot rendered an 11px hash. */
-body.ws .chatlist-channels-pane .chatlist-channel-hash .icon {
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  background-color: currentColor;
 }
 
 body.ws .chatlist-channels-pane .chatlist-channel.has-unread {
