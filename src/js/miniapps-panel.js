@@ -64,7 +64,7 @@ function showMarketplacePanel() {
         pushBack('marketplace', () => { hideMarketplacePanel(); });
         domMarketplacePanel.style.display = 'flex';
         // Initialize marketplace on first show
-        initMarketplace(domMarketplaceContent);
+        initMarketplace();
     }
 }
 

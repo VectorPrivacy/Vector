@@ -48,6 +48,10 @@ import ModStats from './moderation/ModStats.svelte';
 import ModChrome from './moderation/ModChrome.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
 import MiniAppsGrid from './miniapps/MiniAppsGrid.svelte';
+import Marketplace from './marketplace/Marketplace.svelte';
+import MarketplaceFilters from './marketplace/Filters.svelte';
+import AppDetails from './marketplace/AppDetails.svelte';
+export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms } from './lib/marketplace.svelte.js';
 export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress } from './lib/moderation.svelte.js';
@@ -399,4 +403,12 @@ export function mountPolicyDesigner(pane, { h }) {
 export function mountMiniAppsGrid(grid, { h }) {
     grid.replaceChildren();
     return mount(MiniAppsGrid, { target: grid, props: { h } });
+}
+
+/** Mount the Nexus: the scroll body (featured + catalogue), the filter tags, and the details panel body. */
+export function mountMarketplace({ body, filters, details, h }) {
+    body.replaceChildren(); filters.replaceChildren(); details.replaceChildren();
+    mount(Marketplace, { target: body, props: { h } });
+    mount(MarketplaceFilters, { target: filters, props: {} });
+    mount(AppDetails, { target: details, props: { h } });
 }

@@ -1171,7 +1171,6 @@ const domMiniAppsSearch = document.getElementById('miniapps-search');
 const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
 const domMarketplacePanel = document.getElementById('marketplace-panel');
 const domMarketplaceBackBtn = document.getElementById('marketplace-back-btn');
-const domMarketplaceContent = document.getElementById('marketplace-content');
 const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
 const domMiniAppLaunchIconContainer = document.getElementById('miniapp-launch-icon-container');
 const domMiniAppLaunchName = document.getElementById('miniapp-launch-name');
