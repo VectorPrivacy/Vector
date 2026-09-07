@@ -1686,200 +1686,64 @@ function _isPackSubscribed(id) {
 // is just the chrome (global overlay vs inline card).
 // ============================================================================
 
-let _packDetailsCurrentNaddr = null;
-let _packDetailsBusy = false;
+// The modal body is an island over lib/packdetails.svelte.js; this side fetches and closes.
+let _packDetailsMounted = false;
+function _ensurePackDetailsIsland() {
+    if (_packDetailsMounted) return;
+    _packDetailsMounted = true;
+    VectorSvelte.mountPackDetails(document.getElementById('pack-details-body'), {
+        overlay: document.getElementById('pack-details-overlay'),
+        h: {
+            bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
+            maxDisplay: () => MAX_DISPLAY_EMOJIS_PER_PACK,
+            // The same IPCs the in-chat card uses, cap-gated on the equipped-pack limit.
+            toggle: async (naddr, pack, isSub) => {
+                if (!isSub && _userPackCount() >= MAX_EQUIPPED_PACKS) { _pcShowSlotFullError(); return false; }
+                const minDelay = new Promise(r => setTimeout(r, 300));
+                try {
+                    const work = isSub
+                        ? invoke('unsubscribe_emoji_pack', { id: pack.id })
+                        : invoke('subscribe_emoji_pack', { naddr });
+                    await Promise.all([work, minDelay]);
+                    await loadEmojiPacks();
+                    if (!isSub) { if (typeof showToast === 'function') showToast('Pack equipped'); return 'added'; }
+                    return 'removed';
+                } catch (e) {
+                    console.warn('[pack-details] toggle failed:', e);
+                    if (typeof showToast === 'function') showToast(String(e) || 'Failed');
+                    return false;
+                }
+            },
+        },
+    });
+}
 
 async function openPackDetailsModal(naddr) {
     if (!naddr) return;
-    const overlay = document.getElementById('pack-details-overlay');
-    const body = document.getElementById('pack-details-body');
-    if (!overlay || !body) return;
-
-    _packDetailsCurrentNaddr = naddr;
-    overlay.hidden = false;
-    body.innerHTML = `
-        <div class="pack-details-loading">
-            <div class="pack-details-spinner"></div>
-            <p class="pack-details-loading-text">Loading pack…</p>
-        </div>
-    `;
-
+    _ensurePackDetailsIsland();
+    VectorSvelte.openPackDetails(naddr);
     try {
         const pack = await invoke('fetch_emoji_pack_by_naddr', { naddr });
-        // Naddr may have changed in the time the IPC was in flight (user
-        // closed + reopened the modal with a different link). Bail.
-        if (_packDetailsCurrentNaddr !== naddr) return;
-        _renderPackDetails(naddr, pack);
+        VectorSvelte.resolvePackDetails(naddr, { state: 'ok', pack });
     } catch (err) {
-        if (_packDetailsCurrentNaddr !== naddr) return;
         console.warn('[pack-details] fetch failed:', err);
-        body.innerHTML = `
-            <div class="pack-details-error">
-                <p class="pack-details-error-title">Pack unavailable</p>
-                <p class="pack-details-error-detail">${_escapeAttr(String(err) || 'Failed to fetch')}</p>
-            </div>
-        `;
+        VectorSvelte.resolvePackDetails(naddr, { state: 'err', error: String(err) || 'Failed to fetch' });
     }
 }
 
 function closePackDetailsModal() {
-    const overlay = document.getElementById('pack-details-overlay');
-    if (overlay) overlay.hidden = true;
-    _packDetailsCurrentNaddr = null;
-    _packDetailsBusy = false;
-}
-
-function _renderPackDetails(naddr, pack) {
-    const body = document.getElementById('pack-details-body');
-    if (!body || !pack) return;
-
-    const emojis = Array.isArray(pack.emojis) ? pack.emojis : [];
-    const displayEmojis = emojis.slice(0, MAX_DISPLAY_EMOJIS_PER_PACK);
-    const title = _escapeAttr(pack.title || pack.identifier || 'Untitled');
-    const fallbackChar = (pack.title || pack.identifier || '?').trim().charAt(0).toUpperCase();
-    const isSub = _isPackSubscribed(pack.id);
-
-    body.innerHTML = `
-        <div class="pack-details-header">
-            <div class="pack-details-logo" id="pack-details-logo">
-                <span class="pack-details-logo-fallback">${_escapeAttr(fallbackChar)}</span>
-            </div>
-            <div class="pack-details-title-block">
-                <h3 class="pack-details-title">${title}</h3>
-                <div class="pack-details-meta">
-                    <span class="emoji-count">${emojis.length}</span> Emoji${emojis.length === 1 ? '' : 's'}
-                </div>
-            </div>
-        </div>
-        ${pack.description ? `<p class="pack-details-desc">${_escapeAttr(pack.description)}</p>` : ''}
-        <div class="pack-details-grid" id="pack-details-grid"></div>
-        <button type="button" class="pack-details-action ${isSub ? 'is-subscribed' : ''}" id="pack-details-action">
-            ${isSub ? 'Remove Pack' : 'Add Pack'}
-        </button>
-    `;
-
-    // Logo — route through the emoji cache so Blossom URLs never hit the
-    // webview directly.
-    if (pack.image_url) {
-        const logo = document.getElementById('pack-details-logo');
-        const fallback = logo.querySelector('.pack-details-logo-fallback');
-        const img = document.createElement('img');
-        img.alt = '';
-        bindCachedEmojiImg(img, pack.image_url, 'emoji_pack_icon');
-        img.addEventListener('load', () => {
-            fallback && fallback.remove();
-            logo.style.backgroundColor = 'transparent';
-        }, { once: true });
-        logo.appendChild(img);
-    }
-
-    // Thumbnail grid.
-    const grid = document.getElementById('pack-details-grid');
-    if (displayEmojis.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'pack-details-empty';
-        empty.textContent = 'Empty pack';
-        grid.appendChild(empty);
-    } else {
-        for (const e of displayEmojis) {
-            const cell = document.createElement('div');
-            cell.className = 'pack-details-thumb';
-            const img = document.createElement('img');
-            img.alt = `:${e.shortcode}:`;
-            img.dataset.emojiTooltip = `:${e.shortcode}:`;
-            // Oversized / unavailable (cap-rejected) emoji are hidden entirely, as if not in the pack.
-            bindCachedEmojiImg(img, e.url, 'emoji', () => cell.remove());
-            cell.appendChild(img);
-            grid.appendChild(cell);
-        }
-    }
-
-    // Action button — subscribe / unsubscribe via the same IPCs the
-    // in-chat preview uses. Cap-gate on the equipped-pack limit.
-    const actionBtn = document.getElementById('pack-details-action');
-    actionBtn.addEventListener('click', () => _onPackDetailsAction(pack));
-}
-
-async function _onPackDetailsAction(pack) {
-    if (_packDetailsBusy) return;
-    const btn = document.getElementById('pack-details-action');
-    if (!btn) return;
-    const isSub = _isPackSubscribed(pack.id);
-
-    if (!isSub && _userPackCount() >= MAX_EQUIPPED_PACKS) {
-        _pcShowSlotFullError();
-        return;
-    }
-
-    _packDetailsBusy = true;
-    btn.disabled = true;
-    const origText = btn.textContent.trim();
-    btn.textContent = isSub ? 'Removing…' : 'Adding…';
-
-    const minDelay = new Promise(r => setTimeout(r, 300));
-    try {
-        const work = isSub
-            ? invoke('unsubscribe_emoji_pack', { id: pack.id })
-            : invoke('subscribe_emoji_pack', { naddr: _packDetailsCurrentNaddr });
-        await Promise.all([work, minDelay]);
-        await loadEmojiPacks();
-        if (!isSub) {
-            // Successful add — close the modal and confirm via toast so
-            // the user lands back in their normal flow.
-            closePackDetailsModal();
-            if (typeof showToast === 'function') showToast('Pack equipped');
-            return;
-        }
-        // Successful remove — flip button state in-place.
-        btn.classList.add('is-subscribed');
-        btn.classList.remove('is-subscribed');
-        btn.textContent = 'Add Pack';
-    } catch (e) {
-        console.warn('[pack-details] toggle failed:', e);
-        btn.textContent = origText;
-        if (typeof showToast === 'function') showToast(String(e) || 'Failed');
-    } finally {
-        btn.disabled = false;
-        _packDetailsBusy = false;
-    }
+    VectorSvelte.closePackDetails();
 }
 
 // Wire close interactions once at module load.
 (function _initPackDetailsModal() {
     const overlay = document.getElementById('pack-details-overlay');
     if (!overlay) return;
-    const closeBtn = document.getElementById('pack-details-close');
-    closeBtn.addEventListener('click', closePackDetailsModal);
-    // Backdrop dismiss — only when the click landed on the overlay itself,
-    // not when it bubbled up from card content.
-    overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) closePackDetailsModal();
-    });
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && !overlay.hidden) closePackDetailsModal();
-    });
+    document.getElementById('pack-details-close').addEventListener('click', closePackDetailsModal);
+    // Backdrop dismiss: only when the click landed on the overlay itself.
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closePackDetailsModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) closePackDetailsModal(); });
 })();
-
-/**
- * Fill the preview card's thumbnail column. One `<canvas>` draws every thumb
- * (a single compositor layer instead of up to 18 animated `<img>`s — the
- * mobile-lag fix), reusing the panel's URL-keyed frame cache.
- */
-function _mountPackPreviewThumbs(left, pack) {
-    // Mirror the stock grid's responsive column count (the skeleton drops to 5 cols at 480px).
-    const cols = window.innerWidth <= 480 ? 5 : 6;
-    // Three rows, sized to the grid's 96px clip.
-    const thumbs = pack.emojis.slice(0, cols * 3);
-    // 28px thumb in a 32px row matches the stock grid's vertical rhythm.
-    const grid = new PackCanvasGrid(pack, {
-        emojis: thumbs, cols, cellPx: 32, thumbPx: 28, gapPx: 4,
-        boxPx: 0, hoverScale: false, selectable: false, isPreview: true,
-        ioRootMargin: '200px',
-    });
-    left.appendChild(grid.canvas);
-    grid.attachVisibilityObserver(null);
-    return () => grid.destroy();
-}
 
 // ============================================================================
 // Pack-section reveal fade (chatlist pattern)

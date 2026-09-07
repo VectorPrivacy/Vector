@@ -39,6 +39,8 @@ import SearchGrid from './picker/SearchGrid.svelte';
 import PackSections from './picker/PackSections.svelte';
 import PackCreator from './picker/PackCreator.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
+import PackDetailsModal from './picker/PackDetailsModal.svelte';
+import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken } from './lib/packcreator.svelte.js';
 import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
@@ -75,6 +77,7 @@ export { setMessageToolbar };
 export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
 export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome };
 export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken };
+export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -340,4 +343,10 @@ export function mountPackCreator(grid, { els, h }) {
 /** Mount one in-chat pack preview card into `target`; returns the instance for teardown. */
 export function mountPackPreviewCard(target, props) {
     return mount(PackPreviewCard, { target, props });
+}
+
+/** Mount the pack details modal's body into `body`, adopting `overlay` for visibility. */
+export function mountPackDetails(body, { overlay, h }) {
+    body.replaceChildren();
+    return mount(PackDetailsModal, { target: body, props: { overlay, h } });
 }
