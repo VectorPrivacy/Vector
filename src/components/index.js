@@ -31,6 +31,7 @@ import Notifications from './settings/Notifications.svelte';
 import SecurityCard from './settings/SecurityCard.svelte';
 import Display from './settings/Display.svelte';
 import Updates from './settings/Updates.svelte';
+import NetworkList from './settings/NetworkList.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -53,7 +54,7 @@ export {
 } from './lib/filepreview.svelte.js';
 // Settings: the Tor card's state and the blocked-users list's version.
 export {
-    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot, setDisplaySettings, updatesState, setUpdates,
+    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot, setDisplaySettings, updatesState, setUpdates, setNetwork,
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
@@ -226,4 +227,10 @@ export function mountDisplay(target, { h }) {
 export function mountUpdates(target, { h }) {
     target.replaceChildren();
     return mount(Updates, { target, props: { h } });
+}
+
+/** Mount the Network lists into `target` (#network-list). */
+export function mountNetworkList(target, { h }) {
+    target.replaceChildren();
+    return mount(NetworkList, { target, props: { h } });
 }

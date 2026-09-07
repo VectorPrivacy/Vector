@@ -4795,222 +4795,63 @@ async function executeDeepLinkAction(payload) {
  */
 let fSyncComplete = false;
 
-/**
- * Renders the relay list and media servers in the Settings Network section
- */
+let fNetworkListMounted = false;
+
+/** Fetch the relay and media server lists into the Network section's state. */
 async function renderRelayList() {
-    try {
-        const relays = await invoke('get_relays');
-        const networkList = document.getElementById('network-list');
-
-        // Clear existing content
-        networkList.innerHTML = '';
-
-        // Add Nostr Relays header with info and add buttons
-        const relaysTitleContainer = document.createElement('div');
-        relaysTitleContainer.className = 'relay-section-header';
-
-        const relaysTitle = document.createElement('h3');
-        relaysTitle.className = 'network-section-title';
-        relaysTitle.style.display = 'inline-flex';
-        relaysTitle.style.alignItems = 'center';
-        relaysTitle.textContent = 'Nostr Relays';
-
-        const relaysInfoBtn = document.createElement('span');
-        relaysInfoBtn.className = 'icon icon-info btn';
-        relaysInfoBtn.style.width = '16px';
-        relaysInfoBtn.style.height = '16px';
-        relaysInfoBtn.style.position = 'relative';
-        relaysInfoBtn.style.display = 'inline-block';
-        relaysInfoBtn.style.marginLeft = '8px';
-        relaysInfoBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true);
-        };
-
-        const addRelayBtn = document.createElement('button');
-        addRelayBtn.className = 'relay-add-btn';
-        addRelayBtn.textContent = '+';
-        addRelayBtn.title = 'Add Custom Relay';
-        addRelayBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            openAddRelayDialog();
-        };
-
-        relaysTitle.appendChild(relaysInfoBtn);
-        relaysTitleContainer.appendChild(relaysTitle);
-        relaysTitleContainer.appendChild(addRelayBtn);
-        networkList.appendChild(relaysTitleContainer);
-
-        // Create relay items
-        relays.forEach(relay => {
-            const relayItem = document.createElement('div');
-            relayItem.className = 'relay-item' + (relay.enabled ? '' : ' disabled');
-            relayItem.setAttribute('data-relay-url', relay.url);
-            relayItem.setAttribute('data-relay-is-default', relay.is_default);
-            relayItem.setAttribute('data-relay-is-custom', relay.is_custom);
-
-            // Content container (clickable area)
-            const relayContent = document.createElement('div');
-            relayContent.className = 'relay-item-content';
-            relayContent.onclick = () => openRelayInfoDialog(relay);
-
-            const relayUrl = document.createElement('span');
-            relayUrl.className = 'relay-url';
-            relayUrl.textContent = relay.url.replace(/^wss?:\/\//, '');
-
-            // Mode badge (only for custom relays or non-default modes)
-            if (relay.is_custom && relay.mode !== 'both') {
-                const modeBadge = document.createElement('span');
-                modeBadge.className = 'relay-mode-badge';
-                modeBadge.textContent = relay.mode === 'read' ? 'R' : 'W';
-                relayContent.appendChild(modeBadge);
-            }
-
-            // Default badge
-            if (relay.is_default) {
-                const defaultBadge = document.createElement('span');
-                defaultBadge.className = 'relay-default-badge';
-                defaultBadge.textContent = 'default';
-                relayContent.appendChild(defaultBadge);
-            }
-
-            relayContent.appendChild(relayUrl);
-
-            // Status badge
-            const relayStatus = document.createElement('span');
-            relayStatus.className = `relay-status ${relay.status}`;
-            relayStatus.textContent = relay.status;
-
-            // Actions container
-            const actionsContainer = document.createElement('div');
-            actionsContainer.className = 'relay-item-actions';
-
-            // Toggle switch
-            const toggle = document.createElement('input');
-            toggle.type = 'checkbox';
-            toggle.className = 'relay-toggle';
-            toggle.checked = relay.enabled;
-            toggle.onclick = (e) => e.stopPropagation();
-            toggle.onchange = async (e) => {
-                const enabled = e.target.checked;
-                try {
-                    if (relay.is_default) {
-                        // Show warning for default relays
-                        if (!enabled) {
-                            const confirmed = await popupConfirm(
-                                'Disable Default Relay?',
-                                'This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?',
-                                false
-                            );
-                            if (!confirmed) {
-                                e.target.checked = true;
-                                return;
-                            }
-                        }
-                        await invoke('toggle_default_relay', { url: relay.url, enabled });
-                    } else {
-                        await invoke('toggle_custom_relay', { url: relay.url, enabled });
+    if (!fNetworkListMounted) {
+        fNetworkListMounted = true;
+        VectorSvelte.mountNetworkList(document.getElementById('network-list'), {
+            h: {
+                explain: (kind) => kind === 'relays'
+                    ? popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true)
+                    : popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.<br><br>Your server list syncs automatically across your devices.', true),
+                addRelay: () => openAddRelayDialog(),
+                addServer: async () => {
+                    const url = await popupConfirm(
+                        'Add Media Server',
+                        'Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.',
+                        false,
+                        'blossom.primal.net',
+                    );
+                    if (!url) return;
+                    try {
+                        await addCustomBlossomServer(url.trim());
+                        renderRelayList();
+                    } catch (err) {
+                        popupConfirm('Could not add server', String(err), true, '', 'vector_warning.svg');
                     }
-                    // Refresh the list
-                    renderRelayList();
-                } catch (err) {
-                    console.error('Failed to toggle relay:', err);
-                    e.target.checked = !enabled; // Revert on error
-                }
-            };
-
-            actionsContainer.appendChild(relayStatus);
-            actionsContainer.appendChild(toggle);
-
-            relayItem.appendChild(relayContent);
-            relayItem.appendChild(actionsContainer);
-            networkList.appendChild(relayItem);
+                },
+                openRelay: (relay) => openRelayInfoDialog(relay),
+                openServer: (server) => openBlossomServerInfoDialog(server),
+                toggleRelay: async (relay, enabled) => {
+                    try {
+                        if (relay.is_default) {
+                            if (!enabled) {
+                                const confirmed = await popupConfirm(
+                                    'Disable Default Relay?',
+                                    'This is a <b>default relay</b>. Disabling it may affect message delivery and sync reliability.<br><br>Are you sure you want to disable it?',
+                                    false
+                                );
+                                if (!confirmed) return false;
+                            }
+                            await invoke('toggle_default_relay', { url: relay.url, enabled });
+                        } else {
+                            await invoke('toggle_custom_relay', { url: relay.url, enabled });
+                        }
+                        renderRelayList();
+                        return true;
+                    } catch (err) {
+                        console.error('Failed to toggle relay:', err);
+                        return false;
+                    }
+                },
+            },
         });
-        
-        const blossomServers = await invoke('get_blossom_servers_config');
-
-        const mediaTitleContainer = document.createElement('div');
-        mediaTitleContainer.className = 'relay-section-header';
-        mediaTitleContainer.style.marginTop = '2rem';
-
-        const mediaTitle = document.createElement('h3');
-        mediaTitle.className = 'network-section-title';
-        mediaTitle.style.display = 'inline-flex';
-        mediaTitle.style.alignItems = 'center';
-        mediaTitle.textContent = 'Media Servers';
-
-        const mediaInfoBtn = document.createElement('span');
-        mediaInfoBtn.className = 'icon icon-info btn';
-        mediaInfoBtn.style.width = '16px';
-        mediaInfoBtn.style.height = '16px';
-        mediaInfoBtn.style.position = 'relative';
-        mediaInfoBtn.style.display = 'inline-block';
-        mediaInfoBtn.style.marginLeft = '8px';
-        mediaInfoBtn.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.<br><br>Your server list syncs automatically across your devices.', true);
-        };
-
-        const addMediaBtn = document.createElement('button');
-        addMediaBtn.className = 'relay-add-btn';
-        addMediaBtn.textContent = '+';
-        addMediaBtn.title = 'Add Custom Media Server';
-        addMediaBtn.onclick = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const url = await popupConfirm(
-                'Add Media Server',
-                'Enter the address of a Blossom-compatible server. A bare domain like <b>blossom.primal.net</b> works. Vector adds <b>https://</b> automatically.',
-                false,
-                'blossom.primal.net',
-            );
-            if (!url) return;
-            try {
-                await addCustomBlossomServer(url.trim());
-                renderRelayList();
-            } catch (err) {
-                popupConfirm('Could not add server', String(err), true, '', 'vector_warning.svg');
-            }
-        };
-
-        mediaTitle.appendChild(mediaInfoBtn);
-        mediaTitleContainer.appendChild(mediaTitle);
-        mediaTitleContainer.appendChild(addMediaBtn);
-        networkList.appendChild(mediaTitleContainer);
-
-        blossomServers.forEach(server => {
-            const serverItem = document.createElement('div');
-            serverItem.className = 'relay-item media-server-item' + (server.enabled ? '' : ' disabled');
-            serverItem.setAttribute('data-server-url', server.url);
-
-            const serverContent = document.createElement('div');
-            serverContent.className = 'relay-item-content';
-            serverContent.onclick = () => openBlossomServerInfoDialog(server);
-
-            if (server.is_default) {
-                const defaultBadge = document.createElement('span');
-                defaultBadge.className = 'relay-default-badge';
-                defaultBadge.textContent = 'default';
-                serverContent.appendChild(defaultBadge);
-            }
-
-            const serverUrlSpan = document.createElement('span');
-            serverUrlSpan.className = 'relay-url';
-            serverUrlSpan.textContent = server.url.replace(/^https?:\/\//, '');
-            serverContent.appendChild(serverUrlSpan);
-
-            const statusBadge = document.createElement('span');
-            statusBadge.className = `relay-status ${server.enabled ? 'connected' : 'disabled'}`;
-            statusBadge.textContent = server.enabled ? 'active' : 'disabled';
-
-            serverItem.appendChild(serverContent);
-            serverItem.appendChild(statusBadge);
-            networkList.appendChild(serverItem);
-        });
+    }
+    try {
+        const [relays, servers] = await Promise.all([invoke('get_relays'), invoke('get_blossom_servers_config')]);
+        VectorSvelte.setNetwork({ relays, servers });
     } catch (error) {
         console.error('Failed to fetch network info:', error);
     }

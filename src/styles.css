@@ -9204,6 +9204,15 @@ select {
 
 /* Notification Content Privacy row: label left, dropdown right (matches the
    toggle rows). Stacks vertically on narrow screens so the label can't squash. */
+/* The (i) explainer inside a Network section title */
+.network-info {
+  width: 16px;
+  height: 16px;
+  position: relative;
+  display: inline-block;
+  margin-left: 8px;
+}
+
 /* The (i) explainer beside a settings toggle row's label */
 .notif-info {
   width: 18px;

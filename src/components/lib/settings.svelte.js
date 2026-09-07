@@ -91,3 +91,11 @@ const updates = $state({
 });
 export function updatesState() { return updates; }
 export function setUpdates(values) { Object.assign(updates, values); }
+
+// Network: the relay and media server lists the backend last reported.
+const network = $state({ relays: [], servers: [] });
+export function networkState() { return network; }
+export function setNetwork({ relays, servers }) {
+    if (relays) network.relays = relays;
+    if (servers) network.servers = servers;
+}
