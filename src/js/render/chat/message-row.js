@@ -955,6 +955,8 @@ function _dmsgCanAddReactionGroup(msg, uniqueCount) {
  */
 function _dmsgContentSig(msg) {
     const parts = [msg.content, msg.replied_to, !!msg.edited];
+    // An edit's authoritative update can carry new emoji tags under unchanged text.
+    if (msg.emoji_tags?.length) parts.push(...msg.emoji_tags.map(t => t.shortcode + '=' + t.url));
     // Link-preview metadata arrives async via message_update.
     const pm = msg.preview_metadata;
     if (pm) parts.push(pm.og_title, pm.og_image, pm.og_description, pm.title, pm.description);
