@@ -30,7 +30,6 @@
 
 {#key sig}
     {@const text = h.buildText(msg, ctx)}
-    {@const crypto = h.buildCryptoAddress(msg)}
     {#if text}
         <span style="display:contents" use:leaf={text}></span>
     {/if}
@@ -40,8 +39,9 @@
     <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} {h} /></div>
 {/if}
 {#key sig}
-    {#if crypto}
-        <span style="display:contents" use:leaf={crypto}></span>
+    {@const cryptoAddress = h.buildCryptoAddress(msg)}
+    {#if cryptoAddress}
+        <span style="display:contents" use:leaf={cryptoAddress}></span>
     {/if}
     {#if msg.content}
         <span style="display:contents" use:into={(node) => h.renderEmojiPackPreviews(node, msg.content)}></span>
