@@ -121,7 +121,31 @@ const _dmsgRowHelpers = {
     formatHourMinute: (at) => _dmsgFormatHourMinute(at),
     // MessageContent's leaves
     buildText: (msg, ctx) => _dmsgTextLeaf(msg, ctx),
-    buildAttachments: (node, msg, sender, ctx) => _dmsgBuildAttachments(node, msg, sender, ctx.isGroupChat, ctx.revealedBlocked),
+    // Attachments' leaves and facts
+    isImage: (ext) => ['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico'].includes(ext),
+    isAudio: (ext) => ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(ext),
+    isVideo: (ext) => platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(ext),
+    isDownloading: (att) => !!att.downloading || downloadingAttachmentIds.has(att.id),
+    willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && att.size > 0
+        && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed,
+    // Once per attachment id across renders, or every repaint would re-fire the download.
+    autoDownload: (att, msg, sender) => _dmsgStartDownload(att, msg, sender),
+    startDownload: (att, msg, sender) => _dmsgStartDownload(att, msg, sender),
+    renderAudio: (node, att, msg) => handleAudioAttachment(att, node, msg),
+    fileBox: (node, att, state, opts) => _dmsgFileBoxLeaf(node, att, state, opts || {}),
+    attachUploadProgress: (node, msg) => _dmsgAttachUploadProgress(node, msg),
+    assetUrl: (path) => convertFileSrc(path),
+    mediaUrl: (path) => mediaUrl(path),
+    isSpoiler: (att) => isSpoilerAttachment(att),
+    thumbhash: (npub, msgId) => invoke('generate_thumbhash_preview', { npub, msgId }),
+    onImageLoad: () => compensateChatScrollForResize(),
+    onThumbLoad: () => { if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad(); else softChatScroll(); },
+    onVideoMeta: (video) => { if (!video.isConnected) return; video.currentTime = 0.1; compensateChatScrollForResize(); },
+    attachImagePreview: (img) => attachImagePreview(img),
+    attachFileExtBadge: (img, container, ext) => attachFileExtBadge(img, container, ext),
+    cancelUpload: (pendingId) => invoke('cancel_upload', { pendingId }),
+    openChat: () => strOpenChat,
+    formatBytes: (n) => formatBytes(n),
     buildCryptoAddress: (msg) => { const c = detectCryptoAddress(msg.content); return c ? renderCryptoAddress(c) : null; },
     renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
     renderCommunityInvitePreviews: (node, text) => renderCommunityInvitePreviews(node, text),
@@ -522,203 +546,29 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     return span;
 }
 
-/**
- * Render every attachment (image / audio / video / file) into `target`.
- * Branches on per-attachment state: `downloaded` (immediate display),
- * `downloading` (thumbhash + download spinner), and undownloaded (thumbhash
- * + download button OR auto-download trigger if size is within limit).
- */
-function _dmsgBuildAttachments(target, msg, sender, isGroupChat, isRevealedBlockedMsg) {
-    for (const cAttachment of msg.attachments) {
-        if (cAttachment.downloaded) {
-            const assetUrl = convertFileSrc(cAttachment.path);
-
-            if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-                _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachment, assetUrl);
-            } else if (['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(cAttachment.extension)) {
-                handleAudioAttachment(cAttachment, target, msg);
-            } else if (platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(cAttachment.extension)) {
-                _dmsgRenderVideoAttachment(target, cAttachment);
-            } else {
-                _dmsgRenderFileAttachment(target, msg, cAttachment);
-            }
-
-            if (msg.mine && msg.pending) {
-                _dmsgAttachUploadProgress(target, msg);
-            }
-        } else if (cAttachment.downloading || downloadingAttachmentIds.has(cAttachment.id)) {
-            _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAttachment);
-        } else {
-            _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAttachment, isRevealedBlockedMsg);
-        }
-    }
+/** Start an attachment download once; the backend's result event clears the gate. */
+function _dmsgStartDownload(att, msg, sender) {
+    if (downloadingAttachmentIds.has(att.id)) return;
+    downloadingAttachmentIds.add(att.id);
+    const isGroupChat = chatIsGroup(getChat(strOpenChat));
+    const npub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
+    invoke('download_attachment', { npub, msgId: msg.id, attachmentId: att.id })
+        .catch(() => downloadingAttachmentIds.delete(att.id));
 }
 
-/**
- * Size a thumbhash placeholder <img> to the SAME box its real image will occupy — fit within
- * 450×350 preserving aspect, matching `.dmsg-image-attachment`. So the real image swaps in with zero
- * resize (no jagged jump), and a centered download/upload spinner lands on the actual image rather
- * than a full-bleed blur. Driven by width/height attrs + aspect-ratio because the thumbhash's tiny
- * intrinsic size means CSS `width:auto` would collapse it back to ~32px.
- */
-function _sizeThumbhashPlaceholder(imgEl, imgMeta) {
-    if (imgMeta && imgMeta.width && imgMeta.height) {
-        const iw = imgMeta.width, ih = imgMeta.height;
-        const scale = Math.min(450 / iw, 350 / ih, 1);
-        imgEl.width = Math.round(iw * scale);
-        imgEl.height = Math.round(ih * scale);
-        imgEl.style.aspectRatio = `${iw} / ${ih}`;
-    }
-    imgEl.style.maxWidth = 'min(100%, 450px)';
-    imgEl.style.maxHeight = '350px';
-    imgEl.style.height = 'auto';
-    imgEl.style.borderRadius = '8px';
-}
-
-function _dmsgRenderImageAttachment(target, msg, sender, isGroupChat, cAttachment, assetUrl) {
-    const imgContainer = document.createElement('div');
-    imgContainer.style.position = 'relative';
-    imgContainer.style.display = 'inline-block';
-
-    if (isSpoilerAttachment(cAttachment)) {
-        const spoilerNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-        invoke('generate_thumbhash_preview', { npub: spoilerNpub, msgId: msg.id })
-            .then(base64Image => {
-                // Bail out if the chat was switched mid-flight: target became
-                // detached during openChat()'s clear-children sweep. Without
-                // this guard, the image still loads + appends to a detached
-                // tree, leaks memory, and fires scroll callbacks against the
-                // current chat from a stale render's load event.
-                if (!target.isConnected) return;
-                const imgPreview = document.createElement('img');
-                imgPreview.className = 'spoiler-img';
-                if (cAttachment.img_meta) {
-                    // Pre-scale the placeholder dimensions to match what the
-                    // revealed image will display at (fit within 450×350,
-                    // preserve ratio). Without this, the thumbhash placeholder
-                    // would render at 450×350 (squashed) while the revealed
-                    // image fits the box correctly, and the spoiler appears
-                    // wider than the real image.
-                    const iw = cAttachment.img_meta.width;
-                    const ih = cAttachment.img_meta.height;
-                    const scale = Math.min(450 / iw, 350 / ih, 1);
-                    imgPreview.width = Math.round(iw * scale);
-                    imgPreview.height = Math.round(ih * scale);
-                    imgPreview.style.aspectRatio = `${iw} / ${ih}`;
-                }
-                imgPreview.style.maxWidth = '100%';
-                imgPreview.style.height = 'auto';
-                imgPreview.style.borderRadius = '8px';
-                imgPreview.src = base64Image;
-                imgPreview.addEventListener('load', () => {
-                    if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad();
-                    else softChatScroll();
-                }, { once: true });
-                imgContainer.appendChild(imgPreview);
-
-                if (msg.mine && msg.pending) {
-                    imgPreview.style.opacity = '0.25';
-                    const uploadOverlay = document.createElement('div');
-                    uploadOverlay.className = 'attachment-progress-overlay';
-                    const spinner = document.createElement('div');
-                    spinner.className = 'miniapp-downloading-spinner';
-                    spinner.id = msg.id + '_file';
-                    spinner.style.width = '48px';
-                    spinner.style.height = '48px';
-                    applyPendingUploadProgress(spinner, msg.id);
-                    uploadOverlay.appendChild(spinner);
-                    const cancelBtn = document.createElement('div');
-                    cancelBtn.className = 'upload-cancel-btn';
-                    cancelBtn.addEventListener('click', (e) => {
-                        e.stopPropagation();
-                        invoke('cancel_upload', { pendingId: msg.id });
-                    });
-                    uploadOverlay.appendChild(cancelBtn);
-                    imgContainer.appendChild(uploadOverlay);
-                } else {
-                    const overlay = document.createElement('div');
-                    overlay.className = 'spoiler-overlay';
-                    overlay.innerHTML = '<span class="icon icon-eye-off"></span><span class="spoiler-label">Spoiler</span>';
-                    imgContainer.appendChild(overlay);
-                    overlay.addEventListener('click', () => {
-                        const realUrl = convertFileSrc(cAttachment.path);
-                        imgPreview.src = realUrl;
-                        // The revealed image is an ordinary attachment: same 450×350 clamp.
-                        imgPreview.classList.replace('spoiler-img', 'dmsg-image-attachment');
-                        imgPreview.style.aspectRatio = '';
-                        overlay.remove();
-                        attachImagePreview(imgPreview);
-                    }, { once: true });
-                }
-            })
-            .catch(() => {
-                if (!target.isConnected) return;
-                const imgPreview = document.createElement('img');
-                imgPreview.classList.add('dmsg-image-attachment');
-                imgPreview.style.maxWidth = '100%';
-                imgPreview.style.height = 'auto';
-                imgPreview.style.borderRadius = '8px';
-                imgPreview.src = assetUrl;
-                attachImagePreview(imgPreview);
-                imgContainer.appendChild(imgPreview);
-            });
-
-        attachFileExtBadge(null, imgContainer, cAttachment.extension);
-        if (msg.mine && msg.pending) imgContainer.dataset.spoilerUpload = '1';
-        target.appendChild(imgContainer);
+/** A file box in `node`: a downloaded file (opens / reveals), or a download / downloading state. */
+function _dmsgFileBoxLeaf(node, att, state, opts) {
+    if (state === 'downloaded') {
+        _dmsgRenderFileAttachment(node, opts.msg, att);
         return;
     }
-
-    const imgPreview = document.createElement('img');
-    if (cAttachment.extension === 'svg') {
-        imgPreview.setAttribute('data-attachment-type', 'svg');
-        imgPreview.style.width = '25vw';
-    } else {
-        // The CSS rule that fits the image in a 450×350 box (preserving
-        // ratio for portrait shots) is scoped to this class so it doesn't
-        // override sizing of unrelated `<img>`s in the attachment area
-        // (audio cover art, mini-app icons, etc.).
-        imgPreview.classList.add('dmsg-image-attachment');
-        imgPreview.style.maxWidth = '100%';
+    const { fileDiv, statusSpan } = createFileBox(att, state);
+    if (opts.failed && statusSpan) {
+        const reason = (att.download_error || '').slice(0, 64);
+        statusSpan.innerText = reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
     }
-    imgPreview.style.height = 'auto';
-    imgPreview.style.borderRadius = '8px';
-    imgPreview.src = assetUrl;
-    imgPreview.addEventListener('load', () => {
-        // Bail if the row was detached during a chat-switch; firing scroll
-        // adjustments against the new chat's viewport would be a regression.
-        if (!imgPreview.isConnected) return;
-        compensateChatScrollForResize();
-    }, { once: true });
-    attachImagePreview(imgPreview);
-    imgContainer.appendChild(imgPreview);
-    attachFileExtBadge(imgPreview, imgContainer, cAttachment.extension);
-    target.appendChild(imgContainer);
-}
-
-function _dmsgRenderVideoAttachment(target, cAttachment) {
-    const handleMetadataLoaded = (video) => {
-        if (!video.isConnected) return;
-        video.currentTime = 0.1;
-        compensateChatScrollForResize();
-    };
-
-    const vidPreview = document.createElement('video');
-    vidPreview.setAttribute('controlsList', 'nodownload');
-    vidPreview.controls = true;
-    // Width handled by CSS (max-width + auto so portrait videos can shrink
-    // their width when max-height clamps, instead of squashing).
-    vidPreview.style.height = 'auto';
-    vidPreview.style.borderRadius = '8px';
-    vidPreview.style.cursor = 'pointer';
-    vidPreview.preload = 'metadata';
-    vidPreview.playsInline = true;
-    vidPreview.src = mediaUrl(cAttachment.path);
-    vidPreview.addEventListener('loadedmetadata', () => {
-        handleMetadataLoaded(vidPreview);
-    }, { once: true });
-
-    target.appendChild(vidPreview);
+    if (opts.onClick) fileDiv.addEventListener('click', opts.onClick, { once: true });
+    node.appendChild(fileDiv);
 }
 
 function _dmsgRenderFileAttachment(target, msg, cAttachment) {
@@ -864,154 +714,6 @@ function _dmsgAttachUploadProgress(target, msg) {
     const hasSpoilerUpload = target.querySelector('[data-spoiler-upload]');
     if (!hasSpinner && !hasSpoilerUpload && target.lastElementChild) {
         target.lastElementChild.style.opacity = 0.25;
-    }
-}
-
-function _dmsgRenderDownloadingAttachment(target, msg, sender, isGroupChat, cAttachment) {
-    if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-        const thumbhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-        invoke('generate_thumbhash_preview', { npub: thumbhashNpub, msgId: msg.id })
-            .then(base64Image => {
-                if (!target.isConnected) return;
-                const imgPreview = document.createElement('img');
-                _sizeThumbhashPlaceholder(imgPreview, cAttachment.img_meta);
-                imgPreview.style.opacity = '0.7';
-                imgPreview.src = base64Image;
-                imgPreview.addEventListener('load', () => {
-                    if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad();
-                    else softChatScroll();
-                }, { once: true });
-
-                // inline-block + line-height:0 so the container shrink-wraps the (correctly-sized)
-                // placeholder exactly — the absolutely-positioned spinner overlay then centers on the
-                // image, not a full-width box (and with no inline descender gap nudging it down).
-                const container = document.createElement('div');
-                container.style.position = 'relative';
-                container.style.display = 'inline-block';
-                container.style.lineHeight = '0';
-                container.appendChild(imgPreview);
-
-                const dlOverlay = document.createElement('div');
-                dlOverlay.className = 'attachment-progress-overlay';
-                const dlSpinner = document.createElement('div');
-                dlSpinner.className = 'miniapp-downloading-spinner';
-                dlSpinner.setAttribute('data-attachment-id', cAttachment.id);
-                dlSpinner.style.width = '48px';
-                dlSpinner.style.height = '48px';
-                dlOverlay.appendChild(dlSpinner);
-                container.appendChild(dlOverlay);
-
-                target.appendChild(container);
-            })
-            .catch(() => {
-                if (!target.isConnected) return;
-                const { fileDiv } = createFileBox(cAttachment, 'downloading');
-                target.appendChild(fileDiv);
-            });
-    } else {
-        const { fileDiv } = createFileBox(cAttachment, 'downloading');
-        target.appendChild(fileDiv);
-    }
-}
-
-/** Failed-download label: carries the backend's reason so a red box is diagnosable at a glance. */
-function _dmsgDownloadFailedText(cAttachment) {
-    const reason = (cAttachment.download_error || '').slice(0, 64);
-    return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
-}
-
-function _dmsgRenderUndownloadedAttachment(target, msg, sender, isGroupChat, cAttachment, isRevealedBlockedMsg) {
-    const willAutoDownload = AUTO_DOWNLOAD_ENABLED && !isRevealedBlockedMsg && cAttachment.size > 0
-        && cAttachment.size <= MAX_AUTO_DOWNLOAD_BYTES && !cAttachment.download_failed;
-
-    if (['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-        const thumbhashNpub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-        invoke('generate_thumbhash_preview', { npub: thumbhashNpub, msgId: msg.id })
-            .then(base64Image => {
-                if (!target.isConnected) return;
-                const imgPreview = document.createElement('img');
-                _sizeThumbhashPlaceholder(imgPreview, cAttachment.img_meta);
-                imgPreview.style.opacity = willAutoDownload ? '0.8' : '0.6';
-                imgPreview.src = base64Image;
-                imgPreview.addEventListener('load', () => {
-                    if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad();
-                    else softChatScroll();
-                }, { once: true });
-
-                // inline-block so the container shrink-wraps the placeholder — the centered spinner
-                // (auto-download) or Download button then lands on the image, not a full-width box.
-                // (No line-height:0 here: this container also hosts the text Download button.)
-                const container = document.createElement('div');
-                container.style.position = 'relative';
-                container.style.display = 'inline-block';
-                container.appendChild(imgPreview);
-
-                if (!willAutoDownload) {
-                    let strSize = 'Unknown Size';
-                    if (cAttachment.size > 0) strSize = formatBytes(cAttachment.size);
-                    const iDownload = document.createElement('i');
-                    iDownload.setAttribute('data-attachment-id', cAttachment.id);
-                    iDownload.toggleAttribute('download', true);
-                    const downloadNpub2 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-                    iDownload.setAttribute('npub', downloadNpub2);
-                    iDownload.setAttribute('msg', msg.id);
-                    iDownload.classList.add('btn');
-                    iDownload.textContent = cAttachment.download_failed
-                        ? _dmsgDownloadFailedText(cAttachment)
-                        : `Download ${cAttachment.extension.toUpperCase()} (${strSize})`;
-                    iDownload.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background-color:rgba(0,0,0,0.8);padding:8px 15px;border-radius:6px;color:white;cursor:pointer;font-size:12px;white-space:nowrap;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;';
-                    container.appendChild(iDownload);
-                } else {
-                    const adOverlay = document.createElement('div');
-                    adOverlay.className = 'attachment-progress-overlay';
-                    const adSpinner = document.createElement('div');
-                    adSpinner.className = 'miniapp-downloading-spinner';
-                    adSpinner.setAttribute('data-attachment-id', cAttachment.id);
-                    adSpinner.style.width = '48px';
-                    adSpinner.style.height = '48px';
-                    adOverlay.appendChild(adSpinner);
-                    container.appendChild(adOverlay);
-                }
-
-                target.appendChild(container);
-            })
-            .catch(() => {
-                if (!target.isConnected) return;
-                const fallbackState = willAutoDownload ? 'downloading' : 'download';
-                const { fileDiv: fallbackDiv, statusSpan: fallbackStatus } = createFileBox(cAttachment, fallbackState);
-                if (cAttachment.download_failed && fallbackStatus) {
-                    fallbackStatus.innerText = _dmsgDownloadFailedText(cAttachment);
-                }
-                if (!willAutoDownload) {
-                    fallbackDiv.addEventListener('click', () => {
-                        startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
-                    }, { once: true });
-                }
-                target.appendChild(fallbackDiv);
-            });
-    } else if (!willAutoDownload) {
-        const { fileDiv: dlFileDiv, statusSpan: dlStatus } = createFileBox(cAttachment, 'download');
-        if (cAttachment.download_failed && dlStatus) {
-            dlStatus.innerText = _dmsgDownloadFailedText(cAttachment);
-        }
-        dlFileDiv.addEventListener('click', () => {
-            startAttachmentDownload(cAttachment, msg, isGroupChat, strOpenChat, sender);
-        }, { once: true });
-        target.appendChild(dlFileDiv);
-    }
-
-    if (willAutoDownload) {
-        // Dedupe — without this, every re-render of an undownloaded message
-        // (e.g. when reactions arrive before the backend echoes downloading=true)
-        // would re-fire `download_attachment`, flooding the backend.
-        if (downloadingAttachmentIds.has(cAttachment.id)) return;
-        downloadingAttachmentIds.add(cAttachment.id);
-        if (!['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'].includes(cAttachment.extension)) {
-            const { fileDiv: autoFileDiv } = createFileBox(cAttachment, 'downloading');
-            target.appendChild(autoFileDiv);
-        }
-        const downloadNpub4 = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-        invoke('download_attachment', { npub: downloadNpub4, msgId: msg.id, attachmentId: cAttachment.id });
     }
 }
 

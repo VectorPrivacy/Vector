@@ -3656,6 +3656,7 @@ async function setupRustListeners() {
     // Record the latest progress per pending_id so renderMessage can pick it up on creation.
     _on('attachment_upload_progress', async (evt) => {
         pendingUploadProgress.set(evt.payload.id, evt.payload.progress);
+        VectorSvelte.setUploadProgress(evt.payload.id, evt.payload.progress);
         const divUpload = document.getElementById(evt.payload.id + '_file');
         if (divUpload) {
             divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
@@ -3779,6 +3780,7 @@ async function setupRustListeners() {
             downloadSpeedLerp.delete(attachId);
         }
 
+        VectorSvelte.setDownloadProgress(attachId, evt.payload.progress);
         // Update ALL conical progress spinners with this attachment ID (handles deduplication)
         const spinners = document.querySelectorAll(`.miniapp-downloading-spinner[data-attachment-id="${escapedId}"]`);
         if (spinners.length) {
@@ -3810,6 +3812,8 @@ async function setupRustListeners() {
         // this attachment for the rest of the session.
         downloadingAttachmentIds.delete(matchId);
         downloadingAttachmentIds.delete(evt.payload.id);
+        VectorSvelte.clearDownloadProgress(matchId);
+        VectorSvelte.clearDownloadProgress(evt.payload.id);
         for (const id of [matchId, evt.payload.id]) {
             const lerp = downloadSpeedLerp.get(id);
             if (lerp) { if (lerp.raf) cancelAnimationFrame(lerp.raf); downloadSpeedLerp.delete(id); }
@@ -4341,6 +4345,7 @@ async function setupRustListeners() {
         // Drop any buffered upload progress + speed tracker for this pending id (the upload finished
         // or failed; the spinner is gone after re-render, and a 100% frame isn't always emitted).
         pendingUploadProgress.delete(evt.payload.old_id);
+        VectorSvelte.clearUploadProgress(evt.payload.old_id);
         const stUpd = uploadSpeedState.get(evt.payload.old_id);
         if (stUpd) { if (stUpd.raf) cancelAnimationFrame(stUpd.raf); uploadSpeedState.delete(evt.payload.old_id); }
 
@@ -4459,6 +4464,7 @@ async function setupRustListeners() {
         _exitModesForRemovedMessage(id);
         // Drop any buffered upload progress + speed tracker (e.g. on cancel)
         pendingUploadProgress.delete(id);
+        VectorSvelte.clearUploadProgress(id);
         const stUp = uploadSpeedState.get(id);
         if (stUp) { if (stUp.raf) cancelAnimationFrame(stUp.raf); uploadSpeedState.delete(id); }
         const cChat = getChat(chat_id);

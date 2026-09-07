@@ -29,6 +29,7 @@ import MessageToolbar from './chat/MessageToolbar.svelte';
 import ReactionPopups from './chat/ReactionPopups.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
+import { setUploadProgress, clearUploadProgress, setDownloadProgress, clearDownloadProgress } from './lib/attachments.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
@@ -60,6 +61,7 @@ export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, p
 export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
+export { setUploadProgress, clearUploadProgress, setDownloadProgress, clearDownloadProgress };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';

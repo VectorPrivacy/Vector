@@ -4,8 +4,10 @@
     // the cards are the app's builders as leaves, rebuilt whole when the content
     // signature changes (a reaction echo hands the row a new object with the same
     // content, and a rebuild would reset playback and spoiler reveals).
+    import Attachments from './Attachments.svelte';
+
     let { msg, sender, ctx, h, sig } = $props();
-    // h: buildText(msg, ctx) → span | null, buildAttachments(node, msg, sender, ctx), buildCryptoAddress(msg),
+    // h: buildText(msg, ctx) → span | null, the Attachments leaves, buildCryptoAddress(msg),
     //    renderEmojiPackPreviews(node, text), renderCommunityInvitePreviews(node, text), xdcUrl(msg, ctx),
     //    renderXdcUrlCard(node, msg, url), webPreviewsEnabled(), buildLinkPreview(msg), isAndroid(),
     //    fmtCountdown(secs), selfDestructTooltip(el), selfDestructTooltipEnd()
@@ -16,9 +18,6 @@
     }
     function into(node, fill) {
         fill(node);
-    }
-    function attachments(node) {
-        h.buildAttachments(node, msg, sender, ctx);
     }
 
     const live = $derived(!msg.pending && !msg.failed && !ctx.revealedBlocked);
@@ -36,8 +35,7 @@
         <span style="display:contents" use:leaf={text}></span>
     {/if}
     {#if msg.attachments?.length}
-        <!-- Always present when attachments exist: previews often arrive on async paths. -->
-        <div class="dmsg-attachments" use:attachments></div>
+        <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} {h} /></div>
     {/if}
     {#if crypto}
         <span style="display:contents" use:leaf={crypto}></span>
