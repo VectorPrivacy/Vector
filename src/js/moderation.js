@@ -87,6 +87,7 @@ async function openModerationPanel(communityId) {
     if (!communityId) return;
     modEnsureIslands();
     VectorSvelte.modOpen(communityId);
+    VectorSvelte.polResetChannels();
     modShowTab('members');
     const tm = document.getElementById('mod-tab-members');
     const tp = document.getElementById('mod-tab-policies');
@@ -111,9 +112,7 @@ async function modFetch(communityId) {
         // A swap or a close while the read was in flight: don't paint over what is shown now.
         if (modCommunityId() !== communityId) return;
         // The designer's per-channel exemptions read from the same payload.
-        window.polChannels = (intel.channels || []).map(c => ({ id: c.id, name: c.name || 'channel' }));
-        window.polChannelsLoaded = true;
-        window.polChannelsReady?.();
+        VectorSvelte.polSetChannels((intel.channels || []).map(c => ({ id: c.id, name: c.name || 'channel' })));
         VectorSvelte.modSetIntel(intel, new Set(intel.report.members.filter(m => m.verdict !== 'suspect').map(m => m.npub)));
     } catch (err) {
         if (modCommunityId() !== communityId) return;

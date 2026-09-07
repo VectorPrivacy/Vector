@@ -46,6 +46,8 @@ import ModList from './moderation/ModList.svelte';
 import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
 import ModChrome from './moderation/ModChrome.svelte';
+import PolicyDesigner from './moderation/PolicyDesigner.svelte';
+export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
@@ -383,4 +385,10 @@ export function mountModeration({ list, filters, stats, els, h }) {
     mount(ModStats, { target: stats, props: {} });
     const host = document.createElement('div'); host.hidden = true; document.body.appendChild(host);
     mount(ModChrome, { target: host, props: { els, h } });
+}
+
+/** Mount the policy designer into the console's Policies pane (#mod-policies-pane). */
+export function mountPolicyDesigner(pane, { h }) {
+    pane.replaceChildren();
+    return mount(PolicyDesigner, { target: pane, props: { h } });
 }
