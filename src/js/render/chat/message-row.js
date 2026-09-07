@@ -119,8 +119,20 @@ const _dmsgRowHelpers = {
     showTooltip: (text, el) => showGlobalTooltip(text, el),
     hideTooltip: () => hideGlobalTooltip(),
     formatHourMinute: (at) => _dmsgFormatHourMinute(at),
-    fillContent: (node, msg, sender, ctx) =>
-        _dmsgFillContent(node, msg, sender, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked),
+    // MessageContent's leaves
+    buildText: (msg, ctx) => _dmsgTextLeaf(msg, ctx),
+    buildAttachments: (node, msg, sender, ctx) => _dmsgBuildAttachments(node, msg, sender, ctx.isGroupChat, ctx.revealedBlocked),
+    buildCryptoAddress: (msg) => { const c = detectCryptoAddress(msg.content); return c ? renderCryptoAddress(c) : null; },
+    renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
+    renderCommunityInvitePreviews: (node, text) => renderCommunityInvitePreviews(node, text),
+    xdcUrl: (msg) => findXdcUrl(msg.content),
+    renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),
+    webPreviewsEnabled: () => !!fWebPreviewsEnabled,
+    buildLinkPreview: (msg) => _dmsgBuildLinkPreview(msg),
+    isAndroid: () => typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android',
+    fmtCountdown: (secs) => _fmtCountdown(secs),
+    selfDestructTooltip: (el) => _selfDestructTooltip(el),
+    selfDestructTooltipEnd: () => _selfDestructTooltipEnd(),
     contentSig: (msg) => _dmsgContentSig(msg),
     reactionGroups: (msg) => Array.from(_dmsgAggregateReactions(msg), ([emoji, g]) => ({ emoji, ...g })),
     canAddReactionGroup: (msg, n) => _dmsgCanAddReactionGroup(msg, n),
@@ -162,22 +174,12 @@ function _dmsgIsPinged(msg, currentChat, isGroupChat) {
 }
 
 /**
- * Fill a `.dmsg-content` element: text, attachments, crypto address, pack and invite
- * previews, mini-app card, link preview, edited mark, status and self-destruct glyph,
- * in that order. Shared by the vanilla builder and the row island.
+ * The text span for a message, or null when there is nothing to show. Decides the
+ * jumbo emoji-only treatment: up to six graphemes, counting resolved `:shortcode:`
+ * tokens as one each, and nothing else but whitespace.
  */
-function _dmsgFillContent(content, msg, sender, isGroupChat, currentChat, isRevealedBlockedMsg) {
-    // ---- Text content -------------------------------------------------------
-    // Defensive against null/undefined content (attachment-only messages from
-    // some clients can omit content entirely).
-    const displayContent = msg.content || '';
-
-    // Defensive: msg.content can be null/undefined for attachment-only messages.
+function _dmsgTextLeaf(msg, ctx) {
     const safeContent = msg.content || '';
-
-    // Strip resolved `:shortcode:` tokens before the unicode-only check so
-    // a message that's purely custom emojis (or a mix with stock emojis)
-    // still qualifies for the jumbo emoji-only treatment.
     const emojiTagSet = (msg.emoji_tags && msg.emoji_tags.length)
         ? new Set(msg.emoji_tags.map(t => t.shortcode))
         : null;
@@ -193,8 +195,7 @@ function _dmsgFillContent(content, msg, sender, isGroupChat, currentChat, isReve
         });
     }
     const strEmojiCleaned = strippedContent.replace(/\s/g, '');
-    // Cap at 6 graphemes, not UTF-16 units — fully-qualified ZWJ sequences
-    // (e.g. 👁️‍🗨️ = 7 code units) are still a single visual emoji.
+    // Graphemes, not UTF-16 units: a fully-qualified ZWJ sequence is one visual emoji.
     let graphemeCount = customEmojiCount;
     if (strEmojiCleaned) {
         const seg = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
@@ -203,81 +204,12 @@ function _dmsgFillContent(content, msg, sender, isGroupChat, currentChat, isReve
         }
     }
     const remainderIsEmojiOnly = !strEmojiCleaned || isEmojiOnly(strEmojiCleaned);
-    const fEmojiOnly = graphemeCount > 0
-        && graphemeCount <= 6
-        && remainderIsEmojiOnly;
+    const fEmojiOnly = graphemeCount > 0 && graphemeCount <= 6 && remainderIsEmojiOnly;
 
-    const textSpan = _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentChat, isRevealedBlockedMsg);
-    if (textSpan && (textSpan.textContent || textSpan.querySelector('img,video,hr'))) {
-        twemojify(textSpan);
-        content.appendChild(textSpan);
-    }
-
-    // ---- Attachments --------------------------------------------------------
-    // The wrapper is appended unconditionally when attachments exist — image
-    // previews / file-boxes / spinners often arrive via async paths
-    // (generate_thumbhash_preview, etc.), so we can't gate on childNodes.length
-    // at this point. Doing so detaches the wrapper before the async path fires
-    // and the message renders blank — particularly for images sent from clients
-    // that don't ship a thumbhash (e.g. 0xChat).
-    if (msg.attachments?.length) {
-        const attachmentsDiv = document.createElement('div');
-        attachmentsDiv.classList.add('dmsg-attachments');
-        _dmsgBuildAttachments(attachmentsDiv, msg, sender, isGroupChat, isRevealedBlockedMsg);
-        content.appendChild(attachmentsDiv);
-    }
-
-    // ---- Crypto address shortcut --------------------------------------------
-    const cAddress = detectCryptoAddress(msg.content);
-    if (cAddress) {
-        content.appendChild(renderCryptoAddress(cAddress));
-    }
-
-    // ---- Emoji pack preview (NIP-19 naddr → NIP-30 kind 30030) -------------
-    if (msg.content && typeof renderEmojiPackPreviews === 'function') {
-        renderEmojiPackPreviews(content, msg.content);
-    }
-
-    // ---- Community invite card (vectorapp.io/invite share links) -----------
-    if (msg.content && typeof renderCommunityInvitePreviews === 'function') {
-        renderCommunityInvitePreviews(content, msg.content);
-    }
-
-
-    // ---- URL-shared Mini App -------------------------------------------------
-    // An .xdc link renders as a playable game card (same file-box pipeline as
-    // an uploaded Mini App); it also supersedes the OpenGraph card below.
-    const xdcUrl = (!msg.pending && !msg.failed && !isRevealedBlockedMsg) ? findXdcUrl(msg.content) : null;
-    if (xdcUrl) {
-        const xdcTarget = document.createElement('div');
-        content.appendChild(xdcTarget);
-        renderXdcUrlCard(xdcTarget, msg, xdcUrl);
-    }
-
-    // ---- Link preview (OpenGraph) ------------------------------------------
-    // A vectorapp.io profile link renders as a mention pill; an OpenGraph
-    // card for the same URL would be redundant.
-    const skipWebPreview = /https?:\/\/vectorapp\.io\/profile\/npub1[a-z0-9]{58}/i.test(msg.content || '');
-    if (!msg.pending && !msg.failed && fWebPreviewsEnabled && !skipWebPreview && !xdcUrl && !isRevealedBlockedMsg) {
-        const previewEl = _dmsgBuildLinkPreview(msg);
-        if (previewEl) content.appendChild(previewEl);
-    }
-
-    // ---- Edited indicator ---------------------------------------------------
-    if (msg.edited) {
-        content.appendChild(_dmsgBuildEditedIndicator(msg));
-    }
-
-    // ---- Status indicator (own messages only) -------------------------------
-    if (msg.mine) {
-        content.appendChild(_dmsgBuildStatus(msg));
-    }
-
-    // ---- Self-Destruct Timer glyph (per-message NIP-40 expiry) --------------
-    if (msg.expiration) {
-        content.appendChild(_dmsgBuildSelfDestruct(msg));
-    }
-
+    const textSpan = _dmsgBuildText(msg, safeContent, fEmojiOnly, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked);
+    if (!(textSpan && (textSpan.textContent || textSpan.querySelector('img,video,hr')))) return null;
+    twemojify(textSpan);
+    return textSpan;
 }
 
 // ----------------------------------------------------------------------------
@@ -359,29 +291,6 @@ function _dmsgBuildHeader(authorFullId, authorProfile, msg, isGroupChat, current
     return header;
 }
 
-/** Build the subtle clock glyph on a self-destruct (NIP-40) message. Hovering
- *  surfaces a live-ticking "dissolves in mm:ss" tooltip. */
-function _dmsgBuildSelfDestruct(msg) {
-    const el = document.createElement('span');
-    el.className = 'dmsg-selfdestruct';
-    el.dataset.expiration = String(msg.expiration); // unix seconds
-    // Inline SVG (not an .icon): .icon is position:absolute;inset:0 and would
-    // escape this unsized span, rendering nothing in the message row.
-    el.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>';
-    if (typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android') {
-        // Touch has no hover — show the countdown inline beside the clock. The
-        // parent is nowrap inline-flex, so clock + time never split across lines.
-        const t = document.createElement('span');
-        t.className = 'dmsg-selfdestruct-time';
-        const remaining = msg.expiration - Math.floor(Date.now() / 1000);
-        t.textContent = remaining > 0 ? _fmtCountdown(remaining) : '';
-        el.appendChild(t);
-    } else {
-        el.addEventListener('mouseenter', () => _selfDestructTooltip(el));
-        el.addEventListener('mouseleave', _selfDestructTooltipEnd);
-    }
-    return el;
-}
 
 let _sdTooltipTimer = null;
 function _selfDestructTooltip(el) {
@@ -1213,42 +1122,7 @@ function _dmsgBuildLinkPreview(msg) {
     return divPrev;
 }
 
-function _dmsgBuildEditedIndicator(msg) {
-    const span = document.createElement('span');
-    span.classList.add('dmsg-edited');
-    span.textContent = '(edited)';
-    if (msg.edit_history && msg.edit_history.length > 0) {
-        span.classList.add('btn');
-        span.setAttribute('data-msg-id', msg.id);
-        span.title = 'Click to view edit history';
-    }
-    return span;
-}
 
-function _dmsgBuildStatus(msg) {
-    const statusEl = document.createElement('span');
-    statusEl.classList.add('dmsg-status');
-    if (msg.failed) {
-        statusEl.classList.add('dmsg-status-failed');
-        statusEl.textContent = 'Failed · ';
-        const retryBtn = document.createElement('span');
-        retryBtn.className = 'dmsg-failed-action';
-        retryBtn.dataset.action = 'retry';
-        retryBtn.textContent = 'Retry';
-        statusEl.appendChild(retryBtn);
-        statusEl.appendChild(document.createTextNode(' · '));
-        const deleteBtn = document.createElement('span');
-        deleteBtn.className = 'dmsg-failed-action';
-        deleteBtn.dataset.action = 'delete';
-        deleteBtn.textContent = 'Delete';
-        statusEl.appendChild(deleteBtn);
-    } else if (msg.pending) {
-        statusEl.textContent = 'Sending...';
-    } else {
-        statusEl.innerHTML = 'Sent <span class="icon icon-check-circle"></span>';
-    }
-    return statusEl;
-}
 
 // Aggregate a message's flat reaction list into per-emoji groups, preserving
 // first-occurrence order. Carries the first non-null `emoji_url` so custom-pack

@@ -16,6 +16,7 @@
     import { profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import { messageVersion } from '../lib/chatview.svelte.js';
     import ReplyQuote from './ReplyQuote.svelte';
+    import MessageContent from './MessageContent.svelte';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -23,7 +24,7 @@
         streak = 'first',  // computed by the caller from the row above (vanilla owns streaks)
         ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
         h,                 // vanilla helpers: getProfile, getName, getProfileAvatarSrc, twemojify,
-                           //   showTooltip, hideTooltip, formatHourMinute, fillContent, replyView
+                           //   showTooltip, hideTooltip, formatHourMinute, replyView, and MessageContent's leaves
     } = $props();
 
     // The live message. In the list island the `msg` prop itself changes (the array
@@ -132,20 +133,6 @@
     let avatarFailed = $state(false);
     $effect(() => { avatarSrc; avatarFailed = false; });
 
-    // Content: exactly renderMessage's builders; refilled whole when the signature changes.
-    function contentInto(node, { m, sig }) {
-        let cur = sig;
-        h.fillContent(node, m, sender, ctx);
-        return {
-            update: ({ m: next, sig: nextSig }) => {
-                if (nextSig === cur) return;
-                cur = nextSig;
-                node.replaceChildren();
-                h.fillContent(node, next, sender, ctx);
-            },
-        };
-    }
-
     // A reaction chip: the glyph is filled once, the count rolls on change. Chips
     // arriving after the row's first paint pop in.
     let painted = false;
@@ -249,7 +236,7 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
-        <div class="dmsg-content" use:contentInto={{ m: current, sig: contentSig }}></div>
+        <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} {h} sig={contentSig} /></div>
         {#if reactions.length}
             <div class="dmsg-reactions">
                 {#each reactions as g (g.emoji)}
