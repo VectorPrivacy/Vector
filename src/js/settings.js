@@ -1661,6 +1661,73 @@ const NOTIF_EXPLAINERS = {
     privacy: ['Notification Content Privacy', 'Controls how much of a message shows in OS notifications (lock screen, banners).<br><br><b>Show sender and message</b>: full preview.<br><b>Hide message</b>: shows who messaged you, not what.<br><b>Hide sender and message</b>: a generic "You received a message", revealing nothing.'],
 };
 
+const DISPLAY_EXPLAINERS = {
+    imageTypes: ['Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.'],
+    chatBg: ['Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.'],
+    richComposer: ['Rich Composer', 'The chat box formats <b>bold</b>, <i>italics</i>, code and links as you type.<br><br>Turn it off to use a plain text box instead. The change applies on the next app start.'],
+    emoticons: ['Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.'],
+    autocorrect: ['Autocorrect', 'When enabled, your device corrects typos as you type in the chat box, using your system\'s autocorrect.<br><br>Turn it off if your system keeps "fixing" words you meant to type.'],
+};
+
+/**
+ * Mount the Display section and load its toggles. Rich Composer lives in
+ * localStorage: the composer is built at module scope before the settings load,
+ * and it is a per-device compatibility choice.
+ */
+async function initDisplaySettings() {
+    VectorSvelte.mountDisplay(document.getElementById('settings-display-body'), {
+        h: {
+            change: async (key, on) => {
+                switch (key) {
+                    case 'imageTypes':
+                        fDisplayImageTypes = on;
+                        await saveDisplayImageTypes(on);
+                        break;
+                    case 'chatBg':
+                        document.body.classList.toggle('chat-bg-disabled', !on);
+                        await saveChatBgEnabled(on);
+                        refreshChatWallpaper();
+                        break;
+                    case 'richComposer':
+                        localStorage.setItem('rich_composer', on ? 'true' : 'false');
+                        // The input is built once at startup, so the swap needs a fresh load.
+                        popupConfirm('Restart required', 'The composer changes on the next app start.', true);
+                        break;
+                    case 'emoticons':
+                        emoticonSuggestionsEnabled = on;
+                        await saveEmoticonSuggestions(on);
+                        break;
+                    case 'autocorrect':
+                        fAutocorrectEnabled = on;
+                        applyAutocorrectSetting();
+                        await saveAutocorrect(on);
+                        break;
+                }
+            },
+            explain: (key) => popupConfirm(...DISPLAY_EXPLAINERS[key], true),
+        },
+    });
+
+    fDisplayImageTypes = await loadDisplayImageTypes();
+    const chatBg = await loadChatBgEnabled();
+    if (!chatBg) document.body.classList.add('chat-bg-disabled');
+    emoticonSuggestionsEnabled = await loadEmoticonSuggestions();
+    fAutocorrectEnabled = await loadAutocorrect();
+    applyAutocorrectSetting();
+    VectorSvelte.setDisplaySettings({
+        imageTypes: fDisplayImageTypes,
+        chatBg,
+        richComposer: localStorage.getItem('rich_composer') !== 'false',
+        emoticons: emoticonSuggestionsEnabled,
+        autocorrect: fAutocorrectEnabled,
+    });
+}
+
+// The enum is adjacently tagged: only Custom carries a path on the wire.
+function soundWire(sound) {
+    return sound.type === 'Custom' ? { type: 'Custom', path: sound.path } : { type: sound.type };
+}
+
 /**
  * Mount the Notifications section and load its state. Sound preferences live in the
  * desktop-only settings blob; the @everyone mute and content privacy are per-key
@@ -1671,7 +1738,7 @@ async function initNotificationSettings() {
     VectorSvelte.mountNotifications(document.getElementById('settings-notifications-body'), {
         h: {
             saveSounds: ({ globalMute, muteEveryone, sound }) =>
-                saveNotificationSettings({ global_mute: globalMute, mute_everyone: muteEveryone, sound: sound.type === 'Custom' ? { type: 'Custom', path: sound.path } : { type: sound.type } })
+                saveNotificationSettings({ global_mute: globalMute, mute_everyone: muteEveryone, sound: soundWire(sound) })
                     .catch((e) => console.error('Failed to save notification settings:', e)),
             saveMuteEveryone: (on) => invoke('set_sql_setting', { key: 'notif_mute_everyone', value: on ? 'true' : 'false' }),
             savePrivacy: (value) => invoke('set_sql_setting', { key: 'notif_content_privacy', value }),
@@ -1689,7 +1756,7 @@ async function initNotificationSettings() {
                     return null;
                 }
             },
-            preview: (sound) => previewNotificationSound(sound).catch((e) => console.error('Failed to preview sound:', e)),
+            preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
             explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
         },
     });
@@ -1871,79 +1938,7 @@ async function initSettings() {
         }
     };
 
-    // Load and initialize display settings
-    fDisplayImageTypes = await loadDisplayImageTypes();
-    const displayImageTypesToggle = document.getElementById('display-image-types-toggle');
-    displayImageTypesToggle.checked = fDisplayImageTypes;
-    displayImageTypesToggle.addEventListener('change', async (e) => {
-        fDisplayImageTypes = e.target.checked;
-        await saveDisplayImageTypes(e.target.checked);
-    });
-
-    // Background Wallpaper toggle (Chat Background)
-    const chatBgToggle = document.getElementById('chat-bg-toggle');
-    if (chatBgToggle) {
-        // Load saved preference from database (default: enabled)
-        const chatBgEnabled = await loadChatBgEnabled();
-        chatBgToggle.checked = chatBgEnabled;
-        if (!chatBgEnabled) document.body.classList.add('chat-bg-disabled');
-
-        // Handle toggle changes
-        chatBgToggle.addEventListener('change', async () => {
-            if (chatBgToggle.checked) {
-                document.body.classList.remove('chat-bg-disabled');
-                await saveChatBgEnabled(true);
-            } else {
-                document.body.classList.add('chat-bg-disabled');
-                await saveChatBgEnabled(false);
-            }
-            // Re-evaluate the open chat's wallpaper against the new toggle state.
-            refreshChatWallpaper();
-        });
-    }
-
-    // Rich Composer toggle — the inline-formatting input, with the plain textarea
-    // as the escape hatch. Stored in localStorage rather than the settings DB for
-    // two reasons: the composer is constructed at main.js module scope, long before
-    // the async settings load, and it is a per-DEVICE compatibility choice — a
-    // WebView quirk on one machine shouldn't disable it on your others.
-    const richComposerToggle = document.getElementById('rich-composer-toggle');
-    if (richComposerToggle) {
-        richComposerToggle.checked = localStorage.getItem('rich_composer') !== 'false';
-        richComposerToggle.addEventListener('change', () => {
-            localStorage.setItem('rich_composer', richComposerToggle.checked ? 'true' : 'false');
-            // The input is built once at startup, so the swap needs a fresh load.
-            popupConfirm(
-                'Restart required',
-                'The composer changes on the next app start.',
-                true,
-            );
-        });
-    }
-
-    // Emoticon Suggestions toggle (:) → 🙂, :D → 😄, …; off = leave emoticons as literal text)
-    const emoticonToggle = document.getElementById('emoticon-suggestions-toggle');
-    if (emoticonToggle) {
-        emoticonSuggestionsEnabled = await loadEmoticonSuggestions();
-        emoticonToggle.checked = emoticonSuggestionsEnabled;
-        emoticonToggle.addEventListener('change', async (e) => {
-            emoticonSuggestionsEnabled = e.target.checked;
-            await saveEmoticonSuggestions(e.target.checked);
-        });
-    }
-
-    // Autocorrect toggle: applied to the chat box immediately, both at boot and on change.
-    const autocorrectToggle = document.getElementById('autocorrect-toggle');
-    if (autocorrectToggle) {
-        fAutocorrectEnabled = await loadAutocorrect();
-        applyAutocorrectSetting();
-        autocorrectToggle.checked = fAutocorrectEnabled;
-        autocorrectToggle.addEventListener('change', async (e) => {
-            fAutocorrectEnabled = e.target.checked;
-            applyAutocorrectSetting();
-            await saveAutocorrect(e.target.checked);
-        });
-    }
+    await initDisplaySettings();
 
     await initNotificationSettings();
 

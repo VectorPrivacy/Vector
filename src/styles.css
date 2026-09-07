@@ -9204,7 +9204,7 @@ select {
 
 /* Notification Content Privacy row: label left, dropdown right (matches the
    toggle rows). Stacks vertically on narrow screens so the label can't squash. */
-/* The (i) explainer beside a notification row's label */
+/* The (i) explainer beside a settings toggle row's label */
 .notif-info {
   width: 18px;
   height: 18px;

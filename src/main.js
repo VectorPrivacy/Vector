@@ -1220,8 +1220,6 @@ const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-p
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
 const domSettingsPrivacyTorInfo = document.getElementById('privacy-tor-info');
-const domSettingsDisplayImageTypesInfo = document.getElementById('display-image-types-info');
-const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsStorageGalleryInfo = document.getElementById('storage-gallery-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
@@ -12727,32 +12725,6 @@ domChatMessageInput.oninput = async (e) => {
             e.preventDefault();
             e.stopPropagation();
             openUrl('https://torproject.org');
-        };
-    }
-    domSettingsDisplayImageTypesInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Display Image Types', 'When enabled, images in chat will display a <b>small badge showing the file type</b> (e.g., PNG, GIF, WEBP) in the corner.<br><br>This helps identify image formats at a glance.', true);
-    };
-    domSettingsChatBgInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Background Wallpaper', 'This feature enables and disables background images inside of Chats (Private & Group Chats).<br><br>Only applies to certain themes.', true);
-    };
-    const domSettingsEmoticonSuggestionsInfo = document.getElementById('emoticon-suggestions-info');
-    if (domSettingsEmoticonSuggestionsInfo) {
-        domSettingsEmoticonSuggestionsInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm('Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.', true);
-        };
-    }
-    const domSettingsAutocorrectInfo = document.getElementById('autocorrect-info');
-    if (domSettingsAutocorrectInfo) {
-        domSettingsAutocorrectInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm('Autocorrect', 'When enabled, your device corrects typos as you type in the chat box, using your system\'s autocorrect.<br><br>Turn it off if your system keeps "fixing" words you meant to type.', true);
         };
     }
     const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
