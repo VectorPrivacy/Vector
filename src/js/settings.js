@@ -1547,23 +1547,29 @@ async function initAutoDownloadSettings() {
     await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
 }
 
+let fStorageDonutMounted = false;
+
 /**
  * Initialize the Storage section in settings
  */
 async function initStorageSection() {
-    // Get and display storage info
-    const storageInfo = await getStorageInfo();
-    if (storageInfo) {
-        // Total = the same per-category sum the donut slices use, so the two never disagree
-        const distTotal = Object.values(storageInfo.type_distribution || {}).reduce((sum, val) => sum + val, 0);
-        const storageSummary = document.getElementById('storage-summary');
-        if (storageSummary) {
-            storageSummary.textContent = distTotal === 0
-                ? "A breakdown of Vector's storage use."
-                : `Total Storage Used: ${formatBytes(distTotal, 1)}`;
-        }
-        renderStorageDonut(storageInfo.type_distribution);
+    if (!fStorageDonutMounted) {
+        fStorageDonutMounted = true;
+        VectorSvelte.mountStorageDonut(document.getElementById('storage-breakdown'), {
+            h: {
+                formatBytes,
+                confirmDelete: confirmStorageDelete,
+                deleteCategory: (category, exts) => invoke('clear_storage_category', { category, exts }),
+                refresh: () => initStorageSection(),
+                // The emoji memos and any rendered <img>s point at the deleted cache files
+                onCacheCleared: () => reloadCachedEmojiImgs(),
+                toast: (msg) => showToast(msg),
+                deleteFailed: (e) => popupConfirm('Delete Failed', `Could not delete: ${escapeHtml(String(e))}`, true, '', 'vector_warning.svg'),
+            },
+        });
     }
+    const storageInfo = await getStorageInfo();
+    if (storageInfo) VectorSvelte.setStorageDistribution(storageInfo.type_distribution);
 
     // Auto-download: an explicit toggle plus a size limit that greys out when the toggle is off.
     // Values + the pre-split migration load at boot (initAutoDownloadSettings); here we only
@@ -1632,20 +1638,6 @@ async function initStorageSection() {
     }
 }
 
-const STORAGE_CATEGORIES = [
-    { name: 'Images', exts: ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'avif', 'heic', 'heif', 'tif', 'tiff', 'ico'], title: 'Delete all Images?', noun: 'downloaded images' },
-    { name: 'Video', exts: ['mp4', 'mov', 'avi', 'mkv', 'flv', 'wmv', '3gp', 'webm', 'm4v', 'mpeg', 'mpg'], title: 'Delete all Videos?', noun: 'downloaded videos' },
-    { name: 'Audio', exts: ['mp3', 'wav', 'ogg', 'oga', 'opus', 'flac', 'm4a', 'aac', 'weba', 'wma', 'aiff'], title: 'Delete all Audio?', noun: 'downloaded audio and voice messages' },
-    { name: 'Apps', exts: ['xdc', 'jsdos'], title: 'Delete all Mini Apps?', noun: 'downloaded Mini Apps' },
-    { name: 'AI', key: '/ai_models', title: 'Delete AI Models?' },
-    { name: 'Cache', key: '/cache', title: 'Clear the Cache?' },
-    { name: 'Files', rest: true, title: 'Delete all Files?', noun: 'downloaded files' }
-];
-
-// Slice colors rank by size rather than category identity: the largest slice
-// is always purple, descending through the ramp to gray.
-const STORAGE_SLICE_RAMP = ['#9D5DF9', '#5EC4F7', '#4AD99D', '#FBA35B', '#FBC85B', '#FC595C', '#B2B2B2'];
-
 /** Category-aware confirmation for a storage delete; returns the user's choice. */
 async function confirmStorageDelete(cat, sizeText) {
     let body;
@@ -1657,252 +1649,6 @@ async function confirmStorageDelete(cat, sizeText) {
         body = `This will delete ${sizeText} of ${cat.noun} from this device.<br><br>You can download them again from their chats later, if they are still available.`;
     }
     return popupConfirm(cat.title, body, false, '', 'vector_warning.svg');
-}
-
-/**
- * Annular sector between gap center-lines a0..a1 (radians from 12 o'clock,
- * clockwise). Each edge is inset by an angle of (gap/2)/r, which scales with
- * radius so the gap stays a constant linear width along its whole length.
- */
-function donutSlicePath(cx, cy, rIn, rOut, a0, a1, gapPx) {
-    const pt = (r, a) => `${(cx + r * Math.sin(a)).toFixed(2)} ${(cy - r * Math.cos(a)).toFixed(2)}`;
-    const gOut = (gapPx / 2) / rOut;
-    const gIn = (gapPx / 2) / rIn;
-    const largeOut = (a1 - a0 - 2 * gOut) > Math.PI ? 1 : 0;
-    const largeIn = (a1 - a0 - 2 * gIn) > Math.PI ? 1 : 0;
-    return `M ${pt(rOut, a0 + gOut)} A ${rOut} ${rOut} 0 ${largeOut} 1 ${pt(rOut, a1 - gOut)} ` +
-           `L ${pt(rIn, a1 - gIn)} A ${rIn} ${rIn} 0 ${largeIn} 0 ${pt(rIn, a0 + gIn)} Z`;
-}
-
-function renderStorageDonut(typeDistribution) {
-    const svg = document.getElementById('storage-donut');
-    const legend = document.getElementById('storage-legend');
-    const centerValue = document.getElementById('storage-donut-value');
-    const centerLabel = document.getElementById('storage-donut-label');
-    const deleteBtn = document.getElementById('storage-donut-delete');
-    if (!svg || !legend) return;
-
-    if (deleteBtn) {
-        deleteBtn.style.display = 'none';
-        deleteBtn.disabled = false;
-        deleteBtn.textContent = 'Delete';
-    }
-    if (centerLabel) centerLabel.style.display = '';
-
-    const SVG_NS = 'http://www.w3.org/2000/svg';
-    const CX = 100, CY = 100, R_OUT = 96, R_IN = 57;
-
-    svg.innerHTML = '';
-    legend.innerHTML = '';
-    // svg persists across re-renders; reset its handlers (assignment, not
-    // addEventListener, so they can never stack)
-    svg.onmousemove = svg.onmouseleave = svg.onclick = null;
-    svg.style.cursor = '';
-
-    // Fold the per-extension byte map into display categories
-    const restCat = STORAGE_CATEGORIES.find(c => c.rest);
-    const extOwner = new Map();
-    for (const cat of STORAGE_CATEGORIES) {
-        if (cat.exts) for (const ext of cat.exts) extOwner.set(ext, cat.name);
-    }
-    const sizes = new Map(STORAGE_CATEGORIES.map(c => [c.name, 0]));
-    for (const [key, bytes] of Object.entries(typeDistribution || {})) {
-        const special = STORAGE_CATEGORIES.find(c => c.key === key);
-        const owner = special ? special.name : (extOwner.get(key) || restCat.name);
-        sizes.set(owner, sizes.get(owner) + bytes);
-    }
-
-    const segments = STORAGE_CATEGORIES
-        .map(c => ({ name: c.name, size: sizes.get(c.name) }))
-        .filter(s => s.size > 0)
-        .sort((a, b) => b.size - a.size)
-        .map((s, i) => ({ ...s, color: STORAGE_SLICE_RAMP[Math.min(i, STORAGE_SLICE_RAMP.length - 1)] }));
-    const total = segments.reduce((sum, s) => sum + s.size, 0);
-
-    const setCenter = (value, label) => {
-        centerValue.textContent = value;
-        centerLabel.textContent = label;
-    };
-    setCenter(formatBytes(total, 1), 'Total');
-
-    if (total === 0) {
-        const ring = document.createElementNS(SVG_NS, 'circle');
-        ring.setAttribute('cx', CX);
-        ring.setAttribute('cy', CY);
-        ring.setAttribute('r', (R_OUT + R_IN) / 2);
-        ring.setAttribute('fill', 'none');
-        ring.setAttribute('stroke', 'rgba(255, 255, 255, 0.07)');
-        ring.setAttribute('stroke-width', R_OUT - R_IN);
-        svg.appendChild(ring);
-        return;
-    }
-
-    const slices = [];
-    const legendItems = [];
-    // Hover previews a slice; click sticky-selects it, which reveals the Delete
-    // button in the hole. The button only shows while the readout matches the
-    // selection, so a preview can never be deleted by mistake.
-    let selectedIdx = -1;
-    const highlight = (idx) => {
-        segments.forEach((_, i) => {
-            slices[i].classList.toggle('pop', i === idx);
-            slices[i].classList.toggle('dim', idx !== -1 && i !== idx);
-            legendItems[i].classList.toggle('dim', idx !== -1 && i !== idx);
-        });
-        if (idx === -1) {
-            setCenter(formatBytes(total, 1), 'Total');
-        } else {
-            const s = segments[idx];
-            const pct = (s.size / total) * 100;
-            setCenter(formatBytes(s.size, 1), `${s.name} · ${pct < 1 ? '<1' : Math.round(pct)}%`);
-        }
-        // The button swaps in for the name/percent line; three stacked rows
-        // don't fit the hole comfortably
-        const showBtn = idx !== -1 && idx === selectedIdx;
-        if (deleteBtn) deleteBtn.style.display = showBtn ? '' : 'none';
-        centerLabel.style.display = showBtn ? 'none' : '';
-    };
-    const select = (idx) => {
-        selectedIdx = selectedIdx === idx ? -1 : idx;
-        highlight(selectedIdx);
-    };
-    const wireSlice = (el, i) => {
-        el.classList.add('storage-slice');
-        el.style.animationDelay = `${i * 55}ms`;
-        svg.appendChild(el);
-        slices.push(el);
-    };
-
-    if (deleteBtn) deleteBtn.onclick = async () => {
-        if (selectedIdx === -1 || deleteBtn.disabled) return;
-        const seg = segments[selectedIdx];
-        const cat = STORAGE_CATEGORIES.find(c => c.name === seg.name);
-        if (!(await confirmStorageDelete(cat, formatBytes(seg.size, 1)))) return;
-
-        let category = 'files';
-        let exts = [];
-        if (cat.key === '/ai_models') {
-            category = 'ai';
-        } else if (cat.key === '/cache') {
-            category = 'cache';
-        } else if (cat.exts) {
-            exts = cat.exts;
-        } else {
-            // Rest bucket: derive the exact extension list from the live
-            // distribution so it deletes precisely what the slice counted
-            const categorized = new Set();
-            for (const c of STORAGE_CATEGORIES) {
-                if (c.exts) c.exts.forEach(e => categorized.add(e));
-                if (c.key) categorized.add(c.key);
-            }
-            exts = Object.keys(typeDistribution || {}).filter(k => !categorized.has(k));
-        }
-
-        deleteBtn.disabled = true;
-        deleteBtn.textContent = 'Deleting...';
-        try {
-            const res = await invoke('clear_storage_category', { category, exts });
-            showToast(`Freed ${res.freed_formatted}`);
-            // The emoji memos and any rendered <img>s point at the deleted
-            // cache files; re-resolve so they re-download on sight
-            if (category === 'cache') reloadCachedEmojiImgs();
-        } catch (e) {
-            await popupConfirm('Delete Failed', `Could not delete: ${escapeHtml(String(e))}`, true, '', 'vector_warning.svg');
-        }
-        deleteBtn.disabled = false;
-        deleteBtn.textContent = 'Delete';
-        initStorageSection();
-    };
-
-    // Start angle of each slice (gap center-line), for ring hit-testing
-    const bounds = [];
-    if (segments.length === 1) {
-        // A lone category is a full ring; the arc path degenerates at 360 degrees
-        const ring = document.createElementNS(SVG_NS, 'circle');
-        ring.setAttribute('cx', CX);
-        ring.setAttribute('cy', CY);
-        ring.setAttribute('r', (R_OUT + R_IN) / 2);
-        ring.setAttribute('fill', 'none');
-        ring.setAttribute('stroke', segments[0].color);
-        ring.setAttribute('stroke-width', R_OUT - R_IN);
-        bounds.push(0);
-        wireSlice(ring, 0);
-    } else {
-        // Slice angles span gap center-line to center-line; the constant-width
-        // gap is carved inside donutSlicePath. Slivers get a floor so they stay
-        // visible and tappable, paid for out of the largest slice (sorted
-        // first). The floor must exceed GAP_PX / R_IN or the inner arc inverts.
-        const GAP_PX = 5;
-        const MIN_SWEEP = 0.13;
-        let stolen = 0;
-        const sweeps = segments.map(s => {
-            const a = Math.PI * 2 * (s.size / total);
-            if (a < MIN_SWEEP) { stolen += MIN_SWEEP - a; return MIN_SWEEP; }
-            return a;
-        });
-        sweeps[0] -= stolen;
-        let angle = 0;
-        segments.forEach((s, i) => {
-            const a0 = angle;
-            const a1 = a0 + sweeps[i];
-            angle = a1;
-            bounds.push(a0);
-            const path = document.createElementNS(SVG_NS, 'path');
-            path.setAttribute('d', donutSlicePath(CX, CY, R_IN, R_OUT, a0, a1, GAP_PX));
-            path.setAttribute('fill', s.color);
-            wireSlice(path, i);
-        });
-    }
-
-    // Hover/click hit-test the whole ring by angle instead of per-path events:
-    // the gaps then belong to their nearest slice, so dragging the cursor
-    // across a gap can't flash the idle view in between
-    const sliceAtPoint = (e) => {
-        const rect = svg.getBoundingClientRect();
-        if (!rect.width) return -1;
-        const vx = (e.clientX - rect.left) * (200 / rect.width) - CX;
-        const vy = (e.clientY - rect.top) * (200 / rect.height) - CY;
-        const dist = Math.hypot(vx, vy);
-        if (dist < R_IN - 2 || dist > R_OUT + 6) return -1;
-        let a = Math.atan2(vx, -vy);
-        if (a < 0) a += Math.PI * 2;
-        let idx = 0;
-        for (let i = 0; i < bounds.length; i++) if (a >= bounds[i]) idx = i;
-        return idx;
-    };
-    let hoverIdx = -1;
-    svg.onmousemove = (e) => {
-        const idx = sliceAtPoint(e);
-        if (idx === hoverIdx) return;
-        hoverIdx = idx;
-        svg.style.cursor = idx === -1 ? '' : 'pointer';
-        highlight(idx === -1 ? selectedIdx : idx);
-    };
-    svg.onmouseleave = () => {
-        hoverIdx = -1;
-        svg.style.cursor = '';
-        highlight(selectedIdx);
-    };
-    svg.onclick = (e) => {
-        const idx = sliceAtPoint(e);
-        if (idx !== -1) select(idx);
-    };
-
-    segments.forEach((s, i) => {
-        const item = document.createElement('div');
-        item.className = 'storage-legend-item';
-        const swatch = document.createElement('span');
-        swatch.className = 'storage-legend-swatch';
-        swatch.style.backgroundColor = s.color;
-        const name = document.createElement('span');
-        name.textContent = s.name;
-        item.append(swatch, name);
-        item.addEventListener('mouseenter', () => highlight(i));
-        item.addEventListener('mouseleave', () => highlight(selectedIdx));
-        item.addEventListener('click', () => select(i));
-        legend.appendChild(item);
-        legendItems.push(item);
-    });
 }
 
 // ============================================================================

@@ -23,3 +23,12 @@ export function setTorCircuits(circuits) { tor.circuits = circuits; }
 const blocked = $state({ v: 0 });
 export function blockedVersion() { return blocked.v; }
 export function reloadBlockedUsers() { blocked.v++; }
+
+// The Storage breakdown: the per-extension byte map the backend last reported.
+// `v` moves on every report so the chart re-plays its slice-in animation.
+const storage = $state({ distribution: null, v: 0 });
+export function storageState() { return storage; }
+export function setStorageDistribution(distribution) {
+    storage.distribution = distribution || {};
+    storage.v++;
+}

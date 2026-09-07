@@ -26,6 +26,7 @@ import FilePreview from './files/FilePreview.svelte';
 import TorCard from './settings/TorCard.svelte';
 import TorCircuits from './settings/TorCircuits.svelte';
 import BlockedUsers from './settings/BlockedUsers.svelte';
+import StorageDonut from './settings/StorageDonut.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -48,7 +49,7 @@ export {
 } from './lib/filepreview.svelte.js';
 // Settings: the Tor card's state and the blocked-users list's version.
 export {
-    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers,
+    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution,
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
@@ -189,4 +190,10 @@ export function mountTorCard({ els, h }) {
 export function mountBlockedUsers(target, { h, emptyEl }) {
     target.replaceChildren();
     return mount(BlockedUsers, { target, props: { h, emptyEl } });
+}
+
+/** Mount the Storage breakdown (summary, donut, legend) into `target` (#storage-breakdown). */
+export function mountStorageDonut(target, { h }) {
+    target.replaceChildren();
+    return mount(StorageDonut, { target, props: { h } });
 }
