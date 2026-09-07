@@ -10,6 +10,8 @@
     let { h, snapshot } = $props();
 
     import ChannelList from './ChannelList.svelte';
+    import InviteRow from './InviteRow.svelte';
+    import EmptyState from './EmptyState.svelte';
     import { timeTickVersion } from '../lib/stores.js';
     import { listVersion, invitesVersion, paneState, openChatId, communityVersion } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
@@ -48,29 +50,6 @@
     const tick = $derived($timeTickVersion);
 
     // ── actions: leaf widgets stay the vanilla builders / DOM disciplines ──
-
-    function inviteKey(inv) {
-        return `${inv.community_id}\x00${inv.name || ''}`;
-    }
-
-    // Keyed on identity fields, not the invite object: the row's icon fetch is
-    // async (and swaps its own placeholder when it lands), so re-running on every
-    // bump would re-show the placeholder forever.
-    function inviteInto(node, invite) {
-        let cur = inviteKey(invite);
-        node.replaceChildren(h.renderCommunityInviteItem(invite));
-        return {
-            update: (inv) => {
-                if (!inv || inviteKey(inv) === cur) return;
-                cur = inviteKey(inv);
-                node.replaceChildren(h.renderCommunityInviteItem(inv));
-            },
-        };
-    }
-
-    function builtInto(node, builder) {
-        node.replaceChildren(builder());
-    }
 
     // Message-less communities lazy-load their latest membership event so the preview
     // can say "X has joined" — a side effect, so it lives in an effect (the helper's
@@ -122,11 +101,7 @@
     <ChannelList communityId={paneCommunityId} pane {h} />
 {:else}
     {#each invites as invite (invite.community_id)}
-        <div
-            class="chatlist-invite-host"
-            style="display:contents;"
-            use:inviteInto={invite}
-        ></div>
+        <InviteRow {invite} {h} />
     {/each}
     {#each chats as chat (chat.id)}
         <ChatlistRow
@@ -137,8 +112,7 @@
         />
     {/each}
     {#if empty}
-        <div style="display:contents;" use:builtInto={h.buildChatlistEmptyState}></div>
-        <div style="display:contents;" use:builtInto={h.buildChatlistIntro}></div>
+        <EmptyState {h} />
     {/if}
 {/if}
 

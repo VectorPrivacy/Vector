@@ -115,10 +115,14 @@ function chatlistHelpers() {
         openChannel: openCommunityChannel,
         createChannel: promptCreateChannel,
         deleteChannel: promptDeleteChannel,
-        renderCommunityInviteItem,
+        // invite rows
+        cacheInviteLogo: (image) => invoke('cache_invite_logo', { image }).then(path => path ? convertFileSrc(path) : null),
+        acceptInvite: acceptCommunityInvite,
+        declineInvite: declineCommunityInvite,
         // empty state
-        buildChatlistEmptyState,
-        buildChatlistIntro,
+        newChat: () => document.getElementById('new-chat-btn')?.click(),
+        openHub: () => openUrl('https://vectorapp.io/hub'),
+        bindViktor,
         // widescreen
         wsMarkActiveRow,
         // side-effectful loads
@@ -286,57 +290,6 @@ function listShapeKey() {
     let key = '';
     for (const c of arrChats) if (chatIsVisibleInList(c)) key += c.id + ',';
     return key;
-}
-
-/**
- * Build the empty-state placeholder shown when the chat list has no
- * chats or invites. Pulls the user toward the New Chat / Group Chat
- * buttons at the top of the screen, plus a one-tap "Share My Contact"
- * button that copies the user's vectorapp.io profile link to the
- * clipboard so they can paste it into another channel and bootstrap
- * their first conversations.
- */
-function buildChatlistEmptyState() {
-    const wrap = document.createElement('div');
-    wrap.className = 'chatlist-get-started btn';
-    wrap.setAttribute('role', 'button');
-    wrap.innerHTML = `
-        <div class="chatlist-get-started-badge">
-            <span class="icon icon-add-user"></span>
-        </div>
-        <div class="chatlist-get-started-text">
-            <h4>Get Started</h4>
-            <p>Create your first private chat.</p>
-        </div>
-        <div class="chatlist-get-started-watermark">
-            <span class="icon icon-add-user"></span>
-        </div>
-    `;
-    // Rides the New Chat button's own handler, so the two can never diverge.
-    wrap.addEventListener('click', () => document.getElementById('new-chat-btn')?.click());
-    return wrap;
-}
-
-/**
- * Bottom-of-list welcome: Viktor points fresh accounts at the Hub. Rides the
- * list fragment, so the first real chat render sweeps it away with the rest.
- */
-function buildChatlistIntro() {
-    const wrap = document.createElement('div');
-    wrap.className = 'chatlist-intro';
-    wrap.innerHTML = `
-        <img class="chatlist-intro-viktor" alt="Viktor">
-        <div class="chatlist-intro-text">
-            <h4>Welcome to Vector!</h4>
-            <p>Feel free to <span class="chatlist-intro-link">join the public community</span> to learn more about Vector, discuss privacy, and make some new friends.</p>
-        </div>
-    `;
-    wrap.querySelector('.chatlist-intro-link').addEventListener('click', () => {
-        openUrl('https://vectorapp.io/hub');
-    });
-
-    bindViktor(wrap.querySelector('.chatlist-intro-viktor'));
-    return wrap;
 }
 
 /** Viktor greets on the first paint after login; page-lifetime latch. */

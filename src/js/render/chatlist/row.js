@@ -1,13 +1,8 @@
 /**
- * Chat list row context menu + pending community invite row.
- *
- * - `_showChatRowContextMenu` — right-click / long-press actions for a
- *   `.chatlist-contact` row (mark read/unread, mute, pin, block, leave).
- * - `renderCommunityInviteItem` — a `.chatlist-contact.chatlist-invite` row for a
- *   pending community invite (npub gift-wrap) with accept / decline actions.
- *
- * The row DOM itself is rendered by the Svelte island (src/components/Chatlist.svelte);
- * these builders are handed to it via the mount-time `h` helper bundle.
+ * Chat list row context menu: right-click / long-press actions for a
+ * `.chatlist-contact` row (mark read/unread, mute, pin, block, leave). The rows
+ * themselves are the Svelte island (src/components/chatlist/), which gets this
+ * through the mount-time `h` helper bundle.
  */
 
 /**
@@ -92,77 +87,4 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         });
     }
     showContextMenu({ x, y, items });
-}
-
-
-/**
- * Render a pending Community invite row (npub gift-wrap) — same look as an MLS invite
- * slot, pinned at the top of the chat list, with Accept / Decline actions.
- * @param {{community_id: string, name: string, inviter_npub: string}} invite
- */
-function renderCommunityInviteItem(invite) {
-    const divInvite = document.createElement('div');
-    divInvite.classList.add('chatlist-contact', 'chatlist-invite');
-    divInvite.id = `community-invite-${invite.community_id}`;
-
-    // Show the bundled community icon (fetched + decrypted like a public-invite preview) when present;
-    // fall back to the group placeholder for icon-less / pre-icon-bundle invites.
-    const divAvatarContainer = document.createElement('div');
-    divAvatarContainer.style.position = 'relative';
-    const placeholder = createPlaceholderAvatar(true, 50);
-    divAvatarContainer.appendChild(placeholder);
-    divInvite.appendChild(divAvatarContainer);
-    if (invite.icon) {
-        invoke('cache_invite_logo', { image: invite.icon }).then(path => {
-            if (path && placeholder.isConnected) {
-                placeholder.replaceWith(createAvatarImg(convertFileSrc(path), 50, true));
-            }
-        }).catch(() => {});
-    }
-
-    const divPreviewContainer = document.createElement('div');
-    divPreviewContainer.classList.add('chatlist-contact-preview');
-    // Name + Group Chat icon in a header, matching the real community row (renderChat) so the invite
-    // row and the joined row look consistent.
-    const divHeader = document.createElement('div');
-    divHeader.classList.add('chatlist-contact-header');
-    const h4Name = document.createElement('h4');
-    h4Name.textContent = invite.name || 'Community';
-    h4Name.classList.add('cutoff');
-    divHeader.appendChild(h4Name);
-    const groupIcon = document.createElement('span');
-    groupIcon.className = 'icon icon-users-multi chatlist-type-icon';
-    groupIcon.addEventListener('mouseenter', () => showGlobalTooltip('Group Chat', groupIcon));
-    groupIcon.addEventListener('mouseleave', hideGlobalTooltip);
-    divHeader.appendChild(groupIcon);
-    divPreviewContainer.appendChild(divHeader);
-    const pSub = document.createElement('p');
-    pSub.classList.add('cutoff');
-    pSub.textContent = 'Community invite';
-    divPreviewContainer.appendChild(pSub);
-    divInvite.appendChild(divPreviewContainer);
-
-    const divActions = document.createElement('div');
-    divActions.classList.add('invite-action-buttons');
-
-    const btnAccept = document.createElement('button');
-    btnAccept.classList.add('invite-action-btn', 'invite-accept-btn');
-    btnAccept.title = 'Accept Invite';
-    btnAccept.onclick = (e) => { e.stopPropagation(); acceptCommunityInvite(invite.community_id); };
-    const acceptIcon = document.createElement('span');
-    acceptIcon.classList.add('icon', 'icon-check');
-    btnAccept.appendChild(acceptIcon);
-
-    const btnDecline = document.createElement('button');
-    btnDecline.classList.add('invite-action-btn', 'invite-decline-btn');
-    btnDecline.title = 'Decline Invite';
-    btnDecline.onclick = (e) => { e.stopPropagation(); declineCommunityInvite(invite.community_id); };
-    const declineIcon = document.createElement('span');
-    declineIcon.classList.add('icon', 'icon-x');
-    btnDecline.appendChild(declineIcon);
-
-    divActions.appendChild(btnAccept);
-    divActions.appendChild(btnDecline);
-    divInvite.appendChild(divActions);
-    return divInvite;
 }
