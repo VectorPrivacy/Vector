@@ -1037,12 +1037,20 @@ function _ensureEmojiPickerIslands() {
         all: document.getElementById('emoji-all-grid'),
         results: document.getElementById('emoji-search-results'),
         resultsSection: document.getElementById('emoji-search-results-container'),
+        sections: document.getElementById('emoji-pack-sections'),
         h: {
+            deadMessage: (pack) => deadPackMessage(pack),
+            isLinux: () => platformFeatures?.os === 'linux',
+            packMenu: (el, pack) => attachLongPressContextMenu(el, (x, y) => _showPackTabMenu(pack, x, y)),
+            unsubscribe: (pack) => _unsubscribePackFromMenu(pack),
+            sectionHeight: (pack) => _packSectionHeightPx(pack),
+            mountGrid: (section, pack) => _mountPackCanvasGrid(section, pack),
+            afterRender: () => _afterPackSectionsRender(),
             bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
             installTabGestures: (tab, pack) => _installPackTabGestures(tab, pack),
             packIsDead: (pack) => packIsDead(pack),
             packInitial: (pack) => _packTitleInitial(pack),
-            openCreator: () => openEmojiPackCreator(),
+            openCreator: (id) => openEmojiPackCreator(id),
             twemojify: (el) => twemojify(el),
             stockTitle: (e) => stockEmojiTitle(e),
             scrollRoot: () => document.querySelector('.emoji-main'),
@@ -2143,7 +2151,7 @@ function _attachEmojiPackReveal() {
             }
         }
     });
-    mo.observe(main, { childList: true });
+    mo.observe(main, { childList: true, subtree: true });
 }
 
 // ============================================================================
@@ -2932,10 +2940,6 @@ class PackCanvasGrid {
  *  destroy obsolete observers. */
 const _packCanvasGrids = new Map();
 
-function _destroyAllPackCanvasGrids() {
-    for (const g of _packCanvasGrids.values()) g.destroy();
-    _packCanvasGrids.clear();
-}
 
 // ============================================================================
 // Pack Creator — in-panel view
@@ -4789,138 +4793,43 @@ function _packSectionHeightPx(pack) {
     return _packSectionChromePx + PACK_CANVAS_CELL_PX * rows;
 }
 
+/** The sections are an island over the packs order; this arms what is on screen. */
 function renderEmojiPackSections() {
+    _ensureEmojiPickerIslands();
+    VectorSvelte.flushSync();
+    _afterPackSectionsRender();
+}
+
+/**
+ * One canvas grid per section: a direct child of the section (the grid sizes itself from
+ * its parent and the section hosts the cell tooltip). Returns the teardown.
+ */
+function _mountPackCanvasGrid(section, pack) {
+    const grid = new PackCanvasGrid(pack);
+    _packCanvasGrids.set(pack.id, grid);
+    section.appendChild(grid.canvas);
+    const main = document.querySelector('.emoji-main');
+    if (main) grid.attachVisibilityObserver(main);
+    return () => {
+        grid.destroy();
+        if (_packCanvasGrids.get(pack.id) === grid) _packCanvasGrids.delete(pack.id);
+    };
+}
+
+function _afterPackSectionsRender() {
     const main = document.querySelector('.emoji-main');
     if (!main) return;
-    main.querySelectorAll('.emoji-pack-section').forEach(el => el.remove());
-    _destroyAllPackCanvasGrids();
-
-    // Pack sections slot between Recents and All so custom emojis read
-    // as a promoted tier, even though their sidebar tabs sit at the bottom.
-    const anchor = document.getElementById('emoji-all');
-
-    for (const pack of arrEmojiPacks) {
-        const section = document.createElement('div');
-        section.className = 'emoji-section emoji-pack-section';
-        section.dataset.packId = pack.id;
-        // Exact intrinsic size (vs the CSS flat 200px) so a jump-scroll lands
-        // on target first try: with a true estimate the intervening cv:auto
-        // sections don't resize as they render mid-scroll, so nothing shoves
-        // the target down under the animation.
-        section.style.containIntrinsicSize = `0 ${_packSectionHeightPx(pack)}px`;
-
-        const header = document.createElement('div');
-        header.className = 'emoji-section-header';
-        const editPencil = pack.is_own
-            ? `<button type="button" class="emoji-pack-edit-pencil" data-pack-id="${_escapeAttr(pack.id)}" aria-label="Edit pack" title="Edit Pack"><span class="icon icon-edit"></span></button>`
-            : '';
-        // Order: [logo][title][count][collapse-arrow] ... [edit-if-own].
-        // The pencil uses `margin-left: auto` (in CSS) to float right;
-        // no spacer element required.
-        const emojiCount = Array.isArray(pack.emojis) ? pack.emojis.length : 0;
-        header.innerHTML = `<span class="header-text">${_escapeAttr(pack.title || pack.identifier)}</span><span class="emoji-pack-count">(${emojiCount})</span><span class="icon icon-chevron-down"></span>${editPencil}`;
-        // Logo is a separate Element so we can bind it through the URL
-        // cache (raw Blossom URL never lands on <img src>).
-        if (pack.image_url) {
-            const logo = document.createElement('img');
-            logo.className = 'emoji-pack-logo';
-            logo.alt = '';
-            bindCachedEmojiImg(logo, pack.image_url, 'emoji_pack_icon');
-            header.insertBefore(logo, header.firstChild);
-        }
-        const pencil = header.querySelector('.emoji-pack-edit-pencil');
-        if (pencil) {
-            pencil.addEventListener('click', (ev) => {
-                ev.stopPropagation();
-                openEmojiPackCreator(pack.id);
-            });
-        }
-        // Right-click on desktop / long-press on Android, on either the
-        // title text or the logo image — count, chevron, and pencil keep
-        // their stock browser context menu (or their own behaviour).
-        const fireMenu = (x, y) => _showPackTabMenu(pack, x, y);
-        const titleEl = header.querySelector('.header-text');
-        if (titleEl) attachLongPressContextMenu(titleEl, fireMenu);
-        const logoEl = header.querySelector('.emoji-pack-logo');
-        if (logoEl) attachLongPressContextMenu(logoEl, fireMenu);
-        section.appendChild(header);
-
-        // One compositor layer per section instead of one per emoji.
-        // Activation is gated by IntersectionObserver so off-screen pack
-        // sections don't tick.
-        const grid = new PackCanvasGrid(pack);
-        _packCanvasGrids.set(pack.id, grid);
-
-        // The canvas must stay a DIRECT child of the section: PackCanvasGrid
-        // sizes itself from canvas.parentElement and the section is already
-        // the positioning anchor (it hosts the cell tooltip).
-        section.appendChild(grid.canvas);
-
-        if (packIsDead(pack)) {
-            // Graceful drop: the emojis stay visible but blurred behind an
-            // explanation + a user-driven remove. Nothing is ripped away
-            // silently, and old messages keep rendering their own emoji URLs.
-            section.classList.add('emoji-pack-dead');
-            // WebKitGTK doesn't reliably render CSS blur (software fallback
-            // with the DMABUF renderer disabled), which would leave the dead
-            // emojis crisp under the notice — hide the canvas outright there
-            // so the section reads as the notice alone.
-            if (platformFeatures?.os === 'linux') section.classList.add('emoji-pack-dead-noblur');
-            const notice = document.createElement('div');
-            notice.className = 'emoji-pack-dead-notice';
-            const msg = document.createElement('span');
-            msg.className = 'emoji-pack-dead-text';
-            msg.textContent = deadPackMessage(pack);
-            const sub = document.createElement('span');
-            sub.className = 'emoji-pack-dead-subtext';
-            sub.textContent = 'Old messages will still show its emojis.';
-            notice.appendChild(msg);
-            notice.appendChild(sub);
-            // Theme-pinned entries aren't subscriptions (nothing to remove) —
-            // same gate as the pack context menu.
-            if (!pack.is_theme) {
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                btn.className = 'btn emoji-pack-dead-remove';
-                btn.textContent = 'Remove Pack';
-                btn.addEventListener('click', (ev) => {
-                    ev.stopPropagation();
-                    _unsubscribePackFromMenu(pack);
-                });
-                notice.appendChild(btn);
-            }
-            section.appendChild(notice);
-        }
-
-        if (anchor) {
-            main.insertBefore(section, anchor);
-        } else {
-            main.appendChild(section);
-        }
-    }
-
-    // Attach visibility observers after the section is in the DOM so
-    // IntersectionObserver can compute geometry against `.emoji-main`.
-    for (const grid of _packCanvasGrids.values()) {
-        grid.attachVisibilityObserver(main);
-    }
-    // Arm the on-screen packs deterministically rather than waiting on the
-    // IO's first callback (unreliable when this runs mid-open-transition).
+    // Arm the on-screen packs deterministically rather than waiting on the IO's first
+    // callback (unreliable when this runs mid-open-transition).
     _rearmVisiblePackCanvases();
-
-    // Calibrate the header-chrome constant from a real rendered header, then
-    // restamp every section's intrinsic size — keeps the jump-scroll estimate
-    // pixel-accurate across themes/fonts without hardcoding a header height.
+    // Calibrate the header-chrome constant from a real rendered header; the sections'
+    // intrinsic sizes re-derive from it, keeping jump-scroll pixel-accurate across themes.
     requestAnimationFrame(() => {
         const header = main.querySelector('.emoji-pack-section .emoji-section-header');
         const measured = header ? header.offsetHeight : 0;
         if (measured <= 0 || measured === _packSectionChromePx) return;
         _packSectionChromePx = measured;
-        main.querySelectorAll('.emoji-pack-section').forEach(sec => {
-            const grid = _packCanvasGrids.get(sec.dataset.packId);
-            const rows = grid ? Math.max(1, grid.rows) : 1;
-            sec.style.containIntrinsicSize = `0 ${_packSectionChromePx + PACK_CANVAS_CELL_PX * rows}px`;
-        });
+        VectorSvelte.bumpPickerChrome();
     });
 }
 

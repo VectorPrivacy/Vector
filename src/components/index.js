@@ -36,7 +36,8 @@ import PackSidebar from './picker/PackSidebar.svelte';
 import RecentsGrid from './picker/RecentsGrid.svelte';
 import AllGrid from './picker/AllGrid.svelte';
 import SearchGrid from './picker/SearchGrid.svelte';
-import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents } from './lib/picker.svelte.js';
+import PackSections from './picker/PackSections.svelte';
+import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
@@ -69,7 +70,7 @@ export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
 export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
-export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents };
+export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -313,7 +314,7 @@ export function mountFileBox(target, props) {
 }
 
 /** Mount the emoji picker's rail and its three stock grids into their static hosts. */
-export function mountEmojiPicker({ sidebar, recents, all, results, resultsSection, h }) {
+export function mountEmojiPicker({ sidebar, recents, all, results, resultsSection, sections, h }) {
     sidebar.replaceChildren();
     recents.replaceChildren();
     all.replaceChildren();
@@ -322,4 +323,6 @@ export function mountEmojiPicker({ sidebar, recents, all, results, resultsSectio
     mount(RecentsGrid, { target: recents, props: { h } });
     mount(AllGrid, { target: all, props: { grid: all, h } });
     mount(SearchGrid, { target: results, props: { section: resultsSection, h } });
+    sections.replaceChildren();
+    mount(PackSections, { target: sections, props: { h } });
 }
