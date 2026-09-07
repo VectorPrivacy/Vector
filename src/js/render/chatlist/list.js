@@ -157,7 +157,7 @@ function mountChatlist() {
                 createPlaceholderAvatar,
                 twemojify,
                 communityMemberSubtext,
-                raidAlert: (id) => { const v = communityRaidAlerts.get(id); return v?.detected ? v : null; },
+                raidAlert: (id) => { const v = communityRaidAlerts.get(id); return v && (v.detected || v.suspects > 0) ? v : null; },
                 refreshMemberCount: (id) => refreshCommunityMemberCount(id),
                 refreshRaidAlert: (id) => refreshCommunityRaidAlert(id),
                 openCommunityMenu: (chat, e) => openCommunityMenu(chat, e),
