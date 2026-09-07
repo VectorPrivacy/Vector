@@ -10562,6 +10562,10 @@ async function sendMessage(messageText) {
                     });
                     msg.content = cleanedText;
                     msg.edited = true;
+                    // The optimistic row needs the tags the edit will carry: the equipped
+                    // packs' shortcodes present in the new text, ahead of the backend's copy.
+                    msg.emoji_tags = mergeEmojiTags(msg.emoji_tags, equippedEmojiTags())
+                        .filter(t => cleanedText.includes(`:${t.shortcode}:`));
                     // Instant repaint for responsive UX; the backend's authoritative
                     // message_update lands on the same row afterwards.
                     const msgElement = document.getElementById(editMsgId);
