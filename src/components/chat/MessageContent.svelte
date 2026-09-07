@@ -19,6 +19,10 @@
     function into(node, fill) {
         fill(node);
     }
+    function packPreviews(node, text) {
+        h.renderEmojiPackPreviews(node, text);
+        return { destroy: () => h.destroyEmojiPackPreviews(node) };
+    }
 
     const live = $derived(!msg.pending && !msg.failed && !ctx.revealedBlocked);
     const xdcUrl = $derived(live ? h.xdcUrl(msg) : null);
@@ -44,7 +48,7 @@
         <span style="display:contents" use:leaf={cryptoAddress}></span>
     {/if}
     {#if msg.content}
-        <span style="display:contents" use:into={(node) => h.renderEmojiPackPreviews(node, msg.content)}></span>
+        <span style="display:contents" use:packPreviews={msg.content}></span>
         <span style="display:contents" use:into={(node) => h.renderCommunityInvitePreviews(node, msg.content)}></span>
     {/if}
     {#if xdcUrl}

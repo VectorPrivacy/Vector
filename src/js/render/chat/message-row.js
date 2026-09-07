@@ -152,6 +152,7 @@ const _dmsgRowHelpers = {
     formatBytes: (n, dec, short) => formatBytes(n, dec, short),
     buildCryptoAddress: (msg) => { const c = detectCryptoAddress(msg.content); return c ? renderCryptoAddress(c) : null; },
     renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
+    destroyEmojiPackPreviews: (node) => destroyEmojiPackPreviews(node),
     renderCommunityInvitePreviews: (node, text) => renderCommunityInvitePreviews(node, text),
     xdcUrl: (msg) => findXdcUrl(msg.content),
     renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),

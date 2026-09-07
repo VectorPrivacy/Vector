@@ -38,6 +38,7 @@ import AllGrid from './picker/AllGrid.svelte';
 import SearchGrid from './picker/SearchGrid.svelte';
 import PackSections from './picker/PackSections.svelte';
 import PackCreator from './picker/PackCreator.svelte';
+import PackPreviewCard from './picker/PackPreviewCard.svelte';
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken } from './lib/packcreator.svelte.js';
 import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
@@ -334,4 +335,9 @@ export function mountEmojiPicker({ sidebar, recents, all, results, resultsSectio
 export function mountPackCreator(grid, { els, h }) {
     grid.replaceChildren();
     return mount(PackCreator, { target: grid, props: { els, h } });
+}
+
+/** Mount one in-chat pack preview card into `target`; returns the instance for teardown. */
+export function mountPackPreviewCard(target, props) {
+    return mount(PackPreviewCard, { target, props });
 }

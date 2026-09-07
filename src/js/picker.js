@@ -444,7 +444,6 @@ function _composeAndRenderPacks() {
     emojiPacksLoaded = true;
     renderEmojiPackSidebar();
     renderEmojiPackSections();
-    _refreshPackPreviewButtons();
 }
 
 // Place the (non-subscribed) theme pack at the theme-slot marker: right after
@@ -1580,6 +1579,9 @@ function stripEmojiPackNaddrs(text) {
  * @param {HTMLElement} target — append target (usually `.dmsg-content`)
  * @param {string} text — message body text
  */
+// Cards mounted per host, so a rebuilt message body can tear its cards down.
+const _packPreviewCards = new WeakMap();
+
 function renderEmojiPackPreviews(target, text) {
     if (!text) return;
     NADDR_REGEX.lastIndex = 0;
@@ -1590,55 +1592,53 @@ function renderEmojiPackPreviews(target, text) {
         const naddr = (match[1] || match[3]).toLowerCase();
         if (seen.has(naddr)) continue;
         seen.add(naddr);
-        // Only kind-30030 coordinates are emoji packs; anything else
-        // (articles, communities, ...) stays as plain text, never a card.
+        // Only kind-30030 coordinates are emoji packs; anything else stays plain text.
         if (_naddrKind(naddr) !== KIND_EMOJI_SET) continue;
-        const card = _buildPackPreviewCard(naddr);
-        target.appendChild(card);
+        const inst = VectorSvelte.mountPackPreviewCard(target, { naddr, h: _packPreviewHelpers });
+        const list = _packPreviewCards.get(target) || [];
+        list.push(inst);
+        _packPreviewCards.set(target, list);
     }
 }
 
-function _buildPackPreviewCard(naddr) {
-    const card = document.createElement('div');
-    card.className = 'emoji-pack-preview';
-    card.dataset.naddr = naddr;
-
-    const left = document.createElement('div');
-    left.className = 'emoji-pack-preview-grid';
-    card.appendChild(left);
-
-    const right = document.createElement('div');
-    right.className = 'emoji-pack-preview-meta';
-    card.appendChild(right);
-
-    // Skeleton placeholders fill both columns while the relay fetch
-    // runs — same shape + dimensions as the resolved content so the
-    // card doesn't reflow when it lands. Shimmer animation on each
-    // sub-element keeps the loading state alive.
-    card.classList.add('is-loading');
-    left.innerHTML = `
-        <div class="pack-skel pack-skel-thumb"></div>
-        <div class="pack-skel pack-skel-thumb"></div>
-        <div class="pack-skel pack-skel-thumb"></div>
-        <div class="pack-skel pack-skel-thumb"></div>
-        <div class="pack-skel pack-skel-thumb"></div>
-        <div class="pack-skel pack-skel-thumb"></div>
-    `;
-    right.innerHTML = `
-        <div class="emoji-pack-preview-title-row">
-            <div class="pack-skel pack-skel-logo"></div>
-            <div class="pack-skel pack-skel-title"></div>
-        </div>
-        <div class="pack-skel pack-skel-sub"></div>
-        <div class="pack-skel pack-skel-actions"></div>
-    `;
-
-    _resolvePackPreview(naddr).then(result => {
-        _fillPackPreviewCard(card, result);
-    });
-
-    return card;
+/** The host that held cards is going away: release their effects and canvases. */
+function destroyEmojiPackPreviews(target) {
+    const list = _packPreviewCards.get(target);
+    if (!list) return;
+    for (const inst of list) VectorSvelte.unmountComponent(inst);
+    _packPreviewCards.delete(target);
 }
+
+const _packPreviewHelpers = {
+    resolve: (naddr) => _resolvePackPreview(naddr),
+    bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
+    mountPreviewGrid: (left, pack) => _mountPackPreviewThumbs(left, pack),
+    // The shareable vectorapp.io URL (a web preview elsewhere, the deep link for Vector users).
+    copyShareLink: async (naddr) => {
+        const shareUrl = `https://vectorapp.io/emojis/pack/${await _shareNaddr(naddr)}`;
+        try { await navigator.clipboard.writeText(shareUrl); return true; }
+        catch (err) { console.warn('[emoji-packs] copy share link failed:', err); return false; }
+    },
+    // The cap is pre-gated so the user sees actionable copy, not the backend's raw error.
+    // The transient label stays on screen a beat: a local-DB toggle resolves in a few ms.
+    toggle: async (naddr, pack, isSubscribed) => {
+        if (!isSubscribed && _userPackCount() >= MAX_EQUIPPED_PACKS) { _pcShowSlotFullError(); return false; }
+        const minDelay = new Promise(r => setTimeout(r, 350));
+        try {
+            const work = isSubscribed
+                ? invoke('unsubscribe_emoji_pack', { id: pack.id })
+                : invoke('subscribe_emoji_pack', { naddr });
+            await Promise.all([work, minDelay]);
+            await loadEmojiPacks();
+            return true;
+        } catch (e) {
+            console.warn('[emoji-packs] subscribe toggle failed:', e);
+            return false;
+        }
+    },
+    // The grid resolves its canvas height well after the open-scroll: re-pin the view.
+    onResized: (card) => { if (domChatMessages?.contains(card)) compensateChatScrollForResize(); },
+};
 
 // Cached error results expire after this many ms — long enough to
 // coalesce burst re-renders of the same message (reactions land, edits,
@@ -1860,209 +1860,25 @@ async function _onPackDetailsAction(pack) {
     });
 })();
 
-function _fillPackPreviewCard(card, result) {
-    if (!card.isConnected) return;
-    card.classList.remove('is-loading');
-
-    const left = card.querySelector('.emoji-pack-preview-grid');
-    const right = card.querySelector('.emoji-pack-preview-meta');
-    left.innerHTML = '';
-    right.innerHTML = '';
-
-    if (result.state === 'err') {
-        card.classList.add('is-error');
-        right.innerHTML = `<div class="emoji-pack-preview-title-row"><span class="emoji-pack-preview-title">Pack unavailable</span></div><div class="emoji-pack-preview-desc">${_escapeAttr(result.error || 'Failed to fetch')}</div>`;
-        if (domChatMessages?.contains(card)) compensateChatScrollForResize();
-        return;
-    }
-
-    const pack = result.pack;
-    card.dataset.packId = pack.id;
-
-    _buildPackPreviewThumbs(left, pack);
-
-    const titleRow = document.createElement('div');
-    titleRow.className = 'emoji-pack-preview-title-row';
-    if (pack.image_url) {
-        const logo = document.createElement('img');
-        logo.className = 'emoji-pack-preview-logo';
-        bindCachedEmojiImg(logo, pack.image_url, 'emoji_pack_icon');
-        logo.alt = '';
-        titleRow.appendChild(logo);
-    }
-    const title = document.createElement('span');
-    title.className = 'emoji-pack-preview-title';
-    title.textContent = pack.title || pack.identifier;
-    titleRow.appendChild(title);
-    right.appendChild(titleRow);
-
-    const sub = document.createElement('div');
-    sub.className = 'emoji-pack-preview-sub';
-    sub.textContent = `${pack.emojis.length} emoji${pack.emojis.length === 1 ? '' : 's'}`;
-    right.appendChild(sub);
-
-    if (pack.description) {
-        const desc = document.createElement('div');
-        desc.className = 'emoji-pack-preview-desc';
-        desc.textContent = pack.description;
-        right.appendChild(desc);
-    }
-
-    const actions = document.createElement('div');
-    actions.className = 'emoji-pack-preview-actions';
-
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'btn emoji-pack-preview-copy';
-    copyBtn.title = 'Copy share link';
-    copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-    copyBtn.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        _onPackPreviewCopyClick(copyBtn, card);
-    });
-    actions.appendChild(copyBtn);
-
-    const btn = document.createElement('button');
-    btn.className = 'btn emoji-pack-preview-add';
-    _setPackPreviewButtonState(btn, pack, _isPackSubscribed(pack.id));
-    btn.addEventListener('click', async (ev) => {
-        ev.stopPropagation();
-        await _onPackPreviewButtonClick(btn, card);
-    });
-    actions.appendChild(btn);
-
-    right.appendChild(actions);
-
-    // The grid resolves its canvas height now (up to 3 rows), well after the
-    // open-scroll. Re-pin so a tall pack doesn't bump the user off the bottom.
-    if (domChatMessages?.contains(card)) compensateChatScrollForResize();
-}
-
 /**
  * Fill the preview card's thumbnail column. One `<canvas>` draws every thumb
  * (a single compositor layer instead of up to 18 animated `<img>`s — the
  * mobile-lag fix), reusing the panel's URL-keyed frame cache.
  */
-function _buildPackPreviewThumbs(left, pack) {
-    // Mirror the stock grid's responsive column count (matches the skeleton's
-    // CSS, which drops to 5 cols ≤480px — keeps skeleton→canvas seamless).
+function _mountPackPreviewThumbs(left, pack) {
+    // Mirror the stock grid's responsive column count (the skeleton drops to 5 cols at 480px).
     const cols = window.innerWidth <= 480 ? 5 : 6;
-    // Three rows, sized to the grid's `max-height: 96px` clip. The fade only
-    // kicks in once a third row exists so small packs don't fake "more below".
+    // Three rows, sized to the grid's 96px clip.
     const thumbs = pack.emojis.slice(0, cols * 3);
-
-    if (thumbs.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'emoji-pack-preview-empty';
-        empty.textContent = 'Empty pack';
-        left.appendChild(empty);
-        return;
-    }
-    if (pack.emojis.length > cols * 2) left.classList.add('is-overflowing');
-
-    // 28px thumb in a 32px row matches the stock grid's
-    // `grid-auto-rows: 28px; gap: 4px` vertical rhythm.
-    left.classList.add('is-canvas');
+    // 28px thumb in a 32px row matches the stock grid's vertical rhythm.
     const grid = new PackCanvasGrid(pack, {
-        emojis: thumbs,
-        cols,
-        cellPx: 32,
-        thumbPx: 28,
-        gapPx: 4,
-        boxPx: 0,            // decorative grid — no hover highlight box
-        hoverScale: false,
-        selectable: false,
-        isPreview: true,
-        ioRootMargin: '200px', // decode just before the card scrolls in
+        emojis: thumbs, cols, cellPx: 32, thumbPx: 28, gapPx: 4,
+        boxPx: 0, hoverScale: false, selectable: false, isPreview: true,
+        ioRootMargin: '200px',
     });
     left.appendChild(grid.canvas);
-    grid.attachVisibilityObserver(null);   // viewport-rooted
-}
-
-async function _onPackPreviewCopyClick(btn, card) {
-    const naddr = card.dataset.naddr;
-    if (!naddr) return;
-    // Copy the shareable vectorapp.io URL (matches the "Share Pack" action),
-    // not the bare naddr — the URL gives a web preview on other platforms and
-    // the OS deep-link interception for Vector users.
-    const shareUrl = `https://vectorapp.io/emojis/pack/${await _shareNaddr(naddr)}`;
-    navigator.clipboard.writeText(shareUrl).then(() => {
-        const icon = btn.querySelector('.icon');
-        if (!icon) return;
-        icon.classList.remove('icon-copy');
-        icon.classList.add('icon-check');
-        setTimeout(() => {
-            icon.classList.remove('icon-check');
-            icon.classList.add('icon-copy');
-        }, 1500);
-    }).catch(err => {
-        console.warn('[emoji-packs] copy share link failed:', err);
-    });
-}
-
-function _setPackPreviewButtonState(btn, pack, isSubscribed) {
-    btn.dataset.packId = pack.id;
-    if (isSubscribed) {
-        btn.classList.add('is-subscribed');
-        btn.textContent = 'Remove';
-    } else {
-        btn.classList.remove('is-subscribed');
-        btn.textContent = 'Add Pack';
-    }
-}
-
-/** Sweep every in-chat pack preview card's Add/Remove button and re-sync
- *  its label to current subscription state. Called whenever
- *  `arrEmojiPacks` mutates so the inline cards don't drift after a
- *  right-click "Remove Pack" or a sidebar subscribe action. */
-function _refreshPackPreviewButtons() {
-    document.querySelectorAll('.emoji-pack-preview-add[data-pack-id]')
-        .forEach(btn => {
-            const id = btn.dataset.packId;
-            if (!id) return;
-            // Cheap: only re-paint label/class. We don't have the full
-            // pack object here but `_setPackPreviewButtonState` only
-            // reads `pack.id` from it.
-            _setPackPreviewButtonState(btn, { id }, _isPackSubscribed(id));
-        });
-}
-
-async function _onPackPreviewButtonClick(btn, card) {
-    const id = btn.dataset.packId;
-    const naddr = card.dataset.naddr;
-    if (!id || btn.disabled) return;
-    const isSubscribed = btn.classList.contains('is-subscribed');
-    // Pre-gate the cap so users see actionable copy instead of the
-    // backend's raw error. Subscribing to a pack we already have
-    // (idempotent) doesn't count, but that path goes through the
-    // "Remove" branch anyway.
-    if (!isSubscribed && _userPackCount() >= MAX_EQUIPPED_PACKS) {
-        _pcShowSlotFullError();
-        return;
-    }
-    btn.disabled = true;
-    const original = btn.textContent;
-    btn.textContent = isSubscribed ? 'Removing…' : 'Adding…';
-
-    // Minimum on-screen time for the transient state — local-DB toggles
-    // resolve in a few ms otherwise and the label change is invisible.
-    const minDelay = new Promise(r => setTimeout(r, 350));
-    try {
-        const work = isSubscribed
-            ? invoke('unsubscribe_emoji_pack', { id })
-            : invoke('subscribe_emoji_pack', { naddr });
-        await Promise.all([work, minDelay]);
-        await loadEmojiPacks();
-        const cached = _packPreviewCache.get(naddr);
-        const pack = cached && cached.state === 'ok' ? cached.pack : null;
-        if (pack) {
-            _setPackPreviewButtonState(btn, pack, _isPackSubscribed(pack.id));
-        }
-    } catch (e) {
-        console.warn('[emoji-packs] subscribe toggle failed:', e);
-        btn.textContent = original;
-    } finally {
-        btn.disabled = false;
-    }
+    grid.attachVisibilityObserver(null);
+    return () => grid.destroy();
 }
 
 // ============================================================================
