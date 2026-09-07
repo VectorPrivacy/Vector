@@ -84,7 +84,7 @@ async function pinsRefresh() {
         p._jumpable = await pinsResolveJumpable(p.rumor_id);
     }));
     pinsUpdateButton();
-    if (pinsDrawerOpen) pinsRenderDrawer();
+    pinsRenderDrawer();
 }
 
 /// The header button exists only where pins exist: a sealed list counts (the
@@ -97,6 +97,7 @@ function pinsUpdateButton() {
 
 function pinsSetDrawerVisible(visible, instant = false) {
     pinsDrawerOpen = visible;
+    VectorSvelte.setPinsOpen(visible);
     domPinsBtn.classList.toggle('pins-open', visible);
     // Dim/blur the conversation while the drawer owns the screen. Toggled at
     // close START so the unblur transitions alongside the drawer's slide-up.
@@ -129,150 +130,49 @@ function pinsFormatDate(ms) {
     return `${pad(d.getMonth() + 1)}/${pad(d.getDate())}/${d.getFullYear()}`;
 }
 
+/** The drawer's list is an island over lib/pins.svelte.js; this pushes the pin context. */
 function pinsRenderDrawer() {
-    domPinsList.innerHTML = '';
+    pinsEnsureIsland();
+    VectorSvelte.setPins({
+        pins: pinsCache.pins || [], sealed: !!pinsCache.sealed, canPin: pinsCtx.canPin,
+        communityId: pinsCtx.communityId, channelId: pinsCtx.channelId,
+    });
+}
 
-    if (pinsCache.sealed) {
-        const notice = document.createElement('div');
-        notice.className = 'pins-drawer-notice';
-        notice.textContent = "This channel's pins are protected by a key you don't hold yet.";
-        domPinsList.appendChild(notice);
-        return;
-    }
-    if (!pinsCache.pins.length) {
-        const notice = document.createElement('div');
-        notice.className = 'pins-drawer-notice';
-        notice.textContent = 'No pinned messages yet.';
-        domPinsList.appendChild(notice);
-        return;
-    }
-
-    for (const pin of pinsCache.pins) {
-        const row = document.createElement('div');
-        row.className = 'pins-drawer-row';
-        // File pins lead with their TYPE icon (the chat's own vocabulary);
-        // everything else leads with the pin.
-        const typeIcon = pinsAttachmentTypeIcon(pin);
-        if (typeIcon) {
-            row.innerHTML = `<span class="icon icon-${typeIcon} pins-drawer-row-type-icon"></span>`;
-        } else {
-            row.innerHTML = PINS_ROW_SVG;
-        }
-
-        // Controls FLOAT top-right inside the text flow: collapsed rows look
-        // unchanged, but an expanded pin's lines wrap around them and reclaim
-        // the FULL drawer width below the first line — no dead right gutter,
-        // which matters most on narrow mobile widths.
-        const text = document.createElement('div');
-        text.className = 'pins-drawer-row-text';
-        const controls = document.createElement('span');
-        controls.className = 'pins-drawer-row-controls';
-        const body = document.createElement('span');
-        body.className = 'pins-drawer-row-body';
-        text.append(controls, body);
-        pinsRenderCollapsedContent(body, pin);
-        row.appendChild(text);
-
-        const date = document.createElement('span');
-        date.className = 'pins-drawer-row-date';
-        date.textContent = pinsFormatDate(pin.ms);
-        controls.appendChild(date);
-
-        if (pinsCtx.canPin) {
-            const unpin = document.createElement('span');
-            unpin.className = 'icon icon-x pins-drawer-row-unpin btn';
-            unpin.title = 'Unpin';
-            unpin.addEventListener('click', (e) => {
-                e.stopPropagation();
-                pinsUnpin(pin.rumor_id);
-            });
-            controls.appendChild(unpin);
-        }
-        row.dataset.rumorId = pin.rumor_id;
-        // A row without its message on this device offers no jump: no pointer,
-        // no dead click. (If it turns out truncated, the pass below rewires
-        // the click to expansion instead — reading it is all it can offer.)
-        if (pin._jumpable) {
-            row.addEventListener('click', (e) => {
-                if (pinsClickIsInteractive(e)) return;
-                pinsJumpTo(pin.rumor_id);
-            });
-        } else {
-            row.classList.add('pins-no-jump');
-        }
-        domPinsList.appendChild(row);
-    }
-
-    // Show-more chevrons, only where the text actually clips. A pin is often
-    // the ONLY copy a member can read (the original may predate their DB), so
-    // every pin must be fully readable inside the drawer itself. Runs after
-    // the rows are in layout — the drawer is visible whenever this renders.
-    for (const row of domPinsList.querySelectorAll('.pins-drawer-row')) {
-        const text = row.querySelector('.pins-drawer-row-text');
-        if (!text) continue;
-        // The expander appears whenever expansion would SHOW more: a clipped
-        // first line, further displayable lines beyond the one-line preview
-        // (pixels can't detect those — the preview is only line one), or
-        // previewable media (expansion renders it). A non-previewable file
-        // gets no expander: its Reveal/Open affordance rides the collapsed
-        // row, so expanding would reveal nothing.
-        const rowPin = pinsCache.pins.find(p => p.rumor_id === row.dataset.rumorId);
-        const hasMedia = !!rowPin && !!pinsPreviewableMedia(rowPin);
-        const source = rowPin ? (rowPin.edited?.content ?? rowPin.content) : '';
-        const hasMoreLines = source.split('\n').filter(l => l.trim()).length > 1;
-        if (!pinsLineClips(text) && !hasMedia && !hasMoreLines) continue;
-        const expander = document.createElement('span');
-        expander.className = 'icon icon-chevron-down pins-drawer-row-expander btn';
-        expander.title = 'Show more';
-        expander.addEventListener('click', (e) => {
-            e.stopPropagation();
-            pinsToggleRowExpanded(row, text);
-        });
-        const controls = row.querySelector('.pins-drawer-row-controls');
-        controls.insertBefore(expander, row.querySelector('.pins-drawer-row-unpin'));
-        // No jump to offer, but there IS more to read: the whole row becomes
-        // the expand toggle.
-        if (row.classList.contains('pins-no-jump')) {
-            row.classList.add('pins-expandable');
-            row.addEventListener('click', (e) => {
-                if (pinsClickIsInteractive(e)) return;
-                pinsToggleRowExpanded(row, text);
-            });
-        }
-    }
-
-    // Non-previewable file pins get the file's OWN affordance in the same
-    // slot: fetch (the pin-only path — works with zero chat state), then
-    // reveal in the file manager (desktop) or open via the system chooser
-    // (Android) — the chat's exact attachment actions.
-    for (const row of domPinsList.querySelectorAll('.pins-drawer-row')) {
-        const rowPin = pinsCache.pins.find(p => p.rumor_id === row.dataset.rumorId);
-        if (!rowPin || !pinsAttachmentChips(rowPin).length || pinsPreviewableMedia(rowPin)) continue;
-        const isAndroid = platformFeatures?.os === 'android';
-        const open = document.createElement('span');
-        open.className = 'icon icon-file-search pins-drawer-row-open btn';
-        open.title = isAndroid ? 'Open file' : 'Reveal in folder';
-        open.addEventListener('click', async (e) => {
-            e.stopPropagation();
-            try {
-                const att = await invoke('fetch_pinned_attachment', {
-                    communityId: pinsCtx.communityId,
-                    channelId: pinsCtx.channelId,
-                    messageId: rowPin.rumor_id,
-                });
-                if (!att?.path) return;
-                if (isAndroid) {
-                    await openAndroidAttachment(att.path);
-                } else {
-                    revealItemInDir(att.path);
+let pinsIslandMounted = false;
+function pinsEnsureIsland() {
+    if (pinsIslandMounted) return;
+    pinsIslandMounted = true;
+    VectorSvelte.mountPinsDrawer(domPinsList, {
+        h: {
+            typeIcon: (pin) => pinsAttachmentTypeIcon(pin),
+            rowSvg: PINS_ROW_SVG,
+            formatDate: (ms) => pinsFormatDate(ms),
+            renderCollapsed: (body, pin) => pinsRenderCollapsedContent(body, pin),
+            lineClips: (text) => pinsLineClips(text),
+            previewableMedia: (pin) => pinsPreviewableMedia(pin),
+            hasChips: (pin) => pinsAttachmentChips(pin).length > 0,
+            sourceOf: (pin) => pin.edited?.content ?? pin.content ?? '',
+            isInteractive: (e) => pinsClickIsInteractive(e),
+            jump: (id) => pinsJumpTo(id),
+            toggle: (row, text) => pinsToggleRowExpanded(row, text),
+            unpin: (id) => pinsUnpin(id),
+            isAndroid: () => platformFeatures?.os === 'android',
+            // Fetch from the pin alone (works with zero chat state), then the chat's own file action.
+            openFile: async (pin) => {
+                try {
+                    const att = await invoke('fetch_pinned_attachment', {
+                        communityId: pinsCtx.communityId, channelId: pinsCtx.channelId, messageId: pin.rumor_id,
+                    });
+                    if (!att?.path) return;
+                    if (platformFeatures?.os === 'android') await openAndroidAttachment(att.path);
+                    else revealItemInDir(att.path);
+                } catch (err) {
+                    showToast(String(err));
                 }
-            } catch (err) {
-                showToast(String(err));
-            }
-        });
-        const controls = row.querySelector('.pins-drawer-row-controls');
-        controls.insertBefore(open, row.querySelector('.pins-drawer-row-unpin'));
-    }
+            },
+        },
+    });
 }
 
 /// Ride an expansion for its animation window, scrolling the list just enough
