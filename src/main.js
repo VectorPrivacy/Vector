@@ -1225,7 +1225,6 @@ const domSettingsChatBgInfo = document.getElementById('chat-bg-info');
 const domSettingsStorageGalleryInfo = document.getElementById('storage-gallery-info');
 const domSettingsExportAccountInfo = document.getElementById('export-account-info');
 const domSettingsChangePinInfo = document.getElementById('change-pin-info');
-const domSettingsChangePinLabel = document.getElementById('change-pin-label');
 const domSettingsLogoutInfo = document.getElementById('logout-info');
 const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
@@ -10254,75 +10253,39 @@ async function openChatlist() {
  *  status dot. State strings match the backend's `bunker_state` event:
  *  'idle' | 'connecting' | 'online' | 'offline'. Idle clears the dot. */
 function applyRemoteSignerDot(state) {
-    const dot = document.getElementById('remote-signer-dot');
-    if (!dot) return;
-    dot.classList.remove('online', 'offline', 'connecting');
-    if (state === 'online' || state === 'offline' || state === 'connecting') {
-        dot.classList.add(state);
-    }
+    VectorSvelte.setSignerDot(state === 'online' || state === 'offline' || state === 'connecting' ? state : '');
 }
 
-/** Populate the Remote Signer card in Security settings, or hide it
- *  entirely for local-key accounts. Also hides the Export Account row
- *  for bunker accounts since the identity key isn't on this device. */
+/** Resolve the external-signer card's content: a NIP-46 bunker, an on-device
+ *  NIP-55 signer (Amber), or nothing for a local-key account. */
 async function refreshRemoteSignerCard() {
-    const card = document.getElementById('settings-remote-signer');
-    const exportRow = document.getElementById('export-account-row');
-    if (!card) return;
-    const labelEl = document.getElementById('remote-signer-label');
-    const hintEl = document.getElementById('remote-signer-hint');
     try {
         const status = await invoke('get_bunker_status');
         if (status) {
-            // NIP-46 bunker: a remote signer reached over a relay connection, so
-            // the online/offline dot (driven by the bunker_state listener) is
-            // meaningful here.
-            if (labelEl) labelEl.textContent = 'Remote Signer';
-            if (hintEl) hintEl.textContent = 'Your identity key lives on your signer app. Vector only holds a device pairing key.';
-            const pkEl = document.getElementById('remote-signer-pubkey');
-            if (pkEl) {
-                const npub = status.remote_npub || '';
-                pkEl.textContent = npub
-                    ? `${npub.slice(0, 12)}…${npub.slice(-6)}`
-                    : '…';
-                pkEl.title = npub;
-            }
-            card.style.display = '';
-            if (exportRow) exportRow.style.display = 'none';
+            // A remote signer reached over a relay: the bunker_state listener drives the dot.
+            VectorSvelte.setSigner({
+                label: 'Remote Signer',
+                hint: 'Your identity key lives on your signer app. Vector only holds a device pairing key.',
+                npub: status.remote_npub || '',
+            });
             return;
         }
-        // Not a bunker account — an on-device NIP-55 offline signer (Amber)
-        // reuses the same card (both keep the identity key off this device, so
-        // Export stays hidden for either).
         const nip55 = await invoke('get_nip55_status').catch(() => null);
         if (nip55) {
-            if (labelEl) labelEl.textContent = 'Offline Signer';
-            if (hintEl) hintEl.textContent = 'Your identity key stays in your signer app. Vector holds nothing on this device.';
-            const pkEl = document.getElementById('remote-signer-pubkey');
-            if (pkEl) {
-                const npub = nip55.user_npub || '';
-                pkEl.textContent = npub
-                    ? `${npub.slice(0, 12)}…${npub.slice(-6)}`
-                    : '…';
-                pkEl.title = npub;
-            }
-            // A local IPC signer has no online/offline connection to drop, so
-            // the dot reflects install health, not the noisy per-op state:
-            // green = installed & paired, red = the signer app is gone. A
-            // transient needs-auth is surfaced by a toast + the Re-authorize
-            // button, not a persistent red dot.
+            VectorSvelte.setSigner({
+                label: 'Offline Signer',
+                hint: 'Your identity key stays in your signer app. Vector holds nothing on this device.',
+                npub: nip55.user_npub || '',
+            });
+            // A local IPC signer has no connection to drop: the dot reflects install
+            // health. A transient needs-auth is a toast plus Re-authorize, not a red dot.
             applyRemoteSignerDot(nip55.installed ? 'online' : 'offline');
-            card.style.display = '';
-            if (exportRow) exportRow.style.display = 'none';
             return;
         }
-        // Local-key account — no external signer card.
-        card.style.display = 'none';
-        if (exportRow) exportRow.style.display = '';
+        VectorSvelte.setSigner(null);
     } catch (e) {
         console.warn('[settings] remote signer status failed:', e);
-        card.style.display = 'none';
-        if (exportRow) exportRow.style.display = '';
+        VectorSvelte.setSigner(null);
     }
 }
 

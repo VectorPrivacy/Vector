@@ -28,6 +28,7 @@ import TorCircuits from './settings/TorCircuits.svelte';
 import BlockedUsers from './settings/BlockedUsers.svelte';
 import StorageDonut from './settings/StorageDonut.svelte';
 import Notifications from './settings/Notifications.svelte';
+import SecurityCard from './settings/SecurityCard.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -50,7 +51,7 @@ export {
 } from './lib/filepreview.svelte.js';
 // Settings: the Tor card's state and the blocked-users list's version.
 export {
-    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings,
+    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot,
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
@@ -203,4 +204,12 @@ export function mountStorageDonut(target, { h }) {
 export function mountNotifications(target, { h }) {
     target.replaceChildren();
     return mount(Notifications, { target, props: { h } });
+}
+
+/** Mount the Security reconciler over the section's elements. */
+export function mountSecurityCard({ els }) {
+    const host = document.createElement('div');
+    host.hidden = true;
+    document.body.appendChild(host);
+    return mount(SecurityCard, { target: host, props: { els } });
 }

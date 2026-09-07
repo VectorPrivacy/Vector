@@ -50,3 +50,19 @@ export function setNotifSettings({ sounds, globalMute, muteEveryone, sound, priv
     notif.privacy = privacy || 'full';
     notif.loaded = true;
 }
+
+// Security: the encryption status the app last confirmed (the flows write their
+// globals, then sync here) and the external-signer card's content.
+const security = $state({
+    enabled: true, type: 'pin', bioSupported: false,
+    signer: null,          // null (local key) | { label, hint, npub }
+    dot: '',               // '' | online | offline | connecting
+});
+export function securityState() { return security; }
+export function setSecurity({ enabled, type, bioSupported }) {
+    security.enabled = !!enabled;
+    security.type = type || 'pin';
+    if (bioSupported !== undefined) security.bioSupported = !!bioSupported;
+}
+export function setSigner(signer) { security.signer = signer || null; }
+export function setSignerDot(dot) { security.dot = dot || ''; }

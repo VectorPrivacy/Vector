@@ -1996,25 +1996,35 @@ async function initEncryptionSettings() {
 
     if (!encryptionToggle) return;
 
-    // Get current encryption status from backend
+    VectorSvelte.mountSecurityCard({
+        els: {
+            toggle: encryptionToggle,
+            unlockRow: document.getElementById('unlock-method-container'),
+            unlockLabel: document.getElementById('unlock-method-label'),
+            unlockBtn: document.getElementById('unlock-method-switch'),
+            pinRow: document.getElementById('change-pin-container'),
+            pinLabel: document.getElementById('change-pin-label'),
+            card: document.getElementById('settings-remote-signer'),
+            label: document.getElementById('remote-signer-label'),
+            hint: document.getElementById('remote-signer-hint'),
+            pubkey: document.getElementById('remote-signer-pubkey'),
+            dot: document.getElementById('remote-signer-dot'),
+            exportRow: document.getElementById('export-account-row'),
+        },
+    });
+
     try {
         const status = await invoke('get_encryption_status', { npub: null });
         fEncryptionEnabled = status.enabled;
         fSecurityType = status.security_type || 'pin';
-        encryptionToggle.checked = fEncryptionEnabled;
     } catch (e) {
         console.error('Failed to get encryption status:', e);
         fEncryptionEnabled = true;
-        encryptionToggle.checked = true;
     }
+    syncSecurityState();
 
-    // Update change credential button
-    updateChangeCredentialButton();
-
-    // Set up toggle change handler
     encryptionToggle.addEventListener('change', handleEncryptionToggleChange);
 
-    // Set up info button click handler (with stopPropagation to prevent toggle trigger)
     if (encryptionInfoBtn) {
         encryptionInfoBtn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -2022,17 +2032,17 @@ async function initEncryptionSettings() {
             showEncryptionInfo();
         });
     }
-
-    // Set up change credential button handler
     if (changeCredentialBtn) {
         changeCredentialBtn.addEventListener('click', handleChangeCredential);
     }
 
-    // Set up Tauri event listeners for migration progress
     setupMigrationEventListeners();
-
-    // Unlock-method row (mode display + switch)
     await initUnlockMethodRow();
+}
+
+/** Push the flows' globals into the Security reconciler's state. */
+function syncSecurityState() {
+    VectorSvelte.setSecurity({ enabled: fEncryptionEnabled, type: fSecurityType });
 }
 
 /**
@@ -2059,8 +2069,7 @@ async function resyncEncryptionToggle() {
         fSecurityType = st.security_type || 'pin';
         const t = document.getElementById('security-encryption-toggle');
         if (t) t.checked = st.enabled;
-        updateChangeCredentialButton();
-        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        syncSecurityState();
     } catch (e) { /* keep last known state */ }
 }
 
@@ -2078,7 +2087,7 @@ async function enableBiometricOnlyEncryption() {
     showMigrationModal(true);
     try {
         await invoke('enable_encryption_biometric');
-        updateChangeCredentialButton();
+        syncSecurityState();
         return true;
     } catch (e) {
         fSecurityType = prevSecurityType;
@@ -2101,11 +2110,9 @@ async function enableBiometricOnlyEncryption() {
  * engine as Change PIN), so plaintext never touches disk.
  */
 async function initUnlockMethodRow() {
-    const row = document.getElementById('unlock-method-container');
-    const label = document.getElementById('unlock-method-label');
     const btn = document.getElementById('unlock-method-switch');
     const infoBtn = document.getElementById('unlock-method-info');
-    if (!row || !label || !btn) return;
+    if (!btn) return;
 
     let bioSupported = false;
     if (platformFeatures.os === 'android') {
@@ -2114,18 +2121,7 @@ async function initUnlockMethodRow() {
             bioSupported = !!st.supported;
         } catch (e) { /* leave unsupported */ }
     }
-
-    window.__refreshUnlockMethodRow = () => {
-        const isBio = fSecurityType === 'biometric';
-        // Hidden when encryption is off (nothing to unlock) or when the device
-        // can't do biometrics and we're already on a credential (no alternative).
-        row.style.display = fEncryptionEnabled && (bioSupported || isBio) ? '' : 'none';
-        label.textContent = isBio
-            ? 'Unlock: Biometrics'
-            : `Unlock: ${fSecurityType === 'password' ? 'Password' : 'PIN'}`;
-        btn.textContent = isBio ? 'Use PIN' : 'Use Biometrics';
-    };
-    window.__refreshUnlockMethodRow();
+    VectorSvelte.setSecurity({ enabled: fEncryptionEnabled, type: fSecurityType, bioSupported });
 
     if (!btn.dataset.unlockBound) {
         btn.dataset.unlockBound = '1';
@@ -2164,8 +2160,7 @@ async function switchToBiometricMode() {
     showMigrationModal(true);
     try {
         await invoke('switch_to_biometric');
-        updateChangeCredentialButton();
-        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        syncSecurityState();
     } catch (e) {
         fSecurityType = prev;
         fMigrationRekeying = false;
@@ -2174,7 +2169,7 @@ async function switchToBiometricMode() {
         if (!msg.includes('BIOMETRIC_CANCELLED')) {
             await popupConfirm('Could not switch', escapeHtml(msg), true);
         }
-        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        syncSecurityState();
     }
 }
 
@@ -2194,33 +2189,19 @@ async function switchToCredentialMode() {
             credential: result.credential,
             securityType: result.securityType,
         });
-        updateChangeCredentialButton();
-        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        syncSecurityState();
     } catch (e) {
         fSecurityType = prev;
         fMigrationRekeying = false;
         hideMigrationModal();
         await popupConfirm('Could not switch', escapeHtml(String(e)), true);
-        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        syncSecurityState();
     }
 }
 
 /**
  * Update change credential button visibility and text
  */
-function updateChangeCredentialButton() {
-    const container = document.getElementById('change-pin-container');
-    if (!container) return;
-    // Biometric accounts have no typeable credential to change; the
-    // unlock-method row switches them instead.
-    if (fEncryptionEnabled && fSecurityType !== 'biometric') {
-        container.style.display = '';
-        domSettingsChangePinLabel.textContent = fSecurityType === 'password' ? 'Change Password' : 'Change PIN';
-    } else {
-        container.style.display = 'none';
-    }
-}
-
 /**
  * Show info popup about local encryption
  */
@@ -2294,7 +2275,7 @@ async function handleEnableEncryption(toggle) {
     try {
         fSecurityType = result.securityType;
         await invoke('enable_encryption', { credential: result.credential, securityType: result.securityType });
-        updateChangeCredentialButton();
+        syncSecurityState();
     } catch (e) {
         hideMigrationModal();
         await popupConfirm(
@@ -2592,7 +2573,7 @@ async function handleChangeCredential() {
             securityType: result.securityType,
         });
         fSecurityType = result.securityType;
-        updateChangeCredentialButton();
+        syncSecurityState();
     } catch (e) {
         hideMigrationModal();
         fMigrationRekeying = false;
@@ -2671,8 +2652,7 @@ async function setupMigrationEventListeners() {
         fMigrationRekeying = false;
         // Update local state
         fEncryptionEnabled = document.getElementById('security-encryption-toggle').checked;
-        updateChangeCredentialButton();
-        if (window.__refreshUnlockMethodRow) window.__refreshUnlockMethodRow();
+        syncSecurityState();
         showToast(wasRekeying
             ? (fSecurityType === 'biometric' ? 'Now unlocking with biometrics' : 'Unlock method updated')
             : wasEncrypting ? 'Encryption enabled' : 'Encryption disabled');
