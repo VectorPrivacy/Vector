@@ -395,206 +395,89 @@ let cTranscriber = null;
 class VoiceSettings {
     constructor() {
         this.models = [];
-        this.autoTranslate = false;
-        this.autoTranscribe = false;
-        this.selectedModel = 'small'; // Default model
+        this.selectedModel = 'small';
     }
+
+    get autoTranslate() { return VectorSvelte.voiceState().autoTranslate; }
+    get autoTranscribe() { return VectorSvelte.voiceState().autoTranscribe; }
 
     async initVoiceSettings() {
         const voiceSection = document.getElementById('settings-voice');
         if (!voiceSection) return;
-
-        // Only show voice settings if transcription is supported
         if (!platformFeatures.transcription) {
             voiceSection.style.display = 'none';
             return;
         }
-
         voiceSection.style.display = 'block';
 
-        // Load our Settings from disk (or use a default value)
-        const strModelID = await loadChosenWhisperModel() || this.selectedModel;
-        this.autoTranslate = await loadWhisperAutoTranslate();
-        this.autoTranscribe = await loadWhisperAutoTranscribe();
+        VectorSvelte.mountVoice(document.getElementById('settings-voice-body'), {
+            h: {
+                formatBytes,
+                explain: (kind) => popupConfirm(...VOICE_EXPLAINERS[kind], true),
+                setTranslate: async (on) => {
+                    VectorSvelte.setVoice({ autoTranslate: on });
+                    await saveWhisperAutoTranslate(on);
+                },
+                setTranscribe: async (on) => {
+                    VectorSvelte.setVoice({ autoTranscribe: on });
+                    await saveWhisperAutoTranscribe(on);
+                },
+                selectModel: (name) => this.setSelectedModel(name),
+                download: () => this.downloadModel(this.selectedModel),
+                deleteModel: () => this.deleteSelectedModel(),
+                cancelDownload: () => invoke('cancel_whisper_download'),
+            },
+        });
 
-        // Set initial toggle states (will be loaded from backend DB in future)
-        document.getElementById('auto-translate-toggle').checked = this.autoTranslate;
-        document.getElementById('auto-transcribe-toggle').checked = this.autoTranscribe;
-        
-        // Update selectedModel to match the loaded model ID
-        // If the saved model no longer exists (e.g. removed in an update), keep the
-        // selection that loadWhisperModels() already chose and persist it
-        const modelSelect = document.getElementById('whisper-model');
-        const modelExists = this.models.some(m => m.model.name === strModelID);
-        if (modelExists) {
+        // A saved model that no longer exists keeps the pick loadWhisperModels made.
+        const strModelID = await loadChosenWhisperModel() || this.selectedModel;
+        if (this.models.some(m => m.model.name === strModelID)) {
             this.selectedModel = strModelID;
-            modelSelect.value = strModelID;
         } else {
-            this.selectedModel = modelSelect.value || 'small';
             await saveChosenWhisperModel(this.selectedModel);
         }
-
-        this.updateModelStatus();
-        this.updateDeleteButton();
-        this.setupEventListeners();
-        this.updateTranslateAvailability();
-    }
-
-    setupEventListeners() {
-        // Model selection change
-        document.getElementById('whisper-model').addEventListener('change', async (e) => {
-            this.selectedModel = e.target.value;
-            this.updateModelStatus();
-            this.updateDeleteButton();
-            this.updateTranslateAvailability();
-            await this.setSelectedModel(e.target.value);
+        VectorSvelte.setVoice({
+            supported: true,
+            selected: this.selectedModel,
+            autoTranslate: await loadWhisperAutoTranslate(),
+            autoTranscribe: await loadWhisperAutoTranscribe(),
         });
-        
-        // Model download
-        document.getElementById('download-model').addEventListener('click', async () => {
-            const modelName = document.getElementById('whisper-model').value;
-            await this.downloadModel(modelName);
-        });
-
-        // Toggle event listeners
-        document.getElementById('auto-translate-toggle').addEventListener('change', async (e) => {
-            const modelState = this.models.find(m => m.model.name === this.selectedModel);
-            if (modelState && !modelState.model.supports_translate) {
-                e.target.checked = false;
-                return;
-            }
-            this.autoTranslate = e.target.checked;
-            await this.setAutoTranslate(e.target.checked);
-        });
-
-        document.getElementById('auto-transcribe-toggle').addEventListener('change', async (e) => {
-            this.autoTranscribe = e.target.checked;
-            await this.setAutoTranscribe(e.target.checked);
-        });
-
-        // Model deletion
-        const deleteBtn = document.getElementById('delete-model');
-        if (deleteBtn) {
-            deleteBtn.addEventListener('click', () => this.deleteSelectedModel());
-        }
-    }
-
-    async updateTranslateAvailability() {
-        const toggle = document.getElementById('auto-translate-toggle');
-        const warning = document.getElementById('translate-model-warning');
-        const modelState = this.models.find(m => m.model.name === this.selectedModel);
-        const supported = modelState ? modelState.model.supports_translate : true;
-
-        if (!supported) {
-            toggle.checked = false;
-            toggle.disabled = true;
-            toggle.closest('.toggle-container')?.classList.add('disabled');
-            warning.style.display = '';
-            this.autoTranslate = false;
-        } else {
-            toggle.disabled = false;
-            toggle.closest('.toggle-container')?.classList.remove('disabled');
-            warning.style.display = 'none';
-            // Restore saved preference when switching to a capable model
-            const saved = await loadWhisperAutoTranslate();
-            toggle.checked = saved;
-            this.autoTranslate = saved;
-        }
     }
 
     async loadWhisperModels() {
-        const modelSelect = document.getElementById('whisper-model');
-        const modelStatus = document.getElementById('model-status');
-
+        VectorSvelte.setVoice({ loading: true, error: '' });
         try {
-            // Store the currently selected model before rebuilding the dropdown
-            const currentSelection = modelSelect.value;
-
-            // Show loading state while fetching models from backend
-            modelSelect.innerHTML = '<option value="" disabled selected>Loading models...</option>';
-
-            // Fetch device RAM and available models in parallel
             const [deviceMemory, models] = await Promise.all([
                 invoke('get_device_memory'),
                 invoke('list_models'),
             ]);
             this.models = models;
             const deviceMemoryMB = deviceMemory > 0 ? deviceMemory / (1024 * 1024) : Infinity;
-            modelSelect.innerHTML = ''; // Clear loading message
-
-            // Create model hierarchy dynamically from model sizes (lowest to highest quality)
             const modelHierarchy = this.models
-                .slice() // Create a copy to avoid mutating original
-                .sort((a, b) => a.model.size - b.model.size) // Sort by size (smaller = lower quality)
+                .slice()
+                .sort((a, b) => a.model.size - b.model.size)
                 .map(m => m.model.name);
+            const canRun = (m) => deviceMemoryMB >= (m.model.ram_required || 0);
 
-            // Determine the best model for this device's RAM
-            const recommendedModel = this.findBestModelForDevice(deviceMemoryMB);
-
-            // Track if we need to select a fallback model
-            let foundCurrentSelection = false;
-            let selectedModel = null;
-
-            // Populate dropdown with all available models
-            this.models.forEach(modelState => {
-                const option = document.createElement('option');
-                option.value = modelState.model.name;
-
-                // Build display text with size and RAM-based annotations
-                const ramRequired = modelState.model.ram_required || 0;
-                const canRun = deviceMemoryMB >= ramRequired;
-                let displayText = modelState.model.display_name;
-
-                if (!canRun) {
-                    displayText += ' (Insufficient RAM)';
-                    option.disabled = true;
-                } else if (modelState.model.name === recommendedModel) {
-                    displayText += ' [Recommended]';
-                }
-
-                option.textContent = displayText;
-
-                // If this was the previously selected model and it's still downloaded, keep it selected
-                if (currentSelection === modelState.model.name && modelState.downloaded && canRun) {
-                    foundCurrentSelection = true;
-                    option.selected = true;
-                    selectedModel = modelState.model.name;
-                }
-
-                modelSelect.appendChild(option);
-            });
-
-            // If the previously selected model is no longer available, find the best fallback
-            if (!foundCurrentSelection) {
-                selectedModel = this.findBestFallbackModel(currentSelection, modelHierarchy);
-
-                const fallbackOption = Array.from(modelSelect.options).find(opt => opt.value === selectedModel);
-                if (fallbackOption) {
-                    fallbackOption.selected = true;
-                }
+            // Keep the selection while it is downloaded and runnable; otherwise fall back.
+            const current = this.models.find(m => m.model.name === this.selectedModel);
+            if (!(current && current.downloaded && canRun(current))) {
+                this.selectedModel = this.findBestFallbackModel(this.selectedModel, modelHierarchy);
             }
-
-            // Update this.selectedModel to match the UI selection
-            this.selectedModel = selectedModel || this.selectedModel;
-
-            // Update UI elements based on the selected model
-            this.updateDeleteButton();
-            this.updateTranslateAvailability();
-            modelStatus.textContent = '';
+            VectorSvelte.setVoice({
+                models: this.models,
+                memoryMB: deviceMemoryMB,
+                recommended: this.findBestModelForDevice(deviceMemoryMB),
+                selected: this.selectedModel,
+                loading: false,
+            });
         } catch (error) {
-            // Handle errors by showing error state in UI
-            modelSelect.innerHTML = '<option value="" disabled>Error loading models</option>';
-            modelStatus.textContent = `Error: ${error.message}`;
             console.error('Failed to load models:', error);
+            VectorSvelte.setVoice({ loading: false, error: `Error: ${error.message}` });
         }
     }
 
-    /**
-     * Find the best model for the device's available RAM
-     * Prefers small > base > tiny in descending quality order
-     * @param {number} deviceMemoryMB - Device RAM in MB (Infinity = unknown/unlimited)
-     * @returns {string} The recommended model name
-     */
+    /** The best model for the device's RAM: small > base > tiny, else the smallest listed. */
     findBestModelForDevice(deviceMemoryMB) {
         const preferred = ['small', 'base', 'tiny'];
         for (const name of preferred) {
@@ -603,58 +486,23 @@ class VoiceSettings {
                 return name;
             }
         }
-        // Fallback to the smallest available model
         return this.models.length > 0 ? this.models[0].model.name : 'small';
     }
 
-    updateDeleteButton() {
-        const modelSelect = document.getElementById('whisper-model');
-        const deleteBtn = document.getElementById('delete-model');
-        const selectedModel = modelSelect.value;
-        
-        // Hide delete button if no model is selected
-        if (!selectedModel) {
-            deleteBtn.style.display = 'none';
-            return;
-        }
-        
-        // Find the model data for the selected model
-        const model = this.models.find(m => m.model.name === selectedModel);
-        
-        // Only show delete button for downloaded models that aren't currently downloading
-        if (model?.downloaded && !model.downloading) {
-            deleteBtn.style.display = 'block';
-            deleteBtn.classList.add('downloaded');
-            deleteBtn.title = `Delete ${model.model.display_name}`;
-        } else {
-            deleteBtn.style.display = 'none';
-            deleteBtn.classList.remove('downloaded');
-        }
-    }
-
     async deleteSelectedModel() {
-        const modelSelect = document.getElementById('whisper-model');
-        const modelName = modelSelect.value;
-        
-        if (!modelName) {
-            return;
-        }
-        
-        // Confirm deletion
+        const modelName = this.selectedModel;
+        if (!modelName) return;
         const confirmDelete = await popupConfirm(
-            'Delete Model?', 
+            'Delete Model?',
             `Are you sure you want to delete the "${modelName}" model? This will free up disk space but you'll need to download it again to use it.`,
             false,
             '',
             'vector_warning.svg'
         );
-        
         if (!confirmDelete) return;
-        
         try {
             await invoke('delete_whisper_model', { modelName });
             await this.loadWhisperModels();
-            this.updateModelStatus();
             showToast('Model Deleted');
         } catch (error) {
             console.error('Failed to Delete Model:', error);
@@ -662,188 +510,57 @@ class VoiceSettings {
         }
     }
 
-    updateModelStatus() {
-        const statusElement = document.getElementById('model-status');
-        if (!statusElement) return;
-        
-        const model = this.models.find(m => m.model.name === this.selectedModel);
-        if (!model) return;
-        
-        if (model.downloading) {
-            statusElement.innerHTML = `<div class="alert alert-info">Downloading ${model.model.name} model... <span id="voice-model-download-progression">(0%)</span></div>`;
-            return;
-        }
-        
-        if (model.downloaded) {
-            statusElement.innerHTML = `<div class="alert alert-success">Vector AI is ready</div>`;
-            document.getElementById('download-model').style.display = 'none';
-        } else {
-            statusElement.innerHTML = `<div class="alert alert-warning">AI model is not downloaded</div>`;
-            const downloadBtn = document.getElementById('download-model');
-            downloadBtn.style.display = '';
-            
-            // Update button text to include model size
-            const sizeInBytes = model.model.size * 1024 * 1024;
-            const formattedSize = formatBytes(sizeInBytes);
-            downloadBtn.textContent = `Download Model (${formattedSize})`;
-        }
-    }
-
-        async downloadModel(modelName) {
+    async downloadModel(modelName) {
         const model = this.models.find(m => m.model.name === modelName);
-        if (!model || model.downloaded) return;
-
-        const modelStatus = document.getElementById('model-status');
-
-        // Disable UI during download
-        document.getElementById('download-model').style.display = 'none';
-        document.getElementById('delete-model').style.display = 'none';
-        document.getElementById('whisper-model').disabled = true;
-
-        // Show cancel button
-        const cancelBtn = document.getElementById('cancel-download');
-        if (cancelBtn) {
-            cancelBtn.style.display = 'inline-block';
-            cancelBtn.onclick = () => invoke('cancel_whisper_download');
-        }
-
+        if (!model || model.downloaded || model.downloading) return;
+        model.downloading = true;
+        VectorSvelte.setVoice({ error: '', download: { progress: '0%' } });
         try {
-            model.downloading = true;
-
-            // Set up the download UI once
-            modelStatus.innerHTML = `<div class="alert alert-info"><span class="spinner"></span><span id="download-progress-text"> Downloading... 0%</span></div>`;
-
-            // Set up progress listener — updates text only, not the spinner
-            const unlisten = await window.__TAURI__.event.listen(
-                'whisper_download_progress',
-                (event) => {
-                    const { progress } = event.payload;
-                    const textEl = document.getElementById('download-progress-text');
-                    if (textEl) textEl.textContent = ` Downloading... ${Math.round(progress)}%`;
-                }
-            );
-
             await invoke('download_whisper_model', { modelName });
-            unlisten();
-
             model.downloaded = true;
             model.downloading = false;
-
-            modelStatus.innerHTML = `<div class="alert alert-success">Vector AI is ready</div>`;
+            VectorSvelte.setVoice({ download: null });
             await this.loadWhisperModels();
-            this.updateModelStatus();
-
         } catch (error) {
             model.downloading = false;
             const isCancelled = String(error).includes('cancelled');
-            modelStatus.innerHTML = isCancelled
-                ? `<div class="alert alert-warning">AI model is not downloaded</div>`
-                : `<div class="alert alert-warning">Download failed: ${escapeHtml(String(error))}</div>`;
             if (!isCancelled) console.error('Download failed:', error);
-            this.updateModelStatus();
-        } finally {
-            if (cancelBtn) cancelBtn.style.display = 'none';
-            document.getElementById('whisper-model').disabled = false;
+            VectorSvelte.setVoice({ download: null, error: isCancelled ? '' : `Download failed: ${String(error)}` });
         }
-    }
-
-    async setAutoTranslate(enabled) {
-        this.autoTranslate = enabled;
-        
-        // Update UI toggle
-        const toggle = document.getElementById('auto-translate-toggle');
-        if (toggle) {
-            toggle.checked = enabled;
-        }
-        
-        // Save to DB
-        await saveWhisperAutoTranslate(enabled);
-        
-        console.log(`Auto-translate ${enabled ? 'enabled' : 'disabled'}`);
-    }
-
-    async setAutoTranscribe(enabled) {
-        this.autoTranscribe = enabled;
-        
-        // Update UI toggle
-        const toggle = document.getElementById('auto-transcribe-toggle');
-        if (toggle) {
-            toggle.checked = enabled;
-        }
-        
-        // Save to DB
-        await saveWhisperAutoTranscribe(enabled);
-        
-        console.log(`Auto-transcribe ${enabled ? 'enabled' : 'disabled'}`);
     }
 
     async setSelectedModel(modelName) {
         this.selectedModel = modelName;
-        
-        // Update UI dropdown
-        const modelSelect = document.getElementById('whisper-model');
-        if (modelSelect) {
-            modelSelect.value = modelName;
-        }
-        
-        // Save to DB
+        VectorSvelte.setVoice({ selected: modelName });
         await saveChosenWhisperModel(modelName);
-        console.log(`Selected model set to: ${modelName}`);
     }
 
     /**
-     * Find the best fallback model when the current selection is no longer available
-     * @param {string} deletedModel - The model that was deleted or is no longer available
-     * @param {string[]} modelHierarchy - Array of model names ordered from lowest to highest quality
-     * @returns {string} The best fallback model name
+     * The best fallback when the current selection is gone: the next larger downloaded
+     * model, else the next smaller, else small, else the largest downloaded.
+     * @param {string} deletedModel
+     * @param {string[]} modelHierarchy - model names, smallest to largest
      */
     findBestFallbackModel(deletedModel, modelHierarchy) {
-        // Get all downloaded models
         const downloadedModels = this.models.filter(m => m.downloaded);
-        
-        if (downloadedModels.length === 0) {
-            // No downloaded models, fallback to default 'small'
-            return 'small';
-        }
-        
-        // If we have a deleted model, find the next highest downloaded model
+        if (downloadedModels.length === 0) return 'small';
+        const has = (name) => downloadedModels.some(m => m.model.name === name);
         if (deletedModel && modelHierarchy.includes(deletedModel)) {
             const deletedIndex = modelHierarchy.indexOf(deletedModel);
-            
-            // Look for next higher models first
-            for (let i = deletedIndex + 1; i < modelHierarchy.length; i++) {
-                const candidate = modelHierarchy[i];
-                if (downloadedModels.some(m => m.model.name === candidate)) {
-                    return candidate;
-                }
-            }
-            
-            // If no higher model found, look for lower models
-            for (let i = deletedIndex - 1; i >= 0; i--) {
-                const candidate = modelHierarchy[i];
-                if (downloadedModels.some(m => m.model.name === candidate)) {
-                    return candidate;
-                }
-            }
+            for (let i = deletedIndex + 1; i < modelHierarchy.length; i++) if (has(modelHierarchy[i])) return modelHierarchy[i];
+            for (let i = deletedIndex - 1; i >= 0; i--) if (has(modelHierarchy[i])) return modelHierarchy[i];
         }
-        
-        // If 'small' is downloaded, prefer it as default
-        if (downloadedModels.some(m => m.model.name === 'small')) {
-            return 'small';
-        }
-        
-        // Otherwise, return the highest quality downloaded model
-        for (let i = modelHierarchy.length - 1; i >= 0; i--) {
-            const candidate = modelHierarchy[i];
-            if (downloadedModels.some(m => m.model.name === candidate)) {
-                return candidate;
-            }
-        }
-        
-        // Final fallback to 'small' if nothing else works
+        if (has('small')) return 'small';
+        for (let i = modelHierarchy.length - 1; i >= 0; i--) if (has(modelHierarchy[i])) return modelHierarchy[i];
         return 'small';
     }
 }
+
+const VOICE_EXPLAINERS = {
+    model: ['Vector Voice AI Model', 'The Vector Voice AI model <b>determines the Quality of your transcriptions.</b><br><br>A larger model will provide more accurate transcriptions & translations, but require more Disk Space, Memory and CPU power to run.'],
+    translate: ['Vector Voice Translations', 'Vector Voice AI can <b>automatically detect non-English languages and translate them in to English text for you.</b><br><br>You can decide whether Vector Voice transcribes in to their native spoken language, or instead translates in to English on your behalf.'],
+    transcribe: ['Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.'],
+};
 
 /**
  * A GUI wrapper to ask the user for a username, and apply it both

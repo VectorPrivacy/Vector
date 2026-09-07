@@ -1852,58 +1852,6 @@ body.ws .ws-member-search .emoji-search-icon {
   left: 12px;
 }
 
-/* Sections: same language as the channel pane's, so one idea reads one way. */
-body.ws .member-section + .member-section {
-  margin-top: 12px;
-}
-
-body.ws .member-section-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 6px 4px;
-  border-radius: 6px;
-  opacity: 1;
-}
-
-body.ws .member-section-label {
-  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 15px;
-  color: rgba(255, 255, 255, 0.38);
-  transition: color 0.12s ease;
-}
-
-body.ws .member-section-count {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, 0.24);
-}
-
-body.ws .member-section-head:hover .member-section-label {
-  color: rgba(255, 255, 255, 0.7);
-}
-
-body.ws .member-section-caret {
-  position: relative;
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  margin-left: auto;
-}
-
-body.ws .member-section-caret .icon {
-  background-color: rgba(255, 255, 255, 0.32);
-  transition: transform 0.15s ease, background-color 0.12s ease;
-}
-
-body.ws .member-section.is-closed .member-section-caret .icon {
-  transform: rotate(-90deg);
-}
-
-body.ws .member-section.is-closed .member-section-body {
-  display: none;
-}
-
 /* Rank marks sit with the name. Colours are the roles' own, not the theme's:
    a crown that changed hue per theme would stop meaning "owner". */
 .member-rank-mark {
@@ -1939,30 +1887,6 @@ body.ws #group-overview > .chat-header .ws-member-search {
   margin-left: 54px;
 }
 
-/* ── Member rows: a person, two lines ─────────────────────────────────────
-   Name and rank on top, status beneath. The row grows to carry it rather than
-   squeezing the status into the gap. */
-body.ws #group-overview .member-pick-identity {
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
-}
-
-body.ws #group-overview .member-pick-nameline {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  min-width: 0;
-}
-
-body.ws #group-overview .member-pick-status {
-  font-size: 12px;
-  line-height: 1.35;
-  color: rgba(255, 255, 255, 0.38);
-  max-width: 100%;
-}
-
 /* The avatar carries the taller row rather than floating in it. */
 body.ws #group-overview .member-pick-avatar {
   width: 29px !important;
@@ -1988,28 +1912,6 @@ body.ws #group-overview > .chat-header .ws-member-search .emoji-search-icon {
   left: 12px !important;
   top: 50% !important;
   transform: translateY(-50%) scale(0.8);
-}
-
-/* An emoji in a status is inline text, not a picture: unconstrained it renders
-   at its natural size and stretches the row around it. */
-body.ws #group-overview .member-pick-status .emoji,
-body.ws #group-overview .member-pick-nameline .emoji {
-  width: 14px !important;
-  height: 14px !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
-  display: inline-block;
-  vertical-align: -2px;
-  border-radius: 0;
-  object-fit: contain;
-}
-
-/* The status is one line: a long one ellipsises rather than wrapping the row
-   into a paragraph. */
-body.ws #group-overview .member-pick-status {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* Slightly tighter than the two lines need, so the roster stays a list. */

@@ -99,3 +99,23 @@ export function setNetwork({ relays, servers }) {
     if (relays) network.relays = relays;
     if (servers) network.servers = servers;
 }
+
+// Voice: the Whisper models the backend lists, the chosen one and the download in
+// flight. VoiceSettings (settings.js) owns the fetches and writes here.
+const voice = $state({
+    supported: false,
+    models: [],            // [{ model: { name, display_name, size, ram_required, supports_translate }, downloaded, downloading }]
+    memoryMB: Infinity,
+    recommended: '',
+    selected: 'small',
+    autoTranslate: false,
+    autoTranscribe: false,
+    loading: false,        // the model list is being fetched
+    error: '',             // list fetch or download failure text
+    download: null,        // { progress: '0%' } while a download runs
+});
+export function voiceState() { return voice; }
+export function setVoice(values) { Object.assign(voice, values); }
+export function setVoiceDownloadProgress(text) {
+    if (voice.download) voice.download = { progress: text };
+}

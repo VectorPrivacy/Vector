@@ -915,17 +915,13 @@ const domProfileBackBtn = document.getElementById('profile-back-btn');
 const domProfileHeaderAvatarContainer = document.getElementById('profile-header-avatar-container');
 const domProfileName = document.getElementById('profile-name');
 const domProfileStatus = document.getElementById('profile-status');
-// Note: these are 'let' due to needing to use `.replaceWith` when hot-swapping profile elements
 let fProfileEditMode = false;
-let objProfileEditSnapshot = {};
-let strPendingProfileAvatarPath = null;
-let strPendingProfileBannerPath = null;
 const domProfileEditBtn = document.getElementById('profile-edit-btn');
 const domProfileEditBar = document.getElementById('profile-edit-bar');
 const domProfileEditCancelBtn = document.getElementById('profile-edit-cancel-btn');
 const domProfileEditSaveBtn = document.getElementById('profile-edit-save-btn');
-let domProfileBanner = document.getElementById('profile-banner');
-let domProfileAvatar = document.getElementById('profile-avatar');
+const domProfileBanner = document.getElementById('profile-banner');
+const domProfileAvatar = document.getElementById('profile-avatar');
 const domProfileNameSecondary = document.getElementById('profile-secondary-name');
 const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
 const domProfileBadgeInvite = document.getElementById('profile-badge-invites');
@@ -1036,16 +1032,9 @@ document.addEventListener('click', () => {
 
 const domGroupOverview = document.getElementById('group-overview');
 const domGroupOverviewBackBtn = document.getElementById('group-overview-back-btn');
-const domGroupOverviewName = document.getElementById('group-overview-name');
-const domGroupOverviewStatus = document.getElementById('group-overview-status');
-let domGroupOverviewAvatar = document.getElementById('group-overview-avatar');
-const domGroupOverviewNameSecondary = document.getElementById('group-overview-secondary-name');
-const domGroupOverviewDescription = document.getElementById('group-overview-description');
-const domGroupOverviewMembers = document.getElementById('group-overview-members');
-const domGroupMemberSearchInput = document.getElementById('group-member-search-input');
-const domGroupInviteMemberBtn = document.getElementById('group-invite-member-btn');
-const domGroupLeaveBtn = document.getElementById('group-leave-btn');
-const domGroupModerateBtn = document.getElementById('group-moderate-btn');
+// The overview body is an island (mounted below); the roster host and search live inside it.
+const groupMembersEl = () => document.getElementById('group-overview-members');
+const groupSearchEl = () => document.getElementById('group-member-search-input');
 
 const domChats = document.getElementById('chats');
 const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
@@ -1213,9 +1202,6 @@ const domCreateGroupAvatarPlaceholder = document.getElementById('create-group-av
 const domCreateGroupAvatarEditIcon = document.getElementById('create-group-avatar-edit-icon');
 const domSettings = document.getElementById('settings');
 const domSettingsThemeSelect = document.getElementById('theme-select');
-const domSettingsWhisperModelInfo = document.getElementById('whisper-model-info');
-const domSettingsWhisperAutoTranslateInfo = document.getElementById('whisper-auto-translate-info');
-const domSettingsWhisperAutoTranscribeInfo = document.getElementById('whisper-auto-transcribe-info');
 const domSettingsPrivacyWebPreviewsInfo = document.getElementById('privacy-web-previews-info');
 const domSettingsPrivacyStripTrackingInfo = document.getElementById('privacy-strip-tracking-info');
 const domSettingsPrivacySendTypingInfo = document.getElementById('privacy-send-typing-info');
@@ -2956,7 +2942,6 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     // The channel pane's head derives its count from the community signal.
     VectorSvelte.touchCommunity(communityId);
     if (domGroupOverview.getAttribute('data-group-id') === communityId) {
-        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
         // The member SET changed while the overview is open — re-render the rows live so a
         // join/leave/new-speaker appears without closing and reopening (preserve any active search).
         if (domGroupOverview.style.display !== 'none') {
@@ -4650,18 +4635,11 @@ async function setupRustListeners() {
     });
 
     // Listen for Vector Voice AI (Whisper) model download progression updates
-    _on('whisper_download_progress', async (evt) => {
-        const { progress, downloaded_bytes, total_bytes, speed_bps } = evt.payload;
-        const spanProgression = document.getElementById('voice-model-download-progression');
-        if (spanProgression) {
-            if (downloaded_bytes && total_bytes) {
-                const dlMB = (downloaded_bytes / (1024 * 1024)).toFixed(1);
-                const totalMB = (total_bytes / (1024 * 1024)).toFixed(1);
-                spanProgression.textContent = `(${dlMB}/${totalMB} MB)`;
-            } else {
-                spanProgression.textContent = `(${progress}%)`;
-            }
-        }
+    _on('whisper_download_progress', (evt) => {
+        const { progress, downloaded_bytes, total_bytes } = evt.payload;
+        VectorSvelte.setVoiceDownloadProgress(downloaded_bytes && total_bytes
+            ? `${(downloaded_bytes / (1024 * 1024)).toFixed(1)}/${(total_bytes / (1024 * 1024)).toFixed(1)} MB`
+            : `${Math.round(progress)}%`);
     });
 
     // Listen for Windows-specific Overlay Icon update requests
@@ -5726,385 +5704,169 @@ function renderCurrentProfile(cProfile) {
  * Render the Profile tab based on a given profile
  * @param {Profile} cProfile 
  */
+let fProfileViewMounted = false;
+
+/** Show `cProfile` in the expanded profile view; the reconciler derives every field. */
 function renderProfileTab(cProfile) {
-    // Header Mini Avatar
-    domProfileHeaderAvatarContainer.innerHTML = '';
-    const headerAvatarSrc = getProfileAvatarSrc(cProfile);
-    const domHeaderAvatar = createAvatarImg(headerAvatarSrc, 22, false);
-    domHeaderAvatar.classList.add('btn');
-    domProfileHeaderAvatarContainer.appendChild(domHeaderAvatar);
-
-    // Header title: "My Profile ⌄" switcher when viewing our own profile,
-    // otherwise the contact's display name. The switcher opens the multi-
-    // account dropdown; the name is non-interactive.
-    const domSwitcher = document.getElementById('my-profile-switcher');
-    if (cProfile?.mine) {
-        domProfileName.style.display = 'none';
-        if (domSwitcher) domSwitcher.style.display = '';
-    } else {
-        if (domSwitcher) domSwitcher.style.display = 'none';
-        domProfileName.style.display = '';
-        // textContent: name is attacker-controlled kind-0 data, never HTML.
-        domProfileName.textContent = getName(cProfile);
-        if (cProfile?.nickname || cProfile?.name) twemojify(domProfileName);
+    if (!cProfile?.id) return;
+    if (!fProfileViewMounted) {
+        fProfileViewMounted = true;
+        mountProfileView();
     }
+    VectorSvelte.setOpenProfile(cProfile.id);
+    VectorSvelte.touchProfile(cProfile.id);
+}
 
-    // Status
-    const strStatusPlaceholder = cProfile.mine ? 'Set a Status' : '';
-    // textContent: status is attacker-controlled NIP-38 data, never HTML.
-    domProfileStatus.textContent = cProfile?.status?.title || strStatusPlaceholder;
-    if (cProfile?.status?.title) {
-        twemojify(domProfileStatus);
-        renderCustomEmojiShortcodes(domProfileStatus, cProfile.status.emoji_tags || []);
-    }
-
-    // Adjust our Profile Name class to manage space according to Status visibility
-    domProfileName.classList.toggle('chat-contact', !domProfileStatus.textContent);
-    domProfileName.classList.toggle('chat-contact-with-status', !!domProfileStatus.textContent);
-
-    // Banner - keep original structure but add click handler
-    const bannerSrc = getProfileBannerSrc(cProfile);
-    if (bannerSrc) {
-        if (domProfileBanner.tagName === 'DIV') {
-            const newBanner = document.createElement('img');
-            domProfileBanner.replaceWith(newBanner);
-            domProfileBanner = newBanner;
-        }
-        domProfileBanner.src = bannerSrc;
-        // On error, replace with solid color placeholder
-        domProfileBanner.onerror = function() {
-            const placeholder = document.createElement('div');
-            placeholder.style.backgroundColor = '#0a0a0a';
-            placeholder.classList.add('profile-banner');
-            if (cProfile.mine) {
-                placeholder.classList.add('btn');
-                placeholder.onclick = null;
-            }
-            domProfileBanner.replaceWith(placeholder);
-            domProfileBanner = placeholder;
-        };
-    } else {
-        if (domProfileBanner.tagName === 'IMG') {
-            const newBanner = document.createElement('div');
-            newBanner.style.backgroundColor = '#0a0a0a';
-            domProfileBanner.replaceWith(newBanner);
-            domProfileBanner = newBanner;
-        }
-    }
-    domProfileBanner.classList.add('profile-banner');
-    domProfileBanner.onclick = null;
-
-    // Avatar - keep original structure but add click handler
-    const profileAvatarSrc = getProfileAvatarSrc(cProfile);
-    if (profileAvatarSrc) {
-        if (domProfileAvatar.tagName === 'DIV') {
-            const newAvatar = document.createElement('img');
-            domProfileAvatar.replaceWith(newAvatar);
-            domProfileAvatar = newAvatar;
-        }
-        domProfileAvatar.src = profileAvatarSrc;
-        // On error, replace with placeholder
-        domProfileAvatar.onerror = function() {
-            const placeholder = createPlaceholderAvatar(false, 175);
-            placeholder.classList.add('profile-avatar');
-            domProfileAvatar.replaceWith(placeholder);
-            domProfileAvatar = placeholder;
-        };
-    } else {
-        const newAvatar = createPlaceholderAvatar(false, 175);
-        domProfileAvatar.replaceWith(newAvatar);
-        domProfileAvatar = newAvatar;
-    }
-    domProfileAvatar.classList.add('profile-avatar');
-    domProfileAvatar.onclick = null;
-
-    // Secondary Display Name — "Anonymous" for our own un-named profile; npub prefix for others.
-    const strNamePlaceholder = cProfile.mine ? 'Anonymous' : (cProfile?.id ? cProfile.id.substring(0, 10) + '…' : '');
-    domProfileNameSecondary.textContent = cProfile?.nickname || cProfile?.name || cProfile?.display_name || strNamePlaceholder;
-    if (cProfile?.nickname || cProfile?.name) twemojify(domProfileNameSecondary);
-    // Bot marker beside the name — same iconography as the chat list and
-    // message header so bot identity stays consistent everywhere.
-    if (cProfile?.bot) {
-        const botIcon = document.createElement('span');
-        botIcon.className = 'icon icon-bot profile-name-bot-icon';
-        botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
-        botIcon.addEventListener('mouseleave', hideGlobalTooltip);
-        domProfileNameSecondary.appendChild(botIcon);
-    }
-
-    // Secondary Status (innerHTML copy is safe: source was built from a text
-    // node, so serialization is escaped; only twemoji markup carries over)
-    domProfileStatusSecondary.innerHTML = domProfileStatus.innerHTML;
-
-    // Badges
-    domProfileBadgeInvite.style.display = 'none';
-    invoke("get_invited_users", { npub: cProfile.id }).then(count => {
-        if (count > 0) {
-            domProfileBadgeInvite.style.display = '';
-            domProfileBadgeInvite.onclick = () => {
-                showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' });
-            }
-        }
-    }).catch(e => {});
-
-    // Guy Fawkes Day Badge (5th November 2025 - Vector v0.2 Open Beta)
-    domProfileBadgeFawkes.style.display = 'none';
-    const fawkesNpub = cProfile.id;
-    resolveFawkesBadge(fawkesNpub, !!cProfile.mine).then(hasBadge => {
-        // Guard against the user having navigated to a different profile while
-        // the (first-time, uncached) lookup was in flight.
-        if (hasBadge && domProfileId.textContent === fawkesNpub) {
-            domProfileBadgeFawkes.style.display = '';
-            domProfileBadgeFawkes.onclick = () => showFawkesCard();
-        }
-    }).catch(e => {});
-
-    // Bug Hunter Badge (NIP-58, team-awarded; shows the highest tier held)
-    domProfileBadgeBugHunter.style.display = 'none';
-    const bhNpub = cProfile.id;
-    resolveBugHunterTier(bhNpub, !!cProfile.mine).then(tier => {
-        if (tier > 0 && domProfileId.textContent === bhNpub) {
-            domProfileBadgeBugHunter.src = './icons/bughunter_' + tier + '.svg';
-            domProfileBadgeBugHunter.style.display = '';
-            domProfileBadgeBugHunter.onclick = () => showBugHunterCard(tier);
-        }
-    }).catch(e => {});
-
-    // npub display
-    const profileNpub = document.getElementById('profile-npub');
-    if (profileNpub) {
-        profileNpub.dataset.fullNpub = cProfile.id;
-        profileNpub.textContent = cProfile.id.slice(0, 16) + '...' + cProfile.id.slice(-16);
-        document.getElementById('profile-npub-label').textContent = cProfile.mine ? 'My nPub Key' : 'nPub Key';
-    }
-
-    // Description — muted, non-interactive placeholder when empty (editing lives in Edit Mode).
-    const hasAbout = !!(cProfile?.about);
-    domProfileDescription.textContent = hasAbout ? cProfile.about : 'No description yet';
-    domProfileDescription.classList.toggle('group-placeholder', !hasAbout);
-    twemojify(domProfileDescription);
-    // Linkify any npubs in the bio into @tags (cached name or truncated npub), same mini-profile tap
-    // as in-chat. Bare/`@`/`nostr:`-prefixed npubs all match; uncached ones are fetched so the name fills in.
-    if (hasAbout) {
-        renderMentions(domProfileDescription, false, { allowBare: true, queueSync: true });
-    }
-
-    // npub
-    domProfileId.textContent = cProfile.id;
-
-    // Add npub copy functionality
-    document.getElementById('profile-npub-copy').onclick = (e) => {
-        const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
-        if (npub) {
-            // Copy the full profile URL for easy sharing
-            navigator.clipboard.writeText(npub).then(() => {
-                showToast('Copied Profile Link');
-            }).catch(() => {
-                showToast('Failed to Copy');
-                const copyBtn = e.target.closest('#profile-npub-copy');
-                if (copyBtn) {
-                    copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                    setTimeout(() => {
-                        copyBtn.innerHTML = '<span class="icon icon-copy"></span>';
-                    }, 2000);
-                }
-            });
-        }
+function mountProfileView() {
+    const cur = () => getProfile(VectorSvelte.profileViewState().id);
+    const copyProfileLink = (iconHost) => {
+        const npub = VectorSvelte.profileViewState().id;
+        if (!npub) return;
+        navigator.clipboard.writeText(`https://vectorapp.io/profile/${npub}`).then(() => {
+            showToast('Profile Link Copied');
+            const icon = iconHost.querySelector('span');
+            icon.classList.replace('icon-share', 'icon-check');
+            setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
+        }).catch(() => showToast('Failed to Copy Profile Link'));
     };
+    VectorSvelte.mountProfileView({
+        els: {
+            root: domProfile,
+            navbar: domNavbar,
+            headerAvatar: domProfileHeaderAvatarContainer,
+            switcher: document.getElementById('my-profile-switcher'),
+            name: domProfileName,
+            status: domProfileStatus,
+            banner: domProfileBanner,
+            avatar: domProfileAvatar,
+            secondaryName: domProfileNameSecondary,
+            secondaryStatus: domProfileStatusSecondary,
+            description: domProfileDescription,
+            npub: document.getElementById('profile-npub'),
+            npubLabel: document.getElementById('profile-npub-label'),
+            id: domProfileId,
+            options: domProfileOptions,
+            optionMute: domProfileOptionMute,
+            optionBlock: domProfileOptionBlock,
+            moreDropdown: domProfileMoreDropdown,
+            editBtn: domProfileEditBtn,
+            shareBtn: document.getElementById('profile-share-btn'),
+            qrBtn: document.getElementById('profile-qr-btn'),
+            backBtn: domProfileBackBtn,
+            badgeInvite: domProfileBadgeInvite,
+            badgeFawkes: domProfileBadgeFawkes,
+            badgeBugHunter: domProfileBadgeBugHunter,
+            editBar: domProfileEditBar,
+            editLabel: document.getElementById('profile-edit-mode-label'),
+            editFields: document.getElementById('profile-edit-fields'),
+            headerInfo: document.querySelector('.profile-header-info'),
+            npubContainer: document.getElementById('profile-npub-container'),
+            badges: document.getElementById('profile-badges'),
+            bannerContainer: document.getElementById('profile-banner-container'),
+            avatarContainer: document.querySelector('.profile-avatar-container'),
+        },
+        h: {
+            getProfile,
+            getName,
+            getProfileAvatarSrc,
+            getProfileBannerSrc,
+            createAvatarImg,
+            twemojify,
+            renderCustomEmojiShortcodes,
+            renderMentions: (el) => renderMentions(el, false, { allowBare: true, queueSync: true }),
+            isMuted: (id) => !!arrChats.find(c => c.id === id)?.muted,
+            botIcon: () => {
+                const botIcon = document.createElement('span');
+                botIcon.className = 'icon icon-bot profile-name-bot-icon';
+                botIcon.addEventListener('mouseenter', () => showGlobalTooltip('Bot', botIcon));
+                botIcon.addEventListener('mouseleave', hideGlobalTooltip);
+                return botIcon;
+            },
+            invitedCount: (npub) => invoke('get_invited_users', { npub }),
+            fawkesBadge: resolveFawkesBadge,
+            bugHunterTier: resolveBugHunterTier,
+            showInviteBadge: (count) => showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' }),
+            showFawkesCard,
+            showBugHunterCard,
+            pickPicture: pickProfilePicture,
+        },
+    });
 
-    // Banner QR button (both profile kinds) — static icon; tapping it opens
-    // the fullscreen profile QR.
-    const qrBtn = document.getElementById('profile-qr-btn');
-    qrBtn.style.display = 'block';
-    qrBtn.onclick = () => {
-        const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
+    // Controls bind once and read the open profile at click time.
+    document.getElementById('profile-qr-btn').onclick = () => {
+        const npub = VectorSvelte.profileViewState().id;
         if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
     };
-
-    // If this is OUR profile: make the elements clickable, hide the "Contact Options"
-    if (cProfile.mine) {
-        document.getElementById('profile').classList.add('is-own-profile');
-        // Hide Contact Options
-        domProfileOptions.style.display = 'none';
-
-        // Show edit buttons and set their click handlers
-        
-        document.querySelector('.profile-banner-edit').style.display = 'flex';
-        document.querySelector('.profile-banner-edit').onclick = enterProfileEditMode;
-        domProfileEditCancelBtn.onclick = () => exitProfileEditMode(true);
-        domProfileEditSaveBtn.onclick = () => exitProfileEditMode(false);
-
-        // Show Share button on own profile (top-right of banner)
-        const ownShareBtn = document.getElementById('profile-share-btn');
-        ownShareBtn.style.display = 'block';
-        ownShareBtn.onclick = () => {
-            const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
-            if (npub) {
-                const profileUrl = `https://vectorapp.io/profile/${npub}`;
-                navigator.clipboard.writeText(profileUrl).then(() => {
-                    const icon = ownShareBtn.querySelector('span');
-                    showToast('Profile Link Copied');
-                    icon.classList.replace('icon-share', 'icon-check');
-                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
-                }).catch(() => {
-                    showToast('Failed to Copy Profile Link');
-                });
+    document.getElementById('profile-npub-copy').onclick = (e) => {
+        const npub = VectorSvelte.profileViewState().id;
+        if (!npub) return;
+        navigator.clipboard.writeText(npub).then(() => {
+            showToast('Copied Profile Link');
+        }).catch(() => {
+            showToast('Failed to Copy');
+            const copyBtn = e.target.closest('#profile-npub-copy');
+            if (copyBtn) {
+                copyBtn.innerHTML = '<span class="icon icon-check"></span>';
+                setTimeout(() => { copyBtn.innerHTML = '<span class="icon icon-copy"></span>'; }, 2000);
             }
-        };
-        
-        // Hide the 'Back' button and deregister its clickable function
-        domProfileBackBtn.style.display = 'none';
-        domProfileBackBtn.onclick = null;
-
-        // Force banner on profile edit screen
-        domProfileBanner.backgroundColor = 'rgb(27, 27, 27)';
-        domProfileBanner.height = '';
-        
-        // Display the Navbar
-        domNavbar.style.display = '';
-        document.getElementById('profile-header-avatar-container').style.display = 'none';
-        document.getElementById('profile-name').textContent = 'My Profile';
-        document.getElementById('profile-status').style.display = 'none';
-
-        // Name + description display fields are NOT click-to-edit — editing lives in Edit Mode
-        // (the pencil), which swaps these for dedicated inputs. Strip the clickable affordance
-        // so first-time users aren't misled into clicking them. Status stays click-to-edit.
-        domProfileName.classList.remove('btn');
-        domProfileNameSecondary.classList.remove('btn');
-        domProfileDescription.classList.remove('btn');
-        domProfileName.onclick = null;
-        domProfileNameSecondary.onclick = null;
-        domProfileDescription.onclick = null;
-        // Status is the one quick-set field that stays clickable on the profile view.
-        domProfileStatus.classList.add('btn');
-        domProfileStatusSecondary.classList.add('btn');
-        domProfileStatus.onclick = () => askForStatus();
-        domProfileStatusSecondary.onclick = () => askForStatus();
-    } else {
-        document.getElementById('profile').classList.remove('is-own-profile');
-        // Show Contact Options
-        domProfileOptions.style.display = '';
-        document.getElementById('profile-header-avatar-container').style.display = '';
-        document.getElementById('profile-status').style.display = '';
-
-        // Setup Mute option
-        const cMuteChat = arrChats.find(c => c.id === cProfile.id);
-        const isMuted = cMuteChat ? cMuteChat.muted : false;
-        domProfileOptionMute.querySelector('span').classList.replace('icon-volume-' + (isMuted ? 'max' : 'mute'), 'icon-volume-' + (isMuted ? 'mute' : 'max'));
-        domProfileOptionMute.querySelector('p').innerText = isMuted ? 'Unmute' : 'Mute';
-        domProfileOptionMute.onclick = () => invoke('toggle_chat_mute', { chatId: cProfile.id });
-
-        // Setup Message option
-        domProfileOptionMessage.onclick = () => openChat(cProfile.id);
-
-        // Setup Share option
-        domProfileOptionShare.onclick = () => {
-            const npub = document.getElementById('profile-npub')?.dataset.fullNpub;
-            if (npub) {
-                const profileUrl = `https://vectorapp.io/profile/${npub}`;
-                navigator.clipboard.writeText(profileUrl).then(() => {
-                    // Brief visual feedback
-                    const icon = domProfileOptionShare.querySelector('span');
-                    showToast('Profile Link Copied');
-                    icon.classList.replace('icon-share', 'icon-check');
-                    setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
-                    }).catch(() => {
-                    showToast('Failed to Copy Profile Link');
-                });
-            }
-        };
-
-        // Setup Block option (inside More dropdown)
-        const isBlocked = cProfile.is_blocked || false;
-        const blockIcon = domProfileOptionBlock.querySelector('.icon');
-        const blockLabel = domProfileOptionBlock.querySelector('span:first-child');
-        domProfileOptionBlock.classList.add('is-danger');
-        if (blockLabel) {
-            blockLabel.textContent = isBlocked ? 'Unblock' : 'Block';
-        }
-        domProfileOptionBlock.onclick = async () => {
-            domProfileMoreDropdown.style.display = 'none';
-            if (isBlocked) {
-                await invoke('unblock_user', { npub: cProfile.id });
-                VectorSvelte.reloadBlockedUsers();
-                showToast('User Unblocked');
-                profileChanged(cProfile.id);
-            } else {
-                const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
-                if (!confirmed) return;
-                await invoke('block_user', { npub: cProfile.id });
-                VectorSvelte.reloadBlockedUsers();
-                showToast('User Blocked');
-                profileChanged(cProfile.id);
-            }
-        };
-
-        // Setup Nickname option (inside More dropdown)
-        domProfileOptionNickname.onclick = async () => {
-            domProfileMoreDropdown.style.display = 'none';
-            const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
-            if (nick === false) return;
-            if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
-            if (blockedBySync()) return;
-            await invoke('set_nickname', { npub: cProfile.id, nickname: nick });
-        };
-
-        // Setup More dropdown toggle
-        domProfileMoreDropdown.style.display = 'none';
-        domProfileOptionMore.onclick = (e) => {
-            e.stopPropagation();
-            const isOpen = domProfileMoreDropdown.style.display !== 'none';
-            domProfileMoreDropdown.style.display = isOpen ? 'none' : 'block';
-            domProfileOptionMore.classList.toggle('active', !isOpen);
-        };
-
-        // Hide edit buttons and own-profile share
-        document.querySelector('.profile-banner-edit').style.display = 'none';
-        document.getElementById('profile-share-btn').style.display = 'none';
-        
-        // Remove click handlers from avatar and banner
-        domProfileAvatar.onclick = null;
-        domProfileAvatar.classList.remove('btn');
-        domProfileBanner.onclick = null;
-        domProfileBanner.classList.remove('btn');
-        if (!cProfile.banner) {
-            domProfileBanner.style.backgroundColor = '';
-            domProfileBanner.style.height = '115px';
+        });
+    };
+    // Own profile
+    domProfileEditBtn.onclick = enterProfileEditMode;
+    domProfileEditCancelBtn.onclick = () => exitProfileEditMode(true);
+    domProfileEditSaveBtn.onclick = () => exitProfileEditMode(false);
+    const ownShareBtn = document.getElementById('profile-share-btn');
+    ownShareBtn.onclick = () => copyProfileLink(ownShareBtn);
+    domProfileStatus.onclick = () => { if (cur()?.mine) askForStatus(); };
+    domProfileStatusSecondary.onclick = () => { if (cur()?.mine) askForStatus(); };
+    // A contact
+    domProfileBackBtn.onclick = () => {
+        if (previousChatBeforeProfile) {
+            const chatToOpen = previousChatBeforeProfile;
+            previousChatBeforeProfile = '';
+            openChat(chatToOpen);
         } else {
-            domProfileBanner.style.backgroundColor = 'rgb(27, 27, 27)';
-            domProfileBanner.style.height = '';
+            openChat(VectorSvelte.profileViewState().id);
         }
-        
-        // Show the 'Back' button and link it to the profile's chat
-        domProfileBackBtn.style.display = '';
-        domProfileBackBtn.onclick = () => {
-            // If we came from a chat (especially a group chat), return to it
-            if (previousChatBeforeProfile) {
-                const chatToOpen = previousChatBeforeProfile;
-                previousChatBeforeProfile = ''; // Clear before opening to avoid loops
-                openChat(chatToOpen);
-            } else {
-                // Default to opening DM with this user
-                openChat(cProfile.id);
-            }
-        };
-        
-        // Hide the Navbar
-        domNavbar.style.display = 'none';
-
-        // Remove other clickables
-        domProfileName.onclick = null;
-        domProfileName.classList.remove('btn');
-        domProfileStatus.onclick = null;
-        domProfileStatus.classList.remove('btn');
-        domProfileNameSecondary.onclick = null;
-        domProfileNameSecondary.classList.remove('btn');
-        domProfileStatusSecondary.onclick = null;
-        domProfileStatusSecondary.classList.remove('btn');
-        domProfileDescription.onclick = null;
-        domProfileDescription.classList.remove('btn');
-    }
+    };
+    domProfileOptionMessage.onclick = () => openChat(VectorSvelte.profileViewState().id);
+    domProfileOptionMute.onclick = () => invoke('toggle_chat_mute', { chatId: VectorSvelte.profileViewState().id });
+    domProfileOptionShare.onclick = () => copyProfileLink(domProfileOptionShare);
+    domProfileOptionBlock.onclick = async () => {
+        domProfileMoreDropdown.style.display = 'none';
+        const p = cur();
+        if (!p) return;
+        if (p.is_blocked) {
+            await invoke('unblock_user', { npub: p.id });
+            VectorSvelte.reloadBlockedUsers();
+            showToast('User Unblocked');
+            profileChanged(p.id);
+        } else {
+            const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
+            if (!confirmed) return;
+            await invoke('block_user', { npub: p.id });
+            VectorSvelte.reloadBlockedUsers();
+            showToast('User Blocked');
+            profileChanged(p.id);
+        }
+    };
+    domProfileOptionNickname.onclick = async () => {
+        domProfileMoreDropdown.style.display = 'none';
+        const npub = VectorSvelte.profileViewState().id;
+        const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
+        if (nick === false) return;
+        if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
+        if (blockedBySync()) return;
+        await invoke('set_nickname', { npub, nickname: nick });
+    };
+    domProfileOptionMore.onclick = (e) => {
+        e.stopPropagation();
+        const isOpen = domProfileMoreDropdown.style.display !== 'none';
+        domProfileMoreDropdown.style.display = isOpen ? 'none' : 'block';
+        domProfileOptionMore.classList.toggle('active', !isOpen);
+    };
 }
+
 
 /**
  * Display the Invite code input flow.
@@ -9142,74 +8904,157 @@ async function removeCommunityFromUI(communityId) {
  * unlocked, a confirm dialog arms the irreversible wizard. Hidden entirely for members,
  * v2 communities, and dissolved/migrated/ineligible ones.
  */
-async function renderMigrationRow(communityId, name, chatId) {
-    const row = document.getElementById('group-migrate-row');
-    const btn = document.getElementById('group-migrate-btn');
-    const label = document.getElementById('group-migrate-label');
-    if (!row || !btn || !label) return;
-    row.style.display = 'none';
+/** Surface the v2 upgrade row where an action or a countdown is meaningful: owner-only, v1-only. */
+async function loadMigrationStatus(communityId) {
     let status;
     try {
         status = await invoke('migration_status', { communityId });
     } catch (_) { return; }
-    // Only surface the row where an action or a countdown is meaningful.
-    if (!status || (status.state !== 'ready' && status.state !== 'locked' && status.state !== 'in_progress')) return;
-    row.style.display = 'flex';
-    row.style.justifyContent = 'center';
+    if (VectorSvelte.overviewState().communityId !== communityId) return;
+    const shown = status && (status.state === 'ready' || status.state === 'locked' || status.state === 'in_progress');
+    VectorSvelte.setOverview({ migration: shown ? status : null });
+}
 
-    const arm = () => {
-        btn.style.opacity = '';
-        btn.style.pointerEvents = '';
-    };
-    const disarm = () => {
-        btn.style.opacity = '0.5';
-        btn.style.pointerEvents = 'none';
-    };
+/** The type-to-confirm, irreversible upgrade wizard. Lands the owner back inside the room. */
+async function runCommunityMigration() {
+    const { communityId, name, chatId } = VectorSvelte.overviewState();
+    const ok = await popupConfirm(
+        'Upgrade to Concord v2?',
+        `This upgrades "<b>${escapeHtml(name)}</b>" to the newer, more private Concord v2.<br><br>Everyone here moves over automatically, keeping their history. Your old invite links will stop working, so you'll need to share new ones. This cannot be undone.`,
+        false, '', 'concord_v2.svg');
+    if (!ok) return;
+    // Lock the app behind the unclosable ring modal for the whole wizard (rekey contract): the owner
+    // closing the app mid-wizard is the worst case. Registered before the invoke so no phase is missed.
+    const modal = await showRekeyProgressModal('Upgrading to Concord v2', 'community_migration_progress');
+    try {
+        await invoke('migrate_community', { communityId });
+        await modal.finish('Upgrade complete!');
+        modal.close();
+        // openGroupOverview hid every other pane, so a bare hide paints black: this is the back-entry's
+        // close path. The v2 twin reuses the primary channel id, so the same chat id opens the migrated room.
+        popBack('group-overview');
+        domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
+        openChat(chatId);
+    } catch (e) {
+        modal.close();
+        await popupConfirm('Upgrade Failed', escapeHtml(String(e)), true, '', 'vector_warning.svg');
+        // A partially-progressed wizard must come back as "Resume upgrade".
+        loadMigrationStatus(communityId);
+    }
+}
 
-    if (status.state === 'locked') {
-        // Countdown to the unlock (unlock_at is unix seconds).
-        const days = Math.max(0, Math.ceil((status.unlock_at - Date.now() / 1000) / 86400));
-        label.innerText = days > 1 ? `Upgrade unlocks in ${days} days` : 'Upgrade unlocks soon';
-        disarm();
-        return;
-    }
-    if (status.state === 'in_progress') {
-        label.innerText = 'Resume upgrade';
-    } else {
-        label.innerText = 'Upgrade to Concord v2';
-    }
-    arm();
-    btn.onclick = async () => {
-        const ok = await popupConfirm(
-            'Upgrade to Concord v2?',
-            `This upgrades "<b>${escapeHtml(name)}</b>" to the newer, more private Concord v2.<br><br>Everyone here moves over automatically, keeping their history. Your old invite links will stop working, so you'll need to share new ones. This cannot be undone.`,
-            false, '', 'concord_v2.svg');
-        if (!ok) return;
-        disarm();
-        label.innerText = 'Upgrading...';
-        // Lock the app behind the unclosable ring modal for the whole wizard (rekey contract):
-        // the owner closing the app mid-wizard is the worst-case, so the UI holds them here
-        // until the backend returns. Registered before the invoke so no phase is missed.
-        const modal = await showRekeyProgressModal('Upgrading to Concord v2', 'community_migration_progress');
-        try {
-            await invoke('migrate_community', { communityId });
-            await modal.finish('Upgrade complete!');
-            modal.close();
-            // Land the owner back INSIDE the room. openGroupOverview hid every other pane, so a
-            // bare overview-hide paints black — this is the overview back-entry's close path. The
-            // v2 twin reuses the primary channel id, so the same chat id opens the migrated room.
-            popBack('group-overview');
-            domGroupOverview.style.display = 'none';
-            domGroupOverview.removeAttribute('data-group-id');
-            openChat(chatId);
-        } catch (e) {
-            modal.close();
-            await popupConfirm('Upgrade Failed', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-            // Re-derive the row from backend status: a partially-progressed wizard must
-            // come back as "Resume upgrade", not the fresh-start label.
-            renderMigrationRow(communityId, name, chatId);
+let fCommunityOverviewMounted = false;
+function mountCommunityOverview() {
+    fCommunityOverviewMounted = true;
+    const cur = () => {
+        const { chatId } = VectorSvelte.overviewState();
+        return arrChats.find(c => c.id === chatId) || null;
+    };
+    VectorSvelte.mountCommunityOverview(document.getElementById('group-overview-scroll'), {
+        els: {
+            name: document.getElementById('group-overview-name'),
+            status: document.getElementById('group-overview-status'),
+            headerAvatar: document.getElementById('group-overview-header-avatar-container'),
+        },
+        h: {
+            memberSubtext: communityMemberSubtext,
+            createAvatarImg,
+            toggleMute: async () => {
+                const chat = cur();
+                if (!chat) return;
+                VectorSvelte.setOverview({ muted: await invoke('toggle_chat_mute', { chatId: chat.id }) });
+            },
+            pickIcon: () => pickCommunityIcon(cur()),
+            rename: async (newName) => {
+                const chat = cur();
+                const cf = chat?.metadata?.custom_fields;
+                if (!cf) return;
+                const { communityId } = VectorSvelte.overviewState();
+                const prev = cf.name;
+                cf.name = newName;
+                VectorSvelte.setOverview({ name: newName });
+                try {
+                    await invoke('update_community_metadata', { communityId, name: newName, description: null });
+                    communityChanged(communityId);
+                } catch (e) {
+                    console.error('Failed to rename community:', e);
+                    cf.name = prev;
+                    VectorSvelte.setOverview({ name: prev });
+                    showToast('Failed to update the name');
+                }
+            },
+            setDescription: async (newDesc) => {
+                const chat = cur();
+                const cf = chat?.metadata?.custom_fields;
+                if (!cf) return;
+                const { communityId } = VectorSvelte.overviewState();
+                const prev = cf.description || '';
+                cf.description = newDesc;
+                VectorSvelte.setOverview({ description: newDesc });
+                try {
+                    await invoke('update_community_metadata', { communityId, name: null, description: newDesc });
+                } catch (e) {
+                    console.error('Failed to update community description:', e);
+                    cf.description = prev;
+                    VectorSvelte.setOverview({ description: prev });
+                    showToast('Failed to update the description');
+                }
+            },
+            invite: () => { const chat = cur(); if (chat) openCommunityInvitePanel(chat); },
+            moderate: () => openModerationPanel(VectorSvelte.overviewState().communityId),
+            // The flows live in `communityLeaveOrDelete`: the widescreen header menu offers the same action.
+            leaveOrDelete: async () => { const chat = cur(); if (chat) await communityLeaveOrDelete(chat); },
+            migrate: runCommunityMigration,
+        },
+    });
+    domGroupOverviewBackBtn.onclick = () => {
+        // Widescreen: this is the roster's own close button, so it goes through the same pair as the
+        // header's Members toggle, or the preference keeps reading "open" and the roster comes back.
+        if (wsActive()) {
+            wsCloseDetails();
+            wsSetMembersOpen(false);
+            return;
         }
+        const { chatId } = VectorSvelte.overviewState();
+        popBack('group-overview');
+        domGroupOverview.style.display = 'none';
+        domGroupOverview.removeAttribute('data-group-id');
+        openChat(chatId);
     };
+}
+
+/** Pick and upload a new community icon; the pencil becomes a progress ring meanwhile. */
+async function pickCommunityIcon(chat) {
+    const cf = chat?.metadata?.custom_fields;
+    if (!cf) return;
+    const communityId = cf.community_id;
+    const { open } = window.__TAURI__.dialog;
+    const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
+    const filePath = typeof selected === 'string' ? selected : selected?.path;
+    if (!filePath) return;
+    VectorSvelte.setOverview({ upload: { progress: 5 } });
+    let unlisten = null;
+    try {
+        unlisten = await window.__TAURI__.event.listen('community_image_upload_progress', (e) => {
+            if (e.payload?.community_id === communityId && !e.payload?.is_banner) {
+                VectorSvelte.setOverview({ upload: { progress: e.payload.progress || 0 } });
+            }
+        });
+        await invoke('set_community_image', { communityId, filepath: filePath, isBanner: false });
+        cf.icon = '1';
+        const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
+        if (cachedPath) chat.metadata.avatar_cached = cachedPath;
+    } catch (err) {
+        console.error('Failed to set community image:', err);
+        showToast('Failed to update the image');
+        VectorSvelte.setOverview({ upload: null });
+        return;
+    } finally {
+        if (unlisten) unlisten();
+    }
+    await renderCommunityOverview(chat);
+    communityChanged(communityId);
 }
 
 /** The mounted member-roster island and the community it shows (one per overview open). */
@@ -9219,190 +9064,41 @@ let groupRosterCommunityId = null;
 async function renderCommunityOverview(chat, preserveSearch = false) {
     const cf = chat.metadata?.custom_fields || {};
     const communityId = cf.community_id;
-    const isOwner = cf.is_owner === 'true';
     // Role-engine capabilities (NOT an owner check — the owner is just the top role). Each management
-    // affordance gates on the matching bit, so an admin whose role carries a permission sees the same
-    // button as the owner. Falls back to no-caps on error (hide everything management).
+    // affordance gates on the matching bit. Falls back to no-caps on error (hide everything management).
     let caps = {};
     try { caps = await invoke('get_community_capabilities', { communityId }); } catch (_) {}
     // Tag the overview with its community so the realtime `community_refreshed` listener knows to re-render
     // it when a control change (ban/role/metadata/mode) lands live.
     domGroupOverview.setAttribute('data-group-id', communityId);
-    const name = cf.name || `Community ${chat.id.substring(0, 10)}...`;
-    const description = cf.description || '';
-
-    // Header: name + member count as subtext (the description has its own block below). Shows the
-    // cached count instantly; the member fetch further down refreshes it.
-    domGroupOverviewName.textContent = name;
-    domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
-
-    const headerAvatarContainer = document.getElementById('group-overview-header-avatar-container');
-    if (headerAvatarContainer) {
-        headerAvatarContainer.innerHTML = '';
-        const src = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-        headerAvatarContainer.appendChild(createAvatarImg(src, 22, true));
+    if (!fCommunityOverviewMounted) mountCommunityOverview();
+    VectorSvelte.setOverview({
+        chatId: chat.id,
+        communityId,
+        name: cf.name || `Community ${chat.id.substring(0, 10)}...`,
+        description: cf.description || '',
+        avatarSrc: chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null,
+        muted: !!chat.muted,
+        isOwner: cf.is_owner === 'true',
+        isV2: cf.proto_version === '2',
+        caps,
+        raid: null,
+        migration: null,
+        upload: null,
+    });
+    // The narrow layout has no community header to hang a pip on, so the Moderate button carries the alarm.
+    if (caps.ban) {
+        invoke('check_community_raid', { communityId }).then(v => {
+            if (v?.detected && VectorSvelte.overviewState().communityId === communityId) VectorSvelte.setOverview({ raid: { suspects: v.suspects } });
+        }).catch(() => {});
     }
-
-    // Large center avatar (+ owner edit overlay).
-    const avatarParent = domGroupOverviewAvatar.parentElement;
-    const avatarSrc = chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null;
-    const prevImg = avatarParent.querySelector('img');
-    if (prevImg) prevImg.remove();
-    if (avatarSrc) {
-        const img = document.createElement('img');
-        img.src = avatarSrc;
-        img.className = 'group-overview-avatar-img';
-        img.onerror = () => { img.replaceWith(domGroupOverviewAvatar); domGroupOverviewAvatar.style.display = 'inline-block'; };
-        domGroupOverviewAvatar.style.display = 'none';
-        avatarParent.appendChild(img);
-    } else {
-        domGroupOverviewAvatar.style.display = 'inline-block';
-    }
-    const prevOverlay = avatarParent.querySelector('.group-avatar-edit-overlay');
-    if (prevOverlay) prevOverlay.remove();
-    // Reset the edit affordance every render — permission can change live (role grant/revoke) and the
-    // success path re-renders through here, which also clears the in-flight dim below.
-    avatarParent.onclick = null;
-    avatarParent.style.cursor = '';
-    avatarParent.style.opacity = '';
-    if (caps.manage_metadata) {
-        const pickAndSetGroupAvatar = async () => {
-            const { open } = window.__TAURI__.dialog;
-            const selected = await open({ multiple: false, filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] }] });
-            const filePath = typeof selected === 'string' ? selected : selected?.path;
-            if (!filePath) return;
-            // Mirror the profile-avatar uploader: the corner pencil itself becomes a small progress ring,
-            // kept visible through the upload (touch has no hover). On success the overlay re-renders fresh.
-            const overlayEl = avatarParent.querySelector('.group-avatar-edit-overlay');
-            const prevOverlayHtml = overlayEl ? overlayEl.innerHTML : null;
-            if (overlayEl) {
-                overlayEl.style.opacity = '1';
-                overlayEl.innerHTML = '<div class="profile-upload-spinner community-upload-ring" style="--progress:5%;"></div>';
-            }
-            let unlisten = null;
-            try {
-                unlisten = await window.__TAURI__.event.listen('community_image_upload_progress', (e) => {
-                    if (e.payload?.community_id === communityId && !e.payload?.is_banner) {
-                        const ring = overlayEl?.querySelector('.profile-upload-spinner');
-                        if (ring) ring.style.setProperty('--progress', `${Math.max(5, e.payload.progress || 0)}%`);
-                    }
-                });
-                await invoke('set_community_image', { communityId, filepath: filePath, isBanner: false });
-                cf.icon = '1';
-                const cachedPath = await invoke('cache_community_image', { communityId, isBanner: false });
-                if (cachedPath) chat.metadata.avatar_cached = cachedPath;
-            } catch (err) {
-                console.error('Failed to set community image:', err);
-                showToast('Failed to update the image');
-                // Restore the pencil + hover behavior (the success path re-renders the overlay fresh below).
-                if (overlayEl) {
-                    overlayEl.style.opacity = '';
-                    if (prevOverlayHtml != null) overlayEl.innerHTML = prevOverlayHtml;
-                }
-                return;
-            } finally {
-                if (unlisten) unlisten();
-            }
-            await renderCommunityOverview(chat);
-            communityChanged(communityId);
-        };
-        // Whole icon is the tap target (friendlier on touch than the small pencil); the pencil overlay
-        // stays as the visual cue and its tap just bubbles up to this same handler.
-        avatarParent.style.cursor = 'pointer';
-        avatarParent.onclick = pickAndSetGroupAvatar;
-
-        const overlay = document.createElement('div');
-        overlay.className = 'group-avatar-edit-overlay';
-        overlay.innerHTML = '<span class="icon icon-edit" style="width:16px;height:16px;background-color:#fff;"></span>';
-        avatarParent.appendChild(overlay);
-    }
-
-    // Mute button (same as groups).
-    const domGroupMuteBtn = document.getElementById('group-mute-btn');
-    if (domGroupMuteBtn) {
-        const updateMuteBtn = (muted) => {
-            domGroupMuteBtn.querySelector('span').className = `icon icon-volume-${muted ? 'mute' : 'max'} navbar-icon`;
-            domGroupMuteBtn.querySelector('p').innerText = muted ? 'Unmute' : 'Mute';
-        };
-        updateMuteBtn(chat.muted);
-        domGroupMuteBtn.onclick = async () => { updateMuteBtn(await invoke('toggle_chat_mute', { chatId: chat.id })); };
-    }
-
-    // Editable name (owner only).
-    domGroupOverviewNameSecondary.textContent = name;
-    if (caps.manage_metadata) {
-        domGroupOverviewNameSecondary.classList.add('group-editable');
-        domGroupOverviewNameSecondary.onclick = () => {
-            const input = document.createElement('input');
-            input.type = 'text'; input.className = 'group-name-input'; input.value = name; input.maxLength = 32;
-            domGroupOverviewNameSecondary.replaceWith(input);
-            input.focus(); input.select();
-            let saved = false;
-            const save = async () => {
-                if (saved) return; saved = true;
-                const newName = input.value.trim();
-                input.replaceWith(domGroupOverviewNameSecondary);
-                if (newName && newName !== name) {
-                    domGroupOverviewNameSecondary.textContent = newName;
-                    domGroupOverviewName.textContent = newName;
-                    cf.name = newName;
-                    try { await invoke('update_community_metadata', { communityId, name: newName, description: null }); communityChanged(communityId); }
-                    catch (e) {
-                        console.error('Failed to rename community:', e);
-                        // Revert the optimistic header text.
-                        cf.name = name;
-                        domGroupOverviewNameSecondary.textContent = name;
-                        domGroupOverviewName.textContent = name;
-                        showToast('Failed to update the name');
-                    }
-                }
-            };
-            input.onblur = save;
-            input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } if (e.key === 'Escape') { saved = true; input.replaceWith(domGroupOverviewNameSecondary); } };
-        };
-    } else {
-        domGroupOverviewNameSecondary.classList.remove('group-editable');
-        domGroupOverviewNameSecondary.onclick = null;
-    }
-
-    // Editable description (anyone with manage-metadata); shown to everyone if set.
-    domGroupOverviewDescription.style.display = (description || caps.manage_metadata) ? '' : 'none';
-    domGroupOverviewDescription.textContent = description || (caps.manage_metadata ? 'Add a description...' : '');
-    domGroupOverviewDescription.classList.toggle('group-placeholder', !description && caps.manage_metadata);
-    if (caps.manage_metadata) {
-        domGroupOverviewDescription.classList.add('group-editable');
-        domGroupOverviewDescription.onclick = () => {
-            const input = document.createElement('textarea');
-            input.className = 'group-name-input'; input.value = description; input.maxLength = 500; input.rows = 2;
-            domGroupOverviewDescription.replaceWith(input);
-            input.focus();
-            let saved = false;
-            const save = async () => {
-                if (saved) return; saved = true;
-                const newDesc = input.value.trim();
-                input.replaceWith(domGroupOverviewDescription);
-                if (newDesc !== description) {
-                    cf.description = newDesc;
-                    domGroupOverviewDescription.textContent = newDesc || (caps.manage_metadata ? 'Add a description...' : '');
-                    domGroupOverviewDescription.classList.toggle('group-placeholder', !newDesc);
-                    domGroupOverviewStatus.textContent = newDesc;
-                    try { await invoke('update_community_metadata', { communityId, name: null, description: newDesc }); }
-                    catch (e) { console.error('Failed to update community description:', e); showToast('Failed to update the description'); }
-                }
-            };
-            input.onblur = save;
-            input.onkeydown = (e) => { if (e.key === 'Escape') { saved = true; input.replaceWith(domGroupOverviewDescription); } };
-        };
-    } else {
-        domGroupOverviewDescription.classList.remove('group-editable');
-        domGroupOverviewDescription.onclick = null;
-    }
+    loadMigrationStatus(communityId);
 
     // Member list = observed participants (best-effort): everyone who has posted across the
     // Community's channels. Lurkers and link-joiners who haven't spoken don't appear (membership
     // isn't authoritative). Join announcements (presence) surface here too once that ships.
-    if (domGroupOverviewMembers) {
-        const searchEl = domGroupMemberSearchInput;
+    if (groupMembersEl()) {
+        const searchEl = groupSearchEl();
         const myNpub = arrProfiles.find(p => p.mine)?.id;
         const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
         // Cache-first: the last known roster paints instantly (no "Loading members…" flash
@@ -9426,7 +9122,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         if (!groupRoster || groupRosterCommunityId !== communityId || !preserveSearch) {
             if (groupRoster) VectorSvelte.unmountComponent(groupRoster);
             groupRosterCommunityId = communityId;
-            groupRoster = VectorSvelte.mountMemberRoster(domGroupOverviewMembers, {
+            groupRoster = VectorSvelte.mountMemberRoster(groupMembersEl(), {
                 communityId, myNpub, ownerNpub, caps,
                 profiles: [...arrProfiles],
                 members: memberList, admins: adminNpubs, banned: bannedList, roleGraph,
@@ -9441,9 +9137,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);
                     communityMemberCounts.set(communityId, members.length);
-                    if (domGroupOverview.getAttribute('data-group-id') === communityId) {
-                        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
-                    }
+                    VectorSvelte.touchCommunity(communityId);
                 },
             });
             if (searchEl) groupRoster.setFilter(searchEl.value || '');
@@ -9478,7 +9172,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // paint this one's roster (or subtext) over it. The panel carries the COMMUNITY
         // id (re-tagged right after open for the realtime listener), never chat.id here.
         if (domGroupOverview.getAttribute('data-group-id') !== communityId || groupRoster !== roster) return;
-        domGroupOverviewStatus.textContent = communityMemberSubtext(communityId);
+        VectorSvelte.touchCommunity(communityId);
         if (!hadCache || rosterPrint() !== cachedPrint) {
             roster.setRoster({ members: memberList, admins: adminNpubs, banned: bannedList, roleGraph });
         }
@@ -9502,76 +9196,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         }
     }
 
-    // Invite (owner only — link + by-npub).
-    if (caps.create_invite) {
-        domGroupInviteMemberBtn.style.display = 'flex';
-        domGroupInviteMemberBtn.onclick = () => openCommunityInvitePanel(chat);
-    } else {
-        domGroupInviteMemberBtn.style.display = 'none';
-    }
-
-    // Moderation console — batch containment, so it needs BAN, not just KICK.
-    // v2 only: the rotation it drives is a v2 verb.
-    const isV2Community = chat.metadata?.custom_fields?.proto_version === '2';
-    if (caps.ban && isV2Community) {
-        domGroupModerateBtn.style.display = 'flex';
-        domGroupModerateBtn.onclick = () => openModerationPanel(communityId);
-        domGroupModerateBtn.classList.remove('raid-alert');
-        // The narrow layout has no community header to hang a pip on, so the button
-        // itself carries the alarm.
-        invoke('check_community_raid', { communityId }).then(v => {
-            if (!v?.detected) return;
-            if (domGroupOverview.getAttribute('data-group-id') !== communityId) return;
-            domGroupModerateBtn.classList.add('raid-alert');
-            domGroupModerateBtn.title = `${v.suspects} accounts flagged as a raid`;
-        }).catch(() => {});
-    } else {
-        domGroupModerateBtn.style.display = 'none';
-    }
-
-    // Leave / Delete Community. A member leaves (local drop). The OWNER can't meaningfully leave their own
-    // root (§6.1): their button DELETES (dissolves) the community for everyone via an owner tombstone, then
-    // tears down locally. The button label is set in BOTH branches (shared DOM, else a stale label leaks).
-    const isCommunityOwner = chat.metadata?.custom_fields?.is_owner === 'true';
-    const leaveLabel = domGroupLeaveBtn.querySelectorAll('span')[1];
-    domGroupLeaveBtn.style.display = 'flex';
-    domGroupLeaveBtn.style.opacity = '';
-    domGroupLeaveBtn.style.pointerEvents = '';
-    // The flows live in `communityLeaveOrDelete`: the widescreen header menu offers
-    // the same action, and one copy keeps their wording and teardown identical.
-    if (leaveLabel) leaveLabel.innerText = isCommunityOwner ? 'Delete Community' : 'Leave';
-    domGroupLeaveBtn.onclick = async () => {
-        domGroupLeaveBtn.style.opacity = '0.5';
-        domGroupLeaveBtn.style.pointerEvents = 'none';
-        try {
-            await communityLeaveOrDelete(chat);
-        } finally {
-            domGroupLeaveBtn.style.opacity = '';
-            domGroupLeaveBtn.style.pointerEvents = '';
-        }
-    };
-
-    // "Upgrade to Concord v2" — owner-only, v1-only. Reflects the migration timelock:
-    // locked shows a countdown, ready arms the wizard (type-to-confirm, irreversible),
-    // in-progress shows a resumable state. Hidden for members, v2 communities, and any
-    // dissolved/migrated/ineligible community.
-    renderMigrationRow(communityId, name, chat.id);
-
-    domGroupOverviewBackBtn.onclick = () => {
-        // Widescreen: this is the roster's own close button, so it goes through the
-        // same pair as the header's Members toggle. Closing by hand and skipping
-        // wsSetMembersOpen left the preference reading "open", and the next chat
-        // open re-derived the pane from it — the roster came back on its own.
-        if (wsActive()) {
-            wsCloseDetails();
-            wsSetMembersOpen(false);
-            return;
-        }
-        popBack('group-overview');
-        domGroupOverview.style.display = 'none';
-        domGroupOverview.removeAttribute('data-group-id');
-        openChat(chat.id);
-    };
 }
 
 /**
@@ -10220,331 +9844,91 @@ async function openInvites() {
 /**
  * Edit the profile description inline
  */
-function updateProfileEditLabel() {
-    const cProfile = arrProfiles.find(a => a.mine);
-    if (!cProfile) return;
-    const nameInput = document.querySelector('#profile-edit-name input');
-    const statusInput = document.querySelector('#profile-edit-status input');
-    const bioInput = document.querySelector('#profile-edit-bio textarea');
-    const label = document.getElementById('profile-edit-mode-label');
-    if (!label) return;
-
-    const nameChanged = nameInput?.value.trim() !== (objProfileEditSnapshot.name || '');
-    const statusChanged = statusInput?.value.trim() !== (objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '');
-    const bioChanged = bioInput?.value.trim() !== (objProfileEditSnapshot.about || '');
-    const avatarChanged = strPendingProfileAvatarPath !== null;
-    const bannerChanged = strPendingProfileBannerPath !== null;
-
-    if (nameChanged || statusChanged || bioChanged || avatarChanged || bannerChanged) {
-        label.textContent = 'Unsaved Changes Made';
-        label.style.opacity = '0.8';
-    } else {
-        label.textContent = 'Edit Mode is Enabled';
-        label.style.opacity = '0.8';
-    }
-}
-
 function enterProfileEditMode() {
     const cProfile = arrProfiles.find(a => a.mine);
     if (!cProfile) return;
-    objProfileEditSnapshot = {
-        name: cProfile.name || '',
-        status: cProfile.status || '',
-        about: cProfile.about || '',
-        avatar: getProfileAvatarSrc(cProfile) || null,
-        banner: getProfileBannerSrc(cProfile) || null
-    };
-    strPendingProfileAvatarPath = null;
-    strPendingProfileBannerPath = null;
     fProfileEditMode = true;
-    domProfileEditBar.style.opacity = '0';
-    domProfileEditBar.style.display = 'flex';
-    setTimeout(() => domProfileEditBar.style.opacity = '1', 10);
-    domProfileBackBtn.style.display = 'none';
-    document.querySelector('.profile-header-info').style.display = 'none';
-    domProfileBanner.onclick = async () => {
-        if (!fProfileEditMode) return;
-        const { open } = window.__TAURI__.dialog;
-        const file = await open({
-            title: 'Choose Banner Image',
-            multiple: false,
-            directory: false,
-            filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
-        });
-        if (!file) return;
-        strPendingProfileBannerPath = file;
-        updateProfileEditLabel();
-        if (domProfileBanner.tagName === 'DIV') {
-            const newBanner = document.createElement('img');
-            newBanner.id = 'profile-banner';
-            newBanner.className = domProfileBanner.className;
-            // Carry the click-to-repick handler — a bare <img> swap left the second pick dead.
-            newBanner.onclick = domProfileBanner.onclick;
-            domProfileBanner.replaceWith(newBanner);
-            domProfileBanner = newBanner;
-        }
-        domProfileBanner.src = await pickedImagePreviewSrc(file) || '';
-    };
-    document.getElementById('profile-edit-btn').style.display = 'none';
-    document.getElementById('profile-share-btn').style.display = 'none';
-    document.getElementById('profile-qr-btn').style.display = 'none';
-    document.getElementById('profile-npub-label').style.display = 'none';
-    document.getElementById('profile-npub-container').style.display = 'none';
-    document.getElementById('profile-badges').style.display = 'none';
-    document.getElementById('profile-secondary-name').style.display = 'none';
-    document.getElementById('profile-secondary-status').style.display = 'none';
-    document.getElementById('profile-description').style.display = 'none';
-    const editName = document.getElementById('profile-edit-name');
-    const editStatus = document.getElementById('profile-edit-status');
-    const editBio = document.getElementById('profile-edit-bio');
-
-    editName.closest('.profile-edit-field-wrapper').style.position = 'relative';
-    // Static shells via innerHTML; profile values via DOM properties so they
-    // are never parsed as HTML.
-    editName.innerHTML = `<input type="text" maxlength="50" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
-    editName.querySelector('input').value = cProfile.name || '';
-    editStatus.innerHTML = `<input type="text" style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%;">`;
-    editStatus.querySelector('input').value = cProfile.status?.title || '';
-    editBio.innerHTML = `<textarea style="background: none; border: none; outline: none; color: inherit; font-size: 16px; width: 100%; resize: none; min-height: 60px;"></textarea>`;
-    const bioTextarea = editBio.querySelector('textarea');
-    bioTextarea.value = typeof cProfile.about === 'string' ? cProfile.about : '';
-    setTimeout(() => {
-        bioTextarea.style.height = 'auto';
-        bioTextarea.style.height = bioTextarea.scrollHeight + 'px';
-    }, 10);
-    bioTextarea.addEventListener('input', () => {
-        bioTextarea.style.height = 'auto';
-        bioTextarea.style.height = bioTextarea.scrollHeight + 'px';
+    VectorSvelte.setProfileEditing(true);
+    VectorSvelte.startProfileEdit({
+        name: cProfile.name || '',
+        about: typeof cProfile.about === 'string' ? cProfile.about : '',
+        avatar: getProfileAvatarSrc(cProfile) || null,
+        banner: getProfileBannerSrc(cProfile) || null,
     });
-    const nameInput = document.querySelector('#profile-edit-name input');
-    const statusInput = document.querySelector('#profile-edit-status input');
-    nameInput?.addEventListener('input', updateProfileEditLabel);
-    statusInput?.addEventListener('input', updateProfileEditLabel);
-    bioTextarea.addEventListener('input', updateProfileEditLabel);
-    document.getElementById('profile-edit-fields').style.display = 'flex';
-    document.getElementById('profile').classList.add('profile-edit-active');
+}
 
-    domProfileAvatar.classList.add('btn');
-    domProfileAvatar.onclick = async () => {
-        if (!fProfileEditMode) return;
-        const { open } = window.__TAURI__.dialog;
-        const file = await open({
-            title: 'Choose Profile Picture',
-            multiple: false,
-            directory: false,
-            filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
+/** Pick a new avatar or banner while editing; it previews in place until save. */
+async function pickProfilePicture(kind) {
+    if (!fProfileEditMode) return;
+    const { open } = window.__TAURI__.dialog;
+    const file = await open({
+        title: kind === 'avatar' ? 'Choose Profile Picture' : 'Choose Banner Image',
+        multiple: false,
+        directory: false,
+        filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }]
+    });
+    if (!file || !fProfileEditMode) return;
+    VectorSvelte.setProfileEditPicture(kind, file, await pickedImagePreviewSrc(file) || '');
+}
+
+/** Upload a picked picture and publish it; the profile keeps showing the pick meanwhile. */
+function saveProfilePicture(cProfile, kind, path) {
+    const cachedKey = kind === 'avatar' ? 'avatar_cached' : 'banner_cached';
+    const label = kind === 'avatar' ? 'Avatar' : 'Banner';
+    const prev = cProfile[cachedKey];
+    // The backend's upload updates the cached path authoritatively once it lands.
+    cProfile[cachedKey] = path;
+    const revert = () => {
+        cProfile[cachedKey] = prev;
+        if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
+    };
+    invoke('upload_avatar', { filepath: path, uploadType: kind })
+        .then(url => {
+            if (!url) return revert();
+            invoke('update_profile', { name: '', avatar: kind === 'avatar' ? url : '', banner: kind === 'banner' ? url : '', about: '' })
+                .then(ok => {
+                    if (!ok) popupConfirm(`${label} Update Failed!`, `Failed to broadcast ${kind} update to the network.`, true, '', 'vector_warning.svg');
+                })
+                .catch(e => popupConfirm(`${label} Update Failed!`, escapeHtml(String(e)), true, '', 'vector_warning.svg'));
+        })
+        .catch(e => {
+            revert();
+            popupConfirm(`${label} Upload Failed!`, escapeHtml(String(e)), true, '', 'vector_warning.svg');
         });
-        if (!file) return;
-        strPendingProfileAvatarPath = file;
-        updateProfileEditLabel();
-        // An avatar-less profile renders a placeholder <div> — swap it for a real <img>
-        // (carrying the click-to-repick handler) or the preview is a silent no-op.
-        if (domProfileAvatar.tagName !== 'IMG') {
-            const img = document.createElement('img');
-            img.id = 'profile-avatar';
-            img.className = 'profile-avatar btn';
-            img.onclick = domProfileAvatar.onclick;
-            domProfileAvatar.replaceWith(img);
-            domProfileAvatar = img;
-        }
-        domProfileAvatar.src = await pickedImagePreviewSrc(file) || '';
-    };
-
-    // Reset label to clean state on entry
-    updateProfileEditLabel();
-
-    const bannerContainer = document.getElementById('profile-banner-container');
-    const avatarContainer = document.querySelector('.profile-avatar-container');
-    bannerContainer._editMoveHandler = (e) => {
-        const bannerRect = bannerContainer.getBoundingClientRect();
-        const avatarRect = avatarContainer.getBoundingClientRect();
-        const inBanner = e.clientY <= bannerRect.top + 200;
-        const inAvatar = (
-            e.clientX >= avatarRect.left &&
-            e.clientX <= avatarRect.right &&
-            e.clientY >= avatarRect.top &&
-            e.clientY <= avatarRect.bottom
-        );
-        if (inAvatar || !inBanner) {
-            bannerContainer.classList.add('avatar-hovered');
-        } else {
-            bannerContainer.classList.remove('avatar-hovered');
-        }
-    };
-    bannerContainer.addEventListener('mousemove', bannerContainer._editMoveHandler);
 }
 
 function exitProfileEditMode(fCancel = false) {
+    const edit = VectorSvelte.profileEdit();
+    const draft = { name: edit.draft.name.trim(), about: edit.draft.about.trim() };
+    const snapshot = edit.snapshot;
+    const pending = { ...edit.pending };
     fProfileEditMode = false;
-    domProfileEditBar.style.opacity = '0';
-    setTimeout(() => domProfileEditBar.style.display = 'none', 250);
-    document.querySelector('.profile-header-info').style.display = '';
-    domProfileBackBtn.style.display = 'none';
-    document.getElementById('profile-npub-label').style.display = '';
-    document.getElementById('profile-npub-container').style.display = '';
-    document.getElementById('profile-badges').style.display = '';
-    document.getElementById('profile-edit-fields').style.display = 'none';
-    document.getElementById('profile-edit-btn').style.display = '';
-    document.getElementById('profile-share-btn').style.display = '';
-    document.getElementById('profile-qr-btn').style.display = 'block';
-    document.getElementById('profile-secondary-name').style.display = '';
-    document.getElementById('profile-secondary-status').style.display = '';
-    document.getElementById('profile-description').style.display = '';
-    document.getElementById('profile').classList.remove('profile-edit-active');
-
-    // Reset label back to clean state
-    const label = document.getElementById('profile-edit-mode-label');
-    if (label) {
-        label.textContent = 'Edit Mode is Enabled';
-        label.style.opacity = '0.8';
-    }
+    VectorSvelte.endProfileEdit();
+    VectorSvelte.setProfileEditing(false);
 
     const cProfile = arrProfiles.find(a => a.mine);
     if (cProfile) {
-        if (fCancel) {
-            cProfile.name = objProfileEditSnapshot.name;
-            cProfile.status = objProfileEditSnapshot.status;
-            cProfile.about = objProfileEditSnapshot.about;
-            // Revert avatar preview
-            if (strPendingProfileAvatarPath) {
-                strPendingProfileAvatarPath = null;
-                const originalSrc = objProfileEditSnapshot.avatar;
-                if (originalSrc) {
-                    if (domProfileAvatar.tagName === 'DIV') {
-                        const newAvatar = document.createElement('img');
-                        newAvatar.className = domProfileAvatar.className;
-                        domProfileAvatar.replaceWith(newAvatar);
-                        domProfileAvatar = newAvatar;
-                    }
-                    domProfileAvatar.src = originalSrc;
-                } else {
-                    const placeholder = createPlaceholderAvatar(false, 175);
-                    placeholder.classList.add('profile-avatar');
-                    domProfileAvatar.replaceWith(placeholder);
-                    domProfileAvatar = placeholder;
-                }
-            }
-            // Revert banner preview
-            if (strPendingProfileBannerPath) {
-                strPendingProfileBannerPath = null;
-                const originalBannerSrc = objProfileEditSnapshot.banner;
-                if (originalBannerSrc) {
-                    if (domProfileBanner.tagName === 'DIV') {
-                        const newBanner = document.createElement('img');
-                        newBanner.className = domProfileBanner.className;
-                        domProfileBanner.replaceWith(newBanner);
-                        domProfileBanner = newBanner;
-                    }
-                    domProfileBanner.src = originalBannerSrc;
-                } else {
-                    domProfileBanner.src = '';
-                    domProfileBanner.style.backgroundColor = 'rgb(27, 27, 27)';
-                }
-            }
-        } else {
-            const nameInput = document.querySelector('#profile-edit-name input');
-            const statusInput = document.querySelector('#profile-edit-status input');
-            const bioInput = document.querySelector('#profile-edit-bio textarea');
-            const newName = nameInput ? nameInput.value.trim() : cProfile.name;
-            const newStatus = statusInput ? statusInput.value.trim() : (cProfile.status?.title ?? '');
-            const newAbout = bioInput ? bioInput.value.trim() : (cProfile.about ?? '');
-            const prevName = objProfileEditSnapshot.name || '';
-            const prevStatus = objProfileEditSnapshot.status?.title ?? objProfileEditSnapshot.status ?? '';
-            const prevAbout = objProfileEditSnapshot.about || '';
+        if (!fCancel) {
+            cProfile.name = draft.name;
+            cProfile.about = draft.about;
 
-            cProfile.name = newName;
-            if (cProfile.status) cProfile.status.title = newStatus;
-            cProfile.about = newAbout;
-
-            const nameChanged = newName !== prevName;
-            const aboutChanged = newAbout !== prevAbout;
-            const statusChanged = newStatus !== prevStatus;
+            const nameChanged = draft.name !== (snapshot.name || '');
+            const aboutChanged = draft.about !== (snapshot.about || '');
             if (nameChanged || aboutChanged) {
                 invoke('update_profile', {
-                    name: nameChanged ? newName : '',
+                    name: nameChanged ? draft.name : '',
                     avatar: '',
                     banner: '',
-                    about: aboutChanged ? (newAbout.length > 0 ? newAbout : ' ') : '',
+                    about: aboutChanged ? (draft.about.length > 0 ? draft.about : ' ') : '',
                 }).then(ok => {
                     if (!ok) popupConfirm('Profile Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
                 }).catch(e => popupConfirm('Profile Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
             }
-            if (statusChanged) {
-                invoke('update_status', { status: newStatus }).catch(e => popupConfirm('Status Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
-            }
-            if (strPendingProfileAvatarPath) {
-                const pendingAvatarPath = strPendingProfileAvatarPath;
-                const prevAvatarCached = cProfile.avatar_cached;
-                // Keep the just-picked avatar on screen through save instead of
-                // flashing back to the old one; the backend's upload_avatar
-                // updates avatar_cached authoritatively once the upload lands.
-                cProfile.avatar_cached = pendingAvatarPath;
-                invoke('upload_avatar', { filepath: pendingAvatarPath, uploadType: 'avatar' })
-                    .then(avatarUrl => {
-                        if (avatarUrl) {
-                            invoke('update_profile', {
-                                name: '',
-                                avatar: avatarUrl,
-                                banner: '',
-                                about: '',
-                            }).then(ok => {
-                                if (!ok) popupConfirm('Avatar Update Failed!', 'Failed to broadcast avatar update to the network.', true, '', 'vector_warning.svg');
-                            }).catch(e => popupConfirm('Avatar Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
-                        } else {
-                            // Upload produced no URL — revert to the prior avatar.
-                            cProfile.avatar_cached = prevAvatarCached;
-                            if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
-                        }
-                    })
-                    .catch(e => {
-                        cProfile.avatar_cached = prevAvatarCached;
-                        if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
-                        popupConfirm('Avatar Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-                    });
-                strPendingProfileAvatarPath = null;
-            }
-            if (strPendingProfileBannerPath) {
-                const pendingBannerPath = strPendingProfileBannerPath;
-                const prevBannerCached = cProfile.banner_cached;
-                // Keep the just-picked banner on screen through save instead of
-                // flashing back to the old one; the backend's upload_avatar
-                // updates banner_cached authoritatively once the upload lands.
-                cProfile.banner_cached = pendingBannerPath;
-                invoke('upload_avatar', { filepath: pendingBannerPath, uploadType: 'banner' })
-                    .then(bannerUrl => {
-                        if (bannerUrl) {
-                            invoke('update_profile', {
-                                name: '',
-                                avatar: '',
-                                banner: bannerUrl,
-                                about: '',
-                            }).then(ok => {
-                                if (!ok) popupConfirm('Banner Update Failed!', 'Failed to broadcast banner update to the network.', true, '', 'vector_warning.svg');
-                            }).catch(e => popupConfirm('Banner Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
-                        } else {
-                            // Upload produced no URL — revert to the prior banner.
-                            cProfile.banner_cached = prevBannerCached;
-                            if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
-                        }
-                    })
-                    .catch(e => {
-                        cProfile.banner_cached = prevBannerCached;
-                        if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
-                        popupConfirm('Banner Upload Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
-                    });
-                strPendingProfileBannerPath = null;
-            }
-
+            if (pending.avatar) saveProfilePicture(cProfile, 'avatar', pending.avatar);
+            if (pending.banner) saveProfilePicture(cProfile, 'banner', pending.banner);
             showToast('Profile Saved');
         }
         renderProfileTab(cProfile);
-    }
-    document.getElementById('profile-banner-container').classList.remove('avatar-hovered');
-    domProfileBanner.onclick = null;
-    const _bc = document.getElementById('profile-banner-container');
-    if (_bc._editMoveHandler) {
-        _bc.removeEventListener('mousemove', _bc._editMoveHandler);
-        _bc._editMoveHandler = null;
     }
 }
 
@@ -12505,20 +11889,7 @@ domChatMessageInput.oninput = async (e) => {
 
     // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
     // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events
-    domSettingsWhisperModelInfo.onclick = (e) => {
-        popupConfirm('Vector Voice AI Model', 'The Vector Voice AI model <b>determines the Quality of your transcriptions.</b><br><br>A larger model will provide more accurate transcriptions & translations, but require more Disk Space, Memory and CPU power to run.', true);
-    };
-    domSettingsWhisperAutoTranslateInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Vector Voice Translations', 'Vector Voice AI can <b>automatically detect non-English languages and translate them in to English text for you.</b><br><br>You can decide whether Vector Voice transcribes in to their native spoken language, or instead translates in to English on your behalf.', true);
-    };
-    domSettingsWhisperAutoTranscribeInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Vector Voice Transcriptions', 'Vector Voice AI can <b>automatically transcribe incoming Voice Messages</b> for immediate reading, without needing to listen.<br><br>You can decide whether Vector Voice transcribes automatically, or if you prefer to transcribe each message explicitly.', true);
-    };
-    domSettingsPrivacyWebPreviewsInfo.onclick = async (e) => {
+   domSettingsPrivacyWebPreviewsInfo.onclick = async (e) => {
         e.preventDefault();
         e.stopPropagation();
         // Render contextually based on Tor preference. When Tor is enabled,

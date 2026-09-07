@@ -21,6 +21,11 @@ import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
 import CommandStrip from './composer/CommandStrip.svelte';
 import ChatHeader from './chat/ChatHeader.svelte';
+import ProfileView from './profile/ProfileView.svelte';
+import ProfileEditFields from './profile/ProfileEditFields.svelte';
+import CommunityOverview from './community/CommunityOverview.svelte';
+import { overviewState, setOverview } from './lib/overview.svelte.js';
+import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
 import CommunityHead from './chatlist/CommunityHead.svelte';
 import FilePreview from './files/FilePreview.svelte';
 import TorCard from './settings/TorCard.svelte';
@@ -32,6 +37,7 @@ import SecurityCard from './settings/SecurityCard.svelte';
 import Display from './settings/Display.svelte';
 import Updates from './settings/Updates.svelte';
 import NetworkList from './settings/NetworkList.svelte';
+import Voice from './settings/Voice.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -40,9 +46,12 @@ export { timeTickVersion, bumpTimeTick } from './lib/stores.js';
 export {
     ensureSignals, touchChat, touchProfile, touchCommunity, touchInvites,
     reorderChatlist, setOpenChat, setPane,
+    profileViewState, setOpenProfile, setProfileEditing,
 } from './lib/signals.svelte.js';
 /** Apply pending updates synchronously (for the rare caller that reads the DOM right after). */
 export { flushSync };
+export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty };
+export { overviewState, setOverview };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
@@ -54,7 +63,7 @@ export {
 } from './lib/filepreview.svelte.js';
 // Settings: the Tor card's state and the blocked-users list's version.
 export {
-    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot, setDisplaySettings, updatesState, setUpdates, setNetwork,
+    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot, setDisplaySettings, updatesState, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress,
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
@@ -233,4 +242,26 @@ export function mountUpdates(target, { h }) {
 export function mountNetworkList(target, { h }) {
     target.replaceChildren();
     return mount(NetworkList, { target, props: { h } });
+}
+
+/** Mount the Voice section body into `target` (#settings-voice-body). */
+export function mountVoice(target, { h }) {
+    target.replaceChildren();
+    return mount(Voice, { target, props: { h } });
+}
+
+/** Mount the profile view reconciler over #profile's elements. */
+export function mountProfileView({ els, h }) {
+    const host = document.createElement('div');
+    host.hidden = true;
+    document.body.appendChild(host);
+    els.editFields.replaceChildren();
+    mount(ProfileEditFields, { target: els.editFields });
+    return mount(ProfileView, { target: host, props: { els, h } });
+}
+
+/** Mount the Community overview body into `target` (#group-overview-scroll); `els` is its chat header. */
+export function mountCommunityOverview(target, { els, h }) {
+    target.replaceChildren();
+    return mount(CommunityOverview, { target, props: { els, h } });
 }

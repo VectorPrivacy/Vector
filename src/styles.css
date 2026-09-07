@@ -1203,6 +1203,14 @@ html, body {
 }
 
 /* Profile Banner */
+.profile-banner.is-empty {
+  background-color: #0a0a0a;
+}
+
+.profile-avatar.is-placeholder {
+  background: url("icons/user-placeholder.svg") center / cover no-repeat;
+}
+
 .profile-banner {
   object-fit: cover;
   object-position: center;
@@ -12270,6 +12278,91 @@ select:disabled:hover {
     width: 15px !important;
     height: 15px !important;
     vertical-align: middle !important;
+}
+
+/* A roster row: name and rank on top, the person's status beneath, one line that
+   ellipsises. Every layout, not just widescreen: the row is the same list narrow. */
+#group-overview .member-pick-identity {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+}
+
+#group-overview .member-pick-status {
+    font-size: 12px;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.38);
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Roster sections (Admin, Members, a role): same language as the channel pane's.
+   Every layout: the roster is the same list narrow. */
+.member-section + .member-section {
+  margin-top: 12px;
+}
+
+.member-section-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px 4px;
+  border-radius: 6px;
+  opacity: 1;
+}
+
+.member-section-label {
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.38);
+  transition: color 0.12s ease;
+}
+
+.member-section-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.24);
+}
+
+.member-section-head:hover .member-section-label {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.member-section-caret {
+  position: relative;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: auto;
+}
+
+.member-section-caret .icon {
+  background-color: rgba(255, 255, 255, 0.32);
+  transition: transform 0.15s ease, background-color 0.12s ease;
+}
+
+.member-section.is-closed .member-section-caret .icon {
+  transform: rotate(-90deg);
+}
+
+.member-section.is-closed .member-section-body {
+  display: none;
+}
+
+/* An emoji in a name or status is inline text, not a picture: unconstrained it
+   renders at its natural size and stretches the row around it. */
+#group-overview .member-pick-status .emoji,
+#group-overview .member-pick-nameline .emoji {
+    width: 14px !important;
+    height: 14px !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    display: inline-block;
+    vertical-align: -2px;
+    border-radius: 0;
+    object-fit: contain;
 }
 
 .member-pick-indicator {

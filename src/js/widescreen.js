@@ -237,6 +237,14 @@ function wsUpdate() {
         // of room, not the user closing anything, and widening re-derives the pane
         // from it through wsSyncOpenChat.
         if (domGroupOverview.style.display !== 'none') wsCloseDetails();
+        // A roster opened narrow hid every other pane as a whole screen, and widening
+        // may have closed it (no chat beside it). Widescreen forced the panes visible
+        // regardless; narrow honours their inline none, so land where the user was.
+        const anyShown = [domChat, domChats, domProfile, domSettings, domGroupOverview].some(el => el.style.display !== 'none');
+        if (!anyShown) {
+            if (strOpenChat) openChat(strOpenChat);
+            else openChatlist();
+        }
         wsMarkActiveRow();
         adjustSize();
     }

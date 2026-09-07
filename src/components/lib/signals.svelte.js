@@ -99,3 +99,10 @@ export function setPane(communityId, dmsOnly) {
     pane.communityId = communityId || null;
     pane.dmsOnly = !!dmsOnly;
 }
+
+// The expanded profile view: which npub it shows, and whether our own profile is
+// in Edit Mode (the reconciler leaves the screen alone while it is).
+const profileView = $state({ id: '', editing: false });
+export function profileViewState() { return profileView; }
+export function setOpenProfile(id) { profileView.id = id || ''; }
+export function setProfileEditing(on) { profileView.editing = !!on; }
