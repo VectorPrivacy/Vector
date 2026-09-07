@@ -5,7 +5,7 @@
     const pct = $derived(uploadProgress(pendingId));
 </script>
 
-<div class="attachment-progress-overlay">
+<div class="attachment-progress-overlay" style="right: auto; bottom: auto; width: var(--media-w, 100%); height: var(--media-h, 100%);">
     <div class="miniapp-downloading-spinner" id="{pendingId}_file" style="width: {size}px; height: {size}px;" style:--progress={pct != null ? `${pct}%` : null}></div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="upload-cancel-btn" onclick={(e) => { e.stopPropagation(); h.cancelUpload(pendingId); }}></div>

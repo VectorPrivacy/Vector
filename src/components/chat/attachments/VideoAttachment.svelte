@@ -5,10 +5,14 @@
     let { att, msg, h } = $props();   // h: mediaUrl(path), onVideoMeta(video), cancelUpload
     const uploading = $derived(msg.mine && msg.pending);
     let container = $state(null);
-    // The ring centres on the media, not the row: the wrapper follows the media's rendered
-    // width for as long as it is on screen (the clamp settles after metadata, and resizes).
+    // The ring covers the media, not the wrapper: the overlay is sized to the media's rendered
+    // box for as long as it is on screen. Pinning the wrapper instead would cap the media
+    // through its percentage max-width and freeze it at its pre-metadata size.
     function pin(media) {
-        const set = () => { if (media.offsetWidth) container.style.width = media.offsetWidth + 'px'; };
+        const set = () => {
+            container.style.setProperty('--media-w', media.offsetWidth + 'px');
+            container.style.setProperty('--media-h', media.offsetHeight + 'px');
+        };
         const ro = new ResizeObserver(set);
         ro.observe(media);
         return { destroy: () => ro.disconnect() };
@@ -16,7 +20,7 @@
 </script>
 
 {#if uploading}
-    <div style="position: relative; display: inline-block; line-height: 0; max-width: 100%;" bind:this={container}>
+    <div style="position: relative; display: block; line-height: 0; max-width: 100%;" bind:this={container}>
         <!-- svelte-ignore a11y_media_has_caption -->
         <video controlsList="nodownload" preload="metadata" playsinline src={h.mediaUrl(att.path)}
                style="height: auto; border-radius: 8px; cursor: pointer; opacity: 0.25;"
