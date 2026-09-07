@@ -1169,7 +1169,6 @@ const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel
 const domMiniAppsGrid = document.getElementById('miniapps-grid');
 const domMiniAppsSearch = document.getElementById('miniapps-search');
 const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
-const domAttachmentPanelMarketplace = document.getElementById('attachment-panel-marketplace');
 const domMarketplacePanel = document.getElementById('marketplace-panel');
 const domMarketplaceBackBtn = document.getElementById('marketplace-back-btn');
 const domMarketplaceContent = document.getElementById('marketplace-content');
@@ -10766,14 +10765,6 @@ window.addEventListener("DOMContentLoaded", async () => {
             closeMiniAppLaunchDialog();
         }
     };
-
-    // Marketplace event handlers
-    if (domAttachmentPanelMarketplace) {
-        domAttachmentPanelMarketplace.onclick = async () => {
-            closeAttachmentPanel();
-            showMarketplacePanel();
-        };
-    }
 
     if (domMarketplaceBackBtn) {
         domMarketplaceBackBtn.onclick = () => {

@@ -47,6 +47,8 @@ import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
 import ModChrome from './moderation/ModChrome.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
+import MiniAppsGrid from './miniapps/MiniAppsGrid.svelte';
+export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen } from './lib/pins.svelte.js';
@@ -391,4 +393,10 @@ export function mountModeration({ list, filters, stats, els, h }) {
 export function mountPolicyDesigner(pane, { h }) {
     pane.replaceChildren();
     return mount(PolicyDesigner, { target: pane, props: { h } });
+}
+
+/** Mount the Mini Apps panel grid into `grid` (#miniapps-grid); the Nexus tile is rendered by it. */
+export function mountMiniAppsGrid(grid, { h }) {
+    grid.replaceChildren();
+    return mount(MiniAppsGrid, { target: grid, props: { h } });
 }

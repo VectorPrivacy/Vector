@@ -118,331 +118,115 @@ function animateAttachmentPanelItems(container) {
     });
 }
 
+// The grid is a Svelte island over lib/miniappsgrid.svelte.js; this side reads
+// history, resolves icons and owns the gestures.
+const miniAppsEditMode = () => VectorSvelte.gridState().editMode;
+const miniAppIconCache = new Map();
+// Default apps mid-download on a fresh install, kept across history reloads
+// until they land: key → grid entry.
+const miniAppsPreinstalling = new Map();
+
+let miniAppsGridMounted = false;
+function ensureMiniAppsGrid() {
+    if (miniAppsGridMounted || !domMiniAppsGrid) return;
+    miniAppsGridMounted = true;
+    VectorSvelte.mountMiniAppsGrid(domMiniAppsGrid, {
+        h: {
+            openNexus: () => { closeAttachmentPanel(); showMarketplacePanel(); },
+            open: openGridApp,
+            showTip: showGlobalTooltip,
+            hideTip: hideGlobalTooltip,
+            iconFailed: (a) => VectorSvelte.gridPatch(a.key, { icon: null }),
+            update: (a) => handleMiniAppPanelUpdate(a.marketplaceId),
+            remove: removeGridApp,
+        },
+    });
+}
+
+function miniAppKey(app) { return app.marketplace_id || app.src_url || app.name; }
+
+async function openGridApp(a) {
+    if (miniAppsEditMode() || a.downloading) return;
+    hideGlobalTooltip();
+    if (a.pivx) {
+        if (a.hidden) {
+            localStorage.removeItem('pivx_hidden');
+            await loadMiniAppsHistory();
+            popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
+        } else {
+            showPivxWalletPanel();
+        }
+        return;
+    }
+    if (a.app) await openMiniAppFromHistory(a.app);
+}
+
+async function removeGridApp(a) {
+    hideGlobalTooltip();
+    const displayName = a.pivx ? 'PIVX Wallet' : a.name;
+    const confirmed = await popupConfirm(
+        'Remove App?',
+        `Are you sure you want to remove <b>${escapeHtml(displayName)}</b> from your recent Mini Apps?`,
+        false
+    );
+    if (!confirmed) return;
+    if (a.pivx) {
+        // Hidden rather than gone: the search reveals it and a click restores it.
+        localStorage.setItem('pivx_hidden', 'true');
+    } else {
+        try {
+            await invoke('miniapp_remove_from_history', { name: displayName });
+        } catch (err) {
+            console.error('Failed to remove Mini App from history:', err);
+        }
+    }
+    deactivateMiniAppsEditMode();
+    await loadMiniAppsHistory();
+    animateAttachmentPanelItems(domMiniAppsGrid);
+}
+
 /**
- * Loads and renders the Mini Apps history in the panel
- * PIVX is treated as a virtual app and positioned based on usage history
+ * Loads the Mini Apps history into the grid. PIVX is a virtual app positioned
+ * by its own last use.
  */
 async function loadMiniAppsHistory() {
+    ensureMiniAppsGrid();
     try {
-        let history = await invoke('miniapp_get_history', { limit: null });
+        const history = await invoke('miniapp_get_history', { limit: null });
 
-        // Pre-install default apps for new users (empty history)
         const preInstallDone = localStorage.getItem('miniapps_preinstall_done') === 'true';
         if (history.length === 0 && !preInstallDone) {
-            // Mark as done first to prevent re-triggering
             localStorage.setItem('miniapps_preinstall_done', 'true');
-
-            // Clear any existing items first (except Marketplace button)
-            const existingItems = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace), .attachment-panel-empty');
-            existingItems.forEach(item => item.remove());
-
-            // Default apps to pre-install (by app ID with display names)
-            const defaultApps = [
-                { id: 'vectify', name: 'Vectify' },
-                { id: 'deadlock', name: 'State of Surveillance' }
-            ];
-
-            // IMMEDIATELY show placeholder UI before fetching marketplace data
-            const staggerDelay = 0.03; // Same delay used for regular mini apps
-            let animIndex = 0;
-
-            for (const { id: appId, name: displayName } of defaultApps) {
-                const item = document.createElement('button');
-                item.className = 'attachment-panel-item attachment-panel-miniapp animate-in';
-                item.id = `miniapp-downloading-${appId}`;
-                item.draggable = false;
-                item.style.position = 'relative';
-                item.style.animationDelay = `${animIndex * staggerDelay}s`;
-
-                // Show generic loading state initially
-                item.innerHTML = `
-                    <div class="attachment-panel-btn attachment-panel-miniapp-btn">
-                        <span class="icon icon-play"></span>
-                        <div class="miniapp-downloading-overlay">
-                            <div class="miniapp-downloading-spinner" data-app-id="${escapeHtml(appId)}"></div>
-                        </div>
-                    </div>
-                    <span class="attachment-panel-label cutoff">${escapeHtml(displayName)}</span>
-                `;
-                item.dataset.appName = displayName.toLowerCase();
-                item.addEventListener('animationend', () => {
-                    item.classList.remove('animate-in');
-                    item.style.animationDelay = '';
-                }, { once: true });
-                domMiniAppsGrid.appendChild(item);
-                animIndex++;
-            }
-
-            // Add PIVX after the downloading apps. When hidden (the fresh-install
-            // default, seeded at boot), it gets the same treatment as the history
-            // renderer: invisible until the search reveals it, click restores.
-            const pivxHiddenHere = localStorage.getItem('pivx_hidden') === 'true';
-            const pivxBtn = document.createElement('button');
-            pivxBtn.className = 'attachment-panel-item animate-in' + (pivxHiddenHere ? ' miniapp-disabled' : '');
-            pivxBtn.id = 'attachment-panel-pivx';
-            pivxBtn.draggable = false;
-            pivxBtn.style.animationDelay = `${animIndex * staggerDelay}s`;
-            pivxBtn.innerHTML = `
-                <div class="attachment-panel-btn attachment-panel-pivx-btn">
-                    <span class="icon icon-pivx"></span>
-                </div>
-                <span class="attachment-panel-label">PIVX</span>
-            `;
-            pivxBtn.dataset.appName = 'pivx';
-            if (pivxHiddenHere) {
-                pivxBtn.dataset.appHidden = 'true';
-                pivxBtn.style.display = 'none';
-            }
-            pivxBtn.addEventListener('mouseenter', () => showGlobalTooltip(pivxHiddenHere ? 'Restore PIVX Wallet' : 'PIVX Wallet', pivxBtn));
-            pivxBtn.addEventListener('mouseleave', () => hideGlobalTooltip());
-            pivxBtn.addEventListener('animationend', () => {
-                pivxBtn.classList.remove('animate-in');
-                pivxBtn.style.animationDelay = '';
-            }, { once: true });
-            pivxBtn.onclick = async () => {
-                if (miniAppsEditMode) return;
-                hideGlobalTooltip();
-                if (pivxHiddenHere) {
-                    localStorage.removeItem('pivx_hidden');
-                    await loadMiniAppsHistory();
-                    popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
-                } else {
-                    showPivxWalletPanel();
-                }
-            };
-            domMiniAppsGrid.appendChild(pivxBtn);
-
-            // Now fetch marketplace data and start downloads in background
-            try {
-                await fetchMarketplaceApps(true);
-
-                const appsToInstall = [];
-
-                // Update placeholders with actual app metadata and start downloads
-                for (const { id: appId } of defaultApps) {
-                    const app = marketplaceApps.find(a => a.id === appId);
-                    const placeholder = document.getElementById(`miniapp-downloading-${appId}`);
-
-                    if (app && placeholder) {
-                        appsToInstall.push(app);
-
-                        // Update with actual icon and name. Cached local icon
-                        // directly; remote icon_url via the backend cache
-                        // (the WebView never fetches remote — Tor).
-                        const imgStyle = 'width: 100%; height: 100%; object-fit: cover; border-radius: inherit;';
-                        let iconHtml = '<span class="icon icon-play"></span>';
-                        if (app.icon_cached) {
-                            iconHtml = `<img src="${escapeHtml(convertFileSrc(app.icon_cached))}" style="${imgStyle}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`;
-                        } else if (app.icon_url) {
-                            iconHtml = `<img data-cache-icon-url="${escapeHtml(app.icon_url)}" style="${imgStyle}" onerror="this.outerHTML='<span class=\\'icon icon-play\\'></span>'">`;
-                        }
-
-                        placeholder.innerHTML = `
-                            <div class="attachment-panel-btn attachment-panel-miniapp-btn">
-                                ${iconHtml}
-                                <div class="miniapp-downloading-overlay">
-                                    <div class="miniapp-downloading-spinner" data-app-id="${escapeHtml(appId)}"></div>
-                                </div>
-                            </div>
-                            <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
-                        `;
-                        for (const img of placeholder.querySelectorAll('img[data-cache-icon-url]')) {
-                            const url = img.dataset.cacheIconUrl;
-                            delete img.dataset.cacheIconUrl;
-                            bindBackendCachedImg(img, url);
-                        }
-                        placeholder.dataset.appName = app.name.toLowerCase();
-                    } else if (!app && placeholder) {
-                        console.warn(`[Mini Apps] Default app "${appId}" not found in marketplace`);
-                        placeholder.remove();
-                    }
-                }
-
-                // Start all downloads in parallel - transform placeholders when complete
-                const installPromises = appsToInstall.map(async (app) => {
-                    try {
-                        await installMarketplaceApp(app.id);
-
-                        // Transform the downloading placeholder into a normal clickable app
-                        const placeholder = document.getElementById(`miniapp-downloading-${app.id}`);
-                        if (placeholder) {
-                            // Remove the downloading overlay
-                            const overlay = placeholder.querySelector('.miniapp-downloading-overlay');
-                            if (overlay) overlay.remove();
-
-                            // Remove the temporary ID
-                            placeholder.removeAttribute('id');
-
-                            // Add click handler to open the app
-                            placeholder.onclick = async () => {
-                                if (miniAppsEditMode) return;
-                                hideGlobalTooltip();
-                                // Fetch the updated app info from history
-                                const historyApps = await invoke('miniapp_get_history', { limit: null });
-                                const historyApp = historyApps.find(h => h.marketplace_id === app.id || h.name === app.name);
-                                if (historyApp) {
-                                    await openMiniAppFromHistory(historyApp);
-                                }
-                            };
-
-                            // Add tooltip
-                            placeholder.addEventListener('mouseenter', () => showGlobalTooltip(app.name, placeholder));
-                            placeholder.addEventListener('mouseleave', () => hideGlobalTooltip());
-                        }
-
-                        return { success: true, app };
-                    } catch (installErr) {
-                        console.error(`[Mini Apps] Failed to pre-install ${app.id}:`, installErr);
-                        // Remove failed placeholder
-                        const placeholder = document.getElementById(`miniapp-downloading-${app.id}`);
-                        if (placeholder) placeholder.remove();
-                        return { success: false, app, error: installErr };
-                    }
-                });
-
-                // Wait for all installs to complete (UI updates happen individually above)
-                await Promise.all(installPromises);
-
-                // Return early - don't do the normal render since we already set up the UI
-                return;
-            } catch (preInstallErr) {
-                console.error('[Mini Apps] Pre-install failed:', preInstallErr);
-            }
+            preinstallDefaultMiniApps();
         }
 
-        // Clear existing Mini App items (keep only Marketplace)
-        const existingItems = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace), .attachment-panel-empty');
-        existingItems.forEach(item => item.remove());
-
-        // Check if PIVX is hidden by user
         const pivxHidden = localStorage.getItem('pivx_hidden') === 'true';
-
-        // Get PIVX last used timestamp from localStorage (stored in ms, convert to seconds)
         const pivxLastUsedMs = parseInt(localStorage.getItem('pivx_last_used') || '0', 10);
         const pivxLastOpenedAt = Math.floor(pivxLastUsedMs / 1000);
 
-        // Create combined list of apps with PIVX always included (hidden flag controls visibility)
-        const allApps = [
-            // Add PIVX as a virtual app entry (always present, hidden flag for grayed-out state)
-            { name: 'PIVX', isPivx: true, isHidden: pivxHidden, last_opened_at: pivxLastOpenedAt },
-            // Add history apps with their timestamps (backend uses last_opened_at in seconds)
-            ...history.map(app => ({ ...app, isPivx: false, last_opened_at: app.last_opened_at || 0 }))
+        const entries = [
+            { key: 'pivx', name: 'PIVX', pivx: true, hidden: pivxHidden, lastOpened: pivxLastOpenedAt },
+            ...history.map(app => {
+                const marketplaceId = app.marketplace_id || null;
+                const mktApp = marketplaceId ? marketplaceApps.find(m => m.id === marketplaceId) : null;
+                return {
+                    key: miniAppKey(app), name: app.name, pivx: false, hidden: false, app, marketplaceId,
+                    hasUpdate: !!(mktApp && mktApp.version && mktApp.version !== app.installed_version),
+                    downloading: false, icon: miniAppIconCache.get(app.src_url) || null,
+                    lastOpened: app.last_opened_at || 0,
+                };
+            }),
         ];
-
-        // Sort by last_opened_at timestamp (most recent first)
-        allApps.sort((a, b) => b.last_opened_at - a.last_opened_at);
-
-        // Add all app items in sorted order
-        for (const app of allApps) {
-            if (app.isPivx) {
-                // Create PIVX button
-                const pivxBtn = document.createElement('button');
-                pivxBtn.className = 'attachment-panel-item' + (app.isHidden ? ' miniapp-disabled' : '');
-                pivxBtn.id = 'attachment-panel-pivx';
-                pivxBtn.draggable = false;
-                pivxBtn.innerHTML = `
-                    <div class="attachment-panel-btn attachment-panel-pivx-btn">
-                        <span class="icon icon-pivx"></span>
-                    </div>
-                    <span class="attachment-panel-label">PIVX</span>
-                `;
-                // Store app name for search filtering
-                pivxBtn.dataset.appName = 'pivx';
-                // Mark hidden state for search filter logic
-                if (app.isHidden) pivxBtn.dataset.appHidden = 'true';
-
-                // Hidden PIVX starts invisible (only revealed via search)
-                if (app.isHidden) pivxBtn.style.display = 'none';
-
-                // Add tooltip on hover
-                pivxBtn.addEventListener('mouseenter', () => {
-                    showGlobalTooltip(app.isHidden ? 'Restore PIVX Wallet' : 'PIVX Wallet', pivxBtn);
-                });
-                pivxBtn.addEventListener('mouseleave', () => {
-                    hideGlobalTooltip();
-                });
-
-                pivxBtn.onclick = async () => {
-                    // Don't launch if in edit mode
-                    if (miniAppsEditMode) return;
-                    hideGlobalTooltip();
-                    if (app.isHidden) {
-                        // Restore hidden PIVX
-                        localStorage.removeItem('pivx_hidden');
-                        await loadMiniAppsHistory();
-                        popupConfirm('PIVX Wallet Restored', 'The PIVX Wallet has been restored to your Mini Apps panel.', true);
-                    } else {
-                        showPivxWalletPanel();
-                    }
-                };
-                domMiniAppsGrid.appendChild(pivxBtn);
-            } else {
-                // Create Mini App button
-                const item = document.createElement('button');
-                item.className = 'attachment-panel-item attachment-panel-miniapp';
-                item.draggable = false;
-
-                // Start with a placeholder icon, then load the actual icon
-                item.innerHTML = `
-                    <div class="attachment-panel-btn attachment-panel-miniapp-btn">
-                        <span class="icon icon-play"></span>
-                    </div>
-                    <span class="attachment-panel-label cutoff">${escapeHtml(app.name)}</span>
-                `;
-
-                // Store the app name for search filtering
-                item.dataset.appName = app.name.toLowerCase();
-
-                // Add tooltip on hover for the entire item
-                item.addEventListener('mouseenter', () => {
-                    showGlobalTooltip(app.name, item);
-                });
-                item.addEventListener('mouseleave', () => {
-                    hideGlobalTooltip();
-                });
-
-                item.onclick = async () => {
-                    // Don't launch if in edit mode or currently updating
-                    if (miniAppsEditMode) return;
-                    if (item.dataset.updating) return;
-                    hideGlobalTooltip();
-                    // Open the Mini App using the stored attachment reference
-                    await openMiniAppFromHistory(app);
-                };
-                // Set marketplace ID for update lookup
-                if (app.marketplace_id) {
-                    item.dataset.marketplaceId = app.marketplace_id;
-                }
-
-                // Check for marketplace update
-                if (app.marketplace_id) {
-                    const mktApp = marketplaceApps.find(m => m.id === app.marketplace_id);
-                    if (mktApp && mktApp.version && mktApp.version !== app.installed_version) {
-                        item.dataset.hasUpdate = 'true';
-                        const badge = document.createElement('div');
-                        badge.className = 'miniapp-update-badge';
-                        badge.innerHTML = '<span class="icon icon-arrow-up"></span>';
-                        badge.onclick = (e) => {
-                            e.stopPropagation();
-                            handleMiniAppPanelUpdate(app.marketplace_id);
-                        };
-                        item.appendChild(badge);
-                    }
-                }
-
-                domMiniAppsGrid.appendChild(item);
-
-                // Load the Mini App icon asynchronously
-                loadMiniAppIcon(app, item.querySelector('.attachment-panel-btn'));
-            }
+        entries.sort((a, b) => b.lastOpened - a.lastOpened);
+        for (const [key, entry] of miniAppsPreinstalling) {
+            if (!entries.some(e => e.key === key)) entries.push(entry);
         }
+        const empty = history.length === 0 && !miniAppsPreinstalling.size && (pivxHidden || pivxLastOpenedAt === 0);
+        VectorSvelte.gridSetApps(entries, empty);
+        VectorSvelte.flushSync();
 
-        // If no apps at all (only PIVX which is always there), show empty message
-        if (history.length === 0 && (pivxHidden || pivxLastOpenedAt === 0)) {
-            const emptyMsg = document.createElement('div');
-            emptyMsg.className = 'attachment-panel-empty';
-            emptyMsg.textContent = 'No recent Mini Apps';
-            domMiniAppsGrid.appendChild(emptyMsg);
+        for (const app of history) {
+            if (!miniAppIconCache.has(app.src_url)) loadMiniAppIcon(app);
         }
     } catch (e) {
         console.error('Failed to load Mini Apps history:', e);
@@ -450,168 +234,84 @@ async function loadMiniAppsHistory() {
 }
 
 /**
- * Filters the Mini Apps grid based on search query
- * Hides Marketplace when search is active
- * @param {string} query - The search query
+ * A fresh install starts with two default apps. Their tiles appear at once as
+ * downloads and turn into ordinary apps as each lands; the history reload keys
+ * on the marketplace id so the tile is the same node throughout.
  */
-function filterMiniApps(query) {
-    const normalizedQuery = query.toLowerCase().trim();
-    const isSearching = normalizedQuery.length > 0;
-
-    // Get all items in the grid
-    const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item');
-    let visibleCount = 0;
-
-    items.forEach(item => {
-        const appName = item.dataset.appName;
-
-        // Always hide Marketplace when searching
-        if (item.id === 'attachment-panel-marketplace') {
-            item.classList.toggle('hidden-by-search', isSearching);
-            if (!isSearching) visibleCount++;
-            return;
-        }
-
-        // Filter all apps (including PIVX) by name
-        if (appName) {
-            const isHiddenApp = item.dataset.appHidden === 'true';
-            const matches = !isSearching || appName.includes(normalizedQuery);
-
-            if (isHiddenApp) {
-                // Hidden apps: only show when searching and name matches
-                const show = isSearching && matches;
-                item.style.display = show ? '' : 'none';
-                item.classList.toggle('hidden-by-search', !show);
-                if (show) visibleCount++;
-            } else {
-                item.classList.toggle('hidden-by-search', !matches);
-                if (matches) visibleCount++;
+async function preinstallDefaultMiniApps() {
+    const defaults = [
+        { id: 'vectify', name: 'Vectify' },
+        { id: 'deadlock', name: 'State of Surveillance' },
+    ];
+    for (const { id, name } of defaults) {
+        miniAppsPreinstalling.set(id, {
+            key: id, name, pivx: false, hidden: false, app: null, marketplaceId: id,
+            hasUpdate: false, downloading: true, icon: null, lastOpened: 0,
+        });
+    }
+    try {
+        await fetchMarketplaceApps(true);
+        const installs = [];
+        for (const { id } of defaults) {
+            const app = marketplaceApps.find(a => a.id === id);
+            if (!app) {
+                console.warn(`[Mini Apps] Default app "${id}" not found in marketplace`);
+                miniAppsPreinstalling.delete(id);
+                continue;
             }
+            // Cached local icon directly; a remote icon_url via the backend cache
+            // (the WebView never fetches remote — Tor).
+            let icon = app.icon_cached ? convertFileSrc(app.icon_cached) : null;
+            if (!icon && app.icon_url) {
+                icon = await invoke('cache_url_image', { url: app.icon_url }).then(p => p ? convertFileSrc(p) : null).catch(() => null);
+            }
+            const entry = { ...miniAppsPreinstalling.get(id), name: app.name, icon };
+            miniAppsPreinstalling.set(id, entry);
+            VectorSvelte.gridPatch(id, entry);
+            installs.push(installMarketplaceApp(app.id).catch(err => {
+                console.error(`[Mini Apps] Failed to pre-install ${app.id}:`, err);
+            }).then(() => {
+                miniAppsPreinstalling.delete(id);
+                return loadMiniAppsHistory();
+            }));
         }
-    });
-
-    // Also hide/show empty message based on visible items
-    const emptyMsg = domMiniAppsGrid.querySelector('.attachment-panel-empty');
-    if (emptyMsg) {
-        emptyMsg.classList.toggle('hidden-by-search', isSearching);
+        await loadMiniAppsHistory();
+        await Promise.all(installs);
+    } catch (preInstallErr) {
+        console.error('[Mini Apps] Pre-install failed:', preInstallErr);
+        miniAppsPreinstalling.clear();
     }
+}
 
-    // Show/hide "no results" message
-    let noResultsMsg = domMiniAppsGrid.querySelector('.miniapps-no-results');
-    if (isSearching && visibleCount === 0) {
-        if (!noResultsMsg) {
-            noResultsMsg = document.createElement('div');
-            noResultsMsg.className = 'miniapps-no-results';
-            noResultsMsg.innerHTML = `
-                <p>No Mini Apps found</p>
-                <p class="miniapps-no-results-hint">Try a different search, or check out the Nexus!</p>
-            `;
-            domMiniAppsGrid.appendChild(noResultsMsg);
-        }
-        noResultsMsg.style.display = '';
-    } else if (noResultsMsg) {
-        noResultsMsg.style.display = 'none';
-    }
+/** Filter the grid by name; the Nexus hides while searching. */
+function filterMiniApps(query) {
+    VectorSvelte.gridSetQuery(query || '');
 }
 
 // ========== Mini Apps Edit Mode ==========
 
-let miniAppsEditMode = false;
 let miniAppsHoldTimer = null;
 let miniAppsEditModeJustActivated = false;
 
-/**
- * Activates edit mode for the Mini Apps grid
- * Shows red X badges on all apps (except Marketplace) for removal
- */
+/** Edit mode: the grid wobbles and every app but the Nexus grows a delete badge. */
 function activateMiniAppsEditMode() {
-    if (miniAppsEditMode) return;
-    miniAppsEditMode = true;
+    if (miniAppsEditMode()) return;
+    VectorSvelte.gridSetEditMode(true);
     miniAppsEditModeJustActivated = true;
-
-    // Add edit-mode class for wobble animation
     domMiniAppsGrid.classList.add('edit-mode');
 
-    // Add delete badges to all apps except Marketplace
-    const items = domMiniAppsGrid.querySelectorAll('.attachment-panel-item:not(#attachment-panel-marketplace)');
-    items.forEach(item => {
-        // Don't add badge if already exists or app is updating
-        if (item.querySelector('.miniapp-delete-badge')) return;
-        if (item.dataset.updating) return;
-
-        const badge = document.createElement('div');
-        badge.className = 'miniapp-delete-badge';
-        badge.innerHTML = '<span class="icon icon-x"></span>';
-
-        // Get app info for deletion
-        const appName = item.dataset.appName;
-        const isPivx = item.id === 'attachment-panel-pivx';
-
-        badge.onclick = async (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-
-            // Hide tooltip before showing confirm dialog
-            hideGlobalTooltip();
-
-            const displayName = isPivx ? 'PIVX Wallet' : item.querySelector('.attachment-panel-label')?.textContent || appName;
-
-            const confirmed = await popupConfirm(
-                'Remove App?',
-                `Are you sure you want to remove <b>${escapeHtml(displayName)}</b> from your recent Mini Apps?`,
-                false
-            );
-
-            if (confirmed) {
-                if (isPivx) {
-                    // For PIVX, set hidden flag (can be restored in Settings)
-                    localStorage.setItem('pivx_hidden', 'true');
-                } else {
-                    // For regular apps, remove from backend history
-                    try {
-                        await invoke('miniapp_remove_from_history', { name: displayName });
-                    } catch (err) {
-                        console.error('Failed to remove Mini App from history:', err);
-                    }
-                }
-
-                // Deactivate edit mode and refresh the list
-                deactivateMiniAppsEditMode();
-                await loadMiniAppsHistory();
-                animateAttachmentPanelItems(domMiniAppsGrid);
-            }
-        };
-
-        item.appendChild(badge);
-    });
-
-    // Add global click listener to exit edit mode
-    // Remove any existing listener first to prevent duplicates
     document.removeEventListener('click', handleEditModeClickOutside, true);
-    // Add with a small delay so the mouseup click from hold doesn't immediately trigger it
+    // A beat later, so the mouseup click from the hold doesn't exit at once.
     setTimeout(() => {
-        if (miniAppsEditMode) {
-            document.addEventListener('click', handleEditModeClickOutside, true);
-        }
+        if (miniAppsEditMode()) document.addEventListener('click', handleEditModeClickOutside, true);
     }, 50);
 }
 
-/**
- * Deactivates edit mode for the Mini Apps grid
- */
 function deactivateMiniAppsEditMode() {
-    if (!miniAppsEditMode) return;
-    miniAppsEditMode = false;
+    if (!miniAppsEditMode()) return;
+    VectorSvelte.gridSetEditMode(false);
     miniAppsEditModeJustActivated = false;
-
-    // Remove edit-mode class
     domMiniAppsGrid.classList.remove('edit-mode');
-
-    // Remove all delete badges
-    const badges = domMiniAppsGrid.querySelectorAll('.miniapp-delete-badge');
-    badges.forEach(badge => badge.remove());
-
-    // Remove global click listener
     document.removeEventListener('click', handleEditModeClickOutside, true);
 }
 
@@ -648,8 +348,7 @@ function handleEditModeClickOutside(e) {
  * @param {Event} e - The mousedown/touchstart event
  */
 function startMiniAppHold(e) {
-    // Don't start hold on Marketplace or if already in edit mode
-    if (miniAppsEditMode) return;
+    if (miniAppsEditMode()) return;
     const item = e.target.closest('.attachment-panel-item');
     if (!item || item.id === 'attachment-panel-marketplace') return;
 
@@ -713,27 +412,15 @@ function setupMiniAppsEditMode() {
     domMiniAppsGrid.addEventListener('touchmove', cancelMiniAppHold);
 }
 
-/**
- * Load Mini App icon asynchronously and update the button
- */
-async function loadMiniAppIcon(app, btnElement) {
+/** Resolve an app's icon from its bundle and paint it onto its tile. */
+async function loadMiniAppIcon(app) {
     try {
         const info = await invoke('miniapp_load_info', { filePath: app.src_url });
         if (info && info.icon_data) {
-            // Replace only the placeholder icon, preserving overlays (update badge, etc.)
-            const placeholder = btnElement.querySelector('.icon, .attachment-panel-miniapp-icon');
-            const img = document.createElement('img');
-            img.src = info.icon_data;
-            img.alt = app.name;
-            img.className = 'attachment-panel-miniapp-icon';
-            if (placeholder) {
-                placeholder.replaceWith(img);
-            } else {
-                btnElement.prepend(img);
-            }
+            miniAppIconCache.set(app.src_url, info.icon_data);
+            VectorSvelte.gridPatch(miniAppKey(app), { icon: info.icon_data });
         }
     } catch (e) {
-        // Keep the placeholder icon if loading fails
         console.debug('Failed to load Mini App icon:', e);
     }
 }
@@ -1011,37 +698,14 @@ function newestOwnXdcMessage(chatId) {
  * @param {string} marketplaceId - The marketplace app ID to update
  */
 async function handleMiniAppPanelUpdate(marketplaceId) {
-    const item = domMiniAppsGrid.querySelector(
-        `[data-marketplace-id="${CSS.escape(marketplaceId)}"]`
-    );
-    if (!item) return;
-
-    const btn = item.querySelector('.attachment-panel-btn');
-    if (!btn) return;
-
-    // Mark as updating (blocks taps and edit-mode deletion)
-    item.dataset.updating = 'true';
-
-    // Remove update badge
-    const badge = item.querySelector('.miniapp-update-badge');
-    if (badge) badge.remove();
-
-    // Add downloading overlay with progress spinner
-    const overlay = document.createElement('div');
-    overlay.className = 'miniapp-downloading-overlay';
-    overlay.innerHTML = `<div class="miniapp-downloading-spinner" data-app-id="${CSS.escape(marketplaceId)}"></div>`;
-    btn.appendChild(overlay);
-
+    // Downloading blocks taps and edit-mode deletion for the tile.
+    VectorSvelte.gridPatch(marketplaceId, { downloading: true, hasUpdate: false });
     try {
         await updateMarketplaceApp(marketplaceId);
-        overlay.remove();
-        delete item.dataset.hasUpdate;
-        delete item.dataset.updating;
         await loadMiniAppsHistory();
     } catch (e) {
         console.error('Failed to update Mini App from panel:', e);
-        overlay.remove();
-        delete item.dataset.updating;
+        VectorSvelte.gridPatch(marketplaceId, { downloading: false, hasUpdate: true });
     }
 }
 
