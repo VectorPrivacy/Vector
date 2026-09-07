@@ -42,6 +42,11 @@ import PackPreviewCard from './picker/PackPreviewCard.svelte';
 import PackDetailsModal from './picker/PackDetailsModal.svelte';
 import GifGrid from './picker/GifGrid.svelte';
 import PinsDrawer from './chat/PinsDrawer.svelte';
+import ModList from './moderation/ModList.svelte';
+import ModFilters from './moderation/ModFilters.svelte';
+import ModStats from './moderation/ModStats.svelte';
+import ModChrome from './moderation/ModChrome.svelte';
+import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
 import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
@@ -84,6 +89,7 @@ export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken };
 export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { pinsState, setPins, setPinsOpen };
+export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -367,4 +373,14 @@ export function mountGifGrid(grid, { h }) {
 export function mountPinsDrawer(list, { h }) {
     list.replaceChildren();
     return mount(PinsDrawer, { target: list, props: { h } });
+}
+
+/** Mount the moderation console's islands: list, filters, stats, and the renderless chrome. */
+export function mountModeration({ list, filters, stats, els, h }) {
+    list.replaceChildren(); filters.replaceChildren(); stats.replaceChildren();
+    mount(ModList, { target: list, props: { h } });
+    mount(ModFilters, { target: filters, props: {} });
+    mount(ModStats, { target: stats, props: {} });
+    const host = document.createElement('div'); host.hidden = true; document.body.appendChild(host);
+    mount(ModChrome, { target: host, props: { els, h } });
 }

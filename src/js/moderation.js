@@ -28,24 +28,36 @@ const domModRevoke = document.getElementById('mod-revoke-invites');
 const domModRotate = document.getElementById('mod-rotate');
 const domModBanRotate = document.getElementById('mod-ban-rotate');
 
-let modState = {
-    communityId: null,
-    intel: null,
-    /// npubs to carry through a rotation. The panel's whole output.
-    keep: new Set(),
-    filter: 'all',
-    query: '',
-    busy: false,
-};
+// The console's state lives in lib/moderation.svelte.js; this side fetches and publishes.
+const modCommunityId = () => VectorSvelte.modState().communityId;
+const modIntel = () => VectorSvelte.modIntel();
+const modKeep = () => VectorSvelte.modKeep();
+
+let modIslandsMounted = false;
+function modEnsureIslands() {
+    if (modIslandsMounted) return;
+    modIslandsMounted = true;
+    VectorSvelte.mountModeration({
+        list: domModList, filters: domModFilters, stats: document.getElementById('mod-stats'),
+        els: {
+            card: domModCard, name: domModName, epoch: domModEpoch, alert: domModAlert, alertTitle: domModAlertTitle,
+            alertBody: domModAlertBody, tallyKeep: domModTallyKeep, tallyCut: domModTallyCut, banlist: domModBanlist,
+            revoke: domModRevoke, revokeLabel: domModRevoke.querySelector('.mod-btn-label'),
+            rotate: domModRotate, rotateLabel: domModRotate.querySelector('.mod-btn-label'),
+            banRotate: domModBanRotate, banRotateLabel: domModBanRotate.querySelector('.mod-btn-label'), close: domModClose,
+        },
+        h: {
+            ago: modAgo,
+            displayName: modDisplayName,
+            avatarSrc: (npub) => { const p = arrProfiles.find(x => x.id === npub); return p ? getProfileAvatarSrc(p) : null; },
+            createPlaceholderAvatar,
+        },
+    });
+}
 
 // Two groups that always sum to Everyone, named after what happens to them rather than
 // after the machinery. There is deliberately no "Suspects" filter: the verdict starts
 // equal to the selection, so it was two chips showing one number.
-const MOD_FILTERS = [
-    { id: 'all', label: 'Everyone' },
-    { id: 'cut', label: 'Removing' },
-    { id: 'keep', label: 'Staying' },
-];
 
 /** Relative time that stays readable at raid speed (seconds matter here). */
 function modAgo(secs) {
@@ -73,20 +85,14 @@ function modDisplayName(npub) {
  */
 async function openModerationPanel(communityId) {
     if (!communityId) return;
-    modState = { communityId, intel: null, keep: new Set(), filter: 'all', query: '', busy: false };
+    modEnsureIslands();
+    VectorSvelte.modOpen(communityId);
     modShowTab('members');
     const tm = document.getElementById('mod-tab-members');
     const tp = document.getElementById('mod-tab-policies');
     if (tm) tm.onclick = () => modShowTab('members');
     if (tp) tp.onclick = () => modShowTab('policies');
-
     domModSearch.value = '';
-    domModName.textContent = '';
-    domModEpoch.textContent = '';
-    domModAlert.style.display = 'none';
-    domModList.innerHTML = '<div class="mod-empty"><span class="icon icon-loading spin"></span></div>';
-    modRenderFilters();
-    modSetTallies(0, 0);
 
     domModOverlay.classList.remove('closing');
     domModCard.classList.remove('pop-in');
@@ -95,28 +101,23 @@ async function openModerationPanel(communityId) {
     domModCard.classList.add('pop-in');
     document.addEventListener('keydown', modEscape);
     pushBack('mod-overlay', closeModerationPanel);
+    await modFetch(communityId);
+}
 
+/** Fetch the intel; protected and trusted start ticked, convicted start clear. */
+async function modFetch(communityId) {
     try {
         const intel = await invoke('get_moderation_intel', { communityId });
-        // A swap or a close while the read was in flight: don't paint over what
-        // the user is looking at now.
-        if (modState.communityId !== communityId) return;
-        // The designer's per-channel exemptions read from the same payload the
-        // console already has — one place to ask, one answer.
+        // A swap or a close while the read was in flight: don't paint over what is shown now.
+        if (modCommunityId() !== communityId) return;
+        // The designer's per-channel exemptions read from the same payload.
         window.polChannels = (intel.channels || []).map(c => ({ id: c.id, name: c.name || 'channel' }));
         window.polChannelsLoaded = true;
         window.polChannelsReady?.();
-        modState.intel = intel;
-        modState.keep = new Set(
-            intel.report.members.filter(m => m.verdict !== 'suspect').map(m => m.npub)
-        );
-        modApplyIntel();
+        VectorSvelte.modSetIntel(intel, new Set(intel.report.members.filter(m => m.verdict !== 'suspect').map(m => m.npub)));
     } catch (err) {
-        domModList.innerHTML = '';
-        const p = document.createElement('div');
-        p.className = 'mod-empty';
-        p.textContent = String(err);
-        domModList.appendChild(p);
+        if (modCommunityId() !== communityId) return;
+        VectorSvelte.modSetError(err);
     }
 }
 
@@ -136,7 +137,7 @@ function modShowTab(which) {
     if (pol) pol.style.display = members ? 'none' : '';
     const explain = document.querySelector('.mod-explain');
     if (explain) explain.style.display = members ? '' : 'none';
-    if (!members && window.openPolicyDesigner) window.openPolicyDesigner(modState.communityId);
+    if (!members && window.openPolicyDesigner) window.openPolicyDesigner(modCommunityId());
 }
 
 /// The console is opened DURING a raid, and its intel was a one-shot read: the
@@ -171,7 +172,7 @@ function modStopRefresh() {
 /// would let an unrelenting flood — exactly when the console is needed — starve
 /// the refresh forever.
 function modNoteActivity(communityId) {
-    if (!communityId || modState.communityId !== communityId) return;
+    if (!communityId || modCommunityId() !== communityId) return;
     if (modRefreshPending) return; // already coalescing this burst
     const since = Date.now() - modRefreshedAt;
     const wait = Math.max(MOD_REFRESH_COALESCE_MS, MOD_REFRESH_FLOOR_MS - since);
@@ -190,44 +191,42 @@ function modNoteActivity(communityId) {
 /// selector is worse than a slow refresh — an operator would tick a row that no
 /// longer exists and act on a roster the network has already replaced.
 function modNoteControlChange(communityId) {
-    if (!communityId || modState.communityId !== communityId) return;
+    if (!communityId || modCommunityId() !== communityId) return;
     modStopRefresh();
     modRefresh(communityId);
 }
 
 async function modRefresh(communityId) {
     const print = (intel) => JSON.stringify((intel?.report?.members || []).map(m => [m.npub, m.verdict]).sort());
-    // A close, a swap, or a rotation in flight — nothing to repaint onto.
-    if (modState.communityId !== communityId || modState.busy) return;
+    // A close, a swap, or a rotation in flight: nothing to repaint onto.
+    if (modCommunityId() !== communityId || VectorSvelte.modState().busy) return;
     let intel;
     try {
         intel = await invoke('get_moderation_intel', { communityId });
     } catch (_) {
         return; // a blip must not blank the panel an operator is working in
     }
-    if (modState.communityId !== communityId || modState.busy) return;
-    if (print(intel) === print(modState.intel)) return;
-    // NEW members default to their verdict; everyone the operator has already
-    // decided on keeps the tick they were given — a refresh must never move a
-    // tick mid-triage.
-    const decided = modState.keep;
-    const seen = new Set((modState.intel?.report?.members || []).map(m => m.npub));
-    modState.intel = intel;
-    modState.keep = new Set(
+    if (modCommunityId() !== communityId || VectorSvelte.modState().busy) return;
+    const prev = modIntel();
+    if (print(intel) === print(prev)) return;
+    // NEW members default to their verdict; everyone the operator has already decided on
+    // keeps the tick they were given. A refresh must never move a tick mid-triage.
+    const decided = modKeep();
+    const seen = new Set((prev?.report?.members || []).map(m => m.npub));
+    VectorSvelte.modSetIntel(intel, new Set(
         intel.report.members
             .filter(m => (seen.has(m.npub) ? decided.has(m.npub) : m.verdict !== 'suspect'))
             .map(m => m.npub)
-    );
-    modApplyIntel();
+    ));
 }
 
 function closeModerationPanel() {
     if (domModOverlay.classList.contains('closing')) return;
-    if (modState.busy) return;
+    if (VectorSvelte.modState().busy) return;
     document.removeEventListener('keydown', modEscape);
     popBack('mod-overlay');
     modStopRefresh();
-    modState.communityId = null;
+    VectorSvelte.modOpen(null);
     domModOverlay.classList.add('closing');
     domModOverlay._closeTimer = setTimeout(() => {
         domModOverlay.classList.remove('active', 'closing');
@@ -240,302 +239,39 @@ function modEscape(e) {
 }
 
 /** Paint the header, the raid banner and the list from a freshly-read snapshot. */
-function modApplyIntel() {
-    const intel = modState.intel;
-    const r = intel.report;
-    domModName.textContent = intel.name || 'Community';
-    domModEpoch.textContent = `Epoch ${intel.epoch}`;
-
-    modPaintAlert();
-
-    const used = intel.banlist_count;
-    const max = intel.banlist_max;
-    domModBanlist.textContent = `banlist ${used}/${max}`;
-    domModRevoke.querySelector('.mod-btn-label').textContent =
-        intel.invites.length ? `Revoke ${intel.invites.length} invite${intel.invites.length === 1 ? '' : 's'}` : 'No invite links';
-    domModRevoke.disabled = intel.invites.length === 0;
-
-    modRenderFilters();
-    modRenderList();
-}
-
-/** The raid banner, or nothing. Re-run on leaving a busy state, which borrows this slot. */
-function modPaintAlert() {
-    const r = modState.intel?.report;
-    domModAlert.classList.remove('working');
-    if (!r || !r.raid_detected) {
-        domModAlert.style.display = 'none';
-        return;
-    }
-    // `size` is the true cluster; `members` is only a display sample the backend caps.
-    const biggest = r.cohorts[0];
-    const burst = r.burst_size >= 2 && r.burst_to_ms > r.burst_from_ms
-        ? ` ${r.burst_size} joined within ${modAgo(Math.round((r.burst_to_ms - r.burst_from_ms) / 1000))} of each other.`
-        : '';
-    domModAlertTitle.textContent = `Raid: ${r.suspects} accounts flagged.`;
-    domModAlertBody.textContent = (biggest ? ` ${biggest.size} posted \u201c${biggest.sample.slice(0, 40)}\u201d.` : '')
-        + burst
-        + ' They start unticked, so they are the ones being removed.';
-    domModAlert.style.display = '';
-}
-
-function modRenderFilters() {
-    domModFilters.innerHTML = '';
-    const counts = modState.intel ? modCounts() : {};
-    for (const f of MOD_FILTERS) {
-        const b = document.createElement('button');
-        b.className = 'mod-chip' + (modState.filter === f.id ? ' active' : '');
-        b.textContent = f.label;
-        if (modState.intel) {
-            const n = document.createElement('span');
-            n.className = 'mod-chip-count';
-            n.textContent = counts[f.id] ?? 0;
-            b.appendChild(n);
-        }
-        b.onclick = () => { modState.filter = f.id; modRenderFilters(); modRenderList(); };
-        domModFilters.appendChild(b);
-    }
-}
-
-function modCounts() {
-    const members = modState.intel.report.members;
-    const cut = members.filter(m => !modState.keep.has(m.npub)).length;
-    return { all: members.length, cut, keep: members.length - cut };
-}
-
-function modVisible() {
-    const q = modState.query.trim().toLowerCase();
-    return modState.intel.report.members.filter(m => {
-        if (modState.filter === 'cut' && modState.keep.has(m.npub)) return false;
-        if (modState.filter === 'keep' && !modState.keep.has(m.npub)) return false;
-        if (q && !(modDisplayName(m.npub) + ' ' + m.npub).toLowerCase().includes(q)) return false;
-        return true;
-    });
-}
-
-/// What the panel says before you read a single row. A moderator opening this
-/// mid-raid needs one glance to know whether anything is wrong.
-function modRenderStats() {
-    const el = document.getElementById('mod-stats');
-    if (!el || !modState.intel) return;
-    const r = modState.intel.report;
-    const flagged = r.members.filter(m => m.verdict === 'suspect').length;
-    const cells = [
-        { n: r.members.length, label: 'members' },
-        { n: r.trusted || 0, label: 'trusted', tone: 'good' },
-        { n: r.protected || 0, label: 'staff', tone: 'staff' },
-        { n: flagged, label: 'flagged', tone: flagged ? 'bad' : 'quiet' },
-    ];
-    el.innerHTML = cells.map(c =>
-        `<div class="mod-stat mod-stat-${c.tone || 'quiet'}">
-            <span class="mod-stat-n">${c.n}</span>
-            <span class="mod-stat-l">${c.label}</span>
-         </div>`).join('');
-}
-
-function modRenderList() {
-    const rows = modVisible();
-    domModList.innerHTML = '';
-    if (!rows.length) {
-        const p = document.createElement('div');
-        p.className = 'mod-empty';
-        p.textContent = 'No members match.';
-        domModList.appendChild(p);
-        modUpdateTallies();
-        return;
-    }
-    const frag = document.createDocumentFragment();
-    for (const m of rows) frag.appendChild(modBuildRow(m));
-    domModList.appendChild(frag);
-    modRenderStats();
-    modUpdateTallies();
-}
-
-function modBuildRow(m) {
-    const kept = modState.keep.has(m.npub);
-    const locked = m.verdict === 'protected';
-
-    const row = document.createElement('div');
-    // The rail encodes standing at a glance; the badge only appears where a
-    // word adds something the colour cannot.
-    const standing = m.verdict === 'protected' ? 'staff'
-        : m.verdict === 'suspect' ? 'flagged'
-        : m.verdict === 'trusted' ? 'trusted' : 'plain';
-    row.className = `mod-row mod-standing-${standing}` + (kept ? '' : ' cutting') + (locked ? ' locked' : '');
-    row.dataset.npub = m.npub;
-
-    const box = document.createElement('div');
-    box.className = 'mod-check' + (kept ? ' on' : '');
-    box.setAttribute('role', 'checkbox');
-    box.setAttribute('aria-checked', String(kept));
-    if (kept) box.innerHTML = '<span class="icon icon-check"></span>';
-    row.appendChild(box);
-
-    const profile = arrProfiles.find(p => p.id === m.npub) || null;
-    const avatar = createAvatarImg(profile ? getProfileAvatarSrc(profile) : null, 30, false);
-    avatar.className = 'mod-avatar';
-    row.appendChild(avatar);
-
-    const body = document.createElement('div');
-    body.className = 'mod-body';
-
-    const top = document.createElement('div');
-    top.className = 'mod-row-top';
-    const name = document.createElement('span');
-    name.className = 'mod-name cutoff';
-    name.textContent = modDisplayName(m.npub);
-    top.appendChild(name);
-    const badge = modBadge(m);
-    if (badge) top.appendChild(badge);
-    body.appendChild(top);
-
-    const meta = document.createElement('div');
-    meta.className = 'mod-meta cutoff';
-    // Tenure, not the raw Guestbook join: a migration re-seeds every Join at the same
-    // moment, so the join date would tell 600 members they arrived on the same day.
-    // Numbers are wrapped so they can sit in tabular figures and line up down the
-    // column — the difference between reading a list and scanning one.
-    const num = (v) => `<span class="mod-num">${v}</span>`;
-    const bits = [];
-    bits.push(m.tenure_secs ? `here ${num(modAgo(m.tenure_secs))}` : '<span class="mod-unknown">age unknown</span>');
-    bits.push(`${num(m.messages)} msg${m.messages === 1 ? '' : 's'}`);
-    if (m.distinct > 0) bits.push(`${num(m.distinct)} distinct`);
-    if (m.invite_label) bits.push(`via ${modEscapeText(m.invite_label)}`);
-    meta.innerHTML = bits.join('<span class="mod-dot">·</span>');
-    body.appendChild(meta);
-
-    // A reason that only restates the badge is a third copy of the same fact —
-    // the badge names the standing and the tenure above it is the evidence.
-    // Cite the line only when it says something neither of those does.
-    const why = m.reasons.filter(r => !MOD_RESTATES_BADGE.has(r));
-    if (why.length) {
-        const el = document.createElement('div');
-        el.className = 'mod-why cutoff';
-        el.textContent = why.join(' · ');
-        body.appendChild(el);
-    }
-    row.appendChild(body);
-
-    if (!locked) {
-        row.onclick = () => modToggle(m.npub);
-        row.style.cursor = 'pointer';
-    } else {
-        row.title = m.reasons[0] || 'Protected';
-    }
-    return row;
-}
-
-const MOD_RESTATES_BADGE = new Set(['Long-standing member', 'Holds a role', 'Community owner']);
-
-/** A badge only where it adds something: standing you can't infer from the group. */
-function modBadge(m) {
-    let text = null;
-    if (m.is_owner) text = 'OWNER';
-    else if (m.is_me) text = 'YOU';
-    else if (m.is_admin) text = 'STAFF';
-    else if (m.verdict === 'trusted') text = 'REGULAR';
-    else if (m.verdict === 'neutral' && m.reasons.length) text = 'CHECK';
-    if (!text) return null;
-    const b = document.createElement('span');
-    b.className = `mod-badge mod-badge-${m.verdict}`;
-    b.textContent = text;
-    return b;
-}
-
-/** Flip one member in place — a full re-render would lose the scroll position. */
-function modToggle(npub) {
-    if (modState.busy) return;
-    if (modState.keep.has(npub)) modState.keep.delete(npub);
-    else modState.keep.add(npub);
-    const m = modState.intel.report.members.find(x => x.npub === npub);
-    const old = domModList.querySelector(`.mod-row[data-npub="${CSS.escape(npub)}"]`);
-    if (m && old) old.replaceWith(modBuildRow(m));
-    modUpdateTallies();
-    modRenderFilters();
-}
-
-function modSetTallies(keep, cut) {
-    domModTallyKeep.textContent = keep;
-    domModTallyCut.textContent = cut;
-    // A red "0 removing" reads as a standing alarm. It only belongs there once
-    // the admin has actually unticked someone.
-    domModTallyCut.parentElement.hidden = cut === 0;
-}
-
-function modUpdateTallies() {
-    if (!modState.intel) return;
-    const members = modState.intel.report.members;
-    const cut = members.filter(m => !modState.keep.has(m.npub));
-    modSetTallies(members.length - cut.length, cut.length);
-
-    const room = modState.intel.banlist_max - modState.intel.banlist_count;
-    const overCap = cut.length > room;
-    // A bare rotation with nobody cut is legitimate — it's the answer to a leaked link.
-    domModRotate.disabled = false;
-    domModBanRotate.disabled = cut.length === 0 || overCap;
-    domModBanRotate.title = overCap
-        ? `The banlist holds ${modState.intel.banlist_max}; only ${room} slots are free. Rotate instead: it has no ceiling.`
-        : '';
-    domModRotate.querySelector('.mod-btn-label').textContent =
-        cut.length ? `Remove ${cut.length} & rotate` : 'Rotate keys';
-    domModBanRotate.querySelector('.mod-btn-label').textContent =
-        cut.length ? `Ban ${cut.length} & rotate` : 'Ban & rotate';
-}
-
 function modCutList() {
-    return modState.intel.report.members
-        .filter(m => !modState.keep.has(m.npub))
-        .map(m => m.npub);
+    const keep = modKeep();
+    return modIntel().report.members.filter(m => !keep.has(m.npub)).map(m => m.npub);
 }
 
 /** Lock the console for the duration of a publish; these take seconds, not frames. */
 function modSetBusy(busy, label) {
-    modState.busy = busy;
-    domModCard.classList.toggle('busy', busy);
-    for (const b of [domModRevoke, domModRotate, domModBanRotate]) b.disabled = busy;
-    domModClose.disabled = busy;
-    if (busy && label) {
-        domModAlertTitle.textContent = label;
-        domModAlertBody.textContent = ' Publishing. Leave this open until it finishes.';
-        domModAlert.style.display = '';
-        domModAlert.classList.add('working');
-    } else {
-        modPaintAlert();
-    }
+    VectorSvelte.modSetBusy(busy, label, busy ? ' Publishing. Leave this open until it finishes.' : '');
 }
 
 async function modReload() {
-    const communityId = modState.communityId;
+    const communityId = modCommunityId();
     if (!communityId) return;
     // The header pip and the menu entry both cache a verdict; an action just invalidated it.
     clearCommunityRaidAlert(communityId);
-    try {
-        const intel = await invoke('get_moderation_intel', { communityId });
-        if (modState.communityId !== communityId) return;
-        modState.intel = intel;
-        modState.keep = new Set(intel.report.members.filter(m => m.verdict !== 'suspect').map(m => m.npub));
-        modApplyIntel();
-    } catch (err) {
-        showToast(String(err));
-    }
+    await modFetch(communityId);
 }
 
 // The purge publishes one directive per member, so it runs for minutes on a big wave.
 // Without a counter the panel looks hung and a moderator kills it half-done.
 window.__TAURI__.event.listen('community_purge_progress', (e) => {
     const p = e.payload;
-    if (!modState.busy || p.community_id !== modState.communityId) return;
+    if (!VectorSvelte.modState().busy || p.community_id !== modCommunityId()) return;
     const pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
-    domModAlertTitle.textContent = `Removing ${p.done}/${p.total}`;
-    domModAlertBody.textContent = ` ${pct}% \u2014 leave this open until it finishes.`;
+    VectorSvelte.modSetProgress(`Removing ${p.done}/${p.total}`, ` ${pct}% \u2014 leave this open until it finishes.`);
 });
 
 domModClose.onclick = closeModerationPanel;
 domModOverlay.onclick = (e) => { if (e.target === domModOverlay) closeModerationPanel(); };
-domModSearch.oninput = () => { modState.query = domModSearch.value; modRenderList(); };
+domModSearch.oninput = () => VectorSvelte.modSetQuery(domModSearch.value);
 
 domModRevoke.onclick = async () => {
-    const n = modState.intel.invites.length;
+    const n = modIntel().invites.length;
     const ok = await popupConfirm(
         'Revoke every invite link',
         `Retire all ${n} public invite link${n === 1 ? '' : 's'}? Anyone holding one can no longer join. Existing members are unaffected.`,
@@ -543,7 +279,7 @@ domModRevoke.onclick = async () => {
     if (!ok) return;
     modSetBusy(true, 'Revoking invite links…');
     try {
-        const res = await invoke('revoke_all_public_invites', { communityId: modState.communityId });
+        const res = await invoke('revoke_all_public_invites', { communityId: modCommunityId() });
         showToast(res.failed ? `Revoked ${res.revoked}, ${res.failed} failed` : `Revoked ${res.revoked} invite link${res.revoked === 1 ? '' : 's'}`);
         modSetBusy(false);
         await modReload();
@@ -556,28 +292,28 @@ domModRevoke.onclick = async () => {
 domModRotate.onclick = async () => {
     const cut = modCutList();
     // A rotation with links still live buys minutes: the same holder walks back in.
-    const live = modState.intel.invites.length;
+    const live = modIntel().invites.length;
     const linkWarning = live
         ? `<br><br><b>${live} invite link${live === 1 ? ' is' : 's are'} still live.</b> Anyone holding one can rejoin straight after this. Revoke them first.`
         : '';
     const ok = await popupConfirm(
         cut.length ? 'Remove members and rotate' : 'Rotate keys',
         (cut.length
-            ? `Remove <b>${cut.length}</b> member${cut.length === 1 ? '' : 's'} from the community, then mint a new epoch only the ${modState.keep.size} remaining can follow. They are dropped from everyone's member list and lose access, without being banned.<br><br>This publishes one removal per member, so ${cut.length} will take a while.`
+            ? `Remove <b>${cut.length}</b> member${cut.length === 1 ? '' : 's'} from the community, then mint a new epoch only the ${modKeep().size} remaining can follow. They are dropped from everyone's member list and lose access, without being banned.<br><br>This publishes one removal per member, so ${cut.length} will take a while.`
             : 'Mint a new epoch for everyone currently in the community. Use this when an invite link leaked but the members are all real.') + linkWarning,
         false, '', 'vector_warning.svg');
     if (!ok) return;
     modSetBusy(true, cut.length ? `Removing 0/${cut.length}` : 'Rotating keys…');
     try {
         // An empty retain rotates without removing anyone; a non-empty one is the keep-list.
-        const retain = cut.length ? [...modState.keep] : [];
-        const res = await invoke('refound_community', { communityId: modState.communityId, retain });
+        const retain = cut.length ? [...modKeep()] : [];
+        const res = await invoke('refound_community', { communityId: modCommunityId(), retain });
         const refused = res?.refused ? ` ${res.refused} refused.` : '';
         showToast(cut.length ? `Removed ${res?.kicked ?? cut.length} and rotated.${refused}` : 'Keys rotated.');
         modSetBusy(false);
         await modReload();
         // The header count, chat-header subtext and roster all cache the member set.
-        refreshCommunityMemberCount(modState.communityId, true);
+        refreshCommunityMemberCount(modCommunityId(), true);
     } catch (err) {
         modSetBusy(false);
         await popupConfirm("Couldn't complete the removal", escapeHtml(String(err)), true, '', 'vector_warning.svg');
@@ -594,7 +330,7 @@ domModBanRotate.onclick = async () => {
     if (!ok) return;
     modSetBusy(true, `Banning ${cut.length}…`);
     try {
-        await invoke('ban_community_members', { communityId: modState.communityId, npubs: cut });
+        await invoke('ban_community_members', { communityId: modCommunityId(), npubs: cut });
     } catch (err) {
         modSetBusy(false);
         await popupConfirm("Couldn't ban", escapeHtml(String(err)), true, '', 'vector_warning.svg');
@@ -607,8 +343,8 @@ domModBanRotate.onclick = async () => {
     // whole job.
     try {
         modSetBusy(true, 'Rotating keys…');
-        const retain = [...modState.keep];
-        await invoke('refound_community', { communityId: modState.communityId, retain });
+        const retain = [...modKeep()];
+        await invoke('refound_community', { communityId: modCommunityId(), retain });
         showToast(`Banned ${cut.length} and rotated.`);
     } catch (err) {
         modSetBusy(false);
@@ -621,7 +357,7 @@ domModBanRotate.onclick = async () => {
     }
     modSetBusy(false);
     await modReload();
-    refreshCommunityMemberCount(modState.communityId, true);
+    refreshCommunityMemberCount(modCommunityId(), true);
 };
 
 /// Member-supplied text (an invite label) never reaches innerHTML unescaped.
