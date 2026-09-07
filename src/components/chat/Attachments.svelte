@@ -13,8 +13,18 @@
 
     const IMAGE_BLUR = ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
 
-    // The audio player is the app's leaf, its upload ring included.
-    function audio(node, att) { h.renderAudio(node, att, msg); if (msg.mine && msg.pending) h.attachUploadProgress(node, msg); }
+    // The audio player is the app's leaf, its upload ring included. It is built for one
+    // send state (playback is disarmed while uploading), so it rebuilds when that flips.
+    function audio(node, { att, uploading }) {
+        const build = (u) => {
+            node.replaceChildren();
+            h.renderAudio(node, att, msg);
+            if (u) h.attachUploadProgress(node, msg);
+        };
+        let cur = uploading;
+        build(cur);
+        return { update: ({ uploading: u }) => { if (u === cur) return; cur = u; build(u); } };
+    }
 
     // Auto-download: a side effect, once per attachment id (the app dedupes across renders).
     $effect(() => {
@@ -30,7 +40,7 @@
         {#if h.isImage(att.extension)}
             <ImageAttachment {att} {msg} {ctx} {sender} {h} />
         {:else if h.isAudio(att.extension)}
-            <span style="display:contents" use:audio={att}></span>
+            <span style="display:contents" use:audio={{ att, uploading: msg.mine && msg.pending }}></span>
         {:else if h.isVideo(att.extension)}
             <VideoAttachment {att} {msg} {h} />
         {:else}
