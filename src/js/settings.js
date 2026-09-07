@@ -66,77 +66,19 @@ function torStateClass(state) {
     return 'tor-state-disabled';
 }
 
-/**
- * Flip the state class on the card. CSS transitions the colors/opacities
- * smoothly, but the keyframe animations (comet sweep, orbital dots) start
- * and stop abruptly at state changes — they snap because their `transform`
- * is keyframe-driven and can't tween into "no animation". Cheat: fade the
- * glyph to invisible, swap the state class, fade back in. The user sees a
- * clean cross-dissolve instead of the keyframe boundary jump.
- *
- * First-time apply (no prior state class) skips the fade — the glyph just
- * pops in with its initial state.
- */
-const _TOR_STATE_CLASSES = ['tor-state-disabled', 'tor-state-bootstrapping', 'tor-state-connected', 'tor-state-failed'];
-function applyTorCardState(state) {
-    const card = document.getElementById('settings-tor-card');
-    if (!card) return;
-    const next = torStateClass(state);
-    const current = _TOR_STATE_CLASSES.find(c => card.classList.contains(c));
-    if (current === next) return;
-    if (!current) {
-        card.classList.add(next);
-        return;
-    }
-    const glyph = card.querySelector('.tor-glyph');
-    if (!glyph) {
-        card.classList.remove(..._TOR_STATE_CLASSES);
-        card.classList.add(next);
-        return;
-    }
-    // Hold no-transition through the *entire* fade cycle. Inner element
-    // CSS transitions on stroke/fill/opacity are 0.5s — slower than the
-    // 0.22s fade-in — so if they're allowed to engage at all they crossfade
-    // the OLD state's colors visibly *during* the fade-in. With no-transition
-    // active end-to-end, inner state snaps invisibly while opacity is 0 and
-    // stays snapped until the fade-in completes. Cleanup is on its own
-    // timer past the fade-in's end so the next state change still benefits
-    // from smooth tweens.
-    card.classList.add('tor-no-transition');
-    glyph.style.opacity = '0';
-    setTimeout(() => {
-        card.classList.remove(..._TOR_STATE_CLASSES);
-        card.classList.add(next);
-        void glyph.offsetWidth; // commit the new state while invisible
-        glyph.style.opacity = '';
-    }, 220);
-    setTimeout(() => {
-        card.classList.remove('tor-no-transition');
-    }, 500);
-}
-
-/**
- * Drive the comet-trail dasharray off the live bootstrap percentage so the
- * three rings act as a radial progress bar that fills as Arti completes
- * its directory consensus / circuit build / handshake. Called every poll
- * from `ensureTorStatePolling` and from the toggle handlers.
- */
-function applyTorBootstrapProgress(progress) {
-    const card = document.getElementById('settings-tor-card');
-    if (!card) return;
-    if (typeof progress === 'number' && progress >= 0 && progress <= 100) {
-        card.style.setProperty('--tor-bootstrap-progress', String(progress));
-    } else {
-        card.style.removeProperty('--tor-bootstrap-progress');
-    }
+/** The card derives from the last TorState; `statusOverride` is a handler's own line. */
+function torApply(state, statusOverride = '') {
+    // A disconnect drops the cached circuit so the next connect re-fetches fresh.
+    if (!state || !state.running) _torCircuitsLoaded = false;
+    VectorSvelte.setTorState(state, statusOverride);
 }
 
 let _torPollHandle = null;
 
 /**
  * Is Tor currently in a transitional state (bootstrap in flight, or "starting"
- * between user click and the service spawning)? In these windows we lock the
- * toggle so the user can't spam it into a confused state — start/stop ops
+ * between user click and the service spawning)? In these windows the toggle is
+ * locked so the user can't spam it into a confused state — start/stop ops
  * aren't reentrancy-safe across rapid clicks.
  */
 function isTorTransitional(state) {
@@ -148,125 +90,30 @@ function isTorTransitional(state) {
     return false;
 }
 
-/**
- * Lock the toggle while Tor is in a transitional state, restore once stable.
- * Doesn't touch unsupported builds — those have their own permanently-disabled
- * path set during init.
- */
-function applyTorToggleLock(state) {
-    const toggle = document.getElementById('privacy-tor-toggle');
-    if (!toggle) return;
-    if (!state || !state.supported) return;
-    toggle.disabled = isTorTransitional(state);
-}
-
-/**
- * Show the Advanced disclosure only when Tor is fully connected — pre-connect
- * there's nothing to inspect, and exposing it during bootstrap risks the user
- * tapping Refresh and pinning a partially-built circuit. On disconnect we
- * collapse + drop the cached circuit so the next connect re-fetches fresh.
- *
- * Adds `.has-advanced` to the Tor card when shown so the card drops its
- * bottom rounding + bottom border when the panel is expanded — the two
- * boxes then read as one continuous panel.
- */
-function applyTorAdvancedVisibility(state) {
-    const adv = document.getElementById('settings-tor-advanced');
-    const card = document.getElementById('settings-tor-card');
-    if (!adv) return;
-    const shouldShow = !!(state && state.running);
-    adv.style.display = shouldShow ? '' : 'none';
-    if (card) card.classList.toggle('has-advanced', shouldShow);
-    if (!shouldShow) {
-        adv.classList.remove('expanded');
-        const panel = document.getElementById('tor-advanced-panel');
-        if (panel) panel.style.display = 'none';
-        _torCircuitsLoaded = false;
-    }
-}
-
 /** Cached so re-expanding the disclosure doesn't re-build a circuit unless the
  *  user explicitly hits Refresh (or Tor reconnects, which clears this flag). */
 let _torCircuitsLoaded = false;
 let _torCircuitsLoading = false;
 
 /**
- * Fetch the current circuit's hops and render them. First call (or after
- * Refresh) actually builds a circuit through Arti, which can take a few
- * seconds — show a loading state.
+ * Fetch the current circuit's hops. First call (or after Refresh) actually builds
+ * a circuit through Arti, which can take a few seconds — the list shows a loading
+ * state meanwhile.
  */
 async function loadTorCircuits(forceRefresh = false, forceNewCircuit = false) {
-    const list = document.getElementById('tor-circuits-list');
-    const refreshBtn = document.getElementById('tor-circuits-refresh');
-    if (!list) return;
     if (_torCircuitsLoading) return;
     if (_torCircuitsLoaded && !forceRefresh) return;
-
     _torCircuitsLoading = true;
-    if (refreshBtn) refreshBtn.disabled = true;
-
-    list.replaceChildren();
-    const loading = document.createElement('li');
-    loading.className = 'tor-circuits-empty is-loading';
-    loading.textContent = 'Building circuit…';
-    list.appendChild(loading);
-
+    VectorSvelte.setTorCircuits({ phase: 'loading', hops: [], error: '' });
     try {
         const hops = await invoke('tor_get_circuits', { forceNew: forceNewCircuit });
-        list.replaceChildren();
-        if (!Array.isArray(hops) || hops.length === 0) {
-            const empty = document.createElement('li');
-            empty.className = 'tor-circuits-empty';
-            empty.textContent = 'No active circuit.';
-            list.appendChild(empty);
-        } else {
-            for (const hop of hops) {
-                const row = document.createElement('li');
-                row.className = 'tor-hop';
-                row.dataset.position = hop.position || '';
-                if (hop.is_bridge) row.dataset.bridge = 'true';
-
-                const mark = document.createElement('span');
-                mark.className = 'tor-hop-mark';
-                const dot = document.createElement('span');
-                dot.className = 'tor-hop-dot';
-                mark.appendChild(dot);
-                row.appendChild(mark);
-
-                const pos = document.createElement('span');
-                pos.className = 'tor-hop-pos';
-                pos.textContent = hop.position || '';
-                row.appendChild(pos);
-
-                const addr = document.createElement('span');
-                addr.className = 'tor-hop-addr';
-                addr.textContent = hop.address || '—';
-                row.appendChild(addr);
-
-                if (hop.fingerprint) {
-                    const fp = document.createElement('span');
-                    fp.className = 'tor-hop-fp';
-                    // 8-char prefix is enough to disambiguate at a glance;
-                    // hover tooltip carries the full 43-char ed25519 id.
-                    fp.textContent = hop.fingerprint.slice(0, 8) + '…';
-                    fp.title = hop.fingerprint;
-                    row.appendChild(fp);
-                }
-
-                list.appendChild(row);
-            }
-        }
+        VectorSvelte.setTorCircuits({ phase: 'ok', hops: Array.isArray(hops) ? hops : [], error: '' });
         _torCircuitsLoaded = true;
     } catch (err) {
         console.warn('[Tor] tor_get_circuits failed:', err);
-        list.replaceChildren();
-        const errEl = document.createElement('li');
-        errEl.className = 'tor-circuits-error';
-        errEl.textContent = `Failed: ${err}`;
-        list.appendChild(errEl);
+        VectorSvelte.setTorCircuits({ phase: 'error', hops: [], error: String(err) });
     } finally {
         _torCircuitsLoading = false;
-        if (refreshBtn) refreshBtn.disabled = false;
     }
 }
 
@@ -326,9 +173,7 @@ async function initTorBridgesUI() {
         // hit Apply). Persist + reconfigure immediately. The textarea still
         // requires a separate Apply for content edits.
         toggle.disabled = true;
-        const torToggle = document.getElementById('privacy-tor-toggle');
-        const wasTorToggleDisabled = torToggle ? torToggle.disabled : false;
-        if (torToggle) torToggle.disabled = true;
+        VectorSvelte.setTorLocked(true);
         statusEl.textContent = toggle.checked
             ? 'Enabling bridges, reconnecting…'
             : 'Disabling bridges, reconnecting…';
@@ -364,7 +209,7 @@ async function initTorBridgesUI() {
             statusEl.classList.add('is-error');
         } finally {
             toggle.disabled = false;
-            if (torToggle) torToggle.disabled = wasTorToggleDisabled;
+            VectorSvelte.setTorLocked(false);
             refreshApplyEnabled();
         }
     });
@@ -392,11 +237,8 @@ async function initTorBridgesUI() {
         applyBtn.disabled = true;
         textarea.disabled = true;
         toggle.disabled = true;
-        // Lock the main Tor toggle too so the user can't rip the rug out
-        // mid-restart.
-        const torToggle = document.getElementById('privacy-tor-toggle');
-        const wasTorToggleDisabled = torToggle ? torToggle.disabled : false;
-        if (torToggle) torToggle.disabled = true;
+        // Lock the main Tor toggle too so the user can't rip the rug out mid-restart.
+        VectorSvelte.setTorLocked(true);
         statusEl.textContent = 'Applying & reconnecting…';
         statusEl.classList.remove('is-error', 'is-ok');
         try {
@@ -422,7 +264,7 @@ async function initTorBridgesUI() {
         } finally {
             textarea.disabled = false;
             toggle.disabled = false;
-            if (torToggle) torToggle.disabled = wasTorToggleDisabled;
+            VectorSvelte.setTorLocked(false);
             // Re-evaluate Apply against the (possibly newly-saved) baseline
             // rather than blindly enabling it.
             refreshApplyEnabled();
@@ -507,17 +349,12 @@ function renderBridgesStatus(el, text) {
  * auto-start at login finished and never re-fetched. Idempotent — calling
  * twice keeps a single timer alive.
  */
-function ensureTorStatePolling(toggleEl, statusEl) {
+function ensureTorStatePolling() {
     if (_torPollHandle) return;
     _torPollHandle = setInterval(async () => {
         try {
             const state = await invoke('tor_get_state');
-            toggleEl.checked = !!state.running || !!state.enabled;
-            applyTorCardState(state);
-            applyTorBootstrapProgress(state.bootstrap_progress);
-            applyTorToggleLock(state);
-            applyTorAdvancedVisibility(state);
-            statusEl.textContent = formatTorStatus(state);
+            torApply(state);
             const stable = state.running
                 || (!state.enabled && !(state.status || '').startsWith('bootstrapping'))
                 || (state.status || '').startsWith('failed');
@@ -2265,59 +2102,8 @@ async function saveCurrentNotificationSettings() {
 /**
  * Load and render the blocked users list in Privacy settings
  */
-async function loadBlockedUsersList() {
-    const listContainer = document.getElementById('settings-blocked-list');
-    const emptyMsg = document.getElementById('settings-blocked-empty');
-    listContainer.innerHTML = '';
-
-    try {
-        const blocked = await invoke('get_blocked_users');
-        emptyMsg.style.display = blocked.length ? 'none' : '';
-
-        for (const profile of blocked) {
-            const row = document.createElement('div');
-            row.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;';
-
-            const left = document.createElement('div');
-            left.style.cssText = 'display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; -webkit-user-select: none; user-select: none;';
-
-            const avatar = createAvatarImg(getProfileAvatarSrc(profile), 30, false);
-            avatar.style.flexShrink = '0';
-            const name = document.createElement('span');
-            name.style.cssText = 'color: #ddd; font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;';
-            const displayName = profile.nickname || profile.name || profile.display_name;
-            if (displayName) {
-                name.textContent = displayName + ' ';
-                const npubHint = document.createElement('span');
-                npubHint.style.cssText = 'opacity: 0.4; font-size: 12px;';
-                npubHint.textContent = '(' + profile.id.substring(0, 8) + ')';
-                name.appendChild(npubHint);
-            } else {
-                name.textContent = profile.id.substring(0, 20) + '...';
-            }
-
-            left.appendChild(avatar);
-            left.appendChild(name);
-
-            const unblockBtn = document.createElement('span');
-            unblockBtn.textContent = 'Unblock';
-            unblockBtn.classList.add('unblock-btn');
-            unblockBtn.onclick = async () => {
-                const confirmed = await popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(profile))}?`);
-                if (!confirmed) return;
-                await invoke('unblock_user', { npub: profile.id });
-                showToast('User unblocked');
-                profileChanged(profile.id);
-                await loadBlockedUsersList();
-            };
-
-            row.appendChild(left);
-            row.appendChild(unblockBtn);
-            listContainer.appendChild(row);
-        }
-    } catch (e) {
-        console.warn('Failed to load blocked users:', e);
-    }
+function loadBlockedUsersList() {
+    VectorSvelte.reloadBlockedUsers();
 }
 
 /**
@@ -2363,81 +2149,61 @@ async function initSettings() {
     const torToggle = document.getElementById('privacy-tor-toggle');
     const torStatus = document.getElementById('privacy-tor-status');
     if (torToggle && torStatus) {
+        VectorSvelte.mountTorCard({
+            els: {
+                card: document.getElementById('settings-tor-card'),
+                toggle: torToggle,
+                status: torStatus,
+                advanced: document.getElementById('settings-tor-advanced'),
+                panel: document.getElementById('tor-advanced-panel'),
+                refresh: document.getElementById('tor-circuits-refresh'),
+                list: document.getElementById('tor-circuits-list'),
+            },
+            h: { stateClass: torStateClass, formatStatus: formatTorStatus, isTransitional: isTorTransitional },
+        });
         try {
             const state = await invoke('tor_get_state');
-            torToggle.checked = !!state.running || !!state.enabled;
-            applyTorCardState(state);
-            applyTorBootstrapProgress(state.bootstrap_progress);
-            applyTorAdvancedVisibility(state);
-            if (!state.supported) {
-                torToggle.disabled = true;
-            } else {
-                applyTorToggleLock(state);
-            }
-            torStatus.textContent = formatTorStatus(state);
+            torApply(state);
             // If we landed in a transient state (bootstrap still mid-flight
             // when Settings opened), poll until it settles.
-            if (state.enabled && !state.running) {
-                ensureTorStatePolling(torToggle, torStatus);
-            }
+            if (state.enabled && !state.running) ensureTorStatePolling();
         } catch (e) {
             console.warn('[Tor] tor_get_state failed:', e);
         }
 
         torToggle.addEventListener('change', async (e) => {
             const desired = e.target.checked;
-            torToggle.disabled = true;
-            const optimistic = { supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled' };
-            applyTorCardState(optimistic);
-            applyTorBootstrapProgress(desired ? 0 : null);
-            applyTorAdvancedVisibility(optimistic);
-            torStatus.textContent = desired ? 'Bootstrapping…' : 'Disabling…';
+            VectorSvelte.setTorLocked(true);
+            torApply(
+                { supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled', bootstrap_progress: desired ? 0 : null },
+                desired ? 'Bootstrapping…' : 'Disabling…',
+            );
             // tor_set_enabled doesn't return until bootstrap completes (~20-30s
             // first boot) — start polling now so the UI gets live progress.
-            if (desired) ensureTorStatePolling(torToggle, torStatus);
+            if (desired) ensureTorStatePolling();
             try {
                 const state = await invoke('tor_set_enabled', { enabled: desired });
-                torToggle.checked = !!state.running || !!state.enabled;
-                applyTorCardState(state);
-                applyTorBootstrapProgress(state.bootstrap_progress);
-                applyTorAdvancedVisibility(state);
-                torStatus.textContent = formatTorStatus(state);
-                if (state.enabled && !state.running) {
-                    ensureTorStatePolling(torToggle, torStatus);
-                }
-                applyTorToggleLock(state);
+                torApply(state);
+                if (state.enabled && !state.running) ensureTorStatePolling();
             } catch (err) {
                 console.error('[Tor] tor_set_enabled failed:', err);
                 try {
                     const state = await invoke('tor_get_state');
-                    torToggle.checked = !!state.running || !!state.enabled;
-                    applyTorCardState({ ...state, status: 'failed: ' + err });
-                    applyTorBootstrapProgress(state.bootstrap_progress);
-                    applyTorAdvancedVisibility(state);
-                    torStatus.textContent = `Failed: ${err}`;
-                    applyTorToggleLock(state);
+                    torApply({ ...state, status: 'failed: ' + err }, `Failed: ${err}`);
                 } catch (_) { /* nothing else we can do */ }
             } finally {
-                // Keep the toggle locked if Tor re-entered a transitional state
-                // (the poller will release once stable).
-                try {
-                    const post = await invoke('tor_get_state');
-                    if (!isTorTransitional(post)) torToggle.disabled = false;
-                } catch (_) {
-                    torToggle.disabled = false;
-                }
+                // The toggle stays locked while Tor is transitional (derived from the state).
+                try { torApply(await invoke('tor_get_state')); } catch (_) {}
+                VectorSvelte.setTorLocked(false);
             }
         });
 
-        const advWrap = document.getElementById('settings-tor-advanced');
         const advToggle = document.getElementById('tor-advanced-toggle');
-        const advPanel = document.getElementById('tor-advanced-panel');
         const advRefresh = document.getElementById('tor-circuits-refresh');
-        if (advWrap && advToggle && advPanel) {
+        if (advToggle) {
             advToggle.addEventListener('click', () => {
-                const willOpen = !advWrap.classList.contains('expanded');
-                advWrap.classList.toggle('expanded', willOpen);
-                advPanel.style.display = willOpen ? '' : 'none';
+                const willOpen = !VectorSvelte.torState().advancedOpen;
+                VectorSvelte.setTorAdvancedOpen(willOpen);
                 if (willOpen) loadTorCircuits(false);
             });
         }
@@ -2452,8 +2218,23 @@ async function initSettings() {
         await initTorBridgesUI();
     }
 
-    // Load blocked users list + toggle
-    await loadBlockedUsersList();
+    // The blocked-users list island + its disclosure toggle
+    VectorSvelte.mountBlockedUsers(document.getElementById('settings-blocked-list'), {
+        emptyEl: document.getElementById('settings-blocked-empty'),
+        h: {
+            load: () => invoke('get_blocked_users'),
+            getProfile: (npub) => getProfile(npub),
+            getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
+            createAvatarImg: (src, size, group) => createAvatarImg(src, size, group),
+            confirmUnblock: (p) => popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(p))}?`),
+            unblock: async (npub) => {
+                await invoke('unblock_user', { npub });
+                showToast('User unblocked');
+                profileChanged(npub);
+            },
+            reload: () => VectorSvelte.reloadBlockedUsers(),
+        },
+    });
     const blockedToggle = document.getElementById('settings-blocked-toggle');
     const blockedContent = document.getElementById('settings-blocked-content');
     const blockedChevron = blockedToggle.querySelector('.icon');

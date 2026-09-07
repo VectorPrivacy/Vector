@@ -45,6 +45,7 @@
     const ui = {
         placeholder: () => h.createPlaceholderAvatar(false, 25),
         twemojify: h.twemojify,
+        renderCustomEmojiShortcodes: h.renderCustomEmojiShortcodes,
         showTooltip: h.showGlobalTooltip,
         hideTooltip: h.hideGlobalTooltip,
     };

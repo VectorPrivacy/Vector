@@ -23,6 +23,9 @@ import CommandStrip from './composer/CommandStrip.svelte';
 import ChatHeader from './chat/ChatHeader.svelte';
 import CommunityHead from './chatlist/CommunityHead.svelte';
 import FilePreview from './files/FilePreview.svelte';
+import TorCard from './settings/TorCard.svelte';
+import TorCircuits from './settings/TorCircuits.svelte';
+import BlockedUsers from './settings/BlockedUsers.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -43,6 +46,10 @@ export {
     filePreview, filePreviewContent, openFilePreview as fpOpen, closeFilePreview as fpClose,
     setFilePreviewContent as fpContent, patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
+// Settings: the Tor card's state and the blocked-users list's version.
+export {
+    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers,
+} from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
     startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock,
@@ -165,4 +172,21 @@ export function mountCommunityHead(target, { h }) {
 /** Mount the send-file preview overlay at body level; it shows itself from `fpOpen`. */
 export function mountFilePreview({ h }) {
     return mount(FilePreview, { target: document.body, props: { h } });
+}
+
+/** Mount the Tor card reconciler over the Privacy section's elements, and the circuit list into `els.list`. */
+export function mountTorCard({ els, h }) {
+    const host = document.createElement('div');
+    host.hidden = true;
+    document.body.appendChild(host);
+    const card = mount(TorCard, { target: host, props: { els, h } });
+    els.list.replaceChildren();
+    const circuits = mount(TorCircuits, { target: els.list });
+    return { card, circuits };
+}
+
+/** Mount the blocked-users list into `target` (#settings-blocked-list). */
+export function mountBlockedUsers(target, { h, emptyEl }) {
+    target.replaceChildren();
+    return mount(BlockedUsers, { target, props: { h, emptyEl } });
 }

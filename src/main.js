@@ -6191,12 +6191,14 @@ function renderProfileTab(cProfile) {
             domProfileMoreDropdown.style.display = 'none';
             if (isBlocked) {
                 await invoke('unblock_user', { npub: cProfile.id });
+                VectorSvelte.reloadBlockedUsers();
                 showToast('User Unblocked');
                 profileChanged(cProfile.id);
             } else {
                 const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
                 if (!confirmed) return;
                 await invoke('block_user', { npub: cProfile.id });
+                VectorSvelte.reloadBlockedUsers();
                 showToast('User Blocked');
                 profileChanged(cProfile.id);
             }
@@ -9597,7 +9599,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 h: {
                     invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
                     attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc,
-                    createPlaceholderAvatar, twemojify, showGlobalTooltip, hideGlobalTooltip,
+                    createPlaceholderAvatar, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     applyCommunityAdmins, dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
                     memberSectionClosed, setMemberSectionClosed,
                 },

@@ -441,8 +441,9 @@ function _dmsgBuildReplyContext(msg, sender) {
     } else if (cMsg && cMsg.npub) {
         cSenderProfile = getProfile(cMsg.npub);
     } else {
-        // DM, replying to the counterpart's message.
-        cSenderProfile = sender;
+        // DM, replying to the counterpart's message: the chat names them. The row's
+        // `sender` is its own author, which for an own row is me.
+        cSenderProfile = (chat && !chatIsGroup(chat) ? getProfile(chat.id) : null) || sender;
     }
 
     // npub of the replied-to author — drives the small avatar + lets the profile_update handler

@@ -7,9 +7,27 @@
         rank = null,              // 'owner' | 'admin' | null
         rankLabel = null,         // the role's own name when the shield stands for a positioned role
         bot = false,
+        status = null,            // { title, emojiTags } — the person's NIP-38 status line
         style = '',
-        ui,                       // { twemojify, showTooltip, hideTooltip }
+        ui,                       // { twemojify, renderCustomEmojiShortcodes, showTooltip, hideTooltip }
     } = $props();
+
+    // A status is attacker-controlled NIP-38 data: text, then twemoji, then the
+    // status's own custom emoji tags (without them a community's :shortcodes:
+    // read as literal text). Keyed on the title so a same-status re-derive is a no-op.
+    function statusInto(node, s) {
+        let cur;
+        const render = (v) => {
+            const key = (v?.title || '') + '\0' + (v?.emojiTags || []).map(t => t.shortcode + '=' + t.url).join(',');
+            if (key === cur) return;
+            cur = key;
+            node.textContent = v?.title || '';
+            ui.twemojify(node);
+            if (ui.renderCustomEmojiShortcodes) ui.renderCustomEmojiShortcodes(node, v?.emojiTags || []);
+        };
+        render(s);
+        return { update: render };
+    }
 
     // Keyed on the string so a re-derive that yields the same name never touches the node
     // (twemojify would restart image loads).
@@ -50,4 +68,7 @@
             ></span>
         {/if}
     </div>
+    {#if status?.title}
+        <div class="member-pick-status cutoff" use:statusInto={status}></div>
+    {/if}
 </div>

@@ -160,11 +160,12 @@ where
                 if permanent {
                     return Err(e);
                 }
-                // Cloudflare 52x (520 unknown / 521 down / 522 timeout / 523 unreachable /
-                // 524 timeout / 525 TLS-handshake-failed / 526 bad-cert) + 504: the origin
-                // can't ingest the upload, and retrying the same server just repeats the
-                // failure, so route around to the next server immediately.
-                if matches!(status, Some(504 | 520 | 521 | 522 | 523 | 524 | 525 | 526)) {
+                // 502 bad-gateway / 503 unavailable / 504 timeout and Cloudflare 52x
+                // (520 unknown / 521 down / 522 timeout / 523 unreachable / 524 timeout /
+                // 525 TLS-handshake-failed / 526 bad-cert): the origin can't ingest the
+                // upload, and retrying the same server just repeats the failure, so route
+                // around to the next server immediately.
+                if matches!(status, Some(502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 525 | 526)) {
                     crate::log_warn!(
                         "[Blossom] {} origin unreachable (status {}) on {} bytes; routing to the next server",
                         server_url, status.unwrap_or(0), file_data.len(),

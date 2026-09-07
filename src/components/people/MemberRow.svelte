@@ -44,6 +44,15 @@
     <div class="member-pick-hover" style="background:{hoverBg}"></div>
     {@render gutter?.()}
     <Avatar {src} size={25} class="member-pick-avatar" style={dim ? 'opacity:0.5;' : ''} placeholder={ui.placeholder} />
-    <MemberName {display} {hasName} {rank} {rankLabel} bot={!!profile?.bot} style={dim ? 'opacity:0.6;' : ''} {ui} />
+    <MemberName
+        {display}
+        {hasName}
+        {rank}
+        {rankLabel}
+        bot={!!profile?.bot}
+        status={profile?.status?.title ? { title: profile.status.title, emojiTags: profile.status.emoji_tags || [] } : null}
+        style={dim ? 'opacity:0.6;' : ''}
+        {ui}
+    />
     {@render trailing?.()}
 </div>

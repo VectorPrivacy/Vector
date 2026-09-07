@@ -1,0 +1,61 @@
+<script>
+    // The blocked-users list under Privacy. Re-fetches when its version moves (a
+    // block or unblock anywhere), and each row re-derives its name and avatar
+    // from the profile signal as profiles resolve.
+    import { profileVersion } from '../lib/signals.svelte.js';
+    import { blockedVersion } from '../lib/settings.svelte.js';
+
+    let { h, emptyEl } = $props();   // h: load, getProfile, getProfileAvatarSrc, createAvatarImg, confirmUnblock, unblock, reload
+
+    let users = $state.raw([]);
+    $effect(() => {
+        blockedVersion();
+        h.load().then((list) => { users = list || []; }).catch((e) => console.warn('Failed to load blocked users:', e));
+    });
+    $effect(() => {
+        if (emptyEl) emptyEl.style.display = users.length ? 'none' : '';
+    });
+
+    function resolve(u) {
+        profileVersion(u.id);
+        const p = h.getProfile(u.id) || u;
+        const displayName = p.nickname || p.name || p.display_name;
+        return { p, displayName, src: h.getProfileAvatarSrc(p) };
+    }
+
+    // The avatar is the row's first child, built by the app's helper.
+    function avatarInto(node, src) {
+        let cur = null;
+        let el = null;
+        const render = (s) => {
+            if (el && s === cur) return;
+            cur = s;
+            if (el) el.remove();
+            el = h.createAvatarImg(s, 30, false);
+            el.style.flexShrink = '0';
+            node.insertBefore(el, node.firstChild);
+        };
+        render(src);
+        return { update: render };
+    }
+
+    async function unblock(u, p) {
+        const confirmed = await h.confirmUnblock(p);
+        if (!confirmed) return;
+        await h.unblock(u.id);
+        h.reload();
+    }
+</script>
+
+{#each users as u (u.id)}
+    {@const r = resolve(u)}
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 8px 10px;">
+        <div style="display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; -webkit-user-select: none; user-select: none;" use:avatarInto={r.src}>
+            <span style="color: #ddd; font-size: 14px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left;">
+                {#if r.displayName}{r.displayName} <span style="opacity: 0.4; font-size: 12px;">({u.id.substring(0, 8)})</span>{:else}{u.id.substring(0, 20)}...{/if}
+            </span>
+        </div>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <span class="unblock-btn" onclick={() => unblock(u, r.p)}>Unblock</span>
+    </div>
+{/each}
