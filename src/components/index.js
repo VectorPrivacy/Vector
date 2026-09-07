@@ -37,6 +37,8 @@ import RecentsGrid from './picker/RecentsGrid.svelte';
 import AllGrid from './picker/AllGrid.svelte';
 import SearchGrid from './picker/SearchGrid.svelte';
 import PackSections from './picker/PackSections.svelte';
+import PackCreator from './picker/PackCreator.svelte';
+import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken } from './lib/packcreator.svelte.js';
 import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
@@ -71,6 +73,7 @@ export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
 export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
 export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome };
+export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -325,4 +328,10 @@ export function mountEmojiPicker({ sidebar, recents, all, results, resultsSectio
     mount(SearchGrid, { target: results, props: { section: resultsSection, h } });
     sections.replaceChildren();
     mount(PackSections, { target: sections, props: { h } });
+}
+
+/** Mount the pack creator's cells into `grid`, adopting its chrome elements. */
+export function mountPackCreator(grid, { els, h }) {
+    grid.replaceChildren();
+    return mount(PackCreator, { target: grid, props: { els, h } });
 }

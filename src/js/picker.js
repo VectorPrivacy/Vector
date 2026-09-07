@@ -2984,9 +2984,8 @@ function _pcGoneMessage() {
     return emojiUnavailableMessage('404 not found').replace(/<br\s*\/?>/gi, ' ');
 }
 
-function _pcMarkCellBroken(cell, message) {
-    cell.classList.add('emoji-creator-cell-broken');
-    cell.title = message;
+function _pcMarkCellBroken(idx, message) {
+    VectorSvelte.markCreatorBroken(idx, message);
 }
 
 /** Probe the pack's remote media past the warm cache and mark dead cells.
@@ -3008,15 +3007,9 @@ async function _pcVerifyRemoteMedia() {
     for (const r of gone) _pcDeadUrls.add(r.url);
     // The editor may have closed or switched packs while we probed.
     if (!_pc.open || _pc.editingId !== packId) return;
-    // Mark in place rather than re-rendering — a re-render mid-drag would
-    // yank cells out from under the pointer.
-    const grid = document.getElementById('emoji-creator-grid');
-    if (grid) {
-        grid.querySelectorAll('.emoji-creator-cell').forEach(cell => {
-            const e = _pc.emojis[Number(cell.dataset.idx)];
-            if (e && e.url && _pcDeadUrls.has(e.url)) _pcMarkCellBroken(cell, _pcGoneMessage());
-        });
-    }
+    // Mark by index rather than re-syncing: a re-render mid-drag would yank cells out
+    // from under the pointer.
+    _pc.emojis.forEach((e, idx) => { if (e.url && _pcDeadUrls.has(e.url)) _pcMarkCellBroken(idx, _pcGoneMessage()); });
     if (_pcDeadUrls.has(_pc.logoUrl)) _pcRenderLogo();
 }
 
@@ -3156,147 +3149,51 @@ function _pcRevokeBlobUrls() {
 
 function _pcSyncDom() {
     document.getElementById('emoji-creator-name').value = _pc.name;
-    // Shown in BOTH modes: 'edit' deletes the published pack, 'create' discards the
-    // draft. Hiding it in create mode left the only exit labelled "Save and exit".
+    // Shown in BOTH modes: 'edit' deletes the published pack, 'create' discards the draft.
     document.getElementById('emoji-creator-delete').hidden = false;
-    _pcRenderLogo();
     _pcRenderGrid();
 }
 
-function _pcRenderLogo() {
-    const btn = document.getElementById('emoji-creator-logo');
-    if (!btn) return;
-    btn.innerHTML = '';
-    btn.classList.remove('emoji-creator-cell-broken');
-    btn.title = '';
-    if (_pc.logoBlobUrl) {
-        // Local preview of an in-progress upload — blob: URL is safe.
-        const img = document.createElement('img');
-        img.alt = '';
-        img.src = _pc.logoBlobUrl;
-        btn.appendChild(img);
-        btn.classList.add('has-image');
-    } else if (_pc.logoUrl) {
-        // Existing remote logo — route through the cache.
-        const img = document.createElement('img');
-        img.alt = '';
-        bindCachedEmojiImg(img, _pc.logoUrl, 'emoji_pack_icon');
-        btn.appendChild(img);
-        btn.classList.add('has-image');
-        const logoDead = _pcDeadUrls.has(_pc.logoUrl);
-        btn.classList.toggle('emoji-creator-cell-broken', logoDead);
-        btn.title = logoDead ? 'This pack icon is no longer available (it may have been deleted).' : '';
-    } else {
-        btn.innerHTML = '<span class="icon icon-image"></span>';
-        btn.classList.remove('has-image');
-    }
-}
-
-function _pcRenderGrid() {
-    const grid = document.getElementById('emoji-creator-grid');
-    const count = document.getElementById('emoji-creator-count');
-    if (!grid || !count) return;
-    grid.innerHTML = '';
-    count.textContent = `(${_pc.emojis.length}/${PC_MAX_EMOJIS})`;
-
-    const isMobile = typeof platformFeatures !== 'undefined' && platformFeatures.is_mobile;
-
-    _pc.emojis.forEach((e, idx) => {
-        const cell = document.createElement('div');
-        cell.className = 'emoji-creator-cell';
-        cell.dataset.idx = String(idx);
-
-        const img = document.createElement('img');
-        // Local blob URL (freshly-uploaded, never hit the network) is safe
-        // to assign directly. Remote URLs (loaded from a saved pack) route
-        // through the cache helper so the webview never fetches Blossom.
-        if (e.blobUrl) {
-            img.src = e.blobUrl;
-        } else {
-            // The editor must NEVER hide a failed emoji — the creator has to see it's broken and
-            // remove/replace it. Mark the cell broken (reason on hover); keep it and its controls.
-            bindCachedEmojiImg(img, e.url, 'emoji', (el, reason) => {
-                _pcMarkCellBroken(cell, emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '));
-            });
-            if (_pcDeadUrls.has(e.url)) _pcMarkCellBroken(cell, _pcGoneMessage());
-        }
-        img.alt = `:${e.shortcode}:`;
-        img.draggable = false;
-        cell.appendChild(img);
-
-        // Hover-revealed × button is desktop-only; on mobile there's no
-        // hover so we surface delete through the long-press context menu
-        // below instead.
-        if (!isMobile) {
-            const removeBtn = document.createElement('button');
-            removeBtn.type = 'button';
-            removeBtn.className = 'emoji-creator-cell-remove';
-            removeBtn.setAttribute('aria-label', 'Remove emoji');
-            removeBtn.innerHTML = '<span class="icon icon-x"></span>';
-            removeBtn.addEventListener('click', (ev) => {
-                ev.stopPropagation();
-                _pcRemoveEmoji(idx);
-            });
-            cell.appendChild(removeBtn);
-        }
-
-        // JS-managed hover state. CSS `:hover` is unreliable during
-        // pointer-driven drags in WKWebView — mouseleave events for
-        // cells the cursor crossed during a drag never fire, leaving
-        // multiple cells visually "hovered" after drop. The drag handler
-        // toggles `_pcDragActive` so we don't even add the class during
-        // a reorder.
-        cell.addEventListener('mouseenter', () => {
-            if (_pcDragActive) return;
-            cell.classList.add('is-hovered');
-        });
-        cell.addEventListener('mouseleave', () => {
-            cell.classList.remove('is-hovered');
-        });
-
-        // Edit shortcode on click — but only when the pointerdown→pointerup
-        // sequence was a tap, not a drag (see _pcInstallReorderHandlers).
-        cell.addEventListener('click', (ev) => {
-            if (ev.target.closest('.emoji-creator-cell-remove')) return;
-            if (cell.dataset.suppressClick === '1') {
-                delete cell.dataset.suppressClick;
-                return;
-            }
-            // A broken emoji can't be renamed — explain why and how to fix it instead of opening Rename.
-            if (cell.classList.contains('emoji-creator-cell-broken')) {
-                _pcBrokenEmojiError(_emojiFailReason.get(e.url) || '');
-                return;
-            }
-            _pcRenameEmoji(idx);
-        });
-        cell.dataset.emojiTooltip = `:${e.shortcode}:`;
-
-        // Reorder-drag, long-press menu (the only delete path on touch, with no
-        // hover-× to reach) and grid scrolling all begin as the same press, so ONE
-        // arbiter owns them. The previous pair of handlers each ran their own
-        // timers and could not agree who claimed the gesture: at 6px the drag won
-        // and the 8px long-press cancelled itself, so scrolling the grid was
-        // impossible. Right-click is wired inside it too.
-        _pcInstallReorderHandlers(cell, idx);
-        grid.appendChild(cell);
+// The creator's cells, logo face, count and dropzone are an island over lib/packcreator.svelte.js.
+let _pcIslandMounted = false;
+function _pcEnsureIsland() {
+    if (_pcIslandMounted) return;
+    _pcIslandMounted = true;
+    VectorSvelte.mountPackCreator(document.getElementById('emoji-creator-grid'), {
+        els: {
+            logo: document.getElementById('emoji-creator-logo'),
+            count: document.getElementById('emoji-creator-count'),
+            dropzone: document.getElementById('emoji-creator-dropzone'),
+            dropzoneLabel: document.querySelector('#emoji-creator-dropzone .emoji-creator-dropzone-label'),
+        },
+        h: {
+            bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
+            unavailableMessage: (reason) => emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '),
+            goneMessage: () => _pcGoneMessage(),
+            isMobile: () => typeof platformFeatures !== 'undefined' && !!platformFeatures.is_mobile,
+            dragActive: () => _pcDragActive,
+            remove: (idx) => _pcRemoveEmoji(idx),
+            // A broken emoji can't be renamed: explain why and how to fix it instead.
+            cellClick: (idx, broken) => {
+                if (broken) { _pcBrokenEmojiError(_emojiFailReason.get(_pc.emojis[idx]?.url) || ''); return; }
+                _pcRenameEmoji(idx);
+            },
+            installReorder: (cell, idx) => _pcInstallReorderHandlers(cell, idx),
+        },
     });
-
-    // Bottom dropzone label adapts: first-emoji onboarding tone, normal,
-    // or cap-reached.
-    const dz = document.getElementById('emoji-creator-dropzone');
-    if (dz) {
-        const atCap = _pc.emojis.length >= PC_MAX_EMOJIS;
-        dz.classList.toggle('is-disabled', atCap);
-        const label = dz.querySelector('.emoji-creator-dropzone-label');
-        if (atCap) {
-            label.textContent = `Maximum ${PC_MAX_EMOJIS} reached`;
-        } else if (_pc.emojis.length === 0) {
-            label.textContent = 'Upload Emoji';
-        } else {
-            label.textContent = 'Upload Emoji';
-        }
-    }
 }
+
+/** Push the creator's model into its island (a new snapshot per call, so the cells re-derive). */
+function _pcRenderGrid() {
+    _pcEnsureIsland();
+    VectorSvelte.setCreator({
+        name: _pc.name,
+        logo: { blobUrl: _pc.logoBlobUrl || '', url: _pc.logoUrl || '', dead: !!_pc.logoUrl && _pcDeadUrls.has(_pc.logoUrl) },
+        emojis: _pc.emojis.map(e => ({ shortcode: e.shortcode, url: e.url || '', blobUrl: e.blobUrl || '', dead: !!e.url && _pcDeadUrls.has(e.url) })),
+        max: PC_MAX_EMOJIS,
+    });
+}
+const _pcRenderLogo = _pcRenderGrid;
 
 function _pcSanitizeShortcode(s) {
     return String(s).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 22);
@@ -4253,29 +4150,11 @@ function _pcHideProgress() {
  *  underlying cell DOM, so a parallel re-render (e.g. shortcode tweak)
  *  doesn't strand the overlay. */
 function _pcSetCellBusy(idx, state) {
-    const grid = document.getElementById('emoji-creator-grid');
-    if (!grid) return;
-    const cell = grid.querySelector(`.emoji-creator-cell[data-idx="${idx}"]`);
-    if (!cell) return;
-    let overlay = cell.querySelector('.emoji-creator-cell-busy');
-    if (!state) {
-        if (overlay) overlay.remove();
-        return;
-    }
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.className = 'emoji-creator-cell-busy';
-        overlay.innerHTML = '<div class="emoji-creator-cell-busy-ring"></div>';
-        cell.appendChild(overlay);
-    }
-    overlay.classList.remove('is-pending', 'is-uploading', 'is-deleting');
-    overlay.classList.add(`is-${state}`);
+    VectorSvelte.setCreatorBusy(idx, state);
 }
 
 function _pcClearAllBusy() {
-    const grid = document.getElementById('emoji-creator-grid');
-    if (!grid) return;
-    grid.querySelectorAll('.emoji-creator-cell-busy').forEach(o => o.remove());
+    VectorSvelte.clearCreatorBusy();
 }
 
 // Deterministic rejections (too big / empty / wrong account / no server) won't
