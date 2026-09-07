@@ -119,3 +119,11 @@ export function setVoice(values) { Object.assign(voice, values); }
 export function setVoiceDownloadProgress(text) {
     if (voice.download) voice.download = { progress: text };
 }
+
+// The media server info dialog's learned capabilities and the relay info dialog's log.
+const blossomCaps = $state({ status: 'loading', caps: [] });
+export function blossomCapsState() { return blossomCaps; }
+export function setBlossomCaps(status, caps) { blossomCaps.status = status; blossomCaps.caps = caps || []; }
+const relayLogs = $state({ logs: [] });
+export function relayLogsState() { return relayLogs; }
+export function setRelayLogs(logs) { relayLogs.logs = logs || []; }

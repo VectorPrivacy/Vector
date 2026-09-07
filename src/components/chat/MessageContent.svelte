@@ -5,10 +5,11 @@
     // signature changes (a reaction echo hands the row a new object with the same
     // content, and a rebuild would reset playback and spoiler reveals).
     import Attachments from './Attachments.svelte';
+    import InvitePreviews from './InvitePreviews.svelte';
 
     let { msg, sender, ctx, h, sig } = $props();
     // h: buildText(msg, ctx) → span | null, the Attachments leaves, buildCryptoAddress(msg),
-    //    renderEmojiPackPreviews(node, text), renderCommunityInvitePreviews(node, text), xdcUrl(msg, ctx),
+    //    renderEmojiPackPreviews(node, text), inviteKeys(text), resolveInvite(key), xdcUrl(msg, ctx),
     //    renderXdcUrlCard(node, msg, url), webPreviewsEnabled(), buildLinkPreview(msg), isAndroid(),
     //    fmtCountdown(secs), selfDestructTooltip(el), selfDestructTooltipEnd()
 
@@ -49,7 +50,7 @@
     {/if}
     {#if msg.content}
         <span style="display:contents" use:packPreviews={msg.content}></span>
-        <span style="display:contents" use:into={(node) => h.renderCommunityInvitePreviews(node, msg.content)}></span>
+        <InvitePreviews text={msg.content} {h} />
     {/if}
     {#if xdcUrl}
         <!-- An .xdc link is a playable card, and supersedes the OpenGraph card. -->

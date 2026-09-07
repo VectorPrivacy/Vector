@@ -49,6 +49,10 @@ import ModChrome from './moderation/ModChrome.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
 import MiniAppsGrid from './miniapps/MiniAppsGrid.svelte';
 import InviteLinks from './community/InviteLinks.svelte';
+import BlossomCaps from './settings/BlossomCaps.svelte';
+import RelayLogs from './settings/RelayLogs.svelte';
+import AccountRows from './people/AccountRows.svelte';
+export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 import Marketplace from './marketplace/Marketplace.svelte';
 import MarketplaceFilters from './marketplace/Filters.svelte';
@@ -419,4 +423,22 @@ export function mountMarketplace({ body, filters, details, h }) {
 export function mountInviteLinks(host, { h }) {
     host.replaceChildren();
     return mount(InviteLinks, { target: host, props: { h } });
+}
+
+/** Mount the media server capabilities into `slot` (#blossom-info-capabilities). */
+export function mountBlossomCaps(slot, { h }) {
+    slot.replaceChildren();
+    return mount(BlossomCaps, { target: slot, props: { h } });
+}
+
+/** Mount the relay activity log into `list` (#relay-info-logs). */
+export function mountRelayLogs(list) {
+    list.replaceChildren();
+    return mount(RelayLogs, { target: list, props: {} });
+}
+
+/** Mount account rows into `host`; mounted fresh per open, so props are a snapshot. */
+export function mountAccountRows(host, props) {
+    host.replaceChildren();
+    return mount(AccountRows, { target: host, props });
 }

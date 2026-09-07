@@ -119,69 +119,13 @@ const multiAccount = {
     },
 };
 
-/**
- * Build one row of the My Profile dropdown / pre-login picker.
- * `meta` is an AccountMetadata record from the backend.
- * `isActive` adds the green dot + accent ring to the active row.
- */
-function buildAccountRow(meta, { isActive, onClick, onDelete }) {
-    const row = document.createElement('div');
-    row.className = 'profile-switcher-row' + (isActive ? ' active' : '');
-    row.dataset.npub = meta.npub;
-
-    const dot = document.createElement('span');
-    dot.className = 'profile-switcher-active-dot';
-    row.appendChild(dot);
-
-    // Reuse the shared avatar helper so accounts without a profile-set
-    // avatar render the same Nostr placeholder used by chat rows / contact
-    // headers, and a failed image load falls back to the placeholder
-    // automatically.
-    const avatarSrc = meta.avatar_cached
-        ? convertFileSrc(meta.avatar_cached)
-        : (meta.avatar_url || null);
-    const avatar = createAvatarImg(avatarSrc, 28, false);
-    avatar.classList.add('profile-switcher-avatar');
-    row.appendChild(avatar);
-
-    const meta_el = document.createElement('div');
-    meta_el.className = 'profile-switcher-meta';
-    const name = document.createElement('span');
-    name.className = 'profile-switcher-name';
-    name.textContent = meta.display_name || 'Unnamed';
-    const npub = document.createElement('span');
-    npub.className = 'profile-switcher-npub';
-    // Full npub — CSS handles overflow with `text-overflow: ellipsis`,
-    // so the visible cut adapts to the row width on any screen size
-    // instead of being hard-coded to a slice length.
-    npub.textContent = meta.npub;
-    meta_el.appendChild(name);
-    meta_el.appendChild(npub);
-    row.appendChild(meta_el);
-
-    if (onDelete) {
-        const trash = document.createElement('button');
-        trash.className = 'profile-switcher-row-trash btn';
-        trash.setAttribute('aria-label', 'Delete account');
-        // Inline SVG — Vector's `.icon` class is position:absolute inside
-        // sized parents and would render at 0×0 here. Using SVG keeps the
-        // trash icon flowing inline with the row.
-        trash.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14ZM10 11v6M14 11v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-        trash.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            onDelete(meta);
-        });
-        row.appendChild(trash);
-    }
-
-    if (onClick && !isActive) {
-        row.addEventListener('click', (ev) => {
-            onClick(meta);
-        });
-    }
-
-    return row;
-}
+/** Account row helpers shared by the My Profile switcher and the pre-login picker. */
+const accountRowHelpers = {
+    fileSrc: (path) => convertFileSrc(path),
+    placeholder: () => { const el = createPlaceholderAvatar(false, 28); el.classList.add('profile-switcher-avatar'); return el; },
+};
+let profileSwitcherRows = null;
+let loginPickerRows = null;
 
 /**
  * In-app My Profile dropdown — full-feature: switch / add / delete.
@@ -277,17 +221,14 @@ const profileSwitcher = {
             else _maxAccountTier = t;
         }).catch(() => {});
         const list = document.getElementById('profile-switcher-list');
-        list.innerHTML = '';
         const myProfile = arrProfiles.find(p => p.mine);
         const activeNpub = myProfile?.id || '';
-        for (const meta of accounts) {
-            const row = buildAccountRow(meta, {
-                isActive: meta.npub === activeNpub,
-                onClick: (m) => this.onSwitchTo(m),
-                onDelete: (m) => this.onDeleteRow(m),
-            });
-            list.appendChild(row);
-        }
+        if (profileSwitcherRows) VectorSvelte.unmountComponent(profileSwitcherRows);
+        profileSwitcherRows = VectorSvelte.mountAccountRows(list, {
+            accounts, activeNpub, h: accountRowHelpers,
+            onPick: (m) => this.onSwitchTo(m),
+            onDelete: (m) => this.onDeleteRow(m),
+        });
         // Soft cap: disable the Add button at the tier's account ceiling. Existing
         // accounts (even above the cap) stay listed + usable; only adding more is gated.
         const addBtn = document.getElementById('profile-switcher-add');
@@ -483,18 +424,14 @@ const loginPicker = {
         const list = document.getElementById('login-account-list');
         const backdrop = document.getElementById('login-account-list-backdrop');
         const trigger = document.getElementById('login-account-picker');
-        list.innerHTML = '';
         // Active account stays anchored in the pill at the top — only
-        // alternates appear as switchable rows below it.
-        for (const meta of this.accounts) {
-            if (meta.npub === this.activeNpub) continue;
-            const row = buildAccountRow(meta, {
-                isActive: false,
-                onClick: (m) => this.onPick(m),
-                // No delete in pre-login picker (per design).
-            });
-            list.appendChild(row);
-        }
+        // alternates appear as switchable rows below it. No delete here (per design).
+        if (loginPickerRows) VectorSvelte.unmountComponent(loginPickerRows);
+        loginPickerRows = VectorSvelte.mountAccountRows(list, {
+            accounts: this.accounts.filter(m => m.npub !== this.activeNpub),
+            h: accountRowHelpers,
+            onPick: (m) => this.onPick(m),
+        });
         // Anchor the list directly below the pill — measure the pill's
         // current bottom edge so the list always sits flush against it,
         // regardless of how #login-form lays out at this viewport size.
@@ -2692,67 +2629,19 @@ const INVITE_CARDS_PER_MSG = 3;
  * backend preview resolves — which also warms the join preload cache, so an eventual
  * Join opens populated (same path the deep-link flow uses).
  */
-function renderCommunityInvitePreviews(target, text) {
-    if (!text) return;
+/** The distinct invite keys in a message body, capped at what a message may show as cards. */
+function communityInviteKeys(text) {
+    const keys = [];
+    if (!text) return keys;
     COMMUNITY_INVITE_URL_REGEX.lastIndex = 0;
-    const seen = new Set();
     let match;
     while ((match = COMMUNITY_INVITE_URL_REGEX.exec(text)) !== null) {
         const inviteKey = match[1] ? `${match[1]}#${match[2]}` : match[2];
-        if (seen.has(inviteKey)) continue;
-        if (seen.size >= INVITE_CARDS_PER_MSG) break;
-        seen.add(inviteKey);
-        target.appendChild(_buildCommunityInviteCard(inviteKey));
+        if (keys.includes(inviteKey)) continue;
+        if (keys.length >= INVITE_CARDS_PER_MSG) break;
+        keys.push(inviteKey);
     }
-}
-
-function _buildCommunityInviteCard(inviteKey) {
-    const card = document.createElement('div');
-    card.className = 'community-invite-card is-loading';
-
-    const eyebrow = document.createElement('div');
-    eyebrow.className = 'cic-eyebrow';
-    eyebrow.textContent = 'Community Invite';
-    card.appendChild(eyebrow);
-
-    const body = document.createElement('div');
-    body.className = 'cic-body';
-    card.appendChild(body);
-
-    const icon = document.createElement('img');
-    icon.className = 'cic-icon';
-    icon.src = 'icons/group-placeholder.svg';
-    body.appendChild(icon);
-
-    const meta = document.createElement('div');
-    meta.className = 'cic-meta';
-    body.appendChild(meta);
-
-    const name = document.createElement('div');
-    name.className = 'cic-name';
-    name.innerHTML = '<span class="pack-skel cic-skel-name"></span>';
-    meta.appendChild(name);
-
-    const desc = document.createElement('div');
-    desc.className = 'cic-desc';
-    desc.innerHTML = '<span class="pack-skel cic-skel-desc"></span>';
-    meta.appendChild(desc);
-
-    const btn = document.createElement('button');
-    btn.className = 'cic-btn';
-    btn.type = 'button';
-    btn.textContent = 'Join';
-    btn.disabled = true;
-    body.appendChild(btn);
-
-    // Re-renders (scroll, reactions landing) hit the settled cache — fill instantly,
-    // no pop animation; only a genuinely fresh resolve animates in.
-    const settled = _invitePreviewCache.get(inviteKey);
-    const animate = !(settled && settled.state !== 'loading');
-    _resolveCommunityInvitePreview(inviteKey).then((res) => {
-        _fillCommunityInviteCard(card, inviteKey, res, { icon, name, desc, btn }, animate);
-    });
-    return card;
+    return keys;
 }
 
 function _resolveCommunityInvitePreview(inviteKey) {
@@ -2797,85 +2686,24 @@ function _resolveCommunityInvitePreview(inviteKey) {
     return promise;
 }
 
-function _fillCommunityInviteCard(card, inviteKey, res, els, animate) {
-    card.classList.remove('is-loading');
-    if (res.state !== 'ok') {
-        card.classList.add('is-invalid');
-        els.name.textContent = 'Invite Unavailable';
-        els.desc.textContent = 'This invite could not be loaded — it may be revoked or expired.';
-        els.btn.style.display = 'none';
-        return;
-    }
-    // Already a member → render from the chat we're syncing, NOT the fetched preview: the
-    // community's own sync is the single source of truth, so the card can never diverge.
-    const joined = res.info.community_id
-        ? arrChats.find(c => c.metadata?.custom_fields?.community_id === res.info.community_id)
-        : null;
-    const name = (joined && joined.metadata?.custom_fields?.name) || res.info.name || 'Community';
-    const desc = joined ? (joined.metadata?.custom_fields?.description || '') : (res.info.description || '');
-    els.name.textContent = name;
-    if (desc) {
-        els.desc.textContent = desc;
-    } else {
-        els.desc.remove();
-    }
-    const localIcon = joined?.metadata?.avatar_cached;
-    if (localIcon) {
-        els.icon.src = convertFileSrc(localIcon);
-    } else if (res.iconSrc) {
-        els.icon.src = res.iconSrc;
-    }
-    _setInviteCardAction(els.btn, inviteKey, res.info.community_id);
-    if (animate) card.classList.add('cic-ready');
-}
-
 /** The chat row of a community we're already in, or undefined. */
 function findCommunityChat(communityId) {
     if (!communityId) return undefined;
     return arrChats.find(c => c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id === communityId);
 }
 
-/** Point the card's button at the right action: Open when already a member, else Join. */
-function _setInviteCardAction(btn, inviteKey, communityId) {
-    const joined = findCommunityChat(communityId);
-    btn.disabled = false;
-    if (joined) {
-        btn.textContent = 'Open';
-        btn.classList.add('cic-btn-open');
-        btn.onclick = (e) => { e.stopPropagation(); openChat(joined.id); };
-    } else {
-        btn.textContent = 'Join';
-        btn.classList.remove('cic-btn-open');
-        btn.onclick = (e) => { e.stopPropagation(); _joinCommunityFromCard(inviteKey, btn, communityId); };
-    }
-}
-
-async function _joinCommunityFromCard(inviteKey, btn, communityId) {
+/** Join from an invite card; lands in the community on success, and surfaces the error itself. */
+async function _joinCommunityFromCard(inviteKey, communityId) {
     // Shares the deep-link flow's guard: one join at a time, app-wide.
     if (_communityJoinInFlight) return;
     _communityJoinInFlight = true;
-    btn.disabled = true;
-    btn.textContent = 'Joining…';
-    btn.classList.add('is-joining');
     try {
         const summary = await invoke('accept_public_invite', { url: communityInviteUrlFromKey(inviteKey) });
         // Await the first-page sync so the chat lands populated + in the right list slot.
         const channelId = await surfaceCommunitySummary(summary);
-        btn.classList.remove('is-joining');
-        if (channelId) {
-            btn.textContent = 'Open';
-            btn.classList.add('cic-btn-open');
-            btn.disabled = false;
-            btn.onclick = (e) => { e.stopPropagation(); openChat(channelId); };
-            // Joining IS the navigation intent — land in the new community, same as hitting Open.
-            openChat(channelId);
-        } else {
-            _setInviteCardAction(btn, inviteKey, communityId);
-        }
+        // Joining IS the navigation intent — land in the new community, same as hitting Open.
+        if (channelId) openChat(channelId);
     } catch (e) {
-        btn.classList.remove('is-joining');
-        btn.disabled = false;
-        btn.textContent = 'Join';
         popupConfirm('Failed to Join', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     } finally {
         _communityJoinInFlight = false;
@@ -4825,22 +4653,7 @@ async function refreshRelayInfoDialog() {
     // Refresh logs
     try {
         const logs = await invoke('get_relay_logs', { url });
-        const logsList = document.getElementById('relay-info-logs');
-        logsList.innerHTML = '';
-
-        if (logs.length === 0) {
-            const emptyLi = document.createElement('li');
-            emptyLi.className = 'relay-log-empty';
-            emptyLi.textContent = 'No activity recorded yet';
-            logsList.appendChild(emptyLi);
-        } else {
-            logs.forEach(log => {
-                const li = document.createElement('li');
-                const time = new Date(log.timestamp * 1000).toLocaleTimeString();
-                li.innerHTML = `<span class="relay-log-time">${escapeHtml(time)}</span><span class="relay-log-message ${escapeHtml(log.level)}">${escapeHtml(log.message)}</span>`;
-                logsList.appendChild(li);
-            });
-        }
+        VectorSvelte.setRelayLogs(logs);
     } catch (err) {
         console.error('Failed to load relay logs:', err);
     }
@@ -4937,12 +4750,8 @@ function openBlossomServerInfoDialog(server) {
     }
 
     overlay.classList.add('active');
-    // Reset slot synchronously so stale data doesn't flash mid-fetch.
-    const slot = document.getElementById('blossom-info-capabilities');
-    if (slot) {
-        slot.textContent = 'Loading…';
-        slot.style.opacity = '0.6';
-    }
+    // Reset synchronously so stale data doesn't flash mid-fetch.
+    VectorSvelte.setBlossomCaps('loading', []);
     const token = ++_blossomCapsToken;
     renderBlossomCapabilities(server.url, token);
 }
@@ -4950,125 +4759,15 @@ function openBlossomServerInfoDialog(server) {
 /** Monotonic token — rapid open(A) → open(B) races resolve in B's favour. */
 let _blossomCapsToken = 0;
 
-/** Chip distinguishing encrypted (chat) from public (avatar/banner) contexts. */
-function buildBlossomContextBadge(isEncrypted) {
-    const badge = document.createElement('span');
-    badge.className = 'blossom-cap-context';
-    if (isEncrypted) {
-        badge.textContent = 'encrypted';
-        badge.title = 'Tested with encrypted chat data';
-    } else {
-        badge.textContent = 'public';
-        badge.title = 'Tested with public uploads (avatar, banner, etc.)';
-    }
-    return badge;
-}
-
 async function renderBlossomCapabilities(url, token) {
-    const slot = document.getElementById('blossom-info-capabilities');
-    if (!slot) return;
     try {
         const caps = await getBlossomServerCapabilities(url);
         if (token !== _blossomCapsToken) return;
-        if (!caps || caps.length === 0) {
-            slot.textContent = 'No capability data yet. Vector learns each server’s file-type and size limits as you send files.';
-            slot.style.opacity = '0.6';
-            return;
-        }
-        // outcome 1 = accepted, 2 = MIME rejected, 3 = size-only seed.
-        const accepted = caps.filter(c => c.outcome === 1 && c.max_accepted_size > 0);
-        const sizeLimited = caps.filter(c =>
-            (c.outcome === 3 && c.min_rejected_size != null) ||
-            (c.outcome === 1 && c.max_accepted_size === 0 && c.min_rejected_size != null)
-        );
-        const rejected = caps.filter(c => c.outcome === 2);
-        slot.innerHTML = '';
-        slot.style.opacity = '';
-
-        if (accepted.length) {
-            const h = document.createElement('div');
-            h.className = 'blossom-cap-group-label blossom-cap-accepted';
-            h.textContent = 'Accepts';
-            slot.appendChild(h);
-            const ul = document.createElement('ul');
-            ul.className = 'blossom-cap-list';
-            for (const c of accepted) {
-                const li = document.createElement('li');
-                const marker = document.createElement('span');
-                marker.className = 'blossom-cap-marker blossom-cap-accepted';
-                marker.textContent = '✓';
-                marker.setAttribute('aria-label', 'accepted');
-                const mime = document.createElement('span');
-                mime.className = 'blossom-cap-mime';
-                mime.textContent = c.mime_type;
-                li.appendChild(marker);
-                li.appendChild(mime);
-                li.appendChild(buildBlossomContextBadge(c.is_encrypted));
-                const size = document.createElement('span');
-                size.className = 'blossom-cap-size';
-                size.textContent = `${formatBytes(c.max_accepted_size, 1)} max`;
-                li.appendChild(size);
-                ul.appendChild(li);
-            }
-            slot.appendChild(ul);
-        }
-        if (sizeLimited.length) {
-            const h = document.createElement('div');
-            h.className = 'blossom-cap-group-label blossom-cap-limited';
-            h.textContent = 'Size-limited';
-            slot.appendChild(h);
-            const ul = document.createElement('ul');
-            ul.className = 'blossom-cap-list';
-            for (const c of sizeLimited) {
-                const li = document.createElement('li');
-                li.classList.add('blossom-cap-limited-row');
-                const marker = document.createElement('span');
-                marker.className = 'blossom-cap-marker blossom-cap-limited';
-                marker.textContent = '⚠';
-                marker.setAttribute('aria-label', 'size limited');
-                const mime = document.createElement('span');
-                mime.className = 'blossom-cap-mime';
-                mime.textContent = c.mime_type;
-                const size = document.createElement('span');
-                size.className = 'blossom-cap-size';
-                size.textContent = `rejects ≥ ${formatBytes(c.min_rejected_size, 1)}`;
-                li.appendChild(marker);
-                li.appendChild(mime);
-                li.appendChild(buildBlossomContextBadge(c.is_encrypted));
-                li.appendChild(size);
-                ul.appendChild(li);
-            }
-            slot.appendChild(ul);
-        }
-        if (rejected.length) {
-            const h = document.createElement('div');
-            h.className = 'blossom-cap-group-label blossom-cap-rejected';
-            h.textContent = 'Rejects';
-            slot.appendChild(h);
-            const ul = document.createElement('ul');
-            ul.className = 'blossom-cap-list';
-            for (const c of rejected) {
-                const li = document.createElement('li');
-                li.classList.add('blossom-cap-rejected-row');
-                const mime = document.createElement('span');
-                mime.className = 'blossom-cap-mime';
-                mime.textContent = c.mime_type;
-                const marker = document.createElement('span');
-                marker.className = 'blossom-cap-marker blossom-cap-rejected';
-                marker.textContent = '✕';
-                marker.setAttribute('aria-label', 'rejected');
-                li.appendChild(mime);
-                li.appendChild(buildBlossomContextBadge(c.is_encrypted));
-                li.appendChild(marker);
-                ul.appendChild(li);
-            }
-            slot.appendChild(ul);
-        }
+        VectorSvelte.setBlossomCaps('ok', caps || []);
     } catch (err) {
         console.error('Failed to load blossom capabilities:', err);
         if (token !== _blossomCapsToken) return;
-        slot.textContent = 'Could not load capability data.';
-        slot.style.opacity = '0.6';
+        VectorSvelte.setBlossomCaps('error', []);
     }
 }
 
@@ -5163,6 +4862,8 @@ async function handleRelayDisable() {
  * Initialize relay dialog event listeners
  */
 function initRelayDialogs() {
+    VectorSvelte.mountRelayLogs(document.getElementById('relay-info-logs'));
+    VectorSvelte.mountBlossomCaps(document.getElementById('blossom-info-capabilities'), { h: { formatBytes } });
     // Add Relay Dialog
     document.getElementById('add-relay-close').onclick = closeAddRelayDialog;
     document.getElementById('add-relay-cancel').onclick = closeAddRelayDialog;
