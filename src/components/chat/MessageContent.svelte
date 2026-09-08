@@ -63,9 +63,11 @@
         {/if}
     {/if}
     {#if msg.edited}
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span class="dmsg-edited" class:btn={msg.edit_history?.length > 0}
               data-msg-id={msg.edit_history?.length > 0 ? msg.id : undefined}
-              title={msg.edit_history?.length > 0 ? 'Click to view edit history' : undefined}>(edited)</span>
+              title={msg.edit_history?.length > 0 ? 'Click to view edit history' : undefined}
+              onclick={(e) => { if (msg.edit_history?.length > 0) h.showEditHistory(msg.id, e.currentTarget); }}>(edited)</span>
     {/if}
     {#if msg.mine}
         {#if msg.failed}

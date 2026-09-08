@@ -166,6 +166,7 @@ function renderCryptoAddress(coin) {
     // Render the "Pay" button
     const btnCoin = document.createElement('button');
     btnCoin.setAttribute('pay-uri', coin.uri + coin.address);
+    btnCoin.onclick = () => openUrl(coin.uri + coin.address);
     btnCoin.textContent = `Pay`;
 
     // Compile and return the DOM object

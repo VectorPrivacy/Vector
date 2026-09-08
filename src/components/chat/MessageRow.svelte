@@ -240,7 +240,7 @@
         {#if reactions.length}
             <div class="dmsg-reactions">
                 {#each reactions as g (g.emoji)}
-                    <!-- The global '.reaction' click delegate toggles the reaction. -->
+                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                     <span
                         class="reaction"
                         data-emoji={g.emoji}
@@ -248,6 +248,7 @@
                         data-reacted={g.mine ? 'true' : undefined}
                         title={g.mine ? 'Click to remove your reaction' : undefined}
                         use:chip={g}
+                        onclick={() => h.reactionClick(current.id, g.emoji)}
                     ></span>
                 {/each}
                 {#if showAddReaction}

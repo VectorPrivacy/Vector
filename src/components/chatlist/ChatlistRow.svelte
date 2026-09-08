@@ -112,12 +112,14 @@
 
 </script>
 
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div
     class="chatlist-contact"
     class:has-unread={vm.nUnread}
     class:chatlist-joining={vm.joining}
     id="chatlist-{vm.chat.id}"
     use:rowMenu={vm}
+    onclick={() => h.rowClick(vm)}
 >
     <div style:position="relative">
         {#if vm.isGroup}

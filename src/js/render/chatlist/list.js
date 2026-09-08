@@ -121,6 +121,15 @@ function chatlistHelpers() {
         countPingMessages,
         isPrimaryChannelId: (id) => arrChats.some(c => c.id === id && c.metadata?.custom_fields?.primary_channel === id),
         openChannel: openCommunityChannel,
+        // A tap that dismissed an open context menu must only close it, not also open the
+        // chat behind it; the trailing tap a long-press synthesises is swallowed the same way.
+        // An invite row and a community still joining (locked until it is readable) stay put.
+        rowClick: (vm) => {
+            if (wasContextMenuJustDismissed()) return;
+            if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
+            if (vm.joining) return;
+            openChat(vm.chat.id);
+        },
         createChannel: promptCreateChannel,
         deleteChannel: promptDeleteChannel,
         // invite rows

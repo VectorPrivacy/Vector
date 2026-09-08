@@ -35,7 +35,7 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="dmsg-reply btn" class:dmsg-reply-them={!view.mine} id="r-{view.parentId}">
+<div class="dmsg-reply btn" class:dmsg-reply-them={!view.mine} id="r-{view.parentId}" onclick={() => h.jumpToMessage(view.parentId)}>
     <span class="dmsg-reply-avatar-host" style="display:contents" onclick={openProfile}>
         <Avatar src={view.avatarSrc} size={16} class="dmsg-reply-avatar" placeholder={() => h.createPlaceholderAvatar(false, 16)} />
     </span>

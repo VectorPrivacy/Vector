@@ -160,6 +160,9 @@ const _dmsgRowHelpers = {
     joinFromCard: (key, communityId) => _joinCommunityFromCard(key, communityId),
     fileSrc: (path) => convertFileSrc(path),
     openChatById: (id) => openChat(id),
+    jumpToMessage: (id) => jumpToMessage(id),
+    showEditHistory: (id, el) => showEditHistory(id, el),
+    reactionClick: (msgId, emoji) => _dmsgReactionClick(msgId, emoji),
     xdcUrl: (msg) => findXdcUrl(msg.content),
     renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),
     webPreviewsEnabled: () => !!fWebPreviewsEnabled,
@@ -751,6 +754,18 @@ function _dmsgBuildLinkPreview(msg) {
     const divPrev = document.createElement('div');
     divPrev.classList.add('dmsg-preview', 'btn');
     divPrev.setAttribute('url', msg.preview_metadata.og_url || msg.preview_metadata.domain);
+    // og:url is attacker-settable (the linked page's own metadata), so gate the scheme to
+    // http/https before handing it to the OS opener. A schemeless domain is assumed https.
+    divPrev.onclick = () => {
+        const strURL = divPrev.getAttribute('url');
+        if (!strURL) return;
+        let safe = null;
+        try {
+            const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(strURL) ? strURL : 'https://' + strURL);
+            if (u.protocol === 'http:' || u.protocol === 'https:') safe = u.href;
+        } catch (_) { /* unparseable → don't open */ }
+        if (safe) openUrl(safe);
+    };
 
     const description = msg.preview_metadata.og_description || msg.preview_metadata.description;
     const hasImage = !!msg.preview_metadata.og_image;
@@ -1099,3 +1114,32 @@ function _reactionRowAtCapacity(msgId) {
         // insertSystemEvent — they aren't always children of this delegate's container.)
     });
 })();
+
+/**
+ * A reaction chip click: add your matching reaction, or revoke it if you already reacted
+ * (one per emoji per user). Revoke only acts on your OWN reaction.
+ */
+function _dmsgReactionClick(msgId, emoji) {
+    if (isReactionLongPressed()) return;
+    for (const cChat of arrChats) {
+        const cMsg = cChat.messages.find(a => a.id === msgId);
+        if (!cMsg) continue;
+        const mine = cMsg.reactions.find(r => r.emoji === emoji && r.author_id === strPubkey);
+        if (mine) {
+            // A provisional entry means our add is still in flight — swallow the
+            // click (debounce) rather than revoke an id the backend never issued.
+            if (!String(mine.id).startsWith('pending-react-')) {
+                // Already reacted → revoke. The backend optimistically removes the reaction
+                // and emits message_update, so the chip refreshes without local bookkeeping.
+                invoke('revoke_reaction', { reactionId: mine.id })
+                    .catch(err => console.error('revoke_reaction failed:', err));
+            }
+        } else {
+            // Not yet reacted → add. The provisional debounces double-clicks and
+            // keeps the chip reacted through an earlier click's echo.
+            const retract = dmsgReactOptimistic(msgId, emoji, null);
+            reactToMessageRouted(msgId, cChat.id, emoji).catch(() => { if (retract) retract(); });
+        }
+        break;
+    }
+}
