@@ -477,14 +477,8 @@ const addAccountFlow = {
         domInvites.style.display = 'none';
         domGroupOverview.style.display = 'none';
 
-        domLoginImport.style.display = 'none';
-        domLoginInvite.style.display = 'none';
-        domLoginEncrypt.style.display = 'none';
-        domLoginWelcome.style.display = 'none';
-        domLoginStart.style.display = '';
-        domLoginBackBar.style.display = '';
-        document.getElementById('login-form').classList.add('has-back-bar');
-        domLogin.style.display = '';
+        VectorSvelte.loginScreen('start', true);
+        VectorSvelte.loginShowForm(true);
 
         // Hide the pre-login picker pill during Add Profile — the user is
         // creating a new account, not picking an existing one. Without
@@ -506,14 +500,8 @@ const addAccountFlow = {
 
     /** Soft restore — only valid before commit. */
     restore() {
-        domLoginImport.style.display = 'none';
-        domLoginInvite.style.display = 'none';
-        domLoginEncrypt.style.display = 'none';
-        domLoginWelcome.style.display = 'none';
-        domLoginStart.style.display = '';
-        domLoginBackBar.style.display = 'none';
-        document.getElementById('login-form').classList.remove('has-back-bar');
-        domLogin.style.display = 'none';
+        VectorSvelte.loginScreen('start', false);
+        VectorSvelte.loginShowForm(false);
         if (this._restoreFn) {
             this._restoreFn();
             this._restoreFn = null;

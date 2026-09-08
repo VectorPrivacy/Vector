@@ -53,6 +53,8 @@ import BlossomCaps from './settings/BlossomCaps.svelte';
 import RelayLogs from './settings/RelayLogs.svelte';
 import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
+import LoginChrome from './auth/LoginChrome.svelte';
+export { loginState, bunkerState, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick } from './lib/login.svelte.js';
 import CreateCommunity from './community/CreateCommunity.svelte';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { setEditHistory, setEditHistoryBelow, clearEditHistory } from './lib/edithistory.svelte.js';
@@ -457,4 +459,10 @@ export function mountEditHistory(content, { h }) {
 export function mountCreateCommunity(host, { h }) {
     host.replaceChildren();
     return mount(CreateCommunity, { target: host, props: { h } });
+}
+
+/** Mount the renderless login chrome over the shell's elements. */
+export function mountLoginChrome({ els }) {
+    const host = document.createElement('div'); host.hidden = true; document.body.appendChild(host);
+    return mount(LoginChrome, { target: host, props: { els } });
 }

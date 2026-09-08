@@ -1902,8 +1902,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // bunker pairing form is up the form owns its own status display,
         // and the backend's Connecting/Online events during pre-commit pairing
         // would otherwise leak as misleading "signer online" toasts in the UI.
-        const bunkerFormVisible = domLoginBunker
-            && !domLoginBunker.classList.contains('is-hidden');
+        const bunkerFormVisible = VectorSvelte.loginState().bunker;
         if (state === 'offline') {
             if (!bunkerFormVisible && !window.__bunkerOfflineToastShown) {
                 if (typeof showToast === 'function') {
@@ -2000,9 +1999,9 @@ window.addEventListener("DOMContentLoaded", async () => {
         }
         // Only auto-reroll if the bunker form is actually visible — don't
         // start a fresh session if the user has navigated away.
-        if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+        if (VectorSvelte.loginState().bunker) {
             setTimeout(() => {
-                if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+                if (VectorSvelte.loginState().bunker) {
                     startBunkerSession();
                 }
             }, 1500);
@@ -2021,9 +2020,7 @@ window.addEventListener("DOMContentLoaded", async () => {
             // signer (identity matched, no harm done), but rebuilding the UI
             // mid-Settings would yank them out of where they are. Skip the
             // boot sequence — the live session is already healthy.
-            const formVisible = domLoginBunker
-                && !domLoginBunker.classList.contains('is-hidden')
-                && domLoginBunker.style.display !== 'none';
+            const formVisible = VectorSvelte.loginState().bunker;
             if (!formVisible) return;
             const origin = bunkerReauthOrigin;
             if (typeof window.hideBunkerForm === 'function') window.hideBunkerForm();
@@ -2034,10 +2031,8 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // form. Mirror the Back-button restore — tear down the
                 // bunker form and put the user back on the panel they came
                 // from.
-                if (domLoginBackBar) domLoginBackBar.style.display = 'none';
-                const loginForm = document.getElementById('login-form');
-                if (loginForm) loginForm.classList.remove('has-back-bar', 'bunker-active');
-                if (domLogin) domLogin.style.display = 'none';
+                VectorSvelte.loginScreen('none', false);
+                VectorSvelte.loginShowForm(false);
                 bunkerReauthOrigin = null;
                 if (origin === 'settings' && typeof openSettings === 'function') {
                     openSettings();
@@ -2062,9 +2057,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // Form hidden = user backed out; the in-flight bg task may still
         // eventually emit failure (timeout) — silently drop it since the
         // user already moved on and the live session is unchanged.
-        const formVisible = domLoginBunker
-            && !domLoginBunker.classList.contains('is-hidden')
-            && domLoginBunker.style.display !== 'none';
+        const formVisible = VectorSvelte.loginState().bunker;
         if (!formVisible) return;
         const err = evt?.payload?.error || 'Re-authorization failed';
         const status = document.getElementById('bunker-status-text');
@@ -2073,9 +2066,9 @@ window.addEventListener("DOMContentLoaded", async () => {
             status.className = 'login-bunker-status error';
         }
         // Auto-reroll on reauth timeout too (same rationale as pairing).
-        if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+        if (VectorSvelte.loginState().bunker) {
             setTimeout(() => {
-                if (domLoginBunker && !domLoginBunker.classList.contains('is-hidden')) {
+                if (VectorSvelte.loginState().bunker) {
                     startBunkerSession();
                 }
             }, 1500);
@@ -2201,8 +2194,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 loadEmojiUsage();
 
                 // Hide login UI and show main UI
-                domLogin.style.display = 'none';
-                domLoginEncrypt.style.display = 'none';
+                VectorSvelte.loginHide();
                 domNavbar.style.display = '';
                 domChatBookmarksBtn.style.display = 'flex';
                 
@@ -2353,8 +2345,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // indication. We hide the type-select / PIN / password
                 // input UI inside `#login-encrypt` since we're not
                 // soliciting anything; the title is the whole UX.
-                domLoginStart.style.display = 'none';
-                domLoginEncrypt.style.display = '';
+                VectorSvelte.loginScreen('encrypt');
                 const typeSelect = document.getElementById('login-encrypt-type-select');
                 const pinRow = document.getElementById('login-encrypt-pins');
                 const passwordBox = document.getElementById('login-encrypt-password');
@@ -2409,8 +2400,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                         String(e),
                         true
                     );
-                    domLoginEncrypt.style.display = 'none';
-                    domLoginStart.style.display = '';
+                    VectorSvelte.loginScreen('start');
                     // Re-show picker if any other accounts exist; the
                     // user can switch to a working one.
                     if (typeof loginPicker !== 'undefined'

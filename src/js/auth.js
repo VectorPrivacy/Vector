@@ -42,31 +42,25 @@ function stopBunkerSessionTimer() {
         bunkerSessionTimerHandle = null;
     }
     bunkerSessionDeadline = 0;
+    VectorSvelte.bunkerDeadline(0);
 }
 
-function renderBunkerCountdown() {
-    const status = document.getElementById('bunker-status-text');
-    if (!status) return;
-    const remaining = Math.max(0, bunkerSessionDeadline - Date.now());
-    if (remaining === 0) {
-        stopBunkerSessionTimer();
-        status.textContent = 'Refreshing connection link…';
-        status.className = 'login-bunker-status connecting';
-        startBunkerSession();
+/** One tick of the live countdown; at expiry the link is single-use, so a fresh one rolls. */
+function tickBunkerSession() {
+    if (bunkerSessionDeadline - Date.now() > 0) {
+        VectorSvelte.bunkerTick(Date.now());
         return;
     }
-    const secs = Math.ceil(remaining / 1000);
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    status.textContent = `Waiting for signer… (${m}:${s.toString().padStart(2, '0')})`;
-    status.className = 'login-bunker-status connecting';
+    stopBunkerSessionTimer();
+    VectorSvelte.bunkerStatus('Refreshing connection link…', 'connecting');
+    startBunkerSession();
 }
 
 function armBunkerSessionTimer() {
     stopBunkerSessionTimer();
     bunkerSessionDeadline = Date.now() + BUNKER_SESSION_TIMEOUT_MS;
-    bunkerSessionTimerHandle = setInterval(renderBunkerCountdown, 1000);
-    renderBunkerCountdown();
+    VectorSvelte.bunkerDeadline(bunkerSessionDeadline);
+    bunkerSessionTimerHandle = setInterval(tickBunkerSession, 1000);
 }
 
 /**
@@ -77,16 +71,9 @@ function armBunkerSessionTimer() {
  */
 async function startBunkerSession() {
     strBunkerNostrConnectUrl = '';
-    if (domLoginBunkerQrWrap) domLoginBunkerQrWrap.classList.remove('ready');
-    if (domLoginBunkerCopyBtn) {
-        domLoginBunkerCopyBtn.disabled = true;
-        domLoginBunkerCopyBtn.classList.remove('copied');
-        domLoginBunkerCopyBtn.textContent = 'Copy connection link';
-    }
-    if (domLoginBunkerStatus) {
-        domLoginBunkerStatus.textContent = 'Waiting for signer…';
-        domLoginBunkerStatus.className = 'login-bunker-status connecting';
-    }
+    VectorSvelte.bunkerLink('', false);
+    VectorSvelte.bunkerCopied(false);
+    VectorSvelte.bunkerStatus('Waiting for signer…', 'connecting');
     try {
         // Reauth re-uses the existing client keypair from MY_SECRET_KEY and
         // is for already-committed accounts — no Add Profile commit step.
@@ -110,10 +97,8 @@ async function startBunkerSession() {
                     const origin = bunkerReauthOrigin;
                     hideBunkerForm();
                     if (origin) {
-                        if (domLoginBackBar) domLoginBackBar.style.display = 'none';
-                        const lf = document.getElementById('login-form');
-                        if (lf) lf.classList.remove('has-back-bar', 'bunker-active');
-                        if (domLogin) domLogin.style.display = 'none';
+                        VectorSvelte.loginScreen('none', false);
+                        VectorSvelte.loginShowForm(false);
                         bunkerReauthOrigin = null;
                         if (origin === 'settings' && typeof openSettings === 'function') {
                             openSettings();
@@ -131,20 +116,13 @@ async function startBunkerSession() {
         }
         const url = await invoke(cmd);
         strBunkerNostrConnectUrl = url;
-        const rendered = renderQrInto(domLoginBunkerQr, url);
-        if (rendered && domLoginBunkerQrWrap) {
-            domLoginBunkerQrWrap.classList.add('ready');
-        }
-        if (domLoginBunkerCopyBtn) domLoginBunkerCopyBtn.disabled = false;
+        VectorSvelte.bunkerLink(url, renderQrInto(domLoginBunkerQr, url));
         // Start the live countdown — auto-rerolls a fresh QR when the
         // 120s backend timeout expires so the user isn't stranded.
         armBunkerSessionTimer();
     } catch (e) {
         stopBunkerSessionTimer();
-        if (domLoginBunkerStatus) {
-            domLoginBunkerStatus.textContent = String(e);
-            domLoginBunkerStatus.className = 'login-bunker-status error';
-        }
+        VectorSvelte.bunkerStatus(String(e), 'error');
     }
 }
 
@@ -177,25 +155,9 @@ function showBunkerForm(mode = 'new') {
     } else {
         bunkerReauthOrigin = null;
     }
-    if (domLoginImport) domLoginImport.style.display = 'none';
-    if (domLoginStart) domLoginStart.style.display = 'none';
-    if (domLoginInvite) domLoginInvite.style.display = 'none';
-    if (typeof domLoginEncrypt !== 'undefined' && domLoginEncrypt) domLoginEncrypt.style.display = 'none';
-    // Also show the parent login form + back-bar in case we're entering
-    // from the main app (reauth path can fire from anywhere).
-    const loginForm = document.getElementById('login-form');
-    if (loginForm) {
-        loginForm.classList.add('bunker-active');
-        loginForm.classList.add('has-back-bar');
-    }
-    if (typeof domLogin !== 'undefined' && domLogin) domLogin.style.display = '';
-    if (typeof domLoginBackBar !== 'undefined' && domLoginBackBar) domLoginBackBar.style.display = '';
-    domLoginBunker.classList.remove('is-hidden');
-    domLoginBunker.style.display = '';
-    if (domLoginBunkerStatus) {
-        domLoginBunkerStatus.textContent = '';
-        domLoginBunkerStatus.className = 'login-bunker-status';
-    }
+    // The overlay replaces every screen and shows the form + back bar, so the reauth
+    // path can enter from anywhere in the main app.
+    VectorSvelte.loginShowBunker(mode);
     // Fresh URL per open — single-use, can't be cached.
     startBunkerSession();
 }
@@ -204,14 +166,10 @@ window.showBunkerForm = showBunkerForm;
 /** Hide the bunker form and clear its in-memory state. */
 function hideBunkerForm() {
     stopBunkerSessionTimer();
-    domLoginBunker.classList.add('is-hidden');
-    domLoginBunker.style.display = 'none';
-    const loginForm = document.getElementById('login-form');
-    if (loginForm) loginForm.classList.remove('bunker-active');
+    VectorSvelte.loginHideBunker();
     if (domLoginBunkerUrlInput) domLoginBunkerUrlInput.value = '';
     strBunkerNostrConnectUrl = '';
     if (domLoginBunkerQr) domLoginBunkerQr.innerHTML = '';
-    if (domLoginBunkerQrWrap) domLoginBunkerQrWrap.classList.remove('ready');
 }
 window.hideBunkerForm = hideBunkerForm;
 
@@ -232,6 +190,17 @@ const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
 const domLoginEncryptPassword = document.getElementById('login-encrypt-password');
 const domLoginPasswordInput = document.getElementById('login-password-input');
 const domLoginEncryptTypeSelect = document.getElementById('login-encrypt-type-select');
+
+// One reconciler paints the login shell; the flows above and below only set state.
+VectorSvelte.mountLoginChrome({
+    els: {
+        form: domLogin, backBar: domLoginBackBar, start: domLoginStart, import: domLoginImport,
+        invite: domLoginInvite, welcome: domLoginWelcome, encrypt: domLoginEncrypt, bunker: domLoginBunker,
+        logo: document.querySelector('.login-logo'), subtext: document.querySelector('.login-subtext'),
+        status: domLoginBunkerStatus, qrWrap: domLoginBunkerQrWrap, copy: domLoginBunkerCopyBtn,
+        connect: domLoginBunkerConnectBtn, urlInput: domLoginBunkerUrlInput, bunkerStart: domLoginBunkerStartBtn,
+    },
+});
 
 /**
  * Login to the Nostr network
@@ -320,8 +289,7 @@ async function login(skipAnimations = false) {
             const showMainUI = async () => {
                 console.time('[Boot] showMainUI:dom');
                 domLoginInput.value = "";
-                domLogin.style.display = 'none';
-                domLoginEncrypt.style.display = 'none';
+                VectorSvelte.loginHide();
 
                 // Show navbar and bookmarks
                 domNavbar.style.display = '';
@@ -530,9 +498,7 @@ async function login(skipAnimations = false) {
  * Display the Invite code input flow.
  */
 function openInviteFlow() {
-    domLoginStart.style.display = 'none';
-    domLoginImport.style.display = 'none';
-    domLoginInvite.style.display = '';
+    VectorSvelte.loginScreen('invite');
     
     // Focus on the invite input
     domInviteInput.focus();
@@ -548,8 +514,6 @@ function openInviteFlow() {
             // Accept the invite code
             await invoke('accept_invite_code', { inviteCode });
             
-            // Hide invite screen and show welcome screen
-            domLoginInvite.style.display = 'none';
             showWelcomeScreen();
         } catch (e) {
             // Display the specific error from the backend
@@ -579,23 +543,10 @@ function openInviteFlow() {
  * Display the welcome screen after successful invite code acceptance
  */
 function showWelcomeScreen() {
-    // Hide the logo and subtext
-    const domLogo = document.querySelector('.login-logo');
-    const domSubtext = document.querySelector('.login-subtext');
-    domLogo.style.display = 'none';
-    domSubtext.style.display = 'none';
-
-    // Show the welcome screen
-    domLoginWelcome.style.display = '';
-
+    // The chrome hides the logo and tagline while the welcome screen is up.
+    VectorSvelte.loginScreen('welcome');
     // After 5 seconds, transition to the encryption flow
-    setTimeout(() => {
-        domLoginWelcome.style.display = 'none';
-        // Restore the logo and subtext
-        domLogo.style.display = '';
-        domSubtext.style.display = '';
-        openEncryptionFlow(false);
-    }, 5000);
+    setTimeout(() => openEncryptionFlow(false), 5000);
 }
 
 /**
@@ -604,10 +555,7 @@ function showWelcomeScreen() {
  * @param {string} securityType - "pin" or "password" (determines which UI to show)
  */
 function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
-    domLoginStart.style.display = 'none';
-    domLoginImport.style.display = 'none';
-    domLoginInvite.style.display = 'none';
-    domLoginEncrypt.style.display = '';
+    VectorSvelte.loginScreen('encrypt');
     // Hide the picker only for the NEW-account PIN-setup path (fUnlock=false).
     // The unlock path keeps it visible so the user can switch between
     // existing accounts before entering their PIN/password.
@@ -1216,10 +1164,7 @@ async function wireLoginUi() {
         }
     };
     domLoginAccountBtn.onclick = () => {
-        domLoginImport.style.display = '';
-        domLoginStart.style.display = 'none';
-        domLoginBackBar.style.display = '';
-        document.getElementById('login-form').classList.add('has-back-bar');
+        VectorSvelte.loginScreen('import', true);
         // Hide the picker pill — once the user is entering an nsec / seed
         // phrase, the active-account-from-marker context no longer applies.
         loginPicker.hide();
@@ -1276,17 +1221,10 @@ async function wireLoginUi() {
             if (!strBunkerNostrConnectUrl) return;
             try {
                 await navigator.clipboard.writeText(strBunkerNostrConnectUrl);
-                domLoginBunkerCopyBtn.classList.add('copied');
-                domLoginBunkerCopyBtn.textContent = 'Copied — paste in your signer';
-                setTimeout(() => {
-                    domLoginBunkerCopyBtn.classList.remove('copied');
-                    domLoginBunkerCopyBtn.textContent = 'Copy connection link';
-                }, 2500);
+                VectorSvelte.bunkerCopied(true);
+                setTimeout(() => VectorSvelte.bunkerCopied(false), 2500);
             } catch (err) {
-                if (domLoginBunkerStatus) {
-                    domLoginBunkerStatus.textContent = 'Could not copy to clipboard';
-                    domLoginBunkerStatus.className = 'login-bunker-status error';
-                }
+                VectorSvelte.bunkerStatus('Could not copy to clipboard', 'error');
             }
         };
     }
@@ -1332,9 +1270,7 @@ async function wireLoginUi() {
         // staged-but-not-committed session — drain it on the backend so the
         // next attempt doesn't see a leaked NOSTR_CLIENT. No-op when no
         // staged session exists.
-        const wasOnBunkerForm = domLoginBunker
-            && !domLoginBunker.classList.contains('is-hidden')
-            && domLoginBunker.style.display !== 'none';
+        const wasOnBunkerForm = VectorSvelte.loginState().bunker;
         if (wasOnBunkerForm) {
             invoke('cancel_bunker_session').catch((err) => {
                 console.warn('[back] cancel_bunker_session failed:', err);
@@ -1346,10 +1282,8 @@ async function wireLoginUi() {
         if (wasOnBunkerForm && bunkerReauthOrigin) {
             const origin = bunkerReauthOrigin;
             hideBunkerForm();
-            if (domLoginBackBar) domLoginBackBar.style.display = 'none';
-            const loginForm = document.getElementById('login-form');
-            if (loginForm) loginForm.classList.remove('has-back-bar');
-            if (domLogin) domLogin.style.display = 'none';
+            VectorSvelte.loginScreen('none', false);
+            VectorSvelte.loginShowForm(false);
             bunkerReauthOrigin = null;
             if (origin === 'settings' && typeof openSettings === 'function') {
                 openSettings();
@@ -1361,15 +1295,9 @@ async function wireLoginUi() {
         // Regular login back: collapse every sub-screen back to the start
         // picker. Encrypt + welcome were missing here, which is what made
         // the post-commit Add Profile case render two panels at once.
-        domLoginImport.style.display = 'none';
-        domLoginInvite.style.display = 'none';
-        domLoginEncrypt.style.display = 'none';
-        domLoginWelcome.style.display = 'none';
         hideBunkerForm();
-        domLoginBackBar.style.display = 'none';
-        domLoginStart.style.display = '';
+        VectorSvelte.loginScreen('start', false);
         domLoginInput.value = '';
-        document.getElementById('login-form').classList.remove('has-back-bar');
         // Re-reveal the picker pill if we have ≥2 accounts on disk. The
         // Login button's onclick hides the picker (the user is about to
         // import a key, so it'd be confusing to show), and without this
@@ -1410,22 +1338,13 @@ async function wireLoginUi() {
         domLoginBunkerConnectBtn.onclick = async () => {
             const url = (domLoginBunkerUrlInput?.value || '').trim();
             if (!url.toLowerCase().startsWith('bunker://')) {
-                domLoginBunkerStatus.textContent = 'Must start with bunker://';
-                domLoginBunkerStatus.className = 'login-bunker-status error';
+                VectorSvelte.bunkerStatus('Must start with bunker://', 'error');
                 return;
             }
-            // Disable inputs while the bunker handshake runs (5–10s typical
-            // while the user taps "approve" on their signer). Re-enable on
-            // failure so they can retry without leaving the screen.
-            const _disable = (v) => {
-                domLoginBunkerConnectBtn.disabled = v;
-                domLoginBunkerUrlInput.disabled = v;
-                domLoginBunkerStartBtn && (domLoginBunkerStartBtn.disabled = v);
-                if (domLoginBunkerCopyBtn) domLoginBunkerCopyBtn.disabled = v;
-            };
-            _disable(true);
-            domLoginBunkerStatus.textContent = 'Connecting to signer…';
-            domLoginBunkerStatus.className = 'login-bunker-status connecting';
+            // Inputs lock while the bunker handshake runs (5–10s typical while the
+            // user taps "approve" on their signer); a failure unlocks them to retry.
+            VectorSvelte.bunkerBusy(true);
+            VectorSvelte.bunkerStatus('Connecting to signer…', 'connecting');
             try {
                 if (addAccountFlow.active) await addAccountFlow.commit();
                 const { public: pubKey, existing } = await invoke('connect_bunker', {
@@ -1437,13 +1356,11 @@ async function wireLoginUi() {
                     // Bunker identity matches an existing account; backend has
                     // armed `session_reload`. Just hide the form — the document
                     // reload will switch into the stored account.
-                    domLoginBunkerStatus.textContent = 'Account already added — switching…';
-                    domLoginBunkerStatus.className = 'login-bunker-status online';
+                    VectorSvelte.bunkerStatus('Account already added — switching…', 'online');
                     hideBunkerForm();
                     return;
                 }
-                domLoginBunkerStatus.textContent = 'Connected. Choosing security…';
-                domLoginBunkerStatus.className = 'login-bunker-status online';
+                VectorSvelte.bunkerStatus('Connected. Choosing security…', 'online');
                 // UI advances first; relay connect runs in the background so a
                 // hang there doesn't strand the user on the bunker screen.
                 hideBunkerForm();
@@ -1452,9 +1369,8 @@ async function wireLoginUi() {
                     console.warn('[connect_bunker] connect() failed:', err);
                 });
             } catch (e) {
-                domLoginBunkerStatus.textContent = String(e);
-                domLoginBunkerStatus.className = 'login-bunker-status error';
-                _disable(false);
+                VectorSvelte.bunkerStatus(String(e), 'error');
+                VectorSvelte.bunkerBusy(false);
             }
         };
     }
