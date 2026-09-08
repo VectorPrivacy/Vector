@@ -197,6 +197,7 @@ async function openMarketplaceApp(appId, app) {
  * @param {MarketplaceApp} app - The app requesting permissions
  * @returns {Promise<boolean>} True if user confirmed (grant or deny), false if cancelled
  */
+let permissionPromptMounted = false;
 async function showPermissionPrompt(app) {
     // Get available permissions metadata first (outside Promise to properly throw on error)
     let availablePermissions;
@@ -206,112 +207,38 @@ async function showPermissionPrompt(app) {
         console.error('Failed to get available permissions:', error);
         return true; // Continue anyway
     }
+    const items = app.requested_permissions.split(',').map(s => s.trim()).filter(Boolean).map(id => {
+        const info = availablePermissions.find(p => p.id === id);
+        return info ? { id, label: info.label, description: info.description } : null;
+    }).filter(Boolean);
 
-    // Parse requested permissions
-    const requestedPermissions = app.requested_permissions.split(',').filter(s => s.trim());
-
-    // Build permissions list HTML - using same toggle style as App Details
-    const permissionsHtml = requestedPermissions.map(permId => {
-        const permInfo = availablePermissions.find(p => p.id === permId.trim());
-        if (!permInfo) return '';
-
-        return `
-            <div class="permission-prompt-item">
-                <div class="permission-prompt-info">
-                    <span class="permission-prompt-label">${escapeHtml(permInfo.label)}</span>
-                    <span class="permission-prompt-desc">${escapeHtml(permInfo.description)}</span>
-                </div>
-                <label class="toggle-container permission-prompt-toggle">
-                    <input type="checkbox" name="permission" value="${escapeHtml(permId.trim())}">
-                    <span class="neon-toggle"></span>
-                </label>
-            </div>
-        `;
-    }).filter(h => h).join('');
-
-    // Create overlay
-    let overlay = document.getElementById('permission-prompt-overlay');
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.id = 'permission-prompt-overlay';
-        overlay.className = 'permission-prompt-overlay';
-        document.body.appendChild(overlay);
-    }
-
-    overlay.innerHTML = `
-        <div class="permission-prompt-container">
-            <div class="permission-prompt-header">
-                <h2>Permission Request</h2>
-                <p class="permission-prompt-subtitle">${escapeHtml(app.name)} is requesting the following permissions:</p>
-            </div>
-            <div class="permission-prompt-content">
-                <p class="permission-prompt-hint">Select which permissions you want to grant. The app may have reduced functionality without certain permissions.</p>
-                <div class="permission-prompt-list">
-                    ${permissionsHtml}
-                </div>
-            </div>
-            <div class="permission-prompt-buttons">
-                <button class="file-preview-btn file-preview-btn-cancel" id="permission-prompt-deny">Cancel</button>
-                <button class="file-preview-btn file-preview-btn-send" id="permission-prompt-continue">Continue</button>
-            </div>
-        </div>
-    `;
-
-    overlay.style.display = 'flex';
-    setTimeout(() => overlay.classList.add('active'), 10);
+    if (!permissionPromptMounted) { permissionPromptMounted = true; VectorSvelte.mountPermissionPrompt(); }
 
     // Return a Promise that resolves when the user makes a choice
     return new Promise((resolve) => {
-        const denyBtn = document.getElementById('permission-prompt-deny');
-        const continueBtn = document.getElementById('permission-prompt-continue');
-
         const closePrompt = () => {
             popBack('permission-prompt');
-            // Clean up event handlers to prevent memory leaks
-            denyBtn.onclick = null;
-            continueBtn.onclick = null;
-            overlay.onclick = null;
-            overlay.classList.remove('active');
-            setTimeout(() => overlay.style.display = 'none', 300);
+            VectorSvelte.closePermissionPrompt();
+            // The element outlives the fade-out.
+            setTimeout(() => VectorSvelte.unmountPermissionPrompt(), 300);
         };
-
-        denyBtn.onclick = () => {
+        VectorSvelte.openPermissionPrompt(app.name, items, {
             // Cancel - don't save anything, just close and cancel the app opening
-            closePrompt();
-            resolve(false);
-        };
-
-        continueBtn.onclick = async () => {
-            // Collect selected permissions
-            const checkboxes = overlay.querySelectorAll('input[name="permission"]');
-            const permissions = Array.from(checkboxes).map(cb => [cb.value, cb.checked]);
-
-            try {
-                await invoke('miniapp_set_permissions', {
-                    fileHash: app.blossom_hash,
-                    permissions: permissions
-                });
-                // Refresh the App Details permissions list if it's visible
-                loadAppPermissions(app);
-            } catch (error) {
-                console.error('Failed to save permissions:', error);
-            }
-            closePrompt();
-            resolve(true);
-        };
-
-        // Allow clicking outside to cancel
-        overlay.onclick = (e) => {
-            if (e.target === overlay) {
+            deny: () => { closePrompt(); resolve(false); },
+            allow: async (permissions) => {
+                try {
+                    await invoke('miniapp_set_permissions', { fileHash: app.blossom_hash, permissions });
+                    // Refresh the App Details permissions list if it's visible
+                    loadAppPermissions(app);
+                } catch (error) {
+                    console.error('Failed to save permissions:', error);
+                }
                 closePrompt();
-                resolve(false);
-            }
-        };
-
-        pushBack('permission-prompt', () => {
-            closePrompt();
-            resolve(false);
+                resolve(true);
+            },
         });
+        setTimeout(() => VectorSvelte.activatePermissionPrompt(), 10);
+        pushBack('permission-prompt', () => { closePrompt(); resolve(false); });
     });
 }
 

@@ -667,25 +667,13 @@ function writeWallpaperSliders(blur, dim) {
 /** Full-screen "processing" overlay with a dimmed, blurred backdrop that blocks
  *  interaction while a short CPU-bound task (image decode/resize/re-encode) runs
  *  in the backend. Idempotent; pair with hideProcessingOverlay(). */
+let processingMounted = false;
 function showProcessingOverlay(message = 'Processing image...') {
-    let overlay = document.getElementById('processing-overlay');
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.id = 'processing-overlay';
-        overlay.className = 'processing-overlay';
-        overlay.innerHTML =
-            '<div class="processing-overlay-card">' +
-            '<div class="processing-overlay-spinner"></div>' +
-            '<div class="processing-overlay-text"></div></div>';
-        document.body.appendChild(overlay);
-    }
-    overlay.querySelector('.processing-overlay-text').textContent = message;
-    void overlay.offsetWidth; // reflow so the fade-in runs on first show
-    overlay.classList.add('visible');
+    if (!processingMounted) { processingMounted = true; VectorSvelte.mountProcessingOverlay(); }
+    VectorSvelte.showProcessing(message);
 }
-
 function hideProcessingOverlay() {
-    document.getElementById('processing-overlay')?.classList.remove('visible');
+    VectorSvelte.hideProcessing();
 }
 
 async function startWallpaperChange(chatId) {

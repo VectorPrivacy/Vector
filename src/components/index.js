@@ -55,6 +55,9 @@ import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
 import LoginChrome from './auth/LoginChrome.svelte';
 import Popup from './ui/Popup.svelte';
+import ProcessingOverlay from './ui/ProcessingOverlay.svelte';
+import PermissionPrompt from './ui/PermissionPrompt.svelte';
+export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt, permissionState } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, bunkerState, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick } from './lib/login.svelte.js';
 import CreateCommunity from './community/CreateCommunity.svelte';
@@ -473,4 +476,14 @@ export function mountLoginChrome({ els }) {
 export function mountPopup(container) {
     container.replaceChildren();
     return mount(Popup, { target: container, props: { container } });
+}
+
+/** Mount the processing card onto the body (once). */
+export function mountProcessingOverlay() {
+    return mount(ProcessingOverlay, { target: document.body, props: {} });
+}
+
+/** Mount the mini app permission prompt onto the body (once). */
+export function mountPermissionPrompt() {
+    return mount(PermissionPrompt, { target: document.body, props: {} });
 }
