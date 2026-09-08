@@ -1,4 +1,5 @@
 <script>
+    const BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
     // The expanded profile as ONE reconciler. Renderless: the markup stays in index.html
     // (Edit Mode works on the same elements imperatively), so this adopts them and derives
     // every field from the open profile's signal. The banner and avatar are permanent
@@ -75,7 +76,8 @@
         if (frozen) return;
         const t = m;
         const b = els.banner;
-        const empty = () => { b.removeAttribute('src'); b.classList.add('is-empty'); };
+        // A src-less img gets WebKit's broken-image outline; a clear pixel lets the CSS background show.
+        const empty = () => { b.src = BLANK; b.classList.add('is-empty'); };
         if (t.bannerSrc) {
             b.classList.remove('is-empty');
             b.onerror = empty;
@@ -92,7 +94,7 @@
         if (frozen) return;
         const t = m;
         const a = els.avatar;
-        const placeholder = () => { a.removeAttribute('src'); a.classList.add('is-placeholder'); };
+        const placeholder = () => { a.src = BLANK; a.classList.add('is-placeholder'); };
         if (t.avatarSrc) {
             a.classList.remove('is-placeholder');
             a.onerror = placeholder;
