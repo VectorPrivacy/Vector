@@ -151,58 +151,22 @@ async function showDowngradeBlock(info) {
     domBlock.style.display = 'flex';
 }
 
+let popupMounted = false;
 async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false) {
-    // Display the popup and render the UI
-    domPopup.style.display = '';
-    // A bare filename resolves under ./icons/; a full URL (asset/blob/data/http, e.g. a
-    // decrypted community logo) is used verbatim.
-    domPopupIcon.src = /:\/\/|^data:|^blob:/.test(strIcon) ? strIcon : './icons/' + strIcon;
-    domPopupIcon.style.display = strIcon ? '' : 'none';
-    // Avatar-style crop for community logos (matches how Vector renders all avatars).
-    domPopupIcon.classList.toggle('popup-icon-circular', fCircularIcon);
-    domPopupTitle.innerText = strTitle;
-    // Clear any previous classes and add the new one if specified
-    domPopupTitle.className = strTitleClass;
-    domPopupSubtext.innerHTML = strSubtext;
-
-    // Show the backdrop by adding the active class
-    domApp.classList.add('active');
-
-    // Adjust the 'Confirm' button. Caller-provided label wins; otherwise
-    // default to 'Okay' for notices, 'Confirm' for confirms.
-    domPopupConfirmBtn.innerText = strConfirmText || (fNotice ? 'Okay' : 'Confirm');
-    domPopupCancelBtn.style.display = fNotice ? 'none' : '';
-
-    // If a string placeholder is specified, render it
-    domPopupInput.value = '';
-    if (strInputPlaceholder) {
-        domPopupInput.style.display = '';
-        domPopupInput.setAttribute('placeholder', strInputPlaceholder);
-        domPopupInput.focus();
-    } else {
-        // Otherwise, hide it
-        domPopupInput.style.display = 'none';
+    if (!popupMounted) {
+        popupMounted = true;
+        VectorSvelte.mountPopup(document.getElementById('popup-container'));
     }
-
-    // Resolve once, detaching every listener we attached. The handlers are NAMED so
-    // removeEventListener actually unhooks them — registering anonymous wrappers and
-    // trying to remove a different reference leaks one listener per popup onto the
-    // shared confirm/cancel buttons (stale handlers then double-fire on later popups).
+    // Resolve once: the component answers through the store, so no listener is left on a
+    // shared button to double-fire on a later popup.
     return new Promise((resolve) => {
-        const confirmValue = () => (strInputPlaceholder ? domPopupInput.value : true);
-        const cleanup = () => {
-            domPopupConfirmBtn.removeEventListener('click', onConfirm);
-            domPopupCancelBtn.removeEventListener('click', onCancel);
-            document.removeEventListener('keydown', onKeyDown);
-        };
+        const st = VectorSvelte.popupState();
+        const confirmValue = () => (strInputPlaceholder ? st.value : true);
         const finish = (value) => {
-            cleanup();
-            domPopup.style.display = 'none';
-            domApp.classList.remove('active');
+            document.removeEventListener('keydown', onKeyDown);
+            VectorSvelte.closePopupDialog();
             resolve(value);
         };
-        const onConfirm = () => { popBack('popup-confirm'); finish(confirmValue()); };
-        const onCancel = () => { popBack('popup-confirm'); finish(false); };
         const onKeyDown = (e) => {
             if (e.key === 'Enter') {
                 e.preventDefault();
@@ -214,11 +178,16 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
                 finish(fNotice ? confirmValue() : false);
             }
         };
-
+        VectorSvelte.openPopupDialog({
+            title: strTitle, html: strSubtext, notice: fNotice, placeholder: strInputPlaceholder,
+            icon: strIcon, circular: fCircularIcon, titleClass: strTitleClass,
+            // Caller-provided label wins; otherwise 'Okay' for notices, 'Confirm' for confirms.
+            confirmText: strConfirmText || (fNotice ? 'Okay' : 'Confirm'),
+        }, {
+            confirm: () => { popBack('popup-confirm'); finish(confirmValue()); },
+            cancel: () => { popBack('popup-confirm'); finish(false); },
+        });
         document.addEventListener('keydown', onKeyDown);
-        domPopupConfirmBtn.addEventListener('click', onConfirm);
-        if (!fNotice) domPopupCancelBtn.addEventListener('click', onCancel);
-
         // Hardware-back: notices accept-on-back (matches Escape), confirms cancel-on-back.
         // This fires as a RESULT of back, so it must not popBack again — just resolve.
         pushBack('popup-confirm', () => finish(fNotice ? confirmValue() : false));

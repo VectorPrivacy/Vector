@@ -342,14 +342,6 @@ const domSettingsLogout = document.getElementById('logout-btn');
 const domSettingsExport = document.getElementById('export-account-btn');
 const domRemoteSignerReauthBtn = document.getElementById('remote-signer-reauth-btn');
 
-const domApp = document.getElementById('popup-container');
-const domPopup = document.getElementById('popup');
-const domPopupIcon = document.getElementById('popupIcon');
-const domPopupTitle = document.getElementById('popupTitle');
-const domPopupSubtext = document.getElementById('popupSubtext');
-const domPopupConfirmBtn = document.getElementById('popupConfirm');
-const domPopupCancelBtn = document.getElementById('popupCancel');
-const domPopupInput = document.getElementById('popupInput');
 
 /**
  * Opens or closes the Attachment Panel

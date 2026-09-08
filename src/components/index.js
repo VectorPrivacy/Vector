@@ -54,6 +54,8 @@ import RelayLogs from './settings/RelayLogs.svelte';
 import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
 import LoginChrome from './auth/LoginChrome.svelte';
+import Popup from './ui/Popup.svelte';
+export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, bunkerState, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick } from './lib/login.svelte.js';
 import CreateCommunity from './community/CreateCommunity.svelte';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
@@ -465,4 +467,10 @@ export function mountCreateCommunity(host, { h }) {
 export function mountLoginChrome({ els }) {
     const host = document.createElement('div'); host.hidden = true; document.body.appendChild(host);
     return mount(LoginChrome, { target: host, props: { els } });
+}
+
+/** Mount the confirm/notice popup into its container (#popup-container). */
+export function mountPopup(container) {
+    container.replaceChildren();
+    return mount(Popup, { target: container, props: { container } });
 }
