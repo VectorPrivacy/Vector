@@ -222,6 +222,14 @@ function wsUpdate() {
         // adjustSize() leaves an inline max-height sized against the viewport;
         // in widescreen the list is a flex child and must not stay clamped.
         document.getElementById('chat-list').style.maxHeight = '';
+        // A roster opened narrow replaced its conversation. Here it is a column
+        // beside one, so bring that community's channel back and let the sync
+        // dock the roster next to it rather than landing on an empty pane.
+        const rosterFor = domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id');
+        if (!strOpenChat && rosterFor) {
+            const target = wsChannelForCommunity(rosterFor);
+            if (target) openChat(target);
+        }
         wsSyncOpenChat();
         // The rail only exists in this mode, and renderChatlist's hash gate would
         // skip the render that normally fills it.
