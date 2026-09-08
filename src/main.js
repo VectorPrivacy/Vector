@@ -2430,7 +2430,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     domSettingsBtn.onclick = openSettings;
     await wireLoginUi();
     await wireChatUi();
-    await wireComposerUi();
+    await initComposer();
     await wireMiniAppsUi();
 
     // Hook up our drag-n-drop listeners
