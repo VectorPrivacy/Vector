@@ -1232,6 +1232,7 @@ async function openCommunityInvitePanel(chat) {
     const ctaCount = box.querySelector('#cmt-cta-count');
     const cl = VectorSvelte.mountContactList(contactsDiv, {
         profiles: arrProfiles,
+        getProfile: (npub) => getProfile(npub),
         myNpub,
         banned: [...bannedSet],
         members: [...memberSet],

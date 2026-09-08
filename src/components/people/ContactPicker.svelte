@@ -8,6 +8,7 @@
     // methods (setFilter / addStranger / select / setProfiles / reset / getSelection) and
     // listens through the onSelectionChange callback prop.
     import MemberRow from './MemberRow.svelte';
+    import { profileVersion } from '../lib/signals.svelte.js';
 
     let {
         myNpub = '',
@@ -24,6 +25,7 @@
         hideTooltip = () => {},
         hoverBg = '',                // precomputed plain-gradient string for the row hover overlay
         profiles = [],               // initial snapshot; later profile loads ride setProfiles()
+        getProfile = null,           // (npub) => live profile; rows track its signal when given
         onSelectionChange = () => {}, // (sel: Set) — fires with a copy on every selection change
     } = $props();
 
@@ -39,6 +41,12 @@
     const memberSet = $derived(new Set(members));
     const dmSet = $derived(dmNpubs === null ? null : new Set(dmNpubs));
     const profileById = $derived(new Map(profilesList.map((p) => [p.id, p])));
+    // The snapshot decides who is LISTED; each row reads the live profile through its
+    // signal, so a name, avatar or status change repaints without a re-mount.
+    function profileFor(npub, fallback = null) {
+        profileVersion(npub);
+        return (getProfile ? getProfile(npub) : null) || fallback || profileById.get(npub) || null;
+    }
 
     // svelte-ignore state_referenced_locally
     const ui = { placeholder: makePlaceholder, twemojify, showTooltip, hideTooltip };
@@ -97,7 +105,7 @@
         const push = (npub, profile) => out.push({ npub, profile, display: displayName(profile, npub), hasName: !!nameOf(profile), src: avatarSrc(profile) });
         for (const npub of strangers) {
             if (bannedSet.has(npub) || memberSet.has(npub) || !sel.has(npub)) continue;
-            push(npub, profileById.get(npub) || null);
+            push(npub, profileFor(npub));
         }
         const contacts = profilesList
             .filter(
@@ -114,7 +122,7 @@
                 if (d) return d;
                 return displayName(a, a.id).localeCompare(displayName(b, b.id));
             });
-        for (const p of contacts) push(p.id, p);
+        for (const p of contacts) push(p.id, profileFor(p.id, p));
         return out;
     });
 

@@ -51,6 +51,7 @@ function ccEnsureMounted() {
             create: createCommunityFromPanel,
             pickerProps: async () => ({
                 profiles: [...arrProfiles],
+                getProfile: (npub) => getProfile(npub),
                 myNpub: arrProfiles.find(p => p.mine)?.id,
                 banned: [], members: [],
                 dmNpubs: await fetchDmContacts(),
