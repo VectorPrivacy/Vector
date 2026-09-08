@@ -1609,6 +1609,43 @@ function destroyEmojiPackPreviews(target) {
     _packPreviewCards.delete(target);
 }
 
+// The in-chat card's thumb grid: the app's canvas grid, laid out from the grid column's
+// real width so a narrow card shows fewer, larger thumbs. Rebuilt when the column resizes.
+function _packPreviewLayout(width) {
+    const narrow = width < 240;
+    const cellPx = narrow ? 40 : 32, thumbPx = narrow ? 36 : 28, gapPx = 4;
+    // Sized to the grid's 96px clip: three rows at 32px, two at 40px.
+    const rows = narrow ? 2 : 3;
+    const cols = Math.max(3, Math.floor((width + gapPx) / (cellPx + gapPx)));
+    return { cols, rows, cellPx, thumbPx, gapPx };
+}
+function _mountPackPreviewThumbs(left, pack) {
+    const column = left.parentElement;
+    let grid = null, key = '';
+    const build = () => {
+        const width = column?.clientWidth || (window.innerWidth <= 480 ? 200 : 260);
+        const l = _packPreviewLayout(width);
+        const next = `${l.cols}:${l.rows}`;
+        if (next === key) return;
+        key = next;
+        grid?.destroy();
+        left.replaceChildren();
+        column?.classList.toggle('is-overflowing', pack.emojis.length > l.cols * (l.rows - 1));
+        grid = new PackCanvasGrid(pack, {
+            emojis: pack.emojis.slice(0, l.cols * l.rows), cols: l.cols,
+            cellPx: l.cellPx, thumbPx: l.thumbPx, gapPx: l.gapPx,
+            boxPx: 0, hoverScale: false, selectable: false, isPreview: true,
+            ioRootMargin: '200px',
+        });
+        left.appendChild(grid.canvas);
+        grid.attachVisibilityObserver(null);
+    };
+    build();
+    const ro = column && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(build) : null;
+    ro?.observe(column);
+    return () => { ro?.disconnect(); grid?.destroy(); };
+}
+
 const _packPreviewHelpers = {
     resolve: (naddr) => _resolvePackPreview(naddr),
     bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
@@ -2227,6 +2264,10 @@ class PackCanvasGrid {
         canvas.dataset.packId = pack.id;
         canvas.style.display = 'block';
         canvas.style.width = '100%';
+        // Unsized until the first measurement: the browser default (300x150) would pass
+        // the no-op guard in _resize whenever the measured cell equals the initial guess.
+        canvas.width = 0;
+        canvas.height = 0;
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
 

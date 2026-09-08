@@ -38,14 +38,14 @@
 </script>
 
 <div class="emoji-pack-preview" data-naddr={naddr} data-pack-id={pack?.id} class:is-loading={!result} class:is-error={result?.state === 'err'} bind:this={card}>
-    <div class="emoji-pack-preview-grid" class:is-canvas={!!pack && count > 0} class:is-overflowing={!!pack && count > (window.innerWidth <= 480 ? 10 : 12)}>
+    <div class="emoji-pack-preview-grid" class:is-canvas={!!pack && count > 0}>
         {#if !result}
             {#each Array(6) as _, i (i)}<div class="pack-skel pack-skel-thumb"></div>{/each}
         {:else if pack}
             {#if count === 0}
                 <div class="emoji-pack-preview-empty">Empty pack</div>
             {:else}
-                <div style="display:contents" use:thumbs={pack}></div>
+                <div use:thumbs={pack}></div>
             {/if}
         {/if}
     </div>
