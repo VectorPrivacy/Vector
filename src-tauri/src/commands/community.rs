@@ -71,6 +71,9 @@ pub struct CommunitySummary {
     pub is_owner: bool,
     pub has_icon: bool,
     pub channels: Vec<ChannelSummary>,
+    /// The primary channel's id, stamped onto every grafted chat row so the list renders
+    /// one row per community. Without it each channel claims primary until the next boot.
+    pub primary_channel: Option<String>,
     /// The PROVEN owner's npub (bech32), derived by verifying the owner attestation — `None` if
     /// absent/unverifiable. The frontend crowns + hoists this npub; it's never an unchecked claim.
     pub owner_npub: Option<String>,
@@ -122,6 +125,7 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
             .iter()
             .map(|c| ChannelSummary { channel_id: c.id.to_hex(), name: c.name.clone(), private: false, readable: true })
             .collect(),
+        primary_channel: community.channels.first().map(|c| c.id.to_hex()),
         owner_npub,
         dissolved: community.dissolved,
         preloaded: false,
@@ -152,6 +156,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
                 readable: !ch.private || ch.key.is_some(),
             })
             .collect(),
+        primary_channel: c.primary_channel().map(|ch| vector_core::simd::hex::bytes_to_hex_32(&ch.id.0)),
         owner_npub: owner.and_then(|pk| pk.to_bech32().ok()),
         dissolved: c.dissolved,
         preloaded: false,

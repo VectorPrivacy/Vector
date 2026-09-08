@@ -21,8 +21,16 @@
  * duplicate row than a community that silently disappears from the list.
  */
 function isPrimaryChannelChat(chat) {
-    const primary = chat?.metadata?.custom_fields?.primary_channel;
-    return !primary || primary === chat.id;
+    const cf = chat?.metadata?.custom_fields;
+    if (!cf) return true;
+    if (cf.primary_channel) return cf.primary_channel === chat.id;
+    // Unstamped rows (grafted before the backend stamped them): the community's
+    // primary is its "general", else its first row. One head, never one per channel.
+    const communityId = cf.community_id;
+    if (!communityId) return true;
+    const rows = arrChats.filter(c => c.metadata?.custom_fields?.community_id === communityId);
+    const head = rows.find(c => (c.metadata.custom_fields.channel_name || '').toLowerCase() === 'general') || rows[0];
+    return !head || head.id === chat.id;
 }
 
 /**

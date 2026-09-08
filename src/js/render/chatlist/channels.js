@@ -67,16 +67,6 @@ function communityIdOfChat(chat) {
     return chat?.metadata?.custom_fields?.community_id || null;
 }
 
-/**
- * Whether this Community chat is the row the list renders. Non-primary channels are
- * real chats with real history; they just live under their community's row instead of
- * beside it. Rows predating the primary stamp fall back to rendering (better a
- * duplicate row than a community that vanishes from the list).
- */
-function isPrimaryChannelChat(chat) {
-    const primary = chat?.metadata?.custom_fields?.primary_channel;
-    return !primary || primary === chat.id;
-}
 
 /**
  * Whether the community's row gets a channel expander. More than one channel is the
