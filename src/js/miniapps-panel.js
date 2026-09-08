@@ -811,3 +811,60 @@ async function playMiniAppSoloInternal(app) {
 async function openMiniAppFromHistory(app) {
     await showMiniAppLaunchDialog(app);
 }
+
+/** Wire the attachment panel's Mini Apps view, the launch dialog and the Nexus back button. */
+async function wireMiniAppsUi() {
+    // Commands button — bot-chats only. Drops a `/` into the composer and opens
+    // the command list. Grayed (with a tooltip) while a draft is present.
+    domAttachmentPanelCommands.onclick = () => {
+        if (domAttachmentPanelCommands.classList.contains('disabled')) return;
+        closeAttachmentPanel();
+        domChatMessageInput.value = '/';
+        domChatMessageInput.focus();
+        domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    domAttachmentPanelCommands.addEventListener('mouseenter', () => {
+        if (domAttachmentPanelCommands.classList.contains('disabled')) {
+            showGlobalTooltip('Clear your draft to use commands', domAttachmentPanelCommands);
+        }
+    });
+    domAttachmentPanelCommands.addEventListener('mouseleave', hideGlobalTooltip);
+
+    // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
+    domAttachmentPanelMiniApps.onclick = async () => {
+        await showAttachmentPanelMiniApps();
+    };
+
+    // Handle Back button in Mini Apps view - returns to main attachment panel
+    domAttachmentPanelBack.onclick = () => {
+        showAttachmentPanelMain();
+    };
+
+    // Handle search input in Mini Apps view
+    if (domMiniAppsSearch) {
+        domMiniAppsSearch.addEventListener('input', (e) => {
+            filterMiniApps(e.target.value);
+        });
+    }
+
+    // Setup hold-to-edit mode for Mini Apps
+    setupMiniAppsEditMode();
+
+    // Mini App Launch Dialog event handlers
+    domMiniAppLaunchCancel.onclick = closeMiniAppLaunchDialog;
+    domMiniAppLaunchSolo.onclick = playMiniAppSolo;
+    domMiniAppLaunchInvite.onclick = playMiniAppAndInvite;
+    
+    // Close dialog when clicking outside
+    domMiniAppLaunchOverlay.onclick = (e) => {
+        if (e.target === domMiniAppLaunchOverlay) {
+            closeMiniAppLaunchDialog();
+        }
+    };
+
+    if (domMarketplaceBackBtn) {
+        domMarketplaceBackBtn.onclick = () => {
+            hideMarketplacePanel();
+        };
+    }
+}

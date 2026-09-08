@@ -1192,3 +1192,270 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         newInput.focus();
     }
 }
+
+/** Wire the login screens: account creation, import, bunker and NIP-55 signers, back. */
+async function wireLoginUi() {
+    domLoginAccountCreationBtn.onclick = async () => {
+        try {
+            // Add Profile commit point: tear down the existing session
+            // before generating a new keypair, otherwise create_account's
+            // lock-and-check guard would silently reuse the old client.
+            if (addAccountFlow.active) await addAccountFlow.commit();
+
+            const { public: pubKey } = await invoke("create_account");
+            strPubkey = pubKey;
+
+            // Connect to Nostr network
+            await invoke("connect");
+
+            // Skip invite flow - go directly to encryption (key stays backend-only)
+            openEncryptionFlow(false);
+        } catch (e) {
+            // Display the backend error
+            popupConfirm(e, '', true, '', 'vector_warning.svg');
+        }
+    };
+    domLoginAccountBtn.onclick = () => {
+        domLoginImport.style.display = '';
+        domLoginStart.style.display = 'none';
+        domLoginBackBar.style.display = '';
+        document.getElementById('login-form').classList.add('has-back-bar');
+        // Hide the picker pill — once the user is entering an nsec / seed
+        // phrase, the active-account-from-marker context no longer applies.
+        loginPicker.hide();
+    };
+    // Bunker form helpers (startBunkerSession, showBunkerForm,
+    // hideBunkerForm) are now defined at module scope, near the DOM-ref
+    // block — they need to be accessible to the boot-time login catch which
+    // runs before this DOMContentLoaded handler reaches button wiring.
+    // hideBunkerForm hoisted to module scope; window.hideBunkerForm assigned there.
+    if (domLoginBunkerStartBtn) {
+        // Lives inside the Login screen (not the entry screen). Bunker is a
+        // login flow — your signer *is* the identity, so there's no "create"
+        // path. Surfacing it as a secondary action under the nsec/seed input
+        // keeps the entry screen clean for the 98% of users who don't run a
+        // remote signer.
+        domLoginBunkerStartBtn.onclick = showBunkerForm;
+    }
+
+    // NIP-55 offline signer (Amber): Android-only, and only when a signer app
+    // is actually installed — otherwise the button is a dead end. The reveal
+    // is async so the entry screen never flickers a button it can't honour.
+    if (domLoginNip55StartBtn && platformFeatures.os === 'android') {
+        invoke('is_external_signer_installed').then((installed) => {
+            if (installed) domLoginNip55StartBtn.style.display = '';
+        }).catch(() => { /* leave hidden */ });
+
+        domLoginNip55StartBtn.onclick = async () => {
+            domLoginNip55StartBtn.disabled = true;
+            try {
+                if (addAccountFlow.active) await addAccountFlow.commit();
+                // Blocks while Amber is foregrounded and the user approves; the
+                // Activity-result bridge resolves this once they return.
+                const { public: pubKey, existing } = await invoke('login_with_nip55');
+                strPubkey = pubKey;
+                if (existing) {
+                    // Identity already on disk; backend armed session_reload.
+                    return;
+                }
+                // Reuse the shared post-login flow: pick a security mode, then
+                // connect in the background so a relay hang doesn't strand us.
+                openEncryptionFlow(false);
+                invoke('connect').catch((err) => {
+                    console.warn('[login_with_nip55] connect() failed:', err);
+                });
+            } catch (e) {
+                popupConfirm(String(e), '', true, '', 'vector_warning.svg');
+            } finally {
+                domLoginNip55StartBtn.disabled = false;
+            }
+        };
+    }
+    if (domLoginBunkerCopyBtn) {
+        domLoginBunkerCopyBtn.onclick = async () => {
+            if (!strBunkerNostrConnectUrl) return;
+            try {
+                await navigator.clipboard.writeText(strBunkerNostrConnectUrl);
+                domLoginBunkerCopyBtn.classList.add('copied');
+                domLoginBunkerCopyBtn.textContent = 'Copied — paste in your signer';
+                setTimeout(() => {
+                    domLoginBunkerCopyBtn.classList.remove('copied');
+                    domLoginBunkerCopyBtn.textContent = 'Copy connection link';
+                }, 2500);
+            } catch (err) {
+                if (domLoginBunkerStatus) {
+                    domLoginBunkerStatus.textContent = 'Could not copy to clipboard';
+                    domLoginBunkerStatus.className = 'login-bunker-status error';
+                }
+            }
+        };
+    }
+    // Tap the bunker QR to blow it up fullscreen — easier for a phone camera.
+    // openQrOverlay no-ops while the connection link is still generating.
+    if (domLoginBunkerQrWrap) {
+        domLoginBunkerQrWrap.onclick = () => openQrOverlay(strBunkerNostrConnectUrl);
+    }
+    domLoginBackBtn.onclick = async () => {
+        // Add Profile flow back has two cases — independent of which sub-
+        // screen the user happens to be on (start / import / encryption /
+        // welcome). Without this, backing out from the encryption screen
+        // after Create Account left both `domLoginStart` and
+        // `domLoginEncrypt` visible at the same time.
+        //
+        //   - Browsing (not committed): the original session is still alive
+        //     in memory. Soft-restore the main UI; no backend touch, no
+        //     reload, the user keeps their decrypted keys + listeners.
+        //
+        //   - Committed: enter_add_account_mode already tore the session
+        //     down. We have to write the previous-account marker back and
+        //     reload so the next boot lands on the original account.
+        if (addAccountFlow.active) {
+            if (!addAccountFlow.committed) {
+                addAccountFlow.restore();
+                return;
+            }
+            const target = addAccountFlow.backTarget();
+            try {
+                if (target) {
+                    await invoke('set_active_account', { npub: target });
+                }
+            } catch (e) {
+                console.error('[add-account] restore marker failed:', e);
+                popupConfirm('Could not return to your account', String(e), true);
+                return;
+            }
+            addAccountFlow.finish();
+            window.location.reload();
+            return;
+        }
+        // If the bunker form was visible, the user is bailing out of a
+        // staged-but-not-committed session — drain it on the backend so the
+        // next attempt doesn't see a leaked NOSTR_CLIENT. No-op when no
+        // staged session exists.
+        const wasOnBunkerForm = domLoginBunker
+            && !domLoginBunker.classList.contains('is-hidden')
+            && domLoginBunker.style.display !== 'none';
+        if (wasOnBunkerForm) {
+            invoke('cancel_bunker_session').catch((err) => {
+                console.warn('[back] cancel_bunker_session failed:', err);
+            });
+        }
+        // Reauth path: we're inside an active session, came from Settings /
+        // Chats. Restore the panel the user was on; don't fall through to
+        // the login-start picker.
+        if (wasOnBunkerForm && bunkerReauthOrigin) {
+            const origin = bunkerReauthOrigin;
+            hideBunkerForm();
+            if (domLoginBackBar) domLoginBackBar.style.display = 'none';
+            const loginForm = document.getElementById('login-form');
+            if (loginForm) loginForm.classList.remove('has-back-bar');
+            if (domLogin) domLogin.style.display = 'none';
+            bunkerReauthOrigin = null;
+            if (origin === 'settings' && typeof openSettings === 'function') {
+                openSettings();
+            } else if (typeof closeChat === 'function') {
+                closeChat();
+            }
+            return;
+        }
+        // Regular login back: collapse every sub-screen back to the start
+        // picker. Encrypt + welcome were missing here, which is what made
+        // the post-commit Add Profile case render two panels at once.
+        domLoginImport.style.display = 'none';
+        domLoginInvite.style.display = 'none';
+        domLoginEncrypt.style.display = 'none';
+        domLoginWelcome.style.display = 'none';
+        hideBunkerForm();
+        domLoginBackBar.style.display = 'none';
+        domLoginStart.style.display = '';
+        domLoginInput.value = '';
+        document.getElementById('login-form').classList.remove('has-back-bar');
+        // Re-reveal the picker pill if we have ≥2 accounts on disk. The
+        // Login button's onclick hides the picker (the user is about to
+        // import a key, so it'd be confusing to show), and without this
+        // restore the picker stays hidden after the user backs out —
+        // effectively removing their ability to switch accounts from the
+        // start screen without restarting the app.
+        if (typeof loginPicker !== 'undefined'
+            && loginPicker.accounts && loginPicker.accounts.length >= 2) {
+            loginPicker.show(loginPicker.activeNpub);
+        }
+    };
+    domLoginBtn.onclick = async () => {
+        // Import and derive our keys
+        try {
+            // Add Profile commit point: tear down the existing session
+            // before importing the new key.
+            if (addAccountFlow.active) await addAccountFlow.commit();
+
+            const { public: pubKey, existing } = await invoke("login", { importKey: domLoginInput.value.trim() });
+            strPubkey = pubKey;
+
+            // Pasted key matches an account already on disk; the backend has
+            // armed `session_reload` to swap into it. Skip the encryption-
+            // setup flow — the boot path will load the stored credentials.
+            if (existing) return;
+
+            // Connect to Nostr
+            await invoke("connect");
+
+            // Skip invite flow - go directly to encryption (key stays backend-only)
+            openEncryptionFlow(false);
+        } catch (e) {
+            // Display the backend error
+            popupConfirm(e, '', true, '', 'vector_warning.svg');
+        }
+    }
+    if (domLoginBunkerConnectBtn) {
+        domLoginBunkerConnectBtn.onclick = async () => {
+            const url = (domLoginBunkerUrlInput?.value || '').trim();
+            if (!url.toLowerCase().startsWith('bunker://')) {
+                domLoginBunkerStatus.textContent = 'Must start with bunker://';
+                domLoginBunkerStatus.className = 'login-bunker-status error';
+                return;
+            }
+            // Disable inputs while the bunker handshake runs (5–10s typical
+            // while the user taps "approve" on their signer). Re-enable on
+            // failure so they can retry without leaving the screen.
+            const _disable = (v) => {
+                domLoginBunkerConnectBtn.disabled = v;
+                domLoginBunkerUrlInput.disabled = v;
+                domLoginBunkerStartBtn && (domLoginBunkerStartBtn.disabled = v);
+                if (domLoginBunkerCopyBtn) domLoginBunkerCopyBtn.disabled = v;
+            };
+            _disable(true);
+            domLoginBunkerStatus.textContent = 'Connecting to signer…';
+            domLoginBunkerStatus.className = 'login-bunker-status connecting';
+            try {
+                if (addAccountFlow.active) await addAccountFlow.commit();
+                const { public: pubKey, existing } = await invoke('connect_bunker', {
+                    bunkerUrl: url,
+                });
+                strPubkey = pubKey;
+                domLoginBunkerUrlInput.value = '';
+                if (existing) {
+                    // Bunker identity matches an existing account; backend has
+                    // armed `session_reload`. Just hide the form — the document
+                    // reload will switch into the stored account.
+                    domLoginBunkerStatus.textContent = 'Account already added — switching…';
+                    domLoginBunkerStatus.className = 'login-bunker-status online';
+                    hideBunkerForm();
+                    return;
+                }
+                domLoginBunkerStatus.textContent = 'Connected. Choosing security…';
+                domLoginBunkerStatus.className = 'login-bunker-status online';
+                // UI advances first; relay connect runs in the background so a
+                // hang there doesn't strand the user on the bunker screen.
+                hideBunkerForm();
+                openEncryptionFlow(false);
+                invoke('connect').catch((err) => {
+                    console.warn('[connect_bunker] connect() failed:', err);
+                });
+            } catch (e) {
+                domLoginBunkerStatus.textContent = String(e);
+                domLoginBunkerStatus.className = 'login-bunker-status error';
+                _disable(false);
+            }
+        };
+    }
+}
