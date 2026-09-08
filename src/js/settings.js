@@ -2565,112 +2565,61 @@ function updateMigrationProgress(total, completed, phase) {
 }
 
 /** Wire the settings help prompts and the footer links. */
-async function wireSettingsHelp() {
-    // Hook up our "Help Prompts" to give users easy feature explainers in ambiguous or complex contexts
-    // Note: since some of these overlap with Checkbox Labels: we prevent event bubbling so that clicking the Info Icon doesn't also trigger other events
-   domSettingsPrivacyWebPreviewsInfo.onclick = async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        // Render contextually based on Tor preference. When Tor is enabled,
-        // every preview fetch is forced through Tor (or blackholes during
-        // bootstrap) by the network failsafe — no clearnet leak path.
+// Help prompts: one explainer per info icon, keyed by element id. A function body
+// resolves at click time (the change-PIN wording follows the security type).
+const SETTINGS_HELP = {
+    'privacy-strip-tracking-info': ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
+    'privacy-send-typing-info': ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
+    // Trademark notice + non-endorsement disclaimer included per the
+    // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
+    'privacy-tor-info': ['Route traffic through Tor',
+        'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
+        + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
+        + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>'],
+    'battery-bg-service-info': ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
+    'storage-gallery-info': ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
+    'export-account-info': ['Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.'],
+    'change-pin-info': () => fSecurityType === 'password'
+        ? ['Change Password', 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.']
+        : ['Change PIN', 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.'],
+    'crash-log-info': ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
+    'logout-info': ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
+    // Rendered against the Tor preference: with Tor on, every preview fetch is forced
+    // through Tor (or blackholes during bootstrap), so there is no clearnet leak path.
+    'privacy-web-previews-info': async () => {
         let torEnabled = false;
-        try {
-            const torState = await invoke('tor_get_state');
-            torEnabled = !!(torState && torState.enabled);
-        } catch (_) { /* fall through to default warning */ }
-        const message = torEnabled
+        try { torEnabled = !!(await invoke('tor_get_state'))?.enabled; } catch (_) { /* default warning */ }
+        return ['Web Previews', torEnabled
             ? 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>You have <b>Tor enabled</b>, so preview fetches route through the Tor network. Your IP address stays hidden from the linked sites.'
-            : 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address to the linked sites. <b>Use Tor</b> (Privacy, Route traffic through Tor) <b>or a VPN</b> if that\'s a concern.';
-        popupConfirm('Web Previews', message, true);
-    };
-    domSettingsPrivacyStripTrackingInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.', true);
-    };
-    domSettingsPrivacySendTypingInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.', true);
-    };
-    if (domSettingsPrivacyTorInfo) {
-        domSettingsPrivacyTorInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            // Trademark notice + non-endorsement disclaimer included per the
-            // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
-            popupConfirm(
-                'Route traffic through Tor',
-                'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
-                + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
-                + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>',
-                true
-            );
-        };
-    }
-    // Open torproject.org when the small attribution logo is clicked.
-    const torAttributionLink = document.getElementById('tor-attribution-link');
-    if (torAttributionLink) {
-        torAttributionLink.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            openUrl('https://torproject.org');
-        };
-    }
-    const domSettingsBatteryBgServiceInfo = document.getElementById('battery-bg-service-info');
-    if (domSettingsBatteryBgServiceInfo) {
-        domSettingsBatteryBgServiceInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm('Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.', true);
-        };
-    }
-    if (domSettingsStorageGalleryInfo) domSettingsStorageGalleryInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.', true);
-    };
+            : 'When enabled, Vector will <b>automatically fetch and display previews</b> for links shared in messages.<br><br>This may expose your IP address to the linked sites. <b>Use Tor</b> (Privacy, Route traffic through Tor) <b>or a VPN</b> if that\'s a concern.'];
+    },
+};
 
-    domSettingsExportAccountInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.', true);
-    };
+// Footer and attribution links.
+const SETTINGS_LINKS = {
+    'tor-attribution-link': 'https://torproject.org',
+    'footer-donate': 'https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations',
+    'footer-gitbook': 'https://docs.vectorapp.io',
+    'footer-privacy': 'https://vectorapp.io/privacy-policy',
+};
 
-    if (domSettingsChangePinInfo) {
-        domSettingsChangePinInfo.onclick = (e) => {
+/** Wire the settings help prompts, links and the signer re-authorise button. */
+function wireSettingsHelp() {
+    // Some icons sit inside checkbox labels, so the click must not also toggle the box.
+    for (const [id, entry] of Object.entries(SETTINGS_HELP)) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.onclick = async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            popupConfirm(
-                fSecurityType === 'password' ? 'Change Password' : 'Change PIN',
-                fSecurityType === 'password'
-                    ? 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.'
-                    : 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.',
-                true
-            );
+            const [title, body] = typeof entry === 'function' ? await entry() : entry;
+            popupConfirm(title, body, true);
         };
     }
-
-    // Info button for Copy Logs
-    const domCrashLogInfo = document.getElementById('crash-log-info');
-    if (domCrashLogInfo) {
-        domCrashLogInfo.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            popupConfirm(
-                'Logs',
-                'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.',
-                true
-            );
-        };
+    for (const [id, url] of Object.entries(SETTINGS_LINKS)) {
+        const el = document.getElementById(id);
+        if (el) el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openUrl(url); };
     }
-
-    domSettingsLogoutInfo.onclick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        popupConfirm('Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.', true);
-    };
 
     if (domRemoteSignerReauthBtn) {
         domRemoteSignerReauthBtn.onclick = async (e) => {
@@ -2694,18 +2643,4 @@ async function wireSettingsHelp() {
             }
         };
     }
-
-    // Footer Hyperlinks
-    document.getElementById('footer-donate').onclick = (e) => {
-        e.preventDefault();
-        openUrl('https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations');
-    };
-    document.getElementById('footer-gitbook').onclick = (e) => {
-        e.preventDefault();
-        openUrl('https://docs.vectorapp.io');
-    };
-    document.getElementById('footer-privacy').onclick = (e) => {
-        e.preventDefault();
-        openUrl('https://vectorapp.io/privacy-policy');
-    };
 }
