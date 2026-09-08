@@ -717,317 +717,101 @@ async function publishMarketplaceApp(filePath, appId, name, description, version
  * @param {string} filePath - Path to the .xdc file
  * @param {object} miniAppInfo - Mini App info from loadMiniAppInfo
  */
+let publishDialogMounted = false;
 async function showPublishAppDialog(filePath, miniAppInfo) {
-    // Create overlay if it doesn't exist
-    let overlay = document.getElementById('publish-app-overlay');
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.id = 'publish-app-overlay';
-        overlay.className = 'publish-app-overlay';
-        document.body.appendChild(overlay);
-    }
-
+    if (!publishDialogMounted) { publishDialogMounted = true; VectorSvelte.mountPublishDialog(); }
+    const st = VectorSvelte.publishState();
     // Generate a default app ID from the name
     const defaultAppId = (miniAppInfo?.name || 'app')
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, '-')
         .replace(/^-|-$/g, '');
 
-    overlay.innerHTML = `
-        <div class="publish-app-container">
-            <div class="publish-app-header">
-                <h2>Publish to Nexus</h2>
-            </div>
-            <div class="publish-app-content">
-                <div class="publish-app-icon-container">
-                    ${miniAppInfo?.icon_data
-                        ? `<img src="${escapeHtml(miniAppInfo.icon_data)}" alt="App Icon" class="publish-app-icon">`
-                        : '<span class="icon icon-play publish-app-icon-placeholder"></span>'
-                    }
-                </div>
-                <div class="publish-app-form">
-                    <div class="publish-app-field">
-                        <label for="publish-app-id">App ID</label>
-                        <input type="text" id="publish-app-id" value="${escapeHtml(defaultAppId)}" placeholder="my-awesome-game">
-                        <span class="publish-app-hint">Unique identifier (lowercase, no spaces)</span>
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-name">Name</label>
-                        <input type="text" id="publish-app-name" value="${escapeHtml(miniAppInfo?.name || '')}" placeholder="My Awesome Game">
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-description">Description</label>
-                        <textarea id="publish-app-description" placeholder="A brief description of your app...">${escapeHtml(miniAppInfo?.description || '')}</textarea>
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-version">Version</label>
-                        <input type="text" id="publish-app-version" value="${escapeHtml(miniAppInfo?.version || '1.0.0')}" placeholder="1.0.0">
-                    </div>
-                    <div class="publish-app-field publish-app-toggle-field">
-                        <label class="toggle-container">
-                            <span>Is this app a Game?</span>
-                            <input type="checkbox" id="publish-app-is-game" checked>
-                            <span class="neon-toggle"></span>
-                        </label>
-                        <span class="publish-app-hint">This allows Vector to present your app correctly the users.</span>
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-categories">Categories</label>
-                        <input type="text" id="publish-app-categories" placeholder="shooter, art, multiplayer, arcade">
-                        <span class="publish-app-hint">Comma-separated tags</span>
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-developer">Developer (optional)</label>
-                        <input type="text" id="publish-app-developer" placeholder="Developer or studio name">
-                        <span class="publish-app-hint">The original creator of this app</span>
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-source">Source / Website (optional)</label>
-                        <input type="text" id="publish-app-source" value="${escapeHtml(miniAppInfo?.source_code_url || '')}" placeholder="https://github.com/...">
-                        <span class="publish-app-hint">Link to source code or website</span>
-                    </div>
-                    <div class="publish-app-field">
-                        <label for="publish-app-changelog">Changelog (optional)</label>
-                        <textarea id="publish-app-changelog" placeholder="What's new in this version..."></textarea>
-                    </div>
-                    <div class="publish-app-field">
-                        <label>Requested Permissions (optional)</label>
-                        <span class="publish-app-hint">Users must explicitly grant these permissions. Leave all unchecked if your app doesn't need special access.</span>
-                        <div class="publish-app-permissions" id="publish-app-permissions">
-                            <!-- Permissions will be loaded dynamically -->
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="publish-app-buttons">
-                <button class="file-preview-btn file-preview-btn-cancel" id="publish-app-cancel">Cancel</button>
-                <button class="file-preview-btn file-preview-btn-send" id="publish-app-submit">
-                    <span class="icon icon-star"></span> Publish
-                </button>
-            </div>
-        </div>
-    `;
+    const close = () => {
+        VectorSvelte.closePublishDialog();
+        // The element outlives the fade-out.
+        setTimeout(() => VectorSvelte.unmountPublishDialog(), 300);
+    };
 
-    // Show overlay
-    overlay.style.display = 'flex';
-    setTimeout(() => overlay.classList.add('active'), 10);
-
-    // Add App ID change listener to pre-fill from existing published app
-    const appIdInput = document.getElementById('publish-app-id');
-    let prefillTimeout = null;
-    let permissionsLoaded = false;
-
-    const checkAndPrefillFromExisting = () => {
-        const appId = appIdInput.value.trim().toLowerCase();
+    // An App ID we already published prefills the form from that listing, so a new
+    // version is the version and changelog fields, not the whole form again.
+    const prefillFromExisting = () => {
+        const appId = st.form.id.trim().toLowerCase();
         if (!appId) return;
-
-        // Find existing app with this ID that we published
         const existingApp = marketplaceApps.find(app =>
-            app.id === appId &&
-            typeof strPubkey !== 'undefined' &&
-            app.publisher === strPubkey
-        );
-
-        if (existingApp) {
-            console.log('[Marketplace] Found existing app to pre-fill:', existingApp);
-
-            // Pre-fill description
-            const descEl = document.getElementById('publish-app-description');
-            if (descEl && existingApp.description) {
-                descEl.value = existingApp.description;
-            }
-
-            // Pre-fill developer
-            const devEl = document.getElementById('publish-app-developer');
-            if (devEl && existingApp.developer) {
-                devEl.value = existingApp.developer;
-            }
-
-            // Pre-fill source URL
-            const sourceEl = document.getElementById('publish-app-source');
-            if (sourceEl && existingApp.source_url) {
-                sourceEl.value = existingApp.source_url;
-            }
-
-            // Pre-fill categories (excluding 'game' and 'app' tags)
-            const catEl = document.getElementById('publish-app-categories');
-            if (catEl && existingApp.categories && existingApp.categories.length > 0) {
-                const filteredCategories = existingApp.categories.filter(c => c !== 'game' && c !== 'app');
-                catEl.value = filteredCategories.join(', ');
-            }
-
-            // Pre-fill is-game toggle based on categories
-            const isGameEl = document.getElementById('publish-app-is-game');
-            if (isGameEl && existingApp.categories) {
-                isGameEl.checked = existingApp.categories.includes('game');
-            }
-
-            // Pre-fill version
-            const versionEl = document.getElementById('publish-app-version');
-            if (versionEl && existingApp.version) {
-                versionEl.value = existingApp.version;
-            }
-
-            // Pre-fill changelog
-            const changelogEl = document.getElementById('publish-app-changelog');
-            if (changelogEl && existingApp.changelog) {
-                changelogEl.value = existingApp.changelog;
-            }
-
-            // Pre-fill permissions
-            if (existingApp.requested_permissions) {
-                const requestedPerms = existingApp.requested_permissions.split(',').map(p => p.trim());
-                const permItems = document.querySelectorAll('#publish-app-permissions .publish-app-permission-item');
-                permItems.forEach(item => {
-                    const cb = item.querySelector('input[name="permissions"]');
-                    if (cb) {
-                        const shouldCheck = requestedPerms.includes(cb.value);
-                        cb.checked = shouldCheck;
-                        item.classList.toggle('checked', shouldCheck);
-                    }
-                });
-            }
-
-            // Show a subtle indicator that we pre-filled from existing
-            const hintEl = appIdInput.nextElementSibling;
-            if (hintEl && hintEl.classList.contains('publish-app-hint')) {
-                hintEl.innerHTML = '✓ Pre-filled from your existing app. Update the version and changelog!';
-                hintEl.style.color = 'var(--accent-color)';
-            }
+            app.id === appId && typeof strPubkey !== 'undefined' && app.publisher === strPubkey);
+        if (!existingApp) return;
+        const f = st.form;
+        if (existingApp.description) f.description = existingApp.description;
+        if (existingApp.developer) f.developer = existingApp.developer;
+        if (existingApp.source_url) f.source = existingApp.source_url;
+        if (existingApp.categories?.length) {
+            f.categories = existingApp.categories.filter(c => c !== 'game' && c !== 'app').join(', ');
+            f.isGame = existingApp.categories.includes('game');
         }
+        if (existingApp.version) f.version = existingApp.version;
+        if (existingApp.changelog) f.changelog = existingApp.changelog;
+        if (existingApp.requested_permissions) {
+            const requested = existingApp.requested_permissions.split(',').map(p => p.trim());
+            for (const perm of st.perms) perm.checked = requested.includes(perm.id);
+        }
+        VectorSvelte.setPublishHint('✓ Pre-filled from your existing app. Update the version and changelog!', true);
     };
+    let prefillTimeout = null;
 
-    // Check on input change (debounced)
-    appIdInput.addEventListener('input', () => {
-        // Reset hint
-        const hintEl = appIdInput.nextElementSibling;
-        if (hintEl && hintEl.classList.contains('publish-app-hint')) {
-            hintEl.innerHTML = 'Unique identifier (lowercase, no spaces)';
-            hintEl.style.color = '';
-        }
-
-        clearTimeout(prefillTimeout);
-        prefillTimeout = setTimeout(checkAndPrefillFromExisting, 500);
-    });
-
-    // Also check on blur (when user tabs/clicks away)
-    appIdInput.addEventListener('blur', checkAndPrefillFromExisting);
-
-    // Load available permissions, then check for pre-fill
-    try {
-        const availablePermissions = await invoke('miniapp_get_available_permissions');
-        const permissionsContainer = document.getElementById('publish-app-permissions');
-        permissionsContainer.innerHTML = availablePermissions.map(perm => `
-            <div class="publish-app-permission-item" data-permission="${escapeHtml(perm.id)}">
-                <input type="checkbox" name="permissions" value="${escapeHtml(perm.id)}">
-                <span class="publish-app-permission-check"></span>
-                <div class="publish-app-permission-text">
-                    <span class="publish-app-permission-label">${escapeHtml(perm.label)}</span>
-                    <span class="publish-app-permission-desc">${escapeHtml(perm.description)}</span>
-                </div>
-            </div>
-        `).join('');
-        // Add click handler to toggle checkbox and visual state
-        permissionsContainer.querySelectorAll('.publish-app-permission-item').forEach(item => {
-            const checkbox = item.querySelector('input[type="checkbox"]');
-            item.addEventListener('click', () => {
-                checkbox.checked = !checkbox.checked;
-                item.classList.toggle('checked', checkbox.checked);
-            });
+    return new Promise((resolve) => {
+        VectorSvelte.openPublishDialog({
+            id: defaultAppId, name: miniAppInfo?.name || '', description: miniAppInfo?.description || '',
+            version: miniAppInfo?.version || '1.0.0', isGame: true, categories: '', developer: '',
+            source: miniAppInfo?.source_code_url || '', changelog: '',
+        }, miniAppInfo?.icon_data || '', {
+            cancel: () => { close(); resolve(false); },
+            idInput: () => {
+                VectorSvelte.setPublishHint('Unique identifier (lowercase, no spaces)', false);
+                clearTimeout(prefillTimeout);
+                prefillTimeout = setTimeout(prefillFromExisting, 500);
+            },
+            idBlur: prefillFromExisting,
+            submit: async () => {
+                const f = st.form;
+                const appId = f.id.trim();
+                const name = f.name.trim();
+                if (!appId) { alert('App ID is required'); return; }
+                if (!name) { alert('Name is required'); return; }
+                const selected = st.perms.filter(p => p.checked).map(p => p.id);
+                const permissionsStr = selected.length > 0 ? selected.join(',') : null;
+                // Parse categories and add the game or app tag at the beginning.
+                const categories = f.categories.trim()
+                    ? f.categories.toLowerCase().split(',').map(c => c.trim()).filter(c => c)
+                    : [];
+                categories.unshift(f.isGame ? 'game' : 'app');
+                VectorSvelte.setPublishBusy(true);
+                try {
+                    const eventId = await publishMarketplaceApp(
+                        filePath, appId, name, f.description.trim(), f.version.trim(), categories,
+                        f.changelog.trim() || null, f.developer.trim() || null, f.source.trim() || null, permissionsStr,
+                    );
+                    console.log('Published app with event ID:', eventId);
+                    close();
+                    popupConfirm('Published!', `${name} has been published to the Nexus.`, true, '', 'vector-check.svg');
+                    resolve(true);
+                } catch (error) {
+                    console.error('Failed to publish:', error);
+                    VectorSvelte.setPublishBusy(false);
+                    alert('Failed to publish: ' + error.toString());
+                }
+            },
         });
-        permissionsLoaded = true;
-        // Now that permissions are loaded, check for pre-fill
-        checkAndPrefillFromExisting();
-    } catch (error) {
-        console.error('Failed to load permissions:', error);
-        document.getElementById('publish-app-permissions').innerHTML = '<span class="publish-app-hint">Failed to load permissions</span>';
-        // Still try pre-fill for other fields even if permissions failed
-        checkAndPrefillFromExisting();
-    }
+        setTimeout(() => VectorSvelte.activatePublishDialog(), 10);
 
-    // Event handlers
-    const cancelBtn = document.getElementById('publish-app-cancel');
-    const submitBtn = document.getElementById('publish-app-submit');
-
-    cancelBtn.onclick = () => {
-        overlay.classList.remove('active');
-        setTimeout(() => overlay.style.display = 'none', 300);
-    };
-
-    overlay.onclick = (e) => {
-        if (e.target === overlay) {
-            overlay.classList.remove('active');
-            setTimeout(() => overlay.style.display = 'none', 300);
-        }
-    };
-
-    submitBtn.onclick = async () => {
-        const appId = document.getElementById('publish-app-id').value.trim();
-        const name = document.getElementById('publish-app-name').value.trim();
-        const description = document.getElementById('publish-app-description').value.trim();
-        const version = document.getElementById('publish-app-version').value.trim();
-        const isGame = document.getElementById('publish-app-is-game').checked;
-        const categoriesStr = document.getElementById('publish-app-categories').value.trim();
-        const developer = document.getElementById('publish-app-developer').value.trim() || null;
-        const sourceUrl = document.getElementById('publish-app-source').value.trim() || null;
-        const changelog = document.getElementById('publish-app-changelog').value.trim() || null;
-
-        // Collect selected permissions
-        const permissionCheckboxes = document.querySelectorAll('#publish-app-permissions input[name="permissions"]:checked');
-        const selectedPermissions = Array.from(permissionCheckboxes).map(cb => cb.value);
-        const permissionsStr = selectedPermissions.length > 0 ? selectedPermissions.join(',') : null;
-
-        // Validate
-        if (!appId) {
-            alert('App ID is required');
-            return;
-        }
-        if (!name) {
-            alert('Name is required');
-            return;
-        }
-
-        // Parse categories and add game/app tag based on toggle
-        const categories = categoriesStr
-            ? categoriesStr.toLowerCase().split(',').map(c => c.trim()).filter(c => c)
-            : [];
-
-        // Add the game or app tag at the beginning
-        categories.unshift(isGame ? 'game' : 'app');
-
-        // Show loading state
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<span class="icon icon-loading"></span> Publishing...';
-
-        try {
-            const eventId = await publishMarketplaceApp(
-                filePath,
-                appId,
-                name,
-                description,
-                version,
-                categories,
-                changelog,
-                developer,
-                sourceUrl,
-                permissionsStr
-            );
-
-            console.log('Published app with event ID:', eventId);
-
-            // Success - close dialog
-            overlay.classList.remove('active');
-            setTimeout(() => overlay.style.display = 'none', 300);
-
-            // Show success message
-            popupConfirm('Published!', `${name} has been published to the Nexus.`, true, '', 'vector-check.svg');
-        } catch (error) {
-            console.error('Failed to publish:', error);
-            submitBtn.disabled = false;
-            submitBtn.innerHTML = '<span class="icon icon-loading"></span> Publish';
-            alert('Failed to publish: ' + error.toString());
-        }
-    };
+        // Load available permissions, then check for pre-fill
+        invoke('miniapp_get_available_permissions').then((available) => {
+            VectorSvelte.setPublishPerms(available);
+        }).catch((error) => {
+            console.error('Failed to load permissions:', error);
+            VectorSvelte.setPublishPermsError('Failed to load permissions');
+        }).then(prefillFromExisting);
+    });
 }
 
 // ============================================================================

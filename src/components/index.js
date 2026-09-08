@@ -57,6 +57,8 @@ import LoginChrome from './auth/LoginChrome.svelte';
 import Popup from './ui/Popup.svelte';
 import ProcessingOverlay from './ui/ProcessingOverlay.svelte';
 import PermissionPrompt from './ui/PermissionPrompt.svelte';
+import PublishDialog from './ui/PublishDialog.svelte';
+export { publishState, openPublishDialog, activatePublishDialog, closePublishDialog, unmountPublishDialog, setPublishPerms, setPublishPermsError, setPublishHint, setPublishBusy } from './lib/publish.svelte.js';
 export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt, permissionState } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, bunkerState, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick } from './lib/login.svelte.js';
@@ -486,4 +488,9 @@ export function mountProcessingOverlay() {
 /** Mount the mini app permission prompt onto the body (once). */
 export function mountPermissionPrompt() {
     return mount(PermissionPrompt, { target: document.body, props: {} });
+}
+
+/** Mount the Nexus publish dialog onto the body (once). */
+export function mountPublishDialog() {
+    return mount(PublishDialog, { target: document.body, props: {} });
 }

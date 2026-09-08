@@ -458,54 +458,11 @@ const MERGEABLE_SYSTEM_EVENTS = new Set([
  * @param {HTMLElement} parent - Optional parent to append to
  * @returns {HTMLElement} - The created system event element
  */
-function insertSystemEvent(content, parent = null, npub = null, eventType = null) {
+function insertSystemEvent(content, parent = null) {
     const pSystemEvent = document.createElement('p');
     pSystemEvent.classList.add('msg-inline-timestamp'); // Reuse timestamp styling
-
-    // When the user's npub is known, render the NAME as a clickable affordance (data-npub →
-    // the domChatMessages click delegate opens the same mini-profile as a chat name/avatar tap),
-    // with the rest as plain text. Falls back to the plain string otherwise.
-    if (npub && eventType !== null) {
-        // Single inline wrapper = one centered flex item, so the name↔suffix space survives
-        // (two bare flex items would collapse the gap between them).
-        const inner = document.createElement('span');
-        inner.className = 'system-event-text';
-        // Small avatar to the left of the name — same cached/asset-only source as chat rows
-        // (createAvatarImg falls back to a placeholder when no avatar is cached yet; the
-        // retro-resolver below swaps in the real one once the profile lands).
-        const avatar = createAvatarImg(getProfileAvatarSrc(getProfile(npub)), 16);
-        avatar.classList.add('system-event-avatar');
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'system-event-name';
-        nameSpan.dataset.npub = npub;
-        nameSpan.textContent = systemEventName(npub);
-        inner.appendChild(avatar);
-        inner.appendChild(nameSpan);
-        // The suffix owns its own element so the repeat-merge pass can rewrite it
-        // ("… 4 times") without disturbing the name affordance beside it.
-        const suffixSpan = document.createElement('span');
-        suffixSpan.className = 'system-event-suffix';
-        suffixSpan.textContent = systemEventSuffix(eventType);
-        inner.appendChild(suffixSpan);
-        // Direct listener (system events are few — no delegation needed) so the affordance works
-        // regardless of which container the line is appended to. Opens the same mini-profile as a
-        // chat name/avatar tap. stopPropagation so it doesn't double-fire any ancestor delegate.
-        inner.addEventListener('click', (e) => {
-            e.stopPropagation();
-            showMiniProfile(npub, nameSpan);
-        });
-        pSystemEvent.appendChild(inner);
-        // Merge keys, read by `_mergeAdjacentSystemEvents`.
-        pSystemEvent.dataset.systemEventType = String(eventType);
-        pSystemEvent.dataset.systemEventNpub = npub;
-    } else {
-        pSystemEvent.textContent = content;
-    }
-
-    if (parent) {
-        parent.appendChild(pSystemEvent);
-    }
-
+    pSystemEvent.textContent = content;
+    if (parent) parent.appendChild(pSystemEvent);
     return pSystemEvent;
 }
 
