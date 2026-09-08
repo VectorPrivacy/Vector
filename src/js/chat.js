@@ -273,7 +273,7 @@ function setChatHeader(chat) {
     VectorSvelte.flushSync();
 }
 
-async function updateChat(chat, arrMessages = [], profile = null, fClicked = false) {
+async function updateChat(chat, arrMessages = [], profile = null, fClicked = false, arrival = false) {
     // Queue profiles for this chat — fire-and-forget so rendering is not delayed
     // by an IPC roundtrip. Awaiting this here used to race the very first
     // attachment_upload_progress events ahead of the spinner DOM, leaving the
@@ -336,7 +336,8 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
         // The list island derives rows, separators and system events from the window;
         // widen it to cover the batch (a single arrival also gets the entry extras).
         ensureMessageList();
-        _updateChatWindow(chat, sortedMessages, arrMessages.length === 1 ? sortedMessages[0] : null);
+        // Only a live arrival gets the entry extras; an open re-paints history, however small.
+        _updateChatWindow(chat, sortedMessages, arrival && arrMessages.length === 1 ? sortedMessages[0] : null);
 
         // Auto-scroll on new messages (if the user hasn't scrolled up, or on manual chat open).
         // Gated on the intent-aware pin, NOT raw distance: a user resting just below the
@@ -404,8 +405,7 @@ function _updateChatWindow(chat, sortedMessages, single) {
     VectorSvelte.setWindow(chat.id, windowTopId, windowBottomId);
     VectorSvelte.flushSync();
 
-    // A cold open pre-paints a chat that holds only its last message: that is a first
-    // render, not an arrival, so the entry extras need a window that was already on screen.
+    // `single` is only ever a live arrival, and the extras need a window that was already on screen.
     if (single && sameChat && !single.mine && single.id === windowBottomId && hi === msgs.length - 1) {
         const domMsg = document.getElementById(single.id);
         if (domMsg) {

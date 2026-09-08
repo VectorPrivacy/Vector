@@ -858,7 +858,7 @@ async function setupRustListeners() {
                 // Data-only: chat.messages/cache already holds it. No DOM, no badge.
                 proceduralScrollState.totalMessageCount++;
             } else if (!CHAT_WINDOW_ENABLED) {
-                updateChat(chat, [newMessage]);
+                updateChat(chat, [newMessage], null, false, true);
                 rendered = true;
                 refreshChatEmptyState();
                 proceduralScrollState.renderedMessageCount++;
@@ -874,7 +874,7 @@ async function setupRustListeners() {
             } else if (tailAppend) {
                 // The next message after the rendered bottom (and we're at the tail) →
                 // append + trim. The append keeps the window glued to the live tail.
-                updateChat(chat, [newMessage]);
+                updateChat(chat, [newMessage], null, false, true);
                 windowBottomId = newMessage.id;   // the append made it the bottom row
                 windowAtTail = true;              // still glued to the tail
                 windowTrimTopIfOver();
