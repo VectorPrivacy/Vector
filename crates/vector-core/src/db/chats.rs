@@ -147,6 +147,9 @@ pub fn clear_chat_last_read(chat_identifier: &str) -> Result<(), String> {
 }
 
 pub fn save_slim_chat(slim_chat: &SlimChatDB) -> Result<(), String> {
+    if slim_chat.id.is_empty() {
+        return Err("refusing to persist a chat with an empty identifier".into());
+    }
     let conn = super::get_write_connection_guard_static()?;
 
     let chat_type_int = slim_chat.chat_type.to_i32();

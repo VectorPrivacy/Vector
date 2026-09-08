@@ -799,6 +799,10 @@ impl ChatState {
 
     /// Ensure a Community channel chat exists, created as `ChatType::Community`.
     pub fn ensure_community_chat(&mut self, channel_id: &str) {
+        // An empty id would make a chat nothing can open or delete.
+        if channel_id.is_empty() {
+            return;
+        }
         if !self.chats.iter().any(|c| c.id == channel_id) {
             let chat =
                 Chat::new_community_channel(channel_id.to_string(), Vec::new(), &mut self.interner);

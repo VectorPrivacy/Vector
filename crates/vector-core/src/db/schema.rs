@@ -141,7 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 90;
+pub const HIGHEST_MIGRATION_ID: u32 = 91;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1345,6 +1345,19 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
             [],
         )
         .map_err(|e| format!("index community_bans: {e}"))?;
+        Ok(())
+    })?;
+
+    // A chat row needs an identifier to ever be opened; one without is a phantom
+    // that loads into the list and can never be addressed or removed.
+    run_atomic_migration(conn, 91, "Drop chats with an empty identifier", |tx| {
+        tx.execute(
+            "DELETE FROM events WHERE chat_id IN (SELECT id FROM chats WHERE chat_identifier = '')",
+            [],
+        )
+        .map_err(|e| format!("drop phantom chat events: {e}"))?;
+        tx.execute("DELETE FROM chats WHERE chat_identifier = ''", [])
+            .map_err(|e| format!("drop phantom chats: {e}"))?;
         Ok(())
     })?;
 
