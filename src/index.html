@@ -20,6 +20,7 @@
     <script src="/components.bundle.js" defer></script>
     <!-- Before main.js: it constructs the composer at module scope. -->
     <script src="/js/composer.js" defer></script>
+    <script src="/js/create-community.js" defer></script>
     <script src="/js/auth.js" defer></script>
     <script src="/js/accounts.js" defer></script>
     <script src="/js/events.js" defer></script>
@@ -1066,45 +1067,7 @@
           </div>
         </div>
       </div>
-      <div id="create-group" class="create-group-container" style="display: none;">
-        <div class="create-group-content">
-          <center class="chat-new-content">
-            <h2 class="chat-new-title"><span class="icon icon-chats chat-new-icon" style="width: 50px; height: 30px; opacity: 0.7; display: inline-block; vertical-align: bottom;"></span>Create New Group</h2>
-            <hr class="divider chat-new-divider">
-            <div class="row create-group-name-row" style="gap: 12px; align-items: center; padding: 0 15px;">
-              <div id="create-group-avatar-picker" class="create-group-avatar-picker" title="Choose group avatar">
-                <img id="create-group-avatar-preview" class="create-group-avatar-preview" style="display: none;" />
-                <img id="create-group-avatar-placeholder" class="create-group-avatar-placeholder" src="icons/group-placeholder.svg" />
-                <div class="create-group-avatar-edit">
-                  <span id="create-group-avatar-edit-icon" class="icon icon-plus-circle"></span>
-                </div>
-              </div>
-              <div class="create-group-name-wrap">
-                <input id="create-group-name" placeholder="Group Name..." maxlength="32" class="chat-input-container chat-new-input" />
-                <span class="create-group-name-required">Required*</span>
-              </div>
-            </div>
-          </center>
-
-          <!-- Optional in-create direct invites: pick contacts (or paste an npub) to send a
-               private invite to once the Community is created. Not the public-link system. -->
-          <center id="create-group-members-section" class="chat-new-center-content" style="padding: 0 15px; box-sizing: border-box; width: 100%;">
-            <div class="chat-new-content" style="width: 100%; box-sizing: border-box; margin-left: 0; margin-top: 12px;">
-              <div class="emoji-search-container" style="padding: 0; background: transparent; isolation: isolate;">
-                <span class="emoji-search-icon icon icon-search"></span>
-                <input id="create-group-filter" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding: 10px 12px 10px 44px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;">
-              </div>
-              <div id="create-group-list" class="create-group-list"></div>
-            </div>
-          </center>
-        </div>
-
-        <div class="create-group-footer">
-          <p id="create-group-status" class="chat-contact-status"></p>
-          <button id="create-group-create-btn" class="btn accept-btn btn-bounce" disabled>Create Group</button>
-          <button id="create-group-cancel-btn" class="btn cancel-btn">Cancel</button>
-        </div>
-      </div>
+      <div id="create-group" class="create-group-container" style="display: none;"></div>
       <div id="settings" style="display: none;">
         <h2 style="margin-top: 40px">Choose Theme</h2>
         <select id="theme-select">

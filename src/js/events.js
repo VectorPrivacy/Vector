@@ -650,8 +650,8 @@ async function setupRustListeners() {
 
         // Refresh the Create Group picker if a stranger npub's profile resolved while the
         // panel is open (the island re-derives its rows off the new snapshot).
-        if (cgContactList && domCreateGroup?.style.display !== 'none') {
-            cgContactList.setProfiles([...arrProfiles]);
+        if (domCreateGroup?.style.display !== 'none') {
+            VectorSvelte.ccProfilesChanged();
         }
         if (activeInviteModalRerender) {
             activeInviteModalRerender();

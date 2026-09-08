@@ -53,6 +53,8 @@ import BlossomCaps from './settings/BlossomCaps.svelte';
 import RelayLogs from './settings/RelayLogs.svelte';
 import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
+import CreateCommunity from './community/CreateCommunity.svelte';
+export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { setEditHistory, setEditHistoryBelow, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
@@ -449,4 +451,10 @@ export function mountAccountRows(host, props) {
 export function mountEditHistory(content, { h }) {
     content.replaceChildren();
     return mount(EditHistory, { target: content, props: { h } });
+}
+
+/** Mount the Create Community panel into `host` (#create-group). */
+export function mountCreateCommunity(host, { h }) {
+    host.replaceChildren();
+    return mount(CreateCommunity, { target: host, props: { h } });
 }
