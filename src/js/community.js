@@ -842,7 +842,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 loading: !hadCache,
                 h: {
                     invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
-                    attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc,
+                    attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
                     createPlaceholderAvatar, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     applyCommunityAdmins, dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
                     memberSectionClosed, setMemberSectionClosed,

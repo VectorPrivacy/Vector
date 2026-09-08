@@ -991,12 +991,15 @@ async function saveStatus(strStatus) {
     // immediately; the backend's profile_update follows with the exact set.
     cProfile.status.emoji_tags = strStatus ? equippedEmojiTags() : [];
     renderCurrentProfile(cProfile);
+    // Every row showing me (rosters, DM list) re-derives off the signal.
+    VectorSvelte.touchProfile(cProfile.id);
     if (domProfile.style.display === '') renderProfileTab(cProfile);
 
     const rollback = () => {
         cProfile.status.title = oldStatus;
         cProfile.status.emoji_tags = oldTags;
         renderCurrentProfile(cProfile);
+        VectorSvelte.touchProfile(cProfile.id);
         if (domProfile.style.display === '') renderProfileTab(cProfile);
     };
 

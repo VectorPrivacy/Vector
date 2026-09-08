@@ -8,6 +8,7 @@
     // so its caches stay in step. Every mutation flows: confirm → act (row pinned busy) →
     // re-read the settled truth → patch state; nothing is re-rendered by hand.
     import MemberRow from './MemberRow.svelte';
+    import { profileVersion } from '../lib/signals.svelte.js';
     import MemberSection from './MemberSection.svelte';
 
     let {
@@ -80,6 +81,12 @@
     // ── derivations ──
 
     const profileById = $derived(new Map(profilesList.map((p) => [p.id, p])));
+    // A row reads the LIVE profile and tracks its signal, so a status or name change
+    // repaints the row without a re-mount; the snapshot only covers a missing lookup.
+    function profileFor(npub) {
+        profileVersion(npub);
+        return (h.getProfile ? h.getProfile(npub) : null) || profileById.get(npub) || null;
+    }
     const adminSet = $derived(new Set(adminList));
     const iAmOwner = $derived(!!(myNpub && ownerNpub && myNpub === ownerNpub));
 
@@ -133,7 +140,7 @@
         const tierOf = (npub) => (npub === ownerNpub ? 0 : adminSet.has(npub) ? 1 : 2);
         const vms = [];
         for (const m of memberList) {
-            const profile = profileById.get(m.npub) || null;
+            const profile = profileFor(m.npub);
             const display = displayOf(m.npub, profile);
             if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
             const isOwner = m.npub === ownerNpub;
@@ -174,7 +181,7 @@
     const bannedRows = $derived.by(() => {
         if (!caps.ban || f) return [];
         return bannedList.map((npub) => {
-            const profile = profileById.get(npub) || null;
+            const profile = profileFor(npub);
             return { npub, profile, display: displayOf(npub, profile), hasName: !!nameOf(profile), src: profile ? h.getProfileAvatarSrc(profile) || null : null };
         });
     });
