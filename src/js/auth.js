@@ -208,6 +208,16 @@ VectorSvelte.mountLoginChrome({
  */
 async function login(skipAnimations = false) {
     if (strPubkey) {
+        if (addAccountFlow.committed) {
+            // A new account boots the way a switch does: marker, then reload. Booting it
+            // in-process leaves the previous account's open chat, pane and window state on
+            // screen, since only the chat arrays are replaced by init_finished.
+            addAccountFlow.finish();
+            try { await invoke('set_active_account', { npub: strPubkey }); }
+            catch (e) { console.error('[add-account] marker write failed:', e); }
+            window.location.reload();
+            return;
+        }
         // Successful end of the Add Profile flow — drop the back-target
         // and reset flags so the next session starts clean.
         addAccountFlow.finish();
