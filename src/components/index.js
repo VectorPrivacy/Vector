@@ -124,7 +124,7 @@ export {
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
-    startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock,
+    startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setComposerStatus,
     openPopup, closePopup,
     setCommand, clearCommand, setCommandHint, setCommandInvalid, setCommandValue, openChoiceMenu, closeChoiceMenu,
 } from './lib/composer.svelte.js';

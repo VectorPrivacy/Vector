@@ -3,13 +3,14 @@
     // index.html and five modules keep their cached element references, so this adopts
     // those elements and derives their state from lib/composer.svelte.js instead of six
     // modules writing to them. The editor element is never touched.
-    import { composerMode, composerDraft, composerLock, composerCommand } from '../lib/composer.svelte.js';
+    import { composerMode, composerDraft, composerLock, composerCommand, composerStatus } from '../lib/composer.svelte.js';
 
     let { els, h } = $props();   // els: box, input, file, cancel, emoji, voice, send, replyName, replySnippet, replyCancel
 
     const mode = composerMode();
     const draft = composerDraft();
     const lock = composerLock();
+    const status = composerStatus();
     const command = composerCommand();
 
     const isReply = $derived(mode.kind === 'reply');
@@ -67,7 +68,7 @@
         // The property, not the attribute: the rich composer draws its placeholder from
         // data-placeholder (its Proxy maps the property there); a textarea maps it to the
         // attribute. Either way the property is the one channel that renders.
-        els.input.placeholder = locked ? lock.placeholder : (isEdit ? 'Editing message...' : h.placeholder);
+        els.input.placeholder = locked ? lock.placeholder : status.text ? status.text : (isEdit ? 'Editing message...' : h.placeholder);
     });
 
     // ── mic ↔ send ──

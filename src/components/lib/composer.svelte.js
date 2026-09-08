@@ -5,6 +5,9 @@
 const mode = $state({ kind: 'idle', id: '', name: '', snippet: null, original: '' });
 const draft = $state({ empty: true, animate: false, seq: 0 });
 const lock = $state({ reason: null, placeholder: '' });
+// A transient placeholder while a send or edit is in flight ('' = none). Not a lock:
+// the editor stays usable, the text just says what is happening.
+const status = $state({ text: '' });
 // The structured command composer: the picked command's argument pills replace
 // the editor while they are filled. `values` holds the picker-typed args (choice,
 // bool); free-text fields own their text in the DOM. `attach` wires a mounted
@@ -16,6 +19,7 @@ const command = $state({
 export function composerMode() { return mode; }
 export function composerDraft() { return draft; }
 export function composerLock() { return lock; }
+export function composerStatus() { return status; }
 export function composerCommand() { return command; }
 
 /** Replying to `id`. `snippet` is { html, emojiTags } or { text } or null. */
@@ -58,6 +62,9 @@ export function setLock(reason, placeholder = '') {
     lock.reason = reason || null;
     lock.placeholder = placeholder || '';
 }
+
+/** Show a transient placeholder ('Sending...') or clear it (''). */
+export function setComposerStatus(text) { status.text = text || ''; }
 
 /** Enter the command composer for `name` with `args` [{ name, type, required, description, grow }]. */
 export function setCommand({ name, bot, args, attach }) {

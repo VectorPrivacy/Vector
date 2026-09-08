@@ -257,7 +257,7 @@ async function sendMessage(messageText) {
         domChatMessageInput.value = '';
         resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
         resetChatInputSize();
-        domChatMessageInput.placeholder = 'Saving edit...';
+        VectorSvelte.setComposerStatus('Saving edit...');
 
         try {
             const editMsgId = strCurrentEditMessageId;
@@ -332,7 +332,7 @@ async function sendMessage(messageText) {
     domChatMessageInput.value = '';
     resetSendMicButtons(); // Immediately reset to mic button (avoids animation race)
     resetChatInputSize();
-    domChatMessageInput.placeholder = 'Sending...';
+    VectorSvelte.setComposerStatus('Sending...');
 
     try {
         const replyRef = strCurrentReplyReference;
@@ -350,7 +350,7 @@ async function sendMessage(messageText) {
     } catch(e) {
         console.error('Failed to send message:', e);
     } finally {
-        domChatMessageInput.placeholder = 'Enter message...';
+        VectorSvelte.setComposerStatus('');
     }
 }
 
@@ -598,7 +598,7 @@ async function handleSendClick() {
         if (recorder.isInPreview) {
             const sent = recorder.send();
             if (sent && strOpenChat) {
-                domChatMessageInput.placeholder = 'Sending...';
+                VectorSvelte.setComposerStatus('Sending...');
                 try {
                     const strReplyRef = strCurrentReplyReference;
                     cancelReply();
@@ -611,7 +611,7 @@ async function handleSendClick() {
                         popupConfirm(e, '', true, '', 'vector_warning.svg');
                     }
                 }
-                domChatMessageInput.placeholder = 'Enter message...';
+                VectorSvelte.setComposerStatus('');
                 nLastTypingIndicator = 0;
             }
             return;
@@ -633,7 +633,7 @@ async function initComposerVoice() {
     recorder.onStateChange = (newState, oldState) => {
         if (newState === 'idle') {
             // Reset placeholder when returning to idle
-            domChatMessageInput.placeholder = 'Enter message...';
+            VectorSvelte.setComposerStatus('');
         } else if (newState === 'recording' || newState === 'locked') {
             // Clear input and show recording status
             domChatMessageInput.value = '';
@@ -643,7 +643,7 @@ async function initComposerVoice() {
 
     // Handle cancel callback
     recorder.onCancel = () => {
-        domChatMessageInput.placeholder = 'Enter message...';
+        VectorSvelte.setComposerStatus('');
         cancelReply();
     };
 
