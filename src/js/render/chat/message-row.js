@@ -349,6 +349,14 @@ function _selfDestructTooltipEnd() {
     hideGlobalTooltip();
 }
 
+/** Format a countdown: mm:ss under an hour, else Hh Mm / Dd Hh. */
+function _fmtCountdown(secs) {
+    if (secs >= 86400) { const d = Math.floor(secs / 86400); const h = Math.floor((secs % 86400) / 3600); return d + 'd ' + h + 'h'; }
+    if (secs >= 3600)  { const h = Math.floor(secs / 3600);  const m = Math.floor((secs % 3600) / 60);   return h + 'h ' + m + 'm'; }
+    const m = Math.floor(secs / 60), s = secs % 60;
+    return m + ':' + String(s).padStart(2, '0');
+}
+
 /**
  * The quoted parent of a reply as data for the row's ReplyQuote, or null when nothing
  * is known about it yet (neither the backend's context fields nor the parent in memory).
