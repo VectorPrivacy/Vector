@@ -509,6 +509,7 @@ async function login(skipAnimations = false) {
  */
 function openInviteFlow() {
     VectorSvelte.loginScreen('invite');
+    VectorSvelte.flushSync();
     
     // Focus on the invite input
     domInviteInput.focus();
@@ -566,6 +567,8 @@ function showWelcomeScreen() {
  */
 function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     VectorSvelte.loginScreen('encrypt');
+    // The flows below focus an input at once; the screen has to be visible first.
+    VectorSvelte.flushSync();
     // Hide the picker only for the NEW-account PIN-setup path (fUnlock=false).
     // The unlock path keeps it visible so the user can switch between
     // existing accounts before entering their PIN/password.
