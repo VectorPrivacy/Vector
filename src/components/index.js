@@ -127,6 +127,8 @@ export { deriveWindow } from './lib/chatwindow.js';
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, noticeState, setNotice, clearNotices, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
 export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
+export { showToast, hideToast } from './lib/toast.svelte.js';
+export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
 export { setModelDownload, modelDownloadState } from './lib/audio.svelte.js';
 export { recorderState, setVoiceState, setVoiceStatusText, setVoiceTimer, setVoiceDrag, setVoiceDot, setVoiceLockFading, setVoiceTooltip, setVoicePreview, voiceFadeIn, setVoiceHandlers, voiceEls } from './lib/voicerecorder.svelte.js';

@@ -11,6 +11,8 @@
     import PickerRoot from '../picker/PickerRoot.svelte';
     import PickerTooltip from '../picker/PickerTooltip.svelte';
     import ImageViewer from '../ui/ImageViewer.svelte';
+    import Toast from '../ui/Toast.svelte';
+    import BadgeCard from '../ui/BadgeCard.svelte';
     import Tooltip from './Tooltip.svelte';
     const panes = shellPanes();
 </script>
@@ -56,3 +58,5 @@
 <ProfileSwitcher />
 <PickerTooltip />
 <ImageViewer />
+<Toast />
+<BadgeCard />
