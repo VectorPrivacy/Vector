@@ -1266,11 +1266,7 @@ async function setupRustListeners() {
 
         // Also update the info dialog if it's open for this relay
         if (currentRelayInfo && currentRelayInfo.url.toLowerCase() === evt.payload.url.toLowerCase()) {
-            const dialogStatus = document.getElementById('relay-info-status');
-            if (dialogStatus) {
-                dialogStatus.textContent = evt.payload.status;
-                dialogStatus.className = `relay-status ${evt.payload.status}`;
-            }
+            VectorSvelte.relayInfoDialog.patch({ status: evt.payload.status });
             currentRelayInfo.status = evt.payload.status;
         }
     });

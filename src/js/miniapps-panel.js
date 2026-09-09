@@ -427,6 +427,8 @@ async function loadMiniAppIcon(app) {
 
 // Store the pending Mini App for the launch dialog
 let pendingMiniAppLaunch = null;
+/** The Nexus id to update instead of inviting, when the launch dialog offers an update. */
+let pendingMiniAppUpdateId = null;
 
 /**
  * Check if a Mini App is a game based on its categories
@@ -459,47 +461,23 @@ function isMiniAppGame(app) {
 async function showMiniAppLaunchDialog(app) {
     pendingMiniAppLaunch = app;
 
-    // Set the app name
-    domMiniAppLaunchName.textContent = app.name;
-
-    // Determine if this is a game or app and update button text accordingly
-    const isGame = isMiniAppGame(app);
-    const actionText = isGame ? 'Play' : 'Open';
-    domMiniAppLaunchSolo.textContent = actionText;
-    domMiniAppLaunchInvite.textContent = `${actionText} & Invite`;
-
     // Check if this app has a marketplace update available
     const hasUpdate = app.marketplace_id &&
         marketplaceApps.find(m => m.id === app.marketplace_id && m.version && m.version !== app.installed_version);
+    pendingMiniAppUpdateId = hasUpdate ? app.marketplace_id : null;
 
-    if (hasUpdate) {
-        domMiniAppLaunchInvite.textContent = 'Update';
-        domMiniAppLaunchInvite.dataset.updateMode = 'true';
-        domMiniAppLaunchInvite.dataset.marketplaceId = app.marketplace_id;
-    } else {
-        delete domMiniAppLaunchInvite.dataset.updateMode;
-        delete domMiniAppLaunchInvite.dataset.marketplaceId;
-    }
-
-    // Try to load the Mini App icon
+    // The icon comes from the .xdc manifest; a missing or unreadable one shows the play glyph.
+    let icon = null;
     try {
         const info = await invoke('miniapp_load_info', { filePath: app.src_url });
-        if (info && info.icon_data) {
-            // DOM construction: app.name comes from the .xdc manifest
-            const img = document.createElement('img');
-            img.src = info.icon_data;
-            img.alt = app.name;
-            domMiniAppLaunchIconContainer.replaceChildren(img);
-        } else {
-            domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
-        }
+        icon = info?.icon_data || null;
     } catch (e) {
-        // Fallback to generic icon
-        domMiniAppLaunchIconContainer.innerHTML = '<span class="icon icon-play"></span>';
+        icon = null;
     }
 
-    // Show the overlay
-    domMiniAppLaunchOverlay.classList.add('active');
+    VectorSvelte.launchDialog.open({
+        name: app.name, actionText: isMiniAppGame(app) ? 'Play' : 'Open', updateMode: !!hasUpdate, icon,
+    });
     pushBack('miniapp-launch', closeMiniAppLaunchDialog);
 }
 
@@ -508,8 +486,9 @@ async function showMiniAppLaunchDialog(app) {
  */
 function closeMiniAppLaunchDialog() {
     popBack('miniapp-launch');
-    domMiniAppLaunchOverlay.classList.remove('active');
+    VectorSvelte.launchDialog.close();
     pendingMiniAppLaunch = null;
+    pendingMiniAppUpdateId = null;
 }
 
 /**
@@ -545,8 +524,8 @@ async function playMiniAppAndInvite() {
     if (!pendingMiniAppLaunch) return;
 
     // Intercept update mode
-    if (domMiniAppLaunchInvite.dataset.updateMode === 'true') {
-        const marketplaceId = domMiniAppLaunchInvite.dataset.marketplaceId;
+    if (pendingMiniAppUpdateId) {
+        const marketplaceId = pendingMiniAppUpdateId;
         closeMiniAppLaunchDialog();
         await handleMiniAppPanelUpdate(marketplaceId);
         return;
@@ -812,7 +791,7 @@ async function openMiniAppFromHistory(app) {
     await showMiniAppLaunchDialog(app);
 }
 
-/** Wire the attachment panel's Mini Apps view, the launch dialog and the Nexus back button. */
+/** Wire the attachment panel's Mini Apps view and mount the launch dialog. */
 async function wireMiniAppsUi() {
     // Commands button — bot-chats only. Drops a `/` into the composer and opens
     // the command list. Grayed (with a tooltip) while a draft is present.
@@ -850,21 +829,7 @@ async function wireMiniAppsUi() {
     // Setup hold-to-edit mode for Mini Apps
     setupMiniAppsEditMode();
 
-    // Mini App Launch Dialog event handlers
-    domMiniAppLaunchCancel.onclick = closeMiniAppLaunchDialog;
-    domMiniAppLaunchSolo.onclick = playMiniAppSolo;
-    domMiniAppLaunchInvite.onclick = playMiniAppAndInvite;
-    
-    // Close dialog when clicking outside
-    domMiniAppLaunchOverlay.onclick = (e) => {
-        if (e.target === domMiniAppLaunchOverlay) {
-            closeMiniAppLaunchDialog();
-        }
-    };
-
-    if (domMarketplaceBackBtn) {
-        domMarketplaceBackBtn.onclick = () => {
-            hideMarketplacePanel();
-        };
-    }
+    VectorSvelte.mountLaunchDialog(domMiniAppLaunchOverlay, { h: {
+        cancel: closeMiniAppLaunchDialog, solo: playMiniAppSolo, invite: playMiniAppAndInvite,
+    } });
 }

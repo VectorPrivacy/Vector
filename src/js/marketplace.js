@@ -413,14 +413,9 @@ function ensureMarketplaceIslands() {
             if (typeof openUrl === 'function') openUrl(url);
             else invoke('open_url', { url }).catch(console.error);
         },
+        back: () => { hideMarketplacePanel(); },
     };
-    document.getElementById('app-details-back-btn').onclick = () => { closeAppDetailsPanel(); };
-    VectorSvelte.mountMarketplace({
-        body: document.querySelector('.marketplace-scroll-container'),
-        filters: document.getElementById('marketplace-filters'),
-        details: document.getElementById('app-details-content'),
-        h,
-    });
+    VectorSvelte.mountMarketplace({ panel: domMarketplacePanel, details: domAppDetailsPanel, h });
 }
 
 /** Run one action on an app with the button showing it, and a 2s "Failed" if it throws. */
@@ -471,8 +466,8 @@ async function handleAppInstallOrPlay(app) {
  */
 function closeAppDetailsPanel() {
     return new Promise((resolve) => {
-        const panel = document.getElementById('app-details-panel');
-        if (panel && panel.style.display !== 'none') {
+        const panel = domAppDetailsPanel;
+        if (panel.style.display !== 'none') {
             popBack('app-details');
             panel.classList.add('closing');
             panel.addEventListener('animationend', function handler() {
@@ -490,8 +485,7 @@ function closeAppDetailsPanel() {
 
 /** Open the details panel on one app. */
 function showAppDetails(app) {
-    const panel = document.getElementById('app-details-panel');
-    if (!panel) return;
+    const panel = domAppDetailsPanel;
     ensureMarketplaceIslands();
     if (panel.style.display === 'none') pushBack('app-details', () => { closeAppDetailsPanel(); });
     panel.dataset.appId = app.id;
@@ -583,11 +577,7 @@ async function openPublisherProfile(npub) {
 }
 
 function addMarketplaceFilter(category) { VectorSvelte.mktAddFilter(category); }
-function clearMarketplaceFilters() {
-    VectorSvelte.mktClearFilters();
-    const searchInput = document.getElementById('marketplace-search-input');
-    if (searchInput) searchInput.value = '';
-}
+function clearMarketplaceFilters() { VectorSvelte.mktClearFilters(); }
 
 /** Open the Nexus: cached apps at once, then a fresh fetch with install status. */
 async function initMarketplace() {
@@ -596,12 +586,6 @@ async function initMarketplace() {
     ensureMarketplaceIslands();
     clearMarketplaceFilters();
     VectorSvelte.mktSetAnimate(false);
-
-    const searchInput = document.getElementById('marketplace-search-input');
-    if (searchInput) {
-        searchInput.removeEventListener('input', handleMarketplaceSearch);
-        searchInput.addEventListener('input', handleMarketplaceSearch);
-    }
 
     VectorSvelte.mktSetLoading(true);
     try {
@@ -624,10 +608,6 @@ async function initMarketplace() {
     } finally {
         _marketplaceInitInProgress = false;
     }
-}
-
-function handleMarketplaceSearch(e) {
-    VectorSvelte.mktSetQuery(e.target.value);
 }
 
 /**

@@ -67,43 +67,21 @@ async function renderRelayList() {
 
 /** Currently selected relay for info dialog */
 let currentRelayInfo = null;
+/** Its last fetched activity log (the copy action formats from data, not the DOM). */
+let currentRelayLogs = [];
 /** Interval for refreshing relay info dialog data */
 let relayInfoRefreshInterval = null;
 
-/**
- * Opens the Add Relay dialog
- */
 function openAddRelayDialog() {
-    const overlay = document.getElementById('add-relay-overlay');
-    const urlInput = document.getElementById('add-relay-url');
-    const modeSelect = document.getElementById('add-relay-mode');
-
-    // Reset form
-    urlInput.value = '';
-    modeSelect.value = 'both';
-
-    // Show dialog
-    overlay.classList.add('active');
-    urlInput.focus();
+    VectorSvelte.addRelayDialog.open({ url: '', mode: 'both' });
 }
 
-/**
- * Closes the Add Relay dialog
- */
 function closeAddRelayDialog() {
-    const overlay = document.getElementById('add-relay-overlay');
-    overlay.classList.remove('active');
+    VectorSvelte.addRelayDialog.close();
 }
 
-/**
- * Handles adding a new relay from the dialog
- */
-async function handleAddRelay() {
-    const urlInput = document.getElementById('add-relay-url');
-    const modeSelect = document.getElementById('add-relay-mode');
-    let url = urlInput.value.trim();
-    const mode = modeSelect.value;
-
+async function handleAddRelay({ url, mode }) {
+    url = url.trim();
     if (!url) {
         popupConfirm('Invalid URL', 'Please enter a relay URL.', true);
         return;
@@ -129,6 +107,7 @@ async function refreshRelayInfoDialog() {
     if (!currentRelayInfo) return;
 
     const url = currentRelayInfo.url;
+    const dialog = VectorSvelte.relayInfoDialog;
 
     // Fetch fresh relay data
     try {
@@ -136,19 +115,7 @@ async function refreshRelayInfoDialog() {
         const freshRelay = relays.find(r => r.url.toLowerCase() === url.toLowerCase());
         if (freshRelay) {
             currentRelayInfo = freshRelay;
-
-            // Update status
-            const statusEl = document.getElementById('relay-info-status');
-            statusEl.textContent = freshRelay.status;
-            statusEl.className = `relay-status ${freshRelay.status}`;
-
-            // Update disable button text
-        const disableBtn = document.getElementById('relay-info-disable');
-        if (freshRelay.is_default) {
-            disableBtn.innerHTML = freshRelay.enabled 
-                ? '<span class="icon icon-disable"></span> Disable'
-                : '<span class="icon icon-disable"></span> Enable';
-        }
+            dialog.patch({ status: freshRelay.status, enabled: freshRelay.enabled });
         }
     } catch (err) {
         console.error('Failed to refresh relay data:', err);
@@ -157,33 +124,21 @@ async function refreshRelayInfoDialog() {
     // Refresh metrics
     try {
         const metrics = await invoke('get_relay_metrics', { url });
-        const pingEl = document.getElementById('relay-info-ping');
-        if (metrics.ping_ms) {
-            pingEl.textContent = `${metrics.ping_ms}ms`;
-            pingEl.style.color = metrics.ping_ms < 200 ? 'var(--status-excellent)'
-                : metrics.ping_ms < 500 ? 'var(--status-good)'
-                : metrics.ping_ms < 1000 ? 'var(--status-fair)'
-                : 'var(--status-poor)';
-        } else {
-            pingEl.textContent = '--';
-            pingEl.style.color = '';
-        }
+        const ping = metrics.ping_ms ? `${metrics.ping_ms}ms` : '--';
+        const pingColor = !metrics.ping_ms ? ''
+            : metrics.ping_ms < 200 ? 'var(--status-excellent)'
+            : metrics.ping_ms < 500 ? 'var(--status-good)'
+            : metrics.ping_ms < 1000 ? 'var(--status-fair)'
+            : 'var(--status-poor)';
+        let lastCheck = '--';
         if (metrics.last_check) {
-            const lastCheck = new Date(metrics.last_check * 1000);
-            const now = new Date();
-            const diffSecs = Math.floor((now - lastCheck) / 1000);
-            let lastCheckText;
-            if (diffSecs < 60) {
-                lastCheckText = `${diffSecs}s ago`;
-            } else if (diffSecs < 3600) {
-                lastCheckText = `${Math.floor(diffSecs / 60)}m ago`;
-            } else {
-                lastCheckText = lastCheck.toLocaleTimeString();
-            }
-            document.getElementById('relay-info-last-check').textContent = lastCheckText;
-        } else {
-            document.getElementById('relay-info-last-check').textContent = '--';
+            const checked = new Date(metrics.last_check * 1000);
+            const diffSecs = Math.floor((Date.now() - checked) / 1000);
+            lastCheck = diffSecs < 60 ? `${diffSecs}s ago`
+                : diffSecs < 3600 ? `${Math.floor(diffSecs / 60)}m ago`
+                : checked.toLocaleTimeString();
         }
+        dialog.patch({ ping, pingColor, lastCheck });
     } catch (err) {
         console.error('Failed to load relay metrics:', err);
     }
@@ -191,6 +146,7 @@ async function refreshRelayInfoDialog() {
     // Refresh logs
     try {
         const logs = await invoke('get_relay_logs', { url });
+        currentRelayLogs = logs || [];
         VectorSvelte.setRelayLogs(logs);
     } catch (err) {
         console.error('Failed to load relay logs:', err);
@@ -209,16 +165,13 @@ async function openRelayInfoDialog(relay) {
     }
 
     currentRelayInfo = relay;
-    const overlay = document.getElementById('relay-info-overlay');
-    const urlEl = document.getElementById('relay-info-url');
-    const modeSelect = document.getElementById('relay-info-mode');
-
-    // Set static info (URL doesn't change)
-    urlEl.textContent = relay.url.replace(/^wss?:\/\//, '');
-
-    // Set mode (only editable for custom relays)
-    modeSelect.value = relay.mode || 'both';
-    modeSelect.disabled = relay.is_default;
+    currentRelayLogs = [];
+    VectorSvelte.setRelayLogs([]);
+    VectorSvelte.relayInfoDialog.patch({
+        url: relay.url.replace(/^wss?:\/\//, ''), status: relay.status || '',
+        isDefault: !!relay.is_default, enabled: relay.enabled !== false, mode: relay.mode || 'both',
+        ping: '--', pingColor: '', lastCheck: '--', copied: false,
+    });
 
     // Initial data load
     await refreshRelayInfoDialog();
@@ -226,8 +179,7 @@ async function openRelayInfoDialog(relay) {
     // Start refresh interval (every 1 second)
     relayInfoRefreshInterval = setInterval(refreshRelayInfoDialog, 1000);
 
-    // Show dialog
-    overlay.classList.add('active');
+    VectorSvelte.relayInfoDialog.open({});
 }
 
 /**
@@ -240,23 +192,20 @@ function closeRelayInfoDialog() {
         relayInfoRefreshInterval = null;
     }
 
-    const overlay = document.getElementById('relay-info-overlay');
-    overlay.classList.remove('active');
+    VectorSvelte.relayInfoDialog.close();
     currentRelayInfo = null;
 }
 
 /**
  * Handles mode change from the info dialog
  */
-async function handleRelayModeChange() {
+async function handleRelayModeChange(newMode) {
     if (!currentRelayInfo || currentRelayInfo.is_default) return;
-
-    const modeSelect = document.getElementById('relay-info-mode');
-    const newMode = modeSelect.value;
 
     try {
         await invoke('update_relay_mode', { url: currentRelayInfo.url, mode: newMode });
         currentRelayInfo.mode = newMode;
+        VectorSvelte.relayInfoDialog.patch({ mode: newMode });
         renderRelayList();
     } catch (err) {
         console.error('Failed to update relay mode:', err);
@@ -273,21 +222,9 @@ let currentBlossomInfo = null;
 
 function openBlossomServerInfoDialog(server) {
     currentBlossomInfo = server;
-    const overlay = document.getElementById('blossom-info-overlay');
-    document.getElementById('blossom-info-url').textContent = server.url.replace(/^https?:\/\//, '');
-
-    const statusEl = document.getElementById('blossom-info-status');
-    statusEl.className = `relay-status relay-status-small ${server.enabled ? 'connected' : 'disabled'}`;
-    statusEl.textContent = server.enabled ? 'enabled' : 'disabled';
-
-    const actionBtn = document.getElementById('blossom-info-action');
-    if (server.is_custom) {
-        actionBtn.textContent = 'Remove Server';
-    } else {
-        actionBtn.textContent = server.enabled ? 'Disable Server' : 'Enable Server';
-    }
-
-    overlay.classList.add('active');
+    VectorSvelte.blossomInfoDialog.open({
+        url: server.url.replace(/^https?:\/\//, ''), enabled: !!server.enabled, isCustom: !!server.is_custom,
+    });
     // Reset synchronously so stale data doesn't flash mid-fetch.
     VectorSvelte.setBlossomCaps('loading', []);
     const token = ++_blossomCapsToken;
@@ -310,7 +247,7 @@ async function renderBlossomCapabilities(url, token) {
 }
 
 function closeBlossomServerInfoDialog() {
-    document.getElementById('blossom-info-overlay').classList.remove('active');
+    VectorSvelte.blossomInfoDialog.close();
     currentBlossomInfo = null;
 }
 
@@ -396,44 +333,13 @@ async function handleRelayDisable() {
     }
 }
 
-/**
- * Initialize relay dialog event listeners
- */
+/** Mount the Network section's dialogs; their handlers are fixed for the app's life. */
 function initRelayDialogs() {
-    VectorSvelte.mountRelayLogs(document.getElementById('relay-info-logs'));
-    VectorSvelte.mountBlossomCaps(document.getElementById('blossom-info-capabilities'), { h: { formatBytes } });
-    // Add Relay Dialog
-    document.getElementById('add-relay-close').onclick = closeAddRelayDialog;
-    document.getElementById('add-relay-cancel').onclick = closeAddRelayDialog;
-    document.getElementById('add-relay-confirm').onclick = handleAddRelay;
-    document.getElementById('add-relay-overlay').onclick = (e) => {
-        if (e.target.id === 'add-relay-overlay') closeAddRelayDialog();
-    };
-
-    // Allow Enter key to submit
-    document.getElementById('add-relay-url').onkeydown = (e) => {
-        if (e.key === 'Enter') handleAddRelay();
-    };
-
-    // Relay Info Dialog
-    document.getElementById('relay-info-close').onclick = closeRelayInfoDialog;
-    document.getElementById('relay-info-done').onclick = closeRelayInfoDialog;
-    document.getElementById('relay-info-disable').onclick = handleRelayDisable;
-    document.getElementById('relay-info-mode').onchange = handleRelayModeChange;
-    document.getElementById('relay-info-overlay').onclick = (e) => {
-        if (e.target.id === 'relay-info-overlay') closeRelayInfoDialog();
-    };
-
-    // Copy logs button
-    document.getElementById('relay-logs-copy').onclick = copyRelayLogs;
-
-    // Blossom server info dialog
-    document.getElementById('blossom-info-close').onclick = closeBlossomServerInfoDialog;
-    document.getElementById('blossom-info-done').onclick = closeBlossomServerInfoDialog;
-    document.getElementById('blossom-info-action').onclick = handleBlossomAction;
-    document.getElementById('blossom-info-overlay').onclick = (e) => {
-        if (e.target.id === 'blossom-info-overlay') closeBlossomServerInfoDialog();
-    };
+    VectorSvelte.mountNetworkDialogs({ h: {
+        addRelay: { close: closeAddRelayDialog, confirm: handleAddRelay },
+        relayInfo: { close: closeRelayInfoDialog, disable: handleRelayDisable, setMode: handleRelayModeChange, copy: copyRelayLogs },
+        blossom: { close: closeBlossomServerInfoDialog, action: handleBlossomAction, formatBytes },
+    } });
 }
 
 /**
@@ -442,38 +348,23 @@ function initRelayDialogs() {
 function copyRelayLogs() {
     if (!currentRelayInfo) return;
 
-    // Read logs from the displayed DOM to avoid async clipboard permission issues
-    const logsList = document.getElementById('relay-info-logs');
-    const logItems = logsList.querySelectorAll('li:not(.relay-log-empty)');
-
     let text;
-    if (logItems.length === 0) {
+    if (currentRelayLogs.length === 0) {
         text = 'No activity recorded yet';
     } else {
         const header = `Relay Logs: ${currentRelayInfo.url.replace(/^wss?:\/\//, '')}\n${'='.repeat(50)}\n`;
-        const logs = Array.from(logItems).map(li => {
-            const time = li.querySelector('.relay-log-time')?.textContent || '';
-            const msg = li.querySelector('.relay-log-message')?.textContent || '';
-            const level = li.querySelector('.relay-log-message')?.classList.contains('error') ? 'ERROR' :
-                          li.querySelector('.relay-log-message')?.classList.contains('warn') ? 'WARN' : 'INFO';
-            return `[${time}] [${level}] ${msg}`;
+        const logs = currentRelayLogs.map(log => {
+            const time = new Date(log.timestamp * 1000).toLocaleTimeString();
+            const level = log.level === 'error' ? 'ERROR' : log.level === 'warn' ? 'WARN' : 'INFO';
+            return `[${time}] [${level}] ${log.message}`;
         }).join('\n');
         text = header + logs;
     }
 
     navigator.clipboard.writeText(text).then(() => {
-        // Visual feedback - change icon briefly
-        const copyBtn = document.getElementById('relay-logs-copy');
-        const icon = copyBtn.querySelector('.icon');
-        icon.classList.remove('icon-copy');
-        icon.classList.add('icon-check');
-        setTimeout(() => {
-            icon.classList.remove('icon-check');
-            icon.classList.add('icon-copy');
-        }, 1500);
+        VectorSvelte.relayInfoDialog.patch({ copied: true });
+        setTimeout(() => VectorSvelte.relayInfoDialog.patch({ copied: false }), 1500);
     }).catch(err => {
         console.error('Failed to copy relay logs:', err);
     });
 }
-
-// =============================================================================

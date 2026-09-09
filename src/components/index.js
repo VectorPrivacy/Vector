@@ -31,15 +31,9 @@ import { setMessageToolbar } from './lib/toolbar.svelte.js';
 import { uploadProgressed, downloadProgressed, transferDone, transferFailed } from './lib/attachments.svelte.js';
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
-import PackSidebar from './picker/PackSidebar.svelte';
-import RecentsGrid from './picker/RecentsGrid.svelte';
-import AllGrid from './picker/AllGrid.svelte';
-import SearchGrid from './picker/SearchGrid.svelte';
-import PackSections from './picker/PackSections.svelte';
-import PackCreator from './picker/PackCreator.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
-import PackDetailsModal from './picker/PackDetailsModal.svelte';
-import GifGrid from './picker/GifGrid.svelte';
+import PackDetailsOverlay from './picker/PackDetailsOverlay.svelte';
+import PickerPanel from './picker/PickerPanel.svelte';
 import PinsDrawer from './chat/PinsDrawer.svelte';
 import ModList from './moderation/ModList.svelte';
 import ModFilters from './moderation/ModFilters.svelte';
@@ -48,8 +42,11 @@ import ModChrome from './moderation/ModChrome.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
 import MiniAppsGrid from './miniapps/MiniAppsGrid.svelte';
 import InviteLinks from './community/InviteLinks.svelte';
-import BlossomCaps from './settings/BlossomCaps.svelte';
-import RelayLogs from './settings/RelayLogs.svelte';
+import AddRelayDialog from './settings/AddRelayDialog.svelte';
+import RelayInfoDialog from './settings/RelayInfoDialog.svelte';
+import BlossomInfoDialog from './settings/BlossomInfoDialog.svelte';
+import LaunchDialog from './miniapps/LaunchDialog.svelte';
+export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog } from './lib/dialogs.svelte.js';
 import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
 import LoginScreen from './auth/LoginScreen.svelte';
@@ -70,9 +67,8 @@ export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged 
 export { setEditHistory, setEditHistoryBelow, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
-import Marketplace from './marketplace/Marketplace.svelte';
-import MarketplaceFilters from './marketplace/Filters.svelte';
-import AppDetails from './marketplace/AppDetails.svelte';
+import MarketplacePanel from './marketplace/MarketplacePanel.svelte';
+import AppDetailsPanel from './marketplace/AppDetailsPanel.svelte';
 export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms } from './lib/marketplace.svelte.js';
 export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
@@ -80,8 +76,8 @@ import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQ
 import { pinsState, setPins, setPinsOpen } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
 import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
-import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken } from './lib/packcreator.svelte.js';
-import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome } from './lib/picker.svelte.js';
+import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName } from './lib/packcreator.svelte.js';
+import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, panelState, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
@@ -106,8 +102,8 @@ export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
 export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
-export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome };
-export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken };
+export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, panelState, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen };
+export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName };
 export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { pinsState, setPins, setPinsOpen };
@@ -296,24 +292,10 @@ export function mountFileBox(target, props) {
     return inst;
 }
 
-/** Mount the emoji picker's rail and its three stock grids into their static hosts. */
-export function mountEmojiPicker({ sidebar, recents, all, results, resultsSection, sections, h }) {
-    sidebar.replaceChildren();
-    recents.replaceChildren();
-    all.replaceChildren();
-    results.replaceChildren();
-    mount(PackSidebar, { target: sidebar, props: { h } });
-    mount(RecentsGrid, { target: recents, props: { h } });
-    mount(AllGrid, { target: all, props: { grid: all, h } });
-    mount(SearchGrid, { target: results, props: { section: resultsSection, h } });
-    sections.replaceChildren();
-    mount(PackSections, { target: sections, props: { h } });
-}
-
-/** Mount the pack creator's cells into `grid`, adopting its chrome elements. */
-export function mountPackCreator(grid, { els, h }) {
-    grid.replaceChildren();
-    return mount(PackCreator, { target: grid, props: { els, h } });
+/** Mount the emoji / GIF picker into its root (`.emoji-picker`); the root stays the app's anchor. */
+export function mountPickerPanel(root, { h }) {
+    root.replaceChildren();
+    return mount(PickerPanel, { target: root, props: { h } });
 }
 
 /** Mount one in-chat pack preview card into `target`; returns the instance for teardown. */
@@ -321,16 +303,10 @@ export function mountPackPreviewCard(target, props) {
     return mount(PackPreviewCard, { target, props });
 }
 
-/** Mount the pack details modal's body into `body`, adopting `overlay` for visibility. */
-export function mountPackDetails(body, { overlay, h }) {
-    body.replaceChildren();
-    return mount(PackDetailsModal, { target: body, props: { overlay, h } });
-}
-
-/** Mount the GIF grid into `grid` (#gif-grid). */
-export function mountGifGrid(grid, { h }) {
-    grid.replaceChildren();
-    return mount(GifGrid, { target: grid, props: { grid, h } });
+/** Mount the pack details modal into its overlay (#pack-details-overlay), which it shows and hides. */
+export function mountPackDetails(overlay, { h }) {
+    overlay.replaceChildren();
+    return mount(PackDetailsOverlay, { target: overlay, props: { overlay, h } });
 }
 
 /** Mount the pins drawer's list into `list` (#pins-drawer-list). */
@@ -361,12 +337,17 @@ export function mountMiniAppsGrid(grid, { h }) {
     return mount(MiniAppsGrid, { target: grid, props: { h } });
 }
 
-/** Mount the Nexus: the scroll body (featured + catalogue), the filter tags, and the details panel body. */
-export function mountMarketplace({ body, filters, details, h }) {
-    body.replaceChildren(); filters.replaceChildren(); details.replaceChildren();
-    mount(Marketplace, { target: body, props: { h } });
-    mount(MarketplaceFilters, { target: filters, props: {} });
-    mount(AppDetails, { target: details, props: { h } });
+/** Mount the Nexus into its panel container (#marketplace-panel) and the details panel (#app-details-panel). */
+export function mountMarketplace({ panel, details, h }) {
+    panel.replaceChildren(); details.replaceChildren();
+    mount(MarketplacePanel, { target: panel, props: { h } });
+    mount(AppDetailsPanel, { target: details, props: { h } });
+}
+
+/** Mount the mini app launch dialog into its overlay container (#miniapp-launch-overlay). */
+export function mountLaunchDialog(container, { h }) {
+    container.replaceChildren();
+    return mount(LaunchDialog, { target: container, props: { container, h } });
 }
 
 /** Mount the invite panel's link section into `host` (#cmt-links); the panel is built per open. */
@@ -375,16 +356,11 @@ export function mountInviteLinks(host, { h }) {
     return mount(InviteLinks, { target: host, props: { h } });
 }
 
-/** Mount the media server capabilities into `slot` (#blossom-info-capabilities). */
-export function mountBlossomCaps(slot, { h }) {
-    slot.replaceChildren();
-    return mount(BlossomCaps, { target: slot, props: { h } });
-}
-
-/** Mount the relay activity log into `list` (#relay-info-logs). */
-export function mountRelayLogs(list) {
-    list.replaceChildren();
-    return mount(RelayLogs, { target: list, props: {} });
+/** Mount the Network section's dialogs (add relay, relay info, media server info) at body level. */
+export function mountNetworkDialogs({ h }) {
+    mount(AddRelayDialog, { target: document.body, props: { h: h.addRelay } });
+    mount(RelayInfoDialog, { target: document.body, props: { h: h.relayInfo } });
+    mount(BlossomInfoDialog, { target: document.body, props: { h: h.blossom } });
 }
 
 /** Mount account rows into `host`; mounted fresh per open, so props are a snapshot. */
