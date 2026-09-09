@@ -644,56 +644,6 @@ async function cancelWallpaperChange() {
  * @param {'downloaded'|'download'|'downloading'} state - the download state
  * @returns {{ fileDiv: HTMLElement, isMiniApp: boolean, descriptionSpan: HTMLElement, iconElement: HTMLElement, updateMiniAppStatus: Function|null, statusSpan: HTMLElement|null }}
  */
-/**
- * Create a conical progress spinner for file box icons and replace the target element.
- * Handles clearing the text margin so the in-flow spinner doesn't cause layout shift.
- * @param {HTMLElement} target - the icon element to replace (or null to just create)
- * @param {object} [opts] - options: id (element id), attachmentId (data-attribute)
- * @returns {HTMLDivElement} the spinner element
- */
-function createFileBoxSpinner(target, opts = {}) {
-    const spinner = document.createElement('div');
-    spinner.className = 'miniapp-downloading-spinner';
-    if (opts.id) spinner.id = opts.id;
-    if (opts.attachmentId) spinner.setAttribute('data-attachment-id', opts.attachmentId);
-    // Pick up any progress that was emitted before this DOM was attached
-    if (opts.id) applyPendingUploadProgress(spinner, opts.id.replace(/_file$/, ''));
-    // Match the Mini App icon position (marginLeft:5px + padding:10px = 15px from edge)
-    spinner.style.position = 'absolute';
-    spinner.style.left = '15px';
-    spinner.style.top = '0';
-    spinner.style.bottom = '0';
-    spinner.style.margin = 'auto';
-    spinner.style.width = '40px';
-    spinner.style.height = '40px';
-    spinner.style.opacity = '0';
-    spinner.style.scale = '0.5';
-    spinner.style.transition = 'opacity 0.25s ease, scale 0.25s ease, --progress 0.3s ease';
-    const settleTransition = () => {
-        // After intro animation, keep only the progress transition
-        spinner.style.transition = '--progress 0.3s ease';
-    };
-    if (target) {
-        // Shrink + fade out icon, then swap to spinner and grow + fade it in
-        target.style.transition = 'opacity 0.2s ease, scale 0.2s ease';
-        target.style.opacity = '0';
-        target.style.scale = '0.5';
-        setTimeout(() => {
-            // Spinner is absolute-positioned — push sibling text past it
-            const textSibling = target.parentElement?.querySelector('span');
-            if (textSibling) textSibling.style.marginLeft = '60px';
-            target.replaceWith(spinner);
-            requestAnimationFrame(() => { spinner.style.opacity = '1'; spinner.style.scale = '1'; });
-            setTimeout(settleTransition, 300);
-        }, 200);
-    } else {
-        // No target (initial render as downloading) — just grow + fade in
-        requestAnimationFrame(() => { spinner.style.opacity = '1'; spinner.style.scale = '1'; });
-        setTimeout(settleTransition, 300);
-    }
-    return spinner;
-}
-
 function isSpoilerAttachment(attachment) {
     const fileName = attachment.name || '';
     return fileName.toUpperCase().startsWith('SPOILER_');

@@ -17,6 +17,7 @@
     import { messageVersion, arrivalState, setArrival } from '../lib/chatview.svelte.js';
     import ReplyQuote from './ReplyQuote.svelte';
     import MessageContent from './MessageContent.svelte';
+    import ReactionChip from './ReactionChip.svelte';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -133,33 +134,11 @@
     let avatarFailed = $state(false);
     $effect(() => { avatarSrc; avatarFailed = false; });
 
-    // A reaction chip: the glyph is filled once, the count rolls on change. Chips
-    // arriving after the row's first paint pop in.
+    // Chips arriving after the row's first paint pop in.
     let painted = false;
     $effect(() => { painted = true; });
-    function chip(node, g) {
-        h.fillReactionGlyph(node, g.emoji, g.url);
-        const countEl = document.createElement('span');
-        countEl.className = 'reaction-count';
-        const valEl = document.createElement('span');
-        valEl.className = 'rc-value';
-        valEl.textContent = String(g.count);
-        countEl.appendChild(valEl);
-        node.appendChild(countEl);
-        if (painted) {
-            node.classList.add('reaction-enter');
-            node.addEventListener('animationend', () => node.classList.remove('reaction-enter'), { once: true });
-        }
-        return {
-            update: (next) => h.rollReactionCount(node, next.count),
-            destroy: () => h.reactionChipRemoved(),
-        };
-    }
     function pivxInto(node) {
         node.replaceChildren(h.buildPivxBubble(msg));
-    }
-    function blockedInto(node) {
-        node.replaceChildren(h.buildBlockedPlaceholder(msg));
     }
     const arrival = arrivalState();
 </script>
@@ -214,7 +193,12 @@
                 {#if rank.owner}<span class="dmsg-author-badge owner">Owner</span>{/if}
                 <time class="dmsg-time">{hourMinute}</time>
             </div>
-            <div class="dmsg-content" use:blockedInto></div>
+            <div class="dmsg-content">
+                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                <span style="color: rgba(255,255,255,0.3); font-style: italic; cursor: pointer; display: flex; align-items: center; gap: 5px;"
+                      onclick={(e) => { e.stopPropagation(); h.revealBlocked(msg); }}>
+                    <span class="icon icon-cancel" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: rgba(255,255,255,0.3);"></span>Blocked message</span>
+            </div>
         </div>
     {:else}
     <div class="dmsg-body">
@@ -243,16 +227,7 @@
         {#if reactions.length}
             <div class="dmsg-reactions">
                 {#each reactions as g (g.emoji)}
-                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                    <span
-                        class="reaction"
-                        data-emoji={g.emoji}
-                        data-msg-id={current.id}
-                        data-reacted={g.mine ? 'true' : undefined}
-                        title={g.mine ? 'Click to remove your reaction' : undefined}
-                        use:chip={g}
-                        onclick={() => h.reactionClick(current.id, g.emoji)}
-                    ></span>
+                    <ReactionChip msgId={current.id} group={g} {painted} {h} />
                 {/each}
                 {#if showAddReaction}
                     <!-- Discord-style "+" at the row's end; the delegated click listener opens the picker. -->

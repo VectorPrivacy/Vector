@@ -2,27 +2,12 @@
 // events arriving ahead of the DOM they target. One global scope: this loads
 // before main.js and shares its globals.
 
-/**
- * Latest upload progress per pending message id. Buffers values that arrive before
- * the spinner DOM is rendered (updateChat awaits an IPC call before rendering, so the
- * first progress events can race ahead of message_new). renderMessage reads this when
- * creating an upload spinner so the initial paint matches the latest known progress.
- */
-const pendingUploadProgress = new Map();
-
 // In-flight optimistic reaction adds (msg id -> [{id, author_id, emoji, at}]).
 // message_update re-applies these over an incoming payload so a spree's earlier
 // echo can't visually un-react a later click; entries drop once their own echo
 // confirms them (or after the TTL if the send died without an error).
 const pendingReactions = new Map();
 const PENDING_REACTION_TTL_MS = 10000;
-
-function applyPendingUploadProgress(spinner, pendingId) {
-    const progress = pendingUploadProgress.get(pendingId);
-    if (progress !== undefined) {
-        spinner.style.setProperty('--progress', `${progress}%`);
-    }
-}
 
 /**
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
@@ -368,16 +353,9 @@ async function setupRustListeners() {
         showToast(`Couldn't reach any of your ${n} relays, new messages may be missing`);
     });
 
-    // Listen for Attachment Upload Progress events
-    // The spinner DOM is created asynchronously after message_new (updateChat awaits an IPC
-    // call before rendering), so early progress events can arrive before the element exists.
-    // Record the latest progress per pending_id so renderMessage can pick it up on creation.
+    // Upload progress lands in the transfer store; the attachment components read it.
     _on('attachment_upload_progress', async (evt) => {
-        pendingUploadProgress.set(evt.payload.id, evt.payload.progress);
         VectorSvelte.uploadProgressed(evt.payload.id, evt.payload.progress, evt.payload.bytesSent);
-        // The audio player's upload ring is still the app's element.
-        const divUpload = document.getElementById(evt.payload.id + '_file');
-        if (divUpload) divUpload.style.setProperty('--progress', `${evt.payload.progress}%`);
     });
 
     // Listen for backend error toasts
@@ -921,9 +899,7 @@ async function setupRustListeners() {
 
     // Listen for existing message updates (works for both DMs and MLS groups)
     _on('message_update', (evt) => {
-        // Drop any buffered upload progress + speed tracker for this pending id (the upload finished
-        // or failed; the spinner is gone after re-render, and a 100% frame isn't always emitted).
-        pendingUploadProgress.delete(evt.payload.old_id);
+        // The upload finished or failed; a 100% frame isn't always emitted.
         VectorSvelte.transferDone(evt.payload.old_id);
 
         // Find the message we're updating
@@ -1040,8 +1016,6 @@ async function setupRustListeners() {
         // A message vanishing (deletion or self-destruct) must not leave you
         // stuck replying to / reacting to it.
         _exitModesForRemovedMessage(id);
-        // Drop any buffered upload progress + speed tracker (e.g. on cancel)
-        pendingUploadProgress.delete(id);
         VectorSvelte.transferDone(id);
         const cChat = getChat(chat_id);
         if (!cChat) return;

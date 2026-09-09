@@ -4,6 +4,8 @@
     // into #chat-input-host by main.js; everything else derives from lib/composer.
     import { composerMode, composerDraft, composerLock, composerCommand, composerStatus, composerChrome, composerHandlers, composerEls } from '../lib/composer.svelte.js';
     import CommandStrip from './CommandStrip.svelte';
+    import VoiceRecorderUI from './VoiceRecorderUI.svelte';
+    import { recorderState } from '../lib/voicerecorder.svelte.js';
 
     const mode = composerMode();
     const draft = composerDraft();
@@ -13,6 +15,19 @@
     const chrome = composerChrome();
     const els = composerEls();
     const h = () => composerHandlers();
+    const voice = recorderState();
+    // A recording or its preview takes the row over: the controls and the editor step
+    // aside, the mic goes once the finger is off it, and Send returns for the preview.
+    const voiceBusy = $derived(voice.state === 'recording' || voice.state === 'locked' || voice.state === 'preview');
+    const voiceHidesMic = $derived(voice.state === 'locked' || voice.state === 'preview');
+    const voicePreview = $derived(voice.state === 'preview');
+    // Plays the return fade once per tick on a control that is back on screen.
+    function fadeIn(node, tick) {
+        return { update() {
+            node.classList.add('chat-input-fade-in');
+            node.addEventListener('animationend', () => node.classList.remove('chat-input-fade-in'), { once: true });
+        } };
+    }
 
     const isReply = $derived(mode.kind === 'reply');
     const isEdit = $derived(mode.kind === 'edit');
@@ -64,7 +79,14 @@
     $effect(() => {
         const input = h()?.input();
         if (!input) return;
-        input.style.display = command.active ? 'none' : '';
+        input.style.display = command.active || voiceBusy ? 'none' : '';
+    });
+    $effect(() => {
+        voice.fadeTick;
+        const input = h()?.input();
+        if (!input || !voice.fadeTick) return;
+        input.classList.add('chat-input-fade-in');
+        input.addEventListener('animationend', () => input.classList.remove('chat-input-fade-in'), { once: true });
     });
     $effect(() => {
         const input = h()?.input();
@@ -150,14 +172,17 @@
         <CommandStrip onCancel={() => h()?.cancelCommand()} />
     </div>
     <div class="row chat-input-container" bind:this={els.container}>
-        <button id="chat-input-file" class:open={chrome.attachmentOpen} style:display={isEdit || locked ? 'none' : null} bind:this={els.file} onclick={() => h()?.toggleAttachments()}><span class="icon icon-plus"></span></button>
+        <button id="chat-input-file" class:open={chrome.attachmentOpen} style:display={isEdit || locked || voiceBusy ? 'none' : null} bind:this={els.file} use:fadeIn={voice.fadeTick} onclick={() => h()?.toggleAttachments()}><span class="icon icon-plus"></span></button>
         <button id="chat-input-cancel" style:display={isEdit ? null : 'none'} onclick={() => h()?.cancel()}><span class="icon icon-cancel"></span></button>
-        <div id="chat-input-host"></div>
-        <button id="chat-input-emoji" style:display={locked ? 'none' : null} bind:this={els.emoji}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
-        <button id="chat-input-voice" style="margin-right: 3px;" style:display={voiceShown ? null : 'none'} bind:this={els.voice} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
-        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive} class:has-self-destruct={!!chrome.selfDestructSecs} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown ? null : 'none'} bind:this={els.send} onclick={() => h()?.send()}
+        <VoiceRecorderUI part="strip" />
+        <div id="chat-input-host" style:display={voiceBusy ? 'none' : null}></div>
+        <button id="chat-input-emoji" style:display={locked || voiceBusy ? 'none' : null} bind:this={els.emoji} use:fadeIn={voice.fadeTick}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
+        <button id="chat-input-voice" style="margin-right: 3px;" class:pending={voice.state === 'pending'} class:recording={voice.state === 'recording'} style:display={voiceShown && !voiceHidesMic ? null : 'none'} bind:this={els.voice} use:fadeIn={voice.fadeTick} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
+        <VoiceRecorderUI part="dot" />
+        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive || voicePreview} class:voice-preview-send={voicePreview} class:has-self-destruct={!!chrome.selfDestructSecs} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown || voicePreview ? null : 'none'} bind:this={els.send} onclick={() => h()?.send()}
                 oncontextmenu={(e) => { e.preventDefault(); openTimer(); }} ontouchstart={pressStart} ontouchend={pressEnd} ontouchmove={pressEnd} ontouchcancel={pressEnd}><span class="icon icon-send"></span></button>
         <!-- Outside the send button so it never inherits the mic/send swap rotation; it fades with the button. -->
         <span class="self-destruct-badge" class:is-visible={!!chrome.selfDestructSecs && sendShown && !swappingOut}><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg></span>
     </div>
+    <VoiceRecorderUI part="overlays" />
 </div>

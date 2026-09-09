@@ -64,105 +64,12 @@ class VoiceRecorder {
         this.onCancel = null;
         this.onStateChange = null;
 
-        this._createUI();
+        this.isPlaying = false;
         this._bindEvents();
     }
 
-    /**
-     * Creates the recording UI elements inside the chat input container
-     */
-    _createUI() {
-        // Get references to existing elements we'll hide during recording
-        const els = VectorSvelte.composerEls();
-        this.fileButton = els.file;
-        this.textInput = this.inputContainer.querySelector('#chat-input');
-        this.emojiButton = els.emoji;
-
-        // Recording UI container (replaces textarea area during recording)
-        this.recordingUI = document.createElement('div');
-        this.recordingUI.className = 'voice-recording-ui';
-        this.recordingUI.innerHTML = `
-            <div class="voice-recorder-status">
-                <span class="recording-dot"></span>
-                <span class="recording-text">Recording...</span>
-            </div>
-            <div class="voice-recorder-slide-hint">
-                <div class="slide-icon-container">
-                    <span class="icon icon-chevron-double-left"></span>
-                </div>
-                <span class="slide-text">Slide to cancel</span>
-            </div>
-            <div class="voice-recorder-timer">0:00</div>
-        `;
-
-        // Lock indicator (positioned above the red circle)
-        this.lockZone = document.createElement('div');
-        this.lockZone.className = 'voice-recorder-lock-zone';
-        this.lockZone.innerHTML = `
-            <div class="lock-indicator">
-                <span class="icon icon-locked"></span>
-            </div>
-            <div class="lock-arrow">
-                <div class="arrow-icon-container">
-                    <span class="icon icon-chevron-double-left"></span>
-                </div>
-            </div>
-        `;
-
-        // Preview UI container (replaces textarea area during preview)
-        this.previewUI = document.createElement('div');
-        this.previewUI.className = 'voice-preview-ui';
-        this.previewUI.innerHTML = `
-            <button class="voice-preview-delete"><span class="icon icon-trash"></span></button>
-            <div class="voice-preview-center">
-                <button class="voice-preview-play"><span class="icon icon-play"></span></button>
-                <div class="voice-preview-waveform">
-                    <div class="voice-preview-progress"></div>
-                    <div class="voice-preview-handle"></div>
-                </div>
-                <span class="voice-preview-time">0:00</span>
-            </div>
-        `;
-
-        // Red circle/stop button (overlays mic button during recording)
-        this.redCircle = document.createElement('div');
-        this.redCircle.className = 'voice-recorder-red-circle';
-
-        // Tooltip for quick tap hint
-        this.tooltip = document.createElement('div');
-        this.tooltip.className = 'voice-recorder-tooltip';
-        this.tooltip.textContent = 'Hold to record';
-
-        // Insert recording UI before the textarea (so it appears in the middle)
-        this.textInput.parentNode.insertBefore(this.recordingUI, this.textInput);
-        this.textInput.parentNode.insertBefore(this.previewUI, this.textInput);
-
-        // Insert red circle right after the mic button (as a sibling)
-        this.button.parentNode.insertBefore(this.redCircle, this.button.nextSibling);
-
-        // Insert tooltip into the chat box for positioning above mic button
-        this.inputContainer.parentNode.appendChild(this.tooltip);
-
-        // Insert lock zone into the chat box (parent of input container) for absolute positioning
-        this.inputContainer.parentNode.appendChild(this.lockZone);
-
-        // Cache UI elements
-        this.slideHint = this.recordingUI.querySelector('.voice-recorder-slide-hint');
-        this.timerDisplay = this.recordingUI.querySelector('.voice-recorder-timer');
-        this.recordingStatus = this.recordingUI.querySelector('.voice-recorder-status');
-        this.recordingText = this.recordingUI.querySelector('.recording-text');
-        this.lockIndicator = this.lockZone.querySelector('.lock-indicator');
-        this.lockArrow = this.lockZone.querySelector('.lock-arrow');
-
-        this.previewDeleteBtn = this.previewUI.querySelector('.voice-preview-delete');
-        this.previewPlayBtn = this.previewUI.querySelector('.voice-preview-play');
-        this.previewWaveform = this.previewUI.querySelector('.voice-preview-waveform');
-        this.previewProgress = this.previewUI.querySelector('.voice-preview-progress');
-        this.previewHandle = this.previewUI.querySelector('.voice-preview-handle');
-        this.previewTime = this.previewUI.querySelector('.voice-preview-time');
-
-        this.isPlaying = false;
-    }
+    /** The waveform the seek gesture measures; VoiceRecorderUI binds it. */
+    get previewWaveform() { return VectorSvelte.voiceEls().waveform; }
 
     /**
      * Binds all event listeners
@@ -174,15 +81,13 @@ class VoiceRecorder {
         document.addEventListener('pointerup', this._onPointerUp.bind(this));
         document.addEventListener('pointercancel', this._onPointerUp.bind(this));
 
-        // Red circle click (for locked state)
-        this.redCircle.addEventListener('click', this._onRedCircleClick.bind(this));
-
-        // Preview controls
-        this.previewDeleteBtn.addEventListener('click', this._onPreviewDelete.bind(this));
-        this.previewPlayBtn.addEventListener('click', this._onPreviewPlayPause.bind(this));
-
-        // Waveform seeking - support both click and drag
-        this.previewWaveform.addEventListener('pointerdown', this._onWaveformPointerDown.bind(this));
+        // The dot, the preview controls and the waveform are the component's; it calls back.
+        VectorSvelte.setVoiceHandlers({
+            dotClick: () => this._onRedCircleClick(),
+            previewDelete: () => this._onPreviewDelete(),
+            previewPlayPause: () => this._onPreviewPlayPause(),
+            waveformPointerDown: (e) => this._onWaveformPointerDown(e),
+        });
 
         // Listen for audio_ended events from the engine
         this._audioEndedUnlisten = null;
@@ -202,9 +107,9 @@ class VoiceRecorder {
             }
             this.isPlaying = false;
             this._stopPreviewAnimation();
-            this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+            VectorSvelte.setVoicePreview({ playing: false });
         } else {
-            this.previewPlayBtn.innerHTML = '<span class="icon icon-pause"></span>';
+            VectorSvelte.setVoicePreview({ playing: true });
 
             try {
                 const posMs = await invoke('audio_play', { id: this.previewSourceId });
@@ -214,7 +119,7 @@ class VoiceRecorder {
                 this._startPreviewAnimation();
             } catch (err) {
                 console.error('Playback failed:', err);
-                this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+                VectorSvelte.setVoicePreview({ playing: false });
             }
         }
     }
@@ -328,10 +233,10 @@ class VoiceRecorder {
             clearTimeout(this.tooltipTimeout);
         }
 
-        this.tooltip.classList.add('visible');
+        VectorSvelte.setVoiceTooltip(true);
 
         this.tooltipTimeout = setTimeout(() => {
-            this.tooltip.classList.remove('visible');
+            VectorSvelte.setVoiceTooltip(false);
             this.tooltipTimeout = null;
         }, 2000);
     }
@@ -342,16 +247,9 @@ class VoiceRecorder {
     _resetDragState() {
         this.dragAxis = null;
         this.lastMoveAxis = null;
-        if (this.redCircle) {
-            // Add returning class for smooth animation back to origin
-            this.redCircle.classList.add('returning');
-            this.redCircle.style.transform = '';
-
-            // Remove the returning class after animation completes
-            setTimeout(() => {
-                this.redCircle.classList.remove('returning');
-            }, 200);
-        }
+        // `returning` eases the dot back to origin; it lifts once that animation is done.
+        VectorSvelte.setVoiceDot({ returning: true, transform: '' });
+        setTimeout(() => VectorSvelte.setVoiceDot({ returning: false }), 200);
     }
 
     /**
@@ -360,7 +258,7 @@ class VoiceRecorder {
     async _startRecording() {
         try {
             // Reset status text for new recording
-            this.recordingText.textContent = 'Recording...';
+            VectorSvelte.setVoiceStatusText('Recording...');
             await invoke('start_recording');
             this._setState(RecordingState.RECORDING);
             this.recordingStartTime = Date.now();
@@ -381,7 +279,7 @@ class VoiceRecorder {
         this.isStoppingRecording = true;
 
         // Update status text to show we're finishing
-        this.recordingText.textContent = 'Finishing...';
+        VectorSvelte.setVoiceStatusText('Finishing...');
 
         try {
             // Register event listeners BEFORE stop_recording to avoid missing
@@ -449,14 +347,9 @@ class VoiceRecorder {
         // Reset drag state (red circle returns to origin)
         this._resetDragState();
 
-        // Fade out the lock zone before transitioning to locked state
-        this.lockZone.classList.add('fading-out');
-
-        // Wait for fade out transition, then update state
-        setTimeout(() => {
-            this.lockZone.classList.remove('fading-out', 'active');
-            this._setState(RecordingState.LOCKED);
-        }, 200); // Match the CSS transition duration
+        // The lock target fades out before the locked state takes over.
+        VectorSvelte.setVoiceLockFading(true);
+        setTimeout(() => this._setState(RecordingState.LOCKED), 200); // Match the CSS transition duration
     }
 
     /**
@@ -545,20 +438,9 @@ class VoiceRecorder {
         return true;
     }
 
-    /**
-     * Animates the chat input elements with a fade-in effect
-     */
+    /** The composer's controls return with a fade; the box plays it. */
     _animateChatInputFadeIn() {
-        const elements = [this.fileButton, this.textInput, this.emojiButton, this.button];
-
-        elements.forEach(el => {
-            if (el) {
-                el.classList.add('chat-input-fade-in');
-                el.addEventListener('animationend', () => {
-                    el.classList.remove('chat-input-fade-in');
-                }, { once: true });
-            }
-        });
+        VectorSvelte.voiceFadeIn();
     }
 
     /**
@@ -567,141 +449,11 @@ class VoiceRecorder {
     _setState(newState) {
         const oldState = this.state;
         this.state = newState;
-
-        // Update UI based on state
-        this._updateUI();
+        if (newState === RecordingState.IDLE) this.isPlaying = false;
+        VectorSvelte.setVoiceState(newState);
 
         if (this.onStateChange) {
             this.onStateChange(newState, oldState);
-        }
-    }
-
-    /**
-     * Updates UI based on current state
-     */
-    _updateUI() {
-        // Reset all states - show normal input elements
-        this.button.classList.remove('recording', 'pending');
-        this.button.style.display = '';
-        this.redCircle.classList.remove('active', 'locked', 'pending');
-        this.recordingUI.classList.remove('active', 'cancelling');
-        this.previewUI.classList.remove('active');
-        this.lockZone.classList.remove('active', 'locked', 'fading-out');
-        this.lockZone.style.opacity = '';
-
-        // Show normal input elements
-        if (this.fileButton) this.fileButton.style.display = '';
-        if (this.textInput) this.textInput.style.display = '';
-        if (this.emojiButton) this.emojiButton.style.display = '';
-
-        // Hide send button by default (will be shown in preview state)
-        if (this.sendButton) {
-            this.sendButton.style.display = 'none';
-            this.sendButton.classList.remove('active', 'voice-preview-send');
-        }
-
-        // Reset drag feedback
-        if (this.slideHint) {
-            this.slideHint.style.display = '';
-            this.slideHint.style.opacity = '1';
-            this.slideHint.style.transform = '';
-            const iconEl = this.slideHint.querySelector('.icon');
-            if (iconEl) {
-                iconEl.style.backgroundColor = '';
-            }
-        }
-        if (this.lockIndicator) this.lockIndicator.style.transform = '';
-        if (this.lockArrow) this.lockArrow.style.opacity = '';
-
-        // Reset timer display
-        if (this.timerDisplay) {
-            this.timerDisplay.textContent = '0:00';
-            this.timerDisplay.style.opacity = '';
-        }
-
-        // Reset recording status opacity
-        if (this.recordingStatus) {
-            this.recordingStatus.style.opacity = '';
-        }
-
-        // Reset preview progress/handle
-        if (this.previewProgress) this.previewProgress.style.width = '0%';
-        if (this.previewHandle) this.previewHandle.style.left = '0';
-        if (this.previewTime) this.previewTime.textContent = '0:00';
-
-        switch (this.state) {
-            case RecordingState.IDLE:
-                this.button.innerHTML = '<span class="icon icon-mic-on"></span>';
-                // Reset play state
-                this.isPlaying = false;
-                if (this.previewPlayBtn) {
-                    this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
-                }
-                break;
-
-            case RecordingState.PENDING:
-                // Fade out mic button, fade in red circle
-                this.button.classList.add('pending');
-                this.redCircle.classList.add('pending');
-                break;
-
-            case RecordingState.RECORDING:
-                // Hide normal input elements
-                if (this.fileButton) this.fileButton.style.display = 'none';
-                if (this.textInput) this.textInput.style.display = 'none';
-                if (this.emojiButton) this.emojiButton.style.display = 'none';
-
-                // Show recording UI and red circle (hide mic button)
-                this.recordingUI.classList.add('active');
-                this.redCircle.classList.add('active');
-                this.lockZone.classList.add('active');
-                this.button.classList.add('recording');
-
-                // Force restart the chevron animation (fixes animation stopping after cancel)
-                if (this.slideHint) {
-                    const iconEl = this.slideHint.querySelector('.icon');
-                    if (iconEl) {
-                        iconEl.style.animation = 'none';
-                        // Trigger reflow to ensure the animation reset takes effect
-                        void iconEl.offsetHeight;
-                        iconEl.style.animation = '';
-                    }
-                }
-                break;
-
-            case RecordingState.LOCKED:
-                // Hide normal input elements
-                if (this.fileButton) this.fileButton.style.display = 'none';
-                if (this.textInput) this.textInput.style.display = 'none';
-                if (this.emojiButton) this.emojiButton.style.display = 'none';
-
-                // Show recording UI with locked state (hide slide hint)
-                this.recordingUI.classList.add('active');
-                this.redCircle.classList.add('active', 'locked');
-                this.lockZone.classList.add('active', 'locked');
-                this.button.style.display = 'none';
-                // Hide slide to cancel when locked
-                if (this.slideHint) this.slideHint.style.display = 'none';
-                break;
-
-            case RecordingState.PREVIEW:
-                // Hide normal input elements and mic button
-                if (this.fileButton) this.fileButton.style.display = 'none';
-                if (this.textInput) this.textInput.style.display = 'none';
-                if (this.emojiButton) this.emojiButton.style.display = 'none';
-                this.button.style.display = 'none';
-
-                // Show preview UI and send button
-                this.previewUI.classList.add('active');
-                if (this.sendButton) {
-                    this.sendButton.style.display = '';
-                    this.sendButton.classList.add('active', 'voice-preview-send');
-                }
-                break;
-
-            case RecordingState.CANCELLED:
-                this.recordingUI.classList.add('cancelling');
-                break;
         }
     }
 
@@ -713,72 +465,43 @@ class VoiceRecorder {
         const clampedDeltaX = Math.max(0, deltaX);
         const clampedDeltaY = Math.max(0, deltaY);
 
-        // Move red circle along the dominant axis (rail system)
-        if (this.redCircle) {
-            let currentDominantAxis = null;
-            if (clampedDeltaX > 0 || clampedDeltaY > 0) {
-                currentDominantAxis = clampedDeltaX >= clampedDeltaY ? 'x' : 'y';
-            }
-
-            const moveAxis = this.dragAxis || currentDominantAxis;
-            this.lastMoveAxis = moveAxis;
-
-            if (moveAxis === 'x' && clampedDeltaX > 0) {
-                this.redCircle.style.transform = `translateX(${-clampedDeltaX}px) scale(1)`;
-            } else if (moveAxis === 'y' && clampedDeltaY > 0) {
-                this.redCircle.style.transform = `translateY(${-clampedDeltaY}px) scale(1)`;
-            } else {
-                this.redCircle.style.transform = 'scale(1)';
-            }
+        // The dot rides one rail: the locked axis, else whichever delta leads.
+        let currentDominantAxis = null;
+        if (clampedDeltaX > 0 || clampedDeltaY > 0) {
+            currentDominantAxis = clampedDeltaX >= clampedDeltaY ? 'x' : 'y';
         }
+        const moveAxis = this.dragAxis || currentDominantAxis;
+        this.lastMoveAxis = moveAxis;
+        let dotTransform = 'scale(1)';
+        if (moveAxis === 'x' && clampedDeltaX > 0) dotTransform = `translateX(${-clampedDeltaX}px) scale(1)`;
+        else if (moveAxis === 'y' && clampedDeltaY > 0) dotTransform = `translateY(${-clampedDeltaY}px) scale(1)`;
 
         const cancelProgress = Math.min(clampedDeltaX / CANCEL_DRAG_THRESHOLD, 1);
+        const effectiveAxis = this.dragAxis || this.lastMoveAxis;
+        const cancelling = effectiveAxis === 'x' && clampedDeltaX > 0;
 
-        const effectiveAxisForFade = this.dragAxis || this.lastMoveAxis;
-        if (effectiveAxisForFade === 'x' && clampedDeltaX > 0) {
-            const timerFadeProgress = Math.min(clampedDeltaX / 20, 1);
-            const statusFadeProgress = Math.min(clampedDeltaX / 50, 1);
+        // A leftward drag fades the readout and pulls the hint along at half speed.
+        const feedback = {
+            timerOpacity: cancelling ? 1 - Math.min(clampedDeltaX / 20, 1) : 1,
+            statusOpacity: cancelling ? 1 - Math.min(clampedDeltaX / 50, 1) : 1,
+            slide: cancelling
+                ? { offset: clampedDeltaX * 0.5, opacity: 1 - (cancelProgress * 0.5), hot: cancelProgress > 0.5 }
+                : { offset: 0, opacity: 1, hot: false },
+            dot: { transform: dotTransform },
+        };
 
-            if (this.timerDisplay) this.timerDisplay.style.opacity = 1 - timerFadeProgress;
-            if (this.recordingStatus) this.recordingStatus.style.opacity = 1 - statusFadeProgress;
+        // The lock target rises and grows with an upward drag past the show threshold.
+        if (this.dragAxis !== 'y' || clampedDeltaY < LOCK_SHOW_THRESHOLD) {
+            feedback.lock = { opacity: 0, indicatorTransform: '', arrowOpacity: null };
         } else {
-            if (this.timerDisplay) this.timerDisplay.style.opacity = '1';
-            if (this.recordingStatus) this.recordingStatus.style.opacity = '1';
+            const visibleProgress = Math.min((clampedDeltaY - LOCK_SHOW_THRESHOLD) / (LOCK_DRAG_THRESHOLD - LOCK_SHOW_THRESHOLD), 1);
+            feedback.lock = {
+                opacity: visibleProgress,
+                indicatorTransform: `translateY(${-visibleProgress * 15}px) scale(${1 + visibleProgress * 0.2})`,
+                arrowOpacity: 1 - visibleProgress,
+            };
         }
-
-        if (this.slideHint) {
-            const effectiveAxis = this.dragAxis || this.lastMoveAxis;
-            if (effectiveAxis === 'x' && clampedDeltaX > 0) {
-                this.slideHint.style.transform = `translateX(${-clampedDeltaX * 0.5}px)`;
-                this.slideHint.style.opacity = 1 - (cancelProgress * 0.5);
-                const iconEl = this.slideHint.querySelector('.icon');
-                if (iconEl) {
-                    iconEl.style.backgroundColor = cancelProgress > 0.5 ? '#ff4444' : '';
-                }
-            } else {
-                this.slideHint.style.transform = '';
-                this.slideHint.style.opacity = '1';
-                const iconEl = this.slideHint.querySelector('.icon');
-                if (iconEl) iconEl.style.backgroundColor = '';
-            }
-        }
-
-        if (this.lockZone) {
-            if (this.dragAxis !== 'y' || clampedDeltaY < LOCK_SHOW_THRESHOLD) {
-                this.lockZone.style.opacity = 0;
-                if (this.lockIndicator) this.lockIndicator.style.transform = '';
-                if (this.lockArrow) this.lockArrow.style.opacity = '';
-            } else {
-                const visibleProgress = Math.min((clampedDeltaY - LOCK_SHOW_THRESHOLD) / (LOCK_DRAG_THRESHOLD - LOCK_SHOW_THRESHOLD), 1);
-                this.lockZone.style.opacity = visibleProgress;
-                if (this.lockIndicator) {
-                    this.lockIndicator.style.transform = `translateY(${-visibleProgress * 15}px) scale(${1 + visibleProgress * 0.2})`;
-                }
-                if (this.lockArrow) {
-                    this.lockArrow.style.opacity = 1 - visibleProgress;
-                }
-            }
-        }
+        VectorSvelte.setVoiceDrag(feedback);
     }
 
     /**
@@ -789,7 +512,7 @@ class VoiceRecorder {
             const elapsed = Math.floor((Date.now() - this.recordingStartTime) / 1000);
             const minutes = Math.floor(elapsed / 60);
             const seconds = elapsed % 60;
-            this.timerDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            VectorSvelte.setVoiceTimer(`${minutes}:${seconds.toString().padStart(2, '0')}`);
         }, 100);
     }
 
@@ -858,9 +581,7 @@ class VoiceRecorder {
         const posMs = Math.floor(percent * this.durationMs);
 
         // Update visuals immediately (no IPC)
-        this.previewProgress.style.width = `${percent * 100}%`;
-        this.previewHandle.style.left = `calc(${percent * 100}% - 7px)`;
-        this._updateTimeDisplay(posMs / 1000);
+        VectorSvelte.setVoicePreview({ progress: percent * 100, time: this._formatTime(posMs / 1000) });
 
         // Throttle the actual engine seek to avoid audio glitching during drag
         this._pendingSeekMs = posMs;
@@ -878,14 +599,11 @@ class VoiceRecorder {
         }
     }
 
-    /**
-     * Updates the time display
-     */
-    _updateTimeDisplay(seconds) {
+    _formatTime(seconds) {
         const current = Math.floor(seconds);
         const minutes = Math.floor(current / 60);
         const secs = current % 60;
-        this.previewTime.textContent = `${minutes}:${secs.toString().padStart(2, '0')}`;
+        return `${minutes}:${secs.toString().padStart(2, '0')}`;
     }
 
     /**
@@ -897,10 +615,7 @@ class VoiceRecorder {
         const elapsed = performance.now() - this.playStartTime;
         const posMs = Math.min(this.playStartPos + elapsed, this.durationMs);
         const percent = (posMs / this.durationMs) * 100;
-
-        this.previewProgress.style.width = `${percent}%`;
-        this.previewHandle.style.left = `calc(${percent}% - 7px)`;
-        this._updateTimeDisplay(posMs / 1000);
+        VectorSvelte.setVoicePreview({ progress: percent, time: this._formatTime(posMs / 1000) });
 
         if (posMs >= this.durationMs) return;
 
@@ -931,14 +646,9 @@ class VoiceRecorder {
     _onPreviewEnded() {
         this._stopPreviewAnimation();
 
-        // Reset visual progress
         this.playStartPos = 0;
-        this.previewProgress.style.width = '0%';
-        this.previewHandle.style.left = '0';
-        this._updateTimeDisplay(0);
-
         this.isPlaying = false;
-        this.previewPlayBtn.innerHTML = '<span class="icon icon-play"></span>';
+        VectorSvelte.setVoicePreview({ playing: false, progress: 0, time: '0:00' });
     }
 
     /**
@@ -970,7 +680,13 @@ class VoiceTranscriptionUI {
      * @param {HTMLElement} transcribeBtn - The transcribe button element
      * @returns {Promise<boolean>} True if model is ready, false otherwise
      */
-    async ensureModelReady(transcribeBtn) {
+    /**
+     * Ensures the selected voice model is ready for transcription, downloading it if
+     * needed. With `showProgress` the download paints into the player that asked (the
+     * store the AudioPlayer component renders); without it the download runs silently.
+     * @returns {Promise<boolean>} True if model is ready
+     */
+    async ensureModelReady(showProgress = false) {
         if (this.isSettingUp) return false;
 
         const selectedModel = window.voiceSettings?.selectedModel;
@@ -978,10 +694,8 @@ class VoiceTranscriptionUI {
         const model = window.voiceSettings?.models?.find(m => m.model.name === selectedModel);
         if (model?.downloaded) return true;
 
-        // If no button provided (e.g. called from transcribeAudioFile), we can't show
-        // download progress inline — just attempt the download without UI feedback
-        if (!transcribeBtn) {
-            this.isSettingUp = true;
+        this.isSettingUp = true;
+        if (!showProgress) {
             try {
                 await window.voiceSettings?.downloadModel(selectedModel);
                 return true;
@@ -992,101 +706,23 @@ class VoiceTranscriptionUI {
             }
         }
 
-        this.isSettingUp = true;
-
-        // Store original button contents
-        const originalHTML = transcribeBtn.innerHTML;
-        const originalClasses = transcribeBtn.className;
-
-        // Hide audio player UI elements but keep transcribe button visible
-        const audioContainer = transcribeBtn.closest('.audio-message-container');
-        const playBtn = audioContainer?.querySelector('.audio-play-btn');
-        const waveform = audioContainer?.querySelector('.audio-waveform');
-        const timeDisplay = audioContainer?.querySelector('.audio-time-display');
-
-        if (playBtn) playBtn.style.display = 'none';
-        if (waveform) waveform.style.display = 'none';
-        if (timeDisplay) timeDisplay.style.display = 'none';
-
-        // Create progress elements inside the transcribe button
-        const progressContainer = document.createElement('div');
-        progressContainer.classList.add('transcribe-progress-container');
-
-        const progressBar = document.createElement('div');
-        progressBar.classList.add('transcribe-progress-bar');
-
-        const progressFill = document.createElement('div');
-        progressFill.classList.add('transcribe-progress-fill');
-
-        const progressText = document.createElement('div');
-        progressText.classList.add('transcribe-progress-text');
-        progressText.textContent = 'Downloading model...';
-
-        progressBar.appendChild(progressFill);
-        progressContainer.appendChild(progressText);
-        progressContainer.appendChild(progressBar);
-
-        // Allows user to cancel download
-        const cancelBtn = document.createElement('button');
-        cancelBtn.textContent = 'Cancel';
-        cancelBtn.classList.add('cancel-download-inline');
-        cancelBtn.onclick = () => invoke('cancel_whisper_download');
-        progressContainer.appendChild(cancelBtn);
-
-        // Replace button contents with progress indicator
-        transcribeBtn.style.marginLeft = 'auto';
-        transcribeBtn.style.marginRight = 'auto';
-        transcribeBtn.innerHTML = '';
-        transcribeBtn.appendChild(progressContainer);
-        transcribeBtn.classList.add('downloading');
-
+        VectorSvelte.setModelDownload({ active: true, pct: 0, text: 'Downloading model...', failed: false });
+        let unlisten = null;
         try {
-            const unlisten = await window.__TAURI__.event.listen(
-                'whisper_download_progress',
-                (event) => {
-                    const progress = event.payload.progress;
-                    progressFill.style.width = `${progress}%`;
-                    progressText.textContent = `Downloading... ${progress}%`;
-                }
-            );
-
+            unlisten = await window.__TAURI__.event.listen('whisper_download_progress', (event) => {
+                const progress = event.payload.progress;
+                VectorSvelte.setModelDownload({ pct: progress, text: `Downloading... ${progress}%` });
+            });
             await window.voiceSettings.downloadModel(selectedModel);
-            unlisten();
-
-            progressText.textContent = 'Ready!';
-            setTimeout(() => {
-                transcribeBtn.classList.remove('downloading');
-            }, 1000);
-
-        // Restore original button state
-        transcribeBtn.innerHTML = originalHTML;
-        transcribeBtn.className = originalClasses;
-        transcribeBtn.style.marginLeft = '';
-        transcribeBtn.style.marginRight = '';
-
-        // Show audio player UI again
-        if (playBtn) playBtn.style.display = '';
-        if (waveform) waveform.style.display = '';
-        if (timeDisplay) timeDisplay.style.display = '';
-
+            VectorSvelte.setModelDownload({ pct: 100, text: 'Ready!' });
+            setTimeout(() => VectorSvelte.setModelDownload({ active: false }), 1000);
             return true;
         } catch (error) {
-            progressText.textContent = `Download Failed`;
-            progressFill.style.background = '#ff5e5e';
-            setTimeout(() => {
-                transcribeBtn.classList.remove('downloading');
-                // Restore original button state
-                transcribeBtn.innerHTML = originalHTML;
-                transcribeBtn.className = originalClasses;
-                transcribeBtn.style.marginLeft = '';
-                transcribeBtn.style.marginRight = '';
-                // Show audio player UI again
-                if (playBtn) playBtn.style.display = '';
-                if (waveform) waveform.style.display = '';
-                if (timeDisplay) timeDisplay.style.display = '';
-            }, 3000);
+            VectorSvelte.setModelDownload({ text: 'Download Failed', failed: true });
+            setTimeout(() => VectorSvelte.setModelDownload({ active: false, failed: false }), 3000);
             return false;
         } finally {
+            if (unlisten) unlisten();
             this.isSettingUp = false;
         }
     }
@@ -1111,891 +747,39 @@ class VoiceTranscriptionUI {
     }
 }
 
-/**
- * Creates a clickable transcription section element.
- * @param {Object} section - Section data with text and timestamp
- * @param {number} index - Section index
- * @param {Object} seekTarget - Object with seek method: { seek(ms) }
- * @returns {HTMLSpanElement} The transcription section element
- */
-function slideTranscription(el, open, onOpen) {
-    if (el._slideRaf) { cancelAnimationFrame(el._slideRaf); el._slideRaf = null; }
-
-    // Ease-out cubic — fast start, gentle settle
-    const ease = t => 1 - Math.pow(1 - t, 3);
-    // Read resting CSS values from the stylesheet
-    const cs = getComputedStyle(el);
-
-    if (open) {
-        // Capture parent width before transcription forces it wider
-        const parentW = el.parentElement.getBoundingClientRect().width;
-
-        el.classList.remove('hidden');
-        // Measure natural dimensions at rest
-        el.style.height = 'auto';
-        const natural = el.getBoundingClientRect().height;
-        const naturalW = el.parentElement.getBoundingClientRect().width;
-        const pad = parseFloat(cs.paddingTop); // 10
-        const mt = parseFloat(cs.marginTop);   // 10
-        const bw = parseFloat(cs.borderTopWidth); // 1
-        const widthGrows = naturalW > parentW;
-        // Start at zero
-        el.style.overflow = 'hidden';
-        el.style.height = '0px';
-        el.style.paddingTop = '0px';
-        el.style.paddingBottom = '0px';
-        el.style.marginTop = '0px';
-        el.style.borderWidth = '0px';
-        if (widthGrows) el.style.maxWidth = '0px';
-        el.offsetHeight;
-
-        if (onOpen) onOpen();
-
-        const start = performance.now();
-        const dur = 350;
-        let lastTotal = 0;
-        (function frame(now) {
-            const t = Math.min((now - start) / dur, 1);
-            const e = ease(t);
-            const h = e * natural;
-            el.style.height = h + 'px';
-            el.style.paddingTop = (e * pad) + 'px';
-            el.style.paddingBottom = (e * pad) + 'px';
-            el.style.marginTop = (e * mt) + 'px';
-            el.style.borderWidth = (e * bw) + 'px';
-            if (widthGrows) el.style.maxWidth = (e * naturalW) + 'px';
-            const total = h + e * mt;
-            domChatMessages.scrollTop += total - lastTotal;
-            lastTotal = total;
-            if (t < 1) {
-                el._slideRaf = requestAnimationFrame(frame);
-            } else {
-                el.style.height = '';
-                el.style.overflow = '';
-                el.style.paddingTop = '';
-                el.style.paddingBottom = '';
-                el.style.marginTop = '';
-                el.style.borderWidth = '';
-                el.style.maxWidth = '';
-                el._slideRaf = null;
-            }
-        })(performance.now());
-    } else {
-        const current = el.getBoundingClientRect().height;
-        const currentW = el.getBoundingClientRect().width;
-        const pad = parseFloat(cs.paddingTop);
-        const mt = parseFloat(cs.marginTop);
-        const bw = parseFloat(cs.borderTopWidth);
-        el.style.overflow = 'hidden';
-
-        const start = performance.now();
-        const dur = 250;
-        let lastTotal = current + mt;
-        (function frame(now) {
-            const t = Math.min((now - start) / dur, 1);
-            const inv = 1 - ease(t);
-            const h = inv * current;
-            el.style.height = h + 'px';
-            el.style.paddingTop = (inv * pad) + 'px';
-            el.style.paddingBottom = (inv * pad) + 'px';
-            el.style.marginTop = (inv * mt) + 'px';
-            el.style.borderWidth = (inv * bw) + 'px';
-            el.style.maxWidth = (inv * currentW) + 'px';
-            const total = h + inv * mt;
-            domChatMessages.scrollTop += total - lastTotal;
-            lastTotal = total;
-            if (t < 1) {
-                el._slideRaf = requestAnimationFrame(frame);
-            } else {
-                el.classList.add('hidden');
-                el.style.height = '';
-                el.style.overflow = '';
-                el.style.paddingTop = '';
-                el.style.paddingBottom = '';
-                el.style.marginTop = '';
-                el.style.borderWidth = '';
-                el.style.maxWidth = '';
-                el._slideRaf = null;
-            }
-        })(performance.now());
-    }
-}
-
-function animateTranscriptionIn(container) {
-    const sections = container.querySelectorAll('.transcription-section');
-    // Set initial hidden state with transitions disabled
-    sections.forEach(el => {
-        el.style.transition = 'none';
-        el.style.opacity = '0';
-        el.style.filter = 'blur(4px)';
-    });
-    // Force reflow to commit the hidden state
-    container.offsetHeight;
-    // Stagger the reveal
-    sections.forEach((el, i) => {
-        setTimeout(() => {
-            el.style.transition = 'opacity 0.4s ease, filter 0.4s ease';
-            el.style.opacity = '';
-            el.style.filter = '';
-        }, i * 50);
-    });
-}
-
-function createTranscriptionSection(section, index, seekTarget) {
-    const sectionSpan = document.createElement('span');
-    sectionSpan.classList.add('transcription-section');
-    sectionSpan.setAttribute('data-timestamp', section.at);
-    sectionSpan.setAttribute('data-index', index);
-    sectionSpan.textContent = section.text;
-    sectionSpan.style.cursor = 'pointer';
-
-    // Add click functionality to seek audio via engine
-    sectionSpan.addEventListener('click', () => {
-        const timestampMs = parseFloat(section.at);
-        if (seekTarget && seekTarget.seek) {
-            seekTarget.seek(timestampMs);
-        }
-    });
-
-    return sectionSpan;
-}
-
-/**
- * Highlights the current transcription section based on audio playback time.
- * @param {HTMLElement} transcriptionContainer - Container with transcription sections
- * @param {number} currentTime - Current audio time in milliseconds
- */
-function highlightCurrentSection(transcriptionContainer, currentTime) {
-    const sections = transcriptionContainer.querySelectorAll('.transcription-section');
-
-    // Clear all highlights first
-    sections.forEach(section => {
-        section.style.backgroundColor = '';
-        section.style.color = '';
-    });
-
-    // Find and highlight the active section
-    for (let i = 0; i < sections.length; i++) {
-        const sectionTime = parseInt(sections[i].getAttribute('data-timestamp'));
-        const nextSectionTime = i < sections.length - 1 ?
-            parseInt(sections[i + 1].getAttribute('data-timestamp')) : Infinity;
-
-        if (currentTime >= sectionTime && currentTime < nextSectionTime) {
-            sections[i].style.backgroundColor = 'var(--voice-highlight-bg)';
-            sections[i].style.color = 'var(--voice-highlight-text)';
-            break;
-        }
-    }
-}
-
-/**
- * Clears all highlighting from transcription sections.
- * @param {HTMLElement} transcriptionContainer - Container with transcription sections
- */
-function clearHighlighting(transcriptionContainer) {
-    const sections = transcriptionContainer.querySelectorAll('.transcription-section');
-    sections.forEach(section => {
-        section.style.backgroundColor = '';
-        section.style.color = '';
-    });
-}
-
-/**
- * Creates the transcription UI elements and populates them with data.
- * @param {Object} transcriptionData - The transcription data from the backend
- * @param {Object} seekTarget - Object with seek method for clicking sections
- * @returns {HTMLElement} The transcription result container
- */
-function createTranscriptionUI(transcriptionData, seekTarget) {
-    const transcriptionText = document.createElement('div');
-    transcriptionText.classList.add('transcription-text');
-
-    if (transcriptionData.sections?.length > 0) {
-        transcriptionData.sections.forEach((section, index) => {
-            const sectionSpan = createTranscriptionSection(section, index, seekTarget);
-            transcriptionText.appendChild(sectionSpan);
-
-            // Add space between sections (except for the last one)
-            if (index < transcriptionData.sections.length - 1) {
-                transcriptionText.appendChild(document.createTextNode(' '));
-            }
-        });
-    } else {
-        const noTranscription = document.createElement('span');
-        noTranscription.textContent = 'No transcription available';
-        transcriptionText.appendChild(noTranscription);
-    }
-
-    // Add language detection info if available and Auto Translation is enabled
-    if (window.voiceSettings?.autoTranslate &&
-        transcriptionData.lang &&
-        transcriptionData.lang !== 'auto' &&
-        transcriptionData.lang !== 'GB') {
-
-        const langInfo = document.createElement('div');
-        langInfo.style.fontSize = '0.8em';
-        langInfo.style.color = 'rgba(255, 255, 255, 0.6)';
-        langInfo.style.marginTop = '5px';
-
-        const flagEmoji = isoToFlagEmoji(transcriptionData.lang);
-        langInfo.textContent = `Original language: ${transcriptionData.lang} ${flagEmoji}`;
-        twemojify(langInfo);
-        transcriptionText.appendChild(langInfo);
-    }
-
-    return transcriptionText;
-}
-
-/**
- * Handles audio attachment rendering and transcription functionality.
- * Uses the Rust cpal audio engine for playback with precomputed FFT waveform.
- * @param {Object} cAttachment - Attachment data
- * @param {HTMLElement} pMessage - Message container element
- * @param {Object} msg - Message data
- */
-function handleAudioAttachment(cAttachment, pMessage, msg) {
-    const audioContainer = document.createElement('div');
-    audioContainer.classList.add('audio-message-container', 'custom-audio-player');
-
-    // Create custom audio player
-    const customPlayer = document.createElement('div');
-    customPlayer.classList.add('custom-audio-player-inner');
-
-    // Play/Pause button
-    const playBtn = document.createElement('button');
-    playBtn.classList.add('audio-play-btn');
-    playBtn.innerHTML = '<span class="icon icon-play"></span>';
-
-    // Detect voice messages vs uploaded audio files
-    const isVoiceMessage = !cAttachment.name;
-
-    // Disable playback for pending (uploading) messages
-    const isPending = msg.mine && msg.pending;
-    if (isPending) {
-        playBtn.disabled = true;
-        playBtn.style.cursor = 'default';
-    }
-
-    // Time display
-    const timeDisplay = document.createElement('div');
-    timeDisplay.classList.add('audio-time-display');
-    timeDisplay.innerHTML = '<span class="current-time">0:00</span> / <span class="duration">0:00</span>';
-
-    // Transcribe Button
-    const transcribeBtn = document.createElement('button');
-    transcribeBtn.classList.add('audio-transcribe-btn');
-    const transcribeIcon = document.createElement('span');
-    transcribeIcon.classList.add('icon', 'icon-file-plus');
-    transcribeBtn.appendChild(transcribeIcon);
-
-    // Waveform visualization
-    const waveform = document.createElement('div');
-    waveform.classList.add('audio-waveform');
-    let bars = [];
-    let barCount = 0;
-
-    function syncBars() {
-        const w = waveform.clientWidth;
-        if (w === 0) return;
-        const target = Math.max(16, Math.min(64, Math.floor(w / 5)));
-        if (target === barCount) return;
-        // Capture old bar states before destroying
-        const oldStates = bars.map(b => ({
-            transform: b.style.transform,
-            opacity: b.style.opacity,
-            boxShadow: b.style.boxShadow,
-        }));
-        const oldCount = barCount;
-        barCount = target;
-        waveform.innerHTML = '';
-        bars = [];
-        for (let i = 0; i < barCount; i++) {
-            const bar = document.createElement('div');
-            bar.classList.add('waveform-bar');
-            if (oldCount > 0) {
-                const oldIdx = Math.min(Math.round(i * oldCount / barCount), oldCount - 1);
-                const s = oldStates[oldIdx];
-                bar.style.transform = s.transform;
-                bar.style.opacity = s.opacity;
-                bar.style.boxShadow = s.boxShadow;
-            }
-            waveform.appendChild(bar);
-            bars.push(bar);
-        }
-    }
-
-    // Audio engine state
-    let sourceId = null;
-    let waveformData = null;  // Uint8Array from Rust (null until audio_waveform event)
-    let waveformFps = 30;
-    let waveformBins = 64;
-    let durationMs = 0;
-    let binDisplay = null;    // per-bin display value (fast attack / slow release)
-    let barOffsetY = -9;      // shared translateY for all bars (centered when idle)
-    let windDownId = null;    // rAF ID for wind-down animation (cancelled on play)
-
-    // Probe duration immediately (header-only, no decode) — skip for pending uploads
-    if (!isPending) {
-        invoke('audio_probe', { path: cAttachment.path }).then(ms => {
-            if (ms > 0 && durationMs === 0) {
-                durationMs = ms;
-                durationEl.textContent = formatTime(ms / 1000);
-            }
-        }).catch(() => {});
-    }
-    let playStartTime = 0;     // performance.now() when play started
-    let playStartPos = 0;      // position_ms when play started
-    let animationId = null;
-    let audioEndedUnlisten = null;
-    let audioWaveformUnlisten = null;
-    let audioDurationUnlisten = null;
-    const cachedGlowColor = getComputedStyle(document.documentElement).getPropertyValue('--voice-frequency-glow').trim();
-    const currentTimeEl = timeDisplay.querySelector('.current-time');
-    const durationEl = timeDisplay.querySelector('.duration');
-
-    function updateVisualizerFromData() {
-        if (!durationMs) {
-            animationId = requestAnimationFrame(updateVisualizerFromData);
-            return;
-        }
-        const elapsed = performance.now() - playStartTime;
-        const posMs = Math.min(playStartPos + elapsed, durationMs);
-        const progress = posMs / durationMs;
-
-        if (waveformData && waveformData.length > 0) {
-            // Full waveform available — use FFT data
-            const frame = Math.floor((posMs / 1000) * waveformFps);
-            const offset = frame * waveformBins;
-
-            // Initialize per-bin display state
-            if (!binDisplay || binDisplay.length !== waveformBins) {
-                binDisplay = new Float32Array(waveformBins);
-            }
-
-            // Animate shared offset toward 0 (all bars descend together uniformly)
-            barOffsetY *= 0.92;
-
-            // Mean-deviation visualization: shows spectral *shape* per frame.
-            // Each bar's height = how far above/below the frame mean, so all
-            // bins get equal visual weight regardless of absolute energy level.
-            let frameMean = 0;
-            for (let i = 0; i < waveformBins; i++) {
-                frameMean += (offset + i < waveformData.length)
-                    ? waveformData[offset + i] / 255 : 0;
-            }
-            frameMean /= waveformBins;
-
-            // Overall level gate: scale bars by loudness so silence = short bars
-            const level = Math.min(1, Math.sqrt(frameMean * 2));
-
-            for (let i = 0; i < waveformBins; i++) {
-                const v = (offset + i < waveformData.length)
-                    ? waveformData[offset + i] / 255 : 0;
-
-                // Deviation from mean, amplified and centered
-                const target = Math.max(0.05, Math.min(1,
-                    (v - frameMean) * 2.5 + 0.5)) * level;
-
-                // Smooth attack and release for fluid motion
-                if (target > binDisplay[i]) {
-                    binDisplay[i] = binDisplay[i] * 0.7 + target * 0.3;
-                } else {
-                    binDisplay[i] = binDisplay[i] * 0.85 + target * 0.15;
-                }
-            }
-
-            for (let i = 0; i < barCount; i++) {
-                const binIdx = Math.floor(i * waveformBins / barCount);
-                const val = binDisplay[binIdx];
-                const scale = Math.max(0.1, val);
-
-                const bar = bars[i];
-                const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
-                bar.style.transform = `${yOff}scaleY(${scale})`;
-
-                const baseOpacity = 0.3 + val * 0.7;
-                const barProgress = (i + 0.5) / barCount;
-                const playbackOpacity = barProgress <= progress ? 1 : 0.4;
-                bar.style.opacity = baseOpacity * playbackOpacity;
-
-                if (val > 0.7 && barProgress <= progress) {
-                    const glowIntensity = (val - 0.7) * 8;
-                    bar.style.boxShadow = `0 0 ${glowIntensity}px ${cachedGlowColor}`;
-                } else {
-                    bar.style.boxShadow = 'none';
-                }
-            }
-        } else {
-            // Waveform still computing — show progress-only bars
-            for (let i = 0; i < barCount; i++) {
-                const bar = bars[i];
-                bar.style.transform = 'translateY(-7px) scaleY(0.25)';
-                const barProgress = (i + 0.5) / barCount;
-                bar.style.opacity = barProgress <= progress ? '0.5' : '0.2';
-                bar.style.boxShadow = 'none';
-            }
-        }
-
-        currentTimeEl.textContent = formatTime(posMs / 1000);
-        currentTimeEl.style.color = posMs > 0 ? '#ffffffb3' : '';
-
-        // Highlight active transcription section if visible
-        const tContainer = audioContainer.querySelector('.transcription-result:not(.hidden)');
-        if (tContainer) highlightCurrentSection(tContainer, posMs);
-
-        if (posMs >= durationMs) return; // Let ended event handle cleanup
-
-        animationId = requestAnimationFrame(updateVisualizerFromData);
-    }
-
-    // Assemble custom player
-    customPlayer.appendChild(playBtn);
-    if (!isVoiceMessage && cAttachment.name) {
-        audioContainer.classList.add('has-metadata');
-        const waveformWrapper = document.createElement('div');
-        waveformWrapper.classList.add('audio-waveform-wrapper');
-        const filenameLabel = document.createElement('div');
-        filenameLabel.classList.add('audio-filename', 'cutoff');
-        filenameLabel.textContent = cAttachment.name;
-        filenameLabel.title = cAttachment.name;
-        waveformWrapper.appendChild(filenameLabel);
-        waveformWrapper.appendChild(waveform);
-        customPlayer.appendChild(waveformWrapper);
-
-        // Fetch audio metadata (ID3/Vorbis/MP4 tags) for non-voice files
-        if (cAttachment.path) {
-            invoke('get_audio_metadata', { path: cAttachment.path }).then(meta => {
-                if (!meta) return;
-                if (meta.title && filenameLabel) {
-                    filenameLabel.textContent = meta.artist
-                        ? `${meta.artist} — ${meta.title}` : meta.title;
-                    filenameLabel.title = filenameLabel.textContent;
-                }
-                if (meta.cover_art) {
-                    const artWrap = document.createElement('div');
-                    artWrap.classList.add('audio-cover-art-wrap');
-                    const art = document.createElement('img');
-                    art.classList.add('audio-cover-art');
-                    art.onerror = () => artWrap.remove();
-                    art.src = meta.cover_art;
-                    artWrap.appendChild(art);
-                    audioContainer.insertBefore(artWrap, customPlayer);
-                }
-            }).catch(() => {});
-        }
-    } else {
-        customPlayer.appendChild(waveform);
-    }
-    customPlayer.appendChild(timeDisplay);
-
-    audioContainer.appendChild(customPlayer);
-
-    // Initial bar sync once laid out, and on resize
-    requestAnimationFrame(syncBars);
-    const resizeObserver = new ResizeObserver(syncBars);
-    resizeObserver.observe(waveform);
-
-    // Helper functions
-    function formatTime(seconds) {
+/** What the audio player component (components/chat/attachments/AudioPlayer.svelte) needs
+ *  from the app: the Rust engine, the tag reader, the transcriber and a few facts. */
+const AUDIO_PLAYER_HELPERS = {
+    probe: (path) => invoke('audio_probe', { path }),
+    metadata: (path) => invoke('get_audio_metadata', { path }),
+    load: (path) => invoke('audio_load', { path }),
+    play: (id) => invoke('audio_play', { id }),
+    pause: (id) => invoke('audio_pause', { id }),
+    seek: (id, positionMs) => invoke('audio_seek', { id, positionMs }),
+    stop: (id) => invoke('audio_stop', { id }),
+    listen: (event, fn) => window.__TAURI__.event.listen(event, fn),
+    glowColor: () => getComputedStyle(document.documentElement).getPropertyValue('--voice-frequency-glow').trim(),
+    formatTime: (seconds) => {
         const mins = Math.floor(seconds / 60);
         const secs = Math.floor(seconds % 60);
         return `${mins}:${secs.toString().padStart(2, '0')}`;
-    }
-
-    // Play/Pause functionality with engine
-    let isLoading = false; // Guard against double-click during async load
-    const doPlay = async () => {
-        if (isPending || isLoading) return;
-        if (!sourceId) {
-            // First play — load audio in Rust (waveform arrives async via event)
-            isLoading = true;
-            playBtn.classList.add('loading');
-            playBtn.innerHTML = '<span class="icon icon-loading spin"></span>';
-            try {
-                // Register event listeners BEFORE audio_load to avoid missing
-                // fast events (WAV FFT can complete before load returns)
-                audioEndedUnlisten = await window.__TAURI__.event.listen('audio_ended', (event) => {
-                    if (event.payload.id === sourceId) {
-                        onEnded();
-                    }
-                });
-
-                audioWaveformUnlisten = await window.__TAURI__.event.listen('audio_waveform', (event) => {
-                    if (event.payload.id === sourceId) {
-                        waveformData = new Uint8Array(event.payload.waveform);
-                        waveformFps = event.payload.waveform_fps;
-                        waveformBins = event.payload.bins;
-                        if (audioWaveformUnlisten) { audioWaveformUnlisten(); audioWaveformUnlisten = null; }
-                    }
-                });
-
-                audioDurationUnlisten = await window.__TAURI__.event.listen('audio_duration', (event) => {
-                    if (event.payload.id === sourceId) {
-                        durationMs = event.payload.duration_ms;
-                        durationEl.textContent = formatTime(durationMs / 1000);
-                        if (audioDurationUnlisten) { audioDurationUnlisten(); audioDurationUnlisten = null; }
-                    }
-                });
-
-                const result = await invoke('audio_load', { path: cAttachment.path });
-                sourceId = result.id;
-                if (result.duration_ms > 0) {
-                    durationMs = result.duration_ms;
-                    durationEl.textContent = formatTime(durationMs / 1000);
-                }
-                waveformFps = result.waveform_fps;
-                waveformBins = result.bins;
-            } catch (err) {
-                console.error('Audio load failed:', err);
-                playBtn.classList.remove('loading');
-                playBtn.innerHTML = '<span class="icon icon-play"></span>';
-                isLoading = false;
-                return;
-            }
-            playBtn.classList.remove('loading');
-            isLoading = false;
-        }
-
-        try {
-            const posMs = await invoke('audio_play', { id: sourceId });
-            playStartTime = performance.now();
-            playStartPos = posMs;
-            // Cancel any wind-down animation from a previous pause
-            if (windDownId) { cancelAnimationFrame(windDownId); windDownId = null; }
-            playBtn.innerHTML = '<span class="icon icon-pause"></span>';
-            customPlayer.classList.add('playing');
-
-            // Start visualizer
-            updateVisualizerFromData();
-        } catch (err) {
-            console.error('Audio play failed:', err);
-        }
-    };
-
-    const doPause = async () => {
-        if (!sourceId) return;
-        try {
-            await invoke('audio_pause', { id: sourceId });
-        } catch (err) {
-            console.error('Audio pause failed:', err);
-        }
-        playBtn.innerHTML = '<span class="icon icon-play"></span>';
-        customPlayer.classList.remove('playing');
-
-        // Stop visualizer
-        if (animationId) {
-            cancelAnimationFrame(animationId);
-            animationId = null;
-        }
-
-        // Clear transcription highlighting
-        const tContainer = audioContainer.querySelector('.transcription-result');
-        if (tContainer) clearHighlighting(tContainer);
-
-        // Smoothly wind down bars to paused state
-        if (durationMs > 0) {
-            const pausedPos = Math.min(playStartPos + (performance.now() - playStartTime), durationMs);
-            const currentProgress = pausedPos / durationMs;
-            const windDown = () => {
-                barOffsetY = barOffsetY * 0.92 + -9 * 0.08;
-                let settled = true;
-                bars.forEach((bar, i) => {
-                    const binIdx = Math.floor(i * waveformBins / barCount);
-                    if (binDisplay && binIdx < binDisplay.length) {
-                        binDisplay[binIdx] *= 0.94;
-                        if (binDisplay[binIdx] > 0.02) settled = false;
-                    }
-                    const scale = Math.max(0.1, binDisplay ? binDisplay[binIdx] || 0.1 : 0.1);
-                    const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
-                    bar.style.transform = `${yOff}scaleY(${scale})`;
-                    const barProgress = (i + 0.5) / barCount;
-                    bar.style.opacity = barProgress <= currentProgress ? '0.3' : '0.15';
-                    bar.style.boxShadow = 'none';
-                });
-                if (!settled) {
-                    windDownId = requestAnimationFrame(windDown);
-                } else {
-                    windDownId = null;
-                    barOffsetY = -9;
-                    bars.forEach(bar => {
-                        bar.style.transform = 'translateY(-9px) scaleY(0.15)';
-                    });
-                }
-            };
-            windDown();
-        } else {
-            barOffsetY = -9;
-        }
-    };
-
-    playBtn.addEventListener('click', () => {
-        if (customPlayer.classList.contains('playing')) doPause(); else doPlay();
-    });
-
-    // Waveform seek functionality (throttled IPC, immediate visuals)
-    let isWaveformDragging = false;
-    let seekThrottleTimer = null;
-    let pendingSeekMs = null;
-
-    function waveformSeekVisual(clientX) {
-        if (!sourceId || !durationMs) return;
-        const rect = waveform.getBoundingClientRect();
-        const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
-        const percentage = x / rect.width;
-        const posMs = Math.floor(percentage * durationMs);
-
-        // Update visuals immediately (no IPC)
-        currentTimeEl.textContent = formatTime(posMs / 1000);
-        currentTimeEl.style.color = posMs > 0 ? '#ffffffb3' : '';
-        if (!customPlayer.classList.contains('playing') && durationMs > 0) {
-            const currentProgress = posMs / durationMs;
-            bars.forEach((bar, i) => {
-                const barProgress = (i + 0.5) / barCount;
-                bar.style.opacity = barProgress <= currentProgress ? '0.3' : '0.15';
-            });
-        }
-
-        // Throttle the actual engine seek to avoid audio glitching during drag
-        pendingSeekMs = posMs;
-        if (!seekThrottleTimer) {
-            seekThrottleTimer = setTimeout(() => {
-                seekThrottleTimer = null;
-                if (pendingSeekMs != null) {
-                    invoke('audio_seek', { id: sourceId, positionMs: pendingSeekMs }).catch(() => {});
-                    if (customPlayer.classList.contains('playing')) {
-                        playStartTime = performance.now();
-                        playStartPos = pendingSeekMs;
-                    }
-                }
-            }, 50);
-        }
-    }
-
-    function flushPendingSeek() {
-        if (pendingSeekMs != null) {
-            invoke('audio_seek', { id: sourceId, positionMs: pendingSeekMs }).catch(() => {});
-            if (customPlayer.classList.contains('playing')) {
-                playStartTime = performance.now();
-                playStartPos = pendingSeekMs;
-            }
-            pendingSeekMs = null;
-        }
-        if (seekThrottleTimer) {
-            clearTimeout(seekThrottleTimer);
-            seekThrottleTimer = null;
-        }
-    }
-
-    waveform.addEventListener('mousedown', (e) => {
-        isWaveformDragging = true;
-        waveformSeekVisual(e.clientX);
-        document.addEventListener('mousemove', handleWaveformDrag);
-        document.addEventListener('mouseup', stopWaveformDrag);
-    });
-
-    // Touch support for mobile
-    waveform.addEventListener('touchstart', (e) => {
-        isWaveformDragging = true;
-        waveformSeekVisual(e.touches[0].clientX);
-    });
-
-    waveform.addEventListener('touchmove', (e) => {
-        if (isWaveformDragging) {
-            e.preventDefault();
-            waveformSeekVisual(e.touches[0].clientX);
-        }
-    });
-
-    waveform.addEventListener('touchend', () => {
-        isWaveformDragging = false;
-        flushPendingSeek();
-    });
-
-    function handleWaveformDrag(e) {
-        if (isWaveformDragging) {
-            waveformSeekVisual(e.clientX);
-        }
-    }
-
-    function stopWaveformDrag() {
-        isWaveformDragging = false;
-        flushPendingSeek();
-        document.removeEventListener('mousemove', handleWaveformDrag);
-        document.removeEventListener('mouseup', stopWaveformDrag);
-    }
-
-    // Reset on end
-    function onEnded() {
-        playBtn.innerHTML = '<span class="icon icon-play"></span>';
-        customPlayer.classList.remove('playing');
-        currentTimeEl.textContent = '0:00';
-        currentTimeEl.style.color = '';
-
-        // Clear transcription highlighting
-        const tContainer = audioContainer.querySelector('.transcription-result');
-        if (tContainer) clearHighlighting(tContainer);
-
-        if (animationId) {
-            cancelAnimationFrame(animationId);
-            animationId = null;
-        }
-
-        // Smoothly wind down bars
-        const windDownReset = () => {
-            barOffsetY = barOffsetY * 0.92 + -9 * 0.08;
-            let settled = true;
-            bars.forEach((bar, i) => {
-                const binIdx = Math.floor(i * waveformBins / barCount);
-                if (binDisplay && binIdx < binDisplay.length) {
-                    binDisplay[binIdx] *= 0.94;
-                    if (binDisplay[binIdx] > 0.02) settled = false;
-                }
-                const scale = Math.max(0.1, binDisplay ? binDisplay[binIdx] || 0.1 : 0.1);
-                const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
-                bar.style.transform = `${yOff}scaleY(${scale})`;
-                bar.style.opacity = '0.3';
-                bar.style.boxShadow = 'none';
-            });
-            if (!settled) {
-                windDownId = requestAnimationFrame(windDownReset);
-            } else {
-                windDownId = null;
-                barOffsetY = -9;
-                bars.forEach(bar => {
-                    bar.style.transform = 'translateY(-9px) scaleY(0.15)';
-                });
-            }
-        };
-        windDownReset();
-
-    }
-
-    // Only add transcription UI for voice messages with supported formats
-    if (isVoiceMessage && platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(cAttachment.extension)) {
-        // Display the Transcribe button
-        customPlayer.appendChild(transcribeBtn);
-
-        // Add transcribe button container
-        const transcribeContainer = document.createElement('div');
-        transcribeContainer.classList.add('transcribe-container');
-
-        // Create container for transcription result
-        const transcriptionResult = document.createElement('div');
-        transcriptionResult.classList.add('transcription-result', 'hidden');
-
-        // Create a seek target for transcription section clicks
-        const seekTarget = {
-            seek: async (ms) => {
-                if (!sourceId) return;
-                await invoke('audio_seek', { id: sourceId, positionMs: ms });
-                if (customPlayer.classList.contains('playing')) {
-                    playStartTime = performance.now();
-                    playStartPos = ms;
-                }
-                currentTimeEl.textContent = formatTime(ms / 1000);
-                currentTimeEl.style.color = ms > 0 ? '#ffffffb3' : '';
-            }
-        };
-
-        transcribeBtn.addEventListener('click', async () => {
-            if (transcribeBtn.classList.contains('loading') ||
-                transcribeBtn.classList.contains('downloading')) return;
-
-            // If already transcribed, just toggle visibility
-            if (transcriptionResult.textContent.trim()) {
-                const isOpen = transcriptionResult.classList.contains('hidden');
-                transcribeIcon.classList.replace(isOpen ? 'icon-file-plus' : 'icon-file-minus', isOpen ? 'icon-file-minus' : 'icon-file-plus');
-                slideTranscription(transcriptionResult, isOpen, () => {
-                    animateTranscriptionIn(transcriptionResult);
-                });
-                return;
-            }
-
-            // Show loading state
-            transcribeBtn.classList.add('loading');
-            transcribeBtn.style.cursor = 'default';
-            transcribeIcon.classList.replace('icon-file-plus', 'icon-loading');
-            transcribeIcon.classList.add('spin');
-
-            try {
-                // Pass the transcribe button to ensureModelReady
-                if (!await window.cTranscriber.ensureModelReady(transcribeBtn)) {
-                    throw new Error("Voice model setup failed");
-                }
-
-                const transcriptionData = await window.cTranscriber.transcribeAudioFile(cAttachment.path);
-
-                // Restore button state
-                transcribeBtn.classList.remove('loading');
-                transcribeBtn.innerHTML = '';
-                transcribeBtn.style.cursor = '';
-                transcribeBtn.appendChild(transcribeIcon);
-                transcribeIcon.classList.replace('icon-loading', 'icon-file-minus');
-                transcribeIcon.classList.remove('spin');
-
-                // Clear any existing content
-                transcriptionResult.innerHTML = '';
-
-                const transcriptionUI = createTranscriptionUI(transcriptionData, seekTarget);
-                transcriptionResult.appendChild(transcriptionUI);
-                slideTranscription(transcriptionResult, true, () => {
-                    animateTranscriptionIn(transcriptionUI);
-                });
-            } catch (err) {
-                console.error('Transcription error:', err);
-
-                // Restore button state
-                transcribeBtn.classList.remove('loading');
-                transcribeBtn.innerHTML = '';
-                transcribeBtn.style.cursor = '';
-                transcribeBtn.appendChild(transcribeIcon);
-                transcribeIcon.classList.replace('icon-loading', 'icon-file-plus');
-                transcribeIcon.classList.remove('spin');
-
-                transcriptionResult.innerHTML = '';
-                const errorDiv = document.createElement('div');
-                errorDiv.classList.add('transcription-error');
-                errorDiv.textContent = `Error: ${err.message || 'Transcription failed'}`;
-                transcriptionResult.appendChild(errorDiv);
-                transcriptionResult.classList.remove('hidden');
-            }
-        });
-
-        audioContainer.appendChild(transcribeContainer);
-        audioContainer.appendChild(transcriptionResult);
-
-        // Auto-transcribe if enabled and this is a recent received message
-        if (window.voiceSettings?.autoTranscribe &&
-            !msg.mine &&
-            msg.at > (Date.now() - 60)) {
-
-            const selectedModel = window.voiceSettings?.selectedModel || 'small';
-            const currentModel = window.voiceSettings.models?.find(m => m.model.name === selectedModel);
-            if (currentModel?.downloaded) {
-                transcribeBtn.click();
-            }
-        }
-    }
-
-    pMessage.appendChild(audioContainer);
-
-    // Cleanup engine source and observers when element is removed from DOM
-    // NOTE: Must be set up AFTER appendChild so audioContainer.parentNode exists
-    const cleanupObserver = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-            for (const node of m.removedNodes) {
-                if (node === audioContainer || node.contains?.(audioContainer)) {
-                    if (animationId) cancelAnimationFrame(animationId);
-                    if (sourceId) invoke('audio_stop', { id: sourceId }).catch(() => {});
-                    if (audioEndedUnlisten) audioEndedUnlisten();
-                    if (audioWaveformUnlisten) audioWaveformUnlisten();
-                    if (audioDurationUnlisten) audioDurationUnlisten();
-                    resizeObserver.disconnect();
-                    cleanupObserver.disconnect();
-                    return;
-                }
-            }
-        }
-    });
-    cleanupObserver.observe(pMessage, { childList: true, subtree: true });
-}
+    },
+    // Voice messages (no file name) in a format Whisper reads, on a platform that has it.
+    transcriptionSupported: (att) => !att.name && !!platformFeatures.transcription && ['wav', 'mp3', 'flac'].includes(att.extension),
+    transcribe: async (path) => {
+        if (!await window.cTranscriber.ensureModelReady(true)) throw new Error('Voice model setup failed');
+        return window.cTranscriber.transcribeAudioFile(path);
+    },
+    cancelModelDownload: () => invoke('cancel_whisper_download'),
+    // A received message under a minute old, with the chosen model already on disk.
+    autoTranscribe: (msg) => {
+        if (!window.voiceSettings?.autoTranscribe || msg.mine || msg.at <= Date.now() - 60) return false;
+        const selected = window.voiceSettings.selectedModel || 'small';
+        return !!window.voiceSettings.models?.find(m => m.model.name === selected)?.downloaded;
+    },
+    autoTranslate: () => !!window.voiceSettings?.autoTranslate,
+    flag: (lang) => isoToFlagEmoji(lang),
+    twemojify: (el) => twemojify(el),
+    cancelUpload: (pendingId) => invoke('cancel_upload', { pendingId }),
+    scrollBy: (px) => { domChatMessages.scrollTop += px; },
+};

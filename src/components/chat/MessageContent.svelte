@@ -6,12 +6,14 @@
     // content, and a rebuild would reset playback and spoiler reveals).
     import Attachments from './Attachments.svelte';
     import InvitePreviews from './InvitePreviews.svelte';
+    import LinkPreview from './LinkPreview.svelte';
+    import CommandLine from './CommandLine.svelte';
     import { messageVersion, clockSec } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h, sig } = $props();
-    // h: buildText(msg, ctx) → span | null, the Attachments leaves, buildCryptoAddress(msg),
+    // h: buildText(msg, ctx) → span | null, commandInfo(msg), the Attachments leaves, buildCryptoAddress(msg),
     //    renderEmojiPackPreviews(node, text), inviteKeys(text), resolveInvite(key), xdcUrl(msg, ctx),
-    //    renderXdcUrlCard(node, msg, url), webPreviewsEnabled(), buildLinkPreview(msg), isAndroid(),
+    //    renderXdcUrlCard(node, msg, url), webPreviewsEnabled(), linkPreviewData(msg), isAndroid(),
     //    fmtCountdown(secs), selfDestructTooltip(el), selfDestructTooltipEnd()
 
     // One built element into a display:contents host.
@@ -36,9 +38,14 @@
 </script>
 
 {#key sig}
-    {@const text = h.buildText(msg, ctx)}
-    {#if text}
-        <span style="display:contents" use:leaf={text}></span>
+    {@const cmd = h.commandInfo(msg)}
+    {#if cmd}
+        <CommandLine {msg} {cmd} {h} />
+    {:else}
+        {@const text = h.buildText(msg, ctx)}
+        {#if text}
+            <span style="display:contents" use:leaf={text}></span>
+        {/if}
     {/if}
 {/key}
 <!-- Outside the key: attachments derive on their own, so a send finishing keeps its media. -->
@@ -59,9 +66,9 @@
         <div use:into={(node) => h.renderXdcUrlCard(node, msg, xdcUrl)}></div>
     {/if}
     {#if showLinkPreview}
-        {@const preview = h.buildLinkPreview(msg)}
+        {@const preview = h.linkPreviewData(msg)}
         {#if preview}
-            <span style="display:contents" use:leaf={preview}></span>
+            <LinkPreview data={preview} {h} />
         {/if}
     {/if}
     {#if msg.edited}
