@@ -126,7 +126,8 @@ export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDe
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
-export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider } from './lib/chatview.svelte.js';
+export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, noticeState, setNotice, clearNotices, setArrival } from './lib/chatview.svelte.js';
+export { setSelfDestructSecs } from './lib/composer.svelte.js';
 // The send-file preview overlay's state.
 export {
     filePreview, filePreviewContent, openFilePreview as fpOpen, closeFilePreview as fpClose,

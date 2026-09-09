@@ -6,7 +6,7 @@
     // content, and a rebuild would reset playback and spoiler reveals).
     import Attachments from './Attachments.svelte';
     import InvitePreviews from './InvitePreviews.svelte';
-    import { messageVersion } from '../lib/chatview.svelte.js';
+    import { messageVersion, clockSec } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h, sig } = $props();
     // h: buildText(msg, ctx) → span | null, the Attachments leaves, buildCryptoAddress(msg),
@@ -32,7 +32,7 @@
     // A vectorapp.io profile link is already a mention pill; an OpenGraph card would repeat it.
     const showLinkPreview = $derived(live && h.webPreviewsEnabled() && !xdcUrl
         && !/https?:\/\/vectorapp\.io\/profile\/npub1[a-z0-9]{58}/i.test(msg.content || ''));
-    const selfDestructRemaining = $derived(msg.expiration ? msg.expiration - Math.floor(Date.now() / 1000) : 0);
+    const selfDestructRemaining = $derived(msg.expiration ? msg.expiration - clockSec() : 0);
 </script>
 
 {#key sig}

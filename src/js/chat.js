@@ -82,77 +82,10 @@ async function openSelfDestructPicker(chatId, anchor) {
 /** Reflect the open chat's timer as a "temporary send" badge on the send +
  *  voice buttons (whichever is visible shows it). */
 async function updateSelfDestructIndicator(chatId) {
-    const sendBtn = document.getElementById('chat-input-send');
-    if (!sendBtn) return;
-    const apply = (secs) => {
-        if (secs) { sendBtn.dataset.sdSecs = String(secs); sendBtn.classList.add('has-self-destruct'); }
-        else { delete sendBtn.dataset.sdSecs; sendBtn.classList.remove('has-self-destruct'); }
-    };
-    if (!chatId || !chatSupportsSelfDestruct(getChat(chatId))) { apply(null); return; }
+    if (!chatId || !chatSupportsSelfDestruct(getChat(chatId))) { VectorSvelte.setSelfDestructSecs(0); return; }
     let secs = null;
     try { secs = await invoke('get_self_destruct_timer', { chatId }); } catch (_) {}
-    apply(secs && chatId === strOpenChat ? secs : null);
-}
-
-/** Wire the composer: a "temporary send" clock badge on the send + voice
- *  buttons, and right-click / long-press on Send to open the timer picker.
- *  Runs once. */
-function setupSelfDestructComposer() {
-    const sendBtn = document.getElementById('chat-input-send');
-    if (!sendBtn || sendBtn.dataset.sdWired) return;
-    sendBtn.dataset.sdWired = '1';
-
-    _ensureSelfDestructBadge();
-
-    const openFromBtn = () => {
-        if (strOpenChat && chatSupportsSelfDestruct(getChat(strOpenChat))) {
-            openSelfDestructPicker(strOpenChat, sendBtn.getBoundingClientRect());
-        }
-    };
-    sendBtn.addEventListener('contextmenu', (e) => { e.preventDefault(); openFromBtn(); });
-    // Right-clicking the mic does nothing on desktop (suppress the native menu).
-    const voiceBtn = document.getElementById('chat-input-voice');
-    if (voiceBtn) voiceBtn.addEventListener('contextmenu', (e) => e.preventDefault());
-    let pressTimer = null;
-    sendBtn.addEventListener('touchstart', () => { pressTimer = setTimeout(openFromBtn, 500); }, { passive: true });
-    const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
-    sendBtn.addEventListener('touchend', cancelPress);
-    sendBtn.addEventListener('touchmove', cancelPress);
-    sendBtn.addEventListener('touchcancel', cancelPress);
-}
-
-/** Inject the "temporary send" badge into the composer CONTAINER (not the send
- *  button — so it never inherits the mic<->send swap rotation) and mirror the
- *  send button's visibility onto it via `.is-visible`, so it fades with the
- *  swap. Inline SVG so nothing inflates it; pointer-events:none so it never
- *  swallows a send tap. */
-function _ensureSelfDestructBadge() {
-    const send = document.getElementById('chat-input-send');
-    const container = send && send.closest('.chat-input-container');
-    if (!container || container.dataset.sdBadge) return;
-    container.dataset.sdBadge = '1';
-    const badge = document.createElement('span');
-    badge.className = 'self-destruct-badge';
-    badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg>';
-    container.appendChild(badge);
-
-    // Recompute the badge's visibility whenever the send button's state flips
-    // (swap in/out, shown/hidden, timer toggled) — one observer, no swap-logic edits.
-    new MutationObserver(_syncSelfDestructBadge)
-        .observe(send, { attributes: true, attributeFilter: ['class', 'style'] });
-    _syncSelfDestructBadge();
-}
-
-/** Show the badge only while the send button is present, timer-active, and not
- *  mid swap-out — so it fades in/out with the button rather than spinning. */
-function _syncSelfDestructBadge() {
-    const send = document.getElementById('chat-input-send');
-    const badge = document.querySelector('.self-destruct-badge');
-    if (!send || !badge) return;
-    const show = send.classList.contains('has-self-destruct')
-        && send.style.display !== 'none'
-        && !send.classList.contains('button-swap-out');
-    badge.classList.toggle('is-visible', show);
+    VectorSvelte.setSelfDestructSecs(secs && chatId === strOpenChat ? secs : 0);
 }
 
 /** Play the Tron "derez" dissolve on a message row, then remove it. Idempotent. */
@@ -196,25 +129,13 @@ function derezMessageLocally(id, chatId) {
     scheduleUnreadRefresh();
 }
 
-// Drive the per-message countdown + derez for the OPEN chat. Off-screen and
-// closed-chat expiries fall to the backend sweep. One cheap DOM scan per second.
+// Derez expired messages in the OPEN chat on the second (the rows' countdowns tick on
+// the store's clock). Off-screen and closed-chat expiries fall to the backend sweep.
 setInterval(() => {
-    const glyphs = document.querySelectorAll('.dmsg-selfdestruct[data-expiration]');
-    if (!glyphs.length) return;
+    const chat = strOpenChat ? getChat(strOpenChat) : null;
+    if (!chat?.messages?.length) return;
     const now = Math.floor(Date.now() / 1000);
-    glyphs.forEach(el => {
-        const exp = parseInt(el.dataset.expiration, 10);
-        // Keep the inline countdown (Android) ticking.
-        const timeEl = el.querySelector('.dmsg-selfdestruct-time');
-        if (timeEl) {
-            const remaining = exp - now;
-            timeEl.textContent = remaining > 0 ? _fmtCountdown(remaining) : '';
-        }
-        if (!exp || exp > now || el.dataset.fired) return;
-        el.dataset.fired = '1';
-        const row = el.closest('.dmsg');
-        if (row && row.id && strOpenChat) derezMessageLocally(row.id, strOpenChat);
-    });
+    for (const m of chat.messages.filter(m => m.expiration && m.expiration <= now)) derezMessageLocally(m.id, chat.id);
 }, 1000);
 
 /** Build the chat-header overflow ("hamburger") menu items for a chat.
@@ -408,8 +329,7 @@ function _updateChatWindow(chat, sortedMessages, single) {
     if (single && sameChat && !single.mine && single.id === windowBottomId && hi === msgs.length - 1) {
         const domMsg = document.getElementById(single.id);
         if (domMsg) {
-            domMsg.classList.add('new-anim');
-            domMsg.addEventListener('animationend', () => domMsg.classList.remove('new-anim'), { once: true });
+            VectorSvelte.setArrival(single.id);
             // Bump the scroll-down badge if the user is reading above; drop a divider
             // when the window is inactive (pinned but tabbed out, so unseen).
             if (!chatPinnedToBottom) {
@@ -450,20 +370,6 @@ const MERGEABLE_SYSTEM_EVENTS = new Set([
     SystemEventType.PinsModified,
 ]);
 
-/**
- * Helper function to create and insert a system event (member joined/left, etc.)
- * Uses the same styling as timestamps (centered, lower opacity)
- * @param {string} content - The system event text (e.g., "John has left")
- * @param {HTMLElement} parent - Optional parent to append to
- * @returns {HTMLElement} - The created system event element
- */
-function insertSystemEvent(content, parent = null) {
-    const pSystemEvent = document.createElement('p');
-    pSystemEvent.classList.add('msg-inline-timestamp'); // Reuse timestamp styling
-    pSystemEvent.textContent = content;
-    if (parent) parent.appendChild(pSystemEvent);
-    return pSystemEvent;
-}
 
 // ============================================================================
 // Per-DM Wallpaper
@@ -1171,24 +1077,9 @@ function revealSystemEventsInWindow(chatId) {
  * render/content change for the open chat.
  */
 function refreshChatEmptyState() {
-    const existing = document.getElementById('chat-empty-state');
     const chat = strOpenChat ? arrChats.find(c => c.id === strOpenChat) : null;
     const isEmptyCommunity = !!chat && chat.chat_type === 'Community' && (!chat.messages || chat.messages.length === 0);
-    if (isEmptyCommunity) {
-        if (!existing && domChatMessages) {
-            const name = chat.metadata?.custom_fields?.name || 'this community';
-            const el = document.createElement('div');
-            el.id = 'chat-empty-state';
-            el.className = 'chat-empty-state';
-            // .icon is position:absolute → wrap it in a relative, sized span (same pattern as elsewhere).
-            el.innerHTML = `<div class="chat-empty-state-icon"><span class="icon icon-users-multi"></span></div>`
-                + `<h3>Welcome to ${escapeHtml(name)}</h3>`
-                + `<p>This is the very beginning of the channel — say hello! 👋</p>`;
-            domChatMessages.appendChild(el);
-        }
-    } else if (existing) {
-        existing.remove();
-    }
+    VectorSvelte.setNotice('empty', isEmptyCommunity ? (chat.metadata?.custom_fields?.name || 'this community') : '');
 }
 
 async function openChat(contact) {
@@ -1476,17 +1367,13 @@ async function openChat(contact) {
     // Dissolved community: the backend seals it (no new events accepted), so disable the
     // composer the same way a blocked DM does and mark the timeline's end.
     const isDissolvedChat = chatIsDissolved(chat);
-    // Remove any previous blocked / dissolved notice before (re-)evaluating
-    document.getElementById('blocked-notice')?.remove();
-    document.getElementById('dissolved-notice')?.remove();
+    VectorSvelte.setNotice('blocked', false);
+    VectorSvelte.setNotice('dissolved', '');
+    VectorSvelte.setNotice('migrated', false);
     if (isBlockedChat) {
         VectorSvelte.setLock('blocked', 'Unblock to send messages');
+        VectorSvelte.setNotice('blocked', true);
         VectorSvelte.flushSync();
-        // Append a system-style blocked notice at the bottom of the chat
-        const blockedNotice = insertSystemEvent('Blocked — You won\'t receive new messages from them');
-        blockedNotice.id = 'blocked-notice';
-        blockedNotice.style.marginBottom = '20px';
-        domChatMessages.appendChild(blockedNotice);
     } else if (isDissolvedChat) {
         applyDissolvedChatUI(chat);
     } else {
@@ -1728,6 +1615,7 @@ VectorSvelte.setComposerHandlers({
     // Tapping the reply bar's content jumps to the message being replied to.
     jumpToReply: () => jumpToMessage(strCurrentReplyReference),
     send: () => handleSendClick(),
+    openSelfDestruct: (rect) => { if (strOpenChat && chatSupportsSelfDestruct(getChat(strOpenChat))) openSelfDestructPicker(strOpenChat, rect); },
 });
 VectorSvelte.mountCommandComposer({ editor: domChatMessageInput });
 /** Where the header's menu button was when last pressed: the self-destruct picker anchors to it. */
@@ -2064,7 +1952,6 @@ async function wireChatUi() {
 
     // Self-Destruct Timer: right-click / long-press the Send button, plus the
     // active-timer clock indicator injected next to the composer.
-    setupSelfDestructComposer();
 
     // Add scroll event listener for procedural message loading + intent tracking
     let scrollTimeout;

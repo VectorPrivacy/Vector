@@ -93,6 +93,15 @@
         if (animate && shown !== null) swap(want);
         else snap(want);
     });
+    // The timer picker opens from a right-click or a long press on Send.
+    let pressTimer = null;
+    function openTimer() {
+        if (els.send) h()?.openSelfDestruct?.(els.send.getBoundingClientRect());
+    }
+    function pressStart() { pressTimer = setTimeout(openTimer, 500); }
+    function pressEnd() { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }
+    let swappingOut = $state(false);
+
     function clearAnim() {
         els.send?.classList.remove('button-swap-in', 'button-swap-out');
         els.voice?.classList.remove('button-swap-in', 'button-swap-out');
@@ -111,9 +120,11 @@
         shown = want;
         sendActive = want === 'send';
         out.classList.add('button-swap-out');
+        swappingOut = want === 'voice';
         out.addEventListener('animationend', () => {
             if (want === 'send') voiceShown = false; else sendShown = false;
             out.classList.remove('button-swap-out');
+            swappingOut = false;
             if (shown !== want) return;   // superseded mid-flight
             if (want === 'send') sendShown = true; else voiceShown = true;
             inn.classList.add('button-swap-in');
@@ -143,7 +154,10 @@
         <button id="chat-input-cancel" style:display={isEdit ? null : 'none'} onclick={() => h()?.cancel()}><span class="icon icon-cancel"></span></button>
         <div id="chat-input-host"></div>
         <button id="chat-input-emoji" style:display={locked ? 'none' : null} bind:this={els.emoji}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
-        <button id="chat-input-voice" style="margin-right: 3px;" style:display={voiceShown ? null : 'none'} bind:this={els.voice}><span class="icon icon-mic-on"></span></button>
-        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive} style:display={sendShown ? null : 'none'} bind:this={els.send} onclick={() => h()?.send()}><span class="icon icon-send"></span></button>
+        <button id="chat-input-voice" style="margin-right: 3px;" style:display={voiceShown ? null : 'none'} bind:this={els.voice} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
+        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive} class:has-self-destruct={!!chrome.selfDestructSecs} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown ? null : 'none'} bind:this={els.send} onclick={() => h()?.send()}
+                oncontextmenu={(e) => { e.preventDefault(); openTimer(); }} ontouchstart={pressStart} ontouchend={pressEnd} ontouchmove={pressEnd} ontouchcancel={pressEnd}><span class="icon icon-send"></span></button>
+        <!-- Outside the send button so it never inherits the mic/send swap rotation; it fades with the button. -->
+        <span class="self-destruct-badge" class:is-visible={!!chrome.selfDestructSecs && sendShown && !swappingOut}><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg></span>
     </div>
 </div>

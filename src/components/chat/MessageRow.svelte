@@ -14,7 +14,7 @@
     // transforms, the has-reply class after an update) are deliberately not re-bound
     // here, so those writes persist.
     import { profileVersion, communityVersion } from '../lib/signals.svelte.js';
-    import { messageVersion } from '../lib/chatview.svelte.js';
+    import { messageVersion, arrivalState, setArrival } from '../lib/chatview.svelte.js';
     import ReplyQuote from './ReplyQuote.svelte';
     import MessageContent from './MessageContent.svelte';
 
@@ -161,6 +161,7 @@
     function blockedInto(node) {
         node.replaceChildren(h.buildBlockedPlaceholder(msg));
     }
+    const arrival = arrivalState();
 </script>
 
 <div
@@ -176,6 +177,8 @@
     data-replying-to={ctx.replyingTo ? 'true' : undefined}
     data-reply-pending={pendingReply || undefined}
     style:opacity={ctx.revealedBlocked ? '0.4' : null}
+    class:new-anim={arrival.id === current.id}
+    onanimationend={() => { if (arrival.id === current.id) setArrival(null); }}
     use:expando={current}
 >
     <div class="dmsg-gutter">

@@ -199,19 +199,10 @@ async function setupRustListeners() {
                 // hidden file/voice/emoji, "dissolved" notice) a beat before this migration
                 // event. The room is ALIVE on v2, so fully RESTORE the composer — mirror
                 // openChat's live-chat branch, not just the placeholder.
-                document.getElementById('dissolved-notice')?.remove();
+                VectorSvelte.setNotice('dissolved', '');
+                VectorSvelte.setNotice('migrated', true);
                 VectorSvelte.setLock(null);
                 VectorSvelte.flushSync();
-                if (!document.getElementById('migrated-notice')) {
-                    // insertSystemEvent only appends when given a parent — attach explicitly
-                    // (same pattern as the dissolved notice).
-                    const note = insertSystemEvent('This community has upgraded to Concord v2.');
-                    if (note) {
-                        note.id = 'migrated-notice';
-                        note.style.marginBottom = '20px';
-                        domChatMessages.appendChild(note);
-                    }
-                }
             }
         }
     });

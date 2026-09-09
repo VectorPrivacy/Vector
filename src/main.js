@@ -44,8 +44,7 @@ function systemEventSuffix(eventType) {
 
 /** Build a system-event line, resolving the actor's CURRENT cached name (the stored content
  * was baked with the raw npub at receive time, before the profile was known). Plain-string form
- * for notifications / chatlist previews; the in-chat DOM uses `insertSystemEvent` for the
- * clickable-name variant. */
+ * for notifications and chatlist previews; the in-chat row renders the clickable name. */
 function systemEventContent(eventType, npub) {
     return systemEventName(npub) + systemEventSuffix(eventType);
 }
@@ -758,14 +757,8 @@ function rowIsInDissolvedCommunity() {
  */
 function applyDissolvedChatUI(chat) {
     VectorSvelte.setLock('dissolved', 'This community has been dissolved.');
+    VectorSvelte.setNotice('dissolved', chat?.metadata?.custom_fields?.name || 'This community');
     VectorSvelte.flushSync();
-    if (!document.getElementById('dissolved-notice')) {
-        const communityName = chat?.metadata?.custom_fields?.name || 'This community';
-        const dissolvedNotice = insertSystemEvent(`${communityName} was dissolved by the owner.`);
-        dissolvedNotice.id = 'dissolved-notice';
-        dissolvedNotice.style.marginBottom = '20px';
-        domChatMessages.appendChild(dissolvedNotice);
-    }
 }
 
 /**
