@@ -103,6 +103,9 @@ function updateMessageRow(domMsg, msg, profile, oldId = '') {
         VectorSvelte.setWindow(strOpenChat, windowTopId, windowBottomId);
     }
     VectorSvelte.touchMessage(msg.id);
+    // A row keeps its key across an id swap and its version signal was read under the
+    // old id; touching that entry too is what re-derives it under the new one.
+    if (oldId && oldId !== msg.id) VectorSvelte.touchMessage(oldId);
     VectorSvelte.touchWindow();
     VectorSvelte.flushSync();
     const el = document.getElementById(msg.id);
