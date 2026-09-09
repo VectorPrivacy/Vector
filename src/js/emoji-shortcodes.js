@@ -116,20 +116,9 @@ function initEmojiShortcodeSelector(textarea) {
         textarea.value = before + insert + after;
         const newPos = colonStart + insert.length;
         textarea.selectionStart = textarea.selectionEnd = newPos;
-        // Increment usage counter so frequently-used customs (and stock)
-        // rise in the search ranking on future opens.
-        if (item.isCustom) {
-            if (typeof bumpCustomEmojiUsage === 'function') {
-                bumpCustomEmojiUsage(item.shortcode);
-            }
-        }
-        const canonical = !item.isCustom
-            && typeof arrEmojis !== 'undefined'
-            && arrEmojis.find(e => e.emoji === item.emoji);
-        if (canonical) {
-            canonical.used++;
-            if (typeof addToRecentEmojis === 'function') addToRecentEmojis(canonical);
-        }
+        // Usage feeds the ranking on future opens, for customs and stock alike.
+        if (item.isCustom) bumpEmojiUsage('custom', item.shortcode, item.url);
+        else bumpEmojiUsage('unicode', item.emoji);
         hide();
         skipNextInput = true;
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
