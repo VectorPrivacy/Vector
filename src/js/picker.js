@@ -37,9 +37,7 @@ if (picker) {
             pushBack('emoji-picker', () => {
                 picker.classList.remove('visible');
                 picker.style.bottom = '';
-                if (typeof domChatMessageInputEmoji !== 'undefined' && domChatMessageInputEmoji) {
-                    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
-                }
+                domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
             });
         } else {
             hideEmojiTooltip();

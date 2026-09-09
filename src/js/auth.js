@@ -128,15 +128,14 @@ function showBunkerForm(mode = 'new') {
     // visible panel and hide every major view so the bunker form gets the
     // full viewport with no see-through layout.
     if (mode === 'reauth') {
-        const settingsVisible = typeof domSettings !== 'undefined' && domSettings
-            && domSettings.style.display !== 'none';
+        const settingsVisible = domSettings.style.display !== 'none';
         bunkerReauthOrigin = settingsVisible ? 'settings' : 'chats';
-        if (typeof domNavbar !== 'undefined' && domNavbar) domNavbar.style.display = 'none';
-        if (typeof domSettings !== 'undefined' && domSettings) domSettings.style.display = 'none';
-        if (typeof domChats !== 'undefined' && domChats) domChats.style.display = 'none';
-        if (typeof domProfile !== 'undefined' && domProfile) domProfile.style.display = 'none';
-        if (typeof domInvites !== 'undefined' && domInvites) domInvites.style.display = 'none';
-        if (typeof domGroupOverview !== 'undefined' && domGroupOverview) domGroupOverview.style.display = 'none';
+        domNavbar.style.display = 'none';
+        domSettings.style.display = 'none';
+        domChats.style.display = 'none';
+        domProfile.style.display = 'none';
+        domInvites.style.display = 'none';
+        domGroupOverview.style.display = 'none';
     } else {
         bunkerReauthOrigin = null;
     }
@@ -258,9 +257,7 @@ async function login(skipAnimations = false) {
                 domProfile.style.display = 'none';
                 domSettings.style.display = 'none';
                 domInvites.style.display = 'none';
-                if (typeof domGroupOverview !== 'undefined') {
-                    domGroupOverview.style.display = 'none';
-                }
+                domGroupOverview.style.display = 'none';
                 navbarSelect('chat-btn');
 
                 // Render our profile
