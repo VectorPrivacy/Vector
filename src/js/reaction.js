@@ -277,7 +277,8 @@ document.addEventListener('contextmenu', (e) => {
 // Dismiss on click outside
 document.addEventListener('click', (e) => {
     const popup = _reactionDetailsEl();
-    if (popup && !popup.contains(e.target)) hideReactionDetails();
+    // The path, not contains: a row the click re-renders is already unmounted here.
+    if (popup && !popup.contains(e.target) && !(e.composedPath?.() || []).includes(popup)) hideReactionDetails();
 });
 
 // Dismiss on Escape

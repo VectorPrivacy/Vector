@@ -483,7 +483,8 @@ function pinsMenuItems(messageId) {
 domChat.addEventListener('click', (e) => {
     if (!pinsDrawerOpen) return;
     const { drawer, button } = VectorSvelte.pinsEls();
-    if (drawer?.contains(e.target) || button?.contains(e.target)) return;
+    const path = e.composedPath?.() || [];
+    if (drawer?.contains(e.target) || button?.contains(e.target) || path.includes(drawer) || path.includes(button)) return;
     pinsSetDrawerVisible(false);
 });
 

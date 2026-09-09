@@ -76,7 +76,8 @@ function hideMiniProfile() {
 // the mobile-centred dismiss path via its own click handler.
 document.addEventListener('click', (e) => {
     const popup = _miniProfilePopup();
-    if (!popup || popup.contains(e.target)) return;
+    // The path, not contains: a control the click re-renders is already unmounted here.
+    if (!popup || popup.contains(e.target) || (e.composedPath?.() || []).includes(popup)) return;
     // Not on the avatar/name that opened it: the click delegate is about to re-open it
     // on the same chip, so let it own the lifecycle. The command line's bot chip too.
     if (e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot')) return;
