@@ -46,19 +46,20 @@ import { flushSync } from 'svelte';
 const root = $state({ visible: false, statusMode: false, noGifs: false, messageType: false, bottom: '', teleporting: false });
 const rootEls = $state.raw({ root: null });
 let handlers = $state.raw(null);   // the app's bag for PickerPanel
-let onVisibility = null;
+const visibilityListeners = new Set();
 export function pickerRoot() { return root; }
 export function pickerEls() { return rootEls; }
 export function setPickerRootEl(el) { rootEls.root = el; }
 export function pickerHandlers() { return handlers; }
 export function setPickerHandlers(h) { handlers = h; }
-export function setPickerVisibilityHandler(fn) { onVisibility = fn; }
+/** Subscribe to visibility changes; returns the unsubscribe. */
+export function onPickerVisibility(fn) { visibilityListeners.add(fn); return () => visibilityListeners.delete(fn); }
 export function pickerVisible() { return root.visible; }
 export function setPickerVisible(on) {
     if (root.visible === !!on) return;
     root.visible = !!on;
     flushSync();
-    onVisibility?.(root.visible);
+    for (const fn of visibilityListeners) fn(root.visible);
 }
 export function setPickerBottom(px) { root.bottom = px || ''; }
 /** Swap the anchor classes; with `teleport` the move commits before the next transition. */

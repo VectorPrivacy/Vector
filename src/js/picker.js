@@ -23,7 +23,7 @@
 
 // The root is the component's; its visibility drives the Android back stack and dismisses
 // the shared tooltip on keyboard-driven closes (no mouse leaves, so no mouseleave).
-VectorSvelte.setPickerVisibilityHandler((visible) => {
+VectorSvelte.onPickerVisibility((visible) => {
     if (visible) {
         pushBack('emoji-picker', () => {
             VectorSvelte.setPickerVisible(false);
@@ -278,6 +278,8 @@ function closeEmojiPanel() {
     // Auto-save any in-progress pack edit before the panel disappears.
     if (_pc.open) closeEmojiPackCreator();
     VectorSvelte.setPickerVisible(false);
+    // A dialog-owned insert target ends with the panel; a reopen for the dialog sets it again.
+    _emojiPanelTarget = null;
     // The anchor classes outlive the exit: dropping them now retargets the
     // transform mid-flight and the panel leaves at an angle. Re-opening inside
     // the window must not have its own classes stripped by this timer.

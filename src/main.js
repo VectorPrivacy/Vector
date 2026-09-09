@@ -329,11 +329,7 @@ if (domAttachmentPanel) {
 function toggleAttachmentPanel() {
     if (!domAttachmentPanel.classList.contains('visible')) {
         // Close emoji panel if open
-        if (picker.classList.contains('visible')) {
-            picker.classList.remove('visible');
-            picker.style.bottom = '';
-            VectorSvelte.setEmojiIcon('smile');
-        }
+        if (VectorSvelte.pickerVisible()) closeEmojiPanel();
 
         // Display the attachment panel
         domAttachmentPanel.classList.add('visible');

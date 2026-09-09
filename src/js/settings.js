@@ -568,14 +568,11 @@ function openStatusDialog(cProfile) {
 
     // Card position tracks the panel: glide up while it's open, recentre when
     // it closes, whichever path closed it (close, outside tap, select).
-    const panelWatcher = new MutationObserver(() => {
-        dialog.patch({ panelOpen: picker.classList.contains('visible') });
-    });
-    panelWatcher.observe(picker, { attributes: true, attributeFilter: ['class'] });
+    const unwatchPanel = VectorSvelte.onPickerVisibility((open) => dialog.patch({ panelOpen: open }));
 
     const close = () => {
         if (dialog.closing()) return;
-        panelWatcher.disconnect();
+        unwatchPanel();
         _emojiPanelTarget = null;
         closeEmojiPanel();
         popBack('status-dialog');
@@ -588,7 +585,7 @@ function openStatusDialog(cProfile) {
         close,
         key: (e) => {
             if (e.key === 'Escape') {
-                if (picker.classList.contains('visible')) closeEmojiPanel();
+                if (VectorSvelte.pickerVisible()) closeEmojiPanel();
                 else close();
             }
         },
@@ -596,7 +593,7 @@ function openStatusDialog(cProfile) {
             // stopPropagation: the document-level click delegate would otherwise
             // run the panel's open/close toggle against this same click.
             e.stopPropagation();
-            if (picker.classList.contains('visible')) closeEmojiPanel();
+            if (VectorSvelte.pickerVisible()) closeEmojiPanel();
             else openEmojiPanelForStatus(insertIntoStatus);
         },
         save: () => { const v = input.value.trim(); close(); saveStatus(v); },
@@ -604,7 +601,7 @@ function openStatusDialog(cProfile) {
         backdrop: () => {
             // First outside tap dismisses the emoji panel (the document delegate
             // handles it); the next one dismisses the dialog.
-            if (picker.classList.contains('visible')) return;
+            if (VectorSvelte.pickerVisible()) return;
             close();
         },
     };
