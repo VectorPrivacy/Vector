@@ -198,8 +198,10 @@ function openEmojiPanelForStatus(onInsert) {
 function openEmojiPanel(e) {
     const isDefaultPanel = e.target === domChatMessageInputEmoji || domChatMessageInputEmoji.contains(e.target);
 
-    // Don't close if clicking inside the picker itself
-    if (picker.contains(e.target)) return;
+    // Don't close if clicking inside the picker itself. The path is read rather than
+    // the target's ancestry: a panel control that unmounts on click is detached by
+    // the time this document listener runs.
+    if (picker.contains(e.target) || e.composedPath().includes(picker)) return;
 
     // Open or Close the panel depending on it's state
     // `dmsg-react-trigger` is the synthetic class added by the floating
