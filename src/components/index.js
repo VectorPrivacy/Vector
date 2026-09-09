@@ -38,7 +38,7 @@ import PinsDrawer from './chat/PinsDrawer.svelte';
 import ModList from './moderation/ModList.svelte';
 import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
-import ModChrome from './moderation/ModChrome.svelte';
+import ModConsole from './moderation/ModConsole.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
 import InviteLinks from './community/InviteLinks.svelte';
 import AddRelayDialog from './settings/AddRelayDialog.svelte';
@@ -52,9 +52,14 @@ import WithdrawDialog from './miniapps/pivx/WithdrawDialog.svelte';
 import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
 export { attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
-export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog } from './lib/dialogs.svelte.js';
+export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
 import AccountRows from './people/AccountRows.svelte';
-import EditHistory from './chat/EditHistory.svelte';
+import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
+import InvitesScreen from './people/InvitesScreen.svelte';
+import QrOverlay from './ui/QrOverlay.svelte';
+import QrScanner from './ui/QrScanner.svelte';
+import StatusDialog from './ui/StatusDialog.svelte';
+import DowngradeBlock from './ui/DowngradeBlock.svelte';
 import LoginScreen from './auth/LoginScreen.svelte';
 import CredentialModal from './ui/CredentialModal.svelte';
 import MigrationOverlay from './ui/MigrationOverlay.svelte';
@@ -70,7 +75,7 @@ export { credentialState, openCredentialDialog, closeCredentialDialog, migration
 import NewChat from './people/NewChat.svelte';
 import CreateCommunity from './community/CreateCommunity.svelte';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
-export { setEditHistory, setEditHistoryBelow, clearEditHistory } from './lib/edithistory.svelte.js';
+export { editHistoryState, setEditHistory, setEditHistoryBelow, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 import MarketplacePanel from './marketplace/MarketplacePanel.svelte';
@@ -78,7 +83,7 @@ import AppDetailsPanel from './marketplace/AppDetailsPanel.svelte';
 export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms } from './lib/marketplace.svelte.js';
 export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
-import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress } from './lib/moderation.svelte.js';
+import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
 import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
@@ -113,7 +118,7 @@ export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCre
 export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { pinsState, setPins, setPinsOpen };
-export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress };
+export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
@@ -321,17 +326,12 @@ export function mountPinsDrawer(list, { h }) {
     return mount(PinsDrawer, { target: list, props: { h } });
 }
 
-/** Mount the moderation console's islands: list, filters, stats, and the renderless chrome. */
-export function mountModeration({ list, filters, stats, els, h }) {
-    list.replaceChildren(); filters.replaceChildren(); stats.replaceChildren();
-    mount(ModList, { target: list, props: { h } });
-    mount(ModFilters, { target: filters, props: {} });
-    mount(ModStats, { target: stats, props: {} });
-    const host = document.createElement('div'); host.hidden = true; document.body.appendChild(host);
-    mount(ModChrome, { target: host, props: { els, h } });
+/** Mount the moderation console onto the body (once); it renders its own overlay. */
+export function mountModConsole({ h }) {
+    return mount(ModConsole, { target: document.body, props: { h } });
 }
 
-/** Mount the policy designer into the console's Policies pane (#mod-policies-pane). */
+/** Mount the policy designer into the console's Policies pane. */
 export function mountPolicyDesigner(pane, { h }) {
     pane.replaceChildren();
     return mount(PolicyDesigner, { target: pane, props: { h } });
@@ -383,10 +383,35 @@ export function mountAccountRows(host, props) {
     return mount(AccountRows, { target: host, props });
 }
 
-/** Mount the edit-history popup's entries into `content` (#edit-history-content). */
-export function mountEditHistory(content, { h }) {
-    content.replaceChildren();
-    return mount(EditHistory, { target: content, props: { h } });
+/** Mount the edit-history popup onto the body (once); it renders when opened. */
+export function mountEditHistory({ h }) {
+    return mount(EditHistoryPopup, { target: document.body, props: { h } });
+}
+
+/** Mount the Invites screen into `container` (#invites). */
+export function mountInvites(container) {
+    container.replaceChildren();
+    return mount(InvitesScreen, { target: container, props: {} });
+}
+
+/** Mount the fullscreen QR overlay onto the body (once). */
+export function mountQrOverlay({ h }) {
+    return mount(QrOverlay, { target: document.body, props: { h } });
+}
+
+/** Mount the QR scanner onto the body (once); the video element is handed to `h.video`. */
+export function mountQrScanner({ h }) {
+    return mount(QrScanner, { target: document.body, props: { h } });
+}
+
+/** Mount the Status dialog onto the body (once); the composer host is handed to `h.composerHost`. */
+export function mountStatusDialog({ h }) {
+    return mount(StatusDialog, { target: document.body, props: { h } });
+}
+
+/** Mount the downgrade block onto the body (once); it renders when shown. */
+export function mountDowngradeBlock({ h }) {
+    return mount(DowngradeBlock, { target: document.body, props: { h } });
 }
 
 /** Mount the New Chat screen into `host` (#chat-new). */

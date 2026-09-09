@@ -486,17 +486,14 @@ async function askForStatus() {
     openStatusDialog(arrProfiles.find(a => a.mine));
 }
 
-/** Open the Status dialog prefilled with the current status. Emoji come from
- *  the shared Emoji Panel in status mode (GIFs hidden); the live row renders
- *  your avatar + the exact pill other users will see. While the panel is
- *  open the card glides to the upper third so both stay fully visible. */
 /** The Status field's mini composer: the chat composer module with the
- *  emoji-only grammar (inline emoji, no markdown/mentions). Lazy singleton —
- *  the dialog's DOM is permanent, so the instance is too. */
+ *  emoji-only grammar (inline emoji, no markdown/mentions). Lazy singleton in
+ *  the host the dialog hands over: the dialog is permanent, so the instance is too. */
 let _statusComposer = null;
+let _statusHost = null;
 function _ensureStatusComposer() {
     if (_statusComposer) return _statusComposer;
-    _statusComposer = createRichComposer(document.getElementById('status-input-host'), {
+    _statusComposer = createRichComposer(_statusHost, {
         placeholder: "What's happening?",
         emojiOnly: true,
         resolveEmoji: cmpResolvePackEmoji,
@@ -505,37 +502,55 @@ function _ensureStatusComposer() {
     return _statusComposer;
 }
 
+// The dialog's handlers belong to one open at a time; the component routes through here.
+let _statusSession = null;
+let _statusMounted = false;
+function _ensureStatusDialog() {
+    if (_statusMounted) return;
+    _statusMounted = true;
+    VectorSvelte.mountStatusDialog({
+        h: {
+            composerHost: (el) => { _statusHost = el; },
+            avatar: (src) => createAvatarImg(src, 34, false),
+            renderPreview: (node, text) => {
+                node.textContent = text || 'No status';
+                if (text) {
+                    twemojify(node);
+                    renderCustomEmojiShortcodes(node, equippedEmojiTags());
+                }
+            },
+            emoji: (e) => _statusSession?.emoji(e),
+            save: () => _statusSession?.save(),
+            clear: () => _statusSession?.clear(),
+            close: () => _statusSession?.close(),
+            backdrop: () => _statusSession?.backdrop(),
+            key: (e) => _statusSession?.key(e),
+        },
+    });
+    VectorSvelte.flushSync();
+}
+
+/** Open the Status dialog prefilled with the current status. Emoji come from
+ *  the shared Emoji Panel in status mode (GIFs hidden); the live row renders
+ *  your avatar + the exact pill other users will see. While the panel is
+ *  open the card glides to the upper third so both stay fully visible. */
 function openStatusDialog(cProfile) {
     const strCurrent = cProfile?.status?.title || '';
-    const overlay = document.getElementById('status-dialog');
+    _ensureStatusDialog();
     const input = _ensureStatusComposer();
-    const btnEmoji = document.getElementById('status-emoji-btn');
-    const btnSave = document.getElementById('status-save');
-    const btnClose = document.getElementById('status-dialog-close');
-    const btnClear = document.getElementById('status-clear');
-    const charCount = document.getElementById('status-char-count');
-    const preview = document.getElementById('status-preview');
-    const previewText = document.getElementById('status-preview-text');
-    const avatarWrap = document.getElementById('status-preview-avatar');
-
-    avatarWrap.innerHTML = '';
-    avatarWrap.appendChild(createAvatarImg(getProfileAvatarSrc(cProfile), 34, false));
+    const dialog = VectorSvelte.statusDialog;
 
     const updatePreview = () => {
-        // Statuses are one line, 120 chars — the composer itself has no
+        // Statuses are one line, 120 chars: the composer itself has no
         // maxlength, so sanitize the model on every edit.
         const clean = input.value.replace(/\n/g, ' ').slice(0, 120);
         if (clean !== input.value) input.value = clean;
         const txt = clean.trim();
-        preview.classList.toggle('status-preview-empty', !txt);
-        previewText.textContent = txt || 'No status';
-        if (txt) {
-            twemojify(previewText);
-            renderCustomEmojiShortcodes(previewText, equippedEmojiTags());
-        }
         const remaining = 120 - clean.length;
-        charCount.textContent = remaining <= 30 ? String(remaining) : '';
-        charCount.classList.toggle('status-char-low', remaining <= 10);
+        dialog.patch({
+            text: txt, empty: !txt,
+            count: remaining <= 30 ? String(remaining) : '', low: remaining <= 10,
+        });
     };
 
     const insertIntoStatus = (text) => {
@@ -552,76 +567,63 @@ function openStatusDialog(cProfile) {
     };
 
     // Card position tracks the panel: glide up while it's open, recentre when
-    // it closes — regardless of WHICH path closed it (✕, outside tap, select).
+    // it closes, whichever path closed it (close, outside tap, select).
     const panelWatcher = new MutationObserver(() => {
-        overlay.classList.toggle('panel-open', picker.classList.contains('visible'));
+        dialog.patch({ panelOpen: picker.classList.contains('visible') });
     });
     panelWatcher.observe(picker, { attributes: true, attributeFilter: ['class'] });
 
     const close = () => {
-        if (overlay.classList.contains('closing')) return;
+        if (dialog.closing()) return;
         panelWatcher.disconnect();
         _emojiPanelTarget = null;
         closeEmojiPanel();
-        document.removeEventListener('keydown', onKey);
         popBack('status-dialog');
-        // Mirror the open pop, then actually hide (matches the 0.15s animation)
-        overlay.classList.add('closing');
-        overlay._closeTimer = setTimeout(() => {
-            overlay.classList.remove('active', 'closing', 'panel-open');
-            overlay.querySelector('.status-dialog-card').classList.remove('pop-in');
-        }, 160);
+        _statusSession = null;
+        dialog.patch({ panelOpen: false });
+        dialog.close();
     };
 
-    const onKey = (e) => {
-        if (e.key === 'Escape') {
+    _statusSession = {
+        close,
+        key: (e) => {
+            if (e.key === 'Escape') {
+                if (picker.classList.contains('visible')) closeEmojiPanel();
+                else close();
+            }
+        },
+        emoji: (e) => {
+            // stopPropagation: the document-level click delegate would otherwise
+            // run the panel's open/close toggle against this same click.
+            e.stopPropagation();
             if (picker.classList.contains('visible')) closeEmojiPanel();
-            else close();
-        }
+            else openEmojiPanelForStatus(insertIntoStatus);
+        },
+        save: () => { const v = input.value.trim(); close(); saveStatus(v); },
+        clear: () => { close(); saveStatus(''); },
+        backdrop: () => {
+            // First outside tap dismisses the emoji panel (the document delegate
+            // handles it); the next one dismisses the dialog.
+            if (picker.classList.contains('visible')) return;
+            close();
+        },
     };
 
     input.value = strCurrent;
-    btnClear.classList.toggle('hidden', !strCurrent);
-    updatePreview();
-
     input.oninput = updatePreview;
-    // Enter saves — statuses have no second line to go to.
+    // Enter saves: statuses have no second line to go to.
     input.onkeydown = (e) => {
         if (e.key === 'Enter') {
             e.preventDefault();
-            btnSave.click();
+            _statusSession?.save();
         }
     };
-    btnEmoji.onclick = (e) => {
-        // stopPropagation: the document-level click delegate would otherwise
-        // run the panel's open/close toggle against this same click.
-        e.stopPropagation();
-        if (picker.classList.contains('visible')) closeEmojiPanel();
-        else openEmojiPanelForStatus(insertIntoStatus);
-    };
-    btnSave.onclick = () => { const v = input.value.trim(); close(); saveStatus(v); };
-    btnClear.onclick = () => { close(); saveStatus(''); };
-    btnClose.onclick = close;
-    overlay.onclick = (e) => {
-        if (e.target !== overlay) return;
-        // First outside tap dismisses the emoji panel (the document delegate
-        // handles it); the next one dismisses the dialog.
-        if (picker.classList.contains('visible')) return;
-        close();
-    };
 
-    // Cancel any in-flight close, then pop in: the animation class lands
-    // AFTER the overlay renders, because WebKit won't start one declared on
-    // a subtree emerging from display:none.
-    clearTimeout(overlay._closeTimer);
-    overlay.classList.remove('closing');
-    const card = overlay.querySelector('.status-dialog-card');
-    card.classList.remove('pop-in');
-    overlay.classList.add('active');
-    void card.offsetWidth;
-    card.classList.add('pop-in');
-    document.addEventListener('keydown', onKey);
+    dialog.open({ avatarSrc: getProfileAvatarSrc(cProfile), clearHidden: !strCurrent, panelOpen: false });
+    updatePreview();
     pushBack('status-dialog', close);
+    // The composer sits inside the overlay; it can take focus only once that has rendered.
+    VectorSvelte.flushSync();
     if (!platformFeatures.is_mobile) input.focus();
 }
 

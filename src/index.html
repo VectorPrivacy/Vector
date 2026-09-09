@@ -91,40 +91,6 @@
   <body>
     <div id="popup-container" class="popup-container"></div>
 
-    <!-- Downgrade block. Deliberately has no dismiss path: continuing would
-         write an older schema over a newer database. -->
-    <div id="downgrade-block" class="downgrade-block" style="display: none;">
-      <div class="downgrade-card">
-        <img class="downgrade-icon" src="./icons/vector_warning.svg" alt="">
-        <h2>Vector can't open this account</h2>
-        <p>
-          Your data was last used with a newer version of Vector. Opening it with this
-          older build would damage your message history.
-        </p>
-        <div class="downgrade-versions">
-          <div class="downgrade-version">
-            <span>This build</span>
-            <strong id="downgrade-current"></strong>
-          </div>
-          <div class="downgrade-versions-sep"></div>
-          <div class="downgrade-version">
-            <span>Your data needs</span>
-            <strong id="downgrade-required"></strong>
-          </div>
-        </div>
-        <p class="downgrade-reassure">
-          Nothing has been lost. Your messages are intact and will open again on the newer version.
-        </p>
-        <button id="downgrade-get-latest" class="btn accept-btn btn-bounce">Get the latest version</button>
-        <button id="downgrade-quit" class="cancel-btn">Quit Vector</button>
-      </div>
-    </div>
-
-    <!-- Edit History Popup -->
-    <div id="edit-history-popup" class="edit-history-popup" style="display: none;">
-      <div id="edit-history-content" class="edit-history-content"></div>
-    </div>
-
     <!-- Pack Details Modal — opened via deep link (vector://emojis/pack/<naddr>
          or https://vectorapp.io/emojis/pack/<naddr>) and from in-app entry
          points like the share-pack flow. -->
@@ -322,38 +288,7 @@
       <div id="create-group" class="create-group-container" style="display: none;"></div>
       <div id="settings" style="display: none;"></div>
 
-      <div id="invites" style="display: none;">
-        <div class="invites-container">
-          <div class="invites-header">
-            <span class="icon icon-gift invites-main-icon"></span>
-            <h1 class="invites-title">Invite Code</h1>
-          </div>
-          
-          <div class="invites-content">
-            <p class="invites-description">
-              Invite friends to Vector and unlock exclusive badges, earn additional rewards, and help grow the community!
-            </p>
-            
-            <div class="invite-code-section">
-              <h3 class="invite-code-label">Your Invite Code</h3>
-              <div class="invite-code-container">
-                <span id="invite-code" class="invite-code">Loading...</span>
-                <button id="invite-code-copy" class="btn invite-code-copy-btn">
-                  <span class="icon icon-copy"></span>
-                </button>
-              </div>
-              
-              <p class="invite-code-hint">Share this invite code with friends.</p>
-            </div>
-            <a id="invite-code-twitter" class="invite-code-twitter-link" title="Post on Twitter (X)">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
-              </svg>
-              Share on Twitter (X)
-            </a>
-          </div>
-        </div>
-      </div>
+      <div id="invites" style="display: none;"></div>
 
       <!-- Doubles as the widescreen rail: the tab buttons stay as-is (navbarSelect
            drives them either way) and the head/spacer/collapse/account children are
@@ -438,116 +373,6 @@
   
   <!-- Global tooltip element -->
   <div id="global-tooltip" class="global-tooltip"></div>
-
-  <!-- Fullscreen QR overlay (profile banner QR button, bunker login QR) -->
-  <div id="qr-overlay" class="qr-overlay">
-    <div class="qr-overlay-card">
-      <div class="qr-overlay-tile">
-        <div id="qr-overlay-full" aria-label="QR code"></div>
-      </div>
-      <button id="qr-overlay-close" class="qr-overlay-close">Close</button>
-    </div>
-  </div>
-
-  <!-- Status dialog: compact card, live avatar+pill preview, shared emoji panel -->
-  <div id="status-dialog" class="status-dialog-overlay">
-    <div class="status-dialog-card">
-      <div class="status-dialog-head">
-        <span class="status-dialog-label">Status</span>
-        <button id="status-dialog-close" class="status-dialog-x" aria-label="Close">&#x2715;</button>
-      </div>
-      <div class="status-live-row">
-        <div id="status-preview-avatar" class="status-preview-avatar"></div>
-        <div class="status-preview" id="status-preview">
-          <span class="status-preview-dot"></span>
-          <span id="status-preview-text"></span>
-        </div>
-      </div>
-      <div class="status-input-row">
-        <div id="status-input-host" class="status-input-host"></div>
-        <span id="status-char-count" class="status-char-count"></span>
-        <button id="status-emoji-btn" aria-label="Add emoji"><span class="icon icon-smile-face"></span></button>
-      </div>
-      <div class="status-dialog-actions">
-        <button id="status-clear" class="status-btn-clear">Clear Status</button>
-        <button id="status-save" class="status-btn-save">Save</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Community Moderation console: raid triage + the two containment verbs
-       (banlist edition, key rotation). Owner/BAN-holders only, Concord v2 only. -->
-  <div id="mod-overlay" class="mod-overlay">
-    <div class="mod-card">
-      <div class="mod-head">
-        <div class="mod-head-titles">
-          <span class="mod-label">Moderation</span>
-          <h3 id="mod-community-name" class="mod-title cutoff"></h3>
-        </div>
-        <span id="mod-epoch" class="mod-epoch"></span>
-        <button id="mod-close" class="mod-x" aria-label="Close">&#x2715;</button>
-      </div>
-
-      <div id="mod-alert" class="mod-alert" style="display: none;">
-        <span class="icon icon-warning mod-alert-icon"></span>
-        <div class="mod-alert-text">
-          <strong id="mod-alert-title"></strong>
-          <span id="mod-alert-body"></span>
-        </div>
-      </div>
-
-
-      <div class="mod-tabs" role="tablist">
-        <button id="mod-tab-members" class="mod-tab active" role="tab">Members</button>
-        <button id="mod-tab-policies" class="mod-tab" role="tab">Policies</button>
-      </div>
-
-      <div id="mod-policies-pane" class="mod-policies" style="display: none;"></div>
-
-      <div id="mod-members-pane">
-      <div id="mod-stats" class="mod-stats"></div>
-      <p class="mod-explain">Everyone is kept by default. Untick someone to cut them off at the next rotation.</p>
-      <div class="mod-toolbar">
-        <div class="mod-search">
-          <span class="icon icon-search mod-search-icon"></span>
-          <input id="mod-search-input" placeholder="Search members..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-        </div>
-        <div id="mod-filters" class="mod-filters"></div>
-      </div>
-
-      <div id="mod-list" class="mod-list"></div>
-      </div>
-
-      <div id="mod-foot" class="mod-foot">
-        <div class="mod-tally">
-          <span class="mod-tally-keep"><b id="mod-tally-keep">0</b> staying</span>
-          <span class="mod-tally-cut"><b id="mod-tally-cut">0</b> removing</span>
-          <span id="mod-banlist" class="mod-tally-ban"></span>
-        </div>
-        <div class="mod-actions">
-          <button id="mod-revoke-invites" class="mod-btn">
-            <span class="icon icon-locked"></span><span class="mod-btn-label">Revoke invites</span>
-          </button>
-          <button id="mod-rotate" class="mod-btn">
-            <span class="icon icon-refresh"></span><span class="mod-btn-label">Rotate keys</span>
-          </button>
-          <button id="mod-ban-rotate" class="mod-btn mod-btn-danger">
-            <span class="icon icon-x-user"></span><span class="mod-btn-label">Ban &amp; rotate</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Fullscreen QR scanner (mobile; camera via getUserMedia, decode via vendored jsQR) -->
-  <div id="qr-scanner" class="qr-scanner">
-    <video id="qr-scanner-video" class="qr-scanner-video" autoplay playsinline muted></video>
-    <div class="qr-scanner-veil">
-      <div class="qr-scanner-window"></div>
-      <span class="qr-scanner-hint">Point at a Vector QR code</span>
-    </div>
-    <button id="qr-scanner-cancel" class="qr-overlay-close qr-scanner-cancel">Cancel</button>
-  </div>
 
   <!-- Multi-account: My Profile dropdown (in-app) -->
   <div id="profile-switcher-backdrop" class="profile-switcher-backdrop"></div>

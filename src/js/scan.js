@@ -5,6 +5,9 @@
 let qrScanStream = null;
 let qrScanRafId = 0;
 let qrScanToastGate = false;
+// The scanner's video element, handed over by the component once it mounts.
+let qrScanVideo = null;
+VectorSvelte.mountQrScanner({ h: { video: (el) => { qrScanVideo = el; }, close: () => closeQrScanner() } });
 
 /**
  * Pick the primary rear camera. Android exposes every lens (macro, ultra-wide,
@@ -29,7 +32,7 @@ const QR_SCAN_RESOLUTION = { width: { ideal: 1280 }, height: { ideal: 720 } };
 
 async function openQrScanner() {
     if (qrScanStream) return;
-    const video = document.getElementById('qr-scanner-video');
+    const video = qrScanVideo;
     try {
         qrScanStream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: 'environment', ...QR_SCAN_RESOLUTION },
@@ -68,13 +71,11 @@ async function openQrScanner() {
     }
     video.srcObject = qrScanStream;
     // Reveal only once a frame has actually been presented
-    const reveal = () => video.classList.add('live');
+    const reveal = () => VectorSvelte.setQrScanner({ live: true });
     if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(reveal);
     else video.addEventListener('loadeddata', reveal, { once: true });
     video.play().catch(() => {});
-    document.getElementById('qr-scanner').classList.add('active');
-    document.getElementById('qr-scanner-cancel').onclick = closeQrScanner;
-    document.addEventListener('keydown', handleQrScannerEscape);
+    VectorSvelte.setQrScanner({ active: true });
     pushBack('qr-scanner', closeQrScanner);
 
     const canvas = document.createElement('canvas');
@@ -106,16 +107,9 @@ function closeQrScanner() {
         for (const track of qrScanStream.getTracks()) track.stop();
         qrScanStream = null;
     }
-    const video = document.getElementById('qr-scanner-video');
-    video.srcObject = null;
-    video.classList.remove('live');
-    document.getElementById('qr-scanner').classList.remove('active');
-    document.removeEventListener('keydown', handleQrScannerEscape);
+    if (qrScanVideo) qrScanVideo.srcObject = null;
+    VectorSvelte.setQrScanner({ active: false, live: false });
     popBack('qr-scanner');
-}
-
-function handleQrScannerEscape(e) {
-    if (e.key === 'Escape') closeQrScanner();
 }
 
 /**

@@ -2546,22 +2546,4 @@ document.addEventListener('click', (e) => {
             closeAttachmentPanel();
         }
     }
-
-    // Close edit history popup when clicking outside of it
-    const editHistoryPopup = document.getElementById('edit-history-popup');
-    if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
-        if (!editHistoryPopup.contains(e.target) && !e.target.classList.contains('dmsg-edited')) {
-            hideEditHistory();
-        }
-    }
-});
-
-// Close edit history popup on Escape key
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-        const editHistoryPopup = document.getElementById('edit-history-popup');
-        if (editHistoryPopup && editHistoryPopup.style.display !== 'none') {
-            hideEditHistory();
-        }
-    }
 });

@@ -1,7 +1,7 @@
 // The moderation console's state: the backend's intel for one community, the keep set
 // (ticked = kept; the unticked set is what a rotation cuts), the list filter and query,
 // and the busy lock during a publish.
-const m = $state({ communityId: null, loading: false, error: '', filter: 'all', query: '', busy: false, busyTitle: '', busyBody: '' });
+const m = $state({ communityId: null, loading: false, error: '', filter: 'all', query: '', busy: false, busyTitle: '', busyBody: '', tab: 'members' });
 let intel = $state.raw(null);
 let keep = $state.raw(new Set());
 
@@ -9,7 +9,7 @@ export function modState() { return m; }
 export function modIntel() { return intel; }
 export function modKeep() { return keep; }
 export function modOpen(communityId) {
-    m.communityId = communityId; m.loading = true; m.error = ''; m.filter = 'all'; m.query = ''; m.busy = false;
+    m.communityId = communityId; m.loading = true; m.error = ''; m.filter = 'all'; m.query = ''; m.busy = false; m.tab = 'members';
     intel = null; keep = new Set();
 }
 export function modSetIntel(next, keepSet) { intel = next; keep = keepSet; m.loading = false; m.error = ''; }
@@ -24,3 +24,5 @@ export function modToggleKeep(npub) {
 }
 export function modSetBusy(busy, title, body) { m.busy = !!busy; m.busyTitle = title || ''; m.busyBody = body || ''; }
 export function modSetProgress(title, body) { if (m.busy) { m.busyTitle = title; m.busyBody = body; } }
+/** The two faces of the console: who is here, and what the rules are. */
+export function modSetTab(tab) { m.tab = tab; }

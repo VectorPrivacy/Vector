@@ -119,9 +119,6 @@ function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
  * @param {Object} info - vector-core's DowngradeBlock: { db_schema, supported_schema, last_app_version }
  */
 async function showDowngradeBlock(info) {
-    const domBlock = document.getElementById('downgrade-block');
-    if (!domBlock) return;
-
     const format = (v) => (typeof parseVersion === 'function' ? parseVersion(v).display : `v${v}`);
 
     let current = 'This build';
@@ -135,20 +132,20 @@ async function showDowngradeBlock(info) {
         ? format(info.last_app_version)
         : 'A newer version';
 
-    document.getElementById('downgrade-current').textContent = current;
-    document.getElementById('downgrade-required').textContent = required;
-
-    document.getElementById('downgrade-get-latest').onclick = () => openUrl('https://vectorapp.io');
-    document.getElementById('downgrade-quit').onclick = async () => {
-        // The process plugin is desktop-only, so this is accessed lazily.
-        try {
-            await window.__TAURI__.process.exit(0);
-        } catch (e) {
-            window.close();
-        }
-    };
-
-    domBlock.style.display = 'flex';
+    VectorSvelte.mountDowngradeBlock({
+        h: {
+            getLatest: () => openUrl('https://vectorapp.io'),
+            quit: async () => {
+                // The process plugin is desktop-only, so this is accessed lazily.
+                try {
+                    await window.__TAURI__.process.exit(0);
+                } catch (e) {
+                    window.close();
+                }
+            },
+        },
+    });
+    VectorSvelte.showDowngradeBlock(current, required);
 }
 
 let popupMounted = false;

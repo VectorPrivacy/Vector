@@ -30,41 +30,21 @@ function renderQrInto(containerEl, text, opts = {}) {
  * Fullscreen QR overlay, shared by the Profile QR and the bunker login QR.
  * Closes via the button, a backdrop tap, Escape, or Android hardware back.
  */
+let qrOverlayMounted = false;
 function openQrOverlay(text) {
-    if (!text) return;
-    if (!renderQrInto(document.getElementById('qr-overlay-full'), text)) return;
-    const overlay = document.getElementById('qr-overlay');
-    // Cancel any in-flight close, then pop in — the animation class lands
-    // AFTER the overlay renders (WebKit won't start one declared on a
-    // subtree emerging from display:none).
-    clearTimeout(overlay._closeTimer);
-    overlay.classList.remove('closing');
-    const card = overlay.querySelector('.qr-overlay-card');
-    card.classList.remove('pop-in');
-    overlay.classList.add('active');
-    void card.offsetWidth;
-    card.classList.add('pop-in');
-    overlay.onclick = (e) => { if (e.target === overlay) closeQrOverlay(); };
-    document.getElementById('qr-overlay-close').onclick = closeQrOverlay;
-    document.addEventListener('keydown', handleQrOverlayEscape);
+    if (!text || !window.qrcode) return;
+    if (!qrOverlayMounted) {
+        qrOverlayMounted = true;
+        VectorSvelte.mountQrOverlay({ h: { renderQr: renderQrInto, close: closeQrOverlay } });
+    }
+    VectorSvelte.qrOverlay.open({ text });
     pushBack('qr-overlay', closeQrOverlay);
 }
 
 function closeQrOverlay() {
-    const overlay = document.getElementById('qr-overlay');
-    if (overlay.classList.contains('closing')) return;
-    document.removeEventListener('keydown', handleQrOverlayEscape);
+    if (VectorSvelte.qrOverlay.closing()) return;
     popBack('qr-overlay');
-    // Mirror the open pop, then actually hide (matches the 0.15s animation)
-    overlay.classList.add('closing');
-    overlay._closeTimer = setTimeout(() => {
-        overlay.classList.remove('active', 'closing');
-        overlay.querySelector('.qr-overlay-card').classList.remove('pop-in');
-    }, 160);
-}
-
-function handleQrOverlayEscape(e) {
-    if (e.key === 'Escape') closeQrOverlay();
+    VectorSvelte.qrOverlay.close();
 }
 
 /**

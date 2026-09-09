@@ -1126,12 +1126,8 @@ function mergeEmojiTags(...lists) {
 let strCurrentEditHistoryMsgId = '';
 
 function showEditHistory(messageId, targetElement) {
-    const popup = document.getElementById('edit-history-popup');
-    const content = document.getElementById('edit-history-content');
-    if (!popup || !content) return;
-
     // If clicking the same message that's already open, ignore
-    if (strCurrentEditHistoryMsgId === messageId && popup.style.display !== 'none') {
+    if (strCurrentEditHistoryMsgId === messageId && VectorSvelte.editHistoryState().open) {
         return;
     }
 
@@ -1152,52 +1148,17 @@ function showEditHistory(messageId, targetElement) {
     // picker/autocomplete resolve against.
     editHistoryEnsureMounted();
     VectorSvelte.setEditHistory(messageId, msg.edit_history, mergeEmojiTags(msg.emoji_tags, equippedEmojiTags()));
-    VectorSvelte.flushSync();
 
-    // Find the message bubble (p element) for positioning
+    // The popup places itself against the bubble, above or below depending on room.
     const msgBubble = targetElement.closest('.dmsg');
     const rect = msgBubble ? msgBubble.getBoundingClientRect() : targetElement.getBoundingClientRect();
-
-    // Reset position and show popup to measure its actual dimensions
-    popup.style.top = '0';
-    popup.style.left = '0';
-    popup.style.visibility = 'hidden';
-    popup.style.display = 'block';
-
-    // Force layout recalculation then measure
-    const popupHeight = popup.getBoundingClientRect().height;
-    const popupWidth = popup.getBoundingClientRect().width;
-
-    // Position above or below the bubble depending on space
-    let top = rect.top - popupHeight - 4;
-    const showBelow = top < 10;
-    if (showBelow) {
-        top = rect.bottom + 4;
-    }
-
-    // Above: latest (bottom) fades first, oldest (top) last; below: the reverse.
-    VectorSvelte.setEditHistoryBelow(showBelow);
-
-    // Align horizontally with the bubble edge, keep within viewport
-    let left = rect.left;
-    left = Math.max(10, Math.min(left, window.innerWidth - popupWidth - 10));
-
-    popup.style.left = `${left}px`;
-    popup.style.top = `${top}px`;
-    popup.style.visibility = 'visible';
-
-    // Scroll to show the current (latest) entry
-    content.scrollTop = content.scrollHeight;
+    VectorSvelte.openEditHistory({ top: rect.top, bottom: rect.bottom, left: rect.left });
 }
 
 /**
  * Hide the edit history popup
  */
 function hideEditHistory() {
-    const popup = document.getElementById('edit-history-popup');
-    if (popup) {
-        popup.style.display = 'none';
-    }
     strCurrentEditHistoryMsgId = '';
     VectorSvelte.clearEditHistory();
 }
@@ -1206,8 +1167,11 @@ let editHistoryMounted = false;
 function editHistoryEnsureMounted() {
     if (editHistoryMounted) return;
     editHistoryMounted = true;
-    VectorSvelte.mountEditHistory(document.getElementById('edit-history-content'), {
-        h: { renderEmoji: (node, tags) => { renderCustomEmojiShortcodes(node, tags); twemojify(node); } },
+    VectorSvelte.mountEditHistory({
+        h: {
+            renderEmoji: (node, tags) => { renderCustomEmojiShortcodes(node, tags); twemojify(node); },
+            hide: hideEditHistory,
+        },
     });
 }
 

@@ -46,7 +46,7 @@ let polMounted = false;
 function polEnsureMounted() {
     if (polMounted) return;
     polMounted = true;
-    VectorSvelte.mountPolicyDesigner(document.getElementById('mod-policies-pane'), {
+    VectorSvelte.mountPolicyDesigner(modPoliciesPane, {
         h: {
             strictness: STRICTNESS,
             parse: polParse,

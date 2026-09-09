@@ -10,50 +10,29 @@
 // selection is the thing worth getting right: protected and trusted members start
 // ticked, convicted ones start clear.
 
-const domModOverlay = document.getElementById('mod-overlay');
-const domModCard = domModOverlay.querySelector('.mod-card');
-const domModName = document.getElementById('mod-community-name');
-const domModEpoch = document.getElementById('mod-epoch');
-const domModClose = document.getElementById('mod-close');
-const domModAlert = document.getElementById('mod-alert');
-const domModAlertTitle = document.getElementById('mod-alert-title');
-const domModAlertBody = document.getElementById('mod-alert-body');
-const domModSearch = document.getElementById('mod-search-input');
-const domModFilters = document.getElementById('mod-filters');
-const domModList = document.getElementById('mod-list');
-const domModTallyKeep = document.getElementById('mod-tally-keep');
-const domModTallyCut = document.getElementById('mod-tally-cut');
-const domModBanlist = document.getElementById('mod-banlist');
-const domModRevoke = document.getElementById('mod-revoke-invites');
-const domModRotate = document.getElementById('mod-rotate');
-const domModBanRotate = document.getElementById('mod-ban-rotate');
-
 // The console's state lives in lib/moderation.svelte.js; this side fetches and publishes.
 const modCommunityId = () => VectorSvelte.modState().communityId;
 const modIntel = () => VectorSvelte.modIntel();
 const modKeep = () => VectorSvelte.modKeep();
 
-let modIslandsMounted = false;
-function modEnsureIslands() {
-    if (modIslandsMounted) return;
-    modIslandsMounted = true;
-    VectorSvelte.mountModeration({
-        list: domModList, filters: domModFilters, stats: document.getElementById('mod-stats'),
-        els: {
-            card: domModCard, name: domModName, epoch: domModEpoch, alert: domModAlert, alertTitle: domModAlertTitle,
-            alertBody: domModAlertBody, tallyKeep: domModTallyKeep, tallyCut: domModTallyCut, banlist: domModBanlist,
-            revoke: domModRevoke, revokeLabel: domModRevoke.querySelector('.mod-btn-label'),
-            rotate: domModRotate, rotateLabel: domModRotate.querySelector('.mod-btn-label'),
-            banRotate: domModBanRotate, banRotateLabel: domModBanRotate.querySelector('.mod-btn-label'), close: domModClose,
-        },
-        h: {
-            ago: modAgo,
-            displayName: modDisplayName,
-            avatarSrc: (npub) => { const p = arrProfiles.find(x => x.id === npub); return p ? getProfileAvatarSrc(p) : null; },
-            createPlaceholderAvatar,
-        },
-    });
-}
+// The Policies pane's host, handed over by the console once it mounts; the designer
+// mounts into it on the tab's first open.
+let modPoliciesPane = null;
+
+VectorSvelte.mountModConsole({
+    h: {
+        ago: modAgo,
+        displayName: modDisplayName,
+        avatarSrc: (npub) => { const p = arrProfiles.find(x => x.id === npub); return p ? getProfileAvatarSrc(p) : null; },
+        createPlaceholderAvatar,
+        policiesPane: (el) => { modPoliciesPane = el; },
+        showTab: (which) => modShowTab(which),
+        close: () => closeModerationPanel(),
+        revoke: () => modRevokeInvites(),
+        rotate: () => modRotate(),
+        banRotate: () => modBanRotate(),
+    },
+});
 
 // Two groups that always sum to Everyone, named after what happens to them rather than
 // after the machinery. There is deliberately no "Suspects" filter: the verdict starts
@@ -85,22 +64,9 @@ function modDisplayName(npub) {
  */
 async function openModerationPanel(communityId) {
     if (!communityId) return;
-    modEnsureIslands();
     VectorSvelte.modOpen(communityId);
     VectorSvelte.polResetChannels();
-    modShowTab('members');
-    const tm = document.getElementById('mod-tab-members');
-    const tp = document.getElementById('mod-tab-policies');
-    if (tm) tm.onclick = () => modShowTab('members');
-    if (tp) tp.onclick = () => modShowTab('policies');
-    domModSearch.value = '';
-
-    domModOverlay.classList.remove('closing');
-    domModCard.classList.remove('pop-in');
-    domModOverlay.classList.add('active');
-    void domModCard.offsetWidth;
-    domModCard.classList.add('pop-in');
-    document.addEventListener('keydown', modEscape);
+    VectorSvelte.modOverlay.open({});
     pushBack('mod-overlay', closeModerationPanel);
     await modFetch(communityId);
 }
@@ -122,21 +88,9 @@ async function modFetch(communityId) {
 
 /// The two faces of the console: who is here, and what the rules are.
 function modShowTab(which) {
-    const members = which === 'members';
-    document.getElementById('mod-tab-members')?.classList.toggle('active', members);
-    document.getElementById('mod-tab-policies')?.classList.toggle('active', !members);
-    const pane = document.getElementById('mod-members-pane');
-    if (pane) pane.style.display = members ? '' : 'none';
-    const foot = document.getElementById('mod-foot');
-    // The removal actions belong to the member list; hiding them on the
-    // Policies tab keeps "edit a rule" and "remove people" from sharing a
-    // footer.
-    if (foot) foot.style.display = members ? '' : 'none';
-    const pol = document.getElementById('mod-policies-pane');
-    if (pol) pol.style.display = members ? 'none' : '';
-    const explain = document.querySelector('.mod-explain');
-    if (explain) explain.style.display = members ? '' : 'none';
-    if (!members && window.openPolicyDesigner) window.openPolicyDesigner(modCommunityId());
+    VectorSvelte.modSetTab(which);
+    const communityId = modCommunityId();
+    if (which === 'policies' && communityId && window.openPolicyDesigner) window.openPolicyDesigner(communityId);
 }
 
 /// The console is opened DURING a raid, and its intel was a one-shot read: the
@@ -220,21 +174,12 @@ async function modRefresh(communityId) {
 }
 
 function closeModerationPanel() {
-    if (domModOverlay.classList.contains('closing')) return;
+    if (VectorSvelte.modOverlay.closing()) return;
     if (VectorSvelte.modState().busy) return;
-    document.removeEventListener('keydown', modEscape);
     popBack('mod-overlay');
     modStopRefresh();
     VectorSvelte.modOpen(null);
-    domModOverlay.classList.add('closing');
-    domModOverlay._closeTimer = setTimeout(() => {
-        domModOverlay.classList.remove('active', 'closing');
-        domModCard.classList.remove('pop-in');
-    }, 160);
-}
-
-function modEscape(e) {
-    if (e.key === 'Escape') closeModerationPanel();
+    VectorSvelte.modOverlay.close();
 }
 
 /** Paint the header, the raid banner and the list from a freshly-read snapshot. */
@@ -265,11 +210,7 @@ window.__TAURI__.event.listen('community_purge_progress', (e) => {
     VectorSvelte.modSetProgress(`Removing ${p.done}/${p.total}`, ` ${pct}% \u2014 leave this open until it finishes.`);
 });
 
-domModClose.onclick = closeModerationPanel;
-domModOverlay.onclick = (e) => { if (e.target === domModOverlay) closeModerationPanel(); };
-domModSearch.oninput = () => VectorSvelte.modSetQuery(domModSearch.value);
-
-domModRevoke.onclick = async () => {
+async function modRevokeInvites() {
     const n = modIntel().invites.length;
     const ok = await popupConfirm(
         'Revoke every invite link',
@@ -286,9 +227,9 @@ domModRevoke.onclick = async () => {
         modSetBusy(false);
         await popupConfirm("Couldn't revoke", escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
-};
+}
 
-domModRotate.onclick = async () => {
+async function modRotate() {
     const cut = modCutList();
     // A rotation with links still live buys minutes: the same holder walks back in.
     const live = modIntel().invites.length;
@@ -317,9 +258,9 @@ domModRotate.onclick = async () => {
         modSetBusy(false);
         await popupConfirm("Couldn't complete the removal", escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
-};
+}
 
-domModBanRotate.onclick = async () => {
+async function modBanRotate() {
     const cut = modCutList();
     if (!cut.length) return;
     const ok = await popupConfirm(
@@ -357,7 +298,7 @@ domModBanRotate.onclick = async () => {
     modSetBusy(false);
     await modReload();
     refreshCommunityMemberCount(modCommunityId(), true);
-};
+}
 
 /// Member-supplied text (an invite label) never reaches innerHTML unescaped.
 function modEscapeText(s) {

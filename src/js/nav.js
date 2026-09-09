@@ -106,6 +106,13 @@ function openSettings() {
     }
 }
 
+let invitesMounted = false;
+function invitesEnsureMounted() {
+    if (invitesMounted) return;
+    invitesMounted = true;
+    VectorSvelte.mountInvites(domInvites);
+}
+
 async function openInvites() {
     pushBack('invites', () => openChatlist());
     navbarSelect('invites-btn');
@@ -121,37 +128,13 @@ async function openInvites() {
     previousChatBeforeProfile = ""; // Clear when navigating away
 
     // Fetch and display the invite code
-    const inviteCodeElement = document.getElementById('invite-code');
-    inviteCodeElement.textContent = 'Loading';
-    
+    invitesEnsureMounted();
+    VectorSvelte.setInvites({ phase: 'loading', code: '', xUrl: '' });
     try {
         const inviteCode = await invoke('get_or_create_invite_code');
-        inviteCodeElement.textContent = inviteCode;
-        document.getElementById('invite-code-twitter').href = buildXIntentUrl(inviteCode);
-        
-        // Add invite code copy functionality
-        const copyBtn = document.getElementById('invite-code-copy');
-        if (copyBtn) {
-            // Remove any existing listeners to prevent duplicates
-            copyBtn.replaceWith(copyBtn.cloneNode(true));
-            const newCopyBtn = document.getElementById('invite-code-copy');
-            
-            newCopyBtn.addEventListener('click', (e) => {
-                if (inviteCode && inviteCode !== 'Loading...' && inviteCode !== 'Error loading code') {
-                    navigator.clipboard.writeText(inviteCode).then(() => {
-                        const btn = e.target.closest('.invite-code-copy-btn');
-                        if (btn) {
-                            btn.innerHTML = '<span class="icon icon-check"></span>';
-                            setTimeout(() => {
-                                btn.innerHTML = '<span class="icon icon-copy"></span>';
-                            }, 2000);
-                        }
-                    });
-                }
-            });
-        }
+        VectorSvelte.setInvites({ phase: 'ok', code: inviteCode, xUrl: buildXIntentUrl(inviteCode) });
     } catch (error) {
-        inviteCodeElement.textContent = 'Error loading code';
+        VectorSvelte.setInvites({ phase: 'error' });
         console.error('Failed to get invite code:', error);
     }
 
