@@ -40,60 +40,29 @@ function renderProfileTab(cProfile) {
     if (!cProfile?.id) return;
     if (!fProfileViewMounted) {
         fProfileViewMounted = true;
-        mountProfileView();
+        mountProfileScreenOnce();
     }
     VectorSvelte.setOpenProfile(cProfile.id);
     VectorSvelte.touchProfile(cProfile.id);
 }
 
-function mountProfileView() {
-    const cur = () => getProfile(VectorSvelte.profileViewState().id);
-    const copyProfileLink = (iconHost) => {
-        const npub = VectorSvelte.profileViewState().id;
-        if (!npub) return;
-        navigator.clipboard.writeText(`https://vectorapp.io/profile/${npub}`).then(() => {
+function mountProfileScreenOnce() {
+    const openId = () => VectorSvelte.profileViewState().id;
+    const cur = () => getProfile(openId());
+    // The shareable vectorapp.io URL; the caller paints its own copied tick.
+    const copyProfileLink = async () => {
+        const npub = openId();
+        if (!npub) return false;
+        try {
+            await navigator.clipboard.writeText(`https://vectorapp.io/profile/${npub}`);
             showToast('Profile Link Copied');
-            const icon = iconHost.querySelector('span');
-            icon.classList.replace('icon-share', 'icon-check');
-            setTimeout(() => icon.classList.replace('icon-check', 'icon-share'), 2000);
-        }).catch(() => showToast('Failed to Copy Profile Link'));
+            return true;
+        } catch {
+            showToast('Failed to Copy Profile Link');
+            return false;
+        }
     };
-    VectorSvelte.mountProfileView({
-        els: {
-            root: domProfile,
-            navbar: domNavbar,
-            headerAvatar: domProfileHeaderAvatarContainer,
-            switcher: document.getElementById('my-profile-switcher'),
-            name: domProfileName,
-            status: domProfileStatus,
-            banner: domProfileBanner,
-            avatar: domProfileAvatar,
-            secondaryName: domProfileNameSecondary,
-            secondaryStatus: domProfileStatusSecondary,
-            description: domProfileDescription,
-            npub: document.getElementById('profile-npub'),
-            npubLabel: document.getElementById('profile-npub-label'),
-            id: domProfileId,
-            options: domProfileOptions,
-            optionMute: domProfileOptionMute,
-            optionBlock: domProfileOptionBlock,
-            moreDropdown: domProfileMoreDropdown,
-            editBtn: domProfileEditBtn,
-            shareBtn: document.getElementById('profile-share-btn'),
-            qrBtn: document.getElementById('profile-qr-btn'),
-            backBtn: domProfileBackBtn,
-            badgeInvite: domProfileBadgeInvite,
-            badgeFawkes: domProfileBadgeFawkes,
-            badgeBugHunter: domProfileBadgeBugHunter,
-            editBar: domProfileEditBar,
-            editLabel: document.getElementById('profile-edit-mode-label'),
-            editFields: document.getElementById('profile-edit-fields'),
-            headerInfo: document.querySelector('.profile-header-info'),
-            npubContainer: document.getElementById('profile-npub-container'),
-            badges: document.getElementById('profile-badges'),
-            bannerContainer: document.getElementById('profile-banner-container'),
-            avatarContainer: document.querySelector('.profile-avatar-container'),
-        },
+    VectorSvelte.mountProfileScreen(domProfile, {
         h: {
             getProfile,
             getName,
@@ -117,83 +86,70 @@ function mountProfileView() {
             showInviteBadge: (count) => showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' }),
             showFawkesCard,
             showBugHunterCard,
+            showNavbar: (on) => { domNavbar.style.display = on ? '' : 'none'; },
             pickPicture: pickProfilePicture,
+            // Own profile
+            enterEdit: enterProfileEditMode,
+            exitEdit: (cancel) => exitProfileEditMode(cancel),
+            setStatus: askForStatus,
+            toggleSwitcher: () => profileSwitcher.toggle(),
+            toggleSwitcherEdit: () => profileSwitcher.toggleEditMode(),
+            showQr: () => {
+                const npub = openId();
+                if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
+            },
+            copyProfileLink,
+            copyNpub: async () => {
+                const npub = openId();
+                if (!npub) return false;
+                try {
+                    await navigator.clipboard.writeText(npub);
+                    showToast('Copied Profile Link');
+                    return true;
+                } catch {
+                    showToast('Failed to Copy');
+                    return false;
+                }
+            },
+            // A contact
+            back: () => {
+                if (previousChatBeforeProfile) {
+                    const chatToOpen = previousChatBeforeProfile;
+                    previousChatBeforeProfile = '';
+                    openChat(chatToOpen);
+                } else {
+                    openChat(openId());
+                }
+            },
+            message: () => openChat(openId()),
+            toggleMute: () => invoke('toggle_chat_mute', { chatId: openId() }),
+            block: async () => {
+                const p = cur();
+                if (!p) return;
+                if (p.is_blocked) {
+                    await invoke('unblock_user', { npub: p.id });
+                    VectorSvelte.reloadBlockedUsers();
+                    showToast('User Unblocked');
+                    profileChanged(p.id);
+                } else {
+                    const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
+                    if (!confirmed) return;
+                    await invoke('block_user', { npub: p.id });
+                    VectorSvelte.reloadBlockedUsers();
+                    showToast('User Blocked');
+                    profileChanged(p.id);
+                }
+            },
+            nickname: async () => {
+                const npub = openId();
+                const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
+                if (nick === false) return;
+                if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
+                if (blockedBySync()) return;
+                await invoke('set_nickname', { npub, nickname: nick });
+            },
         },
     });
-
-    // Controls bind once and read the open profile at click time.
-    document.getElementById('profile-qr-btn').onclick = () => {
-        const npub = VectorSvelte.profileViewState().id;
-        if (npub) openQrOverlay(`https://vectorapp.io/profile/${npub}`);
-    };
-    document.getElementById('profile-npub-copy').onclick = (e) => {
-        const npub = VectorSvelte.profileViewState().id;
-        if (!npub) return;
-        navigator.clipboard.writeText(npub).then(() => {
-            showToast('Copied Profile Link');
-        }).catch(() => {
-            showToast('Failed to Copy');
-            const copyBtn = e.target.closest('#profile-npub-copy');
-            if (copyBtn) {
-                copyBtn.innerHTML = '<span class="icon icon-check"></span>';
-                setTimeout(() => { copyBtn.innerHTML = '<span class="icon icon-copy"></span>'; }, 2000);
-            }
-        });
-    };
-    // Own profile
-    domProfileEditBtn.onclick = enterProfileEditMode;
-    domProfileEditCancelBtn.onclick = () => exitProfileEditMode(true);
-    domProfileEditSaveBtn.onclick = () => exitProfileEditMode(false);
-    const ownShareBtn = document.getElementById('profile-share-btn');
-    ownShareBtn.onclick = () => copyProfileLink(ownShareBtn);
-    domProfileStatus.onclick = () => { if (cur()?.mine) askForStatus(); };
-    domProfileStatusSecondary.onclick = () => { if (cur()?.mine) askForStatus(); };
-    // A contact
-    domProfileBackBtn.onclick = () => {
-        if (previousChatBeforeProfile) {
-            const chatToOpen = previousChatBeforeProfile;
-            previousChatBeforeProfile = '';
-            openChat(chatToOpen);
-        } else {
-            openChat(VectorSvelte.profileViewState().id);
-        }
-    };
-    domProfileOptionMessage.onclick = () => openChat(VectorSvelte.profileViewState().id);
-    domProfileOptionMute.onclick = () => invoke('toggle_chat_mute', { chatId: VectorSvelte.profileViewState().id });
-    domProfileOptionShare.onclick = () => copyProfileLink(domProfileOptionShare);
-    domProfileOptionBlock.onclick = async () => {
-        domProfileMoreDropdown.style.display = 'none';
-        const p = cur();
-        if (!p) return;
-        if (p.is_blocked) {
-            await invoke('unblock_user', { npub: p.id });
-            VectorSvelte.reloadBlockedUsers();
-            showToast('User Unblocked');
-            profileChanged(p.id);
-        } else {
-            const confirmed = await popupConfirm('Block User', 'Are you sure you want to block this user? You will no longer receive DMs from them.', false, '', 'vector_warning.svg');
-            if (!confirmed) return;
-            await invoke('block_user', { npub: p.id });
-            VectorSvelte.reloadBlockedUsers();
-            showToast('User Blocked');
-            profileChanged(p.id);
-        }
-    };
-    domProfileOptionNickname.onclick = async () => {
-        domProfileMoreDropdown.style.display = 'none';
-        const npub = VectorSvelte.profileViewState().id;
-        const nick = await popupConfirm('Choose a Nickname', '', false, 'Nickname');
-        if (nick === false) return;
-        if (nick.length >= 30) return popupConfirm('Woah woah!', 'A ' + nick.length + '-character nickname seems excessive!', true, '', 'vector_warning.svg');
-        if (blockedBySync()) return;
-        await invoke('set_nickname', { npub, nickname: nick });
-    };
-    domProfileOptionMore.onclick = (e) => {
-        e.stopPropagation();
-        const isOpen = domProfileMoreDropdown.style.display !== 'none';
-        domProfileMoreDropdown.style.display = isOpen ? 'none' : 'block';
-        domProfileOptionMore.classList.toggle('active', !isOpen);
-    };
 }
 
 /**
@@ -350,66 +306,4 @@ function exitProfileEditMode(fCancel = false) {
         }
         renderProfileTab(cProfile);
     }
-}
-
-function editProfileDescription() {
-    // Get the current profile
-    const cProfile = arrProfiles.find(a => a.mine);
-    if (!cProfile) return;
-
-    // Set the textarea content to current description
-    domProfileDescriptionEditor.value = cProfile.about || '';
-
-    // Hide the span and show the textarea
-    domProfileDescription.style.display = 'none';
-    domProfileDescriptionEditor.style.display = '';
-
-    // Focus the text
-    domProfileDescriptionEditor.focus();
-
-    // Handle blur event to save and return to view mode
-    domProfileDescriptionEditor.onblur = () => {
-        // Hide textarea and show span
-        domProfileDescriptionEditor.style.display = 'none';
-        domProfileDescription.style.display = '';
-
-        // Remove the blur event listener
-        domProfileDescriptionEditor.onblur = null;
-
-        // If nothing was edited, don't change anything
-        if (domProfileDescriptionEditor.value === cProfile.about) return;
-
-        // Update the profile's about property
-        cProfile.about = domProfileDescriptionEditor.value;
-
-        // Update the span content
-        domProfileDescription.textContent = cProfile.about;
-        twemojify(domProfileDescription);
-
-        // Upload new About Me to Nostr
-        invoke('update_profile', {
-            name: '',
-            avatar: '',
-            banner: '',
-            about: cProfile.about,
-        }).then(ok => {
-            if (!ok) popupConfirm('Bio Update Failed!', 'Failed to broadcast bio update to the network.', true, '', 'vector_warning.svg');
-        }).catch(e => popupConfirm('Bio Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg'));
-    };
-
-    // Resize it to match the content size (CSS cannot scale textareas based on content)
-    domProfileDescriptionEditor.style.height = Math.min(domProfileDescriptionEditor.scrollHeight, 100) + 'px';
-
-    // Handle input events to resize the textarea dynamically
-    domProfileDescriptionEditor.oninput = () => {
-        domProfileDescriptionEditor.style.height = Math.min(domProfileDescriptionEditor.scrollHeight, 100) + 'px';
-    };
-
-    // Handle Enter key to submit (excluding Shift+Enter for line breaks)
-    domProfileDescriptionEditor.onkeydown = (evt) => {
-        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
-            evt.preventDefault();
-            domProfileDescriptionEditor.blur(); // Trigger the blur event to save
-        }
-    };
 }

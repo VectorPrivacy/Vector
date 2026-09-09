@@ -319,17 +319,9 @@ async function setupRustListeners() {
     _on('badges_updated', (evt) => {
         _myBadges = { vector: !!evt.payload?.vector, tier: evt.payload?.tier | 0, bug_hunter: evt.payload?.bug_hunter | 0 };
         applyTierLimits(_myBadges.tier);
-        // If our own profile is open, reveal the badges live (no reopen needed).
-        const ownProfileOpen = domProfile.style.display !== 'none'
-            && domProfileId.textContent === strPubkey;
-        if (ownProfileOpen && _myBadges.vector) {
-            domProfileBadgeFawkes.style.display = '';
-            domProfileBadgeFawkes.onclick = () => showFawkesCard();
-        }
-        if (ownProfileOpen && _myBadges.bug_hunter > 0) {
-            domProfileBadgeBugHunter.src = './icons/bughunter_' + _myBadges.bug_hunter + '.svg';
-            domProfileBadgeBugHunter.style.display = '';
-            domProfileBadgeBugHunter.onclick = () => showBugHunterCard(_myBadges.bug_hunter);
+        // Our own open profile re-derives its badges from the fresh cache.
+        if (domProfile.style.display !== 'none' && VectorSvelte.profileViewState().id === strPubkey) {
+            VectorSvelte.touchProfile(strPubkey);
         }
     });
 
@@ -605,7 +597,7 @@ async function setupRustListeners() {
         
         // Skip Expanded Profile View repaints during our own edit mode —
         // backend may emit stale `banner_cached` and clobber the just-picked image.
-        if (domProfile.style.display !== 'none' && domProfileId.textContent === evt.payload.id) {
+        if (domProfile.style.display !== 'none' && VectorSvelte.profileViewState().id === evt.payload.id) {
             const isOwnEditingProfile = fProfileEditMode && evt.payload.mine;
             if (!isOwnEditingProfile) {
                 renderProfileTab(evt.payload);
@@ -682,13 +674,6 @@ async function setupRustListeners() {
             cChat.muted = evt.payload.value;
         }
 
-        // If this chat's profile is expanded, update the Mute UI
-        const domMuteBtn = document.getElementById('profile-option-mute');
-        if (domMuteBtn && domProfileId.textContent === evt.payload.chat_id) {
-            domMuteBtn.querySelector('span').classList.replace('icon-volume-' + (evt.payload.value ? 'max' : 'mute'), 'icon-volume-' + (evt.payload.value ? 'mute' : 'max'));
-            domMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
-        }
-
         // If this group's overview is open, update the mute button
         const domGrpMuteBtn = document.getElementById('group-mute-btn');
         if (domGrpMuteBtn && domGroupOverview.style.display !== 'none' && strOpenChat === evt.payload.chat_id) {
@@ -710,7 +695,7 @@ async function setupRustListeners() {
             cProfile.nickname = evt.payload.value;
 
             // If this profile is Expanded, update the UI
-            if (domProfileId.textContent === evt.payload.profile_id) {
+            if (VectorSvelte.profileViewState().id === evt.payload.profile_id) {
                 renderProfileTab(cProfile);
             }
             // One helper owns every surface that shows a name.

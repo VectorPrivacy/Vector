@@ -59,33 +59,7 @@ const domTheme = document.getElementById('theme');
 
 
 const domProfile = document.getElementById('profile');
-const domProfileBackBtn = document.getElementById('profile-back-btn');
-const domProfileHeaderAvatarContainer = document.getElementById('profile-header-avatar-container');
-const domProfileName = document.getElementById('profile-name');
-const domProfileStatus = document.getElementById('profile-status');
 let fProfileEditMode = false;
-const domProfileEditBtn = document.getElementById('profile-edit-btn');
-const domProfileEditBar = document.getElementById('profile-edit-bar');
-const domProfileEditCancelBtn = document.getElementById('profile-edit-cancel-btn');
-const domProfileEditSaveBtn = document.getElementById('profile-edit-save-btn');
-const domProfileBanner = document.getElementById('profile-banner');
-const domProfileAvatar = document.getElementById('profile-avatar');
-const domProfileNameSecondary = document.getElementById('profile-secondary-name');
-const domProfileStatusSecondary = document.getElementById('profile-secondary-status');
-const domProfileBadgeInvite = document.getElementById('profile-badge-invites');
-const domProfileBadgeFawkes = document.getElementById('profile-badge-fawkes');
-const domProfileBadgeBugHunter = document.getElementById('profile-badge-bughunter');
-const domProfileDescription = document.getElementById('profile-description');
-const domProfileDescriptionEditor = document.getElementById('profile-description-editor');
-const domProfileOptions = document.getElementById('profile-option-list');
-const domProfileOptionMessage = document.getElementById('profile-option-message');
-const domProfileOptionMute = document.getElementById('profile-option-mute');
-const domProfileOptionShare = document.getElementById('profile-option-share');
-const domProfileOptionMore = document.getElementById('profile-option-more');
-const domProfileMoreDropdown = document.getElementById('profile-more-dropdown');
-const domProfileOptionNickname = document.getElementById('profile-option-nickname');
-const domProfileOptionBlock = document.getElementById('profile-option-block');
-const domProfileId = document.getElementById('profile-id');
 
 // Our own cached badge flags (from get_my_badges / badges_updated). Used so
 // the own-profile badge display reads the reliable persisted flag instead of
@@ -169,14 +143,6 @@ function showBugHunterCard(tier) {
         access: tier >= 3 ? 'Full Premium Access' : 'Partial Premium Access',
     });
 }
-
-// Close profile "More" dropdown when clicking outside
-document.addEventListener('click', () => {
-    if (domProfileMoreDropdown) {
-        domProfileMoreDropdown.style.display = 'none';
-        domProfileOptionMore.classList.remove('active');
-    }
-});
 
 const domGroupOverview = document.getElementById('group-overview');
 const domGroupOverviewBackBtn = document.getElementById('group-overview-back-btn');

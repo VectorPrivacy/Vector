@@ -21,8 +21,7 @@ import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
 import CommandStrip from './composer/CommandStrip.svelte';
 import ChatHeader from './chat/ChatHeader.svelte';
-import ProfileView from './profile/ProfileView.svelte';
-import ProfileEditFields from './profile/ProfileEditFields.svelte';
+import ProfileScreen from './profile/ProfileScreen.svelte';
 import CommunityOverview from './community/CommunityOverview.svelte';
 import MiniProfile from './people/MiniProfile.svelte';
 import MessageToolbar from './chat/MessageToolbar.svelte';
@@ -98,6 +97,7 @@ export {
 /** Apply pending updates synchronously (for the rare caller that reads the DOM right after). */
 export { flushSync };
 export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty };
+export { profileScreen, setProfileSwitcherOpen } from './lib/profilescreen.svelte.js';
 export { overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
@@ -253,14 +253,10 @@ export function mountSettings(container, { h }) {
     return mount(Settings, { target: container, props: { h } });
 }
 
-/** Mount the profile view reconciler over #profile's elements. */
-export function mountProfileView({ els, h }) {
-    const host = document.createElement('div');
-    host.hidden = true;
-    document.body.appendChild(host);
-    els.editFields.replaceChildren();
-    mount(ProfileEditFields, { target: els.editFields });
-    return mount(ProfileView, { target: host, props: { els, h } });
+/** Mount the Profile screen into `container` (#profile); the nav keeps showing and hiding the container. */
+export function mountProfileScreen(container, { h }) {
+    container.replaceChildren();
+    return mount(ProfileScreen, { target: container, props: { root: container, h } });
 }
 
 /** Mount the Community overview body into `target` (#group-overview-scroll); `els` is its chat header. */

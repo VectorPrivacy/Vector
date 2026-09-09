@@ -76,7 +76,7 @@ let loginPickerRows = null;
 
 /**
  * In-app My Profile dropdown — full-feature: switch / add / delete.
- * Opened by clicking #my-profile-switcher. Renders accounts via multiAccount.list().
+ * Opened from the Profile screen's My Profile header. Renders accounts via multiAccount.list().
  */
 const profileSwitcher = {
     isOpen: false,
@@ -84,19 +84,13 @@ const profileSwitcher = {
     isOpening: false,
 
     init() {
-        const trigger = document.getElementById('my-profile-switcher');
         const backdrop = document.getElementById('profile-switcher-backdrop');
         const panel = document.getElementById('profile-switcher-panel');
-        const trashToggle = document.getElementById('profile-switcher-trash-toggle');
         const addBtn = document.getElementById('profile-switcher-add');
-        if (!trigger || !panel) return;
+        if (!panel) return;
 
-        trigger.addEventListener('click', () => this.toggle());
+        // The trigger and the trash toggle are the Profile screen's; it calls toggle() and toggleEditMode().
         backdrop.addEventListener('click', () => this.close());
-        trashToggle.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            this.toggleEditMode();
-        });
         addBtn.addEventListener('click', () => this.onAddProfile());
 
         // Close on Escape
@@ -128,12 +122,10 @@ const profileSwitcher = {
             document.getElementById('profile-switcher-backdrop').classList.toggle('ws-dropup', dropup);
             document.getElementById('profile-switcher-backdrop').classList.add('visible');
             document.getElementById('profile-switcher-panel').classList.add('open');
-            document.getElementById('my-profile-switcher').classList.add('open');
+            VectorSvelte.setProfileSwitcherOpen(true);
             this.isOpen = true;
             // Android back closes the account list instead of navigating the profile screen away.
             pushBack('profile-switcher', () => profileSwitcher.close());
-            const trashToggle = document.getElementById('profile-switcher-trash-toggle');
-            if (trashToggle) trashToggle.style.display = '';
         } catch (e) {
             console.error('[profile-switcher] open failed:', e);
         } finally {
@@ -151,10 +143,8 @@ const profileSwitcher = {
         // strand the next profile-tab open at the wrong height.
         panel.classList.remove('ws-dropup');
         panel.style.bottom = '';
-        document.getElementById('my-profile-switcher').classList.remove('open');
+        VectorSvelte.setProfileSwitcherOpen(false);
         this.isOpen = false;
-        const trashToggle = document.getElementById('profile-switcher-trash-toggle');
-        if (trashToggle) trashToggle.style.display = 'none';
         // Always reset edit mode on close so the next open starts neutral.
         this.exitEditMode();
     },
