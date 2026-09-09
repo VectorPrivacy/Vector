@@ -1438,31 +1438,26 @@ async function closeChat() {
         chatOpenAutoScrollTimer = null;
     }
 
-    // Attempt to completely release memory (force garbage collection...) of in-chat media
-    while (domChatMessages.firstElementChild) {
-        const domChild = domChatMessages.firstElementChild;
-
-        // For media (images, audio, video); we ensure they're fully unloaded
-        const domMedias = domChild?.querySelectorAll('img, audio, video');
-        for (const domMedia of domMedias) {
-            // Streamable media (audio + video) should be paused, then force-unloaded
-            if (domMedia instanceof HTMLMediaElement) {
-                domMedia.pause();
-                domMedia.removeAttribute('src'); // Better than setting to empty string
-                domMedia.load();
-            }
-            // Static media (images) should simply be unloaded
-            if (domMedia instanceof HTMLImageElement) {
-                if (domMedia.src.startsWith('blob:')) {
-                    URL.revokeObjectURL(domMedia.src);
-                }
-                domMedia.removeAttribute('src');
-            }
+    // Attempt to completely release memory (force garbage collection...) of in-chat media.
+    // The rows are the list island's; only their media is touched here, and the store
+    // empties the list so its own chrome (the hover toolbar, the swipe chip) survives.
+    for (const domMedia of domChatMessages.querySelectorAll('.dmsg img, .dmsg audio, .dmsg video')) {
+        // Streamable media (audio + video) should be paused, then force-unloaded
+        if (domMedia instanceof HTMLMediaElement) {
+            domMedia.pause();
+            domMedia.removeAttribute('src'); // Better than setting to empty string
+            domMedia.load();
         }
-
-        // Now we explicitly drop them
-        domChild.remove();
+        // Static media (images) should simply be unloaded
+        if (domMedia instanceof HTMLImageElement) {
+            if (domMedia.src.startsWith('blob:')) {
+                URL.revokeObjectURL(domMedia.src);
+            }
+            domMedia.removeAttribute('src');
+        }
     }
+    VectorSvelte.clearWindow();
+    VectorSvelte.flushSync();
 
     // Only catch up last_read on close when the user is actually at the
     // bottom. Marking on close while scrolled up would lie about messages the

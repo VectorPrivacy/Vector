@@ -1251,7 +1251,8 @@ async function loadAndScrollToMessage(targetMsgId) {
         const messagesToLoad = chat.messages.slice(startIndex, chat.messages.length);
         proceduralScrollState.renderedMessageCount = messagesToLoad.length;
         proceduralScrollState.totalMessageCount = chat.messages.length;
-        while (domChatMessages.firstElementChild) domChatMessages.firstElementChild.remove();
+        VectorSvelte.clearWindow();
+        VectorSvelte.flushSync();
         await updateChat(chat, messagesToLoad, profile, false);
     }
 
@@ -1562,7 +1563,8 @@ async function jumpToUnread(lastReadId) {
     } else {
         proceduralScrollState.renderedMessageCount = slice.length;
         proceduralScrollState.totalMessageCount = slice.length;
-        while (domChatMessages.firstElementChild) domChatMessages.firstElementChild.remove();
+        VectorSvelte.clearWindow();
+        VectorSvelte.flushSync();
         await updateChat(chat, slice, profile, false);
     }
     await waitForMediaToLoad();
