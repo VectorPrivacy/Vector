@@ -302,14 +302,14 @@ async function sendMessage(messageText) {
             const editPromise = editChatForRoute?.chat_type === 'Community'
                 ? invoke('edit_community_message', { channelId: strOpenChat, messageId: editMsgId, newContent: cleanedText })
                 : invoke('edit_message', { messageId: editMsgId, chatId: strOpenChat, newContent: cleanedText });
-            editPromise.catch(e => {
-                console.error('Failed to edit message:', e);
-                // Optionally: revert the UI change on failure
-            });
+            editPromise
+                .catch(e => { console.error('Failed to edit message:', e); })
+                .finally(() => VectorSvelte.setComposerStatus(''));
 
             nLastTypingIndicator = 0;
         } catch(e) {
             console.error('Failed to edit message:', e);
+            VectorSvelte.setComposerStatus('');
         }
         return;
     }
