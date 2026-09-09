@@ -18,6 +18,7 @@
     import ReplyQuote from './ReplyQuote.svelte';
     import MessageContent from './MessageContent.svelte';
     import ReactionChip from './ReactionChip.svelte';
+    import PivxBubble from './PivxBubble.svelte';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -137,9 +138,6 @@
     // Chips arriving after the row's first paint pop in.
     let painted = false;
     $effect(() => { painted = true; });
-    function pivxInto(node) {
-        node.replaceChildren(h.buildPivxBubble(msg));
-    }
     const arrival = arrivalState();
 </script>
 
@@ -180,7 +178,7 @@
         <time class="dmsg-time-hover">{hourMinute}</time>
     </div>
     {#if isPivx}
-        <div class="dmsg-body" use:pivxInto></div>
+        <div class="dmsg-body"><PivxBubble {msg} h={h.pivx} /></div>
     {:else if isBlocked}
         <div class="dmsg-body">
             <div class="dmsg-header">

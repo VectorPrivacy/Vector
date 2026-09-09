@@ -42,6 +42,8 @@
         </svg>
         <div id="ws-rail-mail" class="btn" title="Messages">
             <span class="icon icon-mail"></span>
+            <!-- Wears the shortcut rows' badge class: a count expanded, a corner dot collapsed. -->
+            {#if st.mailBadge}<span class="ws-rail-item-badge">{st.mailBadge}</span>{/if}
         </div>
     </div>
     <!-- Unread DMs over communities; rail.js mounts the strip island here. -->

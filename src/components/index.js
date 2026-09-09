@@ -34,7 +34,6 @@ import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
 import ModConsole from './moderation/ModConsole.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
-import InviteLinks from './community/InviteLinks.svelte';
 import AddRelayDialog from './settings/AddRelayDialog.svelte';
 import RelayInfoDialog from './settings/RelayInfoDialog.svelte';
 import BlossomInfoDialog from './settings/BlossomInfoDialog.svelte';
@@ -46,6 +45,7 @@ import WithdrawDialog from './miniapps/pivx/WithdrawDialog.svelte';
 import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
 export { attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
+export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
 import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
 import InvitesScreen from './people/InvitesScreen.svelte';
@@ -56,7 +56,7 @@ export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
 export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
 export { accountState, setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
-export { shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
+export { setMailBadge, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
 import StatusDialog from './ui/StatusDialog.svelte';
 import DowngradeBlock from './ui/DowngradeBlock.svelte';
 import LoginScreen from './auth/LoginScreen.svelte';
@@ -128,6 +128,9 @@ export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDiv
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
 export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
 export { showToast, hideToast } from './lib/toast.svelte.js';
+export { contextMenuState, contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/contextmenu.svelte.js';
+export { rekeyState, setRekey } from './lib/rekey.svelte.js';
+export { inviteModalState, setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
 export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
 export { setModelDownload, modelDownloadState } from './lib/audio.svelte.js';
@@ -337,10 +340,6 @@ export function mountLaunchDialog(container, { h }) {
 }
 
 /** Mount the invite panel's link section into `host` (#cmt-links); the panel is built per open. */
-export function mountInviteLinks(host, { h }) {
-    host.replaceChildren();
-    return mount(InviteLinks, { target: host, props: { h } });
-}
 
 /** Mount the Network section's dialogs (add relay, relay info, media server info) at body level. */
 export function mountNetworkDialogs({ h }) {

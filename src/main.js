@@ -839,11 +839,7 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
 
     // Re-render if this chat is open
     if (strOpenChat === chatId) {
-        const domMsg = document.getElementById(oldId);
-        if (domMsg) {
-            const profile = getProfile(chatId);
-            updateMessageRow(domMsg, msg, profile, oldId);
-        }
+        updateMessageRow(msg, oldId);
         strLastMsgID = eventId;
         softChatScroll();
     }

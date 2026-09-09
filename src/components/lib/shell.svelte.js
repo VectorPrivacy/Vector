@@ -26,3 +26,5 @@ export function restorePanes(snap) { Object.assign(panes, snap); flushSync(); }
 
 export function setTab(id) { shell.tab = id; flushSync(); }
 export function setShellFlag(key, on) { shell[key] = !!on; flushSync(); }
+/** The rail's mail badge text ('' hides it). */
+export function setMailBadge(text) { shell.mailBadge = text || ''; }

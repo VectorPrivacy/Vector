@@ -141,37 +141,3 @@ function detectCryptoAddress(text) {
     
     return null;
 }
-
-/**
- * Renders the Payment UI for a detected cryptocurrency address
- * @param {Object} coin - Detected coin address with metadata
- * @returns {HTMLDivElement} Complete payment UI element
- */
-function renderCryptoAddress(coin) {
-    const divCoin = document.createElement('div');
-    divCoin.classList.add('msg-payment');
-
-    // Render the Coin's brand color across the UI
-    divCoin.style.borderColor = `#${coin.color}`;
-    divCoin.style.backgroundColor = `#${coin.color}40`;
-
-    // Render the Coin Logo
-    const imgCoin = document.createElement('img');
-    imgCoin.src = `./icons/${coin.coin.toLowerCase()}.svg`;
-
-    // Render the Coin Name
-    const h2Coin = document.createElement('h2');
-    h2Coin.textContent = coin.coin;
-
-    // Render the "Pay" button
-    const btnCoin = document.createElement('button');
-    btnCoin.setAttribute('pay-uri', coin.uri + coin.address);
-    btnCoin.onclick = () => openUrl(coin.uri + coin.address);
-    btnCoin.textContent = `Pay`;
-
-    // Compile and return the DOM object
-    divCoin.appendChild(imgCoin);
-    divCoin.appendChild(h2Coin);
-    divCoin.appendChild(btnCoin);
-    return divCoin;
-}

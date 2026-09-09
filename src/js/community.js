@@ -924,43 +924,21 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
  * Awaits the listener registration before returning so early phases aren't missed. Returns { finish, close }.
  */
 async function showRekeyProgressModal(title, eventName = 'community_rekey_progress') {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay rekey-progress-overlay';
-    overlay.onclick = (e) => e.stopPropagation(); // swallow — no backdrop dismiss
-    const box = document.createElement('div');
-    box.className = 'modal-box rekey-progress-box';
-    box.innerHTML = `
-        <div class="rekey-ring"><span class="rekey-pct">0%</span></div>
-        <p class="rekey-title">${escapeHtml(title || 'Updating community keys')}</p>
-        <p class="rekey-step">Starting...</p>
-        <p class="rekey-warning"><span class="icon icon-info"></span>Do not close the app during this process</p>
-    `;
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    const ring = box.querySelector('.rekey-ring');
-    const pctEl = box.querySelector('.rekey-pct');
-    const stepEl = box.querySelector('.rekey-step');
+    VectorSvelte.setRekey({ open: true, title: title || 'Updating community keys', pct: 0, step: 'Starting...' });
     const setProgress = (pct, label) => {
-        const p = Math.max(0, Math.min(100, pct | 0));
-        ring.style.setProperty('--rekey-pct', `${p}%`); // the @property transition sweeps the ring to it
-        if (label) stepEl.textContent = label;
+        const patch = { pct: Math.max(0, Math.min(100, pct | 0)) };   // the ring's transition sweeps to it
+        if (label) patch.step = label;
+        VectorSvelte.setRekey(patch);
     };
-    // Drive the % readout from the LIVE animated ring value so the number counts up in lockstep with the
-    // sweep, instead of snapping to the target ahead of it.
-    let rafId = requestAnimationFrame(function tick() {
-        const cur = parseFloat(getComputedStyle(ring).getPropertyValue('--rekey-pct')) || 0;
-        pctEl.textContent = `${Math.round(cur)}%`;
-        rafId = requestAnimationFrame(tick);
-    });
     // Register BEFORE the caller invokes the op, so we don't miss the opening phases.
     const unlisten = await listen(eventName, (evt) => {
         const { pct, label } = evt.payload || {};
         setProgress(typeof pct === 'number' ? pct : 0, label);
     });
     return {
-        // Fill to 100% with a closing label and hold so the sweep + count-up finish before we close.
+        // Fill to 100% with a closing label and hold so the sweep and count-up finish before we close.
         finish: async (label) => { setProgress(100, label || 'Done!'); await new Promise(r => setTimeout(r, 700)); },
-        close: () => { cancelAnimationFrame(rafId); unlisten(); overlay.remove(); },
+        close: () => { unlisten(); VectorSvelte.setRekey({ open: false }); },
     };
 }
 
@@ -1029,85 +1007,26 @@ async function openCommunityInvitePanel(chat) {
     const communityId = chat.metadata?.custom_fields?.community_id;
     if (!communityId) return;
 
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    let busy = false; // a critical op (link create / revoke+rekey / direct invite) is in flight — lock the panel
+    let busy = false; // a critical op (link create / revoke+rekey / direct invite) is in flight: lock the panel
     let unlistenRefresh = null; // community_refreshed subscription, torn down on dismiss
-    const dismiss = () => { if (unlistenRefresh) { unlistenRefresh(); unlistenRefresh = null; } overlay.remove(); };
-    overlay.onclick = (e) => { if (e.target === overlay && !busy) dismiss(); };
+    const dismiss = () => {
+        if (unlistenRefresh) { unlistenRefresh(); unlistenRefresh = null; }
+        popBack('community-invite');
+        VectorSvelte.setInviteModal({ open: false });
+    };
 
-    const box = document.createElement('div');
-    box.className = 'modal-box cmt-modal';
-    box.innerHTML = `
-        <div class="cmt-header">
-            <div class="cmt-header-icon"><span class="icon icon-users-multi"></span></div>
-            <div class="cmt-header-text">
-                <h3 class="cmt-title">Invite to ${escapeHtml(chat.metadata.custom_fields.name || 'Community')}</h3>
-                <p class="cmt-subtitle">Bring people into your community.</p>
-            </div>
-            <button id="cmt-close-x" class="relay-dialog-close cmt-close-x">&times;</button>
-        </div>
-
-        <div class="cmt-body">
-            <div id="cmt-links"></div>
-
-            <section class="cmt-section">
-                <div class="cmt-section-head">
-                    <span class="icon icon-add-user"></span>
-                    <div>
-                        <p class="cmt-section-title">Direct Invites</p>
-                        <p class="cmt-section-desc">Pick contacts to invite, or paste an npub to add someone new.</p>
-                    </div>
-                </div>
-                <div class="emoji-search-container" style="padding: 0; background: transparent; margin-bottom: 8px; isolation: isolate;">
-                    <span class="emoji-search-icon icon icon-search"></span>
-                    <input id="cmt-npub" type="text" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="flex: 1; box-sizing: border-box; margin: 0; padding: 10px 12px 10px 44px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5); border-radius: 8px; color: #fff; font-size: 16px;" />
-                </div>
-                <div id="cmt-contacts" class="cmt-contacts"></div>
-            </section>
-
-            <!-- Sticky action bar inside the single scroll region: gray "Done" morphs to accent
-                 "Invite N" as contacts are picked, so the primary action is always reachable
-                 without scrolling to the bottom. Riding inside the scroll keeps it aligned with
-                 the cards (same scrollbar inset). -->
-            <div class="cmt-footer">
-                <div id="cmt-status" class="cmt-status"></div>
-                <button id="cmt-close" class="cmt-btn cmt-btn-ghost cmt-cta cmt-close">
-                    <span class="cmt-cta-face cmt-cta-face-done">Done</span>
-                    <span class="cmt-cta-face cmt-cta-face-invite"><span class="icon icon-send"></span>Invite <span id="cmt-cta-count"></span></span>
-                </button>
-            </div>
-        </div>
-    `;
-    overlay.appendChild(box);
-    // NOT attached yet — the whole panel is built and filled on this detached tree
-    // (links, mode pill, contact rows are all local-DB reads), then attached ONCE at
-    // the bottom of this function so the modal opens in a single paint, not a
-    // cascade of reflows as each fetch lands.
-
-    const status = box.querySelector('#cmt-status');
     let statusTimer = null;
     const setStatus = (msg, isError) => {
         clearTimeout(statusTimer);   // a new message cancels any pending auto-dismiss
-        status.textContent = msg || '';
-        status.classList.toggle('cmt-err', !!isError);
-        status.classList.toggle('cmt-ok', !!msg && !isError);
+        VectorSvelte.setInviteModalStatus(msg, isError);
     };
-    // The footer CTA (#cmt-close) is wired below, after the contact picker mounts — its action
-    // depends on whether anything is selected (Done = dismiss, Invite N = send).
-    box.querySelector('#cmt-close-x').onclick = () => { if (busy) return; VectorSvelte.unmountComponent(cl); popBack('community-invite'); dismiss(); };
-    // Lock the ENTIRE panel during a critical op: disable every control + block close/backdrop-dismiss, so a
-    // link create / revoke (which re-keys) / direct invite can't be raced or interrupted half-applied. Restores
-    // each control's prior disabled state on release (e.g. the Invite button stays disabled if nothing's picked).
+    // Lock the ENTIRE panel during a critical op (the controls disable and the backdrop stops
+    // dismissing), so a link create / revoke (which re-keys) / direct invite can't be raced or
+    // interrupted half-applied.
     const setBusy = (on) => {
         busy = on;
-        box.classList.toggle('cmt-busy', on);
+        VectorSvelte.setInviteModal({ busy: on });
         VectorSvelte.ilSetBusy(on);
-        box.querySelectorAll('button, input').forEach(el => {
-            if (el.closest('#cmt-links')) return;   // the link section reads the lock from its store
-            if (on) { el.dataset.cmtPrev = el.disabled ? '1' : '0'; el.disabled = true; }
-            else if (el.dataset.cmtPrev !== undefined) { el.disabled = el.dataset.cmtPrev === '1'; delete el.dataset.cmtPrev; }
-        });
     };
 
     // Track the GLOBAL link state (across every creator, §10) so the create/revoke handlers know when a
@@ -1196,9 +1115,6 @@ async function openCommunityInvitePanel(chat) {
     };
 
     VectorSvelte.ilReset();
-    VectorSvelte.mountInviteLinks(box.querySelector('#cmt-links'), {
-        h: { myNpub: strPubkey, name: systemEventName, create: createLink, revoke: revokeLink },
-    });
     await renderLinks();
     // Live-refresh when a control change folds in (a remote create/revoke by another admin, or our own
     // privatize re-founding), so the mode pill + per-creator counts update without a manual close/reopen.
@@ -1209,8 +1125,6 @@ async function openCommunityInvitePanel(chat) {
     });
 
     // ── Direct Invites: a multi-select contact list (DM contacts) with paste-to-add ──
-    const npubInput = box.querySelector('#cmt-npub');
-    const contactsDiv = box.querySelector('#cmt-contacts');
     const myNpub = arrProfiles.find(p => p.mine)?.id;
     // Banned npubs can't be invited (§7) — hide them from the picker (the backend also refuses). Empty if
     // we lack the ban permission to read the list (then the backend refusal is the only guard).
@@ -1226,13 +1140,11 @@ async function openCommunityInvitePanel(chat) {
     if (ownerNpub) memberSet.add(ownerNpub);
     for (const a of (chat.metadata?.admins || [])) memberSet.add(a);
 
-    // Reactive contact picker (Svelte island — src/components/ContactList.svelte). The
-    // component owns its dialog-local state; this side drives it through the instance's
-    // exported methods (setFilter / addStranger / select / setProfiles / reset /
+    // The contact picker (people/ContactPicker) owns its dialog-local state; this side drives it
+    // through the instance's exports (setFilter / addStranger / select / setProfiles / reset /
     // getSelection) and morphs the footer CTA from the onSelectionChange callback.
-    const cta = box.querySelector('#cmt-close');
-    const ctaCount = box.querySelector('#cmt-cta-count');
-    const cl = VectorSvelte.mountContactList(contactsDiv, {
+    const cl = () => VectorSvelte.inviteModalPicker();
+    const contactProps = {
         profiles: arrProfiles,
         getProfile: (npub) => getProfile(npub),
         myNpub,
@@ -1250,61 +1162,67 @@ async function openCommunityInvitePanel(chat) {
         hoverBg: 'rgba(255, 255, 255, 0.085)',
         // The footer CTA morphs with the selection: gray "Done" (dismiss) when nothing's
         // picked, accent "Invite N" (send) once contacts are selected.
-        onSelectionChange: (sel) => {
-            const n = sel.size;
-            cta.classList.toggle('has-selection', n > 0);
-            if (n > 0) ctaCount.textContent = n;
-        },
-    });
+        onSelectionChange: (sel) => VectorSvelte.setInviteModal({ selected: sel.size }),
+    };
 
     // Typing filters; a pasted/typed valid npub gets added to the list and auto-selected — unless it's
     // me, a banned npub, or someone already in the community (can't invite any of them).
-    npubInput.oninput = () => {
-        cl.setFilter(npubInput.value || '');
-        const np = extractNpub(npubInput.value || '');
+    const searchInput = (value) => {
+        const picker = cl();
+        if (!picker) return;
+        picker.setFilter(value || '');
+        const np = extractNpub(value || '');
         if (np && np !== myNpub && !bannedSet.has(np) && !memberSet.has(np)) {
             // Strangers = anyone who isn't an existing DM contact; the contacts loop only
             // renders DM contacts, so a cached-but-never-DM'd profile must ride the stranger
             // path or it shows nowhere. Fetch the profile only when we don't already have it.
             const isDmContact = arrChats.some(c => c.chat_type === 'DirectMessage' && c.id === np);
             if (!isDmContact) {
-                cl.addStranger(np);
+                picker.addStranger(np);
                 if (!arrProfiles.some(p => p.id === np) && !strangerProfileRequested.has(np)) {
                     strangerProfileRequested.add(np);
-                    invoke('load_profile', { npub: np }).then(() => cl.setProfiles([...arrProfiles])).catch(() => {});
+                    invoke('load_profile', { npub: np }).then(() => cl()?.setProfiles([...arrProfiles])).catch(() => {});
                 }
             } else {
-                cl.select(np);
+                picker.select(np);
             }
         }
     };
 
-    cta.onclick = async () => {
+    const cta = async () => {
         if (busy) return;
-        const targets = [...cl.getSelection()];
+        const targets = [...(cl()?.getSelection() || [])];
         if (!targets.length) {   // "Done" — nothing selected, just close the panel
-            VectorSvelte.unmountComponent(cl); popBack('community-invite'); dismiss();
+            dismiss();
             return;
         }
         // "Invite N" — send; the cleared selection then morphs the button back to "Done".
-        cta.disabled = true;
+        VectorSvelte.setInviteModal({ ctaBusy: true });
         setStatus(`Inviting ${targets.length} ${targets.length === 1 ? 'person' : 'people'}…`);
         let ok = 0, fail = 0;
         for (const np of targets) {
             try { await invoke('invite_to_community', { communityId, inviteeNpub: np }); ok++; }
             catch (_) { fail++; }
         }
-        cta.disabled = false;
+        VectorSvelte.setInviteModal({ ctaBusy: false });
         if (fail === 0) {
             setStatus(`Invited ${ok} ${ok === 1 ? 'person' : 'people'}!`);
-            cl.reset(); npubInput.value = '';
+            cl()?.reset();
+            VectorSvelte.setInviteModal({ search: '' });
             statusTimer = setTimeout(() => setStatus(''), 3000);   // success toast collapses itself after 3s
         } else {
             setStatus(`Invited ${ok}, ${fail} failed.`, ok === 0);
         }
     };
 
-    // Fully rendered — attach in one paint (see the note at the top of this function).
-    document.body.appendChild(overlay);
+    VectorSvelte.setInviteModalHandlers({
+        close: () => { if (!busy) dismiss(); },
+        cta,
+        searchInput,
+        links: { myNpub: strPubkey, name: systemEventName, create: createLink, revoke: revokeLink },
+        contactProps,
+    });
+    // Every local read is in: open in one paint.
+    VectorSvelte.setInviteModal({ open: true, busy: false, ctaBusy: false, name: chat.metadata.custom_fields.name || 'Community', status: { text: '', error: false }, selected: 0, search: '' });
     pushBack('community-invite', dismiss);
 }

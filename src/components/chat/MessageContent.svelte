@@ -8,10 +8,11 @@
     import InvitePreviews from './InvitePreviews.svelte';
     import LinkPreview from './LinkPreview.svelte';
     import CommandLine from './CommandLine.svelte';
+    import CryptoAddress from './CryptoAddress.svelte';
     import { messageVersion, clockSec } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h, sig } = $props();
-    // h: buildText(msg, ctx) → span | null, commandInfo(msg), the Attachments leaves, buildCryptoAddress(msg),
+    // h: buildText(msg, ctx) → span | null, commandInfo(msg), the Attachments leaves, cryptoAddress(msg) → coin | null,
     //    renderEmojiPackPreviews(node, text), inviteKeys(text), resolveInvite(key), xdcUrl(msg, ctx),
     //    renderXdcUrlCard(node, msg, url), webPreviewsEnabled(), linkPreviewData(msg), isAndroid(),
     //    fmtCountdown(secs), selfDestructTooltip(el), selfDestructTooltipEnd()
@@ -53,9 +54,9 @@
     <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} {h} /></div>
 {/if}
 {#key sig}
-    {@const cryptoAddress = h.buildCryptoAddress(msg)}
-    {#if cryptoAddress}
-        <span style="display:contents" use:leaf={cryptoAddress}></span>
+    {@const coin = h.cryptoAddress(msg)}
+    {#if coin}
+        <CryptoAddress {coin} {h} />
     {/if}
     {#if msg.content}
         <span style="display:contents" use:packPreviews={msg.content}></span>

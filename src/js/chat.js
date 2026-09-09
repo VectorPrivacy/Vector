@@ -677,10 +677,7 @@ async function retryFailedMessage(msg) {
                 const idx = cached ? cached.findIndex(m => m.id === msg.id) : -1;
                 if (idx !== -1) cached[idx] = local;
             }
-            if (strOpenChat === chatId) {
-                const dom = document.getElementById(msg.id);
-                if (dom) updateMessageRow(dom, local, getProfile(chatId), msg.id);
-            }
+            if (strOpenChat === chatId) updateMessageRow(local, msg.id);
         };
         setSendState(false, true);
         try {

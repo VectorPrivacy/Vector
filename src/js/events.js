@@ -429,35 +429,9 @@ async function setupRustListeners() {
 
             // Re-render all affected messages in the open chat
             if (strOpenChat === evt.payload.profile_id) {
-                const profile = getProfile(evt.payload.profile_id);
                 for (const msgId of affectedMsgIds) {
-                    const domMsg = document.getElementById(msgId);
                     const memMsg = cChat.messages.find(m => m.id === msgId);
-                    if (domMsg && memMsg) {
-                        // Shrink + fade out any active spinners before re-rendering
-                        const spinners = domMsg.querySelectorAll('.miniapp-downloading-spinner');
-                        if (spinners.length) {
-                            for (const sp of spinners) {
-                                sp.style.transition = 'opacity 0.2s ease, scale 0.2s ease';
-                                sp.style.opacity = '0';
-                                sp.style.scale = '0.5';
-                            }
-                            setTimeout(() => {
-                                const newEl = updateMessageRow(domMsg, memMsg, profile, msgId);
-                                // Grow + fade in the new icon
-                                const icon = newEl.querySelector('.custom-audio-player > span[class*="icon-"], .custom-audio-player > img');
-                                if (icon) {
-                                    icon.style.opacity = '0';
-                                    icon.style.scale = '0.5';
-                                    icon.style.transition = 'opacity 0.25s ease, scale 0.25s ease';
-                                    requestAnimationFrame(() => { icon.style.opacity = '1'; icon.style.scale = '1'; });
-                                }
-                                softChatScroll();
-                            }, 200);
-                        } else {
-                            updateMessageRow(domMsg, memMsg, profile, msgId);
-                        }
-                    }
+                    if (memMsg) updateMessageRow(memMsg, msgId);
                 }
                 softChatScroll();
             }
@@ -485,13 +459,9 @@ async function setupRustListeners() {
             }
             // Then swap any painted rows over to the failed/retry rendering
             if (strOpenChat === evt.payload.profile_id) {
-                const profile = getProfile(evt.payload.profile_id);
                 for (const msgId of failedMsgIds) {
-                    const domMsg = document.getElementById(msgId);
                     const memMsg = cChat.messages.find(m => m.id === msgId);
-                    if (domMsg && memMsg) {
-                        updateMessageRow(domMsg, memMsg, profile, msgId);
-                    }
+                    if (memMsg) updateMessageRow(memMsg, msgId);
                 }
             }
         }
@@ -583,21 +553,8 @@ async function setupRustListeners() {
             for (const m of chat.messages || []) {
                 if (m.system_event?.member_npub === evt.payload.id) {
                     m.content = systemEventContent(m.system_event.event_type, evt.payload.id);
-                    const el = document.getElementById(m.id);
-                    if (el) {
-                        // Patch only the clickable name span (preserves the affordance + suffix);
-                        // fall back to whole-line text for a legacy plain-rendered line.
-                        const nameEl = el.querySelector('.system-event-name');
-                        if (nameEl) nameEl.textContent = systemEventName(evt.payload.id);
-                        else el.textContent = m.content;
-                        // Swap the placeholder avatar for the now-cached one.
-                        const avatarEl = el.querySelector('.system-event-avatar');
-                        if (avatarEl) {
-                            const fresh = createAvatarImg(getProfileAvatarSrc(getProfile(evt.payload.id)), 16);
-                            fresh.classList.add('system-event-avatar');
-                            avatarEl.replaceWith(fresh);
-                        }
-                    }
+                    // The row derives the name and avatar from the actor's profile signal.
+                    VectorSvelte.touchProfile(evt.payload.id);
                 }
             }
         }
@@ -644,11 +601,7 @@ async function setupRustListeners() {
         }
 
         // If this group's overview is open, update the mute button
-        const domGrpMuteBtn = document.getElementById('group-mute-btn');
-        if (domGrpMuteBtn && domGroupOverview.style.display !== 'none' && strOpenChat === evt.payload.chat_id) {
-            domGrpMuteBtn.querySelector('span').className = `icon icon-volume-${evt.payload.value ? 'mute' : 'max'} navbar-icon`;
-            domGrpMuteBtn.querySelector('p').innerText = evt.payload.value ? 'Unmute' : 'Mute';
-        }
+        if (strOpenChat === evt.payload.chat_id) VectorSvelte.setOverview({ muted: !!evt.payload.value });
 
         // Reflect glow/badge changes now, then pull fresh DB counts. A sender mute
         // changes OTHER chats' (community) badges too.
@@ -959,13 +912,9 @@ async function setupRustListeners() {
             // `domMsg` is null and the `?.replaceWith` below is a no-op. The next
             // `message_new` will render the up-to-date message from chat.messages,
             // so missing the surgical update here is safe.
-            const domMsg = document.getElementById(evt.payload.old_id);
             // The row refills its body only when the content signature changes, so a
             // reaction echo leaves video playback and spoiler reveals alone.
-            if (domMsg) {
-                const profile = getProfile(evt.payload.chat_id);
-                updateMessageRow(domMsg, evt.payload.message, profile, evt.payload.old_id);
-            }
+            updateMessageRow(evt.payload.message, evt.payload.old_id);
 
             // The row may have grown after its initial layout (a reaction chip added in
             // realtime, an edit, an attachment finishing). Keep a bottom-pinned user pinned.
@@ -1178,13 +1127,7 @@ async function setupRustListeners() {
         if (att) {
             att.url = url;
             // Re-render if this chat is open
-            if (strOpenChat === chat_id) {
-                const domMsg = document.getElementById(message_id);
-                if (domMsg) {
-                    const profile = getProfile(chat_id);
-                    updateMessageRow(domMsg, msg, profile, message_id);
-                }
-            }
+            if (strOpenChat === chat_id) updateMessageRow(msg, message_id);
         }
     });
 

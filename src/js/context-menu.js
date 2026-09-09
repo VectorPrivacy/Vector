@@ -15,7 +15,6 @@
  * });
  */
 
-let _ctxMenuEl = null;
 let _ctxMenuVisible = false;
 let _ctxMenuDismissedAt = 0; // timestamp of the last outside-tap dismissal
 
@@ -26,78 +25,32 @@ function wasContextMenuJustDismissed() {
     return Date.now() - _ctxMenuDismissedAt < 400;
 }
 
-function _ensureContextMenu() {
-    if (_ctxMenuEl) return _ctxMenuEl;
-    const el = document.createElement('div');
-    el.className = 'context-menu';
-    el.setAttribute('role', 'menu');
-    document.body.appendChild(el);
-    _ctxMenuEl = el;
-    // Prevent clicks inside from bubbling out and dismissing the menu
-    // before our item handlers run.
-    el.addEventListener('mousedown', (e) => e.stopPropagation());
-    // Android back closes an open menu instead of leaving the screen.
-    new MutationObserver(() => {
-        if (el.classList.contains('is-visible')) pushBack('context-menu', hideContextMenu);
-        else popBack('context-menu');
-    }).observe(el, { attributes: true, attributeFilter: ['class'] });
-    return el;
-}
+// The menu is a component; an item's activation closes it before its handler runs.
+VectorSvelte.setContextMenuHandlers({
+    activate: (item) => {
+        hideContextMenu();
+        try { item.onClick && item.onClick(); }
+        catch (err) { console.warn('[context-menu] item handler failed:', err); }
+    },
+});
 
 function hideContextMenu() {
     if (!_ctxMenuVisible) return;
     _ctxMenuVisible = false;
-    if (_ctxMenuEl) {
-        _ctxMenuEl.classList.remove('is-visible');
-    }
+    VectorSvelte.setContextMenu({ open: false });
+    popBack('context-menu');
 }
 
 function showContextMenu({ x, y, items }) {
     if (!Array.isArray(items) || items.length === 0) return;
-    const el = _ensureContextMenu();
-    el.innerHTML = '';
-    for (const item of items) {
-        if (item.divider) {
-            const div = document.createElement('div');
-            div.className = 'context-menu-divider';
-            el.appendChild(div);
-            continue;
-        }
-        const row = document.createElement('div');
-        row.className = 'context-menu-item';
-        if (item.danger) row.classList.add('is-danger');
-        row.setAttribute('role', 'menuitem');
-        const label = document.createElement('span');
-        label.textContent = item.label;
-        // Optional dimmed qualifier, e.g. Copy (plain) / Copy (with markdown).
-        if (item.hint) {
-            const hint = document.createElement('span');
-            hint.className = 'context-menu-item-hint';
-            hint.textContent = item.hint;
-            label.appendChild(hint);
-        }
-        row.appendChild(label);
-        if (item.icon) {
-            const icon = document.createElement('span');
-            icon.className = `icon icon-${item.icon}`;
-            row.appendChild(icon);
-        }
-        row.addEventListener('click', (e) => {
-            e.stopPropagation();
-            hideContextMenu();
-            try { item.onClick && item.onClick(); }
-            catch (err) { console.warn('[context-menu] item handler failed:', err); }
-        });
-        el.appendChild(row);
-    }
-
-    // Position. Render hidden to measure, then clamp to viewport so the
-    // menu can never bleed off-screen on long item lists or near edges.
-    el.style.left = '0px';
-    el.style.top = '0px';
-    el.classList.add('is-visible');
+    // Render at the origin to measure, then clamp to the viewport so the menu can never
+    // bleed off-screen on long lists or near edges.
+    VectorSvelte.setContextMenu({ items, x: 0, y: 0, open: true });
+    VectorSvelte.flushSync();
     _ctxMenuVisible = true;
-    const rect = el.getBoundingClientRect();
+    // Android back closes an open menu instead of leaving the screen.
+    pushBack('context-menu', hideContextMenu);
+    const rect = VectorSvelte.contextMenuEls().root.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     let nx = x;
@@ -106,8 +59,7 @@ function showContextMenu({ x, y, items }) {
     if (ny + rect.height > vh - 8) ny = Math.max(8, y - rect.height); // flip up
     if (nx < 8) nx = 8;
     if (ny < 8) ny = 8;
-    el.style.left = `${nx}px`;
-    el.style.top = `${ny}px`;
+    VectorSvelte.setContextMenu({ x: nx, y: ny });
 }
 
 /**

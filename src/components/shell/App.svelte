@@ -13,6 +13,9 @@
     import ImageViewer from '../ui/ImageViewer.svelte';
     import Toast from '../ui/Toast.svelte';
     import BadgeCard from '../ui/BadgeCard.svelte';
+    import ContextMenu from '../ui/ContextMenu.svelte';
+    import RekeyProgress from '../community/RekeyProgress.svelte';
+    import InviteModal from '../community/InviteModal.svelte';
     import Tooltip from './Tooltip.svelte';
     const panes = shellPanes();
 </script>
@@ -60,3 +63,6 @@
 <ImageViewer />
 <Toast />
 <BadgeCard />
+<ContextMenu />
+<RekeyProgress />
+<InviteModal />

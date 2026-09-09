@@ -468,155 +468,66 @@ async function savePivxSettings() {
     }
 }
 
-/**
- * Claims a PIVX payment from a received message
- * @param {string} giftCode - The promo code to claim
- * @param {HTMLElement} bubbleEl - The payment bubble element
- */
-async function claimPivxPayment(giftCode, bubbleEl) {
+/** Claim a payment from a message; the bubble follows the store. */
+async function claimPivxPayment(giftCode) {
     if (!giftCode) return;
-    if (bubbleEl?.classList.contains('claimed')) return;
-    if (bubbleEl?.classList.contains('claiming')) return; // Prevent double-click
-
-    // Mark as claiming to prevent multiple clicks
-    if (bubbleEl) {
-        bubbleEl.classList.add('claiming');
-    }
-
-    // Update hint to show progress
-    const hint = bubbleEl?.querySelector('.msg-pivx-payment-hint');
-    if (hint) {
-        hint.textContent = 'Claiming...';
-    }
-
+    const phase = VectorSvelte.pivxBubble(giftCode)?.phase;
+    if (phase === 'claimed' || phase === 'claiming') return;
+    VectorSvelte.setPivxBubble(giftCode, { phase: 'claiming', hint: 'Claiming...' });
     try {
         const result = await invoke('pivx_claim_from_message', { giftCode });
-
-        if (bubbleEl) {
-            bubbleEl.classList.remove('claiming');
-            bubbleEl.classList.add('claimed');
-        }
-        if (hint) {
-            hint.textContent = 'Claimed!';
-        }
-
+        VectorSvelte.setPivxBubble(giftCode, { phase: 'claimed', hint: 'Claimed!' });
         showToast(`Claimed ${result.amount_piv?.toFixed(2) || ''} PIV`);
         refreshPivxWallet();
     } catch (err) {
         console.error('Failed to claim PIVX:', err);
-        if (bubbleEl) {
-            bubbleEl.classList.remove('claiming');
-        }
-        if (hint) {
-            hint.textContent = 'Claim failed - tap to retry';
-        }
+        VectorSvelte.setPivxBubble(giftCode, { phase: 'failed', hint: 'Claim failed - tap to retry' });
         showToast('Failed to claim: ' + (err.message || err));
     }
 }
 
-/**
- * Renders a PIVX payment bubble for a message
- * @param {string} giftCode - The promo code
- * @param {number} amountPiv - Amount in PIV
- * @param {boolean} isMine - Whether this is my payment (sent by me)
- * @param {string} address - Optional PIVX address for balance checking
- * @returns {HTMLElement} The payment bubble element
- */
-function renderPivxPaymentBubble(giftCode, amountPiv, isMine, address) {
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-pivx-payment';
-    bubble.dataset.giftCode = giftCode;
-    if (address) bubble.dataset.address = address;
+/** The fiat line under an amount, when a price is cached. */
+function pivxFiatLine(amountPiv) {
+    if (!pivxCurrentPrice?.value || !pivxPreferredCurrency) return null;
+    return `~${(amountPiv * pivxCurrentPrice.value).toFixed(2)} ${pivxPreferredCurrency}`;
+}
 
-    // PIVX logo image
-    const img = document.createElement('img');
-    img.src = './icons/pivx.svg';
-    bubble.appendChild(img);
-
-    // Amount and hint on the right
-    const info = document.createElement('div');
-    info.className = 'msg-pivx-payment-info';
-
-    const amountDiv = document.createElement('div');
-    amountDiv.className = 'msg-pivx-payment-amount';
-    amountDiv.textContent = `${amountPiv.toFixed(2)} PIV`;
-    info.appendChild(amountDiv);
-
-    // Show fiat equivalent if we have a cached price
-    if (pivxCurrentPrice?.value && pivxPreferredCurrency) {
-        const fiatValue = amountPiv * pivxCurrentPrice.value;
-        const fiatDiv = document.createElement('div');
-        fiatDiv.className = 'msg-pivx-payment-fiat';
-        fiatDiv.textContent = `~${fiatValue.toFixed(2)} ${pivxPreferredCurrency}`;
-        info.appendChild(fiatDiv);
-    }
-
-    const hint = document.createElement('div');
-    hint.className = 'msg-pivx-payment-hint';
-
-    // If address is available, start in syncing state while we check balance
-    if (address) {
-        bubble.classList.add('syncing');
-        hint.textContent = 'Syncing...';
+/** Seed a bubble's state and start its balance check, once per gift code. */
+const _pivxBubblesChecked = new Set();
+function pivxEnsureBubble(pay, isMine) {
+    const code = pay.gift_code;
+    if (!code || _pivxBubblesChecked.has(code)) return;
+    _pivxBubblesChecked.add(code);
+    if (pay.address) {
+        VectorSvelte.setPivxBubble(code, { phase: 'syncing', hint: 'Syncing...' });
+        checkPivxPaymentClaimedState(code, pay.address, isMine);
     } else {
-        hint.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+        VectorSvelte.setPivxBubble(code, { phase: 'claimable', hint: isMine ? 'Click to reclaim' : 'Click to claim' });
     }
-    info.appendChild(hint);
-
-    bubble.appendChild(info);
-
-    // Make the whole bubble clickable (disabled if claimed/syncing)
-    bubble.onclick = () => {
-        if (!bubble.classList.contains('claimed') && !bubble.classList.contains('syncing')) {
-            claimPivxPayment(giftCode, bubble);
-        }
-    };
-
-    // If address is available, check balance to determine claimed state
-    if (address) {
-        checkPivxPaymentClaimedState(bubble, address, hint, isMine);
-    }
-
-    return bubble;
 }
 
 /**
- * Check if a PIVX payment has been claimed by checking the address balance
- * @param {HTMLElement} bubble - The payment bubble element
- * @param {string} address - PIVX address to check
- * @param {HTMLElement} hintEl - The hint element to update
- * @param {boolean} isMine - Whether this is my payment
- * @param {number} retryCount - Number of retries attempted (for unconfirmed tx propagation)
+ * Settle a bubble's claimed state from the address balance. A zero balance is retried
+ * a few times first: an unconfirmed transaction takes a moment to propagate.
  */
-async function checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount = 0) {
+async function checkPivxPaymentClaimedState(giftCode, address, isMine, retryCount = 0) {
+    const claimable = { phase: 'claimable', hint: isMine ? 'Click to reclaim' : 'Click to claim' };
     try {
-        // Use force=true on retries to bypass cache
-        const force = retryCount > 0;
-        const balance = await __TAURI__.core.invoke('pivx_check_address_balance', { address, force });
-        bubble.classList.remove('syncing');
+        const balance = await __TAURI__.core.invoke('pivx_check_address_balance', { address, force: retryCount > 0 });
         if (balance <= 0) {
-            // Balance is 0 - could be claimed OR unconfirmed tx not yet visible
-            // Retry a few times with delay to handle tx propagation delay
             if (retryCount < 3) {
-                bubble.classList.add('syncing');
-                hintEl.textContent = 'Confirming...';
-                setTimeout(() => {
-                    checkPivxPaymentClaimedState(bubble, address, hintEl, isMine, retryCount + 1);
-                }, 3000); // Retry after 3 seconds
+                VectorSvelte.setPivxBubble(giftCode, { phase: 'syncing', hint: 'Confirming...' });
+                setTimeout(() => checkPivxPaymentClaimedState(giftCode, address, isMine, retryCount + 1), 3000);
                 return;
             }
-            // After retries, mark as claimed
-            bubble.classList.add('claimed');
-            hintEl.textContent = 'Claimed';
+            VectorSvelte.setPivxBubble(giftCode, { phase: 'claimed', hint: 'Claimed' });
         } else {
-            // Has balance - show claim option
-            hintEl.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+            VectorSvelte.setPivxBubble(giftCode, claimable);
         }
     } catch (err) {
-        // If balance check fails, allow claiming anyway
+        // A failed check must not block a claim.
         console.warn('Failed to check PIVX payment balance:', err);
-        bubble.classList.remove('syncing');
-        hintEl.textContent = isMine ? 'Click to reclaim' : 'Click to claim';
+        VectorSvelte.setPivxBubble(giftCode, claimable);
     }
 }
 

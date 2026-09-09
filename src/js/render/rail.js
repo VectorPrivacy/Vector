@@ -83,24 +83,11 @@ function renderRailShortcuts() {
  * expanded and a corner dot collapsed without a second set of rules.
  */
 function syncRailMailBadge(nUnreadDms) {
-    const mail = document.getElementById('ws-rail-mail');
-    if (!mail) return;
-    // Invites stay silent while the DM list is the pane on screen — they're
-    // right there. Unread DMs count wherever you are.
-    const away = typeof wsListCommunityId === 'function' && !!wsListCommunityId();
+    // Invites stay silent while the DM list is the pane on screen, where they are
+    // in view already. Unread DMs count wherever you are.
+    const away = !!wsListCommunityId();
     const count = (nUnreadDms || 0) + (away ? arrCommunityInvites.length : 0);
-    let badge = document.getElementById('ws-rail-mail-badge');
-    if (!count) {
-        badge?.remove();
-        return;
-    }
-    if (!badge) {
-        badge = document.createElement('span');
-        badge.id = 'ws-rail-mail-badge';
-        badge.className = 'ws-rail-item-badge';
-        mail.appendChild(badge);
-    }
-    badge.textContent = count > 99 ? '99+' : String(count);
+    VectorSvelte.setMailBadge(!count ? '' : count > 99 ? '99+' : String(count));
 }
 
 /** The open chat changed: the rail's active shortcut derives from the signal. */

@@ -88,7 +88,7 @@ function _dmsgRowCtx(msg) {
  * streak state and scroll position all survive. Vanilla-built rows (system events,
  * PIVX, blocked) fall back to a full replace.
  */
-function updateMessageRow(domMsg, msg, profile, oldId = '') {
+function updateMessageRow(msg, oldId = '') {
     // The list derives from the array: make sure it holds `msg`, then re-derive. Same
     // id → the row's prop changes and it refills in place; a new id (pending → sent)
     // is a new keyed row, as a replace was.
@@ -108,9 +108,7 @@ function updateMessageRow(domMsg, msg, profile, oldId = '') {
     if (oldId && oldId !== msg.id) VectorSvelte.touchMessage(oldId);
     VectorSvelte.touchWindow();
     VectorSvelte.flushSync();
-    const el = document.getElementById(msg.id);
     if (msg.mine) _dmsgUpdateLastSentVisibility();
-    return el || domMsg;
 }
 
 /** Helpers the row island calls; the leaf builders stay here. */
@@ -152,7 +150,7 @@ const _dmsgRowHelpers = {
     cancelUpload: (pendingId) => invoke('cancel_upload', { pendingId }),
     openChat: () => strOpenChat,
     formatBytes: (n, dec, short) => formatBytes(n, dec, short),
-    buildCryptoAddress: (msg) => { const c = detectCryptoAddress(msg.content); return c ? renderCryptoAddress(c) : null; },
+    cryptoAddress: (msg) => detectCryptoAddress(msg.content),
     renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
     destroyEmojiPackPreviews: (node) => destroyEmojiPackPreviews(node),
     inviteKeys: (text) => communityInviteKeys(text),
@@ -188,8 +186,7 @@ const _dmsgRowHelpers = {
     replyView: (msg, sender) => _dmsgReplyView(msg, sender),
     renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
     createPlaceholderAvatar: (g, size) => createPlaceholderAvatar(g, size),
-    buildPivxBubble: (msg) => renderPivxPaymentBubble(
-        msg.pivx_payment.gift_code, msg.pivx_payment.amount_piv, msg.mine, msg.pivx_payment.address),
+    pivx: { fiat: (amt) => pivxFiatLine(amt), ensure: (pay, mine) => pivxEnsureBubble(pay, mine), claim: (code) => claimPivxPayment(code) },
     revealBlocked: (msg) => { revealedBlockedMessages.add(msg.id); openChat(strOpenChat); },
     commandInfo: (msg) => _dmsgCommandInfo(msg),
     myNpub: () => strPubkey,

@@ -263,8 +263,7 @@ async function sendMessage(messageText) {
                         .filter(t => cleanedText.includes(`:${t.shortcode}:`));
                     // Instant repaint for responsive UX; the backend's authoritative
                     // message_update lands on the same row afterwards.
-                    const msgElement = document.getElementById(editMsgId);
-                    if (msgElement) updateMessageRow(msgElement, msg, getProfile(strOpenChat), editMsgId);
+                    updateMessageRow(msg, editMsgId);
                 }
             }
 
@@ -457,18 +456,11 @@ function _upgradeCommandRows(chatId) {
     if (!known || !known.size) return;
     const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat?.messages) return;
-    const profile = getProfile(strOpenChat);
+    // Only command-shaped messages re-derive: their line reads the manifest that just landed.
     for (const msg of chat.messages) {
         if (msg.addressed_bots && msg.addressed_bots.length) continue;
         if (!/^\s*\/[a-z0-9_-]{1,32}\s+\S/.test(msg.content || '')) continue;
-        const domMsg = document.getElementById(msg.id);
-        if (!domMsg) continue;
-        // Already an action line: re-rendering it produces the same row, and
-        // `replaceWith` above the viewport costs the reader their scroll
-        // position for nothing. This runs on every command-set load, so
-        // without the check a row churns every time.
-        if (domMsg.querySelector('.dmsg-command-line')) continue;
-        updateMessageRow(domMsg, msg, profile, msg.id);
+        updateMessageRow(msg, msg.id);
     }
 }
 
