@@ -89,8 +89,7 @@ function initializeUpdaterUI() {
                 try { localStorage.setItem('beta_updates', on ? 'true' : 'false'); } catch (_) {}
                 VectorSvelte.setUpdates({ beta: on });
                 currentUpdate = null;
-                const updateDot = document.getElementById('settings-update-dot');
-                if (updateDot) updateDot.style.display = 'none';
+                VectorSvelte.setShellFlag('updateDot', false);
                 updateUI('idle');
                 checkForUpdates(false);
             },
@@ -177,7 +176,6 @@ let updateUiTimer = null;
 function updateUI(state, message = '', progress = 0) {
     updateState = state;
     clearTimeout(updateUiTimer);
-    const updateDot = document.getElementById('settings-update-dot');
     const found = state === 'available' && currentUpdate;
     VectorSvelte.setUpdates({
         phase: state,
@@ -187,7 +185,8 @@ function updateUI(state, message = '', progress = 0) {
         changelog: found ? (currentUpdate.body || '') : '',
         downloadLabel: platformFeatures.os === 'android' ? androidUpdateButtonLabel() : 'Download Update',
     });
-    if (updateDot) updateDot.style.display = state === 'available' ? 'block' : (state === 'downloading' || state === 'ready') ? 'none' : updateDot.style.display;
+    if (state === 'available') VectorSvelte.setShellFlag('updateDot', true);
+    else if (state === 'downloading' || state === 'ready') VectorSvelte.setShellFlag('updateDot', false);
     if (state === 'error' || state === 'no-updates') {
         updateUiTimer = setTimeout(() => updateUI('idle'), state === 'error' ? 5000 : 3000);
     }

@@ -1270,15 +1270,15 @@ async function openChat(contact) {
     // Display the Chat UI
     navbarSelect('chat-btn');
     if (fProfileEditMode) exitProfileEditMode(true);
-    domProfile.style.display = 'none';
-    domChatNew.style.display = 'none';
-    domCreateGroup.style.display = 'none';
-    domChats.style.display = 'none';
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('profile', false);
+    VectorSvelte.showPane('chatNew', false);
+    VectorSvelte.showPane('createGroup', false);
+    VectorSvelte.showPane('chats', false);
+    VectorSvelte.showPane('groupOverview', false);
     // Hide the Settings/Invites tabs too — a chat opened from inside one of them (deep-link join,
     // notification tap) must fully take over, not paint underneath the still-visible menu.
-    domSettings.style.display = 'none';
-    domInvites.style.display = 'none';
+    VectorSvelte.showPane('settings', false);
+    VectorSvelte.showPane('invites', false);
     // Jumping to a chat (e.g. mini-profile "Send Message" from the member list) closes Group
     // Details for good — drop its back entry so back-nav doesn't land on a dead re-hide step.
     // Same for the two composers: opening a conversation abandons them, so leaving their
@@ -1286,14 +1286,14 @@ async function openChat(contact) {
     popBack('group-overview');
     popBack('create-group');
     popBack('new-chat');
-    domChat.style.display = '';
+    VectorSvelte.showPane('chat', true);
     // Match the fade transition the navbar/account tabs use for visual cohesion.
     domChat.classList.add('fadein-anim');
     domChat.addEventListener('animationend', () => domChat.classList.remove('fadein-anim'), { once: true });
-    domSettingsBtn.style.display = 'none';
+    VectorSvelte.setShellFlag('settingsTab', false);
 
     // Hide the Navbar
-    domNavbar.style.display = `none`;
+    VectorSvelte.showPane('navbar', false);
 
     // Clear existing messages so they're fully re-rendered (picks up state changes like blocking)
     ensureMessageList();
@@ -1632,16 +1632,16 @@ function openNewChat() {
     // instead of returning to the list. Not closeCreateGroup(): that navigates to
     // the chat list, which is where we are leaving.
     popBack('create-group');
-    domCreateGroup.style.display = 'none';
+    VectorSvelte.showPane('createGroup', false);
 
     pushBack('new-chat', closeChat);
     // Display the UI
-    domChatNew.style.display = '';
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
+    VectorSvelte.showPane('chatNew', true);
+    VectorSvelte.showPane('chats', false);
+    VectorSvelte.showPane('chat', false);
 
     // Hide the Navbar
-    domNavbar.style.display = 'none';
+    VectorSvelte.showPane('navbar', false);
 }
 
 /**
@@ -1723,11 +1723,11 @@ async function closeChat() {
 
     // Reset the chat UI
     if (fProfileEditMode) exitProfileEditMode(true);
-    domProfile.style.display = 'none';
-    domGroupOverview.style.display = 'none';
-    domSettingsBtn.style.display = '';
-    domChatNew.style.display = 'none';
-    domChat.style.display = 'none';
+    VectorSvelte.showPane('profile', false);
+    VectorSvelte.showPane('groupOverview', false);
+    VectorSvelte.setShellFlag('settingsTab', true);
+    VectorSvelte.showPane('chatNew', false);
+    VectorSvelte.showPane('chat', false);
     // Stash the unsent text as this chat's draft and clear the composer, so
     // the next open restores its own draft with a coherent mic/send state.
     if (strCurrentEditMessageId) cancelEdit();
@@ -1744,7 +1744,7 @@ async function closeChat() {
     // Hide the back button notification dot when closing chat
 
     // Display the Navbar
-    domNavbar.style.display = ``;
+    VectorSvelte.showPane('navbar', true);
 
     // Cancel any ongoing replies or selections
     strCurrentReactionReference = "";

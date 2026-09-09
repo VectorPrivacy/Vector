@@ -72,22 +72,22 @@ function openCreateGroup() {
     // Mutually exclusive with Start New Chat — see openNewChat for why the pane and
     // its back entry both have to go.
     popBack('new-chat');
-    domChatNew.style.display = 'none';
+    VectorSvelte.showPane('chatNew', false);
 
     pushBack('create-group', closeCreateGroup);
     ccEnsureMounted();
     VectorSvelte.ccOpen();
-    domCreateGroup.style.display = '';
-    domChats.style.display = 'none';
-    domChat.style.display = 'none';
-    domNavbar.style.display = 'none';
+    VectorSvelte.showPane('createGroup', true);
+    VectorSvelte.showPane('chats', false);
+    VectorSvelte.showPane('chat', false);
+    VectorSvelte.showPane('navbar', false);
 }
 
 /** Close the panel and return to the chat list. */
 async function closeCreateGroup() {
     popBack('create-group');
-    domCreateGroup.style.display = 'none';
-    domNavbar.style.display = '';
+    VectorSvelte.showPane('createGroup', false);
+    VectorSvelte.showPane('navbar', true);
     await openChatlist();
     adjustSize();
 }
@@ -128,7 +128,7 @@ async function createCommunityFromPanel(inviteeNpubs) {
         listChanged();
 
         openChat(channelId);
-        domCreateGroup.style.display = 'none';
+        VectorSvelte.showPane('createGroup', false);
         VectorSvelte.ccSetBusy(false);
 
         // Detached: the community is already on screen; the icon upload must not delay it.

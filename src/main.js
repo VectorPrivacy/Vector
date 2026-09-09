@@ -162,10 +162,6 @@ const domChatNewDM = document.getElementById('new-chat-btn');
 const domChatNewGroup = document.getElementById('create-group-btn');
 const domNavbar = document.getElementById('navbar');
 const domInvites = document.getElementById('invites');
-const domInvitesBtn = document.getElementById('invites-btn');
-const domProfileBtn = document.getElementById('profile-btn');
-const domChatlistBtn = document.getElementById('chat-btn');
-const domSettingsBtn = document.getElementById('settings-btn');
 
 const domChat = document.getElementById('chat');
 const domChatBackBtn = document.getElementById('chat-back-btn');
@@ -2099,7 +2095,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
                 // Hide login UI and show main UI
                 VectorSvelte.loginHide();
-                domNavbar.style.display = '';
+                VectorSvelte.showPane('navbar', true);
                 domChatBookmarksBtn.style.display = 'flex';
                 
                 // Render our profile
@@ -2313,10 +2309,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up our static buttons
-    domInvitesBtn.onclick = openInvites;
-    domProfileBtn.onclick = () => openProfile();
-    domChatlistBtn.onclick = openChatlist;
-    domSettingsBtn.onclick = openSettings;
+    VectorSvelte.setShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings });
     await wireLoginUi();
     await wireChatUi();
     await initComposer();

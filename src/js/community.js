@@ -533,7 +533,7 @@ async function openGroupOverview(chat) {
     if (!chat || !chatIsGroup(chat)) return;
 
     pushBack('group-overview', () => {
-        domGroupOverview.style.display = 'none';
+        VectorSvelte.showPane('groupOverview', false);
         domGroupOverview.removeAttribute('data-group-id');
         // Widescreen docks the roster beside a conversation that never closed, so
         // dismissing it is the user closing the ROSTER — record that, and don't
@@ -546,19 +546,19 @@ async function openGroupOverview(chat) {
     });
 
     navbarSelect('chat-btn');
-    domSettings.style.display = 'none';
-    domInvites.style.display = 'none';
+    VectorSvelte.showPane('settings', false);
+    VectorSvelte.showPane('invites', false);
     if (fProfileEditMode) exitProfileEditMode(true);
-    domProfile.style.display = 'none';
+    VectorSvelte.showPane('profile', false);
     // Narrow, the roster IS the screen and everything else gets out of its way.
     // Widescreen docks it as a fourth column beside panes that must stay up — and
     // hiding them there only LOOKS right because `body.ws` forces them visible with
     // !important. The inline none survives underneath, so narrowing the window past
     // the threshold hands it the win and the whole app paints black.
     if (!wsActive()) {
-        domNavbar.style.display = 'none';
-        domChats.style.display = 'none';
-        domChat.style.display = 'none';
+        VectorSvelte.showPane('navbar', false);
+        VectorSvelte.showPane('chats', false);
+        VectorSvelte.showPane('chat', false);
     }
 
     // Store which group is being viewed
@@ -572,7 +572,7 @@ async function openGroupOverview(chat) {
     if (domGroupOverview.style.display !== '') {
         domGroupOverview.classList.add('fadein-subtle-anim');
         domGroupOverview.addEventListener('animationend', () => domGroupOverview.classList.remove('fadein-subtle-anim'), { once: true });
-        domGroupOverview.style.display = '';
+        VectorSvelte.showPane('groupOverview', true);
     }
 
     // Only Communities are group-like now (chatIsGroup gate above), so render the
@@ -603,7 +603,7 @@ async function removeCommunityFromUI(communityId) {
     const wasViewing = ids.has(strOpenChat);
     if (wasViewing) {
         await closeChat();
-        domGroupOverview.style.display = 'none';
+        VectorSvelte.showPane('groupOverview', false);
         domGroupOverview.removeAttribute('data-group-id');
     }
     arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
@@ -646,7 +646,7 @@ async function runCommunityMigration() {
         // openGroupOverview hid every other pane, so a bare hide paints black: this is the back-entry's
         // close path. The v2 twin reuses the primary channel id, so the same chat id opens the migrated room.
         popBack('group-overview');
-        domGroupOverview.style.display = 'none';
+        VectorSvelte.showPane('groupOverview', false);
         domGroupOverview.removeAttribute('data-group-id');
         openChat(chatId);
     } catch (e) {
@@ -731,7 +731,7 @@ function mountCommunityOverview() {
         }
         const { chatId } = VectorSvelte.overviewState();
         popBack('group-overview');
-        domGroupOverview.style.display = 'none';
+        VectorSvelte.showPane('groupOverview', false);
         domGroupOverview.removeAttribute('data-group-id');
         openChat(chatId);
     };
@@ -973,7 +973,7 @@ async function tearDownCommunityLocally(communityId) {
     );
     if (goneChannelIds.has(strOpenChat)) await closeChat();
     arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('groupOverview', false);
     domGroupOverview.removeAttribute('data-group-id');
     listChanged();
     openChatlist();

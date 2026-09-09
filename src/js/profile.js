@@ -86,7 +86,7 @@ function mountProfileScreenOnce() {
             showInviteBadge: (count) => showBadgeCard({ title: 'Vector Beta Inviter', html: `Acquired by inviting <b>${count} ${count === 1 ? 'user' : 'users'}</b> to the Vector Beta!`, svg: 'vector_badge_placeholder.svg' }),
             showFawkesCard,
             showBugHunterCard,
-            showNavbar: (on) => { domNavbar.style.display = on ? '' : 'none'; },
+            showNavbar: (on) => { VectorSvelte.showPane('navbar', on); },
             pickPicture: pickProfilePicture,
             // Own profile
             enterEdit: enterProfileEditMode,
@@ -158,21 +158,21 @@ function mountProfileScreenOnce() {
  */
 async function openProfile(cProfile) {
     pushBack('profile', () => {
-        domProfile.style.display = 'none';
+        VectorSvelte.showPane('profile', false);
         if (previousChatBeforeProfile) openChat(previousChatBeforeProfile);
         else openChatlist();
     });
     navbarSelect('profile-btn');
-    domNavbar.style.display = '';
-    domChats.style.display = 'none';
-    domSettings.style.display = 'none';
-    domInvites.style.display = 'none';
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('navbar', true);
+    VectorSvelte.showPane('chats', false);
+    VectorSvelte.showPane('settings', false);
+    VectorSvelte.showPane('invites', false);
+    VectorSvelte.showPane('groupOverview', false);
     // "View Profile" from the member-list mini-profile closes Group Details for good — drop its
     // back entry so back-nav doesn't land on a dead re-hide step.
     popBack('group-overview');
-    domChat.style.display = 'none'; // Hide the chat view when opening profile
-    domSettingsBtn.style.display = ''; // Ensure settings button is visible (may have been hidden by openChat)
+    VectorSvelte.showPane('chat', false); // Hide the chat view when opening profile
+    VectorSvelte.setShellFlag('settingsTab', true);
 
     // Scroll profile back to top
     setTimeout(() => {
@@ -213,7 +213,7 @@ async function openProfile(cProfile) {
         domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
 
         // Open the tab
-        domProfile.style.display = '';
+        VectorSvelte.showPane('profile', true);
     }
 }
 

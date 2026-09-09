@@ -6,16 +6,16 @@ async function openChatlist() {
     // press exits to the home screen instead of replaying old open fns.
     clearBack();
     navbarSelect('chat-btn');
-    domNavbar.style.display = '';
+    VectorSvelte.showPane('navbar', true);
     if (fProfileEditMode) exitProfileEditMode(true);
-    domProfile.style.display = 'none';
-    domSettings.style.display = 'none';
-    domInvites.style.display = 'none';
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('profile', false);
+    VectorSvelte.showPane('settings', false);
+    VectorSvelte.showPane('invites', false);
+    VectorSvelte.showPane('groupOverview', false);
     // Hide the chat view too. openChat shows domChat BEFORE it resolves the chat, so a bail-to-list
     // (e.g. a community torn down mid-open by a ban/removal → no chat found) would otherwise strand
     // the blank chat header over the list. The list is the root view: nothing else should overlay it.
-    domChat.style.display = 'none';
+    VectorSvelte.showPane('chat', false);
     previousChatBeforeProfile = ""; // Clear when navigating away
 
     if (domChats.style.display !== '') {
@@ -24,7 +24,7 @@ async function openChatlist() {
         domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
 
         // Open the tab
-        domChats.style.display = '';
+        VectorSvelte.showPane('chats', true);
     }
     
     // Load and display pending Community invites (adjust layout before/after for consistency)
@@ -79,15 +79,15 @@ async function refreshRemoteSignerCard() {
 function openSettings() {
     pushBack('settings', () => openChatlist());
     navbarSelect('settings-btn');
-    domNavbar.style.display = '';
-    domSettings.style.display = '';
+    VectorSvelte.showPane('navbar', true);
+    VectorSvelte.showPane('settings', true);
 
     // Hide the other tabs
     if (fProfileEditMode) exitProfileEditMode(true);
-    domProfile.style.display = 'none';
-    domChats.style.display = 'none';
-    domInvites.style.display = 'none';
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('profile', false);
+    VectorSvelte.showPane('chats', false);
+    VectorSvelte.showPane('invites', false);
+    VectorSvelte.showPane('groupOverview', false);
     previousChatBeforeProfile = ""; // Clear when navigating away
 
     // Update the Storage Breakdown
@@ -99,10 +99,9 @@ function openSettings() {
     refreshRemoteSignerCard();
 
     // An update is waiting: bring the Updates section into view and clear the dot.
-    const updateDot = document.getElementById('settings-update-dot');
-    if (updateDot && updateDot.style.display !== 'none') {
+    if (VectorSvelte.shellState().updateDot) {
         VectorSvelte.requestSettingsScroll('updates');
-        updateDot.style.display = 'none';
+        VectorSvelte.setShellFlag('updateDot', false);
     }
 }
 
@@ -116,15 +115,15 @@ function invitesEnsureMounted() {
 async function openInvites() {
     pushBack('invites', () => openChatlist());
     navbarSelect('invites-btn');
-    domNavbar.style.display = '';
-    domInvites.style.display = '';
+    VectorSvelte.showPane('navbar', true);
+    VectorSvelte.showPane('invites', true);
 
     // Hide the other tabs
     if (fProfileEditMode) exitProfileEditMode(true);
-    domProfile.style.display = 'none';
-    domChats.style.display = 'none';
-    domSettings.style.display = 'none';
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('profile', false);
+    VectorSvelte.showPane('chats', false);
+    VectorSvelte.showPane('settings', false);
+    VectorSvelte.showPane('groupOverview', false);
     previousChatBeforeProfile = ""; // Clear when navigating away
 
     // Fetch and display the invite code
@@ -141,14 +140,7 @@ async function openInvites() {
     // Note: MLS invites are now shown in the Chat tab, not here
 }
 
-/**
- * A utility to "select" one Navbar item, deselecting the rest automatically.
- */
+/** Light one navbar tab; the Navbar component dims the rest. */
 function navbarSelect(strSelectionID = '') {
-    // Scoped to the tab buttons: the navbar also carries the widescreen rail's
-    // head, collapse toggle and account chip, which must not be dimmed.
-    for (const navItem of domNavbar.querySelectorAll('.navbar-btn')) {
-        if (strSelectionID === navItem.id) navItem.classList.remove('navbar-btn-inactive');
-        else navItem.classList.add('navbar-btn-inactive');
-    }
+    VectorSvelte.setTab(strSelectionID);
 }

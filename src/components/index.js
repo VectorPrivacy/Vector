@@ -58,6 +58,8 @@ import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
 import InvitesScreen from './people/InvitesScreen.svelte';
 import QrOverlay from './ui/QrOverlay.svelte';
 import QrScanner from './ui/QrScanner.svelte';
+import App from './shell/App.svelte';
+export { shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
 import StatusDialog from './ui/StatusDialog.svelte';
 import DowngradeBlock from './ui/DowngradeBlock.svelte';
 import LoginScreen from './auth/LoginScreen.svelte';
@@ -458,3 +460,8 @@ export function mountPermissionPrompt() {
 export function mountPublishDialog() {
     return mount(PublishDialog, { target: document.body, props: {} });
 }
+
+// The shell mounts as the bundle evaluates: it loads before main.js, whose load-time
+// getElementById handles need the screens' containers in the document already.
+mount(App, { target: document.body, props: {} });
+flushSync();

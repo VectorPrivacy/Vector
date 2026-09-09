@@ -339,7 +339,7 @@ function wsSetMembersOpen(open) {
 
 function wsCloseDetails() {
     popBack('group-overview');
-    domGroupOverview.style.display = 'none';
+    VectorSvelte.showPane('groupOverview', false);
     domGroupOverview.removeAttribute('data-group-id');
 }
 

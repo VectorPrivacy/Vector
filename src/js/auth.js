@@ -130,12 +130,12 @@ function showBunkerForm(mode = 'new') {
     if (mode === 'reauth') {
         const settingsVisible = domSettings.style.display !== 'none';
         bunkerReauthOrigin = settingsVisible ? 'settings' : 'chats';
-        domNavbar.style.display = 'none';
-        domSettings.style.display = 'none';
-        domChats.style.display = 'none';
-        domProfile.style.display = 'none';
-        domInvites.style.display = 'none';
-        domGroupOverview.style.display = 'none';
+        VectorSvelte.showPane('navbar', false);
+        VectorSvelte.showPane('settings', false);
+        VectorSvelte.showPane('chats', false);
+        VectorSvelte.showPane('profile', false);
+        VectorSvelte.showPane('invites', false);
+        VectorSvelte.showPane('groupOverview', false);
     } else {
         bunkerReauthOrigin = null;
     }
@@ -242,7 +242,7 @@ async function login(skipAnimations = false) {
                 VectorSvelte.loginHide();
 
                 // Show navbar and bookmarks
-                domNavbar.style.display = '';
+                VectorSvelte.showPane('navbar', true);
                 domChatBookmarksBtn.style.display = 'flex';
 
                 // Land on the Chat tab. Without an explicit reset here, the
@@ -252,12 +252,12 @@ async function login(skipAnimations = false) {
                 // which hid every panel and never re-showed them. Always
                 // resetting to Chat gives one consistent landing point for
                 // new accounts, imported accounts, and normal logins alike.
-                domChats.style.display = '';
-                domChat.style.display = 'none';
-                domProfile.style.display = 'none';
-                domSettings.style.display = 'none';
-                domInvites.style.display = 'none';
-                domGroupOverview.style.display = 'none';
+                VectorSvelte.showPane('chats', true);
+                VectorSvelte.showPane('chat', false);
+                VectorSvelte.showPane('profile', false);
+                VectorSvelte.showPane('settings', false);
+                VectorSvelte.showPane('invites', false);
+                VectorSvelte.showPane('groupOverview', false);
                 navbarSelect('chat-btn');
 
                 // Render our profile

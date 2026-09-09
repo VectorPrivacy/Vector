@@ -406,13 +406,13 @@ const addAccountFlow = {
 
         // Pure UI swap — no backend touch. Hide every main-app panel and
         // surface the login form with the start screen + back-bar visible.
-        domNavbar.style.display = 'none';
-        domChats.style.display = 'none';
-        domChat.style.display = 'none';
-        domProfile.style.display = 'none';
-        domSettings.style.display = 'none';
-        domInvites.style.display = 'none';
-        domGroupOverview.style.display = 'none';
+        VectorSvelte.showPane('navbar', false);
+        VectorSvelte.showPane('chats', false);
+        VectorSvelte.showPane('chat', false);
+        VectorSvelte.showPane('profile', false);
+        VectorSvelte.showPane('settings', false);
+        VectorSvelte.showPane('invites', false);
+        VectorSvelte.showPane('groupOverview', false);
 
         VectorSvelte.loginScreen('start', true);
         VectorSvelte.loginShowForm(true);
@@ -466,22 +466,6 @@ const addAccountFlow = {
  * viewport. Returns a closure that re-applies the snapshot.
  */
 function captureMainUiSnapshot() {
-    const visible = {
-        navbar: domNavbar.style.display,
-        chats: domChats.style.display,
-        chat: domChat.style.display,
-        profile: domProfile.style.display,
-        settings: domSettings.style.display,
-        invites: domInvites.style.display,
-        groupOverview: domGroupOverview.style.display,
-    };
-    return () => {
-        domNavbar.style.display = visible.navbar;
-        domChats.style.display = visible.chats;
-        domChat.style.display = visible.chat;
-        domProfile.style.display = visible.profile;
-        domSettings.style.display = visible.settings;
-        domInvites.style.display = visible.invites;
-        domGroupOverview.style.display = visible.groupOverview;
-    };
+    const panes = VectorSvelte.panesSnapshot();
+    return () => VectorSvelte.restorePanes(panes);
 }
