@@ -32,12 +32,12 @@ class VoiceRecorder {
     /**
      * @param {HTMLElement} button - The recording button element
      * @param {HTMLElement} inputContainer - The chat input container element
-     * @param {HTMLElement} sendButton - The send button element (optional, will be found if not provided)
+     * @param {HTMLElement} sendButton - The send button element
      */
-    constructor(button, inputContainer, sendButton = null) {
+    constructor(button, inputContainer, sendButton) {
         this.button = button;
         this.inputContainer = inputContainer;
-        this.sendButton = sendButton || document.getElementById('chat-input-send');
+        this.sendButton = sendButton;
         this.state = RecordingState.IDLE;
         this.holdTimer = null;
         this.startPosition = { x: 0, y: 0 };
@@ -73,9 +73,10 @@ class VoiceRecorder {
      */
     _createUI() {
         // Get references to existing elements we'll hide during recording
-        this.fileButton = this.inputContainer.querySelector('#chat-input-file');
+        const els = VectorSvelte.composerEls();
+        this.fileButton = els.file;
         this.textInput = this.inputContainer.querySelector('#chat-input');
-        this.emojiButton = this.inputContainer.querySelector('#chat-input-emoji');
+        this.emojiButton = els.emoji;
 
         // Recording UI container (replaces textarea area during recording)
         this.recordingUI = document.createElement('div');

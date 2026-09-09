@@ -14,8 +14,7 @@
  * Cross-file dependencies (resolved at call time via classic-script scope):
  *   - emoji.js   — arrEmojis, searchEmojis, getMostUsedEmojis
  *   - twemoji    — twemojify
- *   - main.js    — domChatMessageInput, domChatMessageInputEmoji,
- *                  domChatMessageInputSend, domChatMessageInputFile,
+ *   - main.js    — domChatMessageInput; the box's buttons via composerEls(),
  *                  domAttachmentPanel, domMiniAppLaunchOverlay,
  *                  closeAttachmentPanel, platformFeatures, arrChats
  *   - miniapps-panel.js — closeMiniAppLaunchDialog
@@ -37,7 +36,7 @@ if (picker) {
             pushBack('emoji-picker', () => {
                 picker.classList.remove('visible');
                 picker.style.bottom = '';
-                domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+                VectorSvelte.setEmojiIcon('smile');
             });
         } else {
             hideEmojiTooltip();
@@ -196,7 +195,8 @@ function openEmojiPanelForStatus(onInsert) {
  * @param {MouseEvent?} e - An associated click event
  */
 function openEmojiPanel(e) {
-    const isDefaultPanel = e.target === domChatMessageInputEmoji || domChatMessageInputEmoji.contains(e.target);
+    const emojiBtn = VectorSvelte.composerEls().emoji;
+    const isDefaultPanel = e.target === emojiBtn || emojiBtn.contains(e.target);
 
     // Don't close if clicking inside the picker itself. The path is read rather than
     // the target's ancestry: a panel control that unmounts on click is detached by
@@ -241,7 +241,7 @@ function openEmojiPanel(e) {
 
         // Swap the emoji button to a wink while open (message input only).
         if (isDefaultPanel) {
-            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-wink-face"></span>`;
+            VectorSvelte.setEmojiIcon('wink');
         }
         strCurrentReactionReference = strReaction || '';
 
@@ -315,7 +315,7 @@ function closeEmojiPanel() {
     _stopPackCanvasLoop();
 
     // Change the emoji button to the regular face
-    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+    VectorSvelte.setEmojiIcon('smile');
 }
 
 
@@ -4593,7 +4593,7 @@ async function _onSearchKeydown(e) {
             emojiSearch.value = '';
             picker.classList.remove('visible');
             strCurrentReactionReference = '';
-            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+            VectorSvelte.setEmojiIcon('smile');
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
                 if (!_emojiPanelTarget) domChatMessageInput.focus();
             }
@@ -4634,7 +4634,7 @@ async function _onSearchKeydown(e) {
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
-        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+        VectorSvelte.setEmojiIcon('smile');
 
         // Bring the focus back to the chat (desktop only - mobile keyboards are disruptive)
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -4653,7 +4653,7 @@ async function _onSearchKeydown(e) {
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
-        domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+        VectorSvelte.setEmojiIcon('smile');
 
         // Close the attachment panel if open
         if (domAttachmentPanel.classList.contains('visible')) {
@@ -5175,7 +5175,7 @@ function selectGif(gifId) {
     // Close the picker
     picker.classList.remove('visible');
     picker.style.bottom = '';
-    domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+    VectorSvelte.setEmojiIcon('smile');
 
     // Reset picker state
     emojiSearch.value = '';
@@ -5189,7 +5189,7 @@ function selectGif(gifId) {
 
     // Auto-send only if input was empty (just the GIF)
     if (wasEmpty) {
-        domChatMessageInputSend.click();
+        VectorSvelte.composerEls().send.click();
     }
 }
 

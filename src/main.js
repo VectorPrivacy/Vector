@@ -145,17 +145,11 @@ function showBugHunterCard(tier) {
 }
 
 const domGroupOverview = document.getElementById('group-overview');
-const domGroupOverviewBackBtn = document.getElementById('group-overview-back-btn');
 // The overview body is an island (mounted below); the roster host and search live inside it.
 const groupMembersEl = () => document.getElementById('group-overview-members');
 const groupSearchEl = () => document.getElementById('group-member-search-input');
 
 const domChats = document.getElementById('chats');
-const domChatBookmarksBtn = document.getElementById('chat-bookmarks-btn');
-const domAccount = document.getElementById('account');
-const domAccountAvatarContainer = document.getElementById('account-avatar-container');
-const domAccountName = document.getElementById('account-name');
-const domAccountStatus = document.getElementById('account-status');
 const domSyncLine = document.getElementById('sync-line');
 const domChatList = document.getElementById('chat-list');
 const domChatNewDM = document.getElementById('new-chat-btn');
@@ -164,14 +158,7 @@ const domNavbar = document.getElementById('navbar');
 const domInvites = document.getElementById('invites');
 
 const domChat = document.getElementById('chat');
-const domChatBackBtn = document.getElementById('chat-back-btn');
-const domChatBackNotificationDot = document.getElementById('chat-back-notification-dot');
-const domChatHeaderAvatarContainer = document.getElementById('chat-header-avatar-container');
-const domChatContact = document.getElementById('chat-contact');
-const domChatContactStatus = document.getElementById('chat-contact-status');
 const domChatMessages = document.getElementById('chat-messages');
-const domChatMessageBox = document.getElementById('chat-box');
-const domChatMessagesScrollReturnBtn = document.getElementById('chat-scroll-return');
 // Late-bound because the composer is constructed here, thousands of lines before
 // the mention selector that owns the tracked list. `var` so the binding exists no
 // matter which of the two runs first.
@@ -263,19 +250,10 @@ function buildRichComposer(host) {
     composer.el.id = 'chat-input';
     return composer;
 }
-const domChatMessageInputFile = document.getElementById('chat-input-file');
-const domChatMessageInputCancel = document.getElementById('chat-input-cancel');
-const domChatReplyBarName = document.getElementById('chat-reply-bar-name');
-const domChatReplyBarSnippet = document.getElementById('chat-reply-bar-snippet');
-const domChatReplyBarCancel = document.getElementById('chat-reply-bar-cancel');
-const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domAttachmentPanel = document.getElementById('attachment-panel');
 const domMarketplacePanel = document.getElementById('marketplace-panel');
 const domAppDetailsPanel = document.getElementById('app-details-panel');
 const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
-const domChatMessageInputVoice = document.getElementById('chat-input-voice');
-const domChatMessageInputSend = document.getElementById('chat-input-send');
-const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
 
@@ -355,19 +333,16 @@ function toggleAttachmentPanel() {
         if (picker.classList.contains('visible')) {
             picker.classList.remove('visible');
             picker.style.bottom = '';
-            domChatMessageInputEmoji.innerHTML = `<span class="icon icon-smile-face"></span>`;
+            VectorSvelte.setEmojiIcon('smile');
         }
 
         // Display the attachment panel
         domAttachmentPanel.classList.add('visible');
-        domChatMessageInputFile.classList.add('open');
+        VectorSvelte.setAttachmentOpen(true);
 
         // Position attachment panel dynamically above the chat-box
-        const chatBox = document.getElementById('chat-box');
-        if (chatBox) {
-            const chatBoxHeight = chatBox.getBoundingClientRect().height;
-            domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
-        }
+        const chatBoxHeight = VectorSvelte.composerEls().box.getBoundingClientRect().height;
+        domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
         
         // Commands: only in chats with known bots; grayed while a draft exists.
         const showCmds = !!(commandCtrl && commandCtrl.hasBots && commandCtrl.hasBots());
@@ -388,49 +363,20 @@ function toggleAttachmentPanel() {
 function closeAttachmentPanel() {
     domAttachmentPanel.classList.remove('visible');
     domAttachmentPanel.style.bottom = '';
-    domChatMessageInputFile.classList.remove('open');
+    VectorSvelte.setAttachmentOpen(false);
     // Deactivate edit mode if active
     deactivateMiniAppsEditMode();
     // Reset to main view when closing
     showAttachmentPanelMain();
 }
 
-/**
- * Shows a global tooltip above the target element
- * @param {string} text - The tooltip text
- * @param {HTMLElement} targetElement - The element to position the tooltip above
- */
+/** Show the global tooltip above `targetElement`; the component centres and clamps it. */
 function showGlobalTooltip(text, targetElement) {
-    const tooltip = document.getElementById('global-tooltip');
-    if (!tooltip) return;
-    
-    tooltip.textContent = text;
-
-    // Get the target element's position
-    const rect = targetElement.getBoundingClientRect();
-
-    // Position tooltip above the element, centered horizontally, but clamped
-    // inside the viewport: a wide tooltip (e.g. a long URL) centered over an
-    // edge-hugging target otherwise bleeds off-screen.
-    const pad = 8;
-    const half = tooltip.offsetWidth / 2;
-    const centerX = rect.left + rect.width / 2;
-    const clampedX = Math.max(pad + half, Math.min(window.innerWidth - pad - half, centerX));
-    tooltip.style.left = `${clampedX}px`;
-    tooltip.style.top = `${rect.top - 8}px`;
-    tooltip.style.transform = 'translate(-50%, -100%)';
-
-    // Show the tooltip
-    tooltip.classList.add('visible');
+    VectorSvelte.showTooltip(text, targetElement.getBoundingClientRect());
 }
 
-/**
- * Hides the global tooltip
- */
 function hideGlobalTooltip() {
-    const tooltip = document.getElementById('global-tooltip');
-    if (!tooltip) return;
-    tooltip.classList.remove('visible');
+    VectorSvelte.hideTooltip();
 }
 
 // Dismiss stuck tooltips on any click/tap or window blur
@@ -2096,12 +2042,11 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // Hide login UI and show main UI
                 VectorSvelte.loginHide();
                 VectorSvelte.showPane('navbar', true);
-                domChatBookmarksBtn.style.display = 'flex';
                 
                 // Render our profile
                 const cProfile = arrProfiles.find(p => p.mine);
                 renderCurrentProfile(cProfile);
-                domAccount.style.display = '';
+                VectorSvelte.revealAccount();
                 
                 // Mark init as complete so renderChatlist works
                 fInit = false;
@@ -2310,6 +2255,16 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Hook up our static buttons
     VectorSvelte.setShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings });
+    VectorSvelte.setAccountHandlers({
+        openProfile: () => openProfile(),
+        setStatus: askForStatus,
+        openBookmarks: () => openChat(strPubkey),
+        // Anchored to the row so the drop-up stays put whatever the rail's footer padding becomes.
+        switchAccount: (row) => profileSwitcher.toggle('rail', row),
+        placeholderAvatar: () => createPlaceholderAvatar(false, 22),
+        twemojify,
+        renderCustomEmojiShortcodes,
+    });
     await wireLoginUi();
     await wireChatUi();
     await initComposer();
@@ -2530,7 +2485,7 @@ document.addEventListener('click', (e) => {
     // Close attachment panel when clicking outside of it
     if (domAttachmentPanel.classList.contains('visible')) {
         const clickedInsidePanel = domAttachmentPanel.contains(e.target);
-        const clickedFileButton = domChatMessageInputFile.contains(e.target);
+        const clickedFileButton = VectorSvelte.composerEls().file.contains(e.target);
         // Don't close if clicking inside PIVX dialogs, popup prompts, or Mini App launch dialog
         const clickedInsidePivxDialog = e.target.closest('.pivx-dialog-overlay');
         const clickedInsidePopup = e.target.closest('#popup-container');

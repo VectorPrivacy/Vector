@@ -71,11 +71,10 @@ const accountRowHelpers = {
     fileSrc: (path) => convertFileSrc(path),
     placeholder: () => { const el = createPlaceholderAvatar(false, 28); el.classList.add('profile-switcher-avatar'); return el; },
 };
-let profileSwitcherRows = null;
 
 /**
- * In-app My Profile dropdown — full-feature: switch / add / delete.
- * Opened from the Profile screen's My Profile header. Renders accounts via multiAccount.list().
+ * In-app My Profile dropdown — full-feature: switch / add / delete. The panel is the
+ * shell's ProfileSwitcher component; this drives its store and answers its clicks.
  */
 const profileSwitcher = {
     isOpen: false,
@@ -83,44 +82,41 @@ const profileSwitcher = {
     isOpening: false,
 
     init() {
-        const backdrop = document.getElementById('profile-switcher-backdrop');
-        const panel = document.getElementById('profile-switcher-panel');
-        const addBtn = document.getElementById('profile-switcher-add');
-        if (!panel) return;
-
+        VectorSvelte.setSwitcherHandlers({
+            close: () => this.close(),
+            onPick: (m) => this.onSwitchTo(m),
+            onDelete: (m) => this.onDeleteRow(m),
+            onAdd: () => this.onAddProfile(),
+            rowHelpers: accountRowHelpers,
+        });
         // The trigger and the trash toggle are the Profile screen's; it calls toggle() and toggleEditMode().
-        backdrop.addEventListener('click', () => this.close());
-        addBtn.addEventListener('click', () => this.onAddProfile());
-
-        // Close on Escape
         document.addEventListener('keydown', (ev) => {
             if (ev.key === 'Escape' && this.isOpen) this.close();
         });
     },
 
-    async toggle(anchor) {
+    async toggle(anchor, anchorEl) {
         if (this.isOpen) {
             this.close();
         } else {
-            await this.open(anchor);
+            await this.open(anchor, anchorEl);
         }
     },
 
     /** `anchor` is where the panel hangs from: the Profile tab header ('profile',
      *  the default) or the widescreen rail's account chip ('rail'), which drops
      *  UP and trades the blur for a plain click-catcher — it's a menu, not a
-     *  takeover of the pane you're looking at. */
-    async open(anchor = 'profile') {
+     *  takeover of the pane you're looking at. `anchorEl` pins the drop-up to the
+     *  chip itself, whatever the chip's height or the rail's footer padding become. */
+    async open(anchor = 'profile', anchorEl = null) {
         if (this.isOpening) return;
         this.isOpening = true;
         try {
             const accounts = await multiAccount.list();
             this.render(accounts);
             const dropup = anchor === 'rail';
-            document.getElementById('profile-switcher-panel').classList.toggle('ws-dropup', dropup);
-            document.getElementById('profile-switcher-backdrop').classList.toggle('ws-dropup', dropup);
-            document.getElementById('profile-switcher-backdrop').classList.add('visible');
-            document.getElementById('profile-switcher-panel').classList.add('open');
+            const bottomPx = dropup && anchorEl ? window.innerHeight - anchorEl.getBoundingClientRect().top + 6 : null;
+            VectorSvelte.openSwitcher(dropup, bottomPx);
             VectorSvelte.setProfileSwitcherOpen(true);
             this.isOpen = true;
             // Android back closes the account list instead of navigating the profile screen away.
@@ -134,14 +130,7 @@ const profileSwitcher = {
 
     close() {
         popBack('profile-switcher');
-        const panel = document.getElementById('profile-switcher-panel');
-        document.getElementById('profile-switcher-backdrop').classList.remove('visible');
-        document.getElementById('profile-switcher-backdrop').classList.remove('ws-dropup');
-        panel.classList.remove('open');
-        // The rail anchors the drop-up to its chip inline; leaving it set would
-        // strand the next profile-tab open at the wrong height.
-        panel.classList.remove('ws-dropup');
-        panel.style.bottom = '';
+        VectorSvelte.closeSwitcher();
         VectorSvelte.setProfileSwitcherOpen(false);
         this.isOpen = false;
         // Always reset edit mode on close so the next open starts neutral.
@@ -156,24 +145,12 @@ const profileSwitcher = {
             if (t !== _maxAccountTier && this.isOpen) { _maxAccountTier = t; this.render(accounts); }
             else _maxAccountTier = t;
         }).catch(() => {});
-        const list = document.getElementById('profile-switcher-list');
         const myProfile = arrProfiles.find(p => p.mine);
-        const activeNpub = myProfile?.id || '';
-        if (profileSwitcherRows) VectorSvelte.unmountComponent(profileSwitcherRows);
-        profileSwitcherRows = VectorSvelte.mountAccountRows(list, {
-            accounts, activeNpub, h: accountRowHelpers,
-            onPick: (m) => this.onSwitchTo(m),
-            onDelete: (m) => this.onDeleteRow(m),
-        });
+        VectorSvelte.setSwitcherRows(accounts, myProfile?.id || '');
         // Soft cap: disable the Add button at the tier's account ceiling. Existing
         // accounts (even above the cap) stay listed + usable; only adding more is gated.
-        const addBtn = document.getElementById('profile-switcher-add');
-        if (addBtn) {
-            const atCap = accounts.length >= maxAccountsForTier();
-            addBtn.classList.toggle('disabled', atCap);
-            const label = addBtn.querySelector('.profile-switcher-add-label');
-            if (label) label.textContent = atCap ? 'Maximum Accounts' : 'Add Profile';
-        }
+        const atCap = accounts.length >= maxAccountsForTier();
+        VectorSvelte.setSwitcherAdd(atCap, atCap ? 'Maximum Accounts' : 'Add Profile');
     },
 
     toggleEditMode() {
@@ -263,8 +240,7 @@ const profileSwitcher = {
     },
 
     onAddProfile() {
-        const addBtn = document.getElementById('profile-switcher-add');
-        if (addBtn?.classList.contains('disabled')) return;
+        if (VectorSvelte.switcherState().addDisabled) return;
         this.close();
         addAccountFlow.start();
     },

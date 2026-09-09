@@ -485,7 +485,7 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     }
     // The channel pane's head derives its count from the community signal.
     VectorSvelte.touchCommunity(communityId);
-    if (domGroupOverview.getAttribute('data-group-id') === communityId) {
+    if (VectorSvelte.overviewState().groupId === communityId) {
         // The member SET changed while the overview is open — re-render the rows live so a
         // join/leave/new-speaker appears without closing and reopening (preserve any active search).
         if (domGroupOverview.style.display !== 'none') {
@@ -534,7 +534,7 @@ async function openGroupOverview(chat) {
 
     pushBack('group-overview', () => {
         VectorSvelte.showPane('groupOverview', false);
-        domGroupOverview.removeAttribute('data-group-id');
+        VectorSvelte.setOverviewGroup(null);
         // Widescreen docks the roster beside a conversation that never closed, so
         // dismissing it is the user closing the ROSTER — record that, and don't
         // re-enter a chat that was already open.
@@ -562,7 +562,7 @@ async function openGroupOverview(chat) {
     }
 
     // Store which group is being viewed
-    domGroupOverview.setAttribute('data-group-id', chat.id);
+    VectorSvelte.setOverviewGroup(chat.id);
 
     // Show the shell BEFORE rendering: the renderer's header/avatar paint
     // synchronously and its awaited fetches (members can be network-bound) fill
@@ -604,7 +604,7 @@ async function removeCommunityFromUI(communityId) {
     if (wasViewing) {
         await closeChat();
         VectorSvelte.showPane('groupOverview', false);
-        domGroupOverview.removeAttribute('data-group-id');
+        VectorSvelte.setOverviewGroup(null);
     }
     arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
     listChanged();
@@ -647,7 +647,7 @@ async function runCommunityMigration() {
         // close path. The v2 twin reuses the primary channel id, so the same chat id opens the migrated room.
         popBack('group-overview');
         VectorSvelte.showPane('groupOverview', false);
-        domGroupOverview.removeAttribute('data-group-id');
+        VectorSvelte.setOverviewGroup(null);
         openChat(chatId);
     } catch (e) {
         modal.close();
@@ -665,11 +665,6 @@ function mountCommunityOverview() {
         return arrChats.find(c => c.id === chatId) || null;
     };
     VectorSvelte.mountCommunityOverview(document.getElementById('group-overview-scroll'), {
-        els: {
-            name: document.getElementById('group-overview-name'),
-            status: document.getElementById('group-overview-status'),
-            headerAvatar: document.getElementById('group-overview-header-avatar-container'),
-        },
         h: {
             memberSubtext: communityMemberSubtext,
             createAvatarImg,
@@ -721,21 +716,28 @@ function mountCommunityOverview() {
             migrate: runCommunityMigration,
         },
     });
-    domGroupOverviewBackBtn.onclick = () => {
-        // Widescreen: this is the roster's own close button, so it goes through the same pair as the
-        // header's Members toggle, or the preference keeps reading "open" and the roster comes back.
-        if (wsActive()) {
-            wsCloseDetails();
-            wsSetMembersOpen(false);
-            return;
-        }
-        const { chatId } = VectorSvelte.overviewState();
-        popBack('group-overview');
-        VectorSvelte.showPane('groupOverview', false);
-        domGroupOverview.removeAttribute('data-group-id');
-        openChat(chatId);
-    };
 }
+
+/** The overview header's back button. Widescreen: the roster's own close button goes through
+ *  the same pair as the header's Members toggle, or the preference keeps reading "open". */
+function closeGroupOverviewFromHeader() {
+    if (wsActive()) {
+        wsCloseDetails();
+        wsSetMembersOpen(false);
+        return;
+    }
+    const { chatId } = VectorSvelte.overviewState();
+    popBack('group-overview');
+    VectorSvelte.showPane('groupOverview', false);
+    VectorSvelte.setOverviewGroup(null);
+    openChat(chatId);
+}
+
+VectorSvelte.setOverviewHeadHandlers({
+    back: closeGroupOverviewFromHeader,
+    memberSubtext: communityMemberSubtext,
+    placeholderAvatar: () => createPlaceholderAvatar(true, 22),
+});
 
 /** Pick and upload a new community icon; the pencil becomes a progress ring meanwhile. */
 async function pickCommunityIcon(chat) {
@@ -783,7 +785,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     try { caps = await invoke('get_community_capabilities', { communityId }); } catch (_) {}
     // Tag the overview with its community so the realtime `community_refreshed` listener knows to re-render
     // it when a control change (ban/role/metadata/mode) lands live.
-    domGroupOverview.setAttribute('data-group-id', communityId);
+    VectorSvelte.setOverviewGroup(communityId);
     if (!fCommunityOverviewMounted) mountCommunityOverview();
     VectorSvelte.setOverview({
         chatId: chat.id,
@@ -884,7 +886,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // The user may have switched to another community's overview mid-fetch — don't
         // paint this one's roster (or subtext) over it. The panel carries the COMMUNITY
         // id (re-tagged right after open for the realtime listener), never chat.id here.
-        if (domGroupOverview.getAttribute('data-group-id') !== communityId || groupRoster !== roster) return;
+        if (VectorSvelte.overviewState().groupId !== communityId || groupRoster !== roster) return;
         VectorSvelte.touchCommunity(communityId);
         if (!hadCache || rosterPrint() !== cachedPrint) {
             roster.setRoster({ members: memberList, admins: adminNpubs, banned: bannedList, roleGraph });
@@ -974,7 +976,7 @@ async function tearDownCommunityLocally(communityId) {
     if (goneChannelIds.has(strOpenChat)) await closeChat();
     arrChats = arrChats.filter(c => c.metadata?.custom_fields?.community_id !== communityId);
     VectorSvelte.showPane('groupOverview', false);
-    domGroupOverview.removeAttribute('data-group-id');
+    VectorSvelte.setOverviewGroup(null);
     listChanged();
     openChatlist();
 }

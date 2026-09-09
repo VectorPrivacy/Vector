@@ -19,10 +19,6 @@ const WS_RAIL_AUTO_COLLAPSE_W = 1080;
 const WS_KEY_LIST_W = 'ws_list_width';
 const WS_KEY_RAIL = 'ws_rail_collapsed';
 
-/** Set once the account row has been re-parented into the rail footer, so the
- *  restore path can put it back exactly where the markup had it. */
-let wsAccountHome = null;
-
 /** True while `body.ws` is applied — used by main.js to skip viewport math that
  *  assumes a pane IS the viewport (see adjustSize). */
 function wsActive() {
@@ -112,47 +108,6 @@ function wsOpenDmHome() {
     else closeChat();
 }
 
-/** Dock the account row into the rail footer, or return it to the chat list. */
-function wsMoveAccountRow(intoRail) {
-    const account = document.getElementById('account');
-    const slot = document.getElementById('ws-rail-account');
-    if (!account || !slot) return;
-    if (intoRail) {
-        if (account.parentElement === slot) return;
-        if (!wsAccountHome) {
-            wsAccountHome = { parent: account.parentElement, next: account.nextElementSibling };
-        }
-        slot.appendChild(account);
-        wsAddAccountCaret(account);
-    } else {
-        if (!wsAccountHome || account.parentElement !== slot) return;
-        account.querySelector('.ws-account-caret')?.remove();
-        wsAccountHome.parent.insertBefore(account, wsAccountHome.next);
-    }
-}
-
-/**
- * The chip's own affordance: name opens the profile and status opens the status
- * editor, so switching accounts needs a target of its own rather than a third
- * meaning for the row. Added on dock and removed on undock — the row belongs to
- * the chat list the rest of the time.
- */
-function wsAddAccountCaret(account) {
-    if (account.querySelector('.ws-account-caret')) return;
-    const caret = document.createElement('div');
-    caret.className = 'ws-account-caret btn';
-    caret.title = 'Switch account';
-    caret.onclick = (e) => {
-        e.stopPropagation();
-        // Anchor the drop-up to the chip itself, so it stays put whatever the
-        // chip's height or the rail's footer padding become.
-        const panel = document.getElementById('profile-switcher-panel');
-        if (panel) panel.style.bottom = `${window.innerHeight - account.getBoundingClientRect().top + 6}px`;
-        profileSwitcher.toggle('rail');
-    };
-    account.appendChild(caret);
-}
-
 /** Mirror the pane's mode onto the body, for the chrome that belongs to one of
  *  them: New Chat / Group Chat start DMs, so they have no place over a
  *  community's channels. */
@@ -214,8 +169,9 @@ function wsUpdate() {
     if (want === have) return;
 
     document.body.classList.toggle('ws', want);
+    // The account row renders in the rail or the list from this flag.
+    VectorSvelte.setShellFlag('ws', want);
     paneChanged();
-    wsMoveAccountRow(want);
     wsDockMemberSearch();
     wsSyncPaneMode();
     if (want) {
@@ -340,7 +296,7 @@ function wsSetMembersOpen(open) {
 function wsCloseDetails() {
     popBack('group-overview');
     VectorSvelte.showPane('groupOverview', false);
-    domGroupOverview.removeAttribute('data-group-id');
+    VectorSvelte.setOverviewGroup(null);
 }
 
 /** Bring the pane in line with the preference for whatever is open now: members

@@ -241,9 +241,7 @@ async function login(skipAnimations = false) {
                 VectorSvelte.patchLogin({ importKey: '' });
                 VectorSvelte.loginHide();
 
-                // Show navbar and bookmarks
                 VectorSvelte.showPane('navbar', true);
-                domChatBookmarksBtn.style.display = 'flex';
 
                 // Land on the Chat tab. Without an explicit reset here, the
                 // visibility of the main panels is whatever they were before
@@ -263,7 +261,7 @@ async function login(skipAnimations = false) {
                 // Render our profile
                 const cProfile = arrProfiles.find(p => p.mine);
                 renderCurrentProfile(cProfile);
-                domAccount.style.display = '';
+                VectorSvelte.revealAccount();
                 console.timeEnd('[Boot] showMainUI:dom');
 
                 // Refresh our own profile from the network
@@ -330,17 +328,8 @@ async function login(skipAnimations = false) {
                 console.log('[Boot] UI visible - instant login complete');
 
                 // Apply the same intro animations as the encryption flow
-                domChatBookmarksBtn.style.opacity = '0';
                 domNavbar.classList.add('fadein-anim');
-                domNavbar.addEventListener('animationend', () => {
-                    domNavbar.classList.remove('fadein-anim');
-                    domChatBookmarksBtn.style.opacity = '';
-                    domChatBookmarksBtn.classList.add('fadein-anim');
-                    domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
-                }, { once: true });
-
-                domAccount.classList.add('fadein-anim');
-                domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+                domNavbar.addEventListener('animationend', () => domNavbar.classList.remove('fadein-anim'), { once: true });
 
                 domChatList.classList.add('intro-anim');
                 domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
@@ -361,17 +350,8 @@ async function login(skipAnimations = false) {
                     await showMainUI();
 
                     // Add fade-in animations
-                    domChatBookmarksBtn.style.opacity = '0';
                     domNavbar.classList.add('fadein-anim');
-                    domNavbar.addEventListener('animationend', () => {
-                        domNavbar.classList.remove('fadein-anim');
-                        domChatBookmarksBtn.style.opacity = '';
-                        domChatBookmarksBtn.classList.add('fadein-anim');
-                        domChatBookmarksBtn.addEventListener('animationend', () => domChatBookmarksBtn.classList.remove('fadein-anim'), { once: true });
-                    }, { once: true });
-
-                    domAccount.classList.add('fadein-anim');
-                    domAccount.addEventListener('animationend', () => domAccount.classList.remove('fadein-anim'), { once: true });
+                    domNavbar.addEventListener('animationend', () => domNavbar.classList.remove('fadein-anim'), { once: true });
 
                     domChatList.classList.add('intro-anim');
                     domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });

@@ -1,0 +1,149 @@
+<script>
+    // The composer box: the scroll-return button, the reply and command strips, and the
+    // input row around the editor. The editor (composer.js) is an imperative leaf built
+    // into #chat-input-host by main.js; everything else derives from lib/composer.
+    import { composerMode, composerDraft, composerLock, composerCommand, composerStatus, composerChrome, composerHandlers, composerEls } from '../lib/composer.svelte.js';
+    import CommandStrip from './CommandStrip.svelte';
+
+    const mode = composerMode();
+    const draft = composerDraft();
+    const lock = composerLock();
+    const status = composerStatus();
+    const command = composerCommand();
+    const chrome = composerChrome();
+    const els = composerEls();
+    const h = () => composerHandlers();
+
+    const isReply = $derived(mode.kind === 'reply');
+    const isEdit = $derived(mode.kind === 'edit');
+    const locked = $derived(!!lock.reason);
+    // The send button shows for a non-empty draft and always while editing.
+    const showSend = $derived(!draft.empty || isEdit);
+
+    let replyCancel = $state(null);
+    let cancelRight = $state('');
+
+    // The reply bar's content stays through the collapse animation, so it only
+    // re-renders while a reply is up.
+    function nameInto(node, name) {
+        const apply = (n) => { node.textContent = n; h()?.twemojify(node); };
+        apply(name);
+        return { update: apply };
+    }
+    function snippetInto(node, s) {
+        const apply = (snip) => {
+            node.textContent = '';
+            if (snip && snip.html) {
+                node.innerHTML = snip.html;
+                h()?.twemojify(node);
+                if (snip.emojiTags?.length) h()?.renderCustomEmojiShortcodes(node, snip.emojiTags);
+            } else if (snip && snip.text) {
+                node.textContent = snip.text;
+            }
+        };
+        apply(s);
+        return { update: apply };
+    }
+    // Centre the cancel icon over the mic/send column: those buttons flex-shrink with
+    // the window, so the offset is measured, not assumed.
+    $effect(() => {
+        if (!isReply || !replyCancel) return;
+        mode.snippet; mode.name;
+        const slotBtn = els.voice?.offsetParent ? els.voice : els.send;
+        const slotRect = slotBtn?.getBoundingClientRect();
+        if (!slotRect || slotRect.width <= 0) return;
+        const barRect = replyCancel.parentElement.getBoundingClientRect();
+        // 11.6 = half the 24px button minus a 0.4px optical correction.
+        cancelRight = `${(barRect.right - slotRect.left - slotRect.width / 2 - 11.6).toFixed(1)}px`;
+    });
+
+    // The editor is not ours to render, so its display, lock and placeholder are set
+    // on it. The property, not the attribute: the rich composer draws its placeholder
+    // from data-placeholder (its Proxy maps the property there); a textarea maps it
+    // to the attribute. Either way the property is the one channel that renders.
+    $effect(() => {
+        const input = h()?.input();
+        if (!input) return;
+        input.style.display = command.active ? 'none' : '';
+    });
+    $effect(() => {
+        const input = h()?.input();
+        if (!input) return;
+        input.disabled = locked;
+        input.style.paddingLeft = locked ? '15px' : '';
+        input.placeholder = locked ? lock.placeholder : status.text ? status.text : (isEdit ? 'Editing message...' : h().placeholder);
+    });
+
+    // ── mic ↔ send ──
+    // Typed changes animate the swap; programmatic ones (a chat open, a send, an edit)
+    // snap, because a WebKit swap animation wedges if the composer hides mid-flight.
+    let shown = null;   // 'send' | 'voice' | null, what is on screen
+    let sendShown = $state(false);
+    let voiceShown = $state(true);
+    let sendActive = $state(false);
+    $effect(() => {
+        draft.seq;
+        const want = showSend ? 'send' : 'voice';
+        const animate = draft.animate && !locked;
+        if (locked) {
+            snap('none');
+            return;
+        }
+        if (want === shown) return;
+        if (animate && shown !== null) swap(want);
+        else snap(want);
+    });
+    function clearAnim() {
+        els.send?.classList.remove('button-swap-in', 'button-swap-out');
+        els.voice?.classList.remove('button-swap-in', 'button-swap-out');
+    }
+    function snap(want) {
+        clearAnim();
+        shown = want;
+        sendActive = want === 'send';
+        sendShown = want === 'send';
+        voiceShown = want === 'voice';
+    }
+    function swap(want) {
+        const out = want === 'send' ? els.voice : els.send;
+        const inn = want === 'send' ? els.send : els.voice;
+        clearAnim();
+        shown = want;
+        sendActive = want === 'send';
+        out.classList.add('button-swap-out');
+        out.addEventListener('animationend', () => {
+            if (want === 'send') voiceShown = false; else sendShown = false;
+            out.classList.remove('button-swap-out');
+            if (shown !== want) return;   // superseded mid-flight
+            if (want === 'send') sendShown = true; else voiceShown = true;
+            inn.classList.add('button-swap-in');
+            inn.addEventListener('animationend', () => inn.classList.remove('button-swap-in'), { once: true });
+        }, { once: true });
+    }
+</script>
+
+<div class="row input-box" id="chat-box" class:replying={isReply} class:commanding={command.active} bind:this={els.box}>
+    <!-- Anchored to #chat-box's top edge so it rides up as the composer grows. -->
+    <button id="chat-scroll-return" class="corner-float scroll-return-btn" bind:this={els.scrollReturn}>
+        <span class="icon icon-chevron-down"></span>
+        <span class="scroll-return-badge" class:visible={!!chrome.scrollBadge}>{chrome.scrollBadge}</span>
+    </button>
+    <div id="msg-bottom-fade" class="fadeout-bottom-msgs"></div>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div id="chat-reply-bar" onclick={(e) => { if (e.target.closest('#chat-reply-bar-cancel')) return; h()?.jumpToReply(); }}>
+        <span id="chat-reply-bar-label">Replying to <span id="chat-reply-bar-name" use:nameInto={mode.name}></span></span>
+        <span id="chat-reply-bar-snippet" use:snippetInto={mode.snippet}></span>
+        <button id="chat-reply-bar-cancel" bind:this={replyCancel} style:right={cancelRight || null} onclick={() => h()?.cancelReply()}><span class="icon icon-cancel"></span></button>
+    </div>
+    <div id="chat-command-bar">
+        <CommandStrip onCancel={() => h()?.cancelCommand()} />
+    </div>
+    <div class="row chat-input-container" bind:this={els.container}>
+        <button id="chat-input-file" class:open={chrome.attachmentOpen} style:display={isEdit || locked ? 'none' : null} bind:this={els.file} onclick={() => h()?.toggleAttachments()}><span class="icon icon-plus"></span></button>
+        <button id="chat-input-cancel" style:display={isEdit ? null : 'none'} onclick={() => h()?.cancel()}><span class="icon icon-cancel"></span></button>
+        <div id="chat-input-host"></div>
+        <button id="chat-input-emoji" style:display={locked ? 'none' : null} bind:this={els.emoji}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
+        <button id="chat-input-voice" style="margin-right: 3px;" style:display={voiceShown ? null : 'none'} bind:this={els.voice}><span class="icon icon-mic-on"></span></button>
+        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive} style:display={sendShown ? null : 'none'} bind:this={els.send} onclick={() => h()?.send()}><span class="icon icon-send"></span></button>
+    </div>
+</div>

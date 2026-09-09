@@ -526,7 +526,7 @@ function _dmsgSelectReply(targetMsgId) {
     // of the transition, so the newest message rides up with the bar instead of
     // being clipped. Same windowing guard as softChatScroll: away from the data
     // bottom, a DOM-bottom scroll would cascade window extensions.
-    const fBarWasHidden = !domChatMessageBox.classList.contains('replying');
+    const fBarWasHidden = VectorSvelte.composerMode().kind !== 'reply';
     const fRepin = fBarWasHidden && chatPinnedToBottom
         && (!CHAT_WINDOW_ENABLED || isAtDataBottom());
     // The chrome renders the bar (name, snippet, cancel offset) from the reply state.

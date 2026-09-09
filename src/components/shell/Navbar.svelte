@@ -4,6 +4,7 @@
     // slot widescreen.js docks #account into. The rail-only children are display:none
     // outside `body.ws`.
     import { shellPanes, shellState, shellHandlers } from '../lib/shell.svelte.js';
+    import AccountRow from './AccountRow.svelte';
     const panes = shellPanes();
     const st = shellState();
     const h = () => shellHandlers();
@@ -71,6 +72,10 @@
         <span class="icon icon-chevron-double-left navbar-icon"></span>
         <p class="navbar-text">Collapse</p>
     </div>
-    <!-- #account is re-parented in here by widescreen.js and put back on exit. -->
-    <div id="ws-rail-account"></div>
+    <!-- The rail's footer: your row, rendered here instead of in the list while widescreen. -->
+    <div id="ws-rail-account">
+        {#if st.ws}
+            <AccountRow />
+        {/if}
+    </div>
 </div>

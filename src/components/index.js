@@ -16,11 +16,8 @@ import Chatlist from './chatlist/Chatlist.svelte';
 import RailShortcuts from './rail/RailShortcuts.svelte';
 import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
-import ComposerChrome from './composer/ComposerChrome.svelte';
 import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
-import CommandStrip from './composer/CommandStrip.svelte';
-import ChatHeader from './chat/ChatHeader.svelte';
 import ProfileScreen from './profile/ProfileScreen.svelte';
 import CommunityOverview from './community/CommunityOverview.svelte';
 import MiniProfile from './people/MiniProfile.svelte';
@@ -34,7 +31,6 @@ import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
 import PackDetailsOverlay from './picker/PackDetailsOverlay.svelte';
 import PickerPanel from './picker/PickerPanel.svelte';
-import PinsDrawer from './chat/PinsDrawer.svelte';
 import ModList from './moderation/ModList.svelte';
 import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
@@ -53,12 +49,15 @@ import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
 export { attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
-import AccountRows from './people/AccountRows.svelte';
 import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
 import InvitesScreen from './people/InvitesScreen.svelte';
 import QrOverlay from './ui/QrOverlay.svelte';
 import QrScanner from './ui/QrScanner.svelte';
 import App from './shell/App.svelte';
+export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte.js';
+export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
+export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
+export { accountState, setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
 export { shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
 import StatusDialog from './ui/StatusDialog.svelte';
 import DowngradeBlock from './ui/DowngradeBlock.svelte';
@@ -86,7 +85,7 @@ export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatch
 export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
-import { pinsState, setPins, setPinsOpen } from './lib/pins.svelte.js';
+import { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
 import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName } from './lib/packcreator.svelte.js';
@@ -119,7 +118,9 @@ export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPicke
 export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName };
 export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
-export { pinsState, setPins, setPinsOpen };
+export { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
+export { setChatHeaderHandlers } from './lib/chatpane.svelte.js';
+export { wallpaperState, setWallpaperLayer, setWallpaperSliders, setWallpaperBusy, setWallpaperLabel, setWallpaperPreviewing } from './lib/wallpaper.svelte.js';
 export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
@@ -141,6 +142,7 @@ export {
     startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setComposerStatus,
     openPopup, closePopup,
     setCommand, clearCommand, setCommandHint, setCommandInvalid, setCommandValue, openChoiceMenu, closeChoiceMenu,
+    composerMode, setAttachmentOpen, setEmojiIcon, setScrollBadge, setComposerHandlers, composerEls,
 } from './lib/composer.svelte.js';
 
 /**
@@ -204,17 +206,6 @@ export function mountMessageList(target, { h }) {
 }
 
 /**
- * Mount the composer's chrome reconciler over the existing elements (index.html keeps
- * the markup; the editor is never touched). Renderless: `target` only hosts the effects.
- */
-export function mountComposerChrome({ els, h }) {
-    const host = document.createElement('div');
-    host.hidden = true;
-    document.body.appendChild(host);
-    return mount(ComposerChrome, { target: host, props: { els, h } });
-}
-
-/**
  * Mount the composer's autocomplete popups (mention, shortcode, command) at body
  * level. The controllers publish views through `openPopup`/`closePopup`.
  */
@@ -223,32 +214,21 @@ export function mountComposerPopups({ anchor, h }) {
 }
 
 /**
- * Mount the structured command composer: its argument pills render in a host placed
- * before the editor (display: contents, so they are the row's flex children), and
- * the context strip fills `strip` (#chat-command-bar). `onCancel` is the strip's
- * cancel button.
+ * Mount the structured command composer's argument pills in a host placed before the
+ * editor (display: contents, so they are the row's flex children). The context strip
+ * is the composer box's own.
  */
-export function mountCommandComposer({ editor, strip, onCancel }) {
+export function mountCommandComposer({ editor }) {
     const host = document.createElement('div');
     host.style.display = 'contents';
     editor.before(host);
-    const pills = mount(CommandComposer, { target: host });
-    strip.replaceChildren();
-    const bar = mount(CommandStrip, { target: strip, props: { onCancel } });
-    return { pills, bar };
+    return mount(CommandComposer, { target: host });
 }
 
 /**
  * Mount the chat header reconciler over the existing header elements (renderless).
  * It derives name, avatar, subtext and menu visibility from the open chat's signals.
  */
-export function mountChatHeader({ els, h }) {
-    const host = document.createElement('div');
-    host.hidden = true;
-    document.body.appendChild(host);
-    return mount(ChatHeader, { target: host, props: { els, h } });
-}
-
 /** Mount the community pane's head into `target` (#ws-community-head). */
 export function mountCommunityHead(target, { h }) {
     target.replaceChildren();
@@ -272,10 +252,10 @@ export function mountProfileScreen(container, { h }) {
     return mount(ProfileScreen, { target: container, props: { root: container, h } });
 }
 
-/** Mount the Community overview body into `target` (#group-overview-scroll); `els` is its chat header. */
-export function mountCommunityOverview(target, { els, h }) {
+/** Mount the Community overview body into `target` (#group-overview-scroll). */
+export function mountCommunityOverview(target, { h }) {
     target.replaceChildren();
-    return mount(CommunityOverview, { target, props: { els, h } });
+    return mount(CommunityOverview, { target, props: { h } });
 }
 
 /** Mount the mini profile popup at body level; it shows itself from `openMiniProfile`. */
@@ -320,12 +300,6 @@ export function mountPackPreviewCard(target, props) {
 export function mountPackDetails(overlay, { h }) {
     overlay.replaceChildren();
     return mount(PackDetailsOverlay, { target: overlay, props: { overlay, h } });
-}
-
-/** Mount the pins drawer's list into `list` (#pins-drawer-list). */
-export function mountPinsDrawer(list, { h }) {
-    list.replaceChildren();
-    return mount(PinsDrawer, { target: list, props: { h } });
 }
 
 /** Mount the moderation console onto the body (once); it renders its own overlay. */
@@ -380,10 +354,6 @@ export function mountNetworkDialogs({ h }) {
 }
 
 /** Mount account rows into `host`; mounted fresh per open, so props are a snapshot. */
-export function mountAccountRows(host, props) {
-    host.replaceChildren();
-    return mount(AccountRows, { target: host, props });
-}
 
 /** Mount the edit-history popup onto the body (once); it renders when opened. */
 export function mountEditHistory({ h }) {

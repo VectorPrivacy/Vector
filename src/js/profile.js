@@ -6,27 +6,13 @@
  * @param {Profile} cProfile 
  */
 function renderCurrentProfile(cProfile) {
-    /* Chatlist Tab */
-
-    // Clear and render avatar
-    domAccountAvatarContainer.innerHTML = '';
-    const accountAvatarSrc = getProfileAvatarSrc(cProfile);
-    const domAvatar = createAvatarImg(accountAvatarSrc, 22, false);
-    domAvatar.classList.add('btn');
-    domAvatar.onclick = () => openProfile();
-    domAccountAvatarContainer.appendChild(domAvatar);
-
-    // Render our Display Name
-    domAccountName.textContent = getName(cProfile);
-    domAccountName.onclick = () => openProfile();
-    if (cProfile?.nickname || cProfile?.name) twemojify(domAccountName);
-
-    // Render our status
-    domAccountStatus.textContent = cProfile?.status?.title || 'Set a Status';
-    domAccountStatus.onclick = askForStatus;
-    twemojify(domAccountStatus);
-    renderCustomEmojiShortcodes(domAccountStatus, cProfile?.status?.emoji_tags || []);
-
+    VectorSvelte.setAccount({
+        name: getName(cProfile),
+        hasName: !!(cProfile?.nickname || cProfile?.name),
+        statusText: cProfile?.status?.title || 'Set a Status',
+        emojiTags: cProfile?.status?.emoji_tags || [],
+        avatarSrc: getProfileAvatarSrc(cProfile) || null,
+    });
 }
 
 /**

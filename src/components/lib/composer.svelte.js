@@ -123,3 +123,23 @@ export function openPopup(kind, view) {
 export function closePopup(kind) {
     if (popup.kind === kind) popup = { kind: null };
 }
+
+// The box's chrome flags: the add-file button's open state (mirrors the attachment
+// panel), the emoji button's face (a wink while the picker is up), and the
+// scroll-return badge.
+const chrome = $state({ attachmentOpen: false, emojiIcon: 'smile', scrollBadge: '' });
+export function composerChrome() { return chrome; }
+export function setAttachmentOpen(on) { chrome.attachmentOpen = !!on; }
+export function setEmojiIcon(face) { chrome.emojiIcon = face === 'wink' ? 'wink' : 'smile'; }
+export function setScrollBadge(text) { chrome.scrollBadge = text || ''; }
+
+// The box's handlers, registered by chat.js once its scripts have loaded. Raw state so
+// the box's editor effects re-run once the editor is reachable.
+let handlers = $state.raw(null);
+export function composerHandlers() { return handlers; }
+export function setComposerHandlers(h) { handlers = h; }
+
+// Element refs for the code that has no reactive equivalent: the voice recorder's hold
+// gesture, the picker's hit-tests and the scroll handler. Bound by the box.
+const els = {};
+export function composerEls() { return els; }

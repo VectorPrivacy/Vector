@@ -126,7 +126,7 @@ async function setupRustListeners() {
         purgeCommunityMessageCache(communityId);
         communityChanged(communityId);
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
-        if (domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id') === communityId) {
+        if (domGroupOverview.style.display !== 'none' && VectorSvelte.overviewState().groupId === communityId) {
             const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
             // Live refresh, so an active member filter survives someone else's role/ban change.
             if (chat) renderCommunityOverview(chat, true);

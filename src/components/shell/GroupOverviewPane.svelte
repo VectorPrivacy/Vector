@@ -1,23 +1,40 @@
 <script>
-    // The community overview's frame: header (community.js fills it) and the scroll host
-    // the CommunityOverview island mounts into.
+    // The community overview's frame: its header from overview state (the body island
+    // mounts into the scroll host below). Ids stay where the stylesheets select them.
     import { shellPanes } from '../lib/shell.svelte.js';
+    import { overviewState, overviewHeadHandlers } from '../lib/overview.svelte.js';
+    import { communityVersion } from '../lib/signals.svelte.js';
+    import Avatar from '../ui/Avatar.svelte';
     const panes = shellPanes();
+    const ov = overviewState();
+    const h = () => overviewHeadHandlers();
+    const subtext = $derived.by(() => {
+        if (!ov.communityId) return '';
+        communityVersion(ov.communityId);
+        return h().memberSubtext?.(ov.communityId) || '';
+    });
 </script>
 
-<div id="group-overview" class="chats" style:display={panes.groupOverview ? null : 'none'}>
+<div id="group-overview" class="chats" style:display={panes.groupOverview ? null : 'none'} data-group-id={ov.groupId || undefined}>
     <div class="chat-header" style="top: 0px;">
-        <div id="group-overview-back-btn" class="btn nav-back-btn">
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div id="group-overview-back-btn" class="btn nav-back-btn" onclick={() => h().back?.()}>
             <span class="icon icon-chevron-double-left nav-icon"></span>
         </div>
         <div class="profile-header-info">
             <div class="profile-header-name-row">
                 <div id="group-overview-header-avatar-container">
-                    <img src="./icons/group-placeholder.svg" alt="">
+                    <!-- Rendered per open: the placeholder action runs once, and at boot the
+                         handlers that build it are not registered yet. -->
+                    {#if ov.chatId}
+                        {#key ov.chatId}
+                            <Avatar src={ov.avatarSrc} size={22} placeholder={() => h().placeholderAvatar()} />
+                        {/key}
+                    {/if}
                 </div>
-                <h3 id="group-overview-name" class="cutoff chat-contact-with-status btn"></h3>
+                <h3 id="group-overview-name" class="cutoff chat-contact-with-status btn">{ov.name}</h3>
             </div>
-            <span id="group-overview-status" class="cutoff chat-contact-status btn"></span>
+            <span id="group-overview-status" class="cutoff chat-contact-status btn">{subtext}</span>
         </div>
     </div>
     <div id="group-overview-scroll" style="overflow-y: auto; height: 100%; position: relative;"></div>

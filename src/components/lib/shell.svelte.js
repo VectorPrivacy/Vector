@@ -7,7 +7,7 @@ const panes = $state({
     navbar: false, chats: true, chat: false, profile: false, settings: false,
     invites: false, groupOverview: false, chatNew: false, createGroup: false,
 });
-const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false });
+const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false, ws: false });
 let handlers = {};   // { openProfile, openChatlist, openSettings, openInvites }
 
 export function shellPanes() { return panes; }

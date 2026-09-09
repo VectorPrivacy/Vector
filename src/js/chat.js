@@ -238,8 +238,7 @@ function buildChatMenuItems(chat) {
             label: 'Self-Destruct Timer',
             icon: 'clock',
             onClick: () => {
-                const btn = document.getElementById('chat-menu-btn');
-                const rect = btn ? btn.getBoundingClientRect() : null;
+                const rect = lastChatMenuRect;
                 requestAnimationFrame(() => openSelfDestructPicker(strOpenChat, rect));
             },
         });
@@ -477,9 +476,9 @@ function insertSystemEvent(content, parent = null) {
 //     above the composer. The bar's lifecycle is tracked by
 //     `wallpaperPreviewState`.
 //
-// Visual settings (blur + brightness) are driven by CSS variables on
-// `#chat-wallpaper-layer` so live slider drags are GPU-friendly and don't
-// hit the rumor pipeline. The values are persisted alongside the image on
+// Visual settings (blur + brightness) ride the wallpaper store into the
+// layer's CSS so live slider drags are GPU-friendly and don't hit the rumor
+// pipeline. The values are persisted alongside the image on
 // confirm.
 
 /** {chatId, previewPath, blur, dim} while a preview is active, else null. */
@@ -500,40 +499,36 @@ let _lastAppliedWallpaperKey = null;
  *  drags reuse the loaded image and only touch the blur/brightness vars. */
 function applyChatWallpaper(chatId, path, blur, dim, ts) {
     if (strOpenChat !== chatId) return;
-    const chatEl = document.getElementById('chat');
-    const layer = document.getElementById('chat-wallpaper-layer');
-    if (!chatEl || !layer) return;
+    const wp = VectorSvelte.wallpaperState();
     // Honor the global "Background Wallpaper" display toggle: when it's off,
     // suppress the committed wallpaper so the default theme shows through.
     // A live preview still renders (the user may be setting it for their
     // chat partner and needs to see what they're picking).
-    const previewing = chatEl.getAttribute('data-wallpaper-previewing') === 'true';
     const bgDisabled = document.body.classList.contains('chat-bg-disabled');
-    const newPath = (bgDisabled && !previewing) ? '' : (path || '');
+    const newPath = (bgDisabled && !wp.previewing) ? '' : (path || '');
     // The on-disk filename is deterministic per chat, so an inbound rumor
     // overwrites bytes at the same path. Include `ts` in the cache key
     // so a new wallpaper forces a re-fetch even when the path is unchanged.
     const newKey = newPath + '|' + (ts || 0);
+    let image = wp.image;
     if (newKey !== _lastAppliedWallpaperKey) {
         if (newPath) {
             const url = convertFileSrc(newPath);
             const busted = url + (url.includes('?') ? '&' : '?') + 't=' + (ts || Date.now());
-            layer.style.setProperty('--wp-image', `url("${busted}")`);
-            chatEl.setAttribute('data-wallpaper', 'true');
+            image = `url("${busted}")`;
         } else {
-            layer.style.removeProperty('--wp-image');
-            chatEl.removeAttribute('data-wallpaper');
+            image = '';
         }
         _lastAppliedWallpaperKey = newKey;
     }
     const blurPx = Math.max(0, Math.min(30, blur ?? WALLPAPER_DEFAULT_BLUR));
     const brightness = Math.max(0, Math.min(100, dim ?? WALLPAPER_DEFAULT_DIM)) / 100;
-    // Build the filter directly. `blur(0px)` clashes with brightness() in
-    // WebKit (the layer washes out to solid white), so omit blur entirely at
-    // zero rather than passing a 0px radius.
-    layer.style.filter = blurPx > 0
+    // `blur(0px)` clashes with brightness() in WebKit (the layer washes out to
+    // solid white), so omit blur entirely at zero rather than passing a 0px radius.
+    const filter = blurPx > 0
         ? `blur(${blurPx}px) brightness(${brightness})`
         : `brightness(${brightness})`;
+    VectorSvelte.setWallpaperLayer(image, filter);
 }
 
 /** Refresh the wallpaper layer from the open chat's persisted state. */
@@ -548,72 +543,29 @@ function refreshChatWallpaper() {
     );
 }
 
-/** Show or hide the wallpaper edit UI: the bottom slider/trash bar plus the
- *  Cancel/Save overlay on the chat header. Also flags the chat so the
- *  scroll-return button can be hidden via CSS while the preview is up. */
+/** Show or hide the wallpaper edit UI: the bottom slider bar plus the
+ *  Cancel/Save overlay on the chat header. The pane flags itself so the
+ *  scroll-return button hides via CSS while the preview is up. */
 function setWallpaperPreviewBarVisible(visible) {
-    const bar = document.getElementById('wallpaper-preview-bar');
-    if (bar) bar.style.display = visible ? '' : 'none';
-    const editBar = document.getElementById('wallpaper-edit-bar');
-    if (editBar) {
-        if (visible) {
-            editBar.style.opacity = '0';
-            editBar.style.display = 'flex';
-            setTimeout(() => { editBar.style.opacity = '1'; }, 10);
-        } else {
-            editBar.style.opacity = '0';
-            setTimeout(() => { editBar.style.display = 'none'; }, 250);
-        }
-    }
-    const chatEl = document.getElementById('chat');
-    if (chatEl) {
-        if (visible) chatEl.setAttribute('data-wallpaper-previewing', 'true');
-        else chatEl.removeAttribute('data-wallpaper-previewing');
-    }
+    VectorSvelte.setWallpaperPreviewing(visible);
 }
 
 /** Lock the edit-bar buttons while a publish/removal is in flight. */
 function setWallpaperEditBusy(busy) {
-    for (const id of ['wallpaper-edit-save-btn', 'wallpaper-edit-cancel-btn']) {
-        const el = document.getElementById(id);
-        if (!el) continue;
-        el.style.pointerEvents = busy ? 'none' : '';
-        el.style.opacity = busy ? '0.5' : '';
-    }
+    VectorSvelte.setWallpaperBusy(busy);
 }
 
-/** Read the current slider values from the preview bar. */
+/** The current slider values. */
 function readWallpaperSliders() {
-    const blurEl = document.getElementById('wallpaper-blur-slider');
-    const dimEl = document.getElementById('wallpaper-dim-slider');
-    const blur = blurEl ? parseInt(blurEl.value, 10) : WALLPAPER_DEFAULT_BLUR;
-    const dim = dimEl ? parseInt(dimEl.value, 10) : WALLPAPER_DEFAULT_DIM;
+    const wp = VectorSvelte.wallpaperState();
     return {
-        blur: Number.isFinite(blur) ? blur : WALLPAPER_DEFAULT_BLUR,
-        dim: Number.isFinite(dim) ? dim : WALLPAPER_DEFAULT_DIM,
+        blur: Number.isFinite(wp.blur) ? wp.blur : WALLPAPER_DEFAULT_BLUR,
+        dim: Number.isFinite(wp.dim) ? wp.dim : WALLPAPER_DEFAULT_DIM,
     };
 }
 
-/** Compute the 0..100% the slider's value occupies of its range. */
-function _wallpaperSliderPct(el) {
-    if (!el) return 0;
-    const min = parseFloat(el.min) || 0;
-    const max = parseFloat(el.max) || 100;
-    const val = parseFloat(el.value) || 0;
-    if (max === min) return 0;
-    return Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100));
-}
-
-/** Set the slider values + sync the CSS variable that drives the track fill
- *  gradient. Without this the WebKit `accent-color` fill drifts away from
- *  the thumb position. */
 function writeWallpaperSliders(blur, dim) {
-    const blurEl = document.getElementById('wallpaper-blur-slider');
-    const dimEl = document.getElementById('wallpaper-dim-slider');
-    if (blurEl) blurEl.value = String(blur);
-    if (dimEl) dimEl.value = String(dim);
-    if (blurEl) blurEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(blurEl)}%`);
-    if (dimEl) dimEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(dimEl)}%`);
+    VectorSvelte.setWallpaperSliders(blur, dim);
 }
 
 /**
@@ -697,16 +649,12 @@ async function applyWallpaperPreview(chatId, previewResult) {
     applyChatWallpaper(chatId, previewResult.path, blur, dim, previewTs);
 }
 
-/** Slider input → live-update the layer's CSS variables and preview state. */
+/** Slider input → live-update the layer and preview state. */
 function onWallpaperSliderInput() {
     if (!wallpaperPreviewState) return;
     const { blur, dim } = readWallpaperSliders();
     wallpaperPreviewState.blur = blur;
     wallpaperPreviewState.dim = dim;
-    const blurEl = document.getElementById('wallpaper-blur-slider');
-    const dimEl = document.getElementById('wallpaper-dim-slider');
-    if (blurEl) blurEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(blurEl)}%`);
-    if (dimEl) dimEl.style.setProperty('--slider-pct', `${_wallpaperSliderPct(dimEl)}%`);
     applyChatWallpaper(wallpaperPreviewState.chatId, wallpaperPreviewState.previewPath, blur, dim, wallpaperPreviewState.ts);
 }
 
@@ -743,15 +691,12 @@ async function confirmWallpaperChange() {
 /** Drive the header label as the encrypted blob streams to Blossom, so the
  *  user knows something is happening even before the first chunk lands. */
 function setWallpaperUploadProgress(percentage) {
-    const label = document.getElementById('wallpaper-edit-mode-label');
-    if (!label) return;
     const pct = Math.max(0, Math.min(100, Math.round(percentage || 0)));
-    label.textContent = pct > 0 ? `Uploading… ${pct}%` : 'Uploading…';
+    VectorSvelte.setWallpaperLabel(pct > 0 ? `Uploading… ${pct}%` : 'Uploading…');
 }
 
 function clearWallpaperUploadProgress() {
-    const label = document.getElementById('wallpaper-edit-mode-label');
-    if (label) label.textContent = 'Edit Mode is enabled.';
+    VectorSvelte.setWallpaperLabel('Edit Mode is enabled.');
 }
 
 /** Remove the chat's wallpaper, reverting both sides to the default theme.
@@ -1768,31 +1713,27 @@ async function closeChat() {
 let nLastTypingIndicator = 0;
 
 const strOriginalInputPlaceholder = domChatMessageInput.getAttribute('placeholder');
-// The composer's chrome is one reconciler over these elements (index.html keeps the
-// markup, the editor is never touched); modules set state instead of poking buttons.
-VectorSvelte.mountComposerChrome({
-    els: {
-        box: domChatMessageBox, input: domChatMessageInput,
-        file: domChatMessageInputFile, cancel: domChatMessageInputCancel, emoji: domChatMessageInputEmoji,
-        voice: domChatMessageInputVoice, send: domChatMessageInputSend,
-        replyName: domChatReplyBarName, replySnippet: domChatReplyBarSnippet, replyCancel: domChatReplyBarCancel,
-    },
+// The composer box renders from lib/composer; this registers what it calls back into.
+VectorSvelte.setComposerHandlers({
+    input: () => domChatMessageInput,
+    placeholder: strOriginalInputPlaceholder || 'Enter message...',
     // Lazy: the helpers live in scripts that load after this one evaluates.
-    h: {
-        twemojify: (el) => twemojify(el),
-        renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
-        placeholder: strOriginalInputPlaceholder || 'Enter message...',
-    },
+    twemojify: (el) => twemojify(el),
+    renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
+    toggleAttachments: () => toggleAttachmentPanel(),
+    // Cancel edit mode if active, otherwise cancel reply.
+    cancel: () => { if (strCurrentEditMessageId) cancelEdit(); else cancelReply(); },
+    cancelReply: () => cancelReply(),
+    cancelCommand: () => { if (commandCtrl) commandCtrl.exitComposer(); },
+    // Tapping the reply bar's content jumps to the message being replied to.
+    jumpToReply: () => jumpToMessage(strCurrentReplyReference),
+    send: () => handleSendClick(),
 });
-VectorSvelte.mountCommandComposer({
-    editor: domChatMessageInput,
-    strip: document.getElementById('chat-command-bar'),
-    onCancel: () => { if (commandCtrl) commandCtrl.exitComposer(); },
-});
-VectorSvelte.mountChatHeader({
-    els: { avatar: domChatHeaderAvatarContainer, name: domChatContact, status: domChatContactStatus, menu: document.getElementById('chat-menu-btn'), backDot: domChatBackNotificationDot },
-    // Lazy: the helpers live in scripts that load after this one evaluates.
-    h: {
+VectorSvelte.mountCommandComposer({ editor: domChatMessageInput });
+/** Where the header's menu button was when last pressed: the self-destruct picker anchors to it. */
+let lastChatMenuRect = null;
+VectorSvelte.setChatHeaderHandlers({
+        // Lazy: the helpers live in scripts that load after this one evaluates.
         myNpub: () => strPubkey,
         getChat: (id) => arrChats.find(c => c.id === id),
         getProfile: (npub) => getProfile(npub),
@@ -1811,10 +1752,21 @@ VectorSvelte.mountChatHeader({
         openCommunity: (chat) => openCommunityDetails(chat),
         chats: () => arrChats,
         backDotWanted: () => chatBackDotWanted(),
-    },
+        closeChat: () => closeChat(),
+        togglePins: () => pinsToggleDrawer(),
+        // Chat-scoped actions; only rendered when the open chat has any.
+        openMenu: (rect) => {
+            lastChatMenuRect = rect;
+            const items = buildChatMenuItems(getChat(strOpenChat));
+            if (!items.length) return;
+            showContextMenu({ x: rect.right, y: rect.bottom + 4, items });
+        },
+        wallpaperSave: () => confirmWallpaperChange(),
+        wallpaperCancel: () => cancelWallpaperChange(),
+        wallpaperSliderInput: () => onWallpaperSliderInput(),
 });
 VectorSvelte.mountComposerPopups({
-    anchor: domChatMessageBox,
+    anchor: VectorSvelte.composerEls().box,
     // Lazy: the helpers live in scripts that load after this one evaluates.
     h: {
         bindCachedEmojiImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
@@ -1977,7 +1929,6 @@ function beginProgrammaticScroll() {
 
 let unreadBelowCount = 0;
 let unreadDividerEl = null;
-const domChatScrollReturnBadge = document.getElementById('chat-scroll-return-badge');
 
 /**
  * Insert (or reuse) the "New" divider relative to the given message element.
@@ -2008,14 +1959,7 @@ function clearUnreadDivider() {
 }
 function setUnreadBelow(n) {
     unreadBelowCount = Math.max(0, n);
-    if (!domChatScrollReturnBadge) return;
-    if (unreadBelowCount > 0) {
-        domChatScrollReturnBadge.textContent = unreadBelowCount > 99 ? '99+' : String(unreadBelowCount);
-        domChatScrollReturnBadge.classList.add('visible');
-    } else {
-        domChatScrollReturnBadge.textContent = '';
-        domChatScrollReturnBadge.classList.remove('visible');
-    }
+    VectorSvelte.setScrollBadge(unreadBelowCount > 99 ? '99+' : unreadBelowCount > 0 ? String(unreadBelowCount) : '');
 }
 function incrementUnreadBelow() { setUnreadBelow(unreadBelowCount + 1); }
 function clearUnreadBelow() { setUnreadBelow(0); }
@@ -2102,12 +2046,8 @@ function softChatScroll() {
 
 window.onresize = adjustSize;
 
-/** Wire the chat view chrome: back, bookmarks, header menu, wallpaper, scroll, new chat, reply bar. */
+/** Wire the chat view chrome: bookmarks, scroll, new chat, reply bar. */
 async function wireChatUi() {
-    domChatBackBtn.onclick = closeChat;
-    domChatBookmarksBtn.onclick = () => {
-        openChat(strPubkey);
-    };
     VectorSvelte.mountNewChat(domChatNew, { h: {
         back: closeChat,
         // Same parser as the QR scanner: invites join, npubs DM, and any URL wrapper
@@ -2122,41 +2062,9 @@ async function wireChatUi() {
         helpLeave: hideGlobalTooltip,
     } });
 
-    // Chat-header overflow menu — dropdown of chat-scoped actions. Currently
-    // hosts "Change Wallpaper" for DM chats. Group chats don't get wallpapers
-    // by design, so the option only renders when the open chat is a DM.
-    const domChatMenuBtn = document.getElementById('chat-menu-btn');
-    if (domChatMenuBtn) {
-        domChatMenuBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const rect = domChatMenuBtn.getBoundingClientRect();
-            const items = buildChatMenuItems(getChat(strOpenChat));
-            if (!items.length) return;
-            showContextMenu({ x: rect.right, y: rect.bottom + 4, items });
-        });
-    }
-
     // Self-Destruct Timer: right-click / long-press the Send button, plus the
     // active-timer clock indicator injected next to the composer.
     setupSelfDestructComposer();
-
-    // Wallpaper edit UI — header Cancel/Save overlay, bottom sliders.
-    const wallpaperEditSave = document.getElementById('wallpaper-edit-save-btn');
-    const wallpaperEditCancel = document.getElementById('wallpaper-edit-cancel-btn');
-    const wallpaperBlurSlider = document.getElementById('wallpaper-blur-slider');
-    const wallpaperDimSlider = document.getElementById('wallpaper-dim-slider');
-    if (wallpaperEditSave) {
-        wallpaperEditSave.onclick = () => confirmWallpaperChange();
-    }
-    if (wallpaperEditCancel) {
-        wallpaperEditCancel.onclick = () => cancelWallpaperChange();
-    }
-    if (wallpaperBlurSlider) {
-        wallpaperBlurSlider.addEventListener('input', onWallpaperSliderInput);
-    }
-    if (wallpaperDimSlider) {
-        wallpaperDimSlider.addEventListener('input', onWallpaperSliderInput);
-    }
 
     // Add scroll event listener for procedural message loading + intent tracking
     let scrollTimeout;
@@ -2167,29 +2075,8 @@ async function wireChatUi() {
             handleProceduralScroll();
         }, 100);
     });
-    domChatMessageInputCancel.onclick = () => {
-        // Cancel edit mode if active, otherwise cancel reply
-        if (strCurrentEditMessageId) {
-            cancelEdit();
-        } else {
-            cancelReply();
-        }
-    };
-
-    domChatReplyBarCancel.onclick = () => cancelReply();
-
-    // Tapping the reply bar's content jumps to the message being replied to,
-    // like tapping an inline reply quote. The cancel button keeps its own handler.
-    const domChatReplyBar = document.getElementById('chat-reply-bar');
-    if (domChatReplyBar) {
-        domChatReplyBar.addEventListener('click', (e) => {
-            if (e.target.closest('#chat-reply-bar-cancel')) return;
-            jumpToMessage(strCurrentReplyReference);
-        });
-    }
-
     // Hook up a scroll handler in the chat to display UI elements at certain scroll depths
-    createScrollHandler(domChatMessages, domChatMessagesScrollReturnBtn, {
+    createScrollHandler(domChatMessages, VectorSvelte.composerEls().scrollReturn, {
         threshold: 500,
         isPinned: () => chatPinnedToBottom,
         onClick: clearUnreadBelow,

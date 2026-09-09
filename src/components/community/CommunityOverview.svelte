@@ -2,27 +2,14 @@
     // The Community overview's scroll body, from overview state: mute, icon (with the
     // manage-metadata pencil and upload ring), name and description (inline-editable
     // for managers), the action row and the v2 upgrade row. The chat header above it
-    // is adopted through `els`. The member search and roster host are static: the
+    // is the shell's (GroupOverviewPane). The member search and roster host are static: the
     // roster island mounts into #group-overview-members from the app.
     import { overviewState } from '../lib/overview.svelte.js';
-    import { communityVersion } from '../lib/signals.svelte.js';
 
-    let { els, h } = $props();   // els: name, status, headerAvatar; h: memberSubtext, createAvatarImg, toggleMute, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete, migrate
+    let { h } = $props();   // h: memberSubtext, createAvatarImg, toggleMute, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete, migrate
 
     const ov = overviewState();
     const manage = $derived(!!ov.caps.manage_metadata);
-    const subtext = $derived.by(() => { communityVersion(ov.communityId); return h.memberSubtext(ov.communityId); });
-
-    // ── the chat header ──
-    $effect(() => {
-        els.name.textContent = ov.name;
-    });
-    $effect(() => {
-        els.status.textContent = subtext;
-    });
-    $effect(() => {
-        els.headerAvatar.replaceChildren(h.createAvatarImg(ov.avatarSrc, 22, true));
-    });
 
     let iconBroken = $state(false);
     $effect(() => { ov.avatarSrc; iconBroken = false; });

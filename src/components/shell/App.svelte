@@ -8,6 +8,7 @@
     import ChatPane from './ChatPane.svelte';
     import GroupOverviewPane from './GroupOverviewPane.svelte';
     import ProfileSwitcher from './ProfileSwitcher.svelte';
+    import Tooltip from './Tooltip.svelte';
     const panes = shellPanes();
 </script>
 
@@ -48,5 +49,5 @@
     <div id="login-form" class="fadein-anim"></div>
 </main>
 
-<div id="global-tooltip" class="global-tooltip"></div>
+<Tooltip />
 <ProfileSwitcher />

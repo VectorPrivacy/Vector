@@ -3,9 +3,8 @@
 // islands over lib/composer.svelte.js; this side is the orchestration those islands drive.
 // One global scope: loads after main.js and shares its globals.
 
-/** The add-file button and the attachment panel's file and folder pickers. */
+/** The attachment panel's file and folder pickers. */
 function initComposerAttachments() {
-    domChatMessageInputFile.onclick = () => { toggleAttachmentPanel(); };
     // Folders zip on the desktop only.
     VectorSvelte.attachmentPatch({ folderShown: platformFeatures.os !== 'android' });
 }
@@ -600,7 +599,8 @@ async function handleSendClick() {
 /** The voice recorder and the transcription models. */
 async function initComposerVoice() {
     // Hook up our voice message recorder with Telegram-like UX
-    recorder = new VoiceRecorder(domChatMessageInputVoice, domChatInputContainer);
+    const els = VectorSvelte.composerEls();
+    recorder = new VoiceRecorder(els.voice, els.container, els.send);
 
     // Handle state changes for UI updates
     recorder.onStateChange = (newState, oldState) => {
@@ -641,6 +641,5 @@ async function initComposer() {
     initComposerControllers();
     initCommandController();
     domChatMessageInput.oninput = handleComposerInput;
-    domChatMessageInputSend.onclick = handleSendClick;
     await initComposerVoice();
 }
