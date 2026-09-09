@@ -96,6 +96,10 @@ pub struct SendConfig {
     /// and mirror onto the outer wrap. None = permanent. Resolved per-chat by
     /// the caller (the "Self-Destruct Timer" setting).
     pub expiration: Option<u64>,
+    /// A self-destruct LIFESPAN (secs) resolved at publish instead: a file send
+    /// stamps `now + lifespan` once its upload is done, so a slow upload does not
+    /// eat into the message's life. Takes precedence over `expiration` there.
+    pub self_destruct_secs: Option<u64>,
 }
 
 impl Default for SendConfig {
@@ -108,6 +112,7 @@ impl Default for SendConfig {
             upload_retries: 3,
             upload_retry_delay: std::time::Duration::from_secs(2),
             expiration: None,
+            self_destruct_secs: None,
         }
     }
 }
@@ -857,7 +862,8 @@ pub async fn send_file_dm(
         replied_to: reply_to.unwrap_or("").to_string(),
         at: now.as_millis() as u64, pending: true, mine: true,
         npub: my_pk.to_bech32().ok(), attachments: vec![attachment],
-        expiration: config.expiration,
+        // A lifespan is stamped after the upload; the bubble shows no clock until then.
+        expiration: if config.self_destruct_secs.is_some() { None } else { config.expiration },
         ..Default::default()
     };
     {
@@ -991,8 +997,16 @@ pub async fn send_file_dm(
         file_rumor = file_rumor.tag(Tag::custom("dim", [format!("{}x{}", meta.width, meta.height)]));
     }
     file_rumor = file_rumor.tag(Tag::custom("ms", [milliseconds.to_string()]));
-    if let Some(exp) = config.expiration {
+    // The self-destruct clock starts at publish: resolve the lifespan now that the
+    // upload is done, and put the same stamp on the sender's own bubble.
+    let expiration = config
+        .self_destruct_secs
+        .and_then(crate::self_destruct::expiry_after)
+        .or(config.expiration);
+    if let Some(exp) = expiration {
         file_rumor = file_rumor.tag(Tag::expiration(Timestamp::from_secs(exp)));
+        let mut state = STATE.lock().await;
+        state.update_message(&pending_id, |msg| { msg.expiration_secs = exp as u32; });
     }
 
     let built_rumor = file_rumor.finalize_unsigned_with_id(my_pk);

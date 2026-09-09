@@ -41,12 +41,18 @@ pub fn set_chat_duration_secs(chat_id: &str, secs: Option<u64>) -> Result<(), St
 /// sent to `chat_id`, honoring the chat's configured lifespan. `None` when the
 /// chat is permanent.
 pub fn resolve_send_expiry(chat_id: &str) -> Option<u64> {
-    let duration = chat_duration_secs(chat_id)?;
+    expiry_after(chat_duration_secs(chat_id)?)
+}
+
+/// The absolute NIP-40 expiry for a lifespan that starts now. A file send calls this
+/// after its upload, so the clock starts at publish, not at the moment the send was asked
+/// for.
+pub fn expiry_after(duration_secs: u64) -> Option<u64> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    Some(now + duration)
+    Some(now + duration_secs)
 }
 
 /// Reset the in-flight flag whatever exit `sweep_expired` takes.

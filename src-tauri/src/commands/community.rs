@@ -1567,10 +1567,9 @@ async fn dispatch_community_attachment_message(
         let callback = crate::message::sending::TauriSendCallback;
         let emoji_tags = vector_core::emoji_packs::resolve_outbound_emoji_tags(&content);
 
-        // Resolve the Self-Destruct expiry ONCE, before the upload, so the optimistic
-        // bubble and the post-upload imeta stamp carry the identical NIP-40 expiry —
-        // the sender's own echo self-destructs, not just the recipients'.
-        let expiry = vector_core::self_destruct::resolve_send_expiry(&channel_id);
+        // Self-Destruct Timer: the lifespan is resolved to a stamp after the upload, so
+        // the clock starts at publish; the bubble shows no clock until the echo lands.
+        let self_destruct_secs = vector_core::self_destruct::chat_duration_secs(&channel_id);
         // Optimistic bubble — attachments carry empty URLs (plaintext is already on disk for the
         // sender's preview); the upload fills them in.
         let optimistic_attachments: Vec<_> = prepared.iter().map(|p| p.attachment.clone()).collect();
@@ -1584,7 +1583,7 @@ async fn dispatch_community_attachment_message(
             replied_to: reply.clone().unwrap_or_default(),
             emoji_tags: emoji_tags.clone(),
             attachments: optimistic_attachments,
-            expiration: expiry,
+            expiration: None,
             ..Default::default()
         };
         {
@@ -1717,9 +1716,9 @@ async fn dispatch_community_attachment_message(
             };
             let reply_ref = reply_owned.as_ref().map(|(id, a)| (id.as_str(), a.as_str()));
             let emoji_pairs: Vec<(&str, &str)> = emoji_tags.iter().map(|t| (t.shortcode.as_str(), t.url.as_str())).collect();
-            // Self-Destruct Timer: reuse the expiry resolved before the upload so the
-            // imeta and the sender's optimistic bubble carry the identical NIP-40 stamp
-            // (v2-only; the v1 file path below leaves imeta untouched).
+            // Self-Destruct Timer (v2 only; the v1 file path below leaves imeta untouched):
+            // stamped now that the upload is done, and the echo carries it to the bubble.
+            let expiry = self_destruct_secs.and_then(vector_core::self_destruct::expiry_after);
             if let Some(exp) = expiry {
                 imeta_tags.push(nostr_sdk::prelude::Tag::expiration(nostr_sdk::prelude::Timestamp::from_secs(exp)));
             }

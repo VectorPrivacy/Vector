@@ -687,11 +687,18 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
     // DM: delegate entirely to vector-core
     if !is_group_chat {
-        // Self-Destruct Timer: resolve the chat's lifespan to an absolute NIP-40
-        // expiry so every DM here (text or file) self-destructs on schedule.
-        let config = SendConfig {
-            expiration: vector_core::self_destruct::resolve_send_expiry(&receiver),
-            ..SendConfig::gui()
+        // Self-Destruct Timer: a text DM is stamped now; a file DM carries the lifespan
+        // and is stamped once its upload is done, so the clock starts at publish.
+        let config = if file.is_some() {
+            SendConfig {
+                self_destruct_secs: vector_core::self_destruct::chat_duration_secs(&receiver),
+                ..SendConfig::gui()
+            }
+        } else {
+            SendConfig {
+                expiration: vector_core::self_destruct::resolve_send_expiry(&receiver),
+                ..SendConfig::gui()
+            }
         };
         let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
 
