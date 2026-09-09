@@ -46,8 +46,89 @@ if (picker) {
     }).observe(picker, { attributes: true, attributeFilter: ['class'] });
 }
 
+// The panel's chrome is a component over the root. The hosts it hands back are what the
+// scroll spy, rail follow, jump-scroll and keyboard paths work on; everything the
+// component needs from the app arrives through one bag.
+const _pickerEls = { search: null, sidebar: null, main: null, recents: null, all: null, results: null, gif: null, creatorGrid: null };
 /** @type {HTMLInputElement} */
-const emojiSearch = document.getElementById('emoji-search-input');
+let emojiSearch = null;
+const _cropperEls = { stage: null, img: null, box: null, preview: null, cancel: null, ok: null };
+
+const _pickerPanelHelpers = {
+    mounted: (els) => { Object.assign(_pickerEls, els); emojiSearch = els.search; },
+    searchInput: (e) => _onSearchInput(e),
+    searchKeydown: (e) => _onSearchKeydown(e),
+    setMode: (mode) => setPickerMode(mode === 'gif' ? PICKER_MODE_GIF : PICKER_MODE_EMOJI),
+    railClick: (e) => _onRailClick(e),
+    // Grabbing the rail wins over an in-flight follow: never animate against the user's own finger.
+    railStop: () => _railStop(),
+    mainClick: (e) => {
+        const header = e.target.closest('.emoji-section-header');
+        if (!header) return;
+        e.stopPropagation();
+        header.parentElement.classList.toggle('collapsed');
+    },
+    mainScroll: () => _onMainScroll(),
+    gifClick: (e) => _onGifGridClick(e),
+    gifScroll: () => _onGifGridScroll(),
+    islands: {
+        deadMessage: (pack) => deadPackMessage(pack),
+        isLinux: () => platformFeatures?.os === 'linux',
+        packMenu: (el, pack) => attachLongPressContextMenu(el, (x, y) => _showPackTabMenu(pack, x, y)),
+        unsubscribe: (pack) => _unsubscribePackFromMenu(pack),
+        sectionHeight: (pack) => _packSectionHeightPx(pack),
+        mountGrid: (section, pack) => _mountPackCanvasGrid(section, pack),
+        afterRender: () => _afterPackSectionsRender(),
+        bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
+        installTabGestures: (tab, pack) => _installPackTabGestures(tab, pack),
+        packIsDead: (pack) => packIsDead(pack),
+        packInitial: (pack) => _packTitleInitial(pack),
+        openCreator: (id) => openEmojiPackCreator(id),
+        twemojify: (el) => twemojify(el),
+        stockTitle: (e) => stockEmojiTitle(e),
+        scrollRoot: () => _pickerEls.main,
+        recents: () => getMostUsedEmojis().slice(0, 24).concat(getMostUsedCustomEmojis(24))
+            .sort((a, b) => (b.used || 0) - (a.used || 0)).slice(0, 24),
+        all: () => arrEmojis,
+        search: (q) => searchEmojis(q).filter(e => e.name.toLowerCase().includes(q))
+            .concat(searchCustomEmojis(q)).sort((a, b) => (a.score || 0) - (b.score || 0)).slice(0, 48),
+        loadMedia: (item, el, placeholder) => loadGifWithFallback(el, `${GIF_API_BASE}/media`, item.id, item.title, placeholder, 0),
+    },
+    creator: {
+        bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
+        unavailableMessage: (reason) => emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '),
+        goneMessage: () => _pcGoneMessage(),
+        isMobile: () => typeof platformFeatures !== 'undefined' && !!platformFeatures.is_mobile,
+        dragActive: () => _pcDragActive,
+        remove: (idx) => _pcRemoveEmoji(idx),
+        // A broken emoji can't be renamed: explain why and how to fix it instead.
+        cellClick: (idx, broken) => {
+            if (broken) { _pcBrokenEmojiError(_emojiFailReason.get(_pc.emojis[idx]?.url) || ''); return; }
+            _pcRenameEmoji(idx);
+        },
+        installReorder: (cell, idx) => _pcInstallReorderHandlers(cell, idx),
+        gridMounted: (el) => { _pickerEls.creatorGrid = el; },
+        // Native picker + Rust import (content URIs, non-web-safe formats), not <input type=file>.
+        pickLogo: async () => { const file = await _pcPickImage(false); if (file) _pcSetLogoFile(file); },
+        pickImages: () => _pcPickImage(true),
+        addFiles: (files) => { if (files && files.length) _pcAddFiles(files); },
+        nameInput: (value) => { _pc.name = value; _pc.dirty = true; },
+        done: () => closeEmojiPackCreator(),
+        deletePack: () => _pcDelete(),
+    },
+    overlays: {
+        bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
+        errorRetry: () => _pcHideSizeError(),
+        confirm: (ok) => _pcConfirmFinish(ok),
+        namingInput: () => VectorSvelte.setPickerNamingError(''),
+        namingCommit: (raw) => _pcNamingTryCommit(raw),
+        namingCancel: () => _pcNamingFinish(null),
+        cropperEls: (els) => Object.assign(_cropperEls, els),
+    },
+};
+// Synchronous: the listeners and observers below need the hosts at load.
+VectorSvelte.mountPickerPanel(picker, { h: _pickerPanelHelpers });
+VectorSvelte.flushSync();
 /**
  * The current reaction reference - i.e: a message being reacted to.
  *
@@ -82,7 +163,7 @@ function _setPickerAnchor(mutate) {
 
 function openEmojiPanelForStatus(onInsert) {
     _emojiPanelTarget = { insert: onInsert };
-    document.querySelector('.picker-mode-btn[data-mode="emoji"]')?.click();
+    setPickerMode(PICKER_MODE_EMOJI);
     _setPickerAnchor(() => {
         picker.classList.add('emoji-picker-status-mode', 'emoji-picker-no-gifs');
         picker.classList.remove('emoji-picker-message-type');
@@ -95,7 +176,6 @@ function openEmojiPanelForStatus(onInsert) {
         if (!picker.classList.contains('visible')) return;
         resetEmojiPicker();
         renderEmojiPanel();
-        initCollapsibleSections();
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
             emojiSearch.focus();
         }
@@ -180,7 +260,6 @@ function openEmojiPanel(e) {
 
             resetEmojiPicker();
             renderEmojiPanel();
-            initCollapsibleSections();
 
             // Focus the search box (desktop only — mobile keyboards are disruptive).
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -1022,42 +1101,13 @@ function renderEmojiPackSidebar() {
     VectorSvelte.setPickerPacks(arrEmojiPacks);
 }
 
-// The rail and the three stock grids are islands over lib/picker.svelte.js; the pack
-// sections (canvas grids) and every gesture stay here.
+// The rail and the three stock grids are islands inside the panel; they render on the
+// first open, not at boot. The pack sections (canvas grids) and every gesture stay here.
 let _emojiPickerIslandsMounted = false;
 function _ensureEmojiPickerIslands() {
     if (_emojiPickerIslandsMounted) return;
     _emojiPickerIslandsMounted = true;
-    VectorSvelte.mountEmojiPicker({
-        sidebar: document.querySelector('.emoji-sidebar'),
-        recents: document.getElementById('emoji-recents-grid'),
-        all: document.getElementById('emoji-all-grid'),
-        results: document.getElementById('emoji-search-results'),
-        resultsSection: document.getElementById('emoji-search-results-container'),
-        sections: document.getElementById('emoji-pack-sections'),
-        h: {
-            deadMessage: (pack) => deadPackMessage(pack),
-            isLinux: () => platformFeatures?.os === 'linux',
-            packMenu: (el, pack) => attachLongPressContextMenu(el, (x, y) => _showPackTabMenu(pack, x, y)),
-            unsubscribe: (pack) => _unsubscribePackFromMenu(pack),
-            sectionHeight: (pack) => _packSectionHeightPx(pack),
-            mountGrid: (section, pack) => _mountPackCanvasGrid(section, pack),
-            afterRender: () => _afterPackSectionsRender(),
-            bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
-            installTabGestures: (tab, pack) => _installPackTabGestures(tab, pack),
-            packIsDead: (pack) => packIsDead(pack),
-            packInitial: (pack) => _packTitleInitial(pack),
-            openCreator: (id) => openEmojiPackCreator(id),
-            twemojify: (el) => twemojify(el),
-            stockTitle: (e) => stockEmojiTitle(e),
-            scrollRoot: () => document.querySelector('.emoji-main'),
-            recents: () => getMostUsedEmojis().slice(0, 24).concat(getMostUsedCustomEmojis(24))
-                .sort((a, b) => (b.used || 0) - (a.used || 0)).slice(0, 24),
-            all: () => arrEmojis,
-            search: (q) => searchEmojis(q).filter(e => e.name.toLowerCase().includes(q))
-                .concat(searchCustomEmojis(q)).sort((a, b) => (a.score || 0) - (b.score || 0)).slice(0, 48),
-        },
-    });
+    VectorSvelte.setPickerReady();
 }
 
 // Vertical drag-to-reorder for the equipped-pack sidebar tabs. Same pointer-
@@ -1242,7 +1292,7 @@ let _packRailDragY = 0;
 
 function _packRailAutoScrollTick() {
     _packRailAutoRaf = null;
-    const sidebar = document.querySelector('.emoji-sidebar');
+    const sidebar = _pickerEls.sidebar;
     if (!sidebar || !_packTabDragActive) return;
     const r = sidebar.getBoundingClientRect();
     let v = 0;
@@ -1318,7 +1368,7 @@ function _installPackTabGestures(tab, pack) {
 }
 
 function _packTabs() {
-    const sidebar = document.querySelector('.emoji-sidebar');
+    const sidebar = _pickerEls.sidebar;
     return sidebar ? [...sidebar.querySelectorAll('.emoji-pack-tab')] : [];
 }
 
@@ -1721,13 +1771,13 @@ function _isPackSubscribed(id) {
 // is just the chrome (global overlay vs inline card).
 // ============================================================================
 
-// The modal body is an island over lib/packdetails.svelte.js; this side fetches and closes.
+// The modal is an island over lib/packdetails.svelte.js in its body-level overlay; this
+// side fetches and closes.
 let _packDetailsMounted = false;
 function _ensurePackDetailsIsland() {
     if (_packDetailsMounted) return;
     _packDetailsMounted = true;
-    VectorSvelte.mountPackDetails(document.getElementById('pack-details-body'), {
-        overlay: document.getElementById('pack-details-overlay'),
+    VectorSvelte.mountPackDetails(document.getElementById('pack-details-overlay'), {
         h: {
             bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
             maxDisplay: () => MAX_DISPLAY_EMOJIS_PER_PACK,
@@ -1770,16 +1820,6 @@ function closePackDetailsModal() {
     VectorSvelte.closePackDetails();
 }
 
-// Wire close interactions once at module load.
-(function _initPackDetailsModal() {
-    const overlay = document.getElementById('pack-details-overlay');
-    if (!overlay) return;
-    document.getElementById('pack-details-close').addEventListener('click', closePackDetailsModal);
-    // Backdrop dismiss: only when the click landed on the overlay itself.
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) closePackDetailsModal(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !overlay.hidden) closePackDetailsModal(); });
-})();
-
 // ============================================================================
 // Pack-section reveal fade (chatlist pattern)
 // ============================================================================
@@ -1818,7 +1858,7 @@ function _emojiPackReveal_observeAll(main) {
 
 function _attachEmojiPackReveal() {
     if (_emojiPackRevealAttached) return;
-    const main = document.querySelector('.emoji-main');
+    const main = _pickerEls.main;
     if (!main) return;
     _emojiPackRevealAttached = true;
 
@@ -2189,7 +2229,7 @@ function _stopPackCanvasLoop() {
  *  hide/show (the close drains the active set, but the observed intersection
  *  state never changed). The IO still handles subsequent scrolling. */
 function _rearmVisiblePackCanvases() {
-    const main = document.querySelector('.emoji-main');
+    const main = _pickerEls.main;
     if (!main || _packCanvasGrids.size === 0) return;
     // main + each canvas share the panel's transform, so this viewport-space
     // overlap test stays correct even mid open-transition.
@@ -2781,22 +2821,20 @@ function openEmojiPackCreator(id) {
         _pc.logoUrl = '';
         _pc.emojis = [];
     }
-    _pcShowView(true);
-    _pcSyncDom();
+    VectorSvelte.setCreatorOpen(true);
+    _pcRenderGrid();
     if (editingPack) _pcVerifyRemoteMedia();
     // Reset the scroll container to the top — without this, opening
     // edit mode for a pack while the picker was already scrolled to
     // that pack's section leaves the creator showing its grid bottom
     // instead of the pack title.
-    const main = document.querySelector('.emoji-main');
-    if (main) main.scrollTop = 0;
+    if (_pickerEls.main) _pickerEls.main.scrollTop = 0;
     // Focus the title for immediate-edit affordance — but only on
     // desktop. On mobile the focus pops the soft keyboard, which lands
     // on top of the creator UI and is jarring when the user might not
     // even want to edit the name (e.g. just opened to add emojis).
-    const nameInput = document.getElementById('emoji-creator-name');
     const isMobile = typeof platformFeatures !== 'undefined' && platformFeatures.is_mobile;
-    if (nameInput && !isMobile) setTimeout(() => nameInput.focus(), 50);
+    if (!isMobile) VectorSvelte.focusCreatorName();
 }
 
 /** Saves pending edits (if dirty) and switches back to the normal
@@ -2816,7 +2854,7 @@ async function closeEmojiPackCreator() {
         if (!saved) return false;
     }
     _pc.open = false;
-    _pcShowView(false);
+    VectorSvelte.setCreatorOpen(false);
     _pcRevokeBlobUrls();
     _pc.emojis = [];
     _pc.logoFile = null;
@@ -2827,7 +2865,7 @@ async function closeEmojiPackCreator() {
     _pc.savedPackId = null;
     if (savedId) {
         requestAnimationFrame(() => {
-            const section = document.querySelector(
+            const section = _pickerEls.main?.querySelector(
                 `.emoji-pack-section[data-pack-id="${CSS.escape(savedId)}"]`);
             if (!section) return;
             // Expand first — landing on a collapsed section hides the very
@@ -2837,20 +2875,6 @@ async function closeEmojiPackCreator() {
         });
     }
     return true;
-}
-
-function _pcShowView(showCreator) {
-    const main = document.querySelector('.emoji-main');
-    if (!main) return;
-    const creator = document.getElementById('emoji-creator');
-    if (!creator) return;
-    // Toggle: hide all `.emoji-section`s when in creator mode, show only
-    // `#emoji-creator`. Existing search/section-collapse logic is paused
-    // implicitly because none of those elements receive layout.
-    main.querySelectorAll('.emoji-section').forEach(el => {
-        el.style.display = showCreator ? 'none' : '';
-    });
-    creator.hidden = !showCreator;
 }
 
 function _pcRevokeBlobUrls() {
@@ -2866,45 +2890,7 @@ function _pcRevokeBlobUrls() {
     }
 }
 
-function _pcSyncDom() {
-    document.getElementById('emoji-creator-name').value = _pc.name;
-    // Shown in BOTH modes: 'edit' deletes the published pack, 'create' discards the draft.
-    document.getElementById('emoji-creator-delete').hidden = false;
-    _pcRenderGrid();
-}
-
-// The creator's cells, logo face, count and dropzone are an island over lib/packcreator.svelte.js.
-let _pcIslandMounted = false;
-function _pcEnsureIsland() {
-    if (_pcIslandMounted) return;
-    _pcIslandMounted = true;
-    VectorSvelte.mountPackCreator(document.getElementById('emoji-creator-grid'), {
-        els: {
-            logo: document.getElementById('emoji-creator-logo'),
-            count: document.getElementById('emoji-creator-count'),
-            dropzone: document.getElementById('emoji-creator-dropzone'),
-            dropzoneLabel: document.querySelector('#emoji-creator-dropzone .emoji-creator-dropzone-label'),
-        },
-        h: {
-            bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
-            unavailableMessage: (reason) => emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '),
-            goneMessage: () => _pcGoneMessage(),
-            isMobile: () => typeof platformFeatures !== 'undefined' && !!platformFeatures.is_mobile,
-            dragActive: () => _pcDragActive,
-            remove: (idx) => _pcRemoveEmoji(idx),
-            // A broken emoji can't be renamed: explain why and how to fix it instead.
-            cellClick: (idx, broken) => {
-                if (broken) { _pcBrokenEmojiError(_emojiFailReason.get(_pc.emojis[idx]?.url) || ''); return; }
-                _pcRenameEmoji(idx);
-            },
-            installReorder: (cell, idx) => _pcInstallReorderHandlers(cell, idx),
-        },
-    });
-}
-
-/** Push the creator's model into its island (a new snapshot per call, so the cells re-derive). */
 function _pcRenderGrid() {
-    _pcEnsureIsland();
     VectorSvelte.setCreator({
         name: _pc.name,
         logo: { blobUrl: _pc.logoBlobUrl || '', url: _pc.logoUrl || '', dead: !!_pc.logoUrl && _pcDeadUrls.has(_pc.logoUrl) },
@@ -2930,7 +2916,7 @@ function _pcShortcodeFromFilename(name) {
 }
 
 function _pcClearDropMarkers() {
-    const grid = document.getElementById('emoji-creator-grid');
+    const grid = _pickerEls.creatorGrid;
     if (!grid) return;
     grid.querySelectorAll('.drop-before, .drop-after').forEach(c => {
         c.classList.remove('drop-before', 'drop-after');
@@ -2966,7 +2952,7 @@ function _pcInstallReorderHandlers(cell, idx) {
             cell.classList.add('is-dragging');
             // Clear any stuck hover state — we own this class now, so a drag
             // start is the right moment to normalize it.
-            const grid = document.getElementById('emoji-creator-grid');
+            const grid = _pickerEls.creatorGrid;
             if (grid) {
                 grid.querySelectorAll('.is-hovered').forEach(c =>
                     c.classList.remove('is-hovered'));
@@ -3025,7 +3011,7 @@ function _pcInstallReorderHandlers(cell, idx) {
 }
 
 function _pcResolveDropTarget(x, y) {
-    const grid = document.getElementById('emoji-creator-grid');
+    const grid = _pickerEls.creatorGrid;
     if (!grid) return null;
     // Scope to cells that carry an index — skips the "+" add-cell, which
     // sits in the grid but has no data-idx.
@@ -3064,8 +3050,7 @@ function _pcUpdateDropTarget(x, y) {
     _pcClearDropMarkers();
     const t = _pcResolveDropTarget(x, y);
     if (!t) return;
-    const grid = document.getElementById('emoji-creator-grid');
-    const cell = grid.querySelector(`.emoji-creator-cell[data-idx="${t.targetIdx}"]`);
+    const cell = _pickerEls.creatorGrid?.querySelector(`.emoji-creator-cell[data-idx="${t.targetIdx}"]`);
     if (!cell) return;
     cell.classList.add(t.isBefore ? 'drop-before' : 'drop-after');
 }
@@ -3089,13 +3074,12 @@ function _pcRemoveEmoji(idx) {
 async function _pcRenameEmoji(idx) {
     const e = _pc.emojis[idx];
     if (!e) return;
-    const input = document.getElementById('emoji-pack-creator-naming-input');
-    if (input) input.dataset.ownIdx = String(idx);
+    _pcNamingOwnIdx = idx;
     const next = await _pcShowNaming(
         { src: e.blobUrl || e.url, initial: e.shortcode },
         'edit',
     );
-    if (input) delete input.dataset.ownIdx;
+    _pcNamingOwnIdx = -1;
     if (next == null || next === e.shortcode) return;
     _pc.emojis[idx].shortcode = next;
     _pc.dirty = true;
@@ -3269,19 +3253,18 @@ async function _pcAddFiles(fileList) {
  *  doesn't shift the target out from under us. Skipping keeps the
  *  auto-generated shortcode the file landed with. */
 async function _pcQueueNamingForEntries(entries) {
-    const input = document.getElementById('emoji-pack-creator-naming-input');
     for (let i = 0; i < entries.length; i++) {
         if (!_pc.open) return; // panel closed mid-queue
         const entry = entries[i];
         const idx = _pc.emojis.indexOf(entry);
         if (idx < 0) continue; // user already removed it via the × badge
-        if (input) input.dataset.ownIdx = String(idx);
+        _pcNamingOwnIdx = idx;
         const next = await _pcShowNaming({
             src: entry.blobUrl || entry.url,
             initial: entry.shortcode,
             batch: { current: i + 1, total: entries.length },
         }, 'create');
-        if (input) delete input.dataset.ownIdx;
+        _pcNamingOwnIdx = -1;
         if (next != null && next !== entry.shortcode) {
             entry.shortcode = next;
             _pc.dirty = true;
@@ -3375,48 +3358,41 @@ function _pcShowNaming({ src, initial, batch }, mode = 'create') {
         if (_pcNamingResolver) _pcNamingResolver(null);
         _pcNamingResolver = resolve;
 
-        const overlay  = document.getElementById('emoji-pack-creator-naming');
-        const preview  = document.getElementById('emoji-pack-creator-naming-preview');
-        const input    = document.getElementById('emoji-pack-creator-naming-input');
-        const batchEl  = document.getElementById('emoji-pack-creator-naming-batch');
-        const errEl    = document.getElementById('emoji-pack-creator-naming-error');
-        const skipBtn  = document.getElementById('emoji-pack-creator-naming-skip');
-        const titleEl  = document.getElementById('emoji-pack-creator-naming-title');
-
-        // `src` is either a local blob: URL (safe — never touched the
-        // network) or a remote Blossom URL (must route through the cache).
-        // Clear leftover state from any previous bind on this reused
-        // <img>: a stale cacheToken would let an in-flight .then from a
-        // prior remote bind overwrite our blob src once it resolves,
-        // and a stale `emoji-img-loading` class would paint the mint
-        // placeholder over the actual emoji.
-        if (typeof src === 'string' && src.startsWith('blob:')) {
-            delete preview.dataset.cacheToken;
-            preview.classList.remove('emoji-img-loading');
-            preview.src = src;
-        } else {
-            bindCachedEmojiImg(preview, src, 'emoji');
-        }
-        input.value = initial || '';
-        input.classList.remove('is-invalid');
-        errEl.hidden = true;
-        errEl.textContent = '';
-        skipBtn.textContent = mode === 'edit' ? 'CANCEL' : 'SKIP';
-        titleEl.textContent = mode === 'edit' ? 'Rename Emoji' : 'Name This Emoji';
-        if (batch && batch.total > 1) {
-            batchEl.textContent = `${batch.current} of ${batch.total}`;
-            batchEl.hidden = false;
-        } else {
-            batchEl.hidden = true;
-        }
-        overlay.hidden = false;
-        setTimeout(() => { input.focus(); input.select(); }, 30);
+        VectorSvelte.setPickerNaming({ src, value: initial || '', mode, batch: batch || null, error: '' });
     });
 }
 
+// The emoji being renamed keeps its own shortcode without tripping the collision check.
+let _pcNamingOwnIdx = -1;
+function _pcNamingTryCommit(raw) {
+    const sc = _pcSanitizeShortcode(raw);
+    if (!sc) {
+        VectorSvelte.setPickerNamingError('Letters, numbers, and underscores only.');
+        return;
+    }
+    // Reject collisions with other emojis in this pack — saving an
+    // identical shortcode would silently drop one of them at publish
+    // (_pcSave dedups).
+    const conflict = _pc.emojis.some((e, i) =>
+        i !== _pcNamingOwnIdx && _pcSanitizeShortcode(e.shortcode) === sc);
+    if (conflict) {
+        VectorSvelte.setPickerNamingError(`:${sc}: is already used in this pack.`);
+        // Also surface the prominent panel overlay — the inline hint is
+        // easy to miss, and a duplicate name silently drops one emoji at
+        // publish. Duplicate names across DIFFERENT packs are fine (they
+        // disambiguate as `~1`/`~2`); only same-pack collisions are blocked.
+        _pcShowError(
+            'Oops! Name Already Taken!',
+            `:${sc}: is already used by another emoji in this pack. Pick a different name.`,
+            { title: 'Duplicate Shortcode.', buttonText: 'GOT IT' },
+        );
+        return;
+    }
+    _pcNamingFinish(sc);
+}
+
 function _pcNamingFinish(value) {
-    const overlay = document.getElementById('emoji-pack-creator-naming');
-    if (overlay) overlay.hidden = true;
+    VectorSvelte.setPickerNaming(null);
     const r = _pcNamingResolver;
     _pcNamingResolver = null;
     if (r) r(value);
@@ -3430,8 +3406,6 @@ function _pcNamingFinish(value) {
  *  the modal / chat preview where the picker might be closed, and a
  *  hidden picker means a hidden overlay. */
 function _pcShowError(pretitle, detail, opts = {}) {
-    const overlay = document.getElementById('emoji-pack-creator-error');
-    if (!overlay) return;
     // Ensure the picker is visible so the in-panel overlay actually
     // surfaces. Without this, an error triggered from the deep-link
     // modal / in-chat preview would sit invisible until the user
@@ -3440,15 +3414,7 @@ function _pcShowError(pretitle, detail, opts = {}) {
         picker.classList.add('visible');
         picker.classList.add('emoji-picker-message-type');
     }
-    const pre = document.getElementById('emoji-pack-creator-error-pretitle');
-    const det = document.getElementById('emoji-pack-creator-error-detail');
-    const titleEl = document.getElementById('emoji-pack-creator-error-title');
-    const btn = document.getElementById('emoji-pack-creator-error-retry');
-    if (pre) pre.textContent = pretitle;
-    if (det) det.textContent = detail;
-    if (titleEl) titleEl.textContent = opts.title || 'Please Try Again.';
-    if (btn) btn.textContent = opts.buttonText || 'TRY AGAIN';
-    overlay.hidden = false;
+    VectorSvelte.setPickerError({ pretitle, detail, title: opts.title || '', button: opts.buttonText || '' });
 }
 function _pcShowSizeError() {
     _pcShowError('Oops! File Size Exceeded!', 'File Size must be under 256Kb.');
@@ -3487,8 +3453,7 @@ function _pcBrokenEmojiError(reason) {
     }
 }
 function _pcHideSizeError() {
-    const overlay = document.getElementById('emoji-pack-creator-error');
-    if (overlay) overlay.hidden = true;
+    VectorSvelte.setPickerError(null);
 }
 
 /** Whether a file is eligible for the cropper. All supported image
@@ -3515,14 +3480,8 @@ const PC_CROP_MIN_DISP = 36;
  *  have already vetted the file is `_pcIsCroppableImage`. */
 function _pcShowCropper(file) {
     return new Promise((resolve) => {
-        const overlay = document.getElementById('emoji-pack-creator-cropper');
-        const stage   = document.getElementById('emoji-pack-creator-cropper-stage');
-        const img     = document.getElementById('emoji-pack-creator-cropper-img');
-        const box     = document.getElementById('emoji-pack-creator-cropper-box');
-        const preview = document.getElementById('emoji-pack-creator-cropper-preview');
-        const cancel  = document.getElementById('emoji-pack-creator-cropper-cancel');
-        const ok      = document.getElementById('emoji-pack-creator-cropper-ok');
-        if (!overlay || !stage || !img || !box || !preview || !cancel || !ok) { resolve(null); return; }
+        const { stage, img, box, preview, cancel, ok } = _cropperEls;
+        if (!stage || !img || !box || !preview || !cancel || !ok) { resolve(null); return; }
 
         const blobUrl = URL.createObjectURL(file);
         let srcW = 0, srcH = 0;
@@ -3549,7 +3508,7 @@ function _pcShowCropper(file) {
         const finish = (result) => {
             cleanupListeners();
             URL.revokeObjectURL(blobUrl);
-            overlay.hidden = true;
+            VectorSvelte.setPickerCropperOpen(false);
             img.removeAttribute('src');
             // Drop the preview's background-image so CSS doesn't pin
             // the (revoked) blob URL alive in the layout tree.
@@ -3787,7 +3746,7 @@ function _pcShowCropper(file) {
         ok.addEventListener('click',     onOk);
         document.addEventListener('keydown', onKey, true);
 
-        overlay.hidden = false;
+        VectorSvelte.setPickerCropperOpen(true);
         img.src = blobUrl;
     });
 }
@@ -3811,33 +3770,15 @@ function _pcShowConfirm(opts = {}) {
         if (_pcConfirmResolver) _pcConfirmResolver(false);
         _pcConfirmResolver = resolve;
 
-        const overlay  = document.getElementById('emoji-pack-creator-confirm');
-        const titleEl  = document.getElementById('emoji-pack-creator-confirm-title');
-        const detailEl = document.getElementById('emoji-pack-creator-confirm-detail');
-        const iconEl   = document.getElementById('emoji-pack-creator-confirm-icon');
-        const okBtn    = document.getElementById('emoji-pack-creator-confirm-ok');
-        const cancelBtn = document.getElementById('emoji-pack-creator-confirm-cancel');
-
-        titleEl.textContent = opts.title || 'Are you sure?';
-        detailEl.textContent = opts.detail || '';
-        detailEl.hidden = !opts.detail;
-        if (opts.icon) {
-            iconEl.src = `/icons/${opts.icon}`;
-            iconEl.hidden = false;
-        } else {
-            iconEl.hidden = true;
-        }
-        okBtn.textContent = opts.confirmText || 'CONTINUE';
-        cancelBtn.textContent = opts.cancelText || 'CANCEL';
-        overlay.dataset.tone = opts.tone || 'default';
-        overlay.hidden = false;
-        setTimeout(() => { okBtn.focus(); }, 30);
+        VectorSvelte.setPickerConfirm({
+            title: opts.title || '', detail: opts.detail || '', icon: opts.icon || '',
+            tone: opts.tone || 'default', confirmText: opts.confirmText || '', cancelText: opts.cancelText || '',
+        });
     });
 }
 
 function _pcConfirmFinish(value) {
-    const overlay = document.getElementById('emoji-pack-creator-confirm');
-    if (overlay) overlay.hidden = true;
+    VectorSvelte.setPickerConfirm(null);
     const r = _pcConfirmResolver;
     _pcConfirmResolver = null;
     if (r) r(value);
@@ -3847,20 +3788,13 @@ function _pcConfirmFinish(value) {
  *  where one slow Blossom server can stall for ~30s and per-cell rings
  *  alone leave too much unexplained dead time). */
 function _pcShowProgress(title, detail) {
-    const overlay = document.getElementById('emoji-pack-creator-progress');
-    const titleEl = document.getElementById('emoji-pack-creator-progress-title');
-    const detailEl = document.getElementById('emoji-pack-creator-progress-detail');
-    if (titleEl) titleEl.textContent = title;
-    if (detailEl) detailEl.textContent = detail || '';
-    if (overlay) overlay.hidden = false;
+    VectorSvelte.setPickerProgress({ title, detail: detail || '' });
 }
 function _pcSetProgressDetail(detail) {
-    const detailEl = document.getElementById('emoji-pack-creator-progress-detail');
-    if (detailEl) detailEl.textContent = detail || '';
+    VectorSvelte.setPickerProgressDetail(detail);
 }
 function _pcHideProgress() {
-    const overlay = document.getElementById('emoji-pack-creator-progress');
-    if (overlay) overlay.hidden = true;
+    VectorSvelte.setPickerProgress(null);
 }
 
 /** Per-cell busy state painter. State: 'pending' | 'uploading' | 'deleting'
@@ -3911,7 +3845,7 @@ async function _pcSave() {
     // .slice(0, 26) catches legacy packs whose titles predate the 26-char
     // cap — the input's maxlength only constrains new typing, not values
     // we hydrated into the field from an existing pack.
-    const name = (document.getElementById('emoji-creator-name').value || '').trim().slice(0, 26);
+    const name = (_pc.name || '').trim().slice(0, 26);
     if (!name || !_pc.emojis.length) {
         // Empty pack — drop the in-progress edit silently. Better than
         // publishing a useless empty/no-name set the user clearly bailed on.
@@ -4040,30 +3974,7 @@ async function _pcSave() {
 }
 
 function _pcSetSavingChrome(on) {
-    const done = document.getElementById('emoji-creator-done');
-    if (done) {
-        done.disabled = on;
-        // Swap the Save-and-exit pencil for a spinner while the publish
-        // is in flight. The inner span gets re-classed in place so the
-        // button keeps its size + listener wiring.
-        const iconSpan = done.querySelector('.icon');
-        if (iconSpan) {
-            iconSpan.classList.toggle('icon-edit', !on);
-            iconSpan.classList.toggle('emoji-creator-done-spinner', on);
-        }
-    }
-    const del = document.getElementById('emoji-creator-delete');
-    if (del) del.disabled = on;
-    const name = document.getElementById('emoji-creator-name');
-    if (name) name.disabled = on;
-    const dz = document.getElementById('emoji-creator-dropzone');
-    if (dz) dz.classList.toggle('is-disabled', on || _pc.emojis.length >= PC_MAX_EMOJIS);
-    // Freeze cell interactions during the save: drag-to-reorder, hover
-    // ×, click-to-rename — all paused so the publish flight can't be
-    // raced by an edit. CSS owns the visual + pointer-events block via
-    // the `.is-saving` class on the grid.
-    const grid = document.getElementById('emoji-creator-grid');
-    if (grid) grid.classList.toggle('is-saving', on);
+    VectorSvelte.setCreatorSaving(on);
 }
 
 async function _pcDelete() {
@@ -4106,7 +4017,7 @@ async function _pcDelete() {
         _pc.emojis = [];
         _pc.logoFile = null;
         _pc.logoUrl = '';
-        _pcShowView(false);
+        VectorSvelte.setCreatorOpen(false);
         _pcRevokeBlobUrls();
         return;
     }
@@ -4194,7 +4105,7 @@ async function _pcDelete() {
         _pc.dirty = false;
         _pc.open = false;
         _pcHideProgress();
-        _pcShowView(false);
+        VectorSvelte.setCreatorOpen(false);
         _pcRevokeBlobUrls();
     } catch (e) {
         console.warn('[emoji-pack-creator] delete failed:', e);
@@ -4206,114 +4117,12 @@ async function _pcDelete() {
     }
 }
 
-// ----- Wire up event listeners once at module load --------------------------
-(function _initPackCreator() {
-    const root = document.getElementById('emoji-creator');
-    if (!root) return;
-
-    const nameInput = document.getElementById('emoji-creator-name');
-    nameInput.addEventListener('input', () => {
-        _pc.name = nameInput.value;
-        _pc.dirty = true;
-    });
-
-    // Logo upload — native picker + Rust import (handles content URIs +
-    // non-web-safe formats), not the WebView <input type=file>.
-    const logoBtn = document.getElementById('emoji-creator-logo');
-    logoBtn.addEventListener('click', async () => {
-        const file = await _pcPickImage(false);
-        if (file) _pcSetLogoFile(file);
-    });
-
-    // Bottom dropzone: click opens the native picker (+ Rust import); the
-    // drag/drop handlers below still take DOM Files directly.
-    const dz = document.getElementById('emoji-creator-dropzone');
-    dz.addEventListener('click', async () => {
-        if (dz.classList.contains('is-disabled')) return;
-        const files = await _pcPickImage(true);
-        if (files.length) _pcAddFiles(files);
-    });
-    dz.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        dz.classList.add('is-dragover');
-    });
-    dz.addEventListener('dragleave', () => dz.classList.remove('is-dragover'));
-    dz.addEventListener('drop', (e) => {
-        e.preventDefault();
-        dz.classList.remove('is-dragover');
-        if (dz.classList.contains('is-disabled')) return;
-        _pcAddFiles(e.dataTransfer && e.dataTransfer.files);
-    });
-
-    // Done (top-right pencil) saves + exits.
-    document.getElementById('emoji-creator-done').addEventListener('click', closeEmojiPackCreator);
-    document.getElementById('emoji-creator-delete').addEventListener('click', _pcDelete);
-
-    const errBtn = document.getElementById('emoji-pack-creator-error-retry');
-    if (errBtn) errBtn.addEventListener('click', _pcHideSizeError);
-
-    // Naming overlay wiring.
-    const namingInput = document.getElementById('emoji-pack-creator-naming-input');
-    const namingErr   = document.getElementById('emoji-pack-creator-naming-error');
-    const namingSave  = document.getElementById('emoji-pack-creator-naming-save');
-    const namingSkip  = document.getElementById('emoji-pack-creator-naming-skip');
-    const tryCommit = () => {
-        const raw = namingInput.value;
-        const sc = _pcSanitizeShortcode(raw);
-        if (!sc) {
-            namingInput.classList.add('is-invalid');
-            namingErr.textContent = 'Letters, numbers, and underscores only.';
-            namingErr.hidden = false;
-            return;
-        }
-        // Reject collisions with other emojis in this pack — saving an
-        // identical shortcode would silently drop one of them at publish
-        // (_pcSave dedups). Caller passes its own index via dataset so we
-        // can let the user "keep their own" without flagging it.
-        const ownIdx = namingInput.dataset.ownIdx;
-        const conflict = _pc.emojis.some((e, i) =>
-            String(i) !== ownIdx && _pcSanitizeShortcode(e.shortcode) === sc);
-        if (conflict) {
-            namingInput.classList.add('is-invalid');
-            namingErr.textContent = `:${sc}: is already used in this pack.`;
-            namingErr.hidden = false;
-            // Also surface the prominent panel overlay — the inline hint is
-            // easy to miss, and a duplicate name silently drops one emoji at
-            // publish. Duplicate names across DIFFERENT packs are fine (they
-            // disambiguate as `~1`/`~2`); only same-pack collisions are blocked.
-            _pcShowError(
-                'Oops! Name Already Taken!',
-                `:${sc}: is already used by another emoji in this pack. Pick a different name.`,
-                { title: 'Duplicate Shortcode.', buttonText: 'GOT IT' },
-            );
-            return;
-        }
-        _pcNamingFinish(sc);
-    };
-    namingInput.addEventListener('input', () => {
-        namingInput.classList.remove('is-invalid');
-        namingErr.hidden = true;
-    });
-    namingInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); tryCommit(); }
-        else if (e.key === 'Escape') { e.preventDefault(); _pcNamingFinish(null); }
-    });
-    namingSave.addEventListener('click', tryCommit);
-    namingSkip.addEventListener('click', () => _pcNamingFinish(null));
-
-    // Confirm overlay wiring. Enter / Escape route through the active
-    // resolver so the in-panel modal feels native — and only when the
-    // overlay is the one expecting input (resolver present).
-    const confirmOk     = document.getElementById('emoji-pack-creator-confirm-ok');
-    const confirmCancel = document.getElementById('emoji-pack-creator-confirm-cancel');
-    confirmOk.addEventListener('click', () => _pcConfirmFinish(true));
-    confirmCancel.addEventListener('click', () => _pcConfirmFinish(false));
-    document.addEventListener('keydown', (e) => {
-        if (!_pcConfirmResolver) return;
-        if (e.key === 'Enter') { e.preventDefault(); _pcConfirmFinish(true); }
-        else if (e.key === 'Escape') { e.preventDefault(); _pcConfirmFinish(false); }
-    });
-})();
+// Enter / Escape route through the active confirm resolver, and only while one is up.
+document.addEventListener('keydown', (e) => {
+    if (!_pcConfirmResolver) return;
+    if (e.key === 'Enter') { e.preventDefault(); _pcConfirmFinish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); _pcConfirmFinish(false); }
+});
 
 function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
     if (!emoji) return;
@@ -4406,8 +4215,7 @@ function _mountPackCanvasGrid(section, pack) {
     const grid = new PackCanvasGrid(pack);
     _packCanvasGrids.set(pack.id, grid);
     section.appendChild(grid.canvas);
-    const main = document.querySelector('.emoji-main');
-    if (main) grid.attachVisibilityObserver(main);
+    if (_pickerEls.main) grid.attachVisibilityObserver(_pickerEls.main);
     return () => {
         grid.destroy();
         if (_packCanvasGrids.get(pack.id) === grid) _packCanvasGrids.delete(pack.id);
@@ -4415,7 +4223,7 @@ function _mountPackCanvasGrid(section, pack) {
 }
 
 function _afterPackSectionsRender() {
-    const main = document.querySelector('.emoji-main');
+    const main = _pickerEls.main;
     if (!main) return;
     // Arm the on-screen packs deterministically rather than waiting on the IO's first
     // callback (unreliable when this runs mid-open-transition).
@@ -4445,59 +4253,26 @@ function renderEmojiPanel() {
     VectorSvelte.bumpPickerRecents();
 }
 
-function loadEmojiSections() {
-    // Legacy function - now calls renderEmojiPanel
-    renderEmojiPanel();
-
-    // Initialize collapsible sections after loading emojis
-    initCollapsibleSections();
-}
-
-// Track if we've already initialized to prevent duplicates
-let collapsiblesInitialized = false;
-
-function initCollapsibleSections() {
-    // `.emoji-main` is static, so this delegated listener only needs attaching
-    // once — without the guard every panel open stacked another copy.
-    if (collapsiblesInitialized) return;
-    collapsiblesInitialized = true;
-    document.querySelector('.emoji-main').addEventListener('click', (e) => {
-        const header = e.target.closest('.emoji-section-header');
-        if (!header) return;
-        e.stopPropagation();
-        const section = header.parentElement;
-        section.classList.toggle('collapsed');
-    });
-}
-
-// Function to reset emoji picker state
+// The panel's query clears; the sections come back.
 function resetEmojiPicker() {
-    // Clear search input
     emojiSearch.value = '';
-
-    // Show all sections — but don't override `hidden` attributes; inline display beats the
-    // UA `[hidden]` rule, so any section we deliberately hide would reappear after a search clear.
-    document.querySelectorAll('.emoji-section').forEach(section => {
-        if (section.hidden) return;
-        section.style.display = 'block';
-    });
-
     VectorSvelte.setPickerQuery('');
 }
 
-// Emoji search: the results grid derives from the query; the sections step aside.
-emojiSearch.addEventListener('input', (e) => {
-    if (pickerMode === PICKER_MODE_GIF) return;
-    const search = e.target.value.toLowerCase();
-    if (search) {
-        document.querySelectorAll('.emoji-section:not(#emoji-search-results-container)').forEach(section => {
-            section.style.display = 'none';
-        });
-        VectorSvelte.setPickerQuery(search);
-    } else {
-        resetEmojiPicker();
+// Emoji search: the results grid derives from the query and the sections step aside.
+// GIF search is debounced against the API.
+function _onSearchInput(e) {
+    if (pickerMode === PICKER_MODE_GIF) {
+        clearTimeout(gifSearchTimeout);
+        gifSearchTimeout = setTimeout(() => {
+            searchGifs(e.target.value);
+        }, 300);
+        return;
     }
-});
+    const search = e.target.value.toLowerCase();
+    if (search) VectorSvelte.setPickerQuery(search);
+    else resetEmojiPicker();
+}
 
 // Scroll-spy for the rail: the highlight tracked clicks only, so scrolling the
 // emoji panel left it pointing at whatever was last tapped.
@@ -4526,7 +4301,7 @@ function _railStop() {
 }
 
 function _railStep(ts) {
-    const rail = document.querySelector('.emoji-sidebar');
+    const rail = _pickerEls.sidebar;
     if (!rail || _railTarget === null) { _railStop(); return; }
     // Frame-rate independent: the same glide on a 120Hz panel as on 60Hz.
     const dt = _railLastTs ? Math.min(ts - _railLastTs, 64) : 16.67;
@@ -4547,7 +4322,7 @@ function _railStep(ts) {
 // `block: 'nearest'` + `scroll-padding` behaviour, computed here now that we own
 // the animation, so the inset lives in one place instead of two.
 function _railFollow(tab) {
-    const rail = document.querySelector('.emoji-sidebar');
+    const rail = _pickerEls.sidebar;
     if (!rail) return;
     const max = rail.scrollHeight - rail.clientHeight;
     if (max <= 0) return;
@@ -4572,19 +4347,19 @@ function _tabForSection(section) {
     if (section.classList.contains('emoji-pack-section')) {
         const id = section.dataset.packId;
         return id
-            ? document.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(id)}"]`)
+            ? _pickerEls.sidebar.querySelector(`.emoji-pack-tab[data-pack-id="${CSS.escape(id)}"]`)
             : null;
     }
     // Stock sections are `#emoji-<category>` against `[data-category]` tabs.
     const category = section.id?.startsWith('emoji-') ? section.id.slice(6) : '';
     return category
-        ? document.querySelector(`.emoji-category-btn[data-category="${CSS.escape(category)}"]`)
+        ? _pickerEls.sidebar.querySelector(`.emoji-category-btn[data-category="${CSS.escape(category)}"]`)
         : null;
 }
 
 function _syncActiveSectionTab() {
     if (Date.now() < _emojiSpyMuteUntil) return;
-    const main = document.querySelector('.emoji-main');
+    const main = _pickerEls.main;
     // Creator mode hides every section, so there's nothing to track.
     if (!main || _pc.open) return;
     const sections = [...main.querySelectorAll('.emoji-section')]
@@ -4614,23 +4389,16 @@ function _syncActiveSectionTab() {
     _railFollow(tab);
 }
 
-// Grabbing the rail wins over an in-flight follow — never animate against the
-// user's own finger.
-document.querySelector('.emoji-sidebar')?.addEventListener('pointerdown', _railStop);
-document.querySelector('.emoji-sidebar')?.addEventListener('wheel', _railStop, { passive: true });
-
-document.querySelector('.emoji-main')?.addEventListener('scroll', () => {
+function _onMainScroll() {
     if (_emojiSpyFrame) return;
     _emojiSpyFrame = requestAnimationFrame(() => {
         _emojiSpyFrame = 0;
         _syncActiveSectionTab();
     });
-}, { passive: true });
+}
 
-// Delegated category-button click handler. Single source of truth for
-// both stock tabs (rendered at parse time) and pack tabs (appended at
-// runtime); the bare forEach binding only saw the stock three.
-document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => {
+// One delegated handler for the stock tabs and the pack tabs alike.
+async function _onRailClick(e) {
     const btn = e.target.closest('.emoji-category-btn');
     if (!btn) return;
     e.stopPropagation();
@@ -4654,9 +4422,9 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
 
     let section = null;
     if (btn.dataset.category) {
-        section = document.getElementById(`emoji-${btn.dataset.category}`);
+        section = _pickerEls.main.querySelector(`#emoji-${btn.dataset.category}`);
     } else if (btn.dataset.packId) {
-        section = document.querySelector(
+        section = _pickerEls.main.querySelector(
             `.emoji-pack-section[data-pack-id="${CSS.escape(btn.dataset.packId)}"]`,
         );
     }
@@ -4669,7 +4437,7 @@ document.querySelector('.emoji-sidebar').addEventListener('click', async (e) => 
         _emojiSpyMuteUntil = Date.now() + 700;
         section.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-});
+}
 
 /**
  * Insert text at the cursor position in the chat input
@@ -4784,13 +4552,13 @@ picker.addEventListener('click', (e) => {
 });
 
 // When hitting Enter on the emoji search - choose the first emoji/GIF
-emojiSearch.onkeydown = async (e) => {
+async function _onSearchKeydown(e) {
     if ((e.code === 'Enter' || e.code === 'NumpadEnter')) {
         e.preventDefault();
 
         // Handle GIF mode - select first GIF
         if (pickerMode === PICKER_MODE_GIF) {
-            const firstGif = document.querySelector('#gif-grid .gif-item');
+            const firstGif = _pickerEls.gif.querySelector('.gif-item');
             if (firstGif && firstGif.dataset.gifId) {
                 selectGif(firstGif.dataset.gifId);
             }
@@ -4800,9 +4568,9 @@ emojiSearch.onkeydown = async (e) => {
         // Find the first emoji in search results or recent emojis
         let emojiElement;
         if (emojiSearch.value) {
-            emojiElement = document.querySelector('#emoji-search-results span:first-child');
+            emojiElement = _pickerEls.results.querySelector('span:first-child');
         } else {
-            emojiElement = document.querySelector('#emoji-recents-grid span:first-child');
+            emojiElement = _pickerEls.recents.querySelector('span:first-child');
         }
 
         if (!emojiElement) return;
@@ -4895,7 +4663,7 @@ emojiSearch.onkeydown = async (e) => {
             if (!_emojiPanelTarget) domChatMessageInput.focus();
         }
     }
-};
+}
 
 // Emoji selection
 picker.addEventListener('click', (e) => {
@@ -4926,12 +4694,6 @@ picker.addEventListener('click', (e) => {
 });
 
 // ==================== GIF PICKER ====================
-
-const gifPickerContent = document.querySelector('.gif-picker-content');
-const emojiPickerContent = document.querySelector('.emoji-picker-content');
-const gifGrid = document.getElementById('gif-grid');
-const gifLoading = document.getElementById('gif-loading');
-const pickerModeButtons = document.querySelectorAll('.picker-mode-btn');
 
 /** Picker mode enum for fast comparison */
 const PICKER_MODE_EMOJI = 0;
@@ -4987,18 +4749,7 @@ let gifFetchController = null;
  * @param {number} count - Number of skeleton items to show
  */
 function showGifSkeletons(count) {
-    _ensureGifGrid();
     VectorSvelte.gifLoading(count);
-}
-
-// The grid is an island over lib/gifs.svelte.js; fetching and the format fallback stay here.
-let _gifGridMounted = false;
-function _ensureGifGrid() {
-    if (_gifGridMounted) return;
-    _gifGridMounted = true;
-    VectorSvelte.mountGifGrid(gifGrid, {
-        h: { loadMedia: (item, el, placeholder) => loadGifWithFallback(el, `${GIF_API_BASE}/media`, item.id, item.title, placeholder, 0) },
-    });
 }
 
 /**
@@ -5118,26 +4869,9 @@ const gifPreviewFormat = gifFormatFallbackChain[0];
 function setPickerMode(mode) {
     pickerMode = mode;
 
-    // Update button states (data-mode uses strings for readability)
-    const modeStr = mode === PICKER_MODE_GIF ? 'gif' : 'emoji';
-    pickerModeButtons.forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.mode === modeStr);
-    });
-
-    if (mode === PICKER_MODE_EMOJI) {
-        emojiPickerContent.style.display = '';
-        gifPickerContent.style.display = 'none';
-        emojiSearch.placeholder = 'Search Emojis...';
-    } else {
-        emojiPickerContent.style.display = 'none';
-        gifPickerContent.style.display = 'flex';
-        emojiSearch.placeholder = 'Search GIFs...';
-
-        // Load trending GIFs if not already loaded
-        if (!trendingGifsLoaded) {
-            loadTrendingGifs();
-        }
-    }
+    // The panel swaps its content and placeholder from the mode.
+    VectorSvelte.setPanelMode(mode === PICKER_MODE_GIF ? 'gif' : 'emoji');
+    if (mode === PICKER_MODE_GIF && !trendingGifsLoaded) loadTrendingGifs();
 
     // Auto-focus search box on desktop only (mobile keyboards are intrusive)
     // Only focus if the picker is actually visible to avoid stealing focus
@@ -5173,7 +4907,6 @@ async function loadTrendingGifs() {
         gifCurrentOffset = cachedTrendingGifs.length;
         gifHasMore = cachedTrendingGifs.length >= gifPageSize;
         trendingGifsLoaded = true;
-        gifLoading.style.display = 'none';
         return;
     }
 
@@ -5205,9 +4938,6 @@ async function loadTrendingGifs() {
         console.error('[GIF] Failed to load trending:', error);
         showGifEmptyState('Failed to load GIFs');
         gifHasMore = false;
-    } finally {
-        // Don't hide loading if a newer request has taken over — it owns the UI.
-        if (!signal.aborted) gifLoading.style.display = 'none';
     }
 }
 
@@ -5285,8 +5015,6 @@ async function searchGifs(query) {
         console.error('[GIF] Search failed:', error);
         showGifEmptyState('Search failed');
         gifHasMore = false;
-    } finally {
-        if (!signal.aborted) gifLoading.style.display = 'none';
     }
 }
 
@@ -5347,7 +5075,6 @@ async function loadMoreGifs() {
  * @param {boolean} append - If true, append to existing grid instead of replacing
  */
 function renderGifs(gifs, append = false) {
-    _ensureGifGrid();
     VectorSvelte.gifResults(gifs.map(gif => ({ id: gif.i, title: gif.ti || '', thumb: gif.th ? getCachedThumbhash(gif.th) : null })), append);
 }
 
@@ -5386,7 +5113,7 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
             // Only auto-play if video is actually visible (not just preloaded in margin)
             // Check if element is in the visible viewport
             const rect = gifItem.getBoundingClientRect();
-            const gridRect = gifGrid.getBoundingClientRect();
+            const gridRect = _pickerEls.gif.getBoundingClientRect();
             const isVisible = rect.top < gridRect.bottom && rect.bottom > gridRect.top;
             if (isVisible) {
                 video.play().catch(() => {});
@@ -5428,7 +5155,6 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
  * @param {string} message - The message to display
  */
 function showGifEmptyState(message) {
-    _ensureGifGrid();
     VectorSvelte.gifEmpty(message);
 }
 
@@ -5465,44 +5191,22 @@ function selectGif(gifId) {
     }
 }
 
-// Mode toggle button click handlers
-pickerModeButtons.forEach(btn => {
-    btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        setPickerMode(btn.dataset.mode === 'gif' ? PICKER_MODE_GIF : PICKER_MODE_EMOJI);
-    });
-});
-
-// GIF grid click handler
-gifGrid.addEventListener('click', (e) => {
+function _onGifGridClick(e) {
     e.stopPropagation(); // Prevent bubbling to emoji picker handler
     const gifItem = e.target.closest('.gif-item');
     if (gifItem && gifItem.dataset.gifId) {
         selectGif(gifItem.dataset.gifId);
     }
-});
+}
 
-// GIF grid scroll handler for infinite scroll
-gifGrid.addEventListener('scroll', () => {
-    // Check if scrolled near bottom (within 100px)
-    const scrollBottom = gifGrid.scrollHeight - gifGrid.scrollTop - gifGrid.clientHeight;
+// Infinite scroll: near the bottom (within 100px) fetches the next page.
+function _onGifGridScroll() {
+    const grid = _pickerEls.gif;
+    const scrollBottom = grid.scrollHeight - grid.scrollTop - grid.clientHeight;
     if (scrollBottom < 100 && gifHasMore && !gifIsLoadingMore) {
         loadMoreGifs();
     }
-});
-
-// Modify the emoji search input to handle GIF search
-const originalEmojiSearchHandler = emojiSearch.oninput;
-emojiSearch.addEventListener('input', (e) => {
-    if (pickerMode === PICKER_MODE_GIF) {
-        // Debounce GIF search
-        clearTimeout(gifSearchTimeout);
-        gifSearchTimeout = setTimeout(() => {
-            searchGifs(e.target.value);
-        }, 300);
-    }
-    // Emoji search is handled by the existing handler
-});
+}
 
 // Reset picker mode when panel closes
 const originalCloseObserver = new MutationObserver((mutations) => {

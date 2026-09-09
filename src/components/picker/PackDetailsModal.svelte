@@ -1,14 +1,12 @@
 <script>
     // The pack details modal's body: loading, unavailable, or the pack with its logo,
-    // count, description, thumbs and the Add / Remove action. The overlay element is
-    // adopted (its close button and backdrop dismiss are the app's).
+    // count, description, thumbs and the Add / Remove action.
     import { packDetails, closePackDetails } from '../lib/packdetails.svelte.js';
     import { pickerPacks } from '../lib/picker.svelte.js';
 
-    let { overlay, h } = $props();   // h: bindCachedImg, maxDisplay(), toggle(naddr, pack, subscribed) → Promise<'added'|'removed'|false>
+    let { h } = $props();   // h: bindCachedImg, maxDisplay(), toggle(naddr, pack, subscribed) → Promise<'added'|'removed'|false>
 
     const d = $derived(packDetails());
-    $effect(() => { overlay.hidden = !d; });
     const pack = $derived(d?.state === 'ok' ? d.pack : null);
     const emojis = $derived(pack && Array.isArray(pack.emojis) ? pack.emojis : []);
     const shown = $derived(emojis.slice(0, h.maxDisplay()));
