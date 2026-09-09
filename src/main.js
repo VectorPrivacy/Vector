@@ -296,9 +296,6 @@ const domChatMessageInputSend = document.getElementById('chat-input-send');
 const domChatInputContainer = document.querySelector('.chat-input-container');
 
 const domChatNew = document.getElementById('chat-new');
-const domChatNewBackBtn = document.getElementById('chat-new-back-text-btn');
-const domChatNewInput = document.getElementById('chat-new-input');
-const domChatNewStartBtn = document.getElementById('chat-new-btn');
 
 // Create Group UI refs
 const domCreateGroup = document.getElementById('create-group');

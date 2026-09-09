@@ -168,5 +168,3 @@ async function handleScannedQr(text) {
     }
 }
 
-// Entry point: the QR button on the New Chat box (body.mobile gates visibility)
-document.getElementById('chat-new-scan-btn').onclick = openQrScanner;

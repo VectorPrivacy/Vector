@@ -61,6 +61,7 @@ export { publishState, openPublishDialog, activatePublishDialog, closePublishDia
 export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt, permissionState } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, bunkerState, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick } from './lib/login.svelte.js';
+import NewChat from './people/NewChat.svelte';
 import CreateCommunity from './community/CreateCommunity.svelte';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { setEditHistory, setEditHistoryBelow, clearEditHistory } from './lib/edithistory.svelte.js';
@@ -393,6 +394,12 @@ export function mountAccountRows(host, props) {
 export function mountEditHistory(content, { h }) {
     content.replaceChildren();
     return mount(EditHistory, { target: content, props: { h } });
+}
+
+/** Mount the New Chat screen into `host` (#chat-new). */
+export function mountNewChat(host, { h }) {
+    host.replaceChildren();
+    return mount(NewChat, { target: host, props: { h } });
 }
 
 /** Mount the Create Community panel into `host` (#create-group). */

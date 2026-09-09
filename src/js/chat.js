@@ -2144,7 +2144,19 @@ async function wireChatUi() {
     domChatBookmarksBtn.onclick = () => {
         openChat(strPubkey);
     };
-    domChatNewBackBtn.onclick = closeChat;
+    VectorSvelte.mountNewChat(domChatNew, { h: {
+        back: closeChat,
+        // Same parser as the QR scanner: invites join, npubs DM, and any URL wrapper
+        // around either is ignored. No extractable npub falls through raw; openChat rejects.
+        start: (text) => {
+            const parsed = parseContactInput(text);
+            if (parsed?.kind === 'invite') { previewAndJoinCommunityLink(parsed.url); return; }
+            openChat(parsed?.npub || text);
+        },
+        scan: () => openQrScanner(),
+        helpEnter: (el) => showGlobalTooltip('Visit the Vector Privacy Docs', el),
+        helpLeave: hideGlobalTooltip,
+    } });
 
     // Chat-header overflow menu — dropdown of chat-scoped actions. Currently
     // hosts "Change Wallpaper" for DM chats. Group chats don't get wallpapers
@@ -2191,35 +2203,6 @@ async function wireChatUi() {
             handleProceduralScroll();
         }, 100);
     });
-    domChatNewStartBtn.onclick = () => {
-        const inputValue = domChatNewInput.value.trim();
-        domChatNewInput.value = ``;
-        // Same parser as the QR scanner: invites join, npubs DM, and any
-        // URL wrapper around either is ignored.
-        const parsed = parseContactInput(inputValue);
-        if (parsed?.kind === 'invite') {
-            previewAndJoinCommunityLink(parsed.url);
-            return;
-        }
-        // No extractable npub falls through raw — openChat owns rejection
-        openChat(parsed?.npub || inputValue);
-    };
-    domChatNewInput.onkeydown = async (evt) => {
-        if ((evt.code === 'Enter' || evt.code === 'NumpadEnter') && !evt.shiftKey) {
-            evt.preventDefault();
-            domChatNewStartBtn.click();
-        }
-    };
-    domChatNewInput.addEventListener('input', function() {
-        domChatNewStartBtn.style.display = this.value.length > 0 ? '' : 'none';
-    });
-
-    // Tooltip for help icon
-    document.querySelector('.chat-new-help-link').addEventListener('mouseenter', function() {
-    showGlobalTooltip('Visit the Vector Privacy Docs', this);
-    });
-    document.querySelector('.chat-new-help-link').addEventListener('mouseleave', hideGlobalTooltip);
-
     domChatMessageInputCancel.onclick = () => {
         // Cancel edit mode if active, otherwise cancel reply
         if (strCurrentEditMessageId) {
