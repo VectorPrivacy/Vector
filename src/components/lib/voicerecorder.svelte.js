@@ -26,7 +26,8 @@ export function setVoiceState(state) {
     v.statusOpacity = null;
     v.slide = { visible: state !== 'locked', offset: 0, opacity: null, hot: false, animTick: v.slide.animTick + (state === 'recording' ? 1 : 0) };
     v.lock = { opacity: null, indicatorTransform: '', arrowOpacity: null, fading: false };
-    v.timer = '0:00';
+    // The clock keeps running through a lock; only a fresh recording starts it over.
+    if (state !== 'locked') v.timer = '0:00';
     v.preview = { playing: false, progress: 0, time: '0:00' };
 }
 export function setVoiceStatusText(text) { v.statusText = text; }
