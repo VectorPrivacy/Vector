@@ -4,3 +4,8 @@ const screen = $state({ switcherOpen: false });
 
 export function profileScreen() { return screen; }
 export function setProfileSwitcherOpen(on) { screen.switcherOpen = !!on; }
+
+// The screen's scroll body, for the open that resets it to the top.
+const els = $state.raw({ content: null });
+export function profileEls() { return els; }
+export function bindProfileEl(name) { return (node) => { els[name] = node; return { destroy() { els[name] = null; } }; }; }

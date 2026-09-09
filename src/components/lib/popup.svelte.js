@@ -2,13 +2,13 @@
 // (js/misc.js) opens it and owns the promise; the component reports confirm or cancel.
 const p = $state({
     open: false, title: '', html: '', notice: false, placeholder: '', icon: '', circular: false,
-    titleClass: '', confirmText: 'Confirm', value: '',
+    titleClass: '', confirmText: 'Confirm', value: '', actions: null,
 });
 let answer = null;   // { confirm(), cancel() } for the open popup
 
 export function popupState() { return p; }
 export function openPopupDialog(view, handlers) {
-    Object.assign(p, view, { open: true, value: '' });
+    Object.assign(p, { actions: null }, view, { open: true, value: '' });
     answer = handlers;
 }
 export function closePopupDialog() { p.open = false; answer = null; }

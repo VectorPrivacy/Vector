@@ -1366,7 +1366,7 @@ function setPillLoading(text) {
 
 /** Floating pill at the top of the chat view; shown when unread history sits above the loaded window. */
 function showUnreadJumpPill(count, lastReadId) {
-    const chatView = document.getElementById('chat');
+    const chatView = VectorSvelte.shellElements().chat;
     if (!chatView) return;
     // Snapshot the boundary now — chat.last_read advances to the newest on the open-time auto-mark,
     // so the scroll-up divider reveal can't recover it later (it reads this instead).

@@ -4,7 +4,7 @@
     // from the open profile's signal; the container (#profile) stays with the nav.
     import { profileViewState, profileVersion, chatVersion } from '../lib/signals.svelte.js';
     import { profileEdit, profileEditDirty } from '../lib/profileedit.svelte.js';
-    import { profileScreen } from '../lib/profilescreen.svelte.js';
+    import { profileScreen, bindProfileEl } from '../lib/profilescreen.svelte.js';
     import ProfileEditFields from './ProfileEditFields.svelte';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -173,6 +173,7 @@
         avatarHovered = inAvatar || !inBanner;
     }
     const hidden = $derived(edit.active ? 'none' : '');
+    const bindContent = bindProfileEl('content');
 </script>
 
 <svelte:document onclick={() => { moreOpen = false; }} />
@@ -224,7 +225,7 @@
         </div>
     </div>
 </div>
-<div class="profile-content">
+<div class="profile-content" use:bindContent>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div id="profile-banner-container" style="position: relative;" class:avatar-hovered={avatarHovered} bind:this={bannerContainer} onmousemove={trackHover}>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->

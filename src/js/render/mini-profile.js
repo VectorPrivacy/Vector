@@ -8,7 +8,7 @@
 let miniProfileMounted = false;
 
 function _miniProfilePopup() {
-    return document.querySelector('.mini-profile-popup');
+    return VectorSvelte.miniProfileEls().popup;
 }
 
 function _mountMiniProfile() {

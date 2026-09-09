@@ -1130,19 +1130,7 @@ async function setupRustListeners() {
 
     // Listen for relay status changes
     _on('relay_status_change', (evt) => {
-        // Update the relay status in the network list
-        const relayItem = document.querySelector(`[data-relay-url="${evt.payload.url}"]`);
-        if (relayItem) {
-            const statusElement = relayItem.querySelector('.relay-status');
-            if (statusElement) {
-                // Remove all status classes
-                statusElement.classList.remove('connected', 'connecting', 'disconnected', 'pending', 'initialized', 'terminated', 'banned', 'sleeping');
-                // Add the new status class
-                statusElement.classList.add(evt.payload.status);
-                // Update the text
-                statusElement.textContent = evt.payload.status;
-            }
-        }
+        VectorSvelte.patchRelayStatus(evt.payload.url, evt.payload.status);
 
         // Also update the info dialog if it's open for this relay
         if (currentRelayInfo && currentRelayInfo.url.toLowerCase() === evt.payload.url.toLowerCase()) {

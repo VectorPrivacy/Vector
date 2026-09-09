@@ -1,10 +1,13 @@
 <script>
-    // The community overview's frame: its header from overview state (the body island
-    // mounts into the scroll host below). Ids stay where the stylesheets select them.
+    // The community overview's frame: its header from overview state, the body below it.
+    // Ids stay where the stylesheets select them.
     import { shellPanes, shellReveals, reveal } from '../lib/shell.svelte.js';
     import { overviewState, overviewHeadHandlers } from '../lib/overview.svelte.js';
     import { communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
+    import CommunityOverview from '../community/CommunityOverview.svelte';
+    import MemberSearch from '../community/MemberSearch.svelte';
+    import { shellState, shellScreens } from '../lib/shell.svelte.js';
     const panes = shellPanes();
     const ov = overviewState();
     const h = () => overviewHeadHandlers();
@@ -14,6 +17,8 @@
         return h().memberSubtext?.(ov.communityId) || '';
     });
     const reveals = shellReveals();
+    const shell = shellState();
+    const screens = shellScreens();
 </script>
 
 <div id="group-overview" class="chats" style:display={panes.groupOverview ? null : 'none'} use:reveal={['groupOverview', reveals.groupOverview]} data-group-id={ov.groupId || undefined}>
@@ -31,6 +36,9 @@
             </div>
             <span id="group-overview-status" class="cutoff chat-contact-status btn">{subtext}</span>
         </div>
+        {#if shell.ws && screens.overview}<MemberSearch docked />{/if}
     </div>
-    <div id="group-overview-scroll" style="overflow-y: auto; height: 100%; position: relative;"></div>
+    <div id="group-overview-scroll" style="overflow-y: auto; height: 100%; position: relative;">
+        {#if screens.overview}<CommunityOverview h={screens.overview.h} />{/if}
+    </div>
 </div>

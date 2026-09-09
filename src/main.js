@@ -143,8 +143,6 @@ function showBugHunterCard(tier) {
 }
 
 // The overview body is an island (mounted below); the roster host and search live inside it.
-const groupMembersEl = () => document.getElementById('group-overview-members');
-const groupSearchEl = () => document.getElementById('group-member-search-input');
 
 
 const domChatMessages = document.getElementById('chat-messages');
@@ -2171,7 +2169,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up our static buttons
-    VectorSvelte.setShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup });
+    VectorSvelte.mergeShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup });
     VectorSvelte.setAccountHandlers({
         openProfile: () => openProfile(),
         setStatus: askForStatus,
@@ -2377,7 +2375,7 @@ document.addEventListener('click', (e) => {
                 e.target.classList.add('btn');
             }
             
-            const chatMessages = document.getElementById('chat-messages');
+            const chatMessages = domChatMessages;
             if (chatMessages) {
                 // Check scroll position BEFORE toggle
                 const wasNearBottom = chatMessages.scrollHeight - chatMessages.scrollTop - chatMessages.clientHeight < 150;

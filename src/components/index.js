@@ -11,13 +11,10 @@
 import { mount, unmount, flushSync } from 'svelte';
 
 import ContactPicker from './people/ContactPicker.svelte';
-import MemberRoster from './people/MemberRoster.svelte';
-import RailShortcuts from './rail/RailShortcuts.svelte';
 import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
 import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
-import CommunityOverview from './community/CommunityOverview.svelte';
 import MiniProfile from './people/MiniProfile.svelte';
 import ReactionPopups from './chat/ReactionPopups.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
@@ -26,7 +23,6 @@ import { uploadProgressed, downloadProgressed, transferDone, transferFailed } fr
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
-import PackDetailsOverlay from './picker/PackDetailsOverlay.svelte';
 import ModList from './moderation/ModList.svelte';
 import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
@@ -51,12 +47,11 @@ export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
 export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
 export { accountState, setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
-export { setMailBadge, shellScreens, setScreen, revealPane, revealPending, syncLineState, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
+export { setMailBadge, mergeShellHandlers, shellScreens, setScreen, revealPane, revealPending, syncLineState, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
 import StatusDialog from './ui/StatusDialog.svelte';
 import DowngradeBlock from './ui/DowngradeBlock.svelte';
 import CredentialModal from './ui/CredentialModal.svelte';
 import MigrationOverlay from './ui/MigrationOverlay.svelte';
-import Popup from './ui/Popup.svelte';
 import ProcessingOverlay from './ui/ProcessingOverlay.svelte';
 import PermissionPrompt from './ui/PermissionPrompt.svelte';
 import PublishDialog from './ui/PublishDialog.svelte';
@@ -67,7 +62,7 @@ export { loginState, bunkerState, pickerState as loginPickerState, encryptState,
 export { credentialState, openCredentialDialog, closeCredentialDialog, migrationState, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { editHistoryState, setEditHistory, setEditHistoryBelow, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
-export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
+export { setBlossomCaps, setRelayLogs, patchRelayStatus } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
 export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
@@ -79,9 +74,8 @@ import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } fr
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName } from './lib/packcreator.svelte.js';
 import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, panelState, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
-import { overviewState, setOverview } from './lib/overview.svelte.js';
+import { overviewRoster, overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
-import CommunityHead from './chatlist/CommunityHead.svelte';
 import FilePreview from './files/FilePreview.svelte';
 import Settings from './settings/Settings.svelte';
 
@@ -97,8 +91,8 @@ export {
 /** Apply pending updates synchronously (for the rare caller that reads the DOM right after). */
 export { flushSync };
 export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty };
-export { profileScreen, setProfileSwitcherOpen } from './lib/profilescreen.svelte.js';
-export { overviewState, setOverview };
+export { profileScreen, setProfileSwitcherOpen, profileEls } from './lib/profilescreen.svelte.js';
+export { overviewRoster, overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
 export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
@@ -156,16 +150,6 @@ export function mountContactList(target, props = {}) {
     return mount(ContactPicker, { target, props });
 }
 
-/**
- * Mount the community member roster into `target` (#group-overview-members). The
- * vanilla side seeds it with the cached lists, then feeds authoritative fetches through
- * `setRoster` and profile loads through `setProfiles`; member-driven changes (kick,
- * ban, promote, unban) come back through the `onChange` callback prop.
- */
-export function mountMemberRoster(target, props = {}) {
-    target.replaceChildren();
-    return mount(MemberRoster, { target, props });
-}
 
 /** Tear down a mounted island (call on dialog close / element removal). */
 export function unmountComponent(instance) {
@@ -173,15 +157,6 @@ export function unmountComponent(instance) {
 }
 
 
-/**
- * Mount the widescreen rail shortcuts into `target` (#ws-rail-shortcuts). Derives from
- * the chat list's order and each chat's own signal; the open chat comes through
- * `setOpenChat`. `h.onUnreadDms(n)` reports the count the mail badge shows.
- */
-export function mountRailShortcuts(target, { h, snapshot }) {
-    target.replaceChildren();
-    return mount(RailShortcuts, { target, props: { h, snapshot } });
-}
 
 /**
  * Mount the message-list island into `target` (#chat-messages). Rows, separators, the
@@ -217,11 +192,6 @@ export function mountCommandComposer({ editor }) {
  * Mount the chat header reconciler over the existing header elements (renderless).
  * It derives name, avatar, subtext and menu visibility from the open chat's signals.
  */
-/** Mount the community pane's head into `target` (#ws-community-head). */
-export function mountCommunityHead(target, { h }) {
-    target.replaceChildren();
-    return mount(CommunityHead, { target, props: { h } });
-}
 
 /** Mount the send-file preview overlay at body level; it shows itself from `fpOpen`. */
 export function mountFilePreview({ h }) {
@@ -230,11 +200,6 @@ export function mountFilePreview({ h }) {
 
 
 
-/** Mount the Community overview body into `target` (#group-overview-scroll). */
-export function mountCommunityOverview(target, { h }) {
-    target.replaceChildren();
-    return mount(CommunityOverview, { target, props: { h } });
-}
 
 /** Mount the mini profile popup at body level; it shows itself from `openMiniProfile`. */
 export function mountMiniProfile({ h }) {
@@ -264,11 +229,6 @@ export function mountPackPreviewCard(target, props) {
     return mount(PackPreviewCard, { target, props });
 }
 
-/** Mount the pack details modal into its overlay (#pack-details-overlay), which it shows and hides. */
-export function mountPackDetails(overlay, { h }) {
-    overlay.replaceChildren();
-    return mount(PackDetailsOverlay, { target: overlay, props: { overlay, h } });
-}
 
 /** Mount the moderation console onto the body (once); it renders its own overlay. */
 export function mountModConsole({ h }) {
@@ -338,11 +298,6 @@ export function mountCredentialModals() {
     mount(MigrationOverlay, { target: document.body, props: {} });
 }
 
-/** Mount the confirm/notice popup into its container (#popup-container). */
-export function mountPopup(container) {
-    container.replaceChildren();
-    return mount(Popup, { target: container, props: { container } });
-}
 
 /** Mount the processing card onto the body (once). */
 export function mountProcessingOverlay() {
@@ -363,3 +318,6 @@ export function mountPublishDialog() {
 // getElementById handles need the screens' containers in the document already.
 mount(App, { target: document.body, props: {} });
 flushSync();
+export { reactionEls } from './lib/reactionpopups.svelte.js';
+export { miniProfileEls } from './lib/miniprofile.svelte.js';
+export { railEls } from './lib/rail.svelte.js';

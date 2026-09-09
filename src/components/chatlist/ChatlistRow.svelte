@@ -1,4 +1,6 @@
 <script>
+    import { openChatId } from '../lib/signals.svelte.js';
+    import { shellState } from '../lib/shell.svelte.js';
     // One chat row (migration Phase 1 — SVELTE_MIGRATION_PLAN.md §3.2).
     //
     // Chat objects are RAW (shared by reference with eventCache and mutated in
@@ -110,6 +112,7 @@
     class="chatlist-contact"
     class:has-unread={vm.nUnread}
     class:chatlist-joining={vm.joining}
+    class:ws-active={shellState().ws && openChatId() === vm.chat.id}
     id="chatlist-{vm.chat.id}"
     use:rowMenu={vm}
     onclick={() => h.rowClick(vm)}

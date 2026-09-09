@@ -2,7 +2,7 @@
     // The root: everything under <body>. The popups and overlays keep their containers
     // (their openers mount into them by id); the screens migrated to islands are empty
     // mounts nav shows and hides through the shell store.
-    import { shellPanes, shellScreens, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
+    import { shellPanes, shellScreens, shellReveals, shellHandlers, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import ProfileScreen from '../profile/ProfileScreen.svelte';
     import Settings from '../settings/Settings.svelte';
     import InvitesScreen from '../people/InvitesScreen.svelte';
@@ -23,6 +23,8 @@
     import RekeyProgress from '../community/RekeyProgress.svelte';
     import InviteModal from '../community/InviteModal.svelte';
     import Tooltip from './Tooltip.svelte';
+    import Popup from '../ui/Popup.svelte';
+    import PackDetailsOverlay from '../picker/PackDetailsOverlay.svelte';
     import AttachmentPanelRoot from '../miniapps/AttachmentPanelRoot.svelte';
     import MarketplaceRoot from '../marketplace/MarketplaceRoot.svelte';
     import LaunchDialogRoot from '../miniapps/LaunchDialogRoot.svelte';
@@ -34,9 +36,9 @@
     const bindProfile = bindShellEl('profile');
 </script>
 
-<div id="popup-container" class="popup-container"></div>
+<Popup />
 <!-- Pack details: opened by deep link (vector://emojis/pack/<naddr>) and the share-pack flow. -->
-<div id="pack-details-overlay" class="pack-details-overlay" hidden></div>
+{#if screens.packDetails}<PackDetailsOverlay h={screens.packDetails.h} />{/if}
 
 <main class="container">
     <PickerRoot />
@@ -56,7 +58,9 @@
         <img src="./icons/vector-logo.svg" alt="">
         <p>Pick a conversation to get started</p>
     </div>
-    <div id="ws-list-resize" title="Drag to resize (double-click to reset)"></div>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div id="ws-list-resize" title="Drag to resize (double-click to reset)"
+         onpointerdown={(e) => shellHandlers().listResizeStart?.(e)} ondblclick={() => shellHandlers().listResizeReset?.()}></div>
     <div id="voice-progress-container" class="voice-progress-container" style="display: none;">
         <div class="voice-progress-bar">
             <div class="voice-progress-fill"></div>

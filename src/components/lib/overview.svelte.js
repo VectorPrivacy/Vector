@@ -13,6 +13,8 @@ const ov = $state({
     raid: null,               // { suspects } while a raid is flagged
     migration: null,          // migration_status payload when a row is warranted
     upload: null,             // { progress } while the icon uploads
+    memberSearch: '',         // the roster filter's text; the input renders in the body or, widescreen, the header
+    memberSearchShown: true,  // hidden over an empty roster
 });
 export function overviewState() { return ov; }
 export function setOverview(values) { Object.assign(ov, values); }
@@ -23,3 +25,8 @@ export function setOverviewGroup(id) { ov.groupId = id || ''; flushSync(); }
 let headHandlers = {};   // { back, memberSubtext }
 export function overviewHeadHandlers() { return headHandlers; }
 export function setOverviewHeadHandlers(h) { headHandlers = h || {}; }
+
+// The mounted roster (people/MemberRoster) so community.js can feed it its lists.
+let roster = $state.raw(null);
+export function overviewRoster() { return roster; }
+export function setOverviewRoster(inst) { roster = inst; }

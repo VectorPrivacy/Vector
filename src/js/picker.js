@@ -1757,7 +1757,7 @@ let _packDetailsMounted = false;
 function _ensurePackDetailsIsland() {
     if (_packDetailsMounted) return;
     _packDetailsMounted = true;
-    VectorSvelte.mountPackDetails(document.getElementById('pack-details-overlay'), {
+    VectorSvelte.setScreen('packDetails', {
         h: {
             bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
             maxDisplay: () => MAX_DISPLAY_EMOJIS_PER_PACK,

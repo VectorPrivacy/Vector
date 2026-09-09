@@ -161,8 +161,8 @@ async function openProfile(cProfile) {
 
     // Scroll profile back to top
     setTimeout(() => {
-        document.getElementById('profile')?.scrollTo(0, 0);
-        document.querySelector('.profile-content')?.scrollTo(0, 0);
+        VectorSvelte.shellElements().profile?.scrollTo(0, 0);
+        VectorSvelte.profileEls().content?.scrollTo(0, 0);
     }, 50);
 
     // Render our own profile by default, but otherwise; the given one

@@ -5,7 +5,7 @@
     // beside the tap; mobile centres it over a backdrop.
     import { flushSync } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
-    import { miniProfile, settleMiniProfile } from '../lib/miniprofile.svelte.js';
+    import { miniProfile, settleMiniProfile, bindMiniProfileEl } from '../lib/miniprofile.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     let { h } = $props();   // h: getProfile, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView
@@ -101,7 +101,7 @@
 {#if view}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="mini-profile-backdrop" onclick={(e) => { if (e.target === e.currentTarget) h.onClose(); }}></div>
-    <div class="mini-profile-popup" class:mini-profile-centered={centered} data-npub={view.npub} bind:this={popup}
+    <div class="mini-profile-popup" class:mini-profile-centered={centered} data-npub={view.npub} bind:this={popup} use:bindMiniProfileEl
          style:left={centered ? null : `${pos.left}px`} style:top={centered ? null : `${pos.top}px`}>
         <div class="mini-profile-banner">
             {#if view.bannerSrc && !bannerBroken}

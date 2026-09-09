@@ -5,6 +5,7 @@
     import { accountState, accountHandlers } from '../lib/account.svelte.js';
     import AccountRow from './AccountRow.svelte';
     import Chatlist from '../chatlist/Chatlist.svelte';
+    import CommunityHead from '../chatlist/CommunityHead.svelte';
     const panes = shellPanes();
     const shell = shellState();
     const acct = accountState();
@@ -13,6 +14,7 @@
     const sync = syncLineState();
     const bindList = bindShellEl('chatList');
     const bindNewChat = bindShellEl('newChat');
+    const bindChats = bindShellEl('chats');
 
     function fadeIn(node, tick) {
         const play = (t) => {
@@ -25,7 +27,7 @@
     }
 </script>
 
-<div id="chats" class="chats" style:display={panes.chats ? null : 'none'} use:reveal={['chats', reveals.chats]}>
+<div id="chats" class="chats" style:display={panes.chats ? null : 'none'} use:bindChats use:reveal={['chats', reveals.chats]}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="chat-bookmarks-btn" class="btn chat-bookmarks-btn" style="z-index: 5;" style:display={acct.bookmarks ? 'flex' : 'none'}
          use:fadeIn={acct.revealTick} onclick={() => accountHandlers().openBookmarks?.()}>
@@ -50,7 +52,9 @@
     </div>
     <!-- Widescreen: a community's header, hosted outside the scroller so it cannot
          ride the list's overscroll. Empty (and zero-height) otherwise. -->
-    <div id="ws-community-head"></div>
+    <div id="ws-community-head">
+        {#if screens.communityHead}<CommunityHead h={screens.communityHead.h} />{/if}
+    </div>
     <div id="chat-list" use:bindList use:reveal={['chatList', reveals.chatList]}>
         {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
     </div>

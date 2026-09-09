@@ -5,7 +5,7 @@
     import { flushSync } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
     import { messageVersion } from '../lib/chatview.svelte.js';
-    import { reactionTip, reactionDetails } from '../lib/reactionpopups.svelte.js';
+    import { reactionTip, reactionDetails, bindReactionEl } from '../lib/reactionpopups.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
     let { h } = $props();   // h: findMessage(msgId), getProfile, getName, getProfileAvatarSrc, twemojify, emojiLabel(emoji)
@@ -63,10 +63,12 @@
         run([anchor, gap, centred]);
         return { update: run };
     }
+    const bindTip = bindReactionEl('tip');
+    const bindDetails = bindReactionEl('details');
 </script>
 
 {#if tip}
-    <div class="reaction-hover-tip" use:place={[tip.anchor, 6, true]}>
+    <div class="reaction-hover-tip" use:bindTip use:place={[tip.anchor, 6, true]}>
         <span class="reaction-hover-tip-emoji" use:emojiInto={tip.emoji}></span>
         <span class="reaction-hover-tip-text">reacted by {formatNames(tip.names)}</span>
         <span class="reaction-hover-tip-hint">Right-click for details</span>
@@ -74,7 +76,7 @@
 {/if}
 
 {#if details && reactors.length}
-    <div class="reaction-details-popup" use:place={[details.anchor, 4, false]}>
+    <div class="reaction-details-popup" use:bindDetails use:place={[details.anchor, 4, false]}>
         <div class="reaction-details-header">
             <span class="reaction-details-count">{reactors.length}</span>
             <span class="reaction-details-emoji" use:emojiInto={details.emoji}></span>

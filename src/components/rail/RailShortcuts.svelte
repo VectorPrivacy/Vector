@@ -1,4 +1,6 @@
 <script>
+    import { bindRailEl } from '../lib/rail.svelte.js';
+    const bindSpacesRows = bindRailEl('spacesRows');
     // Widescreen rail shortcuts: unread DMs over communities, between the logo and
     // the nav tabs. Owns #ws-rail-shortcuts. The two groups derive from the chat list's
     // order (listVersion) and from each candidate chat's own signal, so a reply in one
@@ -77,7 +79,7 @@
 </div>
 <div id="ws-rail-spaces" class="ws-rail-group" hidden={groups.spaces.length === 0}>
     <div class="ws-rail-group-label">Communities</div>
-    <div class="ws-rail-rows" use:fade>
+    <div class="ws-rail-rows" use:bindSpacesRows use:fade>
         {#each groups.spaces as chat (chat.id)}
             <RailItem {h} {chat} isCommunity={true} active={activeId === chat.id} />
         {/each}

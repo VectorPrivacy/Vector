@@ -134,26 +134,8 @@ function wsSyncOpenChat() {
     wsMarkActiveRow();
 }
 
-/**
- * Mark the open chat in the list: the contact row (widescreen only, where the list
- * stays beside the conversation) and its channel row (both layouts, since a nested
- * channel list is on screen in both).
- */
+/** The open chat changed: the rows and the rail shortcut derive their active marks from the signal. */
 function wsMarkActiveRow() {
-    const list = document.getElementById('chat-list');
-    if (!list) return;
-    for (const row of list.querySelectorAll('.chatlist-contact.ws-active')) {
-        row.classList.remove('ws-active');
-    }
-    if (wsActive() && strOpenChat) {
-        document.getElementById(`chatlist-${strOpenChat}`)?.classList.add('ws-active');
-    }
-    for (const row of list.querySelectorAll('.chatlist-channel.active')) {
-        row.classList.remove('active');
-    }
-    if (strOpenChat) {
-        document.getElementById(`chatlist-channel-${strOpenChat}`)?.classList.add('active');
-    }
     markRailShortcutActive();
 }
 
@@ -172,12 +154,12 @@ function wsUpdate() {
     // The account row renders in the rail or the list from this flag.
     VectorSvelte.setShellFlag('ws', want);
     paneChanged();
-    wsDockMemberSearch();
     wsSyncPaneMode();
     if (want) {
         // adjustSize() leaves an inline max-height sized against the viewport;
         // in widescreen the list is a flex child and must not stay clamped.
-        document.getElementById('chat-list').style.maxHeight = '';
+        const list = VectorSvelte.shellElements().chatList;
+        if (list) list.style.maxHeight = '';
         // A roster opened narrow replaced its conversation. Here it is a column
         // beside one, so bring that community's channel back and let the sync
         // dock the roster next to it rather than landing on an empty pane.
@@ -218,39 +200,11 @@ function wsUpdate() {
 function wsInitDetailsPane() {
     const sync = () => {
         document.body.classList.toggle('ws-details', VectorSvelte.paneShown('groupOverview'));
-        wsDockMemberSearch();
-    };
+        };
     VectorSvelte.onPaneChange(sync);
     sync();
 }
 
-/** Where the search box came from, so leaving widescreen puts it back. */
-let wsMemberSearchHome = null;
-
-/**
- * Lift the member search into the details column's header, or return it.
- *
- * The header is otherwise an empty bar in this column — its title and status are
- * hidden here, because the community is already named one column left. Putting
- * the search there buys back a row of the roster and makes the header earn its
- * height.
- */
-function wsDockMemberSearch() {
-    const search = document.querySelector('#group-overview .emoji-search-container');
-    const header = document.querySelector('#group-overview > .chat-header');
-    if (!search || !header) return;
-    if (wsActive()) {
-        if (search.parentElement === header) return;
-        wsMemberSearchHome = wsMemberSearchHome || { parent: search.parentElement, next: search.nextSibling };
-        search.classList.add('ws-member-search');
-        header.appendChild(search);
-        return;
-    }
-    if (!wsMemberSearchHome || search.parentElement !== header) return;
-    search.classList.remove('ws-member-search');
-    wsMemberSearchHome.parent.insertBefore(search, wsMemberSearchHome.next);
-    wsMemberSearchHome = null;
-}
 
 /**
  * Header tap on a Community. Single-pane swaps the conversation out for the
@@ -323,11 +277,8 @@ function openCommunityDetails(chat) {
 }
 
 function wsInitResizer() {
-    const handle = document.getElementById('ws-list-resize');
-    if (!handle) return;
     let startX = 0;
     let startW = 0;
-
     const onMove = (ev) => {
         wsApplyListWidth(startW + (ev.clientX - startX));
     };
@@ -338,48 +289,35 @@ function wsInitResizer() {
         const applied = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ws-list-w'), 10);
         if (Number.isFinite(applied)) localStorage.setItem(WS_KEY_LIST_W, String(applied));
     };
-
-    handle.addEventListener('pointerdown', (ev) => {
-        if (ev.button !== 0) return;
-        ev.preventDefault();
-        startX = ev.clientX;
-        startW = document.getElementById('chats').getBoundingClientRect().width;
-        document.body.classList.add('ws-resizing');
-        document.addEventListener('pointermove', onMove);
-        document.addEventListener('pointerup', onUp);
-    });
-
-    // Double-click restores the default, the usual escape hatch for a pane
-    // dragged somewhere unusable.
-    handle.addEventListener('dblclick', () => {
-        localStorage.removeItem(WS_KEY_LIST_W);
-        wsApplyListWidth(wsReadListWidth());
+    VectorSvelte.mergeShellHandlers({
+        listResizeStart: (ev) => {
+            if (ev.button !== 0) return;
+            ev.preventDefault();
+            startX = ev.clientX;
+            startW = VectorSvelte.shellElements().chats?.getBoundingClientRect().width || 0;
+            document.body.classList.add('ws-resizing');
+            document.addEventListener('pointermove', onMove);
+            document.addEventListener('pointerup', onUp);
+        },
+        // Double-click restores the default, the usual escape hatch for a pane dragged
+        // somewhere unusable.
+        listResizeReset: () => {
+            localStorage.removeItem(WS_KEY_LIST_W);
+            wsApplyListWidth(wsReadListWidth());
+        },
     });
 }
 
 function wsInitRail() {
-    // Two doors, one handler: the lockup keeps the muscle memory, the mail button
-    // is the one you can find without knowing it was ever there.
-    const head = document.getElementById('ws-rail-head');
-    if (head) {
-        head.classList.add('btn');
-        head.title = 'Direct Messages';
-        head.addEventListener('click', () => wsOpenDmHome());
-    }
-    document.getElementById('ws-rail-mail')?.addEventListener('click', (e) => {
-        // The button sits inside the head, whose own handler would fire second.
-        e.stopPropagation();
-        wsOpenDmHome();
-    });
-
-    const toggle = document.getElementById('ws-rail-collapse');
-    if (!toggle) return;
-    toggle.addEventListener('click', () => {
-        // Only ever writes the user's PREFERENCE; the width-forced collapse
-        // below the auto threshold is re-derived on every apply.
-        const pref = localStorage.getItem(WS_KEY_RAIL) === 'true';
-        localStorage.setItem(WS_KEY_RAIL, String(!pref));
-        wsApplyRailState();
+    VectorSvelte.mergeShellHandlers({
+        openDmHome: () => wsOpenDmHome(),
+        // Only ever writes the user's PREFERENCE; the width-forced collapse below the
+        // auto threshold is re-derived on every apply.
+        toggleRailCollapse: () => {
+            const pref = localStorage.getItem(WS_KEY_RAIL) === 'true';
+            localStorage.setItem(WS_KEY_RAIL, String(!pref));
+            wsApplyRailState();
+        },
     });
 }
 

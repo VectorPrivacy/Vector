@@ -1,4 +1,8 @@
 <script>
+    import { shellState, shellScreens } from '../lib/shell.svelte.js';
+    import { setOverviewRoster } from '../lib/overview.svelte.js';
+    import MemberRoster from '../people/MemberRoster.svelte';
+    import MemberSearch from './MemberSearch.svelte';
     // The Community overview's scroll body, from overview state: mute, icon (with the
     // manage-metadata pencil and upload ring), name and description (inline-editable
     // for managers), the action row and the v2 upgrade row. The chat header above it
@@ -49,6 +53,10 @@
         upgrading = true;
         try { await h.migrate(); } finally { upgrading = false; }
     }
+    const shell = shellState();
+    const screens = shellScreens();
+    let rosterInst = $state(null);
+    $effect(() => { setOverviewRoster(rosterInst); });
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -129,10 +137,13 @@
                 </button>
             </div>
         {/if}
-        <div class="emoji-search-container" style="padding: 10px 0px; background-color: transparent;">
-            <span class="emoji-search-icon icon icon-search"></span>
-            <input id="group-member-search-input" placeholder="Search Members..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="padding: 10px 40px; background-color: transparent; border: 1px solid rgba(57, 57, 57, 0.5);">
+        {#if !shell.ws}<MemberSearch />{/if}
+        <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);">
+            {#if screens.roster}
+                {#key screens.roster.key}
+                    <MemberRoster {...screens.roster.props} bind:this={rosterInst} />
+                {/key}
+            {/if}
         </div>
-        <div id="group-overview-members" style="padding: 6px; border-radius: 8px; border: 1px solid rgba(57, 57, 57, 0.5);"></div>
     </div>
 </div>

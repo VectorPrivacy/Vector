@@ -21,7 +21,7 @@ let nRailFadeTop = -1;
  * first nor the last row is left dimmed once you've reached it.
  */
 function railScroller() {
-    return document.querySelector('#ws-rail-spaces .ws-rail-rows');
+    return VectorSvelte.railEls().spacesRows;
 }
 
 function syncRailFade() {
@@ -37,18 +37,17 @@ function syncRailFade() {
     domRail.style.setProperty('--ws-rail-fade-top', nTop + 'px');
 }
 
-/** The mounted island (src/components/rail/RailShortcuts.svelte); one per page life. */
-let railIsland = null;
+/** The strip (src/components/rail/RailShortcuts.svelte) is registered once per page life. */
+let railIsland = false;
 
 /**
  * Mount the rail island once the rail exists. From then on the strip derives from
  * the chat list's signals; the legacy callers of this function are no-ops.
  */
 function renderRailShortcuts() {
-    if (railIsland) return;
-    const target = document.getElementById('ws-rail-shortcuts');
-    if (!target || !wsActive()) return;
-    railIsland = VectorSvelte.mountRailShortcuts(target, {
+    if (railIsland || !wsActive()) return;
+    railIsland = true;
+    VectorSvelte.setScreen('rail', {
         h: {
             chatIsGroup,
             isPrimaryChannelChat,

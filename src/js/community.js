@@ -663,7 +663,7 @@ function mountCommunityOverview() {
         const { chatId } = VectorSvelte.overviewState();
         return arrChats.find(c => c.id === chatId) || null;
     };
-    VectorSvelte.mountCommunityOverview(document.getElementById('group-overview-scroll'), {
+    VectorSvelte.setScreen('overview', {
         h: {
             memberSubtext: communityMemberSubtext,
             toggleMute: async () => {
@@ -772,6 +772,7 @@ async function pickCommunityIcon(chat) {
 /** The mounted member-roster island and the community it shows (one per overview open). */
 let groupRoster = null;
 let groupRosterCommunityId = null;
+let groupRosterSeq = 0;
 
 async function renderCommunityOverview(chat, preserveSearch = false) {
     const cf = chat.metadata?.custom_fields || {};
@@ -809,8 +810,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     // Member list = observed participants (best-effort): everyone who has posted across the
     // Community's channels. Lurkers and link-joiners who haven't spoken don't appear (membership
     // isn't authoritative). Join announcements (presence) surface here too once that ships.
-    if (groupMembersEl()) {
-        const searchEl = groupSearchEl();
+    {
         const myNpub = arrProfiles.find(p => p.mine)?.id;
         const ownerNpub = cf.owner_npub || null; // PROVEN owner (verified attestation), or null
         // Cache-first: the last known roster paints instantly (no "Loading members…" flash
@@ -825,16 +825,16 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // The role hierarchy, once it lands. Sections fall back to Admin/Members until then.
         let roleGraph = communityRoleGraphCache.get(communityId) || null;
         // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start clean.
-        if (searchEl && !preserveSearch) searchEl.value = '';
+        if (!preserveSearch) VectorSvelte.setOverview({ memberSearch: '' });
 
         // The roster island (src/components/people/MemberRoster.svelte) owns the member
         // DOM; this side seeds it, feeds it the authoritative lists, and mirrors the
         // member-driven changes it reports back into the session caches. A live refresh
         // feeds the mounted island; a fresh open or another community remounts.
         if (!groupRoster || groupRosterCommunityId !== communityId || !preserveSearch) {
-            if (groupRoster) VectorSvelte.unmountComponent(groupRoster);
             groupRosterCommunityId = communityId;
-            groupRoster = VectorSvelte.mountMemberRoster(groupMembersEl(), {
+            // A new key remounts: the roster's props are mount-time constants.
+            VectorSvelte.setScreen('roster', { key: `${communityId}:${++groupRosterSeq}`, props: {
                 communityId, myNpub, ownerNpub, caps,
                 profiles: [...arrProfiles],
                 members: memberList, admins: adminNpubs, banned: bannedList, roleGraph,
@@ -851,8 +851,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     communityMemberCounts.set(communityId, members.length);
                     VectorSvelte.touchCommunity(communityId);
                 },
-            });
-            if (searchEl) groupRoster.setFilter(searchEl.value || '');
+            } });
+            groupRoster = VectorSvelte.overviewRoster();
+            groupRoster.setFilter(VectorSvelte.overviewState().memberSearch || '');
         }
         const roster = groupRoster;
 
@@ -899,13 +900,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             });
         }
 
-        if (searchEl) {
-            // Hide the whole search row (icon + input), not just the input — else the magnifying glass
-            // hovers orphaned above an empty member list.
-            const searchContainer = searchEl.parentElement;
-            if (searchContainer) searchContainer.style.display = memberList.length ? '' : 'none';
-            searchEl.oninput = () => roster.setFilter(searchEl.value || '');
-        }
+        // The whole search row hides over an empty roster, or the magnifying glass would
+        // hover orphaned above nothing.
+        VectorSvelte.setOverview({ memberSearchShown: memberList.length > 0 });
     }
 
 }

@@ -112,8 +112,8 @@ function _mountReactionPopups() {
         },
     });
 }
-const _reactionTipEl = () => document.querySelector('.reaction-hover-tip');
-const _reactionDetailsEl = () => document.querySelector('.reaction-details-popup');
+const _reactionTipEl = () => VectorSvelte.reactionEls().tip;
+const _reactionDetailsEl = () => VectorSvelte.reactionEls().details;
 
 /**
  * Show the hover summary above a reaction chip. Self-contained — does its own

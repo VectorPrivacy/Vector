@@ -5,17 +5,23 @@
     // outside `body.ws`.
     import { shellPanes, shellState, shellHandlers, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import AccountRow from './AccountRow.svelte';
+    import RailShortcuts from '../rail/RailShortcuts.svelte';
+    import { shellScreens } from '../lib/shell.svelte.js';
     const panes = shellPanes();
     const st = shellState();
     const h = () => shellHandlers();
     const reveals = shellReveals();
     const bindNavbar = bindShellEl('navbar');
+    const screens = shellScreens();
 </script>
 
 <div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]}>
     <!-- The mark's viewBox is cropped to the artwork: the source canvas is 81 wide for a
          29-wide glyph, which would otherwise render it tiny beside the typeface. -->
-    <div id="ws-rail-head">
+    <!-- Two doors, one handler: the lockup keeps the muscle memory, the mail button is the
+         one you can find without knowing it was ever there. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div id="ws-rail-head" class="btn" title="Direct Messages" onclick={() => h().openDmHome?.()}>
         <svg id="ws-rail-mark" viewBox="26.2 7 29.3 50.5" xmlns="http://www.w3.org/2000/svg" aria-label="Vector">
             <defs>
                 <linearGradient id="ws-logo-grad" x1="40.88" y1="53.75" x2="40.88" y2="15.48" gradientUnits="userSpaceOnUse">
@@ -42,14 +48,17 @@
             <path fill="#fff" d="M67.3896,1.7375h-7.8867c-.5799,0-1.05.47-1.05,1.05v6.3233c0,.2789.1109.5463.3083.7432.1969.1965.4636.3068.7417.3068h.0024l5.1917-.0117c.2777-.0006.5438-.1112.7401-.3076l2.695-2.6949c.1969-.1969.3075-.4639.3075-.7424v-3.6167c0-.58-.4701-1.05-1.05-1.05ZM66.3396,5.9692l-2.0809,2.0809-3.7058.0082V3.8374h5.7868v2.1318Z"/>
             <path fill="#fff" d="M80.0595,1.4924h-3.4416c-.2785,0-.5456.1105-.7425.3076l-.9025.9026v-.1625c0-.58-.4701-1.05-1.05-1.05s-1.05.47-1.05,1.05v7.1166c0,.58.4701,1.05,1.05,1.05s1.05-.47,1.05-1.05v-3.9843l2.08-2.08h1.9566v.8984c0,.58.4701,1.05,1.05,1.05s1.05-.47,1.05-1.05v-1.9484c0-.58-.4701-1.05-1.05-1.05Z"/>
         </svg>
-        <div id="ws-rail-mail" class="btn" title="Messages">
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <div id="ws-rail-mail" class="btn" title="Messages" onclick={(e) => { e.stopPropagation(); h().openDmHome?.(); }}>
             <span class="icon icon-mail"></span>
             <!-- Wears the shortcut rows' badge class: a count expanded, a corner dot collapsed. -->
             {#if st.mailBadge}<span class="ws-rail-item-badge">{st.mailBadge}</span>{/if}
         </div>
     </div>
-    <!-- Unread DMs over communities; rail.js mounts the strip island here. -->
-    <div id="ws-rail-shortcuts"></div>
+    <!-- Unread DMs over communities; the strip renders once rail.js registers its bag. -->
+    <div id="ws-rail-shortcuts">
+        {#if screens.rail}<RailShortcuts h={screens.rail.h} snapshot={screens.rail.snapshot} />{/if}
+    </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="profile-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'profile-btn'} onclick={() => h().openProfile?.()}>
         <span class="icon icon-user-circle navbar-icon"></span>
@@ -72,7 +81,8 @@
         <p class="navbar-text">Invites</p>
     </div>
     <div id="ws-rail-spacer"></div>
-    <div id="ws-rail-collapse" class="btn" title="Collapse the sidebar">
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div id="ws-rail-collapse" class="btn" title="Collapse the sidebar" onclick={() => h().toggleRailCollapse?.()}>
         <span class="icon icon-chevron-double-left navbar-icon"></span>
         <p class="navbar-text">Collapse</p>
     </div>

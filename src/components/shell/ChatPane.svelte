@@ -1,7 +1,7 @@
 <script>
     // The conversation pane: header, pins drawer, message list host, wallpaper controls
     // and the composer, each rendering from its store.
-    import { shellPanes, shellReveals, reveal } from '../lib/shell.svelte.js';
+    import { shellPanes, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import { chatPaneHandlers } from '../lib/chatpane.svelte.js';
     import { pinsState } from '../lib/pins.svelte.js';
     import { wallpaperState } from '../lib/wallpaper.svelte.js';
@@ -12,12 +12,13 @@
     import ComposerBox from '../composer/ComposerBox.svelte';
     const panes = shellPanes();
     const reveals = shellReveals();
+    const bindChat = bindShellEl('chat');
     const pins = pinsState();
     const wp = wallpaperState();
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} use:reveal={['chat', reveals.chat]} onclick={(e) => chatPaneHandlers().click?.(e)}
+<div id="chat" class="chat" style:display={panes.chat ? null : 'none'} class:pins-focus={pins.open} use:bindChat use:reveal={['chat', reveals.chat]} onclick={(e) => chatPaneHandlers().click?.(e)}
      data-wallpaper={wp.image ? 'true' : undefined} data-wallpaper-previewing={wp.previewing ? 'true' : undefined}>
     <WallpaperLayer />
     <ChatHeader />

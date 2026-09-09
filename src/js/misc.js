@@ -52,12 +52,7 @@ async function showDowngradeBlock(info) {
     VectorSvelte.showDowngradeBlock(current, required);
 }
 
-let popupMounted = false;
-async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false) {
-    if (!popupMounted) {
-        popupMounted = true;
-        VectorSvelte.mountPopup(document.getElementById('popup-container'));
-    }
+async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlaceholder = '', strIcon = '', strTitleClass = '', strConfirmText = null, fCircularIcon = false, actions = null) {
     // Resolve once: the component answers through the store, so no listener is left on a
     // shared button to double-fire on a later popup.
     return new Promise((resolve) => {
@@ -84,6 +79,7 @@ async function popupConfirm(strTitle, strSubtext, fNotice = false, strInputPlace
             icon: strIcon, circular: fCircularIcon, titleClass: strTitleClass,
             // Caller-provided label wins; otherwise 'Okay' for notices, 'Confirm' for confirms.
             confirmText: strConfirmText || (fNotice ? 'Okay' : 'Confirm'),
+            actions,
         }, {
             confirm: () => { popBack('popup-confirm'); finish(confirmValue()); },
             cancel: () => { popBack('popup-confirm'); finish(false); },

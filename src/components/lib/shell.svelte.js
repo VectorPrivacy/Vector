@@ -14,6 +14,8 @@ export function shellPanes() { return panes; }
 export function shellState() { return shell; }
 export function shellHandlers() { return handlers; }
 export function setShellHandlers(h) { handlers = h || {}; }
+/** Add handlers from another owner (widescreen's rail and resizer) without clobbering the bag. */
+export function mergeShellHandlers(partial) { handlers = { ...handlers, ...partial }; }
 
 export function showPane(name, on) {
     if (!(name in panes)) throw new Error(`showPane: unknown pane '${name}'`);
@@ -34,7 +36,8 @@ export function setMailBadge(text) { shell.mailBadge = text || ''; }
 // The screens the app registers: each entry is the props its component takes, and App
 // renders the component once the entry lands. Registered from the script that owns the
 // screen's helpers, so a screen appears exactly when its bag is ready.
-const screens = $state({ profile: null, settings: null, invites: null, chatNew: null, createGroup: null, chatlist: null, login: null });
+const screens = $state({ profile: null, settings: null, invites: null, chatNew: null, createGroup: null, chatlist: null, login: null,
+    communityHead: null, rail: null, overview: null, roster: null, packDetails: null });
 export function shellScreens() { return screens; }
 export function setScreen(name, props) {
     if (!(name in screens)) throw new Error(`setScreen: unknown screen '${name}'`);
@@ -86,6 +89,6 @@ const paneListeners = new Set();
 export function onPaneChange(fn) { paneListeners.add(fn); return () => paneListeners.delete(fn); }
 
 // The few elements the layout math measures, bound by the shell components.
-const shellEls = $state.raw({ chatList: null, navbar: null, newChat: null, profile: null });
+const shellEls = $state.raw({ chatList: null, chats: null, chat: null, navbar: null, newChat: null, profile: null });
 export function shellElements() { return shellEls; }
 export function bindShellEl(name) { return (node) => { shellEls[name] = node; return { destroy() { shellEls[name] = null; } }; }; }

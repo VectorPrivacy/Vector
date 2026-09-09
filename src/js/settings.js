@@ -749,7 +749,7 @@ async function exportAccount() {
             <p style="font-weight: bold; margin: 0 0 4px 0; text-align: center;">Seed Phrase</p>
             <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
                 <p id="export-seed-value" style="overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; min-width: 0; margin: 0;">${safeSeed}</p>
-                <button id="export-seed-copy" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
+                <button data-action="copy-seed" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
             </div>
             </div>
         `;
@@ -760,25 +760,16 @@ async function exportAccount() {
             <p style="font-weight: bold; margin: 0 0 4px 0; text-align: center;">Private Key (nsec)</p>
             <div style="display: flex; align-items: center; gap: 6px; min-width: 0;">
             <p id="export-nsec-value" style="overflow-x: auto; overflow-y: hidden; white-space: nowrap; background: #1a1a1a; padding: 8px 10px; border-radius: 5px; font-family: monospace; font-size: 12px; flex: 1; min-width: 0; margin: 0;">${safeNsec}</p>
-            <button id="export-nsec-copy" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
+            <button data-action="copy-nsec" style="flex-shrink: 0; padding: 6px 10px; border-radius: 5px; cursor: pointer;">Copy</button>
             </div>
             <p style="color: #4de0a0; font-size: 12px; margin: 8px 0 -10px 0; text-align: center;">Do Not Store on Device. Backup Offline.</p>
         </div>
         `;
 
-        // Kick off the popup. `popupConfirm` is async but the DOM mutations
-        // it does (assigning the innerHTML for our subtext) run synchronously
-        // before it returns its promise, so we can wire the copy buttons up
-        // BEFORE awaiting — `await popupConfirm(...)` only resolves on the
-        // user's Okay click, by which point the popup is gone.
-        const popupPromise = popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg');
-
-        const seedCopyBtn = document.getElementById('export-seed-copy');
-        if (seedCopyBtn) seedCopyBtn.onclick = () => navigator.clipboard.writeText(keys.seed_phrase);
-        const nsecCopyBtn = document.getElementById('export-nsec-copy');
-        if (nsecCopyBtn) nsecCopyBtn.onclick = () => navigator.clipboard.writeText(keys.nsec);
-
-        await popupPromise;
+        await popupConfirm('Export Account', exportContent, true, '', 'vector_warning.svg', '', null, false, {
+            'copy-seed': () => navigator.clipboard.writeText(keys.seed_phrase),
+            'copy-nsec': () => navigator.clipboard.writeText(keys.nsec),
+        });
     } catch (error) {
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');

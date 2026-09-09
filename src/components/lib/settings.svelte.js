@@ -101,6 +101,11 @@ export function setNetwork({ relays, servers }) {
     if (relays) network.relays = relays;
     if (servers) network.servers = servers;
 }
+/** A relay's live status, by URL (case-insensitive). */
+export function patchRelayStatus(url, status) {
+    const u = (url || '').toLowerCase();
+    network.relays = network.relays.map(r => r.url.toLowerCase() === u ? { ...r, status } : r);
+}
 
 // Voice: the Whisper models the backend lists, the chosen one and the download in
 // flight. VoiceSettings (settings.js) owns the fetches and writes here.

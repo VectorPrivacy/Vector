@@ -32,7 +32,7 @@
     }
 
     function attach() {
-        const list = document.getElementById('chat-list');
+        const list = VectorSvelte.shellElements().chatList;
         if (!list) {
             console.warn('[chatlist-reveal] #chat-list not found');
             return;

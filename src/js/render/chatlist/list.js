@@ -136,7 +136,7 @@ function chatlistHelpers() {
         acceptInvite: acceptCommunityInvite,
         declineInvite: declineCommunityInvite,
         // empty state
-        newChat: () => document.getElementById('new-chat-btn')?.click(),
+        newChat: () => openNewChat(),
         openHub: () => openUrl('https://vectorapp.io/hub'),
         bindViktor,
         // widescreen
@@ -160,9 +160,7 @@ function mountChatlist() {
     sortChats();
     VectorSvelte.setScreen('chatlist', { h: chatlistHelpers(), snapshot: chatlistSnapshot });
     chatlistIsland = true;
-    const head = document.getElementById('ws-community-head');
-    if (head) {
-        VectorSvelte.mountCommunityHead(head, {
+    VectorSvelte.setScreen('communityHead', {
             h: {
                 primaryChat: (id) => arrChats.find(c => communityIdOfChat(c) === id && isPrimaryChannelChat(c))
                     || arrChats.find(c => communityIdOfChat(c) === id),
@@ -174,8 +172,7 @@ function mountChatlist() {
                 refreshRaidAlert: (id) => refreshCommunityRaidAlert(id),
                 openCommunityMenu: (chat, e) => openCommunityMenu(chat, e),
             },
-        });
-    }
+    });
     paneChanged();
     VectorSvelte.setOpenChat(strOpenChat);
     renderRailShortcuts();
