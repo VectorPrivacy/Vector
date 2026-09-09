@@ -5,7 +5,7 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: displayName(npub), avatarSrc(npub), ago(secs), createPlaceholderAvatar
+    let { h } = $props();   // h: displayName(npub), avatarSrc(npub), ago(secs)
 
     const st = modState();
     const intel = $derived(modIntel());
@@ -54,7 +54,7 @@
              style:cursor={locked ? null : 'pointer'} title={locked ? (x.reasons[0] || 'Protected') : undefined}
              onclick={locked || st.busy ? null : () => modToggleKeep(x.npub)}>
             <div class="mod-check" class:on={kept} role="checkbox" aria-checked={String(kept)}>{#if kept}<span class="icon icon-check"></span>{/if}</div>
-            <Avatar src={src(x)} size={30} class="mod-avatar" placeholder={() => h.createPlaceholderAvatar(false, 30)} />
+            <Avatar src={src(x)} size={30} class="mod-avatar" />
             <div class="mod-body">
                 <div class="mod-row-top">
                     <span class="mod-name cutoff">{name(x)}</span>

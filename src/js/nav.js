@@ -18,12 +18,8 @@ async function openChatlist() {
     VectorSvelte.showPane('chat', false);
     previousChatBeforeProfile = ""; // Clear when navigating away
 
-    if (domChats.style.display !== '') {
-        // Run a subtle fade-in animation
-        domChats.classList.add('fadein-subtle-anim');
-        domChats.addEventListener('animationend', () => domChats.classList.remove('fadein-subtle-anim'), { once: true });
-
-        // Open the tab
+    if (!VectorSvelte.paneShown('chats')) {
+        VectorSvelte.revealPane('chats', 'fadein-subtle-anim');
         VectorSvelte.showPane('chats', true);
     }
     
@@ -109,7 +105,7 @@ let invitesMounted = false;
 function invitesEnsureMounted() {
     if (invitesMounted) return;
     invitesMounted = true;
-    VectorSvelte.mountInvites(domInvites);
+    VectorSvelte.setScreen('invites', {});
 }
 
 async function openInvites() {

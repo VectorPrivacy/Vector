@@ -3,7 +3,7 @@
     // The bundled icon is decrypted once per invite and swaps in over the placeholder.
     import Avatar from '../ui/Avatar.svelte';
 
-    let { invite, h } = $props();   // h: cacheInviteLogo(icon) → Promise<src|null>, createPlaceholderAvatar, showGlobalTooltip, hideGlobalTooltip, acceptInvite, declineInvite
+    let { invite, h } = $props();   // h: cacheInviteLogo(icon) → Promise<src|null>, showGlobalTooltip, hideGlobalTooltip, acceptInvite, declineInvite
 
     let src = $state(null);
     $effect(() => {
@@ -18,7 +18,7 @@
 
 <div class="chatlist-contact chatlist-invite" id="community-invite-{invite.community_id}">
     <div style="position: relative;">
-        <Avatar {src} size={50} placeholder={() => h.createPlaceholderAvatar(true, 50)} />
+        <Avatar {src} size={50} group />
     </div>
     <div class="chatlist-contact-preview">
         <div class="chatlist-contact-header">

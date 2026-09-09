@@ -12,13 +12,11 @@ import { mount, unmount, flushSync } from 'svelte';
 
 import ContactPicker from './people/ContactPicker.svelte';
 import MemberRoster from './people/MemberRoster.svelte';
-import Chatlist from './chatlist/Chatlist.svelte';
 import RailShortcuts from './rail/RailShortcuts.svelte';
 import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
 import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
-import ProfileScreen from './profile/ProfileScreen.svelte';
 import CommunityOverview from './community/CommunityOverview.svelte';
 import MiniProfile from './people/MiniProfile.svelte';
 import ReactionPopups from './chat/ReactionPopups.svelte';
@@ -48,7 +46,6 @@ export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.sv
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
 import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
-import InvitesScreen from './people/InvitesScreen.svelte';
 import QrOverlay from './ui/QrOverlay.svelte';
 import QrScanner from './ui/QrScanner.svelte';
 import App from './shell/App.svelte';
@@ -56,10 +53,9 @@ export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
 export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
 export { accountState, setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
-export { setMailBadge, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
+export { setMailBadge, shellScreens, setScreen, revealPane, revealPending, syncLineState, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
 import StatusDialog from './ui/StatusDialog.svelte';
 import DowngradeBlock from './ui/DowngradeBlock.svelte';
-import LoginScreen from './auth/LoginScreen.svelte';
 import CredentialModal from './ui/CredentialModal.svelte';
 import MigrationOverlay from './ui/MigrationOverlay.svelte';
 import Popup from './ui/Popup.svelte';
@@ -71,8 +67,6 @@ export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissio
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, bunkerState, pickerState as loginPickerState, encryptState, patchLogin, patchBunker, patchPicker, patchEncrypt, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick, resetLoginPin, focusLoginInput } from './lib/login.svelte.js';
 export { credentialState, openCredentialDialog, closeCredentialDialog, migrationState, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
-import NewChat from './people/NewChat.svelte';
-import CreateCommunity from './community/CreateCommunity.svelte';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { editHistoryState, setEditHistory, setEditHistoryBelow, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
@@ -117,7 +111,7 @@ export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCre
 export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
 export { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
-export { setChatHeaderHandlers } from './lib/chatpane.svelte.js';
+export { setChatPaneHandlers, setChatHeaderHandlers } from './lib/chatpane.svelte.js';
 export { wallpaperState, setWallpaperLayer, setWallpaperSliders, setWallpaperBusy, setWallpaperLabel, setWallpaperPreviewing } from './lib/wallpaper.svelte.js';
 export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
@@ -182,17 +176,6 @@ export function unmountComponent(instance) {
     return unmount(instance);
 }
 
-/**
- * Mount the chat-list island into `target` (#chat-list). The vanilla side supplies
- * every helper it still owns (list.js, row.js, channels.js, main.js globals) plus a
- * snapshot() of the raw state arrays — the bundle is an IIFE and cannot see the page's
- * global lexical bindings. The island owns #chat-list's children exclusively; its keyed
- * {#each} reuses row nodes so single-chat changes patch single rows.
- */
-export function mountChatlist(target, { h, snapshot }) {
-    target.replaceChildren();
-    return mount(Chatlist, { target, props: { h, snapshot } });
-}
 
 /**
  * Mount the widescreen rail shortcuts into `target` (#ws-rail-shortcuts). Derives from
@@ -249,17 +232,7 @@ export function mountFilePreview({ h }) {
     return mount(FilePreview, { target: document.body, props: { h } });
 }
 
-/** Mount the Settings screen into `container` (#settings); the sections read the settings stores. */
-export function mountSettings(container, { h }) {
-    container.replaceChildren();
-    return mount(Settings, { target: container, props: { h } });
-}
 
-/** Mount the Profile screen into `container` (#profile); the nav keeps showing and hiding the container. */
-export function mountProfileScreen(container, { h }) {
-    container.replaceChildren();
-    return mount(ProfileScreen, { target: container, props: { root: container, h } });
-}
 
 /** Mount the Community overview body into `target` (#group-overview-scroll). */
 export function mountCommunityOverview(target, { h }) {
@@ -355,11 +328,6 @@ export function mountEditHistory({ h }) {
     return mount(EditHistoryPopup, { target: document.body, props: { h } });
 }
 
-/** Mount the Invites screen into `container` (#invites). */
-export function mountInvites(container) {
-    container.replaceChildren();
-    return mount(InvitesScreen, { target: container, props: {} });
-}
 
 /** Mount the fullscreen QR overlay onto the body (once). */
 export function mountQrOverlay({ h }) {
@@ -381,23 +349,8 @@ export function mountDowngradeBlock({ h }) {
     return mount(DowngradeBlock, { target: document.body, props: { h } });
 }
 
-/** Mount the New Chat screen into `host` (#chat-new). */
-export function mountNewChat(host, { h }) {
-    host.replaceChildren();
-    return mount(NewChat, { target: host, props: { h } });
-}
 
-/** Mount the Create Community panel into `host` (#create-group). */
-export function mountCreateCommunity(host, { h }) {
-    host.replaceChildren();
-    return mount(CreateCommunity, { target: host, props: { h } });
-}
 
-/** Mount the login screen into its container (#login-form); the flows drive the store. */
-export function mountLoginScreen(container, { h }) {
-    container.replaceChildren();
-    return mount(LoginScreen, { target: container, props: { container, h } });
-}
 
 /** Mount the credential modal and the migration overlay at body level. */
 export function mountCredentialModals() {

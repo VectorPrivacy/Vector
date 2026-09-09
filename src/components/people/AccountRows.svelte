@@ -1,11 +1,9 @@
 <script>
     // Rows of the My Profile switcher and the pre-login picker: avatar, name, full npub
     // (CSS ellipsises it), the active dot, and a trash button where deleting is allowed.
+    import Avatar from '../ui/Avatar.svelte';
     let { accounts, activeNpub = '', onPick = null, onDelete = null, h } = $props();
-    let failed = $state(new Set());
     function src(meta) { return meta.avatar_cached ? h.fileSrc(meta.avatar_cached) : (meta.avatar_url || null); }
-    function fail(npub) { const next = new Set(failed); next.add(npub); failed = next; }
-    function placeholder(node) { node.replaceChildren(h.placeholder()); }
 </script>
 
 {#each accounts as meta (meta.npub)}
@@ -13,11 +11,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="profile-switcher-row" class:active data-npub={meta.npub} onclick={() => { if (onPick && !active) onPick(meta); }}>
         <span class="profile-switcher-active-dot"></span>
-        {#if src(meta) && !failed.has(meta.npub)}
-            <img class="profile-switcher-avatar" src={src(meta)} alt="" style="width: 28px; height: 28px; object-fit: cover; border-radius: 50%;" onerror={() => fail(meta.npub)}>
-        {:else}
-            <span style="display: contents;" use:placeholder></span>
-        {/if}
+        <Avatar src={src(meta)} size={28} class="profile-switcher-avatar" />
         <div class="profile-switcher-meta">
             <span class="profile-switcher-name">{meta.display_name || 'Unnamed'}</span>
             <span class="profile-switcher-npub">{meta.npub}</span>

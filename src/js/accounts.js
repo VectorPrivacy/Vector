@@ -69,7 +69,6 @@ const multiAccount = {
 /** Account row helpers shared by the My Profile switcher and the pre-login picker. */
 const accountRowHelpers = {
     fileSrc: (path) => convertFileSrc(path),
-    placeholder: () => { const el = createPlaceholderAvatar(false, 28); el.classList.add('profile-switcher-avatar'); return el; },
 };
 
 /**

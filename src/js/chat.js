@@ -1071,8 +1071,7 @@ async function openChat(contact) {
     popBack('new-chat');
     VectorSvelte.showPane('chat', true);
     // Match the fade transition the navbar/account tabs use for visual cohesion.
-    domChat.classList.add('fadein-anim');
-    domChat.addEventListener('animationend', () => domChat.classList.remove('fadein-anim'), { once: true });
+    VectorSvelte.revealPane('chat', 'fadein-anim');
     VectorSvelte.setShellFlag('settingsTab', false);
 
     // Hide the Navbar
@@ -1574,7 +1573,6 @@ VectorSvelte.setChatHeaderHandlers({
         getProfile: (npub) => getProfile(npub),
         getName: (x) => getName(x),
         getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
-        createAvatarImg: (src, size, group) => createAvatarImg(src, size, group),
         twemojify: (el) => twemojify(el),
         renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
         convertFileSrc: (p) => convertFileSrc(p),
@@ -1668,9 +1666,10 @@ function adjustSize() {
     // Widescreen sizes the list by flex instead: this math treats the list as the
     // viewport, and would read the full-height rail as a viewport-tall navbar.
     if (!wsActive()) {
-        const nNewChatBtnHeight = domChatNewDM?.getBoundingClientRect().height || 0;
-        const nNavbarHeight = domNavbar.getBoundingClientRect().height;
-        domChatList.style.maxHeight = (window.innerHeight - (domChatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
+        const els = VectorSvelte.shellElements();
+        const nNewChatBtnHeight = els.newChat?.getBoundingClientRect().height || 0;
+        const nNavbarHeight = els.navbar?.getBoundingClientRect().height || 0;
+        if (els.chatList) els.chatList.style.maxHeight = (window.innerHeight - (els.chatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
     }
 
     // Re-calculate chat input size on window resize (text may reflow)
@@ -1883,7 +1882,7 @@ window.onresize = adjustSize;
 
 /** Wire the chat view chrome: bookmarks, scroll, new chat, reply bar. */
 async function wireChatUi() {
-    VectorSvelte.mountNewChat(domChatNew, { h: {
+    VectorSvelte.setScreen('chatNew', { h: {
         back: closeChat,
         // Same parser as the QR scanner: invites join, npubs DM, and any URL wrapper
         // around either is ignored. No extractable npub falls through raw; openChat rejects.

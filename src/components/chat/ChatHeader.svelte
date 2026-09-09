@@ -121,7 +121,7 @@
                     {#key `${vm.id}|${vm.group}`}
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                         <span style="display:contents" onclick={() => vm?.click?.()}>
-                            <Avatar src={vm.avatarSrc} size={22} class="btn" placeholder={() => h().createAvatarImg(null, 22, vm.group)} />
+                            <Avatar src={vm.avatarSrc} size={22} group={vm.group} class="btn" />
                         </span>
                     {/key}
                 {/if}

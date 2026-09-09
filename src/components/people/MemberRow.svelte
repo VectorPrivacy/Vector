@@ -43,7 +43,7 @@
 >
     <div class="member-pick-hover" style="background:{hoverBg}"></div>
     {@render gutter?.()}
-    <Avatar {src} size={25} class="member-pick-avatar" style={dim ? 'opacity:0.5;' : ''} placeholder={ui.placeholder} />
+    <Avatar {src} size={25} class="member-pick-avatar" style={dim ? 'opacity:0.5;' : ''} />
     <MemberName
         {display}
         {hasName}

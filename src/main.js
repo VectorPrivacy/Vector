@@ -57,7 +57,6 @@ function systemEventContent(eventType, npub) {
 const domTheme = document.getElementById('theme');
 
 
-const domProfile = document.getElementById('profile');
 let fProfileEditMode = false;
 
 // Our own cached badge flags (from get_my_badges / badges_updated). Used so
@@ -143,20 +142,11 @@ function showBugHunterCard(tier) {
     });
 }
 
-const domGroupOverview = document.getElementById('group-overview');
 // The overview body is an island (mounted below); the roster host and search live inside it.
 const groupMembersEl = () => document.getElementById('group-overview-members');
 const groupSearchEl = () => document.getElementById('group-member-search-input');
 
-const domChats = document.getElementById('chats');
-const domSyncLine = document.getElementById('sync-line');
-const domChatList = document.getElementById('chat-list');
-const domChatNewDM = document.getElementById('new-chat-btn');
-const domChatNewGroup = document.getElementById('create-group-btn');
-const domNavbar = document.getElementById('navbar');
-const domInvites = document.getElementById('invites');
 
-const domChat = document.getElementById('chat');
 const domChatMessages = document.getElementById('chat-messages');
 // Late-bound because the composer is constructed here, thousands of lines before
 // the mention selector that owns the tracked list. `var` so the binding exists no
@@ -254,11 +244,8 @@ const domMarketplacePanel = document.getElementById('marketplace-panel');
 const domAppDetailsPanel = document.getElementById('app-details-panel');
 const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
 
-const domChatNew = document.getElementById('chat-new');
 
 // Create Group UI refs
-const domCreateGroup = document.getElementById('create-group');
-const domSettings = document.getElementById('settings');
 
 
 /**
@@ -1157,35 +1144,6 @@ function getProfileBannerSrc(profile) {
     return null;
 }
 
-/**
- * Create an avatar image element with automatic fallback to placeholder on error
- * @param {string} src - The image source URL
- * @param {number} size - The size of the avatar in pixels
- * @param {boolean} isGroup - Whether this is a group avatar (affects placeholder)
- * @returns {HTMLElement} - Either an img element or a placeholder div
- */
-function createAvatarImg(src, size, isGroup = false) {
-    if (!src) {
-        return createPlaceholderAvatar(isGroup, size);
-    }
-
-    const img = document.createElement('img');
-    img.src = src;
-    img.style.width = size + 'px';
-    img.style.height = size + 'px';
-    img.style.objectFit = 'cover';
-    img.style.borderRadius = '50%';
-
-    // On error, replace with placeholder
-    img.onerror = function() {
-        const placeholder = createPlaceholderAvatar(isGroup, size);
-        // Copy over any classes from the failed img
-        placeholder.className = img.className;
-        img.replaceWith(placeholder);
-    };
-
-    return img;
-}
 
 /* ── Member sections ───────────────────────────────────────────────────────
  * The same shape the channel pane uses: `{ id, label }` plus its rows, a head
@@ -1241,8 +1199,7 @@ function startMaintenanceLoop() {
         // Widescreen keeps the list pane on screen via CSS (`body.ws #chats { display:
         // flex !important; }`) whatever the tab's inline display says — gate on the
         // live layout, not the inline style, or the list never ticks in wide mode.
-        const listOnScreen = domChats.style.display !== 'none'
-            || (typeof wsActive === 'function' && wsActive());
+        const listOnScreen = VectorSvelte.paneShown('chats') || wsActive();
 
         // Clear expired typing indicators (every tick)
         const now = Date.now() / 1000;
@@ -1674,9 +1631,6 @@ let fSyncComplete = false;
 let strPubkey;
 
 window.addEventListener("DOMContentLoaded", async () => {
-    // Once login fade-in animation ends, remove it
-    domLogin.addEventListener('animationend', () => domLogin.classList.remove('fadein-anim'), { once: true });
-
     // Fetch platform features to determine OS-specific behavior
     await fetchPlatformFeatures();
 
@@ -2045,15 +1999,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
                 mountChatlist();
 
-                // Show the New Chat buttons (same as normal login flow)
-                if (domChatNewDM) {
-                    domChatNewDM.style.display = '';
-                    domChatNewDM.onclick = openNewChat;
-                }
-                if (domChatNewGroup) {
-                    domChatNewGroup.style.display = '';
-                    domChatNewGroup.onclick = openCreateGroup;
-                }
+                VectorSvelte.setShellFlag('newChatButtons', true);
                 
                 // Adjust sizes
                 adjustSize();
@@ -2239,14 +2185,13 @@ window.addEventListener("DOMContentLoaded", async () => {
     }
 
     // Hook up our static buttons
-    VectorSvelte.setShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings });
+    VectorSvelte.setShellHandlers({ openInvites, openProfile: () => openProfile(), openChatlist, openSettings, openNewChat, openCreateGroup });
     VectorSvelte.setAccountHandlers({
         openProfile: () => openProfile(),
         setStatus: askForStatus,
         openBookmarks: () => openChat(strPubkey),
         // Anchored to the row so the drop-up stays put whatever the rail's footer padding becomes.
         switchAccount: (row) => profileSwitcher.toggle('rail', row),
-        placeholderAvatar: () => createPlaceholderAvatar(false, 22),
         twemojify,
         renderCustomEmojiShortcodes,
     });

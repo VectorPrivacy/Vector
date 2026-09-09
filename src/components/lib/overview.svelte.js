@@ -20,6 +20,6 @@ export function setOverview(values) { Object.assign(ov, values); }
 /** Tag (or untag) the pane with a community. Flushed: callers read it back synchronously. */
 export function setOverviewGroup(id) { ov.groupId = id || ''; flushSync(); }
 
-let headHandlers = {};   // { back, memberSubtext, placeholderAvatar }
+let headHandlers = {};   // { back, memberSubtext }
 export function overviewHeadHandlers() { return headHandlers; }
 export function setOverviewHeadHandlers(h) { headHandlers = h || {}; }

@@ -6,11 +6,12 @@
     import { profileEdit, profileEditDirty } from '../lib/profileedit.svelte.js';
     import { profileScreen } from '../lib/profilescreen.svelte.js';
     import ProfileEditFields from './ProfileEditFields.svelte';
+    import Avatar from '../ui/Avatar.svelte';
 
     const BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
     let { root, h } = $props();
-    // h: getProfile, getName, getProfileAvatarSrc, getProfileBannerSrc, createAvatarImg, twemojify,
+    // h: getProfile, getName, getProfileAvatarSrc, getProfileBannerSrc, twemojify,
     //    renderCustomEmojiShortcodes, renderMentions, isMuted, botIcon, invitedCount, fawkesBadge,
     //    bugHunterTier, showInviteBadge, showFawkesCard, showBugHunterCard, showNavbar(on),
     //    back(), message(), toggleMute(), copyProfileLink() → Promise<boolean>, copyNpub() → Promise<boolean>,
@@ -109,17 +110,6 @@
         render(about);
         return { update: render };
     }
-    function headerAvatar(node, [src, mine]) {
-        const render = ([s, mn]) => {
-            node.replaceChildren();
-            if (mn) return;
-            const img = h.createAvatarImg(s, 22, false);
-            img.classList.add('btn');
-            node.appendChild(img);
-        };
-        render([src, mine]);
-        return { update: render };
-    }
 
     // ── badges: async lookups, each guarded against the profile changing under it ──
     let badges = $state.raw({ invites: 0, fawkes: false, bug: 0 });
@@ -201,7 +191,7 @@
     </div>
     <div class="profile-header-info" style:display={hidden}>
         <div class="profile-header-name-row">
-            <div id="profile-header-avatar-container" style:display={m.mine ? 'none' : ''} use:headerAvatar={[m.avatarSrc, m.mine]}></div>
+            <div id="profile-header-avatar-container" style:display={m.mine ? 'none' : ''}>{#if !m.mine}<Avatar src={m.avatarSrc} size={22} class="btn" />{/if}</div>
             <!-- svelte-ignore a11y_missing_content -->
             <h3 id="profile-name" class="cutoff" class:chat-contact={!m.statusText} class:chat-contact-with-status={!!m.statusText}
                 style:display={m.mine ? 'none' : ''} use:nameInto={[m.mine ? '' : m.name, m.hasName]}></h3>

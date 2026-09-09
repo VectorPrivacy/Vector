@@ -480,12 +480,14 @@ function pinsMenuItems(messageId) {
 // clicking anywhere on it (messages, header, composer) dismisses the drawer.
 // The pin button is excluded — its own handler toggles, and running both
 // would close-then-reopen in one tap.
-domChat.addEventListener('click', (e) => {
-    if (!pinsDrawerOpen) return;
-    const { drawer, button } = VectorSvelte.pinsEls();
-    const path = e.composedPath?.() || [];
-    if (drawer?.contains(e.target) || button?.contains(e.target) || path.includes(drawer) || path.includes(button)) return;
-    pinsSetDrawerVisible(false);
+VectorSvelte.setChatPaneHandlers({
+    click: (e) => {
+        if (!pinsDrawerOpen) return;
+        const { drawer, button } = VectorSvelte.pinsEls();
+        const path = e.composedPath?.() || [];
+        if (drawer?.contains(e.target) || button?.contains(e.target) || path.includes(drawer) || path.includes(button)) return;
+        pinsSetDrawerVisible(false);
+    },
 });
 
 // Live updates: the control follow persists a fresh head and announces it.

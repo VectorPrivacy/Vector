@@ -42,7 +42,7 @@
     <div class="profile-header-info">
         <div class="profile-header-name-row">
             <div id="account-avatar-container">
-                <Avatar src={st.avatarSrc} size={22} class="btn" placeholder={() => h().placeholderAvatar?.() || document.createElement('div')} />
+                <Avatar src={st.avatarSrc} size={22} class="btn" />
             </div>
             <h3 id="account-name" class="cutoff chat-contact-with-status btn" use:nameInto={[st.name, st.hasName, h()]} onclick={() => h().openProfile?.()}></h3>
         </div>

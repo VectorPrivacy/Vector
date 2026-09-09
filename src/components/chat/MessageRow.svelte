@@ -131,7 +131,7 @@
     }
 
     // The avatar is a direct child of the gutter; a load failure swaps in the
-    // placeholder the way createAvatarImg does.
+    // placeholder the way the Avatar atom does.
     let avatarFailed = $state(false);
     $effect(() => { avatarSrc; avatarFailed = false; });
 
@@ -160,7 +160,7 @@
 >
     <div class="dmsg-gutter">
         {#if avatarSrc && !avatarFailed}
-            <!-- svelte-ignore a11y_missing_attribute (byte-identical to createAvatarImg's output) -->
+            <!-- svelte-ignore a11y_missing_attribute (byte-identical to the vanilla avatar's output) -->
             <img
                 class="dmsg-avatar btn"
                 src={avatarSrc}

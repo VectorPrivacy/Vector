@@ -6,8 +6,9 @@
     import { flushSync } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
     import { miniProfile, settleMiniProfile } from '../lib/miniprofile.svelte.js';
+    import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: getProfile, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, createPlaceholderAvatar, showTooltip, hideTooltip, onClose, onMessage, onView
+    let { h } = $props();   // h: getProfile, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView
 
     // Relays stay silent for an identity with no metadata; after this long, call it Anon.
     const ANON_FALLBACK_MS = 6000;
@@ -58,11 +59,8 @@
         render([text, tags, mentions]);
         return { update: render };
     }
-    let avatarBroken = $state(false);
     let bannerBroken = $state(false);
-    $effect(() => { view?.avatarSrc; avatarBroken = false; });
     $effect(() => { view?.bannerSrc; bannerBroken = false; });
-    function placeholderInto(node) { node.replaceChildren(h.createPlaceholderAvatar(false, 64)); }
 
     // ── placement ──
     // Anchored: right of the tap, else left, else below; clamped to the viewport.
@@ -112,11 +110,8 @@
         </div>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <div class="mini-profile-avatar" title="View Profile" onclick={(e) => { e.stopPropagation(); h.onView(view.npub); }}>
-            {#if view.avatarSrc && !avatarBroken}
-                <img src={view.avatarSrc} alt="" draggable="false" onerror={() => { avatarBroken = true; }}>
-            {:else}
-                <div style="display:contents" use:placeholderInto></div>
-            {/if}
+            <!-- Sized by the stylesheet (100% of the ring). -->
+            <Avatar src={view.avatarSrc} size={null} />
         </div>
         {#if view.status}
             <div class="mini-profile-status">

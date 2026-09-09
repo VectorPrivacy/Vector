@@ -111,7 +111,7 @@ async function setupRustListeners() {
         purgeCommunityMessageCache(communityId);
         communityChanged(communityId);
         // Re-render the open overview (re-fetches caps/members/banlist fresh) if it's this community.
-        if (domGroupOverview.style.display !== 'none' && VectorSvelte.overviewState().groupId === communityId) {
+        if (VectorSvelte.paneShown('groupOverview') && VectorSvelte.overviewState().groupId === communityId) {
             const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
             // Live refresh, so an active member filter survives someone else's role/ban change.
             if (chat) renderCommunityOverview(chat, true);
@@ -296,7 +296,7 @@ async function setupRustListeners() {
         _myBadges = { vector: !!evt.payload?.vector, tier: evt.payload?.tier | 0, bug_hunter: evt.payload?.bug_hunter | 0 };
         applyTierLimits(_myBadges.tier);
         // Our own open profile re-derives its badges from the fresh cache.
-        if (domProfile.style.display !== 'none' && VectorSvelte.profileViewState().id === strPubkey) {
+        if (VectorSvelte.paneShown('profile') && VectorSvelte.profileViewState().id === strPubkey) {
             VectorSvelte.touchProfile(strPubkey);
         }
     });
@@ -310,13 +310,11 @@ async function setupRustListeners() {
         // the duration so the bar doesn't flash back to full width before shrinking
         // (dropping the mask restores the whole line instantly); only `active` goes,
         // to stop the pulse.
-        domSyncLine.classList.remove('active');
-        domSyncLine.classList.add('fade-out');
+        VectorSvelte.setSyncLine({ active: false, fadeOut: true });
 
-        // Matches the 0.4s retract — clearing early left the class dangling mid-animation.
+        // Matches the 0.4s retract: clearing early leaves the class dangling mid-animation.
         setTimeout(() => {
-            domSyncLine.classList.remove('fade-out', 'progress');
-            domSyncLine.style.removeProperty('--sync-progress');
+            VectorSvelte.setSyncLine({ fadeOut: false, progress: null });
             if (!strOpenChat) adjustSize();
         }, 400);
     });
@@ -331,17 +329,9 @@ async function setupRustListeners() {
         // `active` is the centre reveal and carries BOTH modes — a determinate sync
         // (the common one, since the quick phase runs inside boot) used to jump
         // straight to `progress` and grow out of the left edge instead.
-        domSyncLine.classList.remove('fade-out');
-        domSyncLine.classList.add('active');
-        if (mode === 'Syncing' && current && total) {
-            // Determinate: fill left-to-right within the revealed line (mask).
-            domSyncLine.classList.add('progress');
-            domSyncLine.style.setProperty('--sync-progress', Math.min(current / total, 1));
-        } else {
-            // Indeterminate pulse (reconciliation phase — total unknown).
-            domSyncLine.classList.remove('progress');
-            domSyncLine.style.removeProperty('--sync-progress');
-        }
+        // Determinate: fill left to right within the revealed line; otherwise the pulse.
+        const progress = mode === 'Syncing' && current && total ? Math.min(current / total, 1) : null;
+        VectorSvelte.setSyncLine({ active: true, fadeOut: false, progress });
         if (!fInit && !strOpenChat) adjustSize();
     });
 
@@ -509,34 +499,16 @@ async function setupRustListeners() {
             const id = evt.payload.id;
             const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
             const newAvatarSrc = getProfileAvatarSrc(evt.payload);
-            // Rows derive their author and avatar from the profile signal; reply
-            // quotes and mention chips are vanilla leaves patched here. One grouped
-            // scan; the static NodeList keeps replaceWith safe mid-iteration.
-            document.querySelectorAll(
-                `.dmsg-reply-name[data-npub="${id}"], .dmsg-reply-avatar[data-npub="${id}"], ` +
-                `.mention[data-npub="${id}"]`
-            ).forEach(el => {
-                if (el.classList.contains('dmsg-reply-name')) {
-                    // Reply-quote name resolves the same as the author name.
-                    el.textContent = newName;
-                    twemojify(el);
-                } else if (el.classList.contains('dmsg-reply-avatar')) {
-                    const fresh = createAvatarImg(newAvatarSrc, 16);
-                    fresh.classList.add('dmsg-reply-avatar');
-                    fresh.dataset.npub = id;
-                    // Re-wire the mini-profile opener the original render attached (replaceWith drops it).
-                    fresh.addEventListener('click', (e) => { e.stopPropagation(); showMiniProfile(id, e.currentTarget); });
-                    el.replaceWith(fresh);
-                } else if (el.classList.contains('mention')) {
-                    // Mention chips (@tags in chat + npub tags in profile bios).
-                    el.textContent = '@' + newName;
-                }
+            // Rows and reply quotes derive from the profile signal; mention chips are
+            // vanilla leaves patched here.
+            document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(el => {
+                el.textContent = '@' + newName;
             });
         }
         
         // Skip Expanded Profile View repaints during our own edit mode —
         // backend may emit stale `banner_cached` and clobber the just-picked image.
-        if (domProfile.style.display !== 'none' && VectorSvelte.profileViewState().id === evt.payload.id) {
+        if (VectorSvelte.paneShown('profile') && VectorSvelte.profileViewState().id === evt.payload.id) {
             const isOwnEditingProfile = fProfileEditMode && evt.payload.mine;
             if (!isOwnEditingProfile) {
                 renderProfileTab(evt.payload);
@@ -568,7 +540,7 @@ async function setupRustListeners() {
 
         // Refresh the Create Group picker if a stranger npub's profile resolved while the
         // panel is open (the island re-derives its rows off the new snapshot).
-        if (domCreateGroup?.style.display !== 'none') {
+        if (VectorSvelte.paneShown('createGroup')) {
             VectorSvelte.ccProfilesChanged();
         }
         if (activeInviteModalRerender) {

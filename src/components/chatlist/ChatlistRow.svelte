@@ -9,6 +9,7 @@
     let { h, chat, pinned, tick } = $props();
 
     import ChannelList from './ChannelList.svelte';
+    import Avatar from '../ui/Avatar.svelte';
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
 
     // COMMUNITY_UNREAD_PLUS_THRESHOLD (row.js): past one synced page the count is a
@@ -63,14 +64,6 @@
 
     // ── actions: leaf widgets stay the vanilla builders / DOM disciplines ──
 
-    function placeholderInto(node, isGroup) {
-        node.replaceChildren(h.createPlaceholderAvatar(isGroup, 50));
-    }
-
-    function imgFallback(isGroup) {
-        return (e) => e.currentTarget.replaceWith(h.createPlaceholderAvatar(isGroup, 50));
-    }
-
     // Name text + twemojify. Keyed on the string so a re-derive that yields the
     // same name never touches the node (twemojify would restart image loads).
     function h4Into(node, v) {
@@ -123,33 +116,9 @@
 >
     <div style:position="relative">
         {#if vm.isGroup}
-            {#if vm.chat.metadata?.avatar_cached}
-                <!-- svelte-ignore a11y_missing_attribute (byte-identical to the vanilla avatar img) -->
-                <img
-                    src={h.convertFileSrc(vm.chat.metadata.avatar_cached)}
-                    style:width="50px"
-                    style:height="50px"
-                    style:object-fit="cover"
-                    style:border-radius="50%"
-                    onerror={imgFallback(true)}
-                />
-            {:else}
-                <div use:placeholderInto={true}></div>
-            {/if}
+            <Avatar src={vm.chat.metadata?.avatar_cached ? h.convertFileSrc(vm.chat.metadata.avatar_cached) : null} size={50} group />
         {:else}
-            {#if h.getProfileAvatarSrc(vm.profile)}
-                <!-- svelte-ignore a11y_missing_attribute (byte-identical to the vanilla avatar img) -->
-                <img
-                    src={h.getProfileAvatarSrc(vm.profile)}
-                    style:width="50px"
-                    style:height="50px"
-                    style:object-fit="cover"
-                    style:border-radius="50%"
-                    onerror={imgFallback(false)}
-                />
-            {:else}
-                <div use:placeholderInto={false}></div>
-            {/if}
+            <Avatar src={h.getProfileAvatarSrc(vm.profile)} size={50} />
         {/if}
         {#if vm.presence}
             <div

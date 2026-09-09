@@ -48,13 +48,12 @@ function mountProfileScreenOnce() {
             return false;
         }
     };
-    VectorSvelte.mountProfileScreen(domProfile, {
+    VectorSvelte.setScreen('profile', {
         h: {
             getProfile,
             getName,
             getProfileAvatarSrc,
             getProfileBannerSrc,
-            createAvatarImg,
             twemojify,
             renderCustomEmojiShortcodes,
             renderMentions: (el) => renderMentions(el, false, { allowBare: true, queueSync: true }),
@@ -181,7 +180,7 @@ async function openProfile(cProfile) {
         clearInterval(profileRefreshInterval);
         profileRefreshInterval = setInterval(() => {
             // Only refresh if profile tab is still open
-            if (domProfile.style.display === '') {
+            if (VectorSvelte.paneShown('profile')) {
                 invoke("refresh_profile_now", { npub: cProfile.id });
             } else {
                 // Profile tab closed, stop refreshing
@@ -193,12 +192,8 @@ async function openProfile(cProfile) {
 
     renderProfileTab(cProfile);
 
-    if (domProfile.style.display !== '') {
-        // Run a subtle fade-in animation
-        domProfile.classList.add('fadein-subtle-anim');
-        domProfile.addEventListener('animationend', () => domProfile.classList.remove('fadein-subtle-anim'), { once: true });
-
-        // Open the tab
+    if (!VectorSvelte.paneShown('profile')) {
+        VectorSvelte.revealPane('profile', 'fadein-subtle-anim');
         VectorSvelte.showPane('profile', true);
     }
 }
@@ -242,7 +237,7 @@ function saveProfilePicture(cProfile, kind, path) {
     cProfile[cachedKey] = path;
     const revert = () => {
         cProfile[cachedKey] = prev;
-        if (domProfile.style.display !== 'none') renderProfileTab(cProfile);
+        if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
     };
     invoke('upload_avatar', { filepath: path, uploadType: kind })
         .then(url => {

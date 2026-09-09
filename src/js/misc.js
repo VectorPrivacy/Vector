@@ -2,29 +2,6 @@
 function showToast(message, persist = false) { VectorSvelte.showToast(message, persist); }
 function hideToast() { VectorSvelte.hideToast(); }
 
-/**
- * Generate a placeholder avatar
- * @param {boolean} isGroup - Whether this is a group chat avatar
- * @param {number} limitSizeTo - An optional pixel width/height to lock the avatar to
- */
-function createPlaceholderAvatar(isGroup = false, limitSizeTo = null) {
-    // Create avatar container with the appropriate placeholder SVG
-    const divAvatar = document.createElement('div');
-    divAvatar.classList.add('placeholder-avatar');
-    if (limitSizeTo) {
-        divAvatar.style.minHeight = limitSizeTo + 'px';
-        divAvatar.style.minWidth = limitSizeTo + 'px';
-        divAvatar.style.maxHeight = limitSizeTo + 'px';
-        divAvatar.style.maxWidth = limitSizeTo + 'px';
-    }
-
-    // Use the appropriate placeholder SVG based on chat type
-    divAvatar.style.backgroundImage = `url("${isGroup ? 'icons/group-placeholder.svg' : 'icons/user-placeholder.svg'}")`;
-    divAvatar.style.backgroundSize = 'cover';
-    divAvatar.style.backgroundPosition = 'center';
-
-    return divAvatar;
-}
 
 /**
  * Show a popup dialog to confirm an action.

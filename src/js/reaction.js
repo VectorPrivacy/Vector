@@ -103,7 +103,6 @@ function _mountReactionPopups() {
             },
             getProfile,
             getProfileAvatarSrc,
-            createPlaceholderAvatar,
             twemojify,
             // The dataset's canonical `display` (CLDR tts); `name` for entries predating it.
             emojiLabel: (emoji) => {

@@ -3,14 +3,16 @@
     // (its own island, mounted by rail.js), the tabs, the collapse toggle and the account
     // slot widescreen.js docks #account into. The rail-only children are display:none
     // outside `body.ws`.
-    import { shellPanes, shellState, shellHandlers } from '../lib/shell.svelte.js';
+    import { shellPanes, shellState, shellHandlers, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import AccountRow from './AccountRow.svelte';
     const panes = shellPanes();
     const st = shellState();
     const h = () => shellHandlers();
+    const reveals = shellReveals();
+    const bindNavbar = bindShellEl('navbar');
 </script>
 
-<div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'}>
+<div id="navbar" class="row navbar" style:display={panes.navbar ? null : 'none'} use:bindNavbar use:reveal={['navbar', reveals.navbar]}>
     <!-- The mark's viewBox is cropped to the artwork: the source canvas is 81 wide for a
          29-wide glyph, which would otherwise render it tiny beside the typeface. -->
     <div id="ws-rail-head">

@@ -98,7 +98,6 @@ function chatlistHelpers() {
         // avatars + text finishing
         convertFileSrc,
         getProfileAvatarSrc,
-        createPlaceholderAvatar,
         twemojify,
         timeAgo,
         renderCustomEmojiShortcodes,
@@ -159,10 +158,8 @@ function mountChatlist() {
     if (chatlistIsland || fInit) return;
     ensureListSignals();
     sortChats();
-    chatlistIsland = VectorSvelte.mountChatlist(domChatList, {
-        h: chatlistHelpers(),
-        snapshot: chatlistSnapshot,
-    });
+    VectorSvelte.setScreen('chatlist', { h: chatlistHelpers(), snapshot: chatlistSnapshot });
+    chatlistIsland = true;
     const head = document.getElementById('ws-community-head');
     if (head) {
         VectorSvelte.mountCommunityHead(head, {
@@ -170,8 +167,6 @@ function mountChatlist() {
                 primaryChat: (id) => arrChats.find(c => communityIdOfChat(c) === id && isPrimaryChannelChat(c))
                     || arrChats.find(c => communityIdOfChat(c) === id),
                 convertFileSrc,
-                createAvatarImg,
-                createPlaceholderAvatar,
                 twemojify,
                 communityMemberSubtext,
                 raidAlert: (id) => { const v = communityRaidAlerts.get(id); return v && (v.detected || v.suspects > 0) ? v : null; },
@@ -396,8 +391,8 @@ function bindViktor(img) {
     if (!fViktorGreeted) {
         fViktorGreeted = true;
         const kick = () => setTimeout(exclaim, 150);
-        if (domChatList.classList.contains('intro-anim')) {
-            domChatList.addEventListener('animationend', kick, { once: true });
+        if (VectorSvelte.revealPending('chatList')) {
+            VectorSvelte.revealPane('chatList', 'intro-anim').then(kick);
         } else {
             setTimeout(kick, 400);
         }

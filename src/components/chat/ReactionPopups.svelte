@@ -8,7 +8,7 @@
     import { reactionTip, reactionDetails } from '../lib/reactionpopups.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: findMessage(msgId), getProfile, getName, getProfileAvatarSrc, createPlaceholderAvatar, twemojify, emojiLabel(emoji)
+    let { h } = $props();   // h: findMessage(msgId), getProfile, getName, getProfileAvatarSrc, twemojify, emojiLabel(emoji)
 
     const tip = $derived(reactionTip());
     const details = $derived(reactionDetails());
@@ -83,7 +83,7 @@
         <div class="reaction-details-body">
             {#each reactors as r (r.id)}
                 <div class="reaction-detail-row">
-                    <Avatar src={r.src} size={25} class="reaction-avatar" placeholder={() => h.createPlaceholderAvatar(false, 25)} />
+                    <Avatar src={r.src} size={25} class="reaction-avatar" />
                     <span class="reaction-detail-name">{r.name}</span>
                 </div>
             {/each}

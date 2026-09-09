@@ -64,7 +64,7 @@
     title={vm.name}
     onclick={open}
 >
-    <Avatar src={vm.src} size={26} class="ws-rail-item-avatar" placeholder={() => h.createPlaceholderAvatar(isCommunity, 26)} />
+    <Avatar src={vm.src} size={26} group={isCommunity} class="ws-rail-item-avatar" />
     <span class="ws-rail-item-name cutoff" use:name={vm}></span>
     {#if vm.pings || vm.unread}
         <span class="ws-rail-item-badge" class:is-dot={isDot} class:muted={vm.muted && !isDot}>

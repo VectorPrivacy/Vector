@@ -2,7 +2,13 @@
     // The root: everything under <body>. The popups and overlays keep their containers
     // (their openers mount into them by id); the screens migrated to islands are empty
     // mounts nav shows and hides through the shell store.
-    import { shellPanes } from '../lib/shell.svelte.js';
+    import { shellPanes, shellScreens, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
+    import ProfileScreen from '../profile/ProfileScreen.svelte';
+    import Settings from '../settings/Settings.svelte';
+    import InvitesScreen from '../people/InvitesScreen.svelte';
+    import NewChat from '../people/NewChat.svelte';
+    import CreateCommunity from '../community/CreateCommunity.svelte';
+    import LoginScreen from '../auth/LoginScreen.svelte';
     import Navbar from './Navbar.svelte';
     import ChatListPane from './ChatListPane.svelte';
     import ChatPane from './ChatPane.svelte';
@@ -18,6 +24,11 @@
     import InviteModal from '../community/InviteModal.svelte';
     import Tooltip from './Tooltip.svelte';
     const panes = shellPanes();
+    const screens = shellScreens();
+    const reveals = shellReveals();
+    let profileEl = $state(null);
+    let loginEl = $state(null);
+    const bindProfile = bindShellEl('profile');
 </script>
 
 <div id="popup-container" class="popup-container"></div>
@@ -31,7 +42,9 @@
     <div class="app-details-panel" id="app-details-panel" style="display: none;"></div>
     <div class="miniapp-launch-overlay" id="miniapp-launch-overlay"></div>
 
-    <div id="profile" class="chats" style:display={panes.profile ? null : 'none'}></div>
+    <div id="profile" class="chats" style:display={panes.profile ? null : 'none'} bind:this={profileEl} use:bindProfile use:reveal={['profile', reveals.profile]}>
+        {#if screens.profile && profileEl}<ProfileScreen root={profileEl} h={screens.profile.h} />{/if}
+    </div>
     <GroupOverviewPane />
     <ChatListPane />
     <ChatPane />
@@ -49,12 +62,24 @@
         </div>
     </div>
 
-    <div id="chat-new" style:display={panes.chatNew ? null : 'none'}></div>
-    <div id="create-group" class="create-group-container" style:display={panes.createGroup ? null : 'none'}></div>
-    <div id="settings" style:display={panes.settings ? null : 'none'}></div>
-    <div id="invites" style:display={panes.invites ? null : 'none'}></div>
+    <div id="chat-new" style:display={panes.chatNew ? null : 'none'}>
+        {#if screens.chatNew}<NewChat h={screens.chatNew.h} />{/if}
+    </div>
+    <div id="create-group" class="create-group-container" style:display={panes.createGroup ? null : 'none'}>
+        {#if screens.createGroup}<CreateCommunity h={screens.createGroup.h} />{/if}
+    </div>
+    <div id="settings" style:display={panes.settings ? null : 'none'}>
+        {#if screens.settings}<Settings h={screens.settings.h} />{/if}
+    </div>
+    <div id="invites" style:display={panes.invites ? null : 'none'}>
+        {#if screens.invites}<InvitesScreen />{/if}
+    </div>
     <Navbar />
-    <div id="login-form" class="fadein-anim"></div>
+    <!-- Boots with the fade-in; the class drops once it has played. -->
+    <div id="login-form" class="fadein-anim" bind:this={loginEl} use:reveal={['login', reveals.login]}
+         onanimationend={(e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('fadein-anim'); }}>
+        {#if screens.login && loginEl}<LoginScreen container={loginEl} h={screens.login.h} />{/if}
+    </div>
 </main>
 
 <Tooltip />

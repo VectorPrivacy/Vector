@@ -181,7 +181,7 @@ function wsUpdate() {
         // A roster opened narrow replaced its conversation. Here it is a column
         // beside one, so bring that community's channel back and let the sync
         // dock the roster next to it rather than landing on an empty pane.
-        const rosterFor = domGroupOverview.style.display !== 'none' && domGroupOverview.getAttribute('data-group-id');
+        const rosterFor = VectorSvelte.paneShown('groupOverview') && VectorSvelte.overviewState().groupId;
         if (!strOpenChat && rosterFor) {
             const target = wsChannelForCommunity(rosterFor);
             if (target) openChat(target);
@@ -200,11 +200,11 @@ function wsUpdate() {
         // The PREFERENCE is deliberately untouched: this is the layout running out
         // of room, not the user closing anything, and widening re-derives the pane
         // from it through wsSyncOpenChat.
-        if (domGroupOverview.style.display !== 'none') wsCloseDetails();
+        if (VectorSvelte.paneShown('groupOverview')) wsCloseDetails();
         // A roster opened narrow hid every other pane as a whole screen, and widening
         // may have closed it (no chat beside it). Widescreen forced the panes visible
         // regardless; narrow honours their inline none, so land where the user was.
-        const anyShown = [domChat, domChats, domProfile, domSettings, domGroupOverview].some(el => el.style.display !== 'none');
+        const anyShown = ['chat', 'chats', 'profile', 'settings', 'groupOverview'].some(p => VectorSvelte.paneShown(p));
         if (!anyShown) {
             if (strOpenChat) openChat(strOpenChat);
             else openChatlist();
@@ -214,22 +214,13 @@ function wsUpdate() {
     }
 }
 
-/**
- * Track the community details pane so it can dock as the 4th column.
- *
- * Its visibility is written from ~8 places (openGroupOverview, openChat,
- * closeChat, openChatlist, openProfile, the teardown paths…), so this watches
- * the style attribute instead of hooking every one of them: an observer cannot
- * fall out of sync with what is actually on screen, a list of hooks can.
- */
+/** The details pane docks as the 4th column: mirror its visibility onto the body. */
 function wsInitDetailsPane() {
-    const pane = document.getElementById('group-overview');
-    if (!pane) return;
     const sync = () => {
-        document.body.classList.toggle('ws-details', pane.style.display !== 'none');
+        document.body.classList.toggle('ws-details', VectorSvelte.paneShown('groupOverview'));
         wsDockMemberSearch();
     };
-    new MutationObserver(sync).observe(pane, { attributes: true, attributeFilter: ['style'] });
+    VectorSvelte.onPaneChange(sync);
     sync();
 }
 
@@ -310,7 +301,7 @@ function wsSyncMembersPane() {
     // openChat hid the pane. Reading it here made the sync believe the panel was
     // already up and decline to restore it, so every channel click closed the
     // member list for good — which then looked like a per-community memory.
-    const shown = domGroupOverview.style.display !== 'none';
+    const shown = VectorSvelte.paneShown('groupOverview');
     if (inCommunity && wsMembersOpen && !shown) openGroupOverview(chat);
     else if (shown && (!inCommunity || !wsMembersOpen)) wsCloseDetails();
 }

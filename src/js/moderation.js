@@ -24,7 +24,6 @@ VectorSvelte.mountModConsole({
         ago: modAgo,
         displayName: modDisplayName,
         avatarSrc: (npub) => { const p = arrProfiles.find(x => x.id === npub); return p ? getProfileAvatarSrc(p) : null; },
-        createPlaceholderAvatar,
         policiesPane: (el) => { modPoliciesPane = el; },
         showTab: (which) => modShowTab(which),
         close: () => closeModerationPanel(),

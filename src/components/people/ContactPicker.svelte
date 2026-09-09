@@ -19,7 +19,6 @@
         dmNpubs = null,
         chatTsById = new Map(),
         avatarSrc = () => null,      // (profile) => url | null
-        makePlaceholder = () => document.createElement('div'), // () => the default-avatar element
         twemojify = () => {},
         showTooltip = () => {},      // (text, anchorEl) => the app's global tooltip
         hideTooltip = () => {},
@@ -49,7 +48,7 @@
     }
 
     // svelte-ignore state_referenced_locally
-    const ui = { placeholder: makePlaceholder, twemojify, showTooltip, hideTooltip };
+    const ui = { twemojify, showTooltip, hideTooltip };
 
     // ── instance exports: the vanilla<->island bridge ──
 

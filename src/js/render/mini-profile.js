@@ -22,7 +22,6 @@ function _mountMiniProfile() {
             twemojify,
             renderCustomEmojiShortcodes,
             renderMentions: (el) => renderMentions(el, false, { allowBare: true, queueSync: true }),
-            createPlaceholderAvatar,
             showTooltip: showGlobalTooltip,
             hideTooltip: hideGlobalTooltip,
             onClose: hideMiniProfile,

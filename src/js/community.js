@@ -488,7 +488,7 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     if (VectorSvelte.overviewState().groupId === communityId) {
         // The member SET changed while the overview is open — re-render the rows live so a
         // join/leave/new-speaker appears without closing and reopening (preserve any active search).
-        if (domGroupOverview.style.display !== 'none') {
+        if (VectorSvelte.paneShown('groupOverview')) {
             const chat = arrChats.find(c => c.metadata?.custom_fields?.community_id === communityId);
             if (chat) renderCommunityOverview(chat, true);
         }
@@ -569,9 +569,8 @@ async function openGroupOverview(chat) {
     // in while visible. Every other pane is already hidden above, so awaiting
     // first would leave the app fully black for the whole fetch — and a render
     // throw would strand it there.
-    if (domGroupOverview.style.display !== '') {
-        domGroupOverview.classList.add('fadein-subtle-anim');
-        domGroupOverview.addEventListener('animationend', () => domGroupOverview.classList.remove('fadein-subtle-anim'), { once: true });
+    if (!VectorSvelte.paneShown('groupOverview')) {
+        VectorSvelte.revealPane('groupOverview', 'fadein-subtle-anim');
         VectorSvelte.showPane('groupOverview', true);
     }
 
@@ -667,7 +666,6 @@ function mountCommunityOverview() {
     VectorSvelte.mountCommunityOverview(document.getElementById('group-overview-scroll'), {
         h: {
             memberSubtext: communityMemberSubtext,
-            createAvatarImg,
             toggleMute: async () => {
                 const chat = cur();
                 if (!chat) return;
@@ -736,7 +734,6 @@ function closeGroupOverviewFromHeader() {
 VectorSvelte.setOverviewHeadHandlers({
     back: closeGroupOverviewFromHeader,
     memberSubtext: communityMemberSubtext,
-    placeholderAvatar: () => createPlaceholderAvatar(true, 22),
 });
 
 /** Pick and upload a new community icon; the pencil becomes a progress ring meanwhile. */
@@ -845,7 +842,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                 h: {
                     invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
                     attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
-                    createPlaceholderAvatar, twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
+                    twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
                     applyCommunityAdmins, dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
                     memberSectionClosed, setMemberSectionClosed,
                 },
@@ -1153,7 +1150,6 @@ async function openCommunityInvitePanel(chat) {
         dmNpubs: await fetchDmContacts(),
         chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
         avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
-        makePlaceholder: () => createPlaceholderAvatar(false, 25),
         twemojify: (el) => twemojify(el),
         showTooltip: (text, el) => showGlobalTooltip(text, el),
         hideTooltip: () => hideGlobalTooltip(),

@@ -7,7 +7,7 @@ const s = $state({
 });
 // Reactive: the row renders before main.js hands these over, and the emoji passes
 // must run once they exist.
-let handlers = $state.raw({});   // { openProfile, setStatus, switchAccount, openBookmarks, placeholderAvatar, twemojify, renderCustomEmojiShortcodes }
+let handlers = $state.raw({});   // { openProfile, setStatus, switchAccount, openBookmarks, twemojify, renderCustomEmojiShortcodes }
 
 export function accountState() { return s; }
 export function accountHandlers() { return handlers; }

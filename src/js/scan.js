@@ -118,7 +118,7 @@ function closeQrScanner() {
  * BEFORE opening the destination — closeChat hides the profile view too.
  */
 async function dismissNewChatForScan() {
-    if (domChatNew && domChatNew.style.display !== 'none') await closeChat();
+    if (VectorSvelte.paneShown('chatNew')) await closeChat();
 }
 
 /**

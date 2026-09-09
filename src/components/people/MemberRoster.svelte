@@ -44,7 +44,6 @@
     // Props are mount-time constants here; the picker is remounted, never re-propped.
     // svelte-ignore state_referenced_locally
     const ui = {
-        placeholder: () => h.createPlaceholderAvatar(false, 25),
         twemojify: h.twemojify,
         renderCustomEmojiShortcodes: h.renderCustomEmojiShortcodes,
         showTooltip: h.showGlobalTooltip,

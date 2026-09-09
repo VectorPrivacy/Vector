@@ -5,14 +5,10 @@
     // while the shared emoji panel is open.
     import { statusDialog } from '../lib/dialogs.svelte.js';
     import { popIn } from '../lib/popin.js';
-    let { h } = $props();   // h: composerHost(el), avatar(src) -> element, renderPreview(node, text), emoji(e), save(), clear(), close(), backdrop(), key(e)
+    import Avatar from '../ui/Avatar.svelte';
+    let { h } = $props();   // h: composerHost(el), renderPreview(node, text), emoji(e), save(), clear(), close(), backdrop(), key(e)
     const st = statusDialog.state();
     function host(el) { h.composerHost(el); }
-    function avatar(node, src) {
-        const paint = (s) => node.replaceChildren(h.avatar(s));
-        paint(src);
-        return { update: paint };
-    }
     // Twemoji and pack shortcodes are imperative passes over the text node.
     function preview(node, text) {
         const paint = (t) => h.renderPreview(node, t);
@@ -32,7 +28,7 @@
             <button class="status-dialog-x" aria-label="Close" onclick={() => h.close()}>&#x2715;</button>
         </div>
         <div class="status-live-row">
-            <div class="status-preview-avatar" use:avatar={st.avatarSrc}></div>
+            <div class="status-preview-avatar"><Avatar src={st.avatarSrc} size={34} /></div>
             <div class="status-preview" class:status-preview-empty={st.empty}>
                 <span class="status-preview-dot"></span>
                 <span id="status-preview-text" use:preview={st.text}></span>

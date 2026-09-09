@@ -6,6 +6,7 @@
     import { loginState, bunkerState, pickerState, encryptState } from '../lib/login.svelte.js';
     import PinRow from './PinRow.svelte';
     import AccountRows from '../people/AccountRows.svelte';
+    import Avatar from '../ui/Avatar.svelte';
 
     let { container, h } = $props();
     const l = loginState();
@@ -27,11 +28,6 @@
     $effect(() => {
         if (p.open && pill && list) list.style.top = `${Math.round(pill.getBoundingClientRect().bottom + 8)}px`;
     });
-    function avatar(node, src) {
-        const paint = (s) => node.replaceChildren(h.picker.avatarImg(s));
-        paint(src);
-        return { update: paint };
-    }
 
     // ── bunker ──
     // The countdown owns the status line while a link is live; a status write shows otherwise.
@@ -79,7 +75,7 @@
 {#if p.shown}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="login-account-picker" class="login-account-picker" class:open={p.open} bind:this={pill} onclick={() => h.picker.toggle()}>
-        <span style="display: contents;" use:avatar={p.avatar}></span>
+        <Avatar src={p.avatar} size={36} />
         <span id="login-account-picker-name" class="login-account-picker-name">{p.label}</span>
         <svg class="login-account-picker-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>

@@ -6,7 +6,7 @@
     // roster island mounts into #group-overview-members from the app.
     import { overviewState } from '../lib/overview.svelte.js';
 
-    let { h } = $props();   // h: memberSubtext, createAvatarImg, toggleMute, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete, migrate
+    let { h } = $props();   // h: memberSubtext, toggleMute, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete, migrate
 
     const ov = overviewState();
     const manage = $derived(!!ov.caps.manage_metadata);

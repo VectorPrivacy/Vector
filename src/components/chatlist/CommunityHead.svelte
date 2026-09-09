@@ -4,6 +4,7 @@
     // community's signal, so a count landing or a rename repaints one span.
     import { untrack } from 'svelte';
     import { paneState, communityVersion } from '../lib/signals.svelte.js';
+    import Avatar from '../ui/Avatar.svelte';
 
     let { h } = $props();
 
@@ -37,22 +38,6 @@
         });
     });
 
-    // The avatar is the head's first child, built by the app's avatar helpers.
-    function avatarInto(node, src) {
-        let cur = null;
-        let el = null;
-        const render = (s) => {
-            if (el && s === cur) return;
-            cur = s;
-            if (el) el.remove();
-            el = s ? h.createAvatarImg(s, 36, true) : h.createPlaceholderAvatar(true, 36);
-            el.classList.add('chatlist-community-head-avatar');
-            node.insertBefore(el, node.firstChild);
-        };
-        render(src);
-        return { update: render };
-    }
-
     function name(node, text) {
         let cur;
         const render = (t) => {
@@ -71,9 +56,9 @@
     <div
         class="chatlist-community-head btn"
         id="chatlist-community-head"
-        use:avatarInto={vm.avatarSrc}
         onclick={(e) => h.openCommunityMenu(vm.primary, e)}
     >
+        <Avatar src={vm.avatarSrc} size={36} group class="chatlist-community-head-avatar" />
         <div class="chatlist-community-head-meta">
             <span class="chatlist-community-head-name cutoff" use:name={vm.name}></span>
             <span class="chatlist-community-head-members">

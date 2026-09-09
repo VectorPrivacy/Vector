@@ -2,7 +2,6 @@
 // invite and welcome steps, and the encryption (PIN / password) flow. One global
 // scope: this loads before main.js and shares its globals.
 
-const domLogin = document.getElementById('login-form');
 
 // Active nostrconnect:// URL — captured when start_nostrconnect_session
 // returns so the Copy button can place it on the clipboard.
@@ -128,7 +127,7 @@ function showBunkerForm(mode = 'new') {
     // visible panel and hide every major view so the bunker form gets the
     // full viewport with no see-through layout.
     if (mode === 'reauth') {
-        const settingsVisible = domSettings.style.display !== 'none';
+        const settingsVisible = VectorSvelte.paneShown('settings');
         bunkerReauthOrigin = settingsVisible ? 'settings' : 'chats';
         VectorSvelte.showPane('navbar', false);
         VectorSvelte.showPane('settings', false);
@@ -289,15 +288,7 @@ async function login(skipAnimations = false) {
                 mountChatlist();
                 console.timeEnd('[Boot] showMainUI:mountChatlist');
 
-                // Show the New Chat buttons
-                if (domChatNewDM) {
-                    domChatNewDM.style.display = '';
-                    domChatNewDM.onclick = openNewChat;
-                }
-                if (domChatNewGroup) {
-                    domChatNewGroup.style.display = '';
-                    domChatNewGroup.onclick = openCreateGroup;
-                }
+                VectorSvelte.setShellFlag('newChatButtons', true);
 
                 // Adjust the Chat List sizes (deferred — layout reflows don't block first paint)
                 requestAnimationFrame(() => adjustSize());
@@ -328,43 +319,17 @@ async function login(skipAnimations = false) {
                 console.log('[Boot] UI visible - instant login complete');
 
                 // Apply the same intro animations as the encryption flow
-                domNavbar.classList.add('fadein-anim');
-                domNavbar.addEventListener('animationend', () => domNavbar.classList.remove('fadein-anim'), { once: true });
-
-                domChatList.classList.add('intro-anim');
-                domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
-
-                if (domChatNewDM) {
-                    domChatNewDM.classList.add('intro-anim');
-                    domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
-                }
-                if (domChatNewGroup) {
-                    domChatNewGroup.classList.add('intro-anim');
-                    domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
-                }
+                VectorSvelte.revealPane('navbar', 'fadein-anim');
+                VectorSvelte.revealPane('chatList', 'intro-anim');
+                VectorSvelte.revealPane('newChat', 'intro-anim');
             } else {
                 // Fadeout the login and encryption UI with animation
-                domLogin.classList.add('fadeout-anim');
-                domLogin.addEventListener('animationend', async () => {
-                    domLogin.classList.remove('fadeout-anim');
+                VectorSvelte.revealPane('login', 'fadeout-anim').then(async () => {
                     await showMainUI();
-
-                    // Add fade-in animations
-                    domNavbar.classList.add('fadein-anim');
-                    domNavbar.addEventListener('animationend', () => domNavbar.classList.remove('fadein-anim'), { once: true });
-
-                    domChatList.classList.add('intro-anim');
-                    domChatList.addEventListener('animationend', () => domChatList.classList.remove('intro-anim'), { once: true });
-
-                    if (domChatNewDM) {
-                        domChatNewDM.classList.add('intro-anim');
-                        domChatNewDM.addEventListener('animationend', () => domChatNewDM.classList.remove('intro-anim'), { once: true });
-                    }
-                    if (domChatNewGroup) {
-                        domChatNewGroup.classList.add('intro-anim');
-                        domChatNewGroup.addEventListener('animationend', () => domChatNewGroup.classList.remove('intro-anim'), { once: true });
-                    }
-                }, { once: true });
+                    VectorSvelte.revealPane('navbar', 'fadein-anim');
+                    VectorSvelte.revealPane('chatList', 'intro-anim');
+                    VectorSvelte.revealPane('newChat', 'intro-anim');
+                });
             }
 
             // Setup a subscription for new websocket messages (runs in both animation modes)
@@ -1149,7 +1114,6 @@ const LOGIN_HELPERS = {
         close: () => loginPicker.close(),
         pick: (meta) => loginPicker.onPick(meta),
         rowHelpers: () => accountRowHelpers,
-        avatarImg: (src) => createAvatarImg(src, 36, false),
     },
     bunker: {
         // Bunker is a login flow (the signer is the identity), so it lives under Login.
@@ -1168,7 +1132,7 @@ const LOGIN_HELPERS = {
         biometric: () => encryptFlow?.biometric(),
     },
 };
-VectorSvelte.mountLoginScreen(domLogin, { h: LOGIN_HELPERS });
+VectorSvelte.setScreen('login', { h: LOGIN_HELPERS });
 
 /** The NIP-55 button (Android) shows only when a signer app is installed, so it is never a dead end. */
 async function wireLoginUi() {

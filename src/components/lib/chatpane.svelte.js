@@ -4,3 +4,8 @@
 let handlers = null;
 export function chatHeaderHandlers() { return handlers; }
 export function setChatHeaderHandlers(h) { handlers = h; }
+
+// The pane's own handlers (a click anywhere on it dismisses the pins drawer).
+let paneHandlers = {};
+export function chatPaneHandlers() { return paneHandlers; }
+export function setChatPaneHandlers(h) { paneHandlers = h || {}; }

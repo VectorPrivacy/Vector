@@ -41,7 +41,7 @@ let ccMounted = false;
 function ccEnsureMounted() {
     if (ccMounted) return;
     ccMounted = true;
-    VectorSvelte.mountCreateCommunity(domCreateGroup, {
+    VectorSvelte.setScreen('createGroup', {
         h: {
             extractNpub,
             profiles: () => [...arrProfiles],
@@ -57,7 +57,6 @@ function ccEnsureMounted() {
                 dmNpubs: await fetchDmContacts(),
                 chatTsById: new Map(arrChats.map(c => [c.id, getChatSortTimestamp(c)])),
                 avatarSrc: (p) => (p ? getProfileAvatarSrc(p) : null) || null,
-                makePlaceholder: () => createPlaceholderAvatar(false, 25),
                 twemojify: (el) => twemojify(el),
                 showTooltip: (text, el) => showGlobalTooltip(text, el),
                 hideTooltip: () => hideGlobalTooltip(),

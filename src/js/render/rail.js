@@ -57,7 +57,6 @@ function renderRailShortcuts() {
             getName,
             getProfileAvatarSrc,
             convertFileSrc,
-            createPlaceholderAvatar,
             twemojify,
             computeRowBadgeCount,
             computeListRowBadgeCount,

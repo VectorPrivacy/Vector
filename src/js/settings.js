@@ -446,7 +446,7 @@ async function askForUsername() {
     const oldName = cProfile.name;
     cProfile.name = strUsername;
     renderCurrentProfile(cProfile);
-    if (domProfile.style.display === '') renderProfileTab(cProfile);
+    if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
 
     // Send out the metadata update
     try {
@@ -454,13 +454,13 @@ async function askForUsername() {
         if (!success) {
             cProfile.name = oldName;
             renderCurrentProfile(cProfile);
-            if (domProfile.style.display === '') renderProfileTab(cProfile);
+            if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
             await popupConfirm('Username Update Failed!', 'Failed to broadcast profile update to the network.', true, '', 'vector_warning.svg');
         }
     } catch (e) {
         cProfile.name = oldName;
         renderCurrentProfile(cProfile);
-        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
         await popupConfirm('Username Update Failed!', escapeHtml(String(e)), true, '', 'vector_warning.svg');
     }
 }
@@ -511,7 +511,6 @@ function _ensureStatusDialog() {
     VectorSvelte.mountStatusDialog({
         h: {
             composerHost: (el) => { _statusHost = el; },
-            avatar: (src) => createAvatarImg(src, 34, false),
             renderPreview: (node, text) => {
                 node.textContent = text || 'No status';
                 if (text) {
@@ -636,14 +635,14 @@ async function saveStatus(strStatus) {
     renderCurrentProfile(cProfile);
     // Every row showing me (rosters, DM list) re-derives off the signal.
     VectorSvelte.touchProfile(cProfile.id);
-    if (domProfile.style.display === '') renderProfileTab(cProfile);
+    if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
 
     const rollback = () => {
         cProfile.status.title = oldStatus;
         cProfile.status.emoji_tags = oldTags;
         renderCurrentProfile(cProfile);
         VectorSvelte.touchProfile(cProfile.id);
-        if (domProfile.style.display === '') renderProfileTab(cProfile);
+        if (VectorSvelte.paneShown('profile')) renderProfileTab(cProfile);
     };
 
     try {
@@ -1834,7 +1833,6 @@ const SETTINGS_HELPERS = {
         load: () => invoke('get_blocked_users'),
         getProfile: (npub) => getProfile(npub),
         getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
-        createAvatarImg: (src, size, group) => createAvatarImg(src, size, group),
         confirmUnblock: (p) => popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(p))}?`),
         unblock: async (npub) => {
             await invoke('unblock_user', { npub });
@@ -1892,6 +1890,6 @@ const SETTINGS_HELPERS = {
 
 // Mounted once every script is in: the sections call helpers from files that load later.
 document.addEventListener('DOMContentLoaded', () => {
-    VectorSvelte.mountSettings(domSettings, { h: SETTINGS_HELPERS });
+    VectorSvelte.setScreen('settings', { h: SETTINGS_HELPERS });
     VectorSvelte.mountCredentialModals();
 }, { once: true });

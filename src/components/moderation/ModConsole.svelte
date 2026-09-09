@@ -9,7 +9,7 @@
     import ModList from './ModList.svelte';
     import ModFilters from './ModFilters.svelte';
     import ModStats from './ModStats.svelte';
-    // h: ago(secs), displayName(npub), avatarSrc(npub), createPlaceholderAvatar, policiesPane(el),
+    // h: ago(secs), displayName(npub), avatarSrc(npub), policiesPane(el),
     //    showTab(which), close(), revoke(), rotate(), banRotate()
     let { h } = $props();
 

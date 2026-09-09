@@ -185,7 +185,6 @@ const _dmsgRowHelpers = {
     reactionChipRemoved: () => { if (reactionHoverEl && !reactionHoverEl.isConnected) hideReactionHoverTip(); },
     replyView: (msg, sender) => _dmsgReplyView(msg, sender),
     renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
-    createPlaceholderAvatar: (g, size) => createPlaceholderAvatar(g, size),
     pivx: { fiat: (amt) => pivxFiatLine(amt), ensure: (pay, mine) => pivxEnsureBubble(pay, mine), claim: (code) => claimPivxPayment(code) },
     revealBlocked: (msg) => { revealedBlockedMessages.add(msg.id); openChat(strOpenChat); },
     commandInfo: (msg) => _dmsgCommandInfo(msg),
