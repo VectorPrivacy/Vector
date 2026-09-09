@@ -4,11 +4,11 @@
  * with zoom (scroll/pinch) and pan (drag/touch-drag) capabilities
  */
 
-let viewerOverlay = null;
-let viewerImage = null;
-let viewerContainer = null;
-let zoomInfo = null;
-let zoomTip = null;
+// The element refs the arithmetic measures (the component binds them).
+const viewerImage = () => VectorSvelte.imageViewerEls().image;
+const viewerContainer = () => VectorSvelte.imageViewerEls().container;
+let viewerOpen = false;
+let tipTimer = null;
 
 // Zoom and pan state
 let scale = 1;
@@ -24,132 +24,35 @@ let wheelSettleTimer = null;
 let baseWidth = 0;
 let baseHeight = 0;
 
-/**
- * Create the image viewer overlay
- */
-function createViewer() {
-    // Create overlay
-    viewerOverlay = document.createElement('div');
-    viewerOverlay.className = 'image-viewer-overlay';
-    
-    // Create container
-    viewerContainer = document.createElement('div');
-    viewerContainer.className = 'image-viewer-container';
-    
-    // Create image
-    viewerImage = document.createElement('img');
-    viewerImage.className = 'image-viewer-image';
-    viewerImage.draggable = false; // Disable native drag-and-drop
-    
-    // Create close button
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'image-viewer-close';
-    closeBtn.setAttribute('aria-label', 'Close');
-
-    // Viewer options — a vertical column below the close button
-    const controls = document.createElement('div');
-    controls.className = 'image-viewer-controls';
-    const rotateBtn = document.createElement('button');
-    rotateBtn.className = 'image-viewer-ctrl-btn';
-    rotateBtn.setAttribute('aria-label', 'Rotate image');
-    rotateBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M2 10C2 10 4.00498 7.26822 5.63384 5.63824C7.26269 4.00827 9.5136 3 12 3C16.9706 3 21 7.02944 21 12C21 16.9706 16.9706 21 12 21C7.89691 21 4.43511 18.2543 3.35177 14.5M2 10V4M2 10H8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-    rotateBtn.addEventListener('click', rotateCCW);
-    controls.appendChild(rotateBtn);
-
-    // Create zoom info
-    zoomInfo = document.createElement('div');
-    zoomInfo.className = 'image-viewer-zoom-info';
-    zoomInfo.textContent = '100%';
-    
-    // Create zoom tip
-    zoomTip = document.createElement('div');
-    zoomTip.className = 'image-viewer-tip';
-    zoomTip.textContent = platformFeatures.is_mobile ? 'Pinch to zoom' : 'Scroll to zoom';
-    
-    // Assemble
-    viewerContainer.appendChild(viewerImage);
-    viewerOverlay.appendChild(viewerContainer);
-    viewerOverlay.appendChild(closeBtn);
-    viewerOverlay.appendChild(controls);
-    viewerOverlay.appendChild(zoomInfo);
-    viewerOverlay.appendChild(zoomTip);
-    document.body.appendChild(viewerOverlay);
-    
-    // Event listeners
-    closeBtn.addEventListener('click', closeViewer);
-    
-    // Close on background click (but not if user was dragging)
-    let clickStartX = 0;
-    let clickStartY = 0;
-    let wasDragging = false;
-    
-    viewerContainer.addEventListener('mousedown', (e) => {
-        if (e.target === viewerContainer) {
-            clickStartX = e.clientX;
-            clickStartY = e.clientY;
-            wasDragging = false;
-        }
-    });
-    
-    viewerContainer.addEventListener('mousemove', (e) => {
-        if (e.target === viewerContainer) {
-            const moveDistance = Math.hypot(e.clientX - clickStartX, e.clientY - clickStartY);
-            if (moveDistance > 5) wasDragging = true;
-        }
-    });
-    
-    viewerContainer.addEventListener('mouseup', (e) => {
-        if (e.target === viewerContainer && !wasDragging) {
-            closeViewer();
-        }
-    });
-    
-    // Also handle touch for mobile
-    viewerContainer.addEventListener('touchstart', (e) => {
-        if (e.target === viewerContainer && e.touches.length === 1) {
-            clickStartX = e.touches[0].clientX;
-            clickStartY = e.touches[0].clientY;
-            wasDragging = false;
-        }
-    });
-    
-    viewerContainer.addEventListener('touchmove', (e) => {
-        if (e.target === viewerContainer && e.touches.length === 1) {
-            const moveDistance = Math.hypot(e.touches[0].clientX - clickStartX, e.touches[0].clientY - clickStartY);
-            if (moveDistance > 5) wasDragging = true;
-        }
-    });
-    
-    viewerContainer.addEventListener('touchend', (e) => {
-        if (e.target === viewerContainer && !wasDragging) {
-            closeViewer();
-        }
-    });
-    
-    // Keyboard support
-    document.addEventListener('keydown', handleKeyDown);
-    
-    // Mouse wheel zoom
-    viewerContainer.addEventListener('wheel', handleWheel, { passive: false });
-    
-    // Mouse drag
-    viewerImage.addEventListener('mousedown', handleMouseDown);
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    
-    // Touch support
-    viewerImage.addEventListener('touchstart', handleTouchStart, { passive: false });
-    viewerImage.addEventListener('touchmove', handleTouchMove, { passive: false });
-    viewerImage.addEventListener('touchend', handleTouchEnd);
-    
-    // Handle window resize and orientation changes
-    window.addEventListener('resize', () => {
-        if (viewerOverlay && viewerOverlay.style.display !== 'none' && baseWidth > 0) {
-            measureBaseSize();
-            updateTransform();
-        }
-    });
-}
+// The viewer paints from the store; what stays here is the zoom and pan arithmetic,
+// registered as the component's handlers, plus the document-level listeners.
+VectorSvelte.setImageViewerHandlers({
+    close: () => closeViewer(),
+    rotate: () => rotateCCW(),
+    load: () => {
+        measureBaseSize();
+        centerImage();
+        updateTransform();
+        VectorSvelte.flushSync();
+        void viewerImage()?.offsetWidth;   // commit the settled transform before re-arming the transition
+        VectorSvelte.setImageViewer({ settling: false });
+    },
+    error: () => VectorSvelte.setImageViewer({ settling: false }),
+    wheel: (e) => handleWheel(e),
+    mouseDown: (e) => handleMouseDown(e),
+    touchStart: (e) => handleTouchStart(e),
+    touchMove: (e) => handleTouchMove(e),
+    touchEnd: (e) => handleTouchEnd(e),
+});
+document.addEventListener('keydown', handleKeyDown);
+document.addEventListener('mousemove', handleMouseMove);
+document.addEventListener('mouseup', handleMouseUp);
+window.addEventListener('resize', () => {
+    if (viewerOpen && baseWidth > 0) {
+        measureBaseSize();
+        updateTransform();
+    }
+});
 
 /**
  * Measure the base size of the image at scale 1.
@@ -157,7 +60,7 @@ function createViewer() {
  * reports swapped axes — un-swap to keep base dims in the image's own space.
  */
 function measureBaseSize() {
-    const rect = viewerImage.getBoundingClientRect();
+    const rect = viewerImage().getBoundingClientRect();
     const odd = (((rotation % 360) + 360) % 360) % 180 !== 0;
     baseWidth = (odd ? rect.height : rect.width) / scale;
     baseHeight = (odd ? rect.width : rect.height) / scale;
@@ -170,8 +73,8 @@ function centerImage() {
     const odd = (((rotation % 360) + 360) % 360) % 180 !== 0;
     const effW = (odd ? baseHeight : baseWidth) * scale;
     const effH = (odd ? baseWidth : baseHeight) * scale;
-    translateX = (viewerContainer.clientWidth - effW) / 2;
-    translateY = (viewerContainer.clientHeight - effH) / 2;
+    translateX = (viewerContainer().clientWidth - effW) / 2;
+    translateY = (viewerContainer().clientHeight - effH) / 2;
 }
 
 /**
@@ -208,9 +111,6 @@ function rotationFix() {
  * Open image in viewer
  */
 function openImageViewer(imageSrc) {
-    if (!viewerOverlay) createViewer();
-    
-    // Reset state
     scale = 1;
     translateX = 0;
     translateY = 0;
@@ -218,48 +118,23 @@ function openImageViewer(imageSrc) {
     isDragging = false;
     baseWidth = 0;
     baseHeight = 0;
-    
-    // Hidden + unanimated until the first SETTLED frame: the image otherwise
-    // paints at the container's top-left and visibly slides to center through
-    // the transform transition once onload measures it.
-    viewerImage.classList.add('no-anim');
-    viewerImage.style.visibility = 'hidden';
+    viewerOpen = true;
 
-    // Measure base size once image loads (handlers before src — belt-and-braces
-    // against a cached image racing the load event)
-    viewerImage.onload = () => {
-        measureBaseSize();
-        centerImage(); // updateTransform only clamps now — centering is explicit
-        updateTransform();
-        void viewerImage.offsetWidth; // commit the settled transform before re-arming the transition
-        viewerImage.style.visibility = '';
-        viewerImage.classList.remove('no-anim');
-    };
-    viewerImage.onerror = () => {
-        viewerImage.style.visibility = '';
-        viewerImage.classList.remove('no-anim');
-    };
-
-    // Set image
-    viewerImage.src = imageSrc;
-    viewerImage.style.transform = 'translate(0, 0) scale(1)';
-    
-    // Show overlay
-    viewerOverlay.style.display = 'flex';
-    setTimeout(() => viewerOverlay.classList.add('active'), 10);
+    // Hidden and unanimated until the first settled frame: the image otherwise paints at
+    // the container's top-left and slides to centre once the load measures it.
+    VectorSvelte.setImageViewer({ open: true, active: false, src: imageSrc, settling: true, zoomed: false, transform: 'translate(0, 0) scale(1)' });
+    VectorSvelte.setImageViewerTip(platformFeatures.is_mobile ? 'Pinch to zoom' : 'Scroll to zoom', false);
+    setTimeout(() => VectorSvelte.setImageViewer({ active: true }), 10);
 
     // Android back closes the viewer instead of navigating the conversation away.
     pushBack('image-viewer', closeViewer);
-    
-    // Update zoom info
+
     updateZoomInfo();
-    
-    // Show zoom tip briefly
-    setTimeout(() => {
-        zoomTip.classList.add('visible');
-        setTimeout(() => {
-            zoomTip.classList.remove('visible');
-        }, 2500);
+
+    clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => {
+        VectorSvelte.setImageViewerTip(VectorSvelte.imageViewerState().tip.text, true);
+        tipTimer = setTimeout(() => VectorSvelte.setImageViewerTip(VectorSvelte.imageViewerState().tip.text, false), 2500);
     }, 500);
 }
 
@@ -267,21 +142,19 @@ function openImageViewer(imageSrc) {
  * Close viewer
  */
 function closeViewer() {
-    if (!viewerOverlay) return;
+    if (!viewerOpen) return;
+    viewerOpen = false;
     popBack('image-viewer');
-
-    viewerOverlay.classList.remove('active');
-    setTimeout(() => {
-        viewerOverlay.style.display = 'none';
-    }, 200);
+    VectorSvelte.setImageViewer({ active: false });
+    setTimeout(() => { if (!viewerOpen) VectorSvelte.setImageViewer({ open: false, src: '' }); }, 200);
 }
 
 /**
  * Handle keyboard events
  */
 function handleKeyDown(e) {
-    if (!viewerOverlay || viewerOverlay.style.display === 'none') return;
-    
+    if (!viewerOpen) return;
+
     if (e.key === 'Escape') {
         closeViewer();
     }
@@ -303,12 +176,12 @@ function handleWheel(e) {
 
     // The 0.1s transition fights a high-frequency stream (every event retargets
     // the animation → rubber-banding). Off while zooming, re-armed once quiet.
-    viewerImage.classList.add('no-anim');
+    VectorSvelte.setImageViewer({ noAnim: true });
     clearTimeout(wheelSettleTimer);
-    wheelSettleTimer = setTimeout(() => viewerImage.classList.remove('no-anim'), 150);
+    wheelSettleTimer = setTimeout(() => VectorSvelte.setImageViewer({ noAnim: false }), 150);
     
     // Get cursor position relative to the container
-    const containerRect = viewerContainer.getBoundingClientRect();
+    const containerRect = viewerContainer().getBoundingClientRect();
     const cursorX = e.clientX - containerRect.left;
     const cursorY = e.clientY - containerRect.top;
     
@@ -334,7 +207,7 @@ function handleMouseDown(e) {
     isDragging = true;
     startX = e.clientX - translateX;
     startY = e.clientY - translateY;
-    viewerImage.classList.add('dragging');
+    VectorSvelte.setImageViewer({ dragging: true });
 }
 
 /**
@@ -353,7 +226,7 @@ function handleMouseMove(e) {
  */
 function handleMouseUp() {
     isDragging = false;
-    viewerImage.classList.remove('dragging');
+    VectorSvelte.setImageViewer({ dragging: false });
 }
 
 /**
@@ -369,13 +242,13 @@ function handleTouchStart(e) {
         isDragging = true;
         startX = e.touches[0].clientX - translateX;
         startY = e.touches[0].clientY - translateY;
-        viewerImage.classList.add('dragging');
+        VectorSvelte.setImageViewer({ dragging: true });
     } else if (e.touches.length === 2) {
         // Stop dragging when pinching starts
         isDragging = false;
-        viewerImage.classList.remove('dragging');
+        VectorSvelte.setImageViewer({ dragging: false });
         // Pinch is a continuous stream too — the transition would rubber-band it
-        viewerImage.classList.add('no-anim');
+        VectorSvelte.setImageViewer({ noAnim: true });
         // Two touches - prepare for pinch zoom
         e.preventDefault();
         const touch1 = e.touches[0];
@@ -412,7 +285,7 @@ function handleTouchMove(e) {
             const newScale = Math.min(Math.max(0.5, scale * delta), 5);
             
             // Get container's bounding rect to convert to container-relative coordinates
-            const containerRect = viewerContainer.getBoundingClientRect();
+            const containerRect = viewerContainer().getBoundingClientRect();
             const centerX = (touch1.clientX + touch2.clientX) / 2;
             const centerY = (touch1.clientY + touch2.clientY) / 2;
             
@@ -443,11 +316,11 @@ function handleTouchMove(e) {
 function handleTouchEnd(e) {
     if (e.touches.length < 2) {
         lastTouchDistance = 0;
-        viewerImage.classList.remove('no-anim');
+        VectorSvelte.setImageViewer({ noAnim: false });
     }
     if (e.touches.length === 0) {
         isDragging = false;
-        viewerImage.classList.remove('dragging');
+        VectorSvelte.setImageViewer({ dragging: false });
     }
 }
 
@@ -455,8 +328,8 @@ function handleTouchEnd(e) {
  * Update image transform
  */
 function updateTransform() {
-    const containerWidth = viewerContainer.clientWidth;
-    const containerHeight = viewerContainer.clientHeight;
+    const containerWidth = viewerContainer()?.clientWidth || 0;
+    const containerHeight = viewerContainer()?.clientHeight || 0;
 
     // Use the base size (rendered size at scale 1) for calculations —
     // a quarter-turned image occupies swapped axes on screen
@@ -486,24 +359,18 @@ function updateTransform() {
         translateY = Math.max(containerHeight - scaledHeight, Math.min(0, translateY));
     }
     
-    viewerImage.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})${rotationFix()}`;
-    viewerImage.classList.toggle('zoomed', scale > 1);
+    VectorSvelte.setImageViewer({ transform: `translate(${translateX}px, ${translateY}px) scale(${scale})${rotationFix()}`, zoomed: scale > 1 });
 }
 
 /**
  * Update zoom info display
  */
 function updateZoomInfo() {
-    const percent = Math.round(scale * 100);
-    zoomInfo.textContent = `${percent}%`;
-    zoomInfo.classList.add('visible');
-    
-    // Clear any existing timeout to prevent flashing
+    VectorSvelte.setImageViewerZoom(`${Math.round(scale * 100)}%`, true);
+    // Hide after a second without zoom activity.
     if (zoomInfoTimeout) clearTimeout(zoomInfoTimeout);
-    
-    // Hide after 1 second of no zoom activity
     zoomInfoTimeout = setTimeout(() => {
-        zoomInfo.classList.remove('visible');
+        VectorSvelte.setImageViewerZoom(VectorSvelte.imageViewerState().zoom.text, false);
         zoomInfoTimeout = null;
     }, 1000);
 }

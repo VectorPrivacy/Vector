@@ -10,6 +10,7 @@
     import ProfileSwitcher from './ProfileSwitcher.svelte';
     import PickerRoot from '../picker/PickerRoot.svelte';
     import PickerTooltip from '../picker/PickerTooltip.svelte';
+    import ImageViewer from '../ui/ImageViewer.svelte';
     import Tooltip from './Tooltip.svelte';
     const panes = shellPanes();
 </script>
@@ -54,3 +55,4 @@
 <Tooltip />
 <ProfileSwitcher />
 <PickerTooltip />
+<ImageViewer />

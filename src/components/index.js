@@ -21,7 +21,6 @@ import CommandComposer from './composer/CommandComposer.svelte';
 import ProfileScreen from './profile/ProfileScreen.svelte';
 import CommunityOverview from './community/CommunityOverview.svelte';
 import MiniProfile from './people/MiniProfile.svelte';
-import MessageToolbar from './chat/MessageToolbar.svelte';
 import ReactionPopups from './chat/ReactionPopups.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
@@ -127,6 +126,8 @@ export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, noticeState, setNotice, clearNotices, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
+export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
+export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
 export { setModelDownload, modelDownloadState } from './lib/audio.svelte.js';
 export { recorderState, setVoiceState, setVoiceStatusText, setVoiceTimer, setVoiceDrag, setVoiceDot, setVoiceLockFading, setVoiceTooltip, setVoicePreview, voiceFadeIn, setVoiceHandlers, voiceEls } from './lib/voicerecorder.svelte.js';
 export { setPickerHandlers, onPickerVisibility, pickerVisible, setPickerVisible, setPickerBottom, setPickerAnchor, pickerRoot, pickerEls, showPickerTip, hidePickerTip } from './lib/picker.svelte.js';
@@ -266,11 +267,6 @@ export function mountMiniProfile({ h }) {
     return mount(MiniProfile, { target: document.body, props: { h } });
 }
 
-/** Mount the message toolbar's buttons into `host` (#dmsg-toolbar). */
-export function mountMessageToolbar(host) {
-    host.replaceChildren();
-    return mount(MessageToolbar, { target: host });
-}
 
 /** Mount the reaction hover tip + details popups at body level. */
 export function mountReactionPopups({ h }) {

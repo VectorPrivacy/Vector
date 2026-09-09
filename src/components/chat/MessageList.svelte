@@ -10,6 +10,8 @@
     import { windowState, dividerState, noticeState } from '../lib/chatview.svelte.js';
     import { deriveWindow } from '../lib/chatwindow.js';
     import MessageRow from './MessageRow.svelte';
+    import MessageToolbar from './MessageToolbar.svelte';
+    import { toolbarHost, toolbarSwipe, toolbarEls, toolbarHandlers } from '../lib/toolbar.svelte.js';
     import SystemEvent from './SystemEvent.svelte';
 
     let { h } = $props();   // vanilla helpers: messages(chatId), rules, ctxFor, senderFor, dayLabel, row helpers
@@ -17,6 +19,11 @@
     const win = windowState();
     const divider = dividerState();
     const notices = noticeState();
+    const host = toolbarHost();
+    const swipe = toolbarSwipe();
+    const tbEls = toolbarEls();
+    const tbh = () => toolbarHandlers();
+    function bindHost(node) { tbEls.host = node; return { destroy() { tbEls.host = null; } }; }
 
     const items = $derived.by(() => {
         win.rev;
@@ -42,6 +49,18 @@
     const dividerId = $derived(divider.targetId);
     const dividerAfter = $derived(divider.after);
 </script>
+
+<!-- Before the rows, never after: the list's bottom clearance rides its last child, which
+     must stay the newest row. Both are absolutely positioned, so their order is invisible. -->
+<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+<div id="dmsg-toolbar" hidden={!host.open} data-target={host.target || undefined} style:top={host.top || null} style:left={host.left || null}
+     use:bindHost onmouseenter={() => tbh().hoverIn?.()} onmouseleave={() => tbh().hoverOut?.()} onclick={(e) => tbh().click?.(e)}>
+    <MessageToolbar />
+</div>
+<div class="dmsg-swipe-reply" hidden={!swipe.visible} class:past={swipe.past}
+     style:top={swipe.top || null} style:left={swipe.left || null} style:opacity={swipe.opacity} style:transform={swipe.transform} style:transition={swipe.transition || null}>
+    <span class="dmsg-swipe-reply__icon icon icon-reply"></span>
+</div>
 
 {#each items as it (rowKey(it.msg))}
     {#if it.dayBreak}

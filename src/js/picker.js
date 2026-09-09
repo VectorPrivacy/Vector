@@ -5,11 +5,9 @@
  * mode toggle, search box, and dispatch logic all live here. Emoji data and
  * persistence (recent / shortcodes) live in emoji.js.
  *
- * The panel is also used as a reaction picker — when a `.dmsg-react-trigger`
- * element is the click source (set by the floating message toolbar), the next
- * emoji selection is sent as a reaction to the message instead of being
- * inserted into the chat input. `strCurrentReactionReference` tracks the
- * target message id during that mode.
+ * The panel is also used as a reaction picker: openReactionPicker(msgId) (the message
+ * toolbar's React) makes the next emoji selection a reaction to that message instead
+ * of an insert. `strCurrentReactionReference` tracks the target message id meanwhile.
  *
  * Cross-file dependencies (resolved at call time via classic-script scope):
  *   - emoji.js   — arrEmojis, searchEmojis, getMostUsedEmojis
@@ -186,13 +184,19 @@ function openEmojiPanel(e) {
     const root = VectorSvelte.pickerEls().root;
     if (root.contains(e.target) || (e.composedPath?.() || []).includes(root)) return;
 
-    // Open or Close the panel depending on it's state
-    // `dmsg-react-trigger` is the synthetic class added by the floating
-    // toolbar's _dmsgOpenReactionPicker — see message-toolbar.js. The class
-    // exists solely as a routing token between the toolbar and this handler.
-    const strReaction = e.target.classList.contains('dmsg-react-trigger') ? e.target.parentElement.parentElement.id : '';
-    const fClickedInputOrReaction = isDefaultPanel || strReaction;
-    if (fClickedInputOrReaction && !VectorSvelte.pickerVisible()) {
+    if (isDefaultPanel && !VectorSvelte.pickerVisible()) _openPanel({ isDefaultPanel: true, reactionId: '' });
+    else closeEmojiPanel();
+}
+
+/** The toolbar's React: the panel as a reaction picker for one message. */
+function openReactionPicker(msgId) {
+    if (!VectorSvelte.pickerVisible()) _openPanel({ isDefaultPanel: false, reactionId: msgId });
+    else closeEmojiPanel();
+}
+
+function _openPanel({ isDefaultPanel, reactionId }) {
+    const strReaction = reactionId;
+    {
         // Close attachment panel if open
         if (domAttachmentPanel.classList.contains('visible')) {
             closeAttachmentPanel();
@@ -265,8 +269,6 @@ function openEmojiPanel(e) {
             // animation immediately.
             _rearmVisiblePackCanvases();
         }));
-    } else {
-        closeEmojiPanel();
     }
 }
 

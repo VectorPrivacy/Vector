@@ -14,7 +14,6 @@
  *   - click delegated on toolbar: routes to react / reply / edit / reveal-file / delete handlers
  */
 
-let _dmsgToolbarEl = null;
 let _dmsgToolbarTarget = null;
 let _dmsgToolbarHideTimer = null;
 let _dmsgToolbarListenersAttached = false;
@@ -109,43 +108,16 @@ function dmsgClearDeleteMetaCache() {
     if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected) showMessageToolbar(_dmsgToolbarTarget);
 }
 
-let _dmsgToolbarIsland = null;
 
 function initMessageToolbar() {
-    if (typeof domChatMessages === 'undefined' || !domChatMessages) return;
-
-    // (Re)create the toolbar element if missing or detached. domChatMessages is
-    // cleared on every chat open, which removes the toolbar with it — but the
-    // element reference and listeners-attached flag survive the call. So check
-    // isConnected each time and rebuild the element when needed.
-    if (!_dmsgToolbarEl || !_dmsgToolbarEl.isConnected) {
-        // Explicitly drop the old element (in the rare case it's detached but
-        // still referenced) so its inner listeners get GC'd along with it.
-        if (_dmsgToolbarEl) _dmsgToolbarEl.remove();
-        _dmsgToolbarTarget = null;
-        _dmsgCancelToolbarHide();
-
-        _dmsgToolbarEl = document.createElement('div');
-        _dmsgToolbarEl.id = 'dmsg-toolbar';
-        _dmsgToolbarEl.hidden = true;
-        // The buttons are an island; the host is the app's (placement, hover, clicks).
-        if (_dmsgToolbarIsland) VectorSvelte.unmountComponent(_dmsgToolbarIsland);
-        _dmsgToolbarIsland = VectorSvelte.mountMessageToolbar(_dmsgToolbarEl);
-        // Append INSIDE the scrolling container so the toolbar moves with the message
-        // content automatically (no per-frame reposition on scroll = no lag).
-        // Requires .chat-messages { position: relative } for absolute children to
-        // anchor to its scroll content — that rule lives in the .dmsg CSS section.
-        // First child, not last: the list's bottom clearance rides `> *:last-child`,
-        // which must stay on the newest row. The toolbar is absolutely positioned,
-        // so its place in the order is invisible.
-        domChatMessages.prepend(_dmsgToolbarEl);
-
-        // Listeners that hang off the toolbar element itself must be re-attached
-        // every rebuild (the previous instance is gone).
-        _dmsgToolbarEl.addEventListener('mouseenter', _dmsgCancelToolbarHide);
-        _dmsgToolbarEl.addEventListener('mouseleave', _dmsgScheduleToolbarHide);
-        _dmsgToolbarEl.addEventListener('click', _dmsgHandleToolbarClick);
-    }
+    if (!domChatMessages) return;
+    // The host and the swipe chip render inside the list; the app supplies placement,
+    // hover and the click dispatch.
+    VectorSvelte.setToolbarHandlers({
+        hoverIn: () => _dmsgCancelToolbarHide(),
+        hoverOut: () => _dmsgScheduleToolbarHide(),
+        click: (e) => _dmsgHandleToolbarClick(e),
+    });
 
     // Listeners that hang off domChatMessages itself only need attaching once —
     // the container survives chat switches, only its children get cleared.
@@ -183,7 +155,7 @@ function initMessageToolbar() {
     // The toolbar now scrolls naturally with content, so no per-scroll reposition.
     // We still listen so we can hide the toolbar if the target row scrolls out of view.
     domChatMessages.addEventListener('scroll', () => {
-        if (!_dmsgToolbarTarget || !_dmsgToolbarEl || _dmsgToolbarEl.hidden) return;
+        if (!_dmsgToolbarTarget || !VectorSvelte.toolbarHost().open) return;
         const rowTop = _dmsgToolbarTarget.offsetTop;
         const rowBottom = rowTop + _dmsgToolbarTarget.offsetHeight;
         const viewTop = domChatMessages.scrollTop;
@@ -203,20 +175,18 @@ function showMessageToolbar(rowEl) {
     // surfaces use press-and-hold (context menu) + swipe (reply) instead.
     if (platformFeatures?.is_mobile) return;
     initMessageToolbar();
-    if (!_dmsgToolbarEl) return;
 
     _dmsgToolbarTarget = rowEl;
     _dmsgCancelToolbarHide();
 
     const view = _dmsgToolbarView(rowEl);
     if (!view) {
-        _dmsgToolbarEl.hidden = true;
+        VectorSvelte.setToolbarHost({ open: false });
         return;
     }
     VectorSvelte.setMessageToolbar(view);
+    VectorSvelte.setToolbarHost({ open: true, target: rowEl.id });
     VectorSvelte.flushSync();
-    _dmsgToolbarEl.hidden = false;
-    _dmsgToolbarEl.dataset.target = rowEl.id;
     _dmsgPositionToolbar(rowEl);
 }
 
@@ -281,10 +251,8 @@ function _dmsgToolbarView(rowEl) {
 }
 
 function hideMessageToolbar() {
-    if (!_dmsgToolbarEl) return;
-    _dmsgToolbarEl.hidden = true;
+    VectorSvelte.setToolbarHost({ open: false, target: '' });
     _dmsgToolbarTarget = null;
-    delete _dmsgToolbarEl.dataset.target;
 }
 
 function _dmsgScheduleToolbarHide() {
@@ -300,14 +268,15 @@ function _dmsgCancelToolbarHide() {
 }
 
 function _dmsgPositionToolbar(rowEl) {
-    if (!_dmsgToolbarEl || !rowEl) return;
+    const hostEl = VectorSvelte.toolbarEls().host;
+    if (!hostEl || !rowEl) return;
 
     // Position is computed in the chat-messages SCROLL CONTENT coordinate space,
     // not the viewport — the toolbar is now an absolutely-positioned child of
     // domChatMessages, so it scrolls with the content automatically and no
     // per-frame reposition is needed during scroll.
-    const tbW = _dmsgToolbarEl.offsetWidth || 140;
-    const tbH = _dmsgToolbarEl.offsetHeight || 34;
+    const tbW = hostEl.offsetWidth || 140;
+    const tbH = hostEl.offsetHeight || 34;
     const rowTop = rowEl.offsetTop;
     const rowRight = rowEl.offsetLeft + rowEl.offsetWidth;
 
@@ -327,15 +296,14 @@ function _dmsgPositionToolbar(rowEl) {
     // Don't bleed off the left edge of the chat content area.
     if (left < 0) left = 0;
 
-    _dmsgToolbarEl.style.top = `${top}px`;
-    _dmsgToolbarEl.style.left = `${left}px`;
+    VectorSvelte.setToolbarHost({ top: `${top}px`, left: `${left}px` });
 }
 
 function _dmsgHandleToolbarClick(e) {
     const btn = e.target.closest('.dmsg-toolbar-btn');
     if (!btn) return;
     const action = btn.dataset.action;
-    const targetId = _dmsgToolbarEl.dataset.target;
+    const targetId = VectorSvelte.toolbarHost().target;
     if (!targetId) return;
     e.stopPropagation();
 
@@ -467,24 +435,9 @@ async function _dmsgConfirmAndDelete(targetMsgId, mode, opts) {
     }
 }
 
-/**
- * Open the emoji picker in reaction-mode for a given message.
- *
- * `openEmojiPanel` (in main.js) was originally wired to a click event on a
- * per-row `.add-reaction` chip, and to enter reaction-mode it inspects
- * `e.target.classList.contains('dmsg-react-trigger')` and walks up two parents
- * for the message id. Since the new shell has no per-row chip, we synthesize
- * a detached DOM tree with the right shape and pass it as `e.target`.
- */
+/** Open the emoji picker in reaction mode for a message. */
 function _dmsgOpenReactionPicker(targetMsgId) {
-    const fakeRoot = document.createElement('div');
-    fakeRoot.id = targetMsgId;
-    const fakeMid = document.createElement('div');
-    fakeRoot.appendChild(fakeMid);
-    const fakeBtn = document.createElement('span');
-    fakeBtn.classList.add('dmsg-react-trigger');
-    fakeMid.appendChild(fakeBtn);
-    openEmojiPanel({ target: fakeBtn });
+    openReactionPicker(targetMsgId);
 }
 
 /**
@@ -568,7 +521,6 @@ let _gLastDX = 0;
 let _gAxis = null;            // null until locked, then 'h' | 'v'
 let _gLongTimer = null;
 let _gLongFired = false;
-let _gSwipeIcon = null;
 let _dmsgRightClickHadSelection = false;
 
 function _dmsgClearLongTimer() {
@@ -582,67 +534,37 @@ function _dmsgCopyText(text) {
         .catch(() => showToast('Failed to Copy'));
 }
 
-function _dmsgEnsureSwipeIcon() {
-    // Shared, content-space child of domChatMessages (like the toolbar) so it
-    // tracks scroll for free. domChatMessages is wiped on chat switch, so
-    // rebuild when detached.
-    if (_gSwipeIcon && _gSwipeIcon.isConnected) return _gSwipeIcon;
-    const el = document.createElement('div');
-    el.className = 'dmsg-swipe-reply';
-    el.hidden = true;
-    const glyph = document.createElement('span');
-    glyph.className = 'dmsg-swipe-reply__icon icon icon-reply';
-    el.appendChild(glyph);
-    // Prepend, never append: the chip is positioned by computed coords, so DOM
-    // order is irrelevant to where it renders — but appending would make it the
-    // container's :last-child and steal the trailing margin from the last row.
-    domChatMessages.prepend(el);
-    _gSwipeIcon = el;
-    return el;
-}
 
 function _dmsgBeginSwipeVisual(rowEl) {
     rowEl.style.transition = 'none';
-    const icon = _dmsgEnsureSwipeIcon();
-    icon.hidden = false;
-    icon.classList.remove('past');
-    // Revert to the CSS transition (glow/border ease; transform + opacity are
-    // driven per-frame below, so they stay instant by not being listed there).
-    icon.style.transition = '';
-    icon.style.opacity = '0';
-    icon.style.transform = 'scale(0.4)';
-    icon.style.top = `${rowEl.offsetTop + (rowEl.offsetHeight / 2) - 18}px`;
-    // Pulled in from the right edge so the chip + accent glow clear the scrollbar.
-    icon.style.left = `${rowEl.offsetLeft + rowEl.offsetWidth - 58}px`;
+    // Transform and opacity are driven per frame, so they stay instant by not being in
+    // the transition; the glow and border ease through the stylesheet's own rule.
+    VectorSvelte.setToolbarSwipe({
+        visible: true, past: false, transition: '', opacity: '0', transform: 'scale(0.4)',
+        top: `${rowEl.offsetTop + (rowEl.offsetHeight / 2) - 18}px`,
+        // Pulled in from the right edge so the chip and its glow clear the scrollbar.
+        left: `${rowEl.offsetLeft + rowEl.offsetWidth - 58}px`,
+    });
 }
 
 function _dmsgUpdateSwipeVisual(rowEl, offset, past) {
     rowEl.style.transform = `translateX(${offset}px)`;
-    if (_gSwipeIcon) {
-        const p = Math.min(1, Math.abs(offset) / _G_SWIPE_TRIGGER);
-        _gSwipeIcon.style.opacity = String(p);
-        // Scale up as the gesture nears commit; the pop past threshold is a
-        // one-shot keyframe on the inner glyph (see CSS), so no conflict here.
-        _gSwipeIcon.style.transform = `scale(${(0.4 + 0.6 * p).toFixed(3)})`;
-        _gSwipeIcon.classList.toggle('past', past);
-    }
+    const p = Math.min(1, Math.abs(offset) / _G_SWIPE_TRIGGER);
+    // Scales up as the gesture nears commit; the pop past threshold is a one-shot
+    // keyframe on the inner glyph.
+    VectorSvelte.setToolbarSwipe({ opacity: String(p), transform: `scale(${(0.4 + 0.6 * p).toFixed(3)})`, past });
 }
 
 function _dmsgResetSwipe(animate, rowEl, spring) {
     if (rowEl) {
-        // Non-committed let-go gets a small springy overshoot; a committed
-        // swipe returns flat (it's handing off to reply mode).
+        // A let-go short of commit gets a small springy overshoot; a committed swipe
+        // returns flat, handing off to reply mode.
         if (!animate) rowEl.style.transition = 'none';
         else if (spring) rowEl.style.transition = 'transform 0.3s cubic-bezier(0.34, 1.4, 0.7, 1)';
         else rowEl.style.transition = 'transform 0.18s ease';
         rowEl.style.transform = '';
     }
-    if (_gSwipeIcon) {
-        _gSwipeIcon.style.transition = animate ? 'opacity 0.2s ease, transform 0.2s ease' : 'none';
-        _gSwipeIcon.style.opacity = '0';
-        _gSwipeIcon.style.transform = 'scale(0.4)';
-        _gSwipeIcon.classList.remove('past');
-    }
+    VectorSvelte.setToolbarSwipe({ transition: animate ? 'opacity 0.2s ease, transform 0.2s ease' : 'none', opacity: '0', transform: 'scale(0.4)', past: false });
 }
 
 function _dmsgInitGestures() {
