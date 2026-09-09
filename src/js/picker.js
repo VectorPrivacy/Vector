@@ -21,29 +21,24 @@
  *   - message-row.js    — dmsgReactOptimistic
  */
 
-const picker = document.querySelector('.emoji-picker');
-
-// Dismiss the shared emoji tooltip whenever the picker leaves the
-// `visible` state — handles keyboard-driven closes (Enter / Esc),
-// where the mouse never moves so the usual mouseleave path doesn't
-// fire. One observer covers every close site without sprinkling
-// `hideEmojiTooltip()` calls throughout. The same observer drives the
-// Android back-stack push/pop so the panel can be dismissed with the
-// hardware back button from any of its many open sites.
-if (picker) {
-    new MutationObserver(() => {
-        if (picker.classList.contains('visible')) {
-            pushBack('emoji-picker', () => {
-                picker.classList.remove('visible');
-                picker.style.bottom = '';
-                VectorSvelte.setEmojiIcon('smile');
-            });
-        } else {
-            hideEmojiTooltip();
-            popBack('emoji-picker');
-        }
-    }).observe(picker, { attributes: true, attributeFilter: ['class'] });
-}
+// The root is the component's; its visibility drives the Android back stack and dismisses
+// the shared tooltip on keyboard-driven closes (no mouse leaves, so no mouseleave).
+VectorSvelte.setPickerVisibilityHandler((visible) => {
+    if (visible) {
+        pushBack('emoji-picker', () => {
+            VectorSvelte.setPickerVisible(false);
+            VectorSvelte.setPickerBottom('');
+        });
+    } else {
+        hideEmojiTooltip();
+        popBack('emoji-picker');
+        // A close lands back in emoji mode with the composer's face at rest; the GIF page
+        // reloads on the next open.
+        setPickerMode(PICKER_MODE_EMOJI);
+        trendingGifsLoaded = false;
+        VectorSvelte.setEmojiIcon('smile');
+    }
+});
 
 // The panel's chrome is a component over the root. The hosts it hands back are what the
 // scroll spy, rail follow, jump-scroll and keyboard paths work on; everything the
@@ -56,6 +51,10 @@ const _cropperEls = { stage: null, img: null, box: null, preview: null, cancel: 
 const _pickerPanelHelpers = {
     mounted: (els) => { Object.assign(_pickerEls, els); emojiSearch = els.search; },
     searchInput: (e) => _onSearchInput(e),
+    // The root's own click routing: pack emoji first (capture, it stops the event), then
+    // the stock grids' spans and images.
+    rootClickCapture: (e) => _onPackEmojiClick(e),
+    rootClick: (e) => { _onEmojiSpanClick(e); _onEmojiImgClick(e); },
     searchKeydown: (e) => _onSearchKeydown(e),
     setMode: (mode) => setPickerMode(mode === 'gif' ? PICKER_MODE_GIF : PICKER_MODE_EMOJI),
     railClick: (e) => _onRailClick(e),
@@ -126,7 +125,7 @@ const _pickerPanelHelpers = {
     },
 };
 // Synchronous: the listeners and observers below need the hosts at load.
-VectorSvelte.mountPickerPanel(picker, { h: _pickerPanelHelpers });
+VectorSvelte.setPickerHandlers(_pickerPanelHelpers);
 VectorSvelte.flushSync();
 /**
  * The current reaction reference - i.e: a message being reacted to.
@@ -146,33 +145,16 @@ let _emojiPanelTarget = null;
  * above the dialog overlay. Mirrors openEmojiPanel's deferred-render shape so
  * the open transition starts this frame and content fills in after.
  */
-/**
- * Move the panel's anchor WITHOUT animating the move. The panel transitions
- * `transform`, and its anchor lives in that same property — so swapping anchors
- * while closed slides it sideways over 300ms, and an open starting inside that
- * window interpolates both at once and rises diagonally. Suppress, swap, commit,
- * restore: the anchor teleports, only the open/close is ever animated.
- */
-function _setPickerAnchor(mutate) {
-    picker.style.transition = 'none';
-    mutate();
-    void picker.offsetWidth;
-    picker.style.transition = '';
-}
 
 function openEmojiPanelForStatus(onInsert) {
     _emojiPanelTarget = { insert: onInsert };
     setPickerMode(PICKER_MODE_EMOJI);
-    _setPickerAnchor(() => {
-        picker.classList.add('emoji-picker-status-mode', 'emoji-picker-no-gifs');
-        picker.classList.remove('emoji-picker-message-type');
-        picker.style.bottom = '';
-    });
-    picker.classList.add('visible');
+    VectorSvelte.setPickerAnchor({ statusMode: true, noGifs: true, messageType: false, bottom: '' });
+    VectorSvelte.setPickerVisible(true);
     requestAnimationFrame(() => requestAnimationFrame(async () => {
-        if (!picker.classList.contains('visible')) return;
+        if (!VectorSvelte.pickerVisible()) return;
         await loadEmojiUsage();
-        if (!picker.classList.contains('visible')) return;
+        if (!VectorSvelte.pickerVisible()) return;
         resetEmojiPicker();
         renderEmojiPanel();
         if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -201,7 +183,8 @@ function openEmojiPanel(e) {
     // Don't close if clicking inside the picker itself. The path is read rather than
     // the target's ancestry: a panel control that unmounts on click is detached by
     // the time this document listener runs.
-    if (picker.contains(e.target) || (e.composedPath?.() || []).includes(picker)) return;
+    const root = VectorSvelte.pickerEls().root;
+    if (root.contains(e.target) || (e.composedPath?.() || []).includes(root)) return;
 
     // Open or Close the panel depending on it's state
     // `dmsg-react-trigger` is the synthetic class added by the floating
@@ -209,7 +192,7 @@ function openEmojiPanel(e) {
     // exists solely as a routing token between the toolbar and this handler.
     const strReaction = e.target.classList.contains('dmsg-react-trigger') ? e.target.parentElement.parentElement.id : '';
     const fClickedInputOrReaction = isDefaultPanel || strReaction;
-    if (fClickedInputOrReaction && !picker.classList.contains('visible')) {
+    if (fClickedInputOrReaction && !VectorSvelte.pickerVisible()) {
         // Close attachment panel if open
         if (domAttachmentPanel.classList.contains('visible')) {
             closeAttachmentPanel();
@@ -224,20 +207,14 @@ function openEmojiPanel(e) {
 
         // Read chat-box height while the layout is still clean (before .visible
         // and before the deferred render mutates panel DOM) to avoid a reflow.
-        const chatBox = document.getElementById('chat-box');
+        const chatBox = VectorSvelte.composerEls().box;
         const bottomPx = chatBox ? (chatBox.getBoundingClientRect().height + 10) + 'px' : '';
 
         // A status open may still be exiting; its centred anchor must not carry
         // into this one, and the swap has to settle before `visible` animates.
-        if (picker.classList.contains('emoji-picker-status-mode')) {
-            _setPickerAnchor(() => picker.classList.remove('emoji-picker-status-mode', 'emoji-picker-no-gifs'));
-        }
-        picker.classList.add('visible');
-        picker.classList.add('emoji-picker-message-type');
-        if (bottomPx) picker.style.bottom = bottomPx;
-        picker.style.top = '';
-        picker.style.left = '';
-        picker.style.right = '';
+        if (VectorSvelte.pickerRoot().statusMode) VectorSvelte.setPickerAnchor({ statusMode: false, noGifs: false });
+        VectorSvelte.setPickerAnchor({ messageType: true, bottom: bottomPx || '' }, false);
+        VectorSvelte.setPickerVisible(true);
 
         // Swap the emoji button to a wink while open (message input only).
         if (isDefaultPanel) {
@@ -252,13 +229,13 @@ function openEmojiPanel(e) {
         // fires the frame after (content fills in, ~16ms into the 300ms slide). ---
         requestAnimationFrame(() => requestAnimationFrame(async () => {
             // Bail if the panel was closed again before this fired.
-            if (!picker.classList.contains('visible')) return;
+            if (!VectorSvelte.pickerVisible()) return;
 
             // Hydrate recents/search ranking from the per-account usage store
             // (fast IPC; also picks up the active account after a swap). Re-check
             // visibility after the await in case the panel closed meanwhile.
             await loadEmojiUsage();
-            if (!picker.classList.contains('visible')) return;
+            if (!VectorSvelte.pickerVisible()) return;
 
             resetEmojiPicker();
             renderEmojiPanel();
@@ -300,16 +277,14 @@ function closeEmojiPanel() {
     emojiSearch.value = '';
     // Auto-save any in-progress pack edit before the panel disappears.
     if (_pc.open) closeEmojiPackCreator();
-    picker.classList.remove('visible');
+    VectorSvelte.setPickerVisible(false);
     // The anchor classes outlive the exit: dropping them now retargets the
     // transform mid-flight and the panel leaves at an angle. Re-opening inside
     // the window must not have its own classes stripped by this timer.
     setTimeout(() => {
-        if (!picker.classList.contains('visible')) {
-            _setPickerAnchor(() => picker.classList.remove('emoji-picker-status-mode', 'emoji-picker-no-gifs'));
-        }
+        if (!VectorSvelte.pickerVisible()) VectorSvelte.setPickerAnchor({ statusMode: false, noGifs: false });
     }, 320);
-    picker.style.bottom = ''; // Reset to CSS default
+    VectorSvelte.setPickerBottom('');
     strCurrentReactionReference = '';
     // Drop the canvas rAF so we don't tick under opacity:0.
     _stopPackCanvasLoop();
@@ -1037,7 +1012,7 @@ async function _sharePackToClipboard(pack) {
         if (typeof showToast === 'function') showToast('Copied to Clipboard');
         // Close the picker so the user lands back in their chat ready
         // to paste the link they just copied.
-        picker.classList.remove('visible');
+        VectorSvelte.setPickerVisible(false);
     } catch (e) {
         console.warn('[emoji-packs] share-copy failed:', e);
         if (typeof showToast === 'function') showToast('Failed to Copy');
@@ -1978,7 +1953,6 @@ const PACK_CANVAS_FRAME_SLACK_MS = 4;
 // All callers share the same tooltip node so simultaneously-hovered
 // elements can't double up, and the styling stays consistent.
 
-let _emojiTooltipEl = null;
 let _emojiTooltipTimer = null;
 let _emojiTooltipCurrentAnchor = null;
 let _emojiTooltipWatchdog = null;
@@ -2018,30 +1992,10 @@ function _supportsHoverTooltip() {
     return typeof platformFeatures !== 'undefined' && platformFeatures !== null && !platformFeatures.is_mobile;
 }
 
-function _ensureEmojiTooltip() {
-    if (_emojiTooltipEl) return _emojiTooltipEl;
-    _emojiTooltipEl = document.createElement('div');
-    _emojiTooltipEl.className = 'emoji-pack-canvas-tooltip';
-    document.body.appendChild(_emojiTooltipEl);
-    return _emojiTooltipEl;
-}
 
-// Keep the tooltip this far from the viewport edge when clamping.
-const EMOJI_TOOLTIP_VIEWPORT_MARGIN = 6;
 
 function showEmojiTooltipAt(text, x, y) {
-    const el = _ensureEmojiTooltip();
-    el.textContent = text;
-    // The tooltip is centre-anchored (translateX(-50%)) and nowrap, so a long
-    // shortcode near a screen edge would overflow. Measure now — layout is live
-    // even at opacity:0 — and clamp the centre so both edges stay on-screen.
-    const half = el.offsetWidth / 2;
-    const min = EMOJI_TOOLTIP_VIEWPORT_MARGIN + half;
-    const max = window.innerWidth - EMOJI_TOOLTIP_VIEWPORT_MARGIN - half;
-    const cx = max < min ? window.innerWidth / 2 : Math.min(max, Math.max(min, x));
-    el.style.left = `${cx}px`;
-    el.style.top = `${y}px`;
-    el.classList.add('is-visible');
+    VectorSvelte.showPickerTip(text, x, y);
 }
 
 function hideEmojiTooltip() {
@@ -2054,7 +2008,7 @@ function hideEmojiTooltip() {
         _emojiTooltipTimer = null;
     }
     _emojiTooltipCurrentAnchor = null;
-    if (_emojiTooltipEl) _emojiTooltipEl.classList.remove('is-visible');
+    VectorSvelte.hidePickerTip();
 }
 
 function scheduleEmojiTooltipAt(text, x, y, delay = PACK_CANVAS_TOOLTIP_DELAY_MS) {
@@ -3412,9 +3366,9 @@ function _pcShowError(pretitle, detail, opts = {}) {
     // surfaces. Without this, an error triggered from the deep-link
     // modal / in-chat preview would sit invisible until the user
     // opens the picker themselves.
-    if (typeof picker !== 'undefined' && picker && !picker.classList.contains('visible')) {
-        picker.classList.add('visible');
-        picker.classList.add('emoji-picker-message-type');
+    if (!VectorSvelte.pickerVisible()) {
+        VectorSvelte.setPickerAnchor({ messageType: true }, false);
+        VectorSvelte.setPickerVisible(true);
     }
     VectorSvelte.setPickerError({ pretitle, detail, title: opts.title || '', button: opts.buttonText || '' });
 }
@@ -4138,12 +4092,12 @@ function _handlePackEmojiSelect(pack, emoji, keepOpen = false) {
         }
         // Shift keeps the panel open for rapid multi-react (mirrors compose
         // multi-insert), until the message hits its reaction display ceiling.
-        if (!keepOpen || _reactionRowAtCapacity(strCurrentReactionReference)) picker.classList.remove('visible');
+        if (!keepOpen || _reactionRowAtCapacity(strCurrentReactionReference)) VectorSvelte.setPickerVisible(false);
         return;
     }
     insertAtCursor(`:${code}:`, true);
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
-    if (!keepOpen) picker.classList.remove('visible');
+    if (!keepOpen) VectorSvelte.setPickerVisible(false);
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
@@ -4484,7 +4438,7 @@ function insertAtCursor(text, autoSpace = false) {
 // (their renderer resolves the shortcode against their own pack list).
 // Phase 2 will add the NIP-30 `emoji` tag to the outbound rumor so
 // rendering doesn't depend on the recipient already having the pack.
-picker.addEventListener('click', (e) => {
+function _onPackEmojiClick(e) {
     const span = e.target.closest('.emoji-pack-emoji');
     if (!span) return;
     e.stopPropagation();
@@ -4499,19 +4453,19 @@ picker.addEventListener('click', (e) => {
         }
         // Shift keeps the panel open for rapid multi-react (mirrors compose
         // multi-insert), until the message hits its reaction display ceiling.
-        if (!e.shiftKey || _reactionRowAtCapacity(strCurrentReactionReference)) picker.classList.remove('visible');
+        if (!e.shiftKey || _reactionRowAtCapacity(strCurrentReactionReference)) VectorSvelte.setPickerVisible(false);
         return;
     }
     insertAtCursor(`:${shortcode}:`, true);
     // Shift-click keeps the panel open for rapid multi-insert (Discord-style).
-    if (!e.shiftKey) picker.classList.remove('visible');
+    if (!e.shiftKey) VectorSvelte.setPickerVisible(false);
     if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
         if (!_emojiPanelTarget) domChatMessageInput.focus();
     }
-}, true);
+}
 
 // Emoji selection handler
-picker.addEventListener('click', (e) => {
+function _onEmojiSpanClick(e) {
     if (e.target.tagName === 'SPAN' && e.target.parentElement.classList.contains('emoji-grid')) {
         const char = e.target.dataset.emoji;
         const cEmoji = arrEmojis.find(e => e.emoji === char);
@@ -4543,7 +4497,7 @@ picker.addEventListener('click', (e) => {
             // (Discord-style); release shift, Escape, or click away to dismiss.
             // A reaction that fills the display ceiling also closes.
             if (!e.shiftKey || (strCurrentReactionReference && _reactionRowAtCapacity(strCurrentReactionReference))) {
-                picker.classList.remove('visible');
+                VectorSvelte.setPickerVisible(false);
             }
             // Focus chat input (desktop only - mobile keyboards are disruptive)
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -4551,7 +4505,7 @@ picker.addEventListener('click', (e) => {
             }
         }
     }
-});
+}
 
 // When hitting Enter on the emoji search - choose the first emoji/GIF
 async function _onSearchKeydown(e) {
@@ -4591,7 +4545,7 @@ async function _onSearchKeydown(e) {
                 insertAtCursor(`:${packShortcode}:`, true);
             }
             emojiSearch.value = '';
-            picker.classList.remove('visible');
+            VectorSvelte.setPickerVisible(false);
             strCurrentReactionReference = '';
             VectorSvelte.setEmojiIcon('smile');
             if (platformFeatures.os !== 'android' && platformFeatures.os !== 'ios') {
@@ -4630,7 +4584,7 @@ async function _onSearchKeydown(e) {
 
         // Reset the UI state - use class instead of inline style
         emojiSearch.value = '';
-        picker.classList.remove('visible');
+        VectorSvelte.setPickerVisible(false);
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
@@ -4649,7 +4603,7 @@ async function _onSearchKeydown(e) {
 
         // Close the emoji dialog - use class instead of inline style
         emojiSearch.value = '';
-        picker.classList.remove('visible');
+        VectorSvelte.setPickerVisible(false);
         strCurrentReactionReference = '';
 
         // Change the emoji button to the regular face
@@ -4668,7 +4622,7 @@ async function _onSearchKeydown(e) {
 }
 
 // Emoji selection
-picker.addEventListener('click', (e) => {
+function _onEmojiImgClick(e) {
     if (e.target.tagName === 'IMG') {
         // Register the click in the emoji-dex
         const cEmoji = arrEmojis.find(a => a.emoji === e.target.alt);
@@ -4693,7 +4647,7 @@ picker.addEventListener('click', (e) => {
             }
         }
     }
-});
+}
 
 // ==================== GIF PICKER ====================
 
@@ -4877,7 +4831,7 @@ function setPickerMode(mode) {
 
     // Auto-focus search box on desktop only (mobile keyboards are intrusive)
     // Only focus if the picker is actually visible to avoid stealing focus
-    if (!platformFeatures.is_mobile && picker.classList.contains('visible')) {
+    if (!platformFeatures.is_mobile && VectorSvelte.pickerVisible()) {
         emojiSearch.focus();
     }
 }
@@ -5173,8 +5127,8 @@ function selectGif(gifId) {
     insertAtCursor(gifUrl, true);
 
     // Close the picker
-    picker.classList.remove('visible');
-    picker.style.bottom = '';
+    VectorSvelte.setPickerVisible(false);
+    VectorSvelte.setPickerBottom('');
     VectorSvelte.setEmojiIcon('smile');
 
     // Reset picker state
@@ -5210,16 +5164,3 @@ function _onGifGridScroll() {
     }
 }
 
-// Reset picker mode when panel closes
-const originalCloseObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-        if (mutation.attributeName === 'class') {
-            if (!picker.classList.contains('visible')) {
-                // Reset to emoji mode when panel closes
-                setPickerMode(PICKER_MODE_EMOJI);
-                trendingGifsLoaded = false;
-            }
-        }
-    }
-});
-originalCloseObserver.observe(picker, { attributes: true });

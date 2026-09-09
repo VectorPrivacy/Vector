@@ -38,3 +38,43 @@ export function setPickerConfirm(c) { panel.confirm = c; }
 export function setPickerNaming(n) { panel.naming = n; }
 export function setPickerNamingError(message) { if (panel.naming) panel.naming.error = message || ''; }
 export function setPickerCropperOpen(open) { panel.cropperOpen = !!open; }
+
+// The panel's root: its visibility, anchor classes and bottom offset. Every open and
+// close in the app writes here; PickerRoot paints it. `teleporting` suppresses the
+// transform transition for one frame so an anchor swap while closed does not slide.
+import { flushSync } from 'svelte';
+const root = $state({ visible: false, statusMode: false, noGifs: false, messageType: false, bottom: '', teleporting: false });
+const rootEls = $state.raw({ root: null });
+let handlers = $state.raw(null);   // the app's bag for PickerPanel
+let onVisibility = null;
+export function pickerRoot() { return root; }
+export function pickerEls() { return rootEls; }
+export function setPickerRootEl(el) { rootEls.root = el; }
+export function pickerHandlers() { return handlers; }
+export function setPickerHandlers(h) { handlers = h; }
+export function setPickerVisibilityHandler(fn) { onVisibility = fn; }
+export function pickerVisible() { return root.visible; }
+export function setPickerVisible(on) {
+    if (root.visible === !!on) return;
+    root.visible = !!on;
+    flushSync();
+    onVisibility?.(root.visible);
+}
+export function setPickerBottom(px) { root.bottom = px || ''; }
+/** Swap the anchor classes; with `teleport` the move commits before the next transition. */
+export function setPickerAnchor(fields, teleport = true) {
+    if (teleport) { root.teleporting = true; flushSync(); }
+    Object.assign(root, fields);
+    if (teleport) {
+        flushSync();
+        void rootEls.root?.offsetWidth;
+        root.teleporting = false;
+        flushSync();
+    }
+}
+
+// The canvas grids' per-cell tooltip: centre-anchored, clamped inside the viewport.
+const tip = $state({ text: '', x: 0, y: 0, visible: false });
+export function pickerTip() { return tip; }
+export function showPickerTip(text, x, y) { tip.text = text; tip.x = x; tip.y = y; tip.visible = true; }
+export function hidePickerTip() { tip.visible = false; }

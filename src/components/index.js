@@ -30,7 +30,6 @@ import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
 import PackDetailsOverlay from './picker/PackDetailsOverlay.svelte';
-import PickerPanel from './picker/PickerPanel.svelte';
 import ModList from './moderation/ModList.svelte';
 import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
@@ -128,6 +127,7 @@ export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
 export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, noticeState, setNotice, clearNotices, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
+export { setPickerHandlers, setPickerVisibilityHandler, pickerVisible, setPickerVisible, setPickerBottom, setPickerAnchor, pickerRoot, pickerEls, showPickerTip, hidePickerTip } from './lib/picker.svelte.js';
 // The send-file preview overlay's state.
 export {
     filePreview, filePreviewContent, openFilePreview as fpOpen, closeFilePreview as fpClose,
@@ -286,11 +286,6 @@ export function mountFileBox(target, props) {
     return inst;
 }
 
-/** Mount the emoji / GIF picker into its root (`.emoji-picker`); the root stays the app's anchor. */
-export function mountPickerPanel(root, { h }) {
-    root.replaceChildren();
-    return mount(PickerPanel, { target: root, props: { h } });
-}
 
 /** Mount one in-chat pack preview card into `target`; returns the instance for teardown. */
 export function mountPackPreviewCard(target, props) {

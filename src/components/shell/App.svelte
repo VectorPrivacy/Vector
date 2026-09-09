@@ -8,6 +8,8 @@
     import ChatPane from './ChatPane.svelte';
     import GroupOverviewPane from './GroupOverviewPane.svelte';
     import ProfileSwitcher from './ProfileSwitcher.svelte';
+    import PickerRoot from '../picker/PickerRoot.svelte';
+    import PickerTooltip from '../picker/PickerTooltip.svelte';
     import Tooltip from './Tooltip.svelte';
     const panes = shellPanes();
 </script>
@@ -17,7 +19,7 @@
 <div id="pack-details-overlay" class="pack-details-overlay" hidden></div>
 
 <main class="container">
-    <div class="emoji-picker" tabindex="-1"></div>
+    <PickerRoot />
     <div class="attachment-panel" id="attachment-panel" tabindex="-1"></div>
     <div class="marketplace-panel" id="marketplace-panel" style="display: none;"></div>
     <div class="app-details-panel" id="app-details-panel" style="display: none;"></div>
@@ -51,3 +53,4 @@
 
 <Tooltip />
 <ProfileSwitcher />
+<PickerTooltip />
