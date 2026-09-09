@@ -31,6 +31,9 @@ export const relayInfoDialog = fadeDialog({
 export const blossomInfoDialog = fadeDialog({ url: '', enabled: true, isCustom: false });
 
 export const launchDialog = fadeDialog({ name: '', actionText: 'Play', updateMode: false, icon: null });
+let launchHandlers = $state.raw(null);
+export function launchDialogHandlers() { return launchHandlers; }
+export function setLaunchDialogHandlers(h) { launchHandlers = h; }
 
 // Pop-in overlays: display flips with `active`, the card replays its pop animation when
 // `pop` moves (the component adds the class after the overlay has rendered, because

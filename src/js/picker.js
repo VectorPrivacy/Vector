@@ -13,7 +13,6 @@
  *   - emoji.js   — arrEmojis, searchEmojis, getMostUsedEmojis
  *   - twemoji    — twemojify
  *   - main.js    — domChatMessageInput; the box's buttons via composerEls(),
- *                  domAttachmentPanel, domMiniAppLaunchOverlay,
  *                  closeAttachmentPanel, platformFeatures, arrChats
  *   - miniapps-panel.js — closeMiniAppLaunchDialog
  *   - message-row.js    — dmsgReactOptimistic
@@ -198,7 +197,7 @@ function _openPanel({ isDefaultPanel, reactionId }) {
     const strReaction = reactionId;
     {
         // Close attachment panel if open
-        if (domAttachmentPanel.classList.contains('visible')) {
+        if (VectorSvelte.attachmentVisible()) {
             closeAttachmentPanel();
         }
 
@@ -4600,7 +4599,7 @@ async function _onSearchKeydown(e) {
         }
     } else if (e.code === 'Escape') {
         // Close the Mini App launch dialog if open
-        if (domMiniAppLaunchOverlay.classList.contains('active')) {
+        if (VectorSvelte.launchDialog.state().active) {
             closeMiniAppLaunchDialog();
             return;
         }
@@ -4614,7 +4613,7 @@ async function _onSearchKeydown(e) {
         VectorSvelte.setEmojiIcon('smile');
 
         // Close the attachment panel if open
-        if (domAttachmentPanel.classList.contains('visible')) {
+        if (VectorSvelte.attachmentVisible()) {
             closeAttachmentPanel();
         }
 

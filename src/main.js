@@ -239,10 +239,6 @@ function buildRichComposer(host) {
     composer.el.id = 'chat-input';
     return composer;
 }
-const domAttachmentPanel = document.getElementById('attachment-panel');
-const domMarketplacePanel = document.getElementById('marketplace-panel');
-const domAppDetailsPanel = document.getElementById('app-details-panel');
-const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
 
 
 // Create Group UI refs
@@ -303,28 +299,19 @@ async function runWithTorBootstrapStatus(fn) {
 // Mirror the attachment panel's `.visible` class into the Android back stack
 // so the hardware back press dismisses it from any open site (toggle button,
 // outside click, send finish, miniapp launch).
-if (domAttachmentPanel) {
-    new MutationObserver(() => {
-        if (domAttachmentPanel.classList.contains('visible')) {
-            pushBack('attachment-panel', closeAttachmentPanel);
-        } else {
-            popBack('attachment-panel');
-        }
-    }).observe(domAttachmentPanel, { attributes: true, attributeFilter: ['class'] });
-}
+VectorSvelte.onAttachmentVisibility((visible) => {
+    if (visible) pushBack('attachment-panel', closeAttachmentPanel);
+    else popBack('attachment-panel');
+});
 
 function toggleAttachmentPanel() {
-    if (!domAttachmentPanel.classList.contains('visible')) {
-        // Close emoji panel if open
+    if (!VectorSvelte.attachmentVisible()) {
         if (VectorSvelte.pickerVisible()) closeEmojiPanel();
 
-        // Display the attachment panel
-        domAttachmentPanel.classList.add('visible');
-        VectorSvelte.setAttachmentOpen(true);
-
-        // Position attachment panel dynamically above the chat-box
+        // Above the composer, whatever height its draft has grown it to.
         const chatBoxHeight = VectorSvelte.composerEls().box.getBoundingClientRect().height;
-        domAttachmentPanel.style.bottom = (chatBoxHeight + 10) + 'px';
+        VectorSvelte.setAttachmentVisible(true, (chatBoxHeight + 10) + 'px');
+        VectorSvelte.setAttachmentOpen(true);
         
         // Commands: only in chats with known bots; grayed while a draft exists.
         const showCmds = !!(commandCtrl && commandCtrl.hasBots && commandCtrl.hasBots());
@@ -343,8 +330,7 @@ function toggleAttachmentPanel() {
  * Closes the Attachment Panel
  */
 function closeAttachmentPanel() {
-    domAttachmentPanel.classList.remove('visible');
-    domAttachmentPanel.style.bottom = '';
+    VectorSvelte.setAttachmentVisible(false);
     VectorSvelte.setAttachmentOpen(false);
     // Deactivate edit mode if active
     deactivateMiniAppsEditMode();
@@ -2413,9 +2399,10 @@ document.addEventListener('click', (e) => {
     openEmojiPanel(e);
 
     // Close attachment panel when clicking outside of it
-    if (domAttachmentPanel.classList.contains('visible')) {
+    if (VectorSvelte.attachmentVisible()) {
         // The path, not contains: a view switch unmounts the clicked button before this runs.
-        const clickedInsidePanel = domAttachmentPanel.contains(e.target) || (e.composedPath?.() || []).includes(domAttachmentPanel);
+        const panelEl = VectorSvelte.attachmentEls().root;
+        const clickedInsidePanel = panelEl.contains(e.target) || (e.composedPath?.() || []).includes(panelEl);
         const clickedFileButton = VectorSvelte.composerEls().file.contains(e.target);
         // Don't close if clicking inside PIVX dialogs, popup prompts, or Mini App launch dialog
         const clickedInsidePivxDialog = e.target.closest('.pivx-dialog-overlay');

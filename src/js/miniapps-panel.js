@@ -31,12 +31,10 @@ async function showAttachmentPanelMiniApps() {
  * Shows the marketplace panel
  */
 function showMarketplacePanel() {
-    if (domMarketplacePanel) {
-        pushBack('marketplace', () => { hideMarketplacePanel(); });
-        domMarketplacePanel.style.display = 'flex';
-        // Initialize marketplace on first show
-        initMarketplace();
-    }
+    pushBack('marketplace', () => { hideMarketplacePanel(); });
+    ensureMarketplaceIslands();
+    VectorSvelte.mktOpenPanel();
+    initMarketplace();
 }
 
 /**
@@ -44,20 +42,9 @@ function showMarketplacePanel() {
  * @returns {Promise<void>} Resolves when the animation completes
  */
 function hideMarketplacePanel() {
-    return new Promise((resolve) => {
-        if (domMarketplacePanel && domMarketplacePanel.style.display !== 'none') {
-            popBack('marketplace');
-            domMarketplacePanel.classList.add('closing');
-            domMarketplacePanel.addEventListener('animationend', function handler() {
-                domMarketplacePanel.removeEventListener('animationend', handler);
-                domMarketplacePanel.style.display = 'none';
-                domMarketplacePanel.classList.remove('closing');
-                resolve();
-            });
-        } else {
-            resolve();
-        }
-    });
+    if (!VectorSvelte.mktState().panelOpen) return Promise.resolve();
+    popBack('marketplace');
+    return VectorSvelte.mktClosePanel('panel');
 }
 
 // The grid is a Svelte island over lib/miniappsgrid.svelte.js; this side reads
@@ -714,7 +701,7 @@ async function openMiniAppFromHistory(app) {
 
 /** Mount the attachment panel and the launch dialog. */
 async function wireMiniAppsUi() {
-    VectorSvelte.mountAttachmentPanel(domAttachmentPanel, { h: {
+    VectorSvelte.setAttachmentHandlers({
         file: attachmentPickFile,
         folder: attachmentPickFolder,
         // Commands: bot chats only. Drops a `/` into the composer and opens the command list.
@@ -741,9 +728,9 @@ async function wireMiniAppsUi() {
             withdraw: showPivxWithdrawDialog,
             settings: showPivxSettingsDialog,
         },
-    } });
+    });
 
-    VectorSvelte.mountLaunchDialog(domMiniAppLaunchOverlay, { h: {
+    VectorSvelte.setLaunchDialogHandlers({
         cancel: closeMiniAppLaunchDialog, solo: playMiniAppSolo, invite: playMiniAppAndInvite,
-    } });
+    });
 }

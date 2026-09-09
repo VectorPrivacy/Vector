@@ -1,7 +1,31 @@
 // The Nexus (marketplace) state: the app catalogue, search and category filters, the
 // per-app action in flight (install, update, launch, uninstall), resolved icons, and the
 // details panel's app and permissions. Apps are replaced as whole objects on change.
-const m = $state({ query: '', filters: [], loading: false, error: '', animate: false, detailsId: null });
+const m = $state({ query: '', filters: [], loading: false, error: '', animate: false, detailsId: null,
+    panelOpen: false, panelClosing: false, detailsOpen: false, detailsClosing: false });
+let handlers = $state.raw(null);
+const closeWaiters = new Map();   // 'panel' | 'details' → resolve, settled by the closing animation's end
+export function mktHandlers() { return handlers; }
+export function setMarketplaceHandlers(h) { handlers = h; }
+export function mktOpenPanel() { m.panelClosing = false; m.panelOpen = true; }
+export function mktOpenDetailsPanel() { m.detailsClosing = false; m.detailsOpen = true; }
+/** Play the closing animation; resolves once it ends (immediately when not open). */
+export function mktClosePanel(which) {
+    const open = which === 'panel' ? m.panelOpen : m.detailsOpen;
+    if (!open) return Promise.resolve();
+    return new Promise((resolve) => {
+        closeWaiters.set(which, resolve);
+        if (which === 'panel') m.panelClosing = true; else m.detailsClosing = true;
+        // A frozen or disabled animation never ends; the close must not hang on it.
+        setTimeout(() => { if (closeWaiters.get(which) === resolve) mktClosingEnded(which); }, 400);
+    });
+}
+export function mktClosingEnded(which) {
+    if (which === 'panel') { m.panelOpen = false; m.panelClosing = false; }
+    else { m.detailsOpen = false; m.detailsClosing = false; }
+    closeWaiters.get(which)?.();
+    closeWaiters.delete(which);
+}
 let apps = $state.raw([]);
 let actions = $state.raw(new Map());
 let icons = $state.raw(new Map());

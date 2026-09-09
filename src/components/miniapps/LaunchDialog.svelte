@@ -1,17 +1,13 @@
 <script>
     // The mini app launch choice: play alone, play and invite the open chat, or update
-    // when the Nexus has a newer version. Renders inside the overlay container, which
-    // keeps the `active` class so the panel's outside-click and Escape checks still see it.
+    // when the Nexus has a newer version. Owns its overlay element; a backdrop click cancels.
     import { launchDialog } from '../lib/dialogs.svelte.js';
-    let { container, h } = $props();   // h: cancel(), solo(), invite()
+    let { h } = $props();   // h: cancel(), solo(), invite()
     const st = launchDialog.state();
-    $effect(() => { container.classList.toggle('active', st.active); });
-    $effect(() => {
-        const onClick = (e) => { if (e.target === container) h.cancel(); };
-        container.addEventListener('click', onClick);
-        return () => container.removeEventListener('click', onClick);
-    });
 </script>
+
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="miniapp-launch-overlay" id="miniapp-launch-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.cancel(); }}>
 
 {#if st.open}
     <div class="miniapp-launch-container">
@@ -30,3 +26,4 @@
         </div>
     </div>
 {/if}
+</div>

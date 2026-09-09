@@ -35,16 +35,14 @@ import PolicyDesigner from './moderation/PolicyDesigner.svelte';
 import AddRelayDialog from './settings/AddRelayDialog.svelte';
 import RelayInfoDialog from './settings/RelayInfoDialog.svelte';
 import BlossomInfoDialog from './settings/BlossomInfoDialog.svelte';
-import LaunchDialog from './miniapps/LaunchDialog.svelte';
-import AttachmentPanel from './miniapps/AttachmentPanel.svelte';
 import DepositDialog from './miniapps/pivx/DepositDialog.svelte';
 import SendDialog from './miniapps/pivx/SendDialog.svelte';
 import WithdrawDialog from './miniapps/pivx/WithdrawDialog.svelte';
 import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
-export { attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
+export { attachmentEls, setAttachmentHandlers, onAttachmentVisibility, attachmentVisible, setAttachmentVisible, attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
-export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
+export { setLaunchDialogHandlers, addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
 import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
 import QrOverlay from './ui/QrOverlay.svelte';
 import QrScanner from './ui/QrScanner.svelte';
@@ -71,9 +69,7 @@ export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged 
 export { editHistoryState, setEditHistory, setEditHistoryBelow, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
-import MarketplacePanel from './marketplace/MarketplacePanel.svelte';
-import AppDetailsPanel from './marketplace/AppDetailsPanel.svelte';
-export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms } from './lib/marketplace.svelte.js';
+export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
 export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
@@ -285,11 +281,6 @@ export function mountPolicyDesigner(pane, { h }) {
     return mount(PolicyDesigner, { target: pane, props: { h } });
 }
 
-/** Mount the attachment panel into its fixed container (#attachment-panel); the grid rides inside. */
-export function mountAttachmentPanel(container, { h }) {
-    container.replaceChildren();
-    return mount(AttachmentPanel, { target: container, props: { container, h } });
-}
 
 /** Mount the four PIVX wallet dialogs on the body; each opens through its store. */
 export function mountPivxDialogs({ h }) {
@@ -299,18 +290,7 @@ export function mountPivxDialogs({ h }) {
     mount(PivxSettingsDialog, { target: document.body, props: { h: h.settings } });
 }
 
-/** Mount the Nexus into its panel container (#marketplace-panel) and the details panel (#app-details-panel). */
-export function mountMarketplace({ panel, details, h }) {
-    panel.replaceChildren(); details.replaceChildren();
-    mount(MarketplacePanel, { target: panel, props: { h } });
-    mount(AppDetailsPanel, { target: details, props: { h } });
-}
 
-/** Mount the mini app launch dialog into its overlay container (#miniapp-launch-overlay). */
-export function mountLaunchDialog(container, { h }) {
-    container.replaceChildren();
-    return mount(LaunchDialog, { target: container, props: { container, h } });
-}
 
 /** Mount the invite panel's link section into `host` (#cmt-links); the panel is built per open. */
 

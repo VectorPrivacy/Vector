@@ -23,6 +23,9 @@
     import RekeyProgress from '../community/RekeyProgress.svelte';
     import InviteModal from '../community/InviteModal.svelte';
     import Tooltip from './Tooltip.svelte';
+    import AttachmentPanelRoot from '../miniapps/AttachmentPanelRoot.svelte';
+    import MarketplaceRoot from '../marketplace/MarketplaceRoot.svelte';
+    import LaunchDialogRoot from '../miniapps/LaunchDialogRoot.svelte';
     const panes = shellPanes();
     const screens = shellScreens();
     const reveals = shellReveals();
@@ -37,10 +40,9 @@
 
 <main class="container">
     <PickerRoot />
-    <div class="attachment-panel" id="attachment-panel" tabindex="-1"></div>
-    <div class="marketplace-panel" id="marketplace-panel" style="display: none;"></div>
-    <div class="app-details-panel" id="app-details-panel" style="display: none;"></div>
-    <div class="miniapp-launch-overlay" id="miniapp-launch-overlay"></div>
+    <AttachmentPanelRoot />
+    <MarketplaceRoot />
+    <LaunchDialogRoot />
 
     <div id="profile" class="chats" style:display={panes.profile ? null : 'none'} bind:this={profileEl} use:bindProfile use:reveal={['profile', reveals.profile]}>
         {#if screens.profile && profileEl}<ProfileScreen root={profileEl} h={screens.profile.h} />{/if}

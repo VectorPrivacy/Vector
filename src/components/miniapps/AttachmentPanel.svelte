@@ -2,16 +2,16 @@
     // The composer's attachment panel: the main buttons, the mini apps view (search + grid)
     // and the PIVX wallet card. Renders inside the fixed container the composer positions
     // and toggles `visible` on; the wallet's border tint rides the container too.
-    import { attachmentState } from '../lib/attachmentpanel.svelte.js';
+    import { attachmentState, setAttachmentRootEl } from '../lib/attachmentpanel.svelte.js';
     import { gridState } from '../lib/miniappsgrid.svelte.js';
     import MiniAppsGrid from './MiniAppsGrid.svelte';
     import PivxWallet from './pivx/PivxWallet.svelte';
 
-    let { container, h } = $props();
+    let { h } = $props();
     // h: file(), folder(), commands(), commandsEnter(el), commandsLeave(), miniapps(), back(),
     //    search(q), bindGrid(el) → cleanup, grid: MiniAppsGrid's bag, pivx: PivxWallet's bag
     const st = attachmentState();
-    $effect(() => { container.classList.toggle('pivx-active', st.view === 'pivx'); });
+    function rootEl(node) { setAttachmentRootEl(node); return { destroy() { setAttachmentRootEl(null); } }; }
 
     // Staggered fade-in of a view's items, replayed whenever its pulse moves.
     function stagger(node, pulse) {
@@ -35,6 +35,8 @@
     }
     function grid(node) { return { destroy: h.bindGrid(node) }; }
 </script>
+
+<div class="attachment-panel" id="attachment-panel" tabindex="-1" use:rootEl class:visible={st.visible} class:pivx-active={st.view === 'pivx'} style:bottom={st.bottom || null}>
 
 {#if st.view === 'main'}
     <div class="attachment-panel-content" id="attachment-panel-main" use:stagger={st.pulse.main}>
@@ -85,3 +87,4 @@
         <PivxWallet h={h.pivx} pulse={st.pulse.pivx} />
     </div>
 {/if}
+</div>

@@ -415,7 +415,7 @@ function ensureMarketplaceIslands() {
         },
         back: () => { hideMarketplacePanel(); },
     };
-    VectorSvelte.mountMarketplace({ panel: domMarketplacePanel, details: domAppDetailsPanel, h });
+    VectorSvelte.setMarketplaceHandlers(h);
 }
 
 /** Run one action on an app with the button showing it, and a 2s "Failed" if it throws. */
@@ -465,32 +465,17 @@ async function handleAppInstallOrPlay(app) {
  * @returns {Promise<void>} Resolves when the animation completes
  */
 function closeAppDetailsPanel() {
-    return new Promise((resolve) => {
-        const panel = domAppDetailsPanel;
-        if (panel.style.display !== 'none') {
-            popBack('app-details');
-            panel.classList.add('closing');
-            panel.addEventListener('animationend', function handler() {
-                panel.removeEventListener('animationend', handler);
-                panel.style.display = 'none';
-                panel.classList.remove('closing');
-                VectorSvelte.mktCloseDetails();
-                resolve();
-            });
-        } else {
-            resolve();
-        }
-    });
+    if (!VectorSvelte.mktState().detailsOpen) return Promise.resolve();
+    popBack('app-details');
+    return VectorSvelte.mktClosePanel('details').then(() => VectorSvelte.mktCloseDetails());
 }
 
 /** Open the details panel on one app. */
 function showAppDetails(app) {
-    const panel = domAppDetailsPanel;
     ensureMarketplaceIslands();
-    if (panel.style.display === 'none') pushBack('app-details', () => { closeAppDetailsPanel(); });
-    panel.dataset.appId = app.id;
+    if (!VectorSvelte.mktState().detailsOpen) pushBack('app-details', () => { closeAppDetailsPanel(); });
     VectorSvelte.mktOpenDetails(app.id);
-    panel.style.display = 'flex';
+    VectorSvelte.mktOpenDetailsPanel();
     if (app.requested_permissions && app.requested_permissions.length > 0 && (app.installed || app.local_path)) {
         loadAppPermissions(app);
     }

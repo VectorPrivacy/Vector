@@ -1,12 +1,15 @@
 <script>
-    // The Nexus panel: back, search, the active filter tags and the scroll body. Renders
-    // inside the panel container, which the opener shows, hides and animates.
-    import { mktState, mktSetQuery } from '../lib/marketplace.svelte.js';
+    // The Nexus panel: back, search, the active filter tags and the scroll body. Owns its
+    // panel element: shown while open, the closing animation settles the store.
+    import { mktState, mktSetQuery, mktClosingEnded } from '../lib/marketplace.svelte.js';
     import Filters from './Filters.svelte';
     import Marketplace from './Marketplace.svelte';
     let { h } = $props();   // h: back() plus the catalogue helpers
     const st = mktState();
 </script>
+
+<div class="marketplace-panel" id="marketplace-panel" style:display={st.panelOpen ? 'flex' : 'none'} class:closing={st.panelClosing}
+     onanimationend={(e) => { if (e.target === e.currentTarget && st.panelClosing) mktClosingEnded('panel'); }}>
 
 <div class="marketplace-header">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -22,3 +25,4 @@
 </div>
 <Filters />
 <div class="marketplace-scroll-container"><Marketplace {h} /></div>
+</div>
