@@ -337,10 +337,6 @@ const domChatNewStartBtn = document.getElementById('chat-new-btn');
 // Create Group UI refs
 const domCreateGroup = document.getElementById('create-group');
 const domSettings = document.getElementById('settings');
-const domSettingsThemeSelect = document.getElementById('theme-select');
-const domSettingsLogout = document.getElementById('logout-btn');
-const domSettingsExport = document.getElementById('export-account-btn');
-const domRemoteSignerReauthBtn = document.getElementById('remote-signer-reauth-btn');
 
 
 /**
@@ -2479,7 +2475,6 @@ window.addEventListener("DOMContentLoaded", async () => {
 
     // Initialize settings
     await initSettings();
-    await wireSettingsHelp();
 });
 
 /**

@@ -57,12 +57,14 @@ const security = $state({
     enabled: true, type: 'pin', bioSupported: false,
     signer: null,          // null (local key) | { label, hint, npub }
     dot: '',               // '' | online | offline | connecting
+    v: 0,                  // moves on every sync so a cancelled flip snaps the toggle back
 });
 export function securityState() { return security; }
 export function setSecurity({ enabled, type, bioSupported }) {
     security.enabled = !!enabled;
     security.type = type || 'pin';
     if (bioSupported !== undefined) security.bioSupported = !!bioSupported;
+    security.v++;
 }
 export function setSigner(signer) { security.signer = signer || null; }
 export function setSignerDot(dot) { security.dot = dot || ''; }
@@ -127,3 +129,34 @@ export function setBlossomCaps(status, caps) { blossomCaps.status = status; blos
 const relayLogs = $state({ logs: [] });
 export function relayLogsState() { return relayLogs; }
 export function setRelayLogs(logs) { relayLogs.logs = logs || []; }
+
+// The Settings screen itself (Phase 5): the plain toggles and platform visibility
+// the sections render from. Nested keys merge one level deep so a caller patches
+// `{ storage: { clearing: true } }` without restating the rest.
+const screen = $state({
+    theme: 'vector',
+    privacy: { webPreviews: true, stripTracking: true, sendTyping: true },
+    battery: { shown: false, enabled: false, warning: false },
+    storage: { galleryShown: false, galleryHidden: false, autoDownload: true, limit: 10485760, clearing: false },
+    platform: { tor: true, voice: false, updates: true },
+    bridges: {
+        enabled: false, lines: '', saved: '',   // `saved` is the persisted text: Apply gates on a diff
+        status: '', statusClass: '',            // a handler's own line and its is-ok / is-error class
+        busy: false, obfs4Hint: '',             // obfs4Hint: the install hint when obfs4proxy is missing
+    },
+    scroll: { target: '', v: 0 },               // a section to scroll into view on open
+});
+export function settingsScreen() { return screen; }
+export function setSettingsScreen(patch) {
+    for (const [k, v] of Object.entries(patch)) {
+        if (v && typeof v === 'object' && !Array.isArray(v) && screen[k] && typeof screen[k] === 'object') Object.assign(screen[k], v);
+        else screen[k] = v;
+    }
+}
+export function requestSettingsScroll(target) { screen.scroll = { target, v: screen.scroll.v + 1 }; }
+
+// Section handler bags that other modules register when they are ready (the
+// updater, the relay list, voice). A section renders once its bag exists.
+const handlers = $state({});
+export function settingsHandlers() { return handlers; }
+export function setSettingsHandlers(key, h) { Object.assign(handlers, { [key]: h }); }

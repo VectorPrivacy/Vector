@@ -80,10 +80,7 @@ function updateBetaRowVisibility() {
 
 // Initialize updater UI elements
 function initializeUpdaterUI() {
-    const body = document.getElementById('settings-updates-body');
-    if (!body) return;
-    VectorSvelte.mountUpdates(body, {
-        h: {
+    VectorSvelte.setSettingsHandlers('updates', {
             check: handleButtonClick,
             restart: () => window.__TAURI__.process.relaunch(),
             explainBeta: () => popupConfirm('Beta Updates', 'Beta builds are <b>release candidates of the next Vector version</b>, offered here before the official release.<br><br>They carry the newest fixes and features with a little less polish, and you\'ll be moved onto the official build the moment it releases.<br><br>Turning this off on a beta parks you on your current build until the next official release, then you ride stable from there.', true),
@@ -97,7 +94,6 @@ function initializeUpdaterUI() {
                 updateUI('idle');
                 checkForUpdates(false);
             },
-        },
     });
     VectorSvelte.setUpdates({
         version: versionInfo.display,
@@ -367,10 +363,7 @@ async function downloadUpdate() {
 async function initializeUpdater() {
     // iOS: no updater plugin and no store hand-off wired up yet.
     if (platformFeatures.os === 'ios') {
-        const updatesSection = document.getElementById('settings-updates');
-        if (updatesSection) {
-            updatesSection.style.display = 'none';
-        }
+        VectorSvelte.setSettingsScreen({ platform: { updates: false } });
         return;
     }
 
@@ -384,8 +377,7 @@ async function initializeUpdater() {
                 const source = await window.__TAURI__.core.invoke('get_install_source');
                 if (source.has_store) label = source.label;
             } catch (_) { /* keep the flavour's own store */ }
-            const body = document.getElementById('settings-updates-body');
-            if (body) VectorSvelte.mountUpdates(body, { h: {} });
+            VectorSvelte.setSettingsHandlers('updates', {});
             VectorSvelte.setUpdates({ version: versionInfo.display, preview: versionInfo.preview !== null, phase: 'store', message: `Updates arrive through ${label}` });
         };
         if (document.readyState === 'loading') {
@@ -400,12 +392,7 @@ async function initializeUpdater() {
     // the button label and the status copy all branch on it.
     versionInfo = parseVersion(await getCurrentVersion());
 
-    // Initialize UI when DOM is ready
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initializeUpdaterUI);
-    } else {
-        initializeUpdaterUI();
-    }
+    initializeUpdaterUI();
 
     // Android: resolve the install source BEFORE the first check so an
     // available-update button renders with the real store label instead of

@@ -5,15 +5,12 @@
     import { profileVersion } from '../lib/signals.svelte.js';
     import { blockedVersion } from '../lib/settings.svelte.js';
 
-    let { h, emptyEl } = $props();   // h: load, getProfile, getProfileAvatarSrc, createAvatarImg, confirmUnblock, unblock, reload
+    let { h } = $props();   // h: load, getProfile, getProfileAvatarSrc, createAvatarImg, confirmUnblock, unblock, reload
 
     let users = $state.raw([]);
     $effect(() => {
         blockedVersion();
         h.load().then((list) => { users = list || []; }).catch((e) => console.warn('Failed to load blocked users:', e));
-    });
-    $effect(() => {
-        if (emptyEl) emptyEl.style.display = users.length ? 'none' : '';
     });
 
     function resolve(u) {
@@ -59,3 +56,6 @@
         <span class="unblock-btn" onclick={() => unblock(u, r.p)}>Unblock</span>
     </div>
 {/each}
+{#if users.length === 0}
+    <p id="settings-blocked-empty" style="color: #666; font-size: 13px;">No blocked users</p>
+{/if}

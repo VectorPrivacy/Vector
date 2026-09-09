@@ -84,16 +84,7 @@ import { overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
 import CommunityHead from './chatlist/CommunityHead.svelte';
 import FilePreview from './files/FilePreview.svelte';
-import TorCard from './settings/TorCard.svelte';
-import TorCircuits from './settings/TorCircuits.svelte';
-import BlockedUsers from './settings/BlockedUsers.svelte';
-import StorageDonut from './settings/StorageDonut.svelte';
-import Notifications from './settings/Notifications.svelte';
-import SecurityCard from './settings/SecurityCard.svelte';
-import Display from './settings/Display.svelte';
-import Updates from './settings/Updates.svelte';
-import NetworkList from './settings/NetworkList.svelte';
-import Voice from './settings/Voice.svelte';
+import Settings from './settings/Settings.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -130,6 +121,7 @@ export {
 // Settings: the Tor card's state and the blocked-users list's version.
 export {
     torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot, setDisplaySettings, updatesState, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress,
+    settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers,
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
@@ -255,65 +247,10 @@ export function mountFilePreview({ h }) {
     return mount(FilePreview, { target: document.body, props: { h } });
 }
 
-/** Mount the Tor card reconciler over the Privacy section's elements, and the circuit list into `els.list`. */
-export function mountTorCard({ els, h }) {
-    const host = document.createElement('div');
-    host.hidden = true;
-    document.body.appendChild(host);
-    const card = mount(TorCard, { target: host, props: { els, h } });
-    els.list.replaceChildren();
-    const circuits = mount(TorCircuits, { target: els.list });
-    return { card, circuits };
-}
-
-/** Mount the blocked-users list into `target` (#settings-blocked-list). */
-export function mountBlockedUsers(target, { h, emptyEl }) {
-    target.replaceChildren();
-    return mount(BlockedUsers, { target, props: { h, emptyEl } });
-}
-
-/** Mount the Storage breakdown (summary, donut, legend) into `target` (#storage-breakdown). */
-export function mountStorageDonut(target, { h }) {
-    target.replaceChildren();
-    return mount(StorageDonut, { target, props: { h } });
-}
-
-/** Mount the Notifications section body into `target` (#settings-notifications-body). */
-export function mountNotifications(target, { h }) {
-    target.replaceChildren();
-    return mount(Notifications, { target, props: { h } });
-}
-
-/** Mount the Security reconciler over the section's elements. */
-export function mountSecurityCard({ els }) {
-    const host = document.createElement('div');
-    host.hidden = true;
-    document.body.appendChild(host);
-    return mount(SecurityCard, { target: host, props: { els } });
-}
-
-/** Mount the Display section body into `target` (#settings-display-body). */
-export function mountDisplay(target, { h }) {
-    target.replaceChildren();
-    return mount(Display, { target, props: { h } });
-}
-
-/** Mount the Updates section body into `target` (#settings-updates-body). */
-export function mountUpdates(target, { h }) {
-    target.replaceChildren();
-    return mount(Updates, { target, props: { h } });
-}
-
-/** Mount the Network lists into `target` (#network-list). */
-export function mountNetworkList(target, { h }) {
-    target.replaceChildren();
-    return mount(NetworkList, { target, props: { h } });
-}
-
-/** Mount the Voice section body into `target` (#settings-voice-body). */
-export function mountVoice(target, { h }) {
-    target.replaceChildren();
-    return mount(Voice, { target, props: { h } });
+/** Mount the Settings screen into `container` (#settings); the sections read the settings stores. */
+export function mountSettings(container, { h }) {
+    container.replaceChildren();
+    return mount(Settings, { target: container, props: { h } });
 }
 
 /** Mount the profile view reconciler over #profile's elements. */

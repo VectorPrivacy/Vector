@@ -117,228 +117,107 @@ async function loadTorCircuits(forceRefresh = false, forceNewCircuit = false) {
     }
 }
 
-/**
- * Wire the Bridges section under Tor → Advanced. Toggle reveals the textarea;
- * Apply persists via tor_set_bridges (which also restarts Tor if it's
- * currently running so the new bridges take effect immediately).
- */
-async function initTorBridgesUI() {
-    const toggle = document.getElementById('tor-bridges-toggle');
-    const body = document.getElementById('tor-bridges-body');
-    const textarea = document.getElementById('tor-bridges-textarea');
-    const applyBtn = document.getElementById('tor-bridges-apply');
-    const statusEl = document.getElementById('tor-bridges-status');
-    const link = document.getElementById('tor-bridges-link');
-    if (!toggle || !body || !textarea || !applyBtn || !statusEl) return;
-
-    // Hydrate from backend.
-    // Track the persisted lines so Apply can be gated on a real diff.
-    let savedLines = '';
-    const isDirty = () => textarea.value !== savedLines;
-    const refreshApplyEnabled = () => {
-        applyBtn.disabled = !isDirty();
-    };
-
+/** Hydrate the bridges editor from the backend. */
+async function loadTorBridges() {
     try {
         const cur = await invoke('tor_get_bridges');
-        toggle.checked = !!(cur && cur.enabled);
-        textarea.value = (cur && cur.lines) || '';
-        savedLines = textarea.value;
-        body.style.display = toggle.checked ? '' : 'none';
-        renderBridgesStatus(statusEl, textarea.value);
-        refreshApplyEnabled();
+        const lines = (cur && cur.lines) || '';
+        VectorSvelte.setSettingsScreen({ bridges: { enabled: !!(cur && cur.enabled), lines, saved: lines, status: '', statusClass: '' } });
+        refreshObfs4Banner(lines);
     } catch (e) {
         console.warn('[Tor] tor_get_bridges failed:', e);
-        refreshApplyEnabled();
     }
+}
 
-    toggle.addEventListener('change', async () => {
-        body.style.display = toggle.checked ? '' : 'none';
-        refreshObfs4Banner(textarea.value);
-
-        // Toggling ON with no lines yet: just expand the UI and wait for
-        // the user to enter bridges + hit Apply. Skipping persist/reconfigure
-        // here avoids a wasted Tor reconfigure cycle (enabled-but-no-lines
-        // resolves to direct anyway), and avoids any "empty obfs4" attempt.
-        if (toggle.checked && !textarea.value.trim()) {
-            statusEl.textContent = 'Add bridge lines, then Apply.';
-            statusEl.classList.remove('is-error', 'is-ok');
-            refreshApplyEnabled();
-            return;
-        }
-
-        // The toggle is itself the apply for the on/off state. Without this,
-        // flipping the toggle off would leave the saved-and-running config
-        // untouched (Tor would keep using bridges until the user found and
-        // hit Apply). Persist + reconfigure immediately. The textarea still
-        // requires a separate Apply for content edits.
-        toggle.disabled = true;
-        VectorSvelte.setTorLocked(true);
-        statusEl.textContent = toggle.checked
-            ? 'Enabling bridges, reconnecting…'
-            : 'Disabling bridges, reconnecting…';
-        statusEl.classList.remove('is-error', 'is-ok');
-        try {
-            await invoke('tor_set_bridges', {
-                enabled: !!toggle.checked,
-                lines: textarea.value,
-            });
-            // Toggle persists the textarea content as a side effect; the
-            // saved baseline now matches the textarea, so Apply has nothing
-            // to do. Sync.
-            savedLines = textarea.value;
-            // Refresh the displayed circuit, but DON'T pass forceNewCircuit:
-            // tor_set_bridges already cycled relays once. Passing
-            // force_new=true here would rotate the isolation token and
-            // cycle sockets a second time.
-            try { await loadTorCircuits(true, false); } catch (_) {}
-            statusEl.textContent = toggle.checked
-                ? 'Bridges enabled. Tor reconnected.'
-                : 'Bridges disabled. Tor reconnected directly.';
-            statusEl.classList.add('is-ok');
-        } catch (err) {
-            console.error('[Tor] tor_set_bridges (toggle) failed:', err);
-            // Roll the toggle back so the UI matches the actual (unchanged)
-            // backend state. KEEP the body visible regardless so the user
-            // can see the error message + the obfs4 banner that explains
-            // why — the status element lives inside the body, so hiding
-            // the body would silence the failure entirely.
-            toggle.checked = !toggle.checked;
-            body.style.display = '';
-            statusEl.textContent = `Failed: ${err}`;
-            statusEl.classList.add('is-error');
-        } finally {
-            toggle.disabled = false;
-            VectorSvelte.setTorLocked(false);
-            refreshApplyEnabled();
-        }
-    });
-    textarea.addEventListener('input', () => {
-        renderBridgesStatus(statusEl, textarea.value);
-        refreshObfs4Banner(textarea.value);
-        refreshApplyEnabled();
-    });
-    // Initial banner state.
-    refreshObfs4Banner(textarea.value);
-
-    // bridges.torproject.org link → external open via Tauri (matches the
-    // Tor logo attribution link's pattern in main.js).
-    if (link) {
-        link.onclick = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            // obfs4 is the realistic anti-censorship transport; vanilla
-            // bridges are essentially abandoned by The Tor Project.
-            openUrl('https://bridges.torproject.org/bridges/en?transport=obfs4');
-        };
-    }
-
-    applyBtn.addEventListener('click', async () => {
-        applyBtn.disabled = true;
-        textarea.disabled = true;
-        toggle.disabled = true;
-        // Lock the main Tor toggle too so the user can't rip the rug out mid-restart.
-        VectorSvelte.setTorLocked(true);
-        statusEl.textContent = 'Applying & reconnecting…';
-        statusEl.classList.remove('is-error', 'is-ok');
-        try {
-            const res = await invoke('tor_set_bridges', {
-                enabled: !!toggle.checked,
-                lines: textarea.value,
-            });
-            // Update the saved baseline so the Apply button gates back to
-            // disabled until the user types another change.
-            savedLines = textarea.value;
-            // Re-render circuit display only — tor_set_bridges already cycled
-            // relays. Don't pass forceNewCircuit or we'd rotate the isolation
-            // token + cycle sockets a second time.
-            try { await loadTorCircuits(true, false); } catch (_) {}
-            statusEl.textContent = res && res.enabled
-                ? 'Bridges applied. Tor reconnected.'
-                : 'Bridges saved. Tor will use them when next enabled.';
-            statusEl.classList.add('is-ok');
-        } catch (err) {
-            console.error('[Tor] tor_set_bridges failed:', err);
-            statusEl.textContent = `Failed: ${err}`;
-            statusEl.classList.add('is-error');
-        } finally {
-            textarea.disabled = false;
-            toggle.disabled = false;
-            VectorSvelte.setTorLocked(false);
-            // Re-evaluate Apply against the (possibly newly-saved) baseline
-            // rather than blindly enabling it.
-            refreshApplyEnabled();
-        }
-    });
+function _bridgesStatus(status, statusClass = '') {
+    VectorSvelte.setSettingsScreen({ bridges: { status, statusClass } });
 }
 
 /**
- * Show the obfs4-needs-install banner inline when (a) the user's bridge
- * lines include any obfs4 entry AND (b) `obfs4proxy` isn't detected on the
- * system. Otherwise hide it. Renders a platform-tailored install command so
- * the user can copy-paste-fix instead of guessing.
+ * The toggle is itself the apply for the on/off state: flipping it persists and
+ * reconfigures at once, so Tor never keeps using bridges the user switched off.
+ * Content edits still need Apply.
+ */
+async function setTorBridgesEnabled(enabled) {
+    const b = VectorSvelte.settingsScreen().bridges;
+    VectorSvelte.setSettingsScreen({ bridges: { enabled } });
+    refreshObfs4Banner(b.lines);
+    // On with nothing typed yet: expand and wait for Apply, skipping a wasted reconfigure.
+    if (enabled && !b.lines.trim()) { _bridgesStatus('Add bridge lines, then Apply.'); return; }
+
+    VectorSvelte.setSettingsScreen({ bridges: { busy: true } });
+    VectorSvelte.setTorLocked(true);
+    _bridgesStatus(enabled ? 'Enabling bridges, reconnecting…' : 'Disabling bridges, reconnecting…');
+    try {
+        await invoke('tor_set_bridges', { enabled, lines: b.lines });
+        // The toggle persisted the text as a side effect, so Apply has nothing left to do.
+        VectorSvelte.setSettingsScreen({ bridges: { saved: b.lines } });
+        // tor_set_bridges already cycled relays; a forced new circuit would cycle them twice.
+        try { await loadTorCircuits(true, false); } catch (_) {}
+        _bridgesStatus(enabled ? 'Bridges enabled. Tor reconnected.' : 'Bridges disabled. Tor reconnected directly.', 'is-ok');
+    } catch (err) {
+        console.error('[Tor] tor_set_bridges (toggle) failed:', err);
+        // Roll back to the backend's unchanged state; the body stays open to show the error.
+        VectorSvelte.setSettingsScreen({ bridges: { enabled: !enabled } });
+        _bridgesStatus(`Failed: ${err}`, 'is-error');
+    } finally {
+        VectorSvelte.setSettingsScreen({ bridges: { busy: false } });
+        VectorSvelte.setTorLocked(false);
+    }
+}
+
+/** The editor's text changed: clear a stale result line and re-check the obfs4 hint. */
+function onTorBridgesInput() {
+    _bridgesStatus('');
+    refreshObfs4Banner(VectorSvelte.settingsScreen().bridges.lines);
+}
+
+/** Persist the editor and restart Tor on the new bridges. The main toggle locks meanwhile. */
+async function applyTorBridges() {
+    const b = VectorSvelte.settingsScreen().bridges;
+    VectorSvelte.setSettingsScreen({ bridges: { busy: true } });
+    VectorSvelte.setTorLocked(true);
+    _bridgesStatus('Applying & reconnecting…');
+    try {
+        const res = await invoke('tor_set_bridges', { enabled: b.enabled, lines: b.lines });
+        VectorSvelte.setSettingsScreen({ bridges: { saved: b.lines } });
+        try { await loadTorCircuits(true, false); } catch (_) {}
+        _bridgesStatus(res && res.enabled ? 'Bridges applied. Tor reconnected.' : 'Bridges saved. Tor will use them when next enabled.', 'is-ok');
+    } catch (err) {
+        console.error('[Tor] tor_set_bridges failed:', err);
+        _bridgesStatus(`Failed: ${err}`, 'is-error');
+    } finally {
+        VectorSvelte.setSettingsScreen({ bridges: { busy: false } });
+        VectorSvelte.setTorLocked(false);
+    }
+}
+
+/**
+ * The obfs4 install hint shows when the bridge lines include an obfs4 entry and
+ * obfs4proxy is not on the system. Only the latest check may write: fast typing
+ * fires several, and an older "missing" result must not land on newer text.
  */
 let _obfs4BannerGen = 0;
 async function refreshObfs4Banner(text) {
-    const banner = document.getElementById('tor-obfs4-banner');
-    const msg = document.getElementById('tor-obfs4-banner-msg');
-    if (!banner || !msg) return;
-
-    // Stamp this invocation. Fast typing can fire many parallel checks; only
-    // the most recent one is allowed to mutate the DOM. Otherwise an older
-    // "obfs4 + missing" check resolving after a newer "no obfs4" check would
-    // re-show the banner against an empty textarea.
     const myGen = ++_obfs4BannerGen;
-
-    const lines = (text || '').split(/\r?\n/);
-    const hasObfs4 = lines.some(l => l.trim().toLowerCase().startsWith('obfs4 '));
-    if (!hasObfs4) {
-        banner.style.display = 'none';
-        return;
-    }
+    const hasObfs4 = (text || '').split(/\r?\n/).some(l => l.trim().toLowerCase().startsWith('obfs4 '));
+    const setHint = (hint) => VectorSvelte.setSettingsScreen({ bridges: { obfs4Hint: hint } });
+    if (!hasObfs4) { setHint(''); return; }
     let status;
     try {
         status = await invoke('tor_check_obfs4_proxy');
     } catch (_) {
-        if (myGen !== _obfs4BannerGen) return;
-        banner.style.display = 'none';
+        if (myGen === _obfs4BannerGen) setHint('');
         return;
     }
     if (myGen !== _obfs4BannerGen) return;
-    if (status && status.installed) {
-        banner.style.display = 'none';
-        return;
-    }
-
-    // Platform-specific install hint.
+    if (status && status.installed) { setHint(''); return; }
     const os = (platformFeatures && platformFeatures.os) || 'unknown';
-    let hint;
     switch (os) {
-        case 'macos':
-            hint = '<code>brew install obfs4proxy</code>';
-            break;
-        case 'linux':
-            hint = '<code>apt install obfs4proxy</code> (or your distro\'s package manager)';
-            break;
-        case 'windows':
-            hint = 'download from torproject.org and add to PATH';
-            break;
-        default:
-            hint = 'install <code>obfs4proxy</code> for your platform';
-            break;
-    }
-    msg.innerHTML = `obfs4 bridges need <code>obfs4proxy</code> installed: ${hint}. Apply will fail until it\'s available.`;
-    banner.style.display = '';
-}
-
-/** Show a tiny "N bridges configured" / "0 bridges" line under the textarea. */
-function renderBridgesStatus(el, text) {
-    const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    el.classList.remove('is-error', 'is-ok');
-    if (lines.length === 0) {
-        el.textContent = 'No bridges configured.';
-    } else {
-        el.textContent = `${lines.length} bridge${lines.length === 1 ? '' : 's'} configured`;
+        case 'macos': setHint('<code>brew install obfs4proxy</code>'); break;
+        case 'linux': setHint('<code>apt install obfs4proxy</code> (or your distro\'s package manager)'); break;
+        case 'windows': setHint('download from torproject.org and add to PATH'); break;
+        default: setHint('install <code>obfs4proxy</code> for your platform'); break;
     }
 }
 
@@ -402,32 +281,24 @@ class VoiceSettings {
     get autoTranscribe() { return VectorSvelte.voiceState().autoTranscribe; }
 
     async initVoiceSettings() {
-        const voiceSection = document.getElementById('settings-voice');
-        if (!voiceSection) return;
-        if (!platformFeatures.transcription) {
-            voiceSection.style.display = 'none';
-            return;
-        }
-        voiceSection.style.display = 'block';
-
-        VectorSvelte.mountVoice(document.getElementById('settings-voice-body'), {
-            h: {
-                formatBytes,
-                explain: (kind) => popupConfirm(...VOICE_EXPLAINERS[kind], true),
-                setTranslate: async (on) => {
-                    VectorSvelte.setVoice({ autoTranslate: on });
-                    await saveWhisperAutoTranslate(on);
-                },
-                setTranscribe: async (on) => {
-                    VectorSvelte.setVoice({ autoTranscribe: on });
-                    await saveWhisperAutoTranscribe(on);
-                },
-                selectModel: (name) => this.setSelectedModel(name),
-                download: () => this.downloadModel(this.selectedModel),
-                deleteModel: () => this.deleteSelectedModel(),
-                cancelDownload: () => invoke('cancel_whisper_download'),
+        if (!platformFeatures.transcription) return;
+        VectorSvelte.setSettingsHandlers('voice', {
+            formatBytes,
+            explain: (kind) => popupConfirm(...VOICE_EXPLAINERS[kind], true),
+            setTranslate: async (on) => {
+                VectorSvelte.setVoice({ autoTranslate: on });
+                await saveWhisperAutoTranslate(on);
             },
+            setTranscribe: async (on) => {
+                VectorSvelte.setVoice({ autoTranscribe: on });
+                await saveWhisperAutoTranscribe(on);
+            },
+            selectModel: (name) => this.setSelectedModel(name),
+            download: () => this.downloadModel(this.selectedModel),
+            deleteModel: () => this.deleteSelectedModel(),
+            cancelDownload: () => invoke('cancel_whisper_download'),
         });
+        VectorSvelte.setSettingsScreen({ platform: { voice: true } });
 
         // A saved model that no longer exists keeps the pick loadWhisperModels made.
         const strModelID = await loadChosenWhisperModel() || this.selectedModel;
@@ -1048,7 +919,7 @@ function applyTheme(theme = 'vector', mode = 'dark') {
   document.body.classList.add(`${theme}-theme`);
   
   domTheme.href = `/themes/${theme}/${mode}.css`;
-  domSettingsThemeSelect.value = theme;
+  VectorSvelte.setSettingsScreen({ theme });
 }
 
 /**
@@ -1063,15 +934,8 @@ async function setTheme(theme = 'vector', mode = 'dark') {
   refreshEmojiPacksForTheme();
 }
 
-// Apply Theme changes in real-time
-domSettingsThemeSelect.onchange = async (evt) => {
-    await setTheme(evt.target.value);
-    // Refresh storage section after theme change to update colors
-    initStorageSection();
-};
-
-// Listen for Logout clicks
-domSettingsLogout.onclick = async (evt) => {
+/** Confirm, then erase the local database and keys. */
+async function logoutAccount() {
     // Prompt for confirmation
     const fConfirm = await popupConfirm('Going Incognito?', 'Logging out of Vector will fully erase the database, <b>ensure you have a backup of your keys before logging out!</b><br><br><b>You will permanently lose access to your Group Chats after logging out!</b><br><br>That said, would you like to continue?', false, '', 'vector_warning.svg');
     if (!fConfirm) return;
@@ -1084,10 +948,10 @@ domSettingsLogout.onclick = async (evt) => {
     } catch (e) {
         await popupConfirm('Logout failed', String(e), true);
     }
-};
+}
 
-// Listen for Export Account clicks
-domSettingsExport.onclick = async (evt) => {
+/** Show the account's keys in a popup with copy buttons. */
+async function exportAccount() {
     try {
         // Call the backend to export keys
         const keys = await invoke('export_keys');
@@ -1148,7 +1012,7 @@ domSettingsExport.onclick = async (evt) => {
         console.error('Export failed:', error);
         await popupConfirm('Export Failed', escapeHtml(error.toString()), true, '', 'vector_warning.svg');
     }
-};
+}
 
 // Privacy Settings - Simple global variables
 let fWebPreviewsEnabled = true;
@@ -1198,8 +1062,7 @@ async function getStorageInfo() {
  * Clear storage by deleting all files in the Vector directory
  */
 async function clearStorage() {
-    const clearStorageBtn = document.getElementById('clear-storage-btn');
-    if (clearStorageBtn.disabled) return;
+    if (VectorSvelte.settingsScreen().storage.clearing) return;
 
     const confirmClear = await popupConfirm(
         'Clear Storage?',
@@ -1211,23 +1074,19 @@ async function clearStorage() {
     
     if (!confirmClear) return;
     
-    let strPrevText = clearStorageBtn.textContent;
+    VectorSvelte.setSettingsScreen({ storage: { clearing: true } });
     try {
-        clearStorageBtn.disabled = true;
-        clearStorageBtn.textContent = 'Clearing...';
         await invoke('clear_storage');
         // Full clear nukes the image cache too; drop the emoji memos so
         // rendered emojis re-download instead of pointing at deleted files
         reloadCachedEmojiImgs();
-        clearStorageBtn.textContent = strPrevText;
-        clearStorageBtn.disabled = false;
         return true;
     } catch (error) {
-        clearStorageBtn.textContent = strPrevText;
-        clearStorageBtn.disabled = false;
         console.error('Failed to clear storage:', error);
         await popupConfirm('Clear Failed', `Could not clear storage: ${escapeHtml(String(error.message))}`, true, '', 'vector_warning.svg');
         return false;
+    } finally {
+        VectorSvelte.setSettingsScreen({ storage: { clearing: false } });
     }
 }
 
@@ -1267,94 +1126,18 @@ async function initAutoDownloadSettings() {
     await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
 }
 
-let fStorageDonutMounted = false;
-
-/**
- * Initialize the Storage section in settings
- */
+/** Refresh the Storage breakdown and reflect the auto-download and gallery values. */
 async function initStorageSection() {
-    if (!fStorageDonutMounted) {
-        fStorageDonutMounted = true;
-        VectorSvelte.mountStorageDonut(document.getElementById('storage-breakdown'), {
-            h: {
-                formatBytes,
-                confirmDelete: confirmStorageDelete,
-                deleteCategory: (category, exts) => invoke('clear_storage_category', { category, exts }),
-                refresh: () => initStorageSection(),
-                // The emoji memos and any rendered <img>s point at the deleted cache files
-                onCacheCleared: () => reloadCachedEmojiImgs(),
-                toast: (msg) => showToast(msg),
-                deleteFailed: (e) => popupConfirm('Delete Failed', `Could not delete: ${escapeHtml(String(e))}`, true, '', 'vector_warning.svg'),
-            },
-        });
-    }
     const storageInfo = await getStorageInfo();
     if (storageInfo) VectorSvelte.setStorageDistribution(storageInfo.type_distribution);
+    VectorSvelte.setSettingsScreen({ storage: { autoDownload: AUTO_DOWNLOAD_ENABLED, limit: MAX_AUTO_DOWNLOAD_BYTES } });
 
-    // Auto-download: an explicit toggle plus a size limit that greys out when the toggle is off.
-    // Values + the pre-split migration load at boot (initAutoDownloadSettings); here we only
-    // reflect them into the UI and wire the controls. onchange (not addEventListener) since
-    // initStorageSection re-runs (theme change / Clear Storage) and must not stack listeners.
-    const adToggle = document.getElementById('auto-download-toggle');
-    const adLimitGroup = document.getElementById('auto-download-limit-group');
-    const adLimit = document.getElementById('auto-download-limit');
-    const applyAutoDownloadState = () => {
-        if (adLimit) adLimit.disabled = !AUTO_DOWNLOAD_ENABLED;
-        if (adLimitGroup) adLimitGroup.classList.toggle('disabled', !AUTO_DOWNLOAD_ENABLED);
-    };
-    if (adToggle) {
-        adToggle.checked = AUTO_DOWNLOAD_ENABLED;
-        adToggle.onchange = async () => {
-            AUTO_DOWNLOAD_ENABLED = adToggle.checked;
-            await saveAutoDownloadEnabled(AUTO_DOWNLOAD_ENABLED);
-            applyAutoDownloadState();
-        };
-    }
-    if (adLimit) {
-        adLimit.value = String(MAX_AUTO_DOWNLOAD_BYTES);
-        adLimit.onchange = async () => {
-            MAX_AUTO_DOWNLOAD_BYTES = parseInt(adLimit.value, 10);
-            await saveMaxAutoDownloadBytes(MAX_AUTO_DOWNLOAD_BYTES);
-        };
-    }
-    applyAutoDownloadState();
-
-    // Explainer (i) icons. preventDefault so the toggle-row icon doesn't flip the switch.
-    const adInfo = document.getElementById('auto-download-info');
-    if (adInfo) adInfo.onclick = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        popupConfirm('Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.', true);
-    };
-    const adLimitInfo = document.getElementById('auto-download-limit-info');
-    if (adLimitInfo) adLimitInfo.onclick = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        popupConfirm('Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.', true);
-    };
-    const clearInfo = document.getElementById('clear-storage-info');
-    if (clearInfo) clearInfo.onclick = (e) => {
-        e.preventDefault(); e.stopPropagation();
-        popupConfirm('Clear Storage', 'Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender.', true);
-    };
-
-    // Hide Media from Gallery (Android only — the backend command is a no-op on
-    // desktop, and the gallery concept doesn't apply there). onchange (not
-    // addEventListener) since initStorageSection re-runs after Clear Storage.
-    const galleryGroup = document.getElementById('storage-gallery-group');
-    const galleryToggle = document.getElementById('storage-gallery-toggle');
-    if (galleryGroup && galleryToggle && platformFeatures.is_mobile) {
-        galleryGroup.style.display = '';
-        try {
-            galleryToggle.checked = await invoke('get_gallery_hidden');
-        } catch (_) {
-            galleryToggle.checked = false;
-        }
-        galleryToggle.onchange = async (e) => {
-            try {
-                await invoke('set_gallery_hidden', { hidden: e.target.checked });
-            } catch (err) {
-                console.error('set_gallery_hidden failed:', err);
-            }
-        };
+    // Hide Media from Gallery is Android only: the backend command is a no-op on
+    // desktop, and the gallery concept does not apply there.
+    if (platformFeatures.is_mobile) {
+        let hidden = false;
+        try { hidden = await invoke('get_gallery_hidden'); } catch (_) {}
+        VectorSvelte.setSettingsScreen({ storage: { galleryShown: true, galleryHidden: !!hidden } });
     }
 }
 
@@ -1394,9 +1177,7 @@ const DISPLAY_EXPLAINERS = {
  * localStorage: the composer is built at module scope before the settings load,
  * and it is a per-device compatibility choice.
  */
-async function initDisplaySettings() {
-    VectorSvelte.mountDisplay(document.getElementById('settings-display-body'), {
-        h: {
+const DISPLAY_HANDLERS = {
             change: async (key, on) => {
                 switch (key) {
                     case 'imageTypes':
@@ -1425,9 +1206,9 @@ async function initDisplaySettings() {
                 }
             },
             explain: (key) => popupConfirm(...DISPLAY_EXPLAINERS[key], true),
-        },
-    });
+};
 
+async function initDisplaySettings() {
     fDisplayImageTypes = await loadDisplayImageTypes();
     const chatBg = await loadChatBgEnabled();
     if (!chatBg) document.body.classList.add('chat-bg-disabled');
@@ -1453,10 +1234,7 @@ function soundWire(sound) {
  * desktop-only settings blob; the @everyone mute and content privacy are per-key
  * settings the backend reads at notify time (values: full | hide_content | hide_all).
  */
-async function initNotificationSettings() {
-    const sounds = !!platformFeatures.notification_sounds;
-    VectorSvelte.mountNotifications(document.getElementById('settings-notifications-body'), {
-        h: {
+const NOTIF_HANDLERS = {
             saveSounds: ({ globalMute, muteEveryone, sound }) =>
                 saveNotificationSettings({ global_mute: globalMute, mute_everyone: muteEveryone, sound: soundWire(sound) })
                     .catch((e) => console.error('Failed to save notification settings:', e)),
@@ -1478,9 +1256,10 @@ async function initNotificationSettings() {
             },
             preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
             explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
-        },
-    });
+};
 
+async function initNotificationSettings() {
+    const sounds = !!platformFeatures.notification_sounds;
     let blob = { global_mute: false, sound: { type: 'Default' }, mute_everyone: false };
     if (sounds) {
         try {
@@ -1514,6 +1293,52 @@ function loadBlockedUsersList() {
     VectorSvelte.reloadBlockedUsers();
 }
 
+/** The Tor toggle: persist the preference and start or stop the embedded service. */
+async function setTorEnabled(desired) {
+    VectorSvelte.setTorLocked(true);
+    torApply(
+        { supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled', bootstrap_progress: desired ? 0 : null },
+        desired ? 'Bootstrapping…' : 'Disabling…',
+    );
+    // tor_set_enabled returns only once bootstrap completes: poll for live progress meanwhile.
+    if (desired) ensureTorStatePolling();
+    try {
+        const state = await invoke('tor_set_enabled', { enabled: desired });
+        torApply(state);
+        if (state.enabled && !state.running) ensureTorStatePolling();
+    } catch (err) {
+        console.error('[Tor] tor_set_enabled failed:', err);
+        try {
+            const state = await invoke('tor_get_state');
+            torApply({ ...state, status: 'failed: ' + err }, `Failed: ${err}`);
+        } catch (_) { /* nothing else we can do */ }
+    } finally {
+        try { torApply(await invoke('tor_get_state')); } catch (_) {}
+        VectorSvelte.setTorLocked(false);
+    }
+}
+
+/** The Privacy toggles: keep the global the renderers read, then persist. */
+async function setPrivacySetting(key, on) {
+    switch (key) {
+        case 'webPreviews': fWebPreviewsEnabled = on; await saveWebPreviews(on); break;
+        case 'stripTracking': fStripTrackingEnabled = on; await saveStripTracking(on); break;
+        case 'sendTyping': fSendTypingIndicators = on; await saveSendTypingIndicators(on); break;
+    }
+}
+
+/** Copy the pre-fetched logs (clipboard writes must run inside the click). */
+function copyLogs() {
+    if (!window._cachedLogs) {
+        showToast('No logs to copy!');
+        return;
+    }
+    const lines = window._cachedLogs.split('\n').filter(l => l.trim()).length;
+    navigator.clipboard.writeText(window._cachedLogs).then(() => {
+        showToast('Copied ' + lines + ' log entries to clipboard');
+    });
+}
+
 /**
  * Initialize settings on app start
  */
@@ -1522,167 +1347,30 @@ async function initSettings() {
     fWebPreviewsEnabled = await loadWebPreviews();
     fStripTrackingEnabled = await loadStripTracking();
     fSendTypingIndicators = await loadSendTypingIndicators();
+    VectorSvelte.setSettingsScreen({ privacy: { webPreviews: fWebPreviewsEnabled, stripTracking: fStripTrackingEnabled, sendTyping: fSendTypingIndicators } });
 
     // Auto-download toggle + limit (migrates pre-split accounts). At boot so the
     // gate in message-row.js is correct before Settings is opened.
     await initAutoDownloadSettings();
 
-    // Set initial toggle states
-    const webPreviewsToggle = document.getElementById('privacy-web-previews-toggle');
-    const stripTrackingToggle = document.getElementById('privacy-strip-tracking-toggle');
-    const sendTypingToggle = document.getElementById('privacy-send-typing-toggle');
-    
-    webPreviewsToggle.checked = fWebPreviewsEnabled;
-    webPreviewsToggle.addEventListener('change', async (e) => {
-        fWebPreviewsEnabled = e.target.checked;
-        await saveWebPreviews(e.target.checked);
-    });
-    
-    stripTrackingToggle.checked = fStripTrackingEnabled;
-    stripTrackingToggle.addEventListener('change', async (e) => {
-        fStripTrackingEnabled = e.target.checked;
-        await saveStripTracking(e.target.checked);
-    });
-    
-    sendTypingToggle.checked = fSendTypingIndicators;
-    sendTypingToggle.addEventListener('change', async (e) => {
-        fSendTypingIndicators = e.target.checked;
-        await saveSendTypingIndicators(e.target.checked);
-    });
-
-    // Tor toggle — reads current state from the backend (which knows whether
-    // the build was compiled with `--features tor`), then attaches a change
-    // handler that persists the preference and starts/stops the embedded Tor
-    // service. While the toggle awaits bootstrap, we show progress text.
-    const torToggle = document.getElementById('privacy-tor-toggle');
-    const torStatus = document.getElementById('privacy-tor-status');
-    if (torToggle && torStatus) {
-        VectorSvelte.mountTorCard({
-            els: {
-                card: document.getElementById('settings-tor-card'),
-                toggle: torToggle,
-                status: torStatus,
-                advanced: document.getElementById('settings-tor-advanced'),
-                panel: document.getElementById('tor-advanced-panel'),
-                refresh: document.getElementById('tor-circuits-refresh'),
-                list: document.getElementById('tor-circuits-list'),
-            },
-            h: { stateClass: torStateClass, formatStatus: formatTorStatus, isTransitional: isTorTransitional },
-        });
-        try {
-            const state = await invoke('tor_get_state');
-            torApply(state);
-            // If we landed in a transient state (bootstrap still mid-flight
-            // when Settings opened), poll until it settles.
-            if (state.enabled && !state.running) ensureTorStatePolling();
-        } catch (e) {
-            console.warn('[Tor] tor_get_state failed:', e);
-        }
-
-        torToggle.addEventListener('change', async (e) => {
-            const desired = e.target.checked;
-            VectorSvelte.setTorLocked(true);
-            torApply(
-                { supported: true, enabled: desired, running: false, status: desired ? 'bootstrapping' : 'disabled', bootstrap_progress: desired ? 0 : null },
-                desired ? 'Bootstrapping…' : 'Disabling…',
-            );
-            // tor_set_enabled doesn't return until bootstrap completes (~20-30s
-            // first boot) — start polling now so the UI gets live progress.
-            if (desired) ensureTorStatePolling();
-            try {
-                const state = await invoke('tor_set_enabled', { enabled: desired });
-                torApply(state);
-                if (state.enabled && !state.running) ensureTorStatePolling();
-            } catch (err) {
-                console.error('[Tor] tor_set_enabled failed:', err);
-                try {
-                    const state = await invoke('tor_get_state');
-                    torApply({ ...state, status: 'failed: ' + err }, `Failed: ${err}`);
-                } catch (_) { /* nothing else we can do */ }
-            } finally {
-                // The toggle stays locked while Tor is transitional (derived from the state).
-                try { torApply(await invoke('tor_get_state')); } catch (_) {}
-                VectorSvelte.setTorLocked(false);
-            }
-        });
-
-        const advToggle = document.getElementById('tor-advanced-toggle');
-        const advRefresh = document.getElementById('tor-circuits-refresh');
-        if (advToggle) {
-            advToggle.addEventListener('click', () => {
-                const willOpen = !VectorSvelte.torState().advancedOpen;
-                VectorSvelte.setTorAdvancedOpen(willOpen);
-                if (willOpen) loadTorCircuits(false);
-            });
-        }
-        if (advRefresh) {
-            // "New circuit" intentionally rotates the isolation token AND
-            // cycles relay sockets. Bridges flows below only refresh the
-            // display (without doubling up on switch_relay_transport).
-            advRefresh.addEventListener('click', () => loadTorCircuits(true, true));
-        }
-
-        // Bridges: toggle reveals textarea, Apply persists + reconnects Tor.
-        await initTorBridgesUI();
+    // Tor: the backend knows whether the build carries it. A transient state
+    // (bootstrap mid-flight when Settings opened) polls until it settles.
+    try {
+        const state = await invoke('tor_get_state');
+        torApply(state);
+        if (state.enabled && !state.running) ensureTorStatePolling();
+    } catch (e) {
+        console.warn('[Tor] tor_get_state failed:', e);
     }
-
-    // The blocked-users list island + its disclosure toggle
-    VectorSvelte.mountBlockedUsers(document.getElementById('settings-blocked-list'), {
-        emptyEl: document.getElementById('settings-blocked-empty'),
-        h: {
-            load: () => invoke('get_blocked_users'),
-            getProfile: (npub) => getProfile(npub),
-            getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
-            createAvatarImg: (src, size, group) => createAvatarImg(src, size, group),
-            confirmUnblock: (p) => popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(p))}?`),
-            unblock: async (npub) => {
-                await invoke('unblock_user', { npub });
-                showToast('User unblocked');
-                profileChanged(npub);
-            },
-            reload: () => VectorSvelte.reloadBlockedUsers(),
-        },
-    });
-    const blockedToggle = document.getElementById('settings-blocked-toggle');
-    const blockedContent = document.getElementById('settings-blocked-content');
-    const blockedChevron = blockedToggle.querySelector('.icon');
-    blockedToggle.onclick = () => {
-        const isOpen = blockedContent.style.display !== 'none';
-        if (isOpen) {
-            blockedContent.style.display = 'none';
-            blockedChevron.style.transform = '';
-        } else {
-            blockedContent.style.display = '';
-            blockedContent.style.animation = 'blockedFadeIn 0.2s ease';
-            blockedChevron.style.transform = 'rotate(180deg)';
-        }
-    };
+    await loadTorBridges();
 
     await initDisplaySettings();
 
     await initNotificationSettings();
 
-    // Set up clear storage button
-    const clearStorageBtn = document.getElementById('clear-storage-btn');
-    clearStorageBtn.addEventListener('click', async () => {
-        const success = await clearStorage();
-        if (success) initStorageSection();
-    });
-
     // Pre-fetch logs so clipboard.writeText runs synchronously on click (user gesture required)
     window._cachedLogs = '';
     invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
-    const copyCrashLogBtn = document.getElementById('copy-crash-log-btn');
-    copyCrashLogBtn.addEventListener('click', () => {
-        if (!window._cachedLogs) {
-            showToast('No logs to copy!');
-            return;
-        }
-        const lines = window._cachedLogs.split('\n').filter(l => l.trim()).length;
-        navigator.clipboard.writeText(window._cachedLogs).then(() => {
-            showToast('Copied ' + lines + ' log entries to clipboard');
-        });
-    });
 
     // Initialize battery / background service settings (mobile only)
     if (platformFeatures.is_mobile) {
@@ -1705,29 +1393,6 @@ async function initSettings() {
  * Initialize encryption settings UI and event listeners
  */
 async function initEncryptionSettings() {
-    const encryptionToggle = document.getElementById('security-encryption-toggle');
-    const encryptionInfoBtn = document.getElementById('security-encryption-info');
-    const changeCredentialBtn = document.getElementById('security-change-credential');
-
-    if (!encryptionToggle) return;
-
-    VectorSvelte.mountSecurityCard({
-        els: {
-            toggle: encryptionToggle,
-            unlockRow: document.getElementById('unlock-method-container'),
-            unlockLabel: document.getElementById('unlock-method-label'),
-            unlockBtn: document.getElementById('unlock-method-switch'),
-            pinRow: document.getElementById('change-pin-container'),
-            pinLabel: document.getElementById('change-pin-label'),
-            card: document.getElementById('settings-remote-signer'),
-            label: document.getElementById('remote-signer-label'),
-            hint: document.getElementById('remote-signer-hint'),
-            pubkey: document.getElementById('remote-signer-pubkey'),
-            dot: document.getElementById('remote-signer-dot'),
-            exportRow: document.getElementById('export-account-row'),
-        },
-    });
-
     try {
         const status = await invoke('get_encryption_status', { npub: null });
         fEncryptionEnabled = status.enabled;
@@ -1737,19 +1402,6 @@ async function initEncryptionSettings() {
         fEncryptionEnabled = true;
     }
     syncSecurityState();
-
-    encryptionToggle.addEventListener('change', handleEncryptionToggleChange);
-
-    if (encryptionInfoBtn) {
-        encryptionInfoBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            showEncryptionInfo();
-        });
-    }
-    if (changeCredentialBtn) {
-        changeCredentialBtn.addEventListener('click', handleChangeCredential);
-    }
 
     setupMigrationEventListeners();
     await initUnlockMethodRow();
@@ -1782,8 +1434,6 @@ async function resyncEncryptionToggle() {
         const st = await invoke('get_encryption_status', { npub: null });
         fEncryptionEnabled = st.enabled;
         fSecurityType = st.security_type || 'pin';
-        const t = document.getElementById('security-encryption-toggle');
-        if (t) t.checked = st.enabled;
         syncSecurityState();
     } catch (e) { /* keep last known state */ }
 }
@@ -1825,10 +1475,6 @@ async function enableBiometricOnlyEncryption() {
  * engine as Change PIN), so plaintext never touches disk.
  */
 async function initUnlockMethodRow() {
-    const btn = document.getElementById('unlock-method-switch');
-    const infoBtn = document.getElementById('unlock-method-info');
-    if (!btn) return;
-
     let bioSupported = false;
     if (platformFeatures.os === 'android') {
         try {
@@ -1837,33 +1483,13 @@ async function initUnlockMethodRow() {
         } catch (e) { /* leave unsupported */ }
     }
     VectorSvelte.setSecurity({ enabled: fEncryptionEnabled, type: fSecurityType, bioSupported });
+}
 
-    if (!btn.dataset.unlockBound) {
-        btn.dataset.unlockBound = '1';
-        btn.addEventListener('click', async () => {
-            if (fMigrationInProgress) return;
-            if (fSecurityType === 'biometric') {
-                await switchToCredentialMode();
-            } else {
-                await switchToBiometricMode();
-            }
-        });
-        if (infoBtn) {
-            infoBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                popupConfirm(
-                    'Unlock Method',
-                    'Your local data is always encrypted. This chooses what unlocks it:<br><br>' +
-                    '<b>Biometrics</b> uses your device security (fingerprint, face, or device PIN) with a key held in hardware.<br><br>' +
-                    '<b>PIN or Password</b> uses a credential you type and remember.',
-                    true,
-                    '',
-                    'vector-check.svg'
-                );
-            });
-        }
-    }
+/** The Unlock row's button: flip between the two mutually exclusive modes. */
+async function switchUnlockMethod() {
+    if (fMigrationInProgress) return;
+    if (fSecurityType === 'biometric') await switchToCredentialMode();
+    else await switchToBiometricMode();
 }
 
 /** Vector-backed to OS-backed. The prompt happens before anything commits. */
@@ -1915,48 +1541,20 @@ async function switchToCredentialMode() {
 }
 
 /**
- * Update change credential button visibility and text
- */
-/**
- * Show info popup about local encryption
- */
-async function showEncryptionInfo() {
-    await popupConfirm(
-        'Local Encryption',
-        'Protects your messages and keys if your device is lost or stolen.<br><br>' +
-        'Disabling speeds up app launch but stores data in plain text.',
-        true,
-        '',
-        'vector-check.svg'
-    );
-}
-
-/**
  * Handle encryption toggle change
  */
-async function handleEncryptionToggleChange(e) {
-    const newValue = e.target.checked;
-
+async function handleEncryptionToggleChange(desired) {
     // Block if migration running or a credential modal is already open
     if (fMigrationInProgress || document.getElementById('credential-modal-overlay')?.classList.contains('active')) {
-        e.target.checked = fEncryptionEnabled;
+        syncSecurityState();
         return;
     }
-
-    if (newValue) {
-        // Enabling encryption - requires PIN
-        await handleEnableEncryption(e.target);
-    } else {
-        // Disabling encryption - confirm and migrate
-        await handleDisableEncryption(e.target);
-    }
+    if (desired) await handleEnableEncryption();
+    else await handleDisableEncryption();
 }
 
-/**
- * Handle enabling encryption
- * @param {HTMLInputElement} toggle - The toggle element
- */
-async function handleEnableEncryption(toggle) {
+/** Enable encryption; any exit before the backend commits snaps the toggle back. */
+async function handleEnableEncryption() {
     // Android with capable hardware: offer biometric-only mode first — a
     // generated credential nobody knows, unlocked solely by the OS.
     if (platformFeatures.os === 'android') {
@@ -1970,7 +1568,7 @@ async function handleEnableEncryption(toggle) {
             );
             if (useBio) {
                 const ok = await enableBiometricOnlyEncryption();
-                if (!ok) toggle.checked = false;
+                if (!ok) syncSecurityState();
                 return;
             }
         }
@@ -1980,7 +1578,7 @@ async function handleEnableEncryption(toggle) {
     const result = await promptSecurityCredential('Set Up Encryption', 'Choose how to protect your local data. There is no recovery if you forget!');
 
     if (!result) {
-        toggle.checked = false;
+        syncSecurityState();
         return;
     }
 
@@ -2000,7 +1598,7 @@ async function handleEnableEncryption(toggle) {
             '',
             'vector_warning.svg'
         );
-        toggle.checked = false;
+        syncSecurityState();
     }
 }
 
@@ -2302,11 +1900,8 @@ async function handleChangeCredential() {
     }
 }
 
-/**
- * Handle disabling encryption
- * @param {HTMLInputElement} toggle - The toggle element
- */
-async function handleDisableEncryption(toggle) {
+/** Disable encryption; a cancel or failure snaps the toggle back. */
+async function handleDisableEncryption() {
     // Confirm with user
     const confirmed = await popupConfirm(
         'Disable Encryption?',
@@ -2319,8 +1914,7 @@ async function handleDisableEncryption(toggle) {
     );
 
     if (!confirmed) {
-        // User cancelled - revert toggle
-        toggle.checked = true;
+        syncSecurityState();
         return;
     }
 
@@ -2339,7 +1933,7 @@ async function handleDisableEncryption(toggle) {
             '',
             'vector_warning.svg'
         );
-        toggle.checked = true;
+        syncSecurityState();
     }
 }
 
@@ -2365,8 +1959,8 @@ async function setupMigrationEventListeners() {
         const wasRekeying = fMigrationRekeying;
         hideMigrationModal();
         fMigrationRekeying = false;
-        // Update local state
-        fEncryptionEnabled = document.getElementById('security-encryption-toggle').checked;
+        // A re-key keeps encryption on; otherwise the migration's direction is the new state.
+        if (!wasRekeying) fEncryptionEnabled = wasEncrypting;
         syncSecurityState();
         showToast(wasRekeying
             ? (fSecurityType === 'biometric' ? 'Now unlocking with biometrics' : 'Unlock method updated')
@@ -2418,65 +2012,45 @@ function hideMigrationModal() {
 // Battery & Background Service Settings (mobile only)
 // ============================================================================
 
-/**
- * Initialize the battery settings section (toggle, warning).
- */
-async function initBatterySettings() {
-    const section = document.getElementById('settings-battery');
-    if (!section) return;
-
-    section.style.display = 'block';
-
-    const toggle = document.getElementById('battery-bg-service-toggle');
-    const warning = document.getElementById('battery-warning');
-
-    // Load current state
+/** Reflect the background service and battery exemption into the Battery section. */
+async function refreshBatterySection() {
     const enabled = await invoke('get_background_service_enabled');
-    toggle.checked = enabled;
+    const exempt = enabled ? await invoke('check_battery_optimized') : true;
+    VectorSvelte.setSettingsScreen({ battery: { shown: true, enabled, warning: enabled && !exempt } });
+}
 
-    // Show warning if enabled but battery optimization is active
-    if (enabled) {
+async function initBatterySettings() {
+    await refreshBatterySection();
+}
+
+/** Tapping the warning opens the system dialog; re-check once the app is back. */
+async function batteryWarningTap() {
+    await invoke('request_battery_optimization');
+    await waitForVisibility();
+    const nowExempt = await invoke('check_battery_optimized');
+    VectorSvelte.setSettingsScreen({ battery: { warning: !nowExempt } });
+}
+
+/** The Run in Background toggle. Turning on needs the battery exemption first. */
+async function setBackgroundService(on) {
+    if (on) {
         const exempt = await invoke('check_battery_optimized');
-        warning.style.display = exempt ? 'none' : '';
-    } else {
-        warning.style.display = 'none';
-    }
-
-    // Tap warning to open battery optimization dialog
-    warning.style.cursor = 'pointer';
-    warning.addEventListener('click', async () => {
-        await invoke('request_battery_optimization');
-        await waitForVisibility();
-        const nowExempt = await invoke('check_battery_optimized');
-        warning.style.display = nowExempt ? 'none' : '';
-    });
-
-    toggle.addEventListener('change', async () => {
-        if (toggle.checked) {
-            // Turning ON — check battery optimization first
-            const exempt = await invoke('check_battery_optimized');
-            if (!exempt) {
-                // Request exemption
-                await invoke('request_battery_optimization');
-                // Wait for user to return from system dialog
-                await waitForVisibility();
-                const nowExempt = await invoke('check_battery_optimized');
-                if (!nowExempt) {
-                    // User denied — revert toggle
-                    toggle.checked = false;
-                    warning.style.display = 'none';
-                    popupConfirm('Battery Optimization', 'Battery optimization must be disabled for reliable background notifications.', true, '', 'vector_warning.svg');
-                    return;
-                }
+        if (!exempt) {
+            await invoke('request_battery_optimization');
+            await waitForVisibility();
+            const nowExempt = await invoke('check_battery_optimized');
+            if (!nowExempt) {
+                VectorSvelte.setSettingsScreen({ battery: { enabled: false, warning: false } });
+                popupConfirm('Battery Optimization', 'Battery optimization must be disabled for reliable background notifications.', true, '', 'vector_warning.svg');
+                return;
             }
-            await invoke('set_background_service_enabled', { enabled: true });
-            warning.style.display = 'none';
-        } else {
-            // Turning OFF — stop service immediately
-            await invoke('set_background_service_enabled', { enabled: false });
-            warning.style.display = 'none';
         }
-    });
+        await invoke('set_background_service_enabled', { enabled: true });
+        VectorSvelte.setSettingsScreen({ battery: { enabled: true, warning: false } });
+    } else {
+        await invoke('set_background_service_enabled', { enabled: false });
+        VectorSvelte.setSettingsScreen({ battery: { enabled: false, warning: false } });
+    }
 }
 
 /**
@@ -2501,15 +2075,7 @@ async function showBackgroundServicePrompt() {
         await invoke('set_background_service_enabled', { enabled: false });
     }
 
-    // Refresh the settings UI to reflect current state
-    const warning = document.getElementById('battery-warning');
-    const toggle = document.getElementById('battery-bg-service-toggle');
-    if (warning && toggle) {
-        const enabled = await invoke('get_background_service_enabled');
-        const exempt = await invoke('check_battery_optimized');
-        toggle.checked = enabled;
-        warning.style.display = (enabled && !exempt) ? '' : 'none';
-    }
+    await refreshBatterySection();
 }
 
 /**
@@ -2564,29 +2130,36 @@ function updateMigrationProgress(total, completed, phase) {
     progressText.textContent = `${percentage}%`;
 }
 
-/** Wire the settings help prompts and the footer links. */
-// Help prompts: one explainer per info icon, keyed by element id. A function body
-// resolves at click time (the change-PIN wording follows the security type).
+// Help prompts: one explainer per info icon. A function body resolves at click
+// time (the change-PIN wording follows the security type).
 const SETTINGS_HELP = {
-    'privacy-strip-tracking-info': ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
-    'privacy-send-typing-info': ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
+    stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
+    sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
     // Trademark notice + non-endorsement disclaimer included per the
     // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
-    'privacy-tor-info': ['Route traffic through Tor',
+    tor: ['Route traffic through Tor',
         'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
         + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
         + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>'],
-    'battery-bg-service-info': ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
-    'storage-gallery-info': ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
-    'export-account-info': ['Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.'],
-    'change-pin-info': () => fSecurityType === 'password'
+    battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
+    gallery: ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
+    autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
+    autoDownloadLimit: ['Auto-Download Limit', 'The largest attachment size Vector will fetch automatically.<br><br>Anything above this waits for you to tap Download. Only applies while Auto-Download Media is on.'],
+    clearStorage: ['Clear Storage', 'Deletes the downloaded and sent files Vector has cached on this device, to free up space.<br><br>Your messages stay. Attachments can be downloaded again later if they are still available from their sender.'],
+    encryption: ['Local Encryption', 'Protects your messages and keys if your device is lost or stolen.<br><br>Disabling speeds up app launch but stores data in plain text.', 'vector-check.svg'],
+    unlockMethod: ['Unlock Method',
+        'Your local data is always encrypted. This chooses what unlocks it:<br><br>'
+        + '<b>Biometrics</b> uses your device security (fingerprint, face, or device PIN) with a key held in hardware.<br><br>'
+        + '<b>PIN or Password</b> uses a credential you type and remember.', 'vector-check.svg'],
+    exportAccount: ['Export Account', 'Export Account will display a backup of your encryption keys. Keep it safe to restore your account later.'],
+    changePin: () => fSecurityType === 'password'
         ? ['Change Password', 'Your password encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new password.']
         : ['Change PIN', 'Your PIN encrypts all local data including messages, keys, and secrets stored on your device. Resetting it will re-encrypt everything with your new PIN.'],
-    'crash-log-info': ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
-    'logout-info': ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
+    crashLog: ['Logs', 'Copies error logs and crash details to your clipboard.<br><br>Share with developers when reporting bugs to help diagnose issues.'],
+    logout: ['Logout', 'Logout will erase the local database and remove all stored keys. You will lose access to group chats unless you have a backup.'],
     // Rendered against the Tor preference: with Tor on, every preview fetch is forced
     // through Tor (or blackholes during bootstrap), so there is no clearnet leak path.
-    'privacy-web-previews-info': async () => {
+    webPreviews: async () => {
         let torEnabled = false;
         try { torEnabled = !!(await invoke('tor_get_state'))?.enabled; } catch (_) { /* default warning */ }
         return ['Web Previews', torEnabled
@@ -2595,52 +2168,128 @@ const SETTINGS_HELP = {
     },
 };
 
-// Footer and attribution links.
+// Footer and attribution links. obfs4 is the realistic anti-censorship transport;
+// vanilla bridges are essentially abandoned by The Tor Project.
 const SETTINGS_LINKS = {
-    'tor-attribution-link': 'https://torproject.org',
-    'footer-donate': 'https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations',
-    'footer-gitbook': 'https://docs.vectorapp.io',
-    'footer-privacy': 'https://vectorapp.io/privacy-policy',
+    torAttribution: 'https://torproject.org',
+    bridges: 'https://bridges.torproject.org/bridges/en?transport=obfs4',
+    donate: 'https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations',
+    gitbook: 'https://docs.vectorapp.io',
+    privacy: 'https://vectorapp.io/privacy-policy',
 };
 
-/** Wire the settings help prompts, links and the signer re-authorise button. */
-function wireSettingsHelp() {
-    // Some icons sit inside checkbox labels, so the click must not also toggle the box.
-    for (const [id, entry] of Object.entries(SETTINGS_HELP)) {
-        const el = document.getElementById(id);
-        if (!el) continue;
-        el.onclick = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const [title, body] = typeof entry === 'function' ? await entry() : entry;
-            popupConfirm(title, body, true);
-        };
-    }
-    for (const [id, url] of Object.entries(SETTINGS_LINKS)) {
-        const el = document.getElementById(id);
-        if (el) el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); openUrl(url); };
-    }
-
-    if (domRemoteSignerReauthBtn) {
-        domRemoteSignerReauthBtn.onclick = async (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            // NIP-55 re-auth is a direct Amber intent (no QR/paste), so dispatch
-            // on the actual account type rather than assuming bunker.
-            const nip55 = await invoke('get_nip55_status').catch(() => null);
-            if (nip55) {
-                try {
-                    await invoke('reauthorize_nip55');
-                    if (typeof showToast === 'function') showToast('Signer re-authorized.');
-                    refreshRemoteSignerCard();
-                } catch (err) {
-                    popupConfirm(String(err), '', true, '', 'vector_warning.svg');
-                }
-                return;
-            }
-            if (typeof window.showBunkerForm === 'function') {
-                window.showBunkerForm('reauth');
-            }
-        };
-    }
+async function showSettingsHelp(key) {
+    const entry = SETTINGS_HELP[key];
+    const [title, body, icon] = typeof entry === 'function' ? await entry() : entry;
+    popupConfirm(title, body, true, '', icon || '');
 }
+
+/** Re-authorize the external signer: a direct Amber intent for NIP-55, the bunker form otherwise. */
+async function reauthorizeSigner() {
+    const nip55 = await invoke('get_nip55_status').catch(() => null);
+    if (nip55) {
+        try {
+            await invoke('reauthorize_nip55');
+            showToast('Signer re-authorized.');
+            refreshRemoteSignerCard();
+        } catch (err) {
+            popupConfirm(String(err), '', true, '', 'vector_warning.svg');
+        }
+        return;
+    }
+    if (typeof window.showBunkerForm === 'function') window.showBunkerForm('reauth');
+}
+
+// The Settings screen's helpers. Section owners that come up later (the updater,
+// the relay list, voice) register their own bags on the store.
+const SETTINGS_HELPERS = {
+    help: showSettingsHelp,
+    openLink: (key) => openUrl(SETTINGS_LINKS[key]),
+    setTheme: async (theme) => {
+        await setTheme(theme);
+        // The breakdown's slice colours follow the theme.
+        initStorageSection();
+    },
+    setPrivacy: setPrivacySetting,
+    tor: {
+        stateClass: torStateClass, formatStatus: formatTorStatus, isTransitional: isTorTransitional,
+        setTorEnabled,
+        injectGlyph: injectTorGlyph,
+        help: showSettingsHelp,
+        openLink: (key) => openUrl(SETTINGS_LINKS[key]),
+        toggleAdvanced: () => {
+            const willOpen = !VectorSvelte.torState().advancedOpen;
+            VectorSvelte.setTorAdvancedOpen(willOpen);
+            if (willOpen) loadTorCircuits(false);
+        },
+        // A new circuit rotates the isolation token AND cycles relay sockets; the
+        // bridges flows only refresh the display.
+        newCircuit: () => loadTorCircuits(true, true),
+        setBridgesEnabled: setTorBridgesEnabled,
+        bridgesInput: onTorBridgesInput,
+        applyBridges: applyTorBridges,
+    },
+    blocked: {
+        load: () => invoke('get_blocked_users'),
+        getProfile: (npub) => getProfile(npub),
+        getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
+        createAvatarImg: (src, size, group) => createAvatarImg(src, size, group),
+        confirmUnblock: (p) => popupConfirm('Unblock User', `Are you sure you want to unblock ${escapeHtml(getName(p))}?`),
+        unblock: async (npub) => {
+            await invoke('unblock_user', { npub });
+            showToast('User unblocked');
+            profileChanged(npub);
+        },
+        reload: () => VectorSvelte.reloadBlockedUsers(),
+    },
+    display: DISPLAY_HANDLERS,
+    notif: NOTIF_HANDLERS,
+    storageDonut: {
+        // misc.js loads after this file: resolve at call time.
+        formatBytes: (n) => formatBytes(n),
+        confirmDelete: confirmStorageDelete,
+        deleteCategory: (category, exts) => invoke('clear_storage_category', { category, exts }),
+        refresh: () => initStorageSection(),
+        // The emoji memos and any rendered <img>s point at the deleted cache files
+        onCacheCleared: () => reloadCachedEmojiImgs(),
+        toast: (msg) => showToast(msg),
+        deleteFailed: (e) => popupConfirm('Delete Failed', `Could not delete: ${escapeHtml(String(e))}`, true, '', 'vector_warning.svg'),
+    },
+    setGalleryHidden: async (hidden) => {
+        VectorSvelte.setSettingsScreen({ storage: { galleryHidden: hidden } });
+        try {
+            await invoke('set_gallery_hidden', { hidden });
+        } catch (err) {
+            console.error('set_gallery_hidden failed:', err);
+        }
+    },
+    setAutoDownload: async (on) => {
+        AUTO_DOWNLOAD_ENABLED = on;
+        await saveAutoDownloadEnabled(on);
+    },
+    setAutoDownloadLimit: async (bytes) => {
+        MAX_AUTO_DOWNLOAD_BYTES = bytes;
+        VectorSvelte.setSettingsScreen({ storage: { limit: bytes } });
+        await saveMaxAutoDownloadBytes(bytes);
+    },
+    clearStorage: async () => {
+        if (await clearStorage()) initStorageSection();
+    },
+    setBackgroundService,
+    batteryWarningTap,
+    security: {
+        toggleEncryption: handleEncryptionToggleChange,
+        changeCredential: handleChangeCredential,
+        switchUnlock: switchUnlockMethod,
+        reauthorize: reauthorizeSigner,
+        exportAccount,
+        help: showSettingsHelp,
+    },
+    copyLogs,
+    logout: logoutAccount,
+};
+
+// Mounted once every script is in: the sections call helpers from files that load later.
+document.addEventListener('DOMContentLoaded', () => {
+    VectorSvelte.mountSettings(domSettings, { h: SETTINGS_HELPERS });
+}, { once: true });

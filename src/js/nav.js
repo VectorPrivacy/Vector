@@ -98,18 +98,11 @@ function openSettings() {
     invoke('get_logs').then((log) => { window._cachedLogs = log || ''; });
     refreshRemoteSignerCard();
 
-    // If an update is available, scroll to the updates section
+    // An update is waiting: bring the Updates section into view and clear the dot.
     const updateDot = document.getElementById('settings-update-dot');
     if (updateDot && updateDot.style.display !== 'none') {
-        // Give the settings tab time to render
-        setTimeout(() => {
-            const updatesSection = document.getElementById('settings-updates');
-            if (updatesSection) {
-                updatesSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                // Hide the notification dot after scrolling
-                updateDot.style.display = 'none';
-            }
-        }, 100);
+        VectorSvelte.requestSettingsScroll('updates');
+        updateDot.style.display = 'none';
     }
 }
 

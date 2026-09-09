@@ -1,14 +1,13 @@
 // Relays and media servers: the network list and its dialogs.
 // One global scope: loads after main.js and shares its globals.
 
-let fNetworkListMounted = false;
+let fNetworkHandlersSet = false;
 
 /** Fetch the relay and media server lists into the Network section's state. */
 async function renderRelayList() {
-    if (!fNetworkListMounted) {
-        fNetworkListMounted = true;
-        VectorSvelte.mountNetworkList(document.getElementById('network-list'), {
-            h: {
+    if (!fNetworkHandlersSet) {
+        fNetworkHandlersSet = true;
+        VectorSvelte.setSettingsHandlers('network', {
                 explain: (kind) => kind === 'relays'
                     ? popupConfirm('Nostr Relays', 'Nostr Relays are <b>decentralized servers that store and relay your messages</b> across the Nostr network.<br><br>Vector connects to multiple relays simultaneously to ensure your messages are delivered reliably and are censorship-resistant.', true)
                     : popupConfirm('Media Servers', 'Media Servers are <b>Blossom-compatible servers that store your files</b> (images, videos, documents) for sharing in messages and for storage in an encrypted cloud.<br><br>Your server list syncs automatically across your devices.', true),
@@ -52,7 +51,6 @@ async function renderRelayList() {
                         return false;
                     }
                 },
-            },
         });
     }
     try {

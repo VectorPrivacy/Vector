@@ -39,14 +39,15 @@ const TOR_GLYPH_SVG = `
   <circle class="tor-core" cx="60" cy="60" r="6"></circle>
 `;
 
+/** Inline the glyph into one `<svg class="tor-glyph">`, once. */
+function injectTorGlyph(svg) {
+    if (svg.dataset.torGlyphInjected) return;
+    svg.dataset.torGlyphInjected = '1';
+    svg.innerHTML = TOR_GLYPH_SVG;
+}
+
 function _injectTorGlyphs() {
-    const targets = document.querySelectorAll('svg.tor-glyph');
-    targets.forEach((svg) => {
-        // Only inject once per element.
-        if (svg.dataset.torGlyphInjected) return;
-        svg.dataset.torGlyphInjected = '1';
-        svg.innerHTML = TOR_GLYPH_SVG;
-    });
+    document.querySelectorAll('svg.tor-glyph').forEach(injectTorGlyph);
 }
 
 if (document.readyState === 'loading') {
