@@ -6,6 +6,7 @@
     // content, and a rebuild would reset playback and spoiler reveals).
     import Attachments from './Attachments.svelte';
     import InvitePreviews from './InvitePreviews.svelte';
+    import { messageVersion } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h, sig } = $props();
     // h: buildText(msg, ctx) → span | null, the Attachments leaves, buildCryptoAddress(msg),
@@ -25,7 +26,8 @@
         return { destroy: () => h.destroyEmojiPackPreviews(node) };
     }
 
-    const live = $derived(!msg.pending && !msg.failed && !ctx.revealedBlocked);
+    // Send state is mutated in place; the message's version is what moves.
+    const live = $derived.by(() => { messageVersion(msg.id); return !msg.pending && !msg.failed && !ctx.revealedBlocked; });
     const xdcUrl = $derived(live ? h.xdcUrl(msg) : null);
     // A vectorapp.io profile link is already a mention pill; an OpenGraph card would repeat it.
     const showLinkPreview = $derived(live && h.webPreviewsEnabled() && !xdcUrl

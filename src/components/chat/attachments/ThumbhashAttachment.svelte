@@ -4,13 +4,14 @@
     // A missing blur falls back to the file box leaf.
     import { downloadProgress } from '../../lib/attachments.svelte.js';
     import FileBox from './FileBox.svelte';
+    import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, auto, h } = $props();
     // h: thumbhash(npub, msgId), onThumbLoad(), formatBytes, startDownload(att, msg, sender), openChat(), and FileBox's
 
     // Mount-time: a row's chat and author never change under it.
     // svelte-ignore state_referenced_locally
     const npub = ctx.isGroupChat ? h.openChat() : (sender?.id || h.openChat());
-    const downloading = $derived(!!att.downloading || auto || started);
+    const downloading = $derived.by(() => { messageVersion(msg.id); return !!att.downloading || auto || started; });
     let started = $state(false);
     let blur = $state(null);
     let blurFailed = $state(false);

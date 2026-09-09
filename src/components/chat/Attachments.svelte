@@ -6,6 +6,7 @@
     import VideoAttachment from './attachments/VideoAttachment.svelte';
     import ThumbhashAttachment from './attachments/ThumbhashAttachment.svelte';
     import FileBox from './attachments/FileBox.svelte';
+    import { messageVersion } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h } = $props();
     // h (beyond the leaves'): isImage(ext), isAudio(ext), isVideo(ext), willAutoDownload(att, ctx), isDownloading(att),
@@ -26,34 +27,45 @@
         return { update: ({ uploading: u }) => { if (u === cur) return; cur = u; build(u); } };
     }
 
+    // Transfer state is mutated in place on the attachment; the message's version is
+    // what moves, so every phase derives under it.
+    const rows = $derived.by(() => {
+        messageVersion(msg.id);
+        return (msg.attachments || []).map((att) => ({
+            att,
+            phase: att.downloaded ? 'downloaded' : h.isDownloading(att) ? 'downloading' : 'idle',
+            auto: !att.downloaded && h.willAutoDownload(att, ctx),
+            uploading: !!(msg.mine && msg.pending),
+        }));
+    });
+
     // Auto-download: a side effect, once per attachment id (the app dedupes across renders).
     $effect(() => {
-        for (const att of msg.attachments || []) {
-            if (!att.downloaded && !h.isDownloading(att) && h.willAutoDownload(att, ctx)) h.autoDownload(att, msg, sender);
+        for (const r of rows) {
+            if (r.phase === 'idle' && r.auto) h.autoDownload(r.att, msg, sender);
         }
     });
 </script>
 
 <!-- By position, not id: an upload's id changes when it lands, and its picture must not remount. -->
-{#each msg.attachments || [] as att, i (i)}
-    {#if att.downloaded}
+{#each rows as { att, phase, auto, uploading }, i (i)}
+    {#if phase === 'downloaded'}
         {#if h.isImage(att.extension)}
             <ImageAttachment {att} {msg} {ctx} {sender} {h} />
         {:else if h.isAudio(att.extension)}
-            <span style="display:contents" use:audio={{ att, uploading: msg.mine && msg.pending }}></span>
+            <span style="display:contents" use:audio={{ att, uploading }}></span>
         {:else if h.isVideo(att.extension)}
             <VideoAttachment {att} {msg} {h} />
         {:else}
             <FileBox {att} {msg} {sender} phase="downloaded" {h} />
         {/if}
-    {:else if h.isDownloading(att)}
+    {:else if phase === 'downloading'}
         {#if IMAGE_BLUR.includes(att.extension)}
             <ThumbhashAttachment {att} {msg} {ctx} {sender} auto={false} {h} />
         {:else}
             <FileBox {att} {msg} {sender} phase="downloading" {h} />
         {/if}
     {:else}
-        {@const auto = h.willAutoDownload(att, ctx)}
         {#if IMAGE_BLUR.includes(att.extension)}
             <ThumbhashAttachment {att} {msg} {ctx} {sender} {auto} {h} />
         {:else}

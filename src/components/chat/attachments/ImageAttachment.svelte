@@ -2,11 +2,12 @@
     // A downloaded picture: the real image, or a thumbhash blur behind a Spoiler veil
     // until tapped. An upload in flight dims it under a progress ring.
     import UploadOverlay from './UploadOverlay.svelte';
+    import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, h } = $props();
     // h: assetUrl(path), isSpoiler(att), thumbhash(npub, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
     //    attachFileExtBadge(img, container, ext), cancelUpload
 
-    const uploading = $derived(msg.mine && msg.pending);
+    const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     // svelte-ignore state_referenced_locally
     const spoiler = h.isSpoiler(att);
     // Mount-time: a row's chat and author never change under it.

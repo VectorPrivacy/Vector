@@ -4,6 +4,7 @@
     import { transfer } from '../../lib/attachments.svelte.js';
     import { miniappStatus } from '../../lib/miniapps.svelte.js';
     import { profileVersion } from '../../lib/signals.svelte.js';
+    import { messageVersion } from '../../lib/chatview.svelte.js';
 
     let { att, msg, sender = null, phase, label = null, onActivate = null, h } = $props();
     // phase: 'downloaded' | 'download' | 'downloading'; label overrides the small line; onActivate overrides the click
@@ -20,7 +21,7 @@
     // svelte-ignore state_referenced_locally
     const topicKey = att.webxdc_topic || `att:${att.id}`;
 
-    const uploading = $derived(msg.mine && msg.pending && phase === 'downloaded');
+    const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending) && phase === 'downloaded'; });
     const up = $derived(uploading ? transfer(msg.id) : null);
     const down = $derived(phase === 'downloading' ? transfer(att.id) : null);
     const spinning = $derived(uploading || phase === 'downloading');

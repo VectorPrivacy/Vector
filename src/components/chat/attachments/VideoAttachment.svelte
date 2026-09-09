@@ -2,8 +2,9 @@
     // A downloaded video. Width is the CSS's (max-width + auto, so portrait clips shrink
     // rather than squash). An upload in flight dims it under a progress ring.
     import UploadOverlay from './UploadOverlay.svelte';
+    import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, h } = $props();   // h: mediaUrl(path), onVideoMeta(video), cancelUpload
-    const uploading = $derived(msg.mine && msg.pending);
+    const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     let container = $state(null);
     // The ring covers the media, not the wrapper: the overlay is sized to the media's rendered
     // box for as long as it is on screen. Pinning the wrapper instead would cap the media
