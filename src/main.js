@@ -2484,7 +2484,8 @@ document.addEventListener('click', (e) => {
 
     // Close attachment panel when clicking outside of it
     if (domAttachmentPanel.classList.contains('visible')) {
-        const clickedInsidePanel = domAttachmentPanel.contains(e.target);
+        // The path, not contains: a view switch unmounts the clicked button before this runs.
+        const clickedInsidePanel = domAttachmentPanel.contains(e.target) || (e.composedPath?.() || []).includes(domAttachmentPanel);
         const clickedFileButton = VectorSvelte.composerEls().file.contains(e.target);
         // Don't close if clicking inside PIVX dialogs, popup prompts, or Mini App launch dialog
         const clickedInsidePivxDialog = e.target.closest('.pivx-dialog-overlay');
