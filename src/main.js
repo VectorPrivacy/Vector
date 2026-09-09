@@ -274,15 +274,6 @@ const domChatReplyBarSnippet = document.getElementById('chat-reply-bar-snippet')
 const domChatReplyBarCancel = document.getElementById('chat-reply-bar-cancel');
 const domChatMessageInputEmoji = document.getElementById('chat-input-emoji');
 const domAttachmentPanel = document.getElementById('attachment-panel');
-const domAttachmentPanelMain = document.getElementById('attachment-panel-main');
-const domAttachmentPanelFile = document.getElementById('attachment-panel-file');
-const domAttachmentPanelFolder = document.getElementById('attachment-panel-folder');
-const domAttachmentPanelMiniApps = document.getElementById('attachment-panel-miniapps');
-const domAttachmentPanelCommands = document.getElementById('attachment-panel-commands');
-const domAttachmentPanelMiniAppsView = document.getElementById('attachment-panel-miniapps-view');
-const domMiniAppsGrid = document.getElementById('miniapps-grid');
-const domMiniAppsSearch = document.getElementById('miniapps-search');
-const domAttachmentPanelBack = document.getElementById('attachment-panel-back');
 const domMarketplacePanel = document.getElementById('marketplace-panel');
 const domAppDetailsPanel = document.getElementById('app-details-panel');
 const domMiniAppLaunchOverlay = document.getElementById('miniapp-launch-overlay');
@@ -383,16 +374,12 @@ function toggleAttachmentPanel() {
         }
         
         // Commands: only in chats with known bots; grayed while a draft exists.
-        if (domAttachmentPanelCommands) {
-            const showCmds = !!(commandCtrl && commandCtrl.hasBots && commandCtrl.hasBots());
-            domAttachmentPanelCommands.style.display = showCmds ? '' : 'none';
-            if (showCmds) {
-                domAttachmentPanelCommands.classList.toggle('disabled', domChatMessageInput.value.trim().length > 0);
-            }
-        }
-
-        // Animate items when panel opens
-        animateAttachmentPanelItems(domAttachmentPanelMain);
+        const showCmds = !!(commandCtrl && commandCtrl.hasBots && commandCtrl.hasBots());
+        VectorSvelte.attachmentPatch({
+            commandsShown: showCmds,
+            commandsDisabled: showCmds && domChatMessageInput.value.trim().length > 0,
+        });
+        VectorSvelte.attachmentPulse('main');
     } else {
         // Hide the attachment panel
         closeAttachmentPanel();

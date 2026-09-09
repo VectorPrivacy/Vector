@@ -11,49 +11,20 @@
  * Marketplace itself (catalog, install, update internals) lives in marketplace.js.
  */
 
-/**
- * Shows the main attachment panel view (File, Mini Apps buttons)
- */
+/** The main attachment panel view (File, Mini Apps buttons). */
 function showAttachmentPanelMain() {
     popBack('attachment-mini-apps');
-    domAttachmentPanelMain.style.display = 'flex';
-    domAttachmentPanelMiniAppsView.style.display = 'none';
-    // Also hide PIVX wallet view if open
-    if (domAttachmentPanelPivxView) {
-        domAttachmentPanelPivxView.style.display = 'none';
-    }
-    // Remove PIVX-active border styling
-    if (domAttachmentPanel) {
-        domAttachmentPanel.classList.remove('pivx-active');
-    }
-
-    // Animate items with staggered delay
-    animateAttachmentPanelItems(domAttachmentPanelMain);
+    VectorSvelte.attachmentSetView('main');
+    VectorSvelte.attachmentPulse('main');
 }
 
-/**
- * Shows the Mini Apps list view
- */
+/** The Mini Apps list view. */
 async function showAttachmentPanelMiniApps() {
     pushBack('attachment-mini-apps', showAttachmentPanelMain);
-    domAttachmentPanelMain.style.display = 'none';
-    domAttachmentPanelMiniAppsView.style.display = 'flex';
-    // Also hide PIVX wallet view if open
-    if (domAttachmentPanelPivxView) {
-        domAttachmentPanelPivxView.style.display = 'none';
-    }
-
-    // Clear search input and reset filter
-    if (domMiniAppsSearch) {
-        domMiniAppsSearch.value = '';
-        filterMiniApps('');
-    }
-
-    // Load Mini Apps history from backend
+    VectorSvelte.attachmentPatch({ view: 'miniapps', search: '' });
+    filterMiniApps('');
     await loadMiniAppsHistory();
-
-    // Animate items with staggered delay
-    animateAttachmentPanelItems(domMiniAppsGrid);
+    VectorSvelte.attachmentPulse('grid');
 }
 
 /**
@@ -89,35 +60,6 @@ function hideMarketplacePanel() {
     });
 }
 
-/**
- * Animate attachment panel items with staggered fade-in effect
- */
-function animateAttachmentPanelItems(container) {
-    const items = container.querySelectorAll('.attachment-panel-item');
-    const totalAnimTime = 0.35; // Total stagger duration in seconds
-    const maxDelay = 0.08; // Cap at 80ms per item for small counts
-    const staggerDelay = items.length > 1 ? Math.min(maxDelay, totalAnimTime / (items.length - 1)) : 0;
-
-    items.forEach((item, index) => {
-        // Remove any existing animation
-        item.classList.remove('animate-in');
-        item.style.animationDelay = '';
-
-        // Force reflow to restart animation
-        void item.offsetWidth;
-
-        // Add animation with staggered delay
-        item.style.animationDelay = `${index * staggerDelay}s`;
-        item.classList.add('animate-in');
-
-        // Remove animate-in class when animation finishes to avoid conflicts with other animations
-        item.addEventListener('animationend', () => {
-            item.classList.remove('animate-in');
-            item.style.animationDelay = '';
-        }, { once: true });
-    });
-}
-
 // The grid is a Svelte island over lib/miniappsgrid.svelte.js; this side reads
 // history, resolves icons and owns the gestures.
 const miniAppsEditMode = () => VectorSvelte.gridState().editMode;
@@ -126,22 +68,15 @@ const miniAppIconCache = new Map();
 // until they land: key → grid entry.
 const miniAppsPreinstalling = new Map();
 
-let miniAppsGridMounted = false;
-function ensureMiniAppsGrid() {
-    if (miniAppsGridMounted || !domMiniAppsGrid) return;
-    miniAppsGridMounted = true;
-    VectorSvelte.mountMiniAppsGrid(domMiniAppsGrid, {
-        h: {
-            openNexus: () => { closeAttachmentPanel(); showMarketplacePanel(); },
-            open: openGridApp,
-            showTip: showGlobalTooltip,
-            hideTip: hideGlobalTooltip,
-            iconFailed: (a) => VectorSvelte.gridPatch(a.key, { icon: null }),
-            update: (a) => handleMiniAppPanelUpdate(a.marketplaceId),
-            remove: removeGridApp,
-        },
-    });
-}
+const miniAppsGridHelpers = {
+    openNexus: () => { closeAttachmentPanel(); showMarketplacePanel(); },
+    open: openGridApp,
+    showTip: showGlobalTooltip,
+    hideTip: hideGlobalTooltip,
+    iconFailed: (a) => VectorSvelte.gridPatch(a.key, { icon: null }),
+    update: (a) => handleMiniAppPanelUpdate(a.marketplaceId),
+    remove: removeGridApp,
+};
 
 function miniAppKey(app) { return app.marketplace_id || app.src_url || app.name; }
 
@@ -182,7 +117,7 @@ async function removeGridApp(a) {
     }
     deactivateMiniAppsEditMode();
     await loadMiniAppsHistory();
-    animateAttachmentPanelItems(domMiniAppsGrid);
+    VectorSvelte.attachmentPulse('grid');
 }
 
 /**
@@ -190,7 +125,6 @@ async function removeGridApp(a) {
  * by its own last use.
  */
 async function loadMiniAppsHistory() {
-    ensureMiniAppsGrid();
     try {
         const history = await invoke('miniapp_get_history', { limit: null });
 
@@ -298,7 +232,6 @@ function activateMiniAppsEditMode() {
     if (miniAppsEditMode()) return;
     VectorSvelte.gridSetEditMode(true);
     miniAppsEditModeJustActivated = true;
-    domMiniAppsGrid.classList.add('edit-mode');
 
     document.removeEventListener('click', handleEditModeClickOutside, true);
     // A beat later, so the mouseup click from the hold doesn't exit at once.
@@ -311,7 +244,6 @@ function deactivateMiniAppsEditMode() {
     if (!miniAppsEditMode()) return;
     VectorSvelte.gridSetEditMode(false);
     miniAppsEditModeJustActivated = false;
-    domMiniAppsGrid.classList.remove('edit-mode');
     document.removeEventListener('click', handleEditModeClickOutside, true);
 }
 
@@ -385,31 +317,20 @@ function suppressClickAfterEditMode(e) {
     }
 }
 
-/**
- * Sets up hold-to-edit event listeners on the Mini Apps grid
- */
-function setupMiniAppsEditMode() {
-    if (!domMiniAppsGrid) return;
-
-    // Prevent any drag behavior on the grid items
-    domMiniAppsGrid.addEventListener('dragstart', (e) => {
-        e.preventDefault();
-        return false;
-    });
-
-    // Mouse events
-    domMiniAppsGrid.addEventListener('mousedown', startMiniAppHold);
-    domMiniAppsGrid.addEventListener('mouseup', cancelMiniAppHold);
-    domMiniAppsGrid.addEventListener('mouseleave', cancelMiniAppHold);
-
+/** Hold-to-edit gestures on the grid host; the panel calls this each time the view mounts. */
+function bindMiniAppsGrid(grid) {
+    const noDrag = (e) => { e.preventDefault(); return false; };
+    grid.addEventListener('dragstart', noDrag);
+    grid.addEventListener('mousedown', startMiniAppHold);
+    grid.addEventListener('mouseup', cancelMiniAppHold);
+    grid.addEventListener('mouseleave', cancelMiniAppHold);
     // Suppress clicks immediately after edit mode activation
-    domMiniAppsGrid.addEventListener('click', suppressClickAfterEditMode, true);
-
-    // Touch events for mobile
-    domMiniAppsGrid.addEventListener('touchstart', startMiniAppHold, { passive: false });
-    domMiniAppsGrid.addEventListener('touchend', cancelMiniAppHold);
-    domMiniAppsGrid.addEventListener('touchcancel', cancelMiniAppHold);
-    domMiniAppsGrid.addEventListener('touchmove', cancelMiniAppHold);
+    grid.addEventListener('click', suppressClickAfterEditMode, true);
+    grid.addEventListener('touchstart', startMiniAppHold, { passive: false });
+    grid.addEventListener('touchend', cancelMiniAppHold);
+    grid.addEventListener('touchcancel', cancelMiniAppHold);
+    grid.addEventListener('touchmove', cancelMiniAppHold);
+    return () => { cancelMiniAppHold(); deactivateMiniAppsEditMode(); };
 }
 
 /** Resolve an app's icon from its bundle and paint it onto its tile. */
@@ -791,43 +712,36 @@ async function openMiniAppFromHistory(app) {
     await showMiniAppLaunchDialog(app);
 }
 
-/** Wire the attachment panel's Mini Apps view and mount the launch dialog. */
+/** Mount the attachment panel and the launch dialog. */
 async function wireMiniAppsUi() {
-    // Commands button — bot-chats only. Drops a `/` into the composer and opens
-    // the command list. Grayed (with a tooltip) while a draft is present.
-    domAttachmentPanelCommands.onclick = () => {
-        if (domAttachmentPanelCommands.classList.contains('disabled')) return;
-        closeAttachmentPanel();
-        domChatMessageInput.value = '/';
-        domChatMessageInput.focus();
-        domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
-    };
-    domAttachmentPanelCommands.addEventListener('mouseenter', () => {
-        if (domAttachmentPanelCommands.classList.contains('disabled')) {
-            showGlobalTooltip('Clear your draft to use commands', domAttachmentPanelCommands);
-        }
-    });
-    domAttachmentPanelCommands.addEventListener('mouseleave', hideGlobalTooltip);
-
-    // Handle Mini Apps button in attachment panel - shows the Mini Apps list view
-    domAttachmentPanelMiniApps.onclick = async () => {
-        await showAttachmentPanelMiniApps();
-    };
-
-    // Handle Back button in Mini Apps view - returns to main attachment panel
-    domAttachmentPanelBack.onclick = () => {
-        showAttachmentPanelMain();
-    };
-
-    // Handle search input in Mini Apps view
-    if (domMiniAppsSearch) {
-        domMiniAppsSearch.addEventListener('input', (e) => {
-            filterMiniApps(e.target.value);
-        });
-    }
-
-    // Setup hold-to-edit mode for Mini Apps
-    setupMiniAppsEditMode();
+    VectorSvelte.mountAttachmentPanel(domAttachmentPanel, { h: {
+        file: attachmentPickFile,
+        folder: attachmentPickFolder,
+        // Commands: bot chats only. Drops a `/` into the composer and opens the command list.
+        commands: () => {
+            if (VectorSvelte.attachmentState().commandsDisabled) return;
+            closeAttachmentPanel();
+            domChatMessageInput.value = '/';
+            domChatMessageInput.focus();
+            domChatMessageInput.dispatchEvent(new Event('input', { bubbles: true }));
+        },
+        commandsEnter: (el) => {
+            if (VectorSvelte.attachmentState().commandsDisabled) showGlobalTooltip('Clear your draft to use commands', el);
+        },
+        commandsLeave: hideGlobalTooltip,
+        miniapps: showAttachmentPanelMiniApps,
+        back: showAttachmentPanelMain,
+        search: (q) => { VectorSvelte.attachmentPatch({ search: q }); filterMiniApps(q); },
+        bindGrid: bindMiniAppsGrid,
+        grid: miniAppsGridHelpers,
+        pivx: {
+            back: hidePivxWalletPanel,
+            send: showPivxSendDialog,
+            deposit: showPivxDepositDialog,
+            withdraw: showPivxWithdrawDialog,
+            settings: showPivxSettingsDialog,
+        },
+    } });
 
     VectorSvelte.mountLaunchDialog(domMiniAppLaunchOverlay, { h: {
         cancel: closeMiniAppLaunchDialog, solo: playMiniAppSolo, invite: playMiniAppAndInvite,

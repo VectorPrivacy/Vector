@@ -5,61 +5,34 @@
 
 /** The add-file button and the attachment panel's file and folder pickers. */
 function initComposerAttachments() {
-    const isAndroid = platformFeatures.os === 'android';
+    domChatMessageInputFile.onclick = () => { toggleAttachmentPanel(); };
+    // Folders zip on the desktop only.
+    VectorSvelte.attachmentPatch({ folderShown: platformFeatures.os !== 'android' });
+}
 
-    if (isAndroid) {
-        // Toggle attachment panel when clicking the add-file button
-        domChatMessageInputFile.onclick = () => {
-            toggleAttachmentPanel();
-        };
-
-        // Handle File button in attachment panel (Android). Use the native
-        // picker (dialog.open) -> content URI -> openFilePreview, which reads via
-        // ContentResolver. The WebView <input type=file> hands back a File whose
-        // arrayBuffer() can't read documents-provider content URIs.
-        domAttachmentPanelFile.onclick = async () => {
-            closeAttachmentPanel();
-            const filepath = await selectFile();
-            if (filepath) {
-                const strReplyRef = strCurrentReplyReference;
-                cancelReply();
-                await openFilePreview(filepath, strOpenChat, strReplyRef);
-            }
-        };
-    } else {
-        // Toggle attachment panel when clicking the add-file button
-        domChatMessageInputFile.onclick = () => {
-            toggleAttachmentPanel();
-        };
-
-        // Handle File button in attachment panel (Desktop - use Tauri dialog)
-        domAttachmentPanelFile.onclick = async () => {
-            closeAttachmentPanel();
-            let filepath = await selectFile();
-            if (filepath) {
-                // Reset reply selection while passing a copy of the reference to the backend
-                const strReplyRef = strCurrentReplyReference;
-                cancelReply();
-                // Show file preview instead of sending directly
-                await openFilePreview(filepath, strOpenChat, strReplyRef);
-            }
-        };
-
-        // Show Folder button on desktop only
-        if (domAttachmentPanelFolder) {
-            domAttachmentPanelFolder.style.display = '';
-            domAttachmentPanelFolder.onclick = async () => {
-                closeAttachmentPanel();
-                let folderPath = await selectFolder();
-                if (folderPath) {
-                    const strReplyRef = strCurrentReplyReference;
-                    cancelReply();
-                    await openFolderZipPreview(folderPath, strOpenChat, strReplyRef);
-                }
-            };
-        }
+/**
+ * Pick a file for the open chat. Android goes through the native picker to a content URI
+ * (the WebView's file input hands back a File that can't read documents-provider URIs).
+ */
+async function attachmentPickFile() {
+    closeAttachmentPanel();
+    const filepath = await selectFile();
+    if (filepath) {
+        // Reset reply selection while passing a copy of the reference to the backend
+        const strReplyRef = strCurrentReplyReference;
+        cancelReply();
+        await openFilePreview(filepath, strOpenChat, strReplyRef);
     }
+}
 
+async function attachmentPickFolder() {
+    closeAttachmentPanel();
+    const folderPath = await selectFolder();
+    if (folderPath) {
+        const strReplyRef = strCurrentReplyReference;
+        cancelReply();
+        await openFolderZipPreview(folderPath, strOpenChat, strReplyRef);
+    }
 }
 
 /** A paste into the app: a native file, an in-band blob, or a clipboard bitmap, else plain text. */

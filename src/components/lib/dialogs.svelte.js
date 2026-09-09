@@ -1,7 +1,7 @@
 // Fade-in / fade-out dialogs whose handlers are fixed at mount: the Add Relay form, the
 // relay and media server info dialogs, and the mini app launch dialog. `open` mounts the
 // element, `active` drives the fade; `close` drops `active` and unmounts after the fade.
-function fadeDialog(fields) {
+export function fadeDialog(fields) {
     const s = $state({ open: false, active: false, ...fields });
     return {
         state: () => s,

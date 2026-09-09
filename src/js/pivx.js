@@ -1,155 +1,36 @@
-// PIVX DOM references (resolved after DOM is parsed)
-let domAttachmentPanelPivx = null;
-let domAttachmentPanelPivxView = null;
-let domAttachmentPanelPivxBack = null;
-let domPivxBalanceAmount = null;
-let domPivxDepositBtn = null;
-let domPivxSendBtn = null;
-let domPivxSettingsBtn = null;
-let domPivxDepositOverlay = null;
-let domPivxSendOverlay = null;
-let domPivxSettingsOverlay = null;
-
 // ========== PIVX Wallet Functions ==========
 
-/**
- * Shows the PIVX wallet panel and hides the main Mini Apps view
- */
+/** The PIVX wallet card replaces the Mini Apps view; the card slides in on each open. */
 function showPivxWalletPanel() {
     // Track PIVX usage for history-based positioning
     localStorage.setItem('pivx_last_used', Date.now().toString());
-
-    if (domAttachmentPanelMiniAppsView) {
-        domAttachmentPanelMiniAppsView.style.display = 'none';
-    }
-    if (domAttachmentPanelPivxView) {
-        domAttachmentPanelPivxView.style.display = 'flex';
-        // Animate PIVX panel elements
-        animatePivxPanelOpen(domAttachmentPanelPivxView);
-    }
-    if (domAttachmentPanel) {
-        domAttachmentPanel.classList.add('pivx-active');
-    }
+    VectorSvelte.attachmentSetView('pivx');
+    VectorSvelte.attachmentPulse('pivx');
     refreshPivxWallet();
 }
 
-/**
- * Animates PIVX panel elements when opened
- */
-function animatePivxPanelOpen(container) {
-    const balanceSection = container.querySelector('.pivx-balance-section');
-    const dockButtons = container.querySelectorAll('.pivx-dock-btn');
-    const staggerDelay = 0.06; // 60ms delay between each button
-
-    // Reset animations (elements are opacity:0 by default in CSS)
-    if (balanceSection) {
-        balanceSection.classList.remove('pivx-panel-animate');
-        void balanceSection.offsetWidth; // Force reflow
-        balanceSection.classList.add('pivx-panel-animate');
-    }
-
-    dockButtons.forEach((btn, index) => {
-        btn.classList.remove('pivx-panel-animate');
-        btn.style.animationDelay = '';
-        void btn.offsetWidth; // Force reflow
-        btn.style.animationDelay = `${(index + 1) * staggerDelay}s`;
-        btn.classList.add('pivx-panel-animate');
-    });
-}
-
-/**
- * Hides the PIVX wallet panel and shows the main Mini Apps view
- */
+/** Back from the wallet card to the Mini Apps view. */
 function hidePivxWalletPanel() {
-    if (domAttachmentPanelPivxView) {
-        // Remove animation classes so elements revert to CSS default (opacity: 0)
-        const balanceSection = domAttachmentPanelPivxView.querySelector('.pivx-balance-section');
-        const dockButtons = domAttachmentPanelPivxView.querySelectorAll('.pivx-dock-btn');
-
-        if (balanceSection) {
-            balanceSection.classList.remove('pivx-panel-animate');
-        }
-        dockButtons.forEach((btn) => {
-            btn.classList.remove('pivx-panel-animate');
-            btn.style.animationDelay = '';
-        });
-
-        domAttachmentPanelPivxView.style.display = 'none';
-    }
-    if (domAttachmentPanelMiniAppsView) {
-        domAttachmentPanelMiniAppsView.style.display = 'flex';
-        animateAttachmentPanelItems(domMiniAppsGrid);
-    }
-    if (domAttachmentPanel) {
-        domAttachmentPanel.classList.remove('pivx-active');
-    }
+    VectorSvelte.attachmentSetView('miniapps');
+    VectorSvelte.attachmentPulse('grid');
 }
 
-/**
- * Refreshes the PIVX wallet balance by fetching from backend
- */
+/** Fetch the balance and price and paint the wallet card. */
 async function refreshPivxWallet() {
-    const domPivxBalanceFiat = document.getElementById('pivx-balance-fiat');
-
-    // Show loading spinner and hide fiat during load
-    if (domPivxBalanceAmount) {
-        domPivxBalanceAmount.classList.remove('pivx-fade-in');
-        domPivxBalanceAmount.innerHTML = '<div class="pivx-balance-loading"><div class="pivx-spinner"></div></div>';
-    }
-    if (domPivxBalanceFiat) {
-        domPivxBalanceFiat.classList.remove('pivx-fade-in');
-        domPivxBalanceFiat.style.display = 'none';
-    }
-
+    VectorSvelte.pivxWalletLoading();
     try {
-        // Fetch balance and price in parallel
         const [balance, priceInfo] = await Promise.all([
             invoke('pivx_get_wallet_balance'),
             fetchPivxPrice()
         ]);
-
         // Store current balance for deposit limit check
         pivxCurrentWalletBalance = balance;
-
-        if (domPivxBalanceAmount) {
-            domPivxBalanceAmount.innerHTML = `${balance.toFixed(2)} <span style="color: #642D8F;">PIV</span>`;
-            // Trigger fade-in animation
-            void domPivxBalanceAmount.offsetWidth; // Force reflow
-            domPivxBalanceAmount.classList.add('pivx-fade-in');
-        }
-
-        // Update deposit button state based on balance
-        if (domPivxDepositBtn) {
-            if (balance >= PIVX_MAX_BALANCE_WARNING) {
-                domPivxDepositBtn.classList.add('disabled');
-                domPivxDepositBtn.title = 'Balance too high - please withdraw first';
-            } else {
-                domPivxDepositBtn.classList.remove('disabled');
-                domPivxDepositBtn.title = '';
-            }
-        }
-
-        // Show fiat value if we have price data
-        if (domPivxBalanceFiat && priceInfo && priceInfo.value > 0) {
-            const fiatValue = balance * priceInfo.value;
-            domPivxBalanceFiat.textContent = formatFiatValue(fiatValue, priceInfo.currency.toUpperCase());
-            domPivxBalanceFiat.style.display = '';
-            // Trigger fade-in animation with slight delay
-            void domPivxBalanceFiat.offsetWidth; // Force reflow
-            domPivxBalanceFiat.classList.add('pivx-fade-in');
-        } else if (domPivxBalanceFiat) {
-            domPivxBalanceFiat.style.display = 'none';
-        }
+        const fiat = priceInfo && priceInfo.value > 0
+            ? formatFiatValue(balance * priceInfo.value, priceInfo.currency.toUpperCase()) : '';
+        VectorSvelte.pivxWalletSet({ balance, fiat, depositDisabled: balance >= PIVX_MAX_BALANCE_WARNING });
     } catch (err) {
         console.error('Failed to refresh PIVX wallet:', err);
-        if (domPivxBalanceAmount) {
-            domPivxBalanceAmount.innerHTML = `0.00 <span style="color: #642D8F;">PIV</span>`;
-            void domPivxBalanceAmount.offsetWidth;
-            domPivxBalanceAmount.classList.add('pivx-fade-in');
-        }
-        if (domPivxBalanceFiat) {
-            domPivxBalanceFiat.style.display = 'none';
-        }
+        VectorSvelte.pivxWalletSet({ balance: 0, fiat: '', depositDisabled: false });
     }
 }
 
@@ -175,45 +56,19 @@ async function showPivxDepositDialog() {
         return;
     }
 
-    // Show loading state on deposit button
-    if (domPivxDepositBtn) {
-        domPivxDepositBtn.classList.add('loading');
-        domPivxDepositBtn.disabled = true;
-    }
-
+    VectorSvelte.pivxWalletPatch({ depositLoading: true });
     try {
         // Create a new promo code for deposit
         const promo = await invoke('pivx_create_promo');
         pivxCurrentDepositAddress = promo.address;
-
-        const addressEl = document.getElementById('pivx-deposit-address');
-        const statusEl = document.getElementById('pivx-deposit-status');
-
-        if (addressEl) addressEl.textContent = promo.address;
-        if (statusEl) {
-            statusEl.innerHTML = `
-                <div class="pivx-awaiting-deposit">
-                    <div class="pivx-spinner"></div>
-                    <span>Awaiting Deposit...</span>
-                </div>
-            `;
-        }
-
-        if (domPivxDepositOverlay) {
-            domPivxDepositOverlay.classList.add('active');
-        }
-
+        VectorSvelte.pivxDeposit.open({ address: promo.address, received: 0 });
         // Start polling for incoming deposit
         startDepositPolling(promo.address);
     } catch (err) {
         console.error('Failed to create deposit promo:', err);
         showToast('Failed to create deposit address');
     } finally {
-        // Remove loading state from deposit button
-        if (domPivxDepositBtn) {
-            domPivxDepositBtn.classList.remove('loading');
-            domPivxDepositBtn.disabled = false;
-        }
+        VectorSvelte.pivxWalletPatch({ depositLoading: false });
     }
 }
 
@@ -246,15 +101,7 @@ async function checkForDeposit(address) {
             // Deposit detected!
             stopDepositPolling();
 
-            const statusEl = document.getElementById('pivx-deposit-status');
-            if (statusEl) {
-                statusEl.innerHTML = `
-                    <div class="pivx-deposit-received">
-                        <span class="icon icon-check"></span>
-                        <span>Received ${thisPromo.balance_piv.toFixed(8)} PIV!</span>
-                    </div>
-                `;
-            }
+            VectorSvelte.pivxDeposit.patch({ received: thisPromo.balance_piv });
 
             showToast(`Received ${thisPromo.balance_piv.toFixed(8)} PIV!`);
 
@@ -285,16 +132,12 @@ function stopDepositPolling() {
  */
 function closePivxDepositDialog() {
     stopDepositPolling();
-    if (domPivxDepositOverlay) {
-        domPivxDepositOverlay.classList.remove('active');
-    }
+    VectorSvelte.pivxDeposit.close();
 }
 
 // Track send dialog state
 let pivxSendAvailableBalance = 0;
-let pivxSendSelectedPromo = null;
 let pivxSendPromos = [];
-let pivxSendMode = 'quick'; // 'quick' or 'custom'
 
 // Currency/price tracking (session-cached)
 let pivxCurrencyList = null; // Cached currency list (fetched once per session)
@@ -413,326 +256,113 @@ function formatFiatValue(value, currency) {
     }
 }
 
-/**
- * Shows the send dialog for sending PIVX to the current chat
- */
+/** The send dialog for the open chat: quick send lists funded promos, custom takes an amount. */
 async function showPivxSendDialog() {
     if (!strOpenChat) {
         showToast('Open a chat first to send PIVX');
         return;
     }
-
-    const recipientEl = document.getElementById('pivx-send-recipient');
-    const amountEl = document.getElementById('pivx-send-amount');
-    const availableEl = document.getElementById('pivx-send-available-amount');
-    const promoListEl = document.getElementById('pivx-send-promo-list');
-    const promoSectionEl = document.getElementById('pivx-send-promo-section');
-    const customSectionEl = document.getElementById('pivx-send-custom-section');
-    const confirmBtn = document.getElementById('pivx-send-confirm');
-
-    // Get the chat name for display
-    const chatName = getChatDisplayName(strOpenChat);
-    if (recipientEl) recipientEl.textContent = chatName || 'this chat';
-
-    // Reset state
-    pivxSendSelectedPromo = null;
-    pivxSendMode = 'quick';
-    if (amountEl) amountEl.value = '';
-
-    // Show promo section, hide custom section
-    if (promoSectionEl) promoSectionEl.style.display = '';
-    if (customSectionEl) customSectionEl.style.display = 'none';
-
-    // Disable send button while loading
-    if (confirmBtn) {
-        confirmBtn.classList.add('loading');
-        confirmBtn.disabled = true;
-    }
-
-    // Show loading in promo list
-    if (promoListEl) {
-        promoListEl.innerHTML = `
-            <div class="pivx-send-promo-loading">
-                <div class="pivx-spinner"></div>
-                <span>Loading...</span>
-            </div>
-        `;
-    }
-
-    if (domPivxSendOverlay) {
-        domPivxSendOverlay.classList.add('active');
-    }
-
-    // Fetch promos with balances
+    const d = VectorSvelte.pivxSend;
+    pivxSendAvailableBalance = 0;
+    d.open({
+        recipient: getChatDisplayName(strOpenChat) || 'this chat', mode: 'quick', loading: true,
+        promos: [], error: '', selectedCode: '', amount: '', available: 0, busy: false,
+    });
     try {
         pivxSendPromos = await invoke('pivx_refresh_balances');
-        // Filter to only promos with balance, sort by amount descending
+        // Only promos with balance, largest first
         const promosWithBalance = pivxSendPromos
             .filter(p => p.balance_piv > 0)
             .sort((a, b) => b.balance_piv - a.balance_piv);
-
         pivxSendAvailableBalance = promosWithBalance.reduce((sum, p) => sum + p.balance_piv, 0);
-        if (availableEl) availableEl.textContent = pivxSendAvailableBalance.toFixed(2);
-
-        if (promoListEl) {
-            if (promosWithBalance.length === 0) {
-                promoListEl.innerHTML = `
-                    <div class="pivx-send-promo-empty">
-                        No funds available to send.<br>
-                        Deposit PIVX first.
-                    </div>
-                `;
-            } else {
-                promoListEl.innerHTML = promosWithBalance.map(promo => `
-                    <div class="pivx-send-promo-item" data-code="${promo.gift_code}" data-amount="${promo.balance_piv}">
-                        <span class="pivx-send-promo-item-amount">${promo.balance_piv.toFixed(2)} PIV</span>
-                        <span class="pivx-send-promo-item-code">${promo.gift_code}</span>
-                    </div>
-                `).join('');
-
-                // Add click handlers and staggered animation
-                const items = promoListEl.querySelectorAll('.pivx-send-promo-item');
-                const totalAnimTime = 0.3;
-                const maxDelay = 0.06;
-                const staggerDelay = items.length > 1 ? Math.min(maxDelay, totalAnimTime / (items.length - 1)) : 0;
-
-                items.forEach((item, index) => {
-                    item.onclick = () => selectPivxSendPromo(item);
-                    item.style.animationDelay = `${index * staggerDelay}s`;
-                    item.classList.add('animate-in');
-                });
-            }
-        }
+        d.patch({ promos: promosWithBalance, available: pivxSendAvailableBalance, loading: false });
     } catch (err) {
         console.error('Failed to fetch promos for send:', err);
-        pivxSendAvailableBalance = 0;
         pivxSendPromos = [];
-        if (availableEl) availableEl.textContent = '0.00';
-        if (promoListEl) {
-            promoListEl.innerHTML = `
-                <div class="pivx-send-promo-empty">
-                    Failed to load wallet.
-                </div>
-            `;
-        }
-    } finally {
-        // Re-enable send button after loading
-        if (confirmBtn) {
-            confirmBtn.classList.remove('loading');
-            confirmBtn.disabled = false;
-        }
+        d.patch({ promos: [], available: 0, error: 'Failed to load wallet.', loading: false });
     }
 }
 
-/**
- * Select a promo for quick send
- */
-function selectPivxSendPromo(itemEl) {
-    // Deselect others
-    document.querySelectorAll('.pivx-send-promo-item').forEach(el => {
-        el.classList.remove('selected');
-    });
+function showPivxSendCustomMode() { VectorSvelte.pivxSend.patch({ mode: 'custom', selectedCode: '' }); }
+function showPivxSendQuickMode() { VectorSvelte.pivxSend.patch({ mode: 'quick', amount: '' }); }
+function closePivxSendDialog() { VectorSvelte.pivxSend.close(); }
 
-    // Select this one
-    itemEl.classList.add('selected');
-    pivxSendSelectedPromo = {
-        gift_code: itemEl.dataset.code,
-        amount: parseFloat(itemEl.dataset.amount)
-    };
-}
-
-/**
- * Toggle to custom amount mode
- */
-function showPivxSendCustomMode() {
-    pivxSendMode = 'custom';
-    pivxSendSelectedPromo = null;
-
-    const promoSectionEl = document.getElementById('pivx-send-promo-section');
-    const customSectionEl = document.getElementById('pivx-send-custom-section');
-
-    if (promoSectionEl) promoSectionEl.style.display = 'none';
-    if (customSectionEl) customSectionEl.style.display = '';
-}
-
-/**
- * Toggle back to quick send mode
- */
-function showPivxSendQuickMode() {
-    pivxSendMode = 'quick';
-
-    const promoSectionEl = document.getElementById('pivx-send-promo-section');
-    const customSectionEl = document.getElementById('pivx-send-custom-section');
-    const amountEl = document.getElementById('pivx-send-amount');
-
-    if (promoSectionEl) promoSectionEl.style.display = '';
-    if (customSectionEl) customSectionEl.style.display = 'none';
-    if (amountEl) amountEl.value = '';
-}
-
-/**
- * Closes the send dialog
- */
-function closePivxSendDialog() {
-    if (domPivxSendOverlay) {
-        domPivxSendOverlay.classList.remove('active');
-    }
-}
-
-/**
- * Shows the settings dialog with current wallet address and currency selector
- */
+/** Wallet settings: the auto-withdraw address (local) and the currency list (an API call). */
 async function showPivxSettingsDialog() {
-    // Show dialog immediately
-    if (domPivxSettingsOverlay) {
-        domPivxSettingsOverlay.classList.add('active');
-    }
+    const d = VectorSvelte.pivxSettings;
+    d.open({ address: '', currencies: [], currency: '', currenciesLoading: true });
 
-    // Load wallet address (fast local query)
     invoke('pivx_get_wallet_address').then(address => {
-        const addressInput = document.getElementById('pivx-wallet-address-input');
-        if (addressInput) {
-            addressInput.value = address || '';
-        }
+        d.patch({ address: address || '' });
     }).catch(err => {
         console.error('Failed to get wallet address:', err);
     });
 
-    // Load currency selector (may be slow, API call)
-    const currencySelect = document.getElementById('pivx-currency-select');
-    if (currencySelect) {
-        // Show loading state
-        currencySelect.innerHTML = '<option value="">Loading...</option>';
-        currencySelect.disabled = true;
-
-        Promise.all([
-            fetchPivxCurrencies(),
-            invoke('pivx_get_preferred_currency').catch(() => null)
-        ]).then(([currencies, savedCurrency]) => {
-            const currentCurrency = savedCurrency || pivxPreferredCurrency || detectDefaultCurrency();
-            pivxPreferredCurrency = currentCurrency;
-
-            currencySelect.innerHTML = '';
-            for (const curr of currencies) {
-                const option = document.createElement('option');
-                option.value = curr.currency.toUpperCase();
-                option.textContent = curr.currency.toUpperCase();
-                if (curr.currency.toUpperCase() === currentCurrency.toUpperCase()) {
-                    option.selected = true;
-                }
-                currencySelect.appendChild(option);
-            }
-            currencySelect.disabled = false;
-        }).catch(err => {
-            console.error('Failed to load currencies:', err);
-            currencySelect.innerHTML = '<option value="USD">USD</option>';
-            currencySelect.disabled = false;
-        });
-    }
+    Promise.all([
+        fetchPivxCurrencies(),
+        invoke('pivx_get_preferred_currency').catch(() => null)
+    ]).then(([currencies, savedCurrency]) => {
+        const currentCurrency = (savedCurrency || pivxPreferredCurrency || detectDefaultCurrency()).toUpperCase();
+        pivxPreferredCurrency = currentCurrency;
+        const list = currencies.map(c => c.currency.toUpperCase());
+        d.patch({ currencies: list, currency: list.includes(currentCurrency) ? currentCurrency : '', currenciesLoading: false });
+    }).catch(err => {
+        console.error('Failed to load currencies:', err);
+        d.patch({ currencies: ['USD'], currency: 'USD', currenciesLoading: false });
+    });
 }
 
-/**
- * Closes the settings dialog
- */
-function closePivxSettingsDialog() {
-    if (domPivxSettingsOverlay) {
-        domPivxSettingsOverlay.classList.remove('active');
-    }
-}
+function closePivxSettingsDialog() { VectorSvelte.pivxSettings.close(); }
 
 // Withdraw dialog state
 let pivxWithdrawAvailableBalance = 0;
 
-/**
- * Shows the withdraw dialog
- */
+/** The withdraw dialog, with the wallet balance as the ceiling. */
 async function showPivxWithdrawDialog() {
-    const withdrawOverlay = document.getElementById('pivx-withdraw-overlay');
-    const addressInput = document.getElementById('pivx-withdraw-address');
-    const amountInput = document.getElementById('pivx-withdraw-amount');
-    const availableEl = document.getElementById('pivx-withdraw-available-amount');
-    const confirmBtn = document.getElementById('pivx-withdraw-confirm');
-
-    // Reset inputs
-    if (addressInput) addressInput.value = '';
-    if (amountInput) amountInput.value = '';
-    if (confirmBtn) {
-        confirmBtn.disabled = false;
-        confirmBtn.textContent = 'Withdraw';
-    }
-
-    // Get available balance
+    const d = VectorSvelte.pivxWithdraw;
+    d.open({ address: '', amount: '', available: 0, busy: false });
     try {
         pivxWithdrawAvailableBalance = await invoke('pivx_get_wallet_balance');
-        if (availableEl) {
-            availableEl.textContent = pivxWithdrawAvailableBalance.toFixed(2);
-        }
     } catch (err) {
         console.error('Failed to get balance:', err);
         pivxWithdrawAvailableBalance = 0;
-        if (availableEl) availableEl.textContent = '0.00';
     }
-
-    if (withdrawOverlay) {
-        withdrawOverlay.classList.add('active');
-    }
+    d.patch({ available: pivxWithdrawAvailableBalance });
 }
 
-/**
- * Closes the withdraw dialog
- */
-function closePivxWithdrawDialog() {
-    const withdrawOverlay = document.getElementById('pivx-withdraw-overlay');
-    if (withdrawOverlay) {
-        withdrawOverlay.classList.remove('active');
-    }
-}
+function closePivxWithdrawDialog() { VectorSvelte.pivxWithdraw.close(); }
 
 /**
  * Executes a PIVX withdrawal
  */
 async function executePivxWithdraw() {
-    const addressInput = document.getElementById('pivx-withdraw-address');
-    const amountInput = document.getElementById('pivx-withdraw-amount');
-    const confirmBtn = document.getElementById('pivx-withdraw-confirm');
-
-    const address = addressInput?.value?.trim() || '';
-    const amount = parseFloat(amountInput?.value || '0');
+    const d = VectorSvelte.pivxWithdraw;
+    const address = (d.state().address || '').trim();
+    const amount = parseFloat(d.state().amount || '0');
 
     // Validate address
     if (!address || !address.startsWith('D') || address.length < 30 || address.length > 36) {
         showToast('Invalid PIVX address');
         return;
     }
-
-    // Validate amount
     if (amount <= 0) {
         showToast('Enter a valid amount');
         return;
     }
-
     if (amount > pivxWithdrawAvailableBalance) {
         showToast('Insufficient balance');
         return;
     }
 
-    // Disable button during withdraw
-    if (confirmBtn) {
-        confirmBtn.disabled = true;
-        confirmBtn.textContent = 'Withdrawing...';
-    }
-
+    d.patch({ busy: true });
     try {
         const result = await invoke('pivx_withdraw', {
             destAddress: address,
             amountPiv: amount
         });
-
         closePivxWithdrawDialog();
         showToast(`Withdrawn ${amount.toFixed(2)} PIV`);
         refreshPivxWallet();
-
-        // Log change if any
         if (result.change_piv > 0) {
             console.log(`Withdrawal change: ${result.change_piv} PIV saved to new promo`);
         }
@@ -740,10 +370,7 @@ async function executePivxWithdraw() {
         console.error('Withdrawal failed:', err);
         showToast('Withdrawal failed: ' + (err.message || err));
     } finally {
-        if (confirmBtn) {
-            confirmBtn.disabled = false;
-            confirmBtn.textContent = 'Withdraw';
-        }
+        d.patch({ busy: false });
     }
 }
 
@@ -751,68 +378,43 @@ async function executePivxWithdraw() {
  * Sends a PIVX payment to the current chat
  */
 async function sendPivxPayment() {
-    const confirmBtn = document.getElementById('pivx-send-confirm');
-
     if (!strOpenChat) {
         showToast('No chat selected');
         return;
     }
-
-    // Disable button during send
-    if (confirmBtn) {
-        confirmBtn.disabled = true;
-        confirmBtn.textContent = 'Sending...';
-    }
-
+    const d = VectorSvelte.pivxSend;
+    const st = d.state();
+    d.patch({ busy: true });
     try {
-        if (pivxSendMode === 'quick') {
-            // Quick send mode - send an existing whole promo
-            if (!pivxSendSelectedPromo) {
+        if (st.mode === 'quick') {
+            // Quick send: an existing whole promo
+            const promo = st.promos.find(p => p.gift_code === st.selectedCode);
+            if (!promo) {
                 showToast('Select an amount to send');
-                if (confirmBtn) {
-                    confirmBtn.disabled = false;
-                    confirmBtn.textContent = 'Send to Chat';
-                }
                 return;
             }
-
             await invoke('pivx_send_existing_promo', {
                 receiver: strOpenChat,
-                giftCode: pivxSendSelectedPromo.gift_code
+                giftCode: promo.gift_code
             });
-
             closePivxSendDialog();
-            showToast(`Sent ${pivxSendSelectedPromo.amount.toFixed(2)} PIV`);
+            showToast(`Sent ${promo.balance_piv.toFixed(2)} PIV`);
             refreshPivxWallet();
         } else {
-            // Custom amount mode
-            const amountEl = document.getElementById('pivx-send-amount');
-            const amount = parseFloat(amountEl?.value || '0');
-
+            const amount = parseFloat(st.amount || '0');
             if (amount <= 0) {
                 showToast('Enter a valid amount');
-                if (confirmBtn) {
-                    confirmBtn.disabled = false;
-                    confirmBtn.textContent = 'Send to Chat';
-                }
                 return;
             }
-
             if (amount > pivxSendAvailableBalance) {
                 showToast(`Insufficient funds (max: ${pivxSendAvailableBalance.toFixed(2)} PIV)`);
-                if (confirmBtn) {
-                    confirmBtn.disabled = false;
-                    confirmBtn.textContent = 'Send to Chat';
-                }
                 return;
             }
-
-            // Send custom amount via coin selection
+            // Custom amount via coin selection
             await invoke('pivx_send_payment', {
                 receiver: strOpenChat,
                 amountPiv: amount
             });
-
             closePivxSendDialog();
             showToast(`Sent ${amount.toFixed(2)} PIV`);
             refreshPivxWallet();
@@ -821,10 +423,7 @@ async function sendPivxPayment() {
         console.error('Failed to send PIVX payment:', err);
         showToast('Failed to send: ' + (err.message || err));
     } finally {
-        if (confirmBtn) {
-            confirmBtn.disabled = false;
-            confirmBtn.textContent = 'Send to Chat';
-        }
+        d.patch({ busy: false });
     }
 }
 
@@ -832,10 +431,9 @@ async function sendPivxPayment() {
  * Saves the PIVX wallet settings
  */
 async function savePivxSettings() {
-    const addressInput = document.getElementById('pivx-wallet-address-input');
-    const currencySelect = document.getElementById('pivx-currency-select');
-    const address = addressInput?.value?.trim() || '';
-    const currency = currencySelect?.value || '';
+    const st = VectorSvelte.pivxSettings.state();
+    const address = (st.address || '').trim();
+    const currency = st.currency || '';
 
     // Basic validation for PIVX address (starts with D, proper length)
     if (address && (!address.startsWith('D') || address.length < 30 || address.length > 36)) {
@@ -1155,118 +753,31 @@ async function mergePivxPaymentsIntoChat(contact, initialMessages) {
 
 // ========== End Chat Integration ==========
 
-// Resolve DOM refs and wire up PIVX event listeners once DOM is parsed
-document.addEventListener('DOMContentLoaded', function initPivxListeners() {
-    // Resolve DOM references
-    domAttachmentPanelPivxView = document.getElementById('attachment-panel-pivx-view');
-    domAttachmentPanelPivxBack = document.getElementById('attachment-panel-pivx-back');
-    domPivxBalanceAmount = document.getElementById('pivx-balance-amount');
-    domPivxDepositBtn = document.getElementById('pivx-deposit-btn');
-    domPivxSendBtn = document.getElementById('pivx-send-btn');
-    domPivxSettingsBtn = document.getElementById('pivx-settings-btn');
-    domPivxDepositOverlay = document.getElementById('pivx-deposit-overlay');
-    domPivxSendOverlay = document.getElementById('pivx-send-overlay');
-    domPivxSettingsOverlay = document.getElementById('pivx-settings-overlay');
-
-    // PIVX Wallet event handlers
-    if (domAttachmentPanelPivx) {
-        domAttachmentPanelPivx.onclick = () => {
-            showPivxWalletPanel();
-        };
-    }
-
-    if (domAttachmentPanelPivxBack) {
-        domAttachmentPanelPivxBack.onclick = () => {
-            hidePivxWalletPanel();
-        };
-    }
-
-    if (domPivxDepositBtn) {
-        domPivxDepositBtn.onclick = () => {
-            showPivxDepositDialog();
-        };
-    }
-
-    if (domPivxSendBtn) {
-        domPivxSendBtn.onclick = () => {
-            showPivxSendDialog();
-        };
-    }
-
-    if (domPivxSettingsBtn) {
-        domPivxSettingsBtn.onclick = () => {
-            showPivxSettingsDialog();
-        };
-    }
-
-    // PIVX Withdraw button
-    const domPivxWithdrawBtn = document.getElementById('pivx-withdraw-btn');
-    if (domPivxWithdrawBtn) {
-        domPivxWithdrawBtn.onclick = () => {
-            showPivxWithdrawDialog();
-        };
-    }
-
-    // PIVX Dialog close buttons
-    document.getElementById('pivx-deposit-close')?.addEventListener('click', closePivxDepositDialog);
-    document.getElementById('pivx-send-close')?.addEventListener('click', closePivxSendDialog);
-    document.getElementById('pivx-withdraw-close')?.addEventListener('click', closePivxWithdrawDialog);
-    document.getElementById('pivx-settings-close')?.addEventListener('click', closePivxSettingsDialog);
-
-    // PIVX copy buttons
-    document.getElementById('pivx-copy-address')?.addEventListener('click', () => {
-        const address = document.getElementById('pivx-deposit-address')?.textContent;
-        if (address) {
-            navigator.clipboard.writeText(address);
-            showToast('Address copied!');
-        }
-    });
-
-    // PIVX send confirm
-    document.getElementById('pivx-send-confirm')?.addEventListener('click', sendPivxPayment);
-
-    // PIVX available balance click to prefill
-    document.getElementById('pivx-send-available')?.addEventListener('click', () => {
-        const amountEl = document.getElementById('pivx-send-amount');
-        if (amountEl && pivxSendAvailableBalance > 0) {
-            amountEl.value = pivxSendAvailableBalance.toFixed(2);
-        }
-    });
-
-    // PIVX send mode toggles
-    document.getElementById('pivx-send-custom-toggle')?.addEventListener('click', showPivxSendCustomMode);
-    document.getElementById('pivx-send-back-toggle')?.addEventListener('click', showPivxSendQuickMode);
-    document.getElementById('pivx-send-max')?.addEventListener('click', () => {
-        const amountEl = document.getElementById('pivx-send-amount');
-        if (amountEl && pivxSendAvailableBalance > 0) {
-            amountEl.value = pivxSendAvailableBalance.toFixed(2);
-        }
-    });
-
-    // PIVX withdraw handlers
-    document.getElementById('pivx-withdraw-confirm')?.addEventListener('click', executePivxWithdraw);
-    document.getElementById('pivx-withdraw-max')?.addEventListener('click', () => {
-        const amountEl = document.getElementById('pivx-withdraw-amount');
-        if (amountEl && pivxWithdrawAvailableBalance > 0) {
-            amountEl.value = pivxWithdrawAvailableBalance.toFixed(2);
-        }
-    });
-
-    // PIVX settings save
-    document.getElementById('pivx-settings-save')?.addEventListener('click', savePivxSettings);
-
-    // PIVX dialog overlay click to close
-    domPivxDepositOverlay?.addEventListener('click', (e) => {
-        if (e.target === domPivxDepositOverlay) closePivxDepositDialog();
-    });
-    domPivxSendOverlay?.addEventListener('click', (e) => {
-        if (e.target === domPivxSendOverlay) closePivxSendDialog();
-    });
-    const domPivxWithdrawOverlay = document.getElementById('pivx-withdraw-overlay');
-    domPivxWithdrawOverlay?.addEventListener('click', (e) => {
-        if (e.target === domPivxWithdrawOverlay) closePivxWithdrawDialog();
-    });
-    domPivxSettingsOverlay?.addEventListener('click', (e) => {
-        if (e.target === domPivxSettingsOverlay) closePivxSettingsDialog();
-    });
+// The dialogs mount once the bundle has run (this script is not deferred).
+document.addEventListener('DOMContentLoaded', function initPivxDialogs() {
+    VectorSvelte.mountPivxDialogs({ h: {
+        deposit: {
+            close: closePivxDepositDialog,
+            copy: () => {
+                const address = VectorSvelte.pivxDeposit.state().address;
+                if (address) {
+                    navigator.clipboard.writeText(address);
+                    showToast('Address copied!');
+                }
+            },
+        },
+        send: {
+            close: closePivxSendDialog,
+            confirm: sendPivxPayment,
+            custom: showPivxSendCustomMode,
+            quick: showPivxSendQuickMode,
+            max: () => { if (pivxSendAvailableBalance > 0) VectorSvelte.pivxSend.patch({ amount: pivxSendAvailableBalance.toFixed(2) }); },
+        },
+        withdraw: {
+            close: closePivxWithdrawDialog,
+            confirm: executePivxWithdraw,
+            max: () => { if (pivxWithdrawAvailableBalance > 0) VectorSvelte.pivxWithdraw.patch({ amount: pivxWithdrawAvailableBalance.toFixed(2) }); },
+        },
+        settings: { close: closePivxSettingsDialog, save: savePivxSettings },
+    } });
 });

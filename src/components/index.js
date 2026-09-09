@@ -40,12 +40,18 @@ import ModFilters from './moderation/ModFilters.svelte';
 import ModStats from './moderation/ModStats.svelte';
 import ModChrome from './moderation/ModChrome.svelte';
 import PolicyDesigner from './moderation/PolicyDesigner.svelte';
-import MiniAppsGrid from './miniapps/MiniAppsGrid.svelte';
 import InviteLinks from './community/InviteLinks.svelte';
 import AddRelayDialog from './settings/AddRelayDialog.svelte';
 import RelayInfoDialog from './settings/RelayInfoDialog.svelte';
 import BlossomInfoDialog from './settings/BlossomInfoDialog.svelte';
 import LaunchDialog from './miniapps/LaunchDialog.svelte';
+import AttachmentPanel from './miniapps/AttachmentPanel.svelte';
+import DepositDialog from './miniapps/pivx/DepositDialog.svelte';
+import SendDialog from './miniapps/pivx/SendDialog.svelte';
+import WithdrawDialog from './miniapps/pivx/WithdrawDialog.svelte';
+import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
+export { attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
+export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog } from './lib/dialogs.svelte.js';
 import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
@@ -331,10 +337,18 @@ export function mountPolicyDesigner(pane, { h }) {
     return mount(PolicyDesigner, { target: pane, props: { h } });
 }
 
-/** Mount the Mini Apps panel grid into `grid` (#miniapps-grid); the Nexus tile is rendered by it. */
-export function mountMiniAppsGrid(grid, { h }) {
-    grid.replaceChildren();
-    return mount(MiniAppsGrid, { target: grid, props: { h } });
+/** Mount the attachment panel into its fixed container (#attachment-panel); the grid rides inside. */
+export function mountAttachmentPanel(container, { h }) {
+    container.replaceChildren();
+    return mount(AttachmentPanel, { target: container, props: { container, h } });
+}
+
+/** Mount the four PIVX wallet dialogs on the body; each opens through its store. */
+export function mountPivxDialogs({ h }) {
+    mount(DepositDialog, { target: document.body, props: { h: h.deposit } });
+    mount(SendDialog, { target: document.body, props: { h: h.send } });
+    mount(WithdrawDialog, { target: document.body, props: { h: h.withdraw } });
+    mount(PivxSettingsDialog, { target: document.body, props: { h: h.settings } });
 }
 
 /** Mount the Nexus into its panel container (#marketplace-panel) and the details panel (#app-details-panel). */
