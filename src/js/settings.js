@@ -1318,7 +1318,7 @@ async function switchToCredentialMode() {
  */
 async function handleEncryptionToggleChange(desired) {
     // Block if migration running or a credential modal is already open
-    if (fMigrationInProgress || document.getElementById('credential-modal-overlay')?.classList.contains('active')) {
+    if (fMigrationInProgress || VectorSvelte.credentialState().open) {
         syncSecurityState();
         return;
     }
@@ -1392,149 +1392,17 @@ async function handleEnableEncryption() {
  */
 function showCredentialModal({ mode, title, subtitle, confirmText = 'Confirm' }) {
     return new Promise((resolve) => {
-        const overlay = document.getElementById('credential-modal-overlay');
-        const titleEl = document.getElementById('credential-modal-title');
-        const subtitleEl = document.getElementById('credential-modal-subtitle');
-        const typeSelect = document.getElementById('credential-modal-type-select');
-        const pinRow = document.getElementById('credential-modal-pin-row');
-        const passwordDiv = document.getElementById('credential-modal-password');
-        const passwordInput = document.getElementById('credential-modal-password-input');
-        const confirmBtn = document.getElementById('credential-modal-confirm');
-        const cancelBtn = document.getElementById('credential-modal-cancel');
-
-        // Reset state
-        titleEl.textContent = title;
-        subtitleEl.textContent = subtitle;
-        typeSelect.style.display = 'none';
-        pinRow.style.display = 'none';
-        passwordDiv.style.display = 'none';
-        confirmBtn.textContent = confirmText;
-
-        // PIN inputs — fresh query each time
-        const pinInputs = pinRow.querySelectorAll('.cred-pin');
-        pinInputs.forEach(el => { el.value = ''; });
-
-        passwordInput.value = '';
-
-        let selectedType = 'pin';
-        let resolved = false;
-
-        function cleanup() {
-            if (resolved) return;
-            resolved = true;
-            overlay.classList.remove('active');
-            document.removeEventListener('keydown', onKeyDown);
-            // Remove PIN listeners
-            pinInputs.forEach(el => {
-                el.removeEventListener('input', onPinInput);
-                el.removeEventListener('keydown', onPinKeyDown);
-            });
-        }
-
-        function finish(value) {
-            cleanup();
+        let done = false;
+        const finish = (value) => {
+            if (done) return;
+            done = true;
+            VectorSvelte.closeCredentialDialog();
             resolve(value);
-        }
-
-        // --- Cancel ---
-        cancelBtn.onclick = () => finish(null);
-
-        function onKeyDown(e) {
-            if (e.key === 'Escape') {
-                e.preventDefault();
-                finish(null);
-            }
-        }
-        document.addEventListener('keydown', onKeyDown);
-
-        // --- PIN input handlers ---
-        function onPinKeyDown(e) {
-            const idx = Array.from(pinInputs).indexOf(e.target);
-            if (e.key === 'Backspace') {
-                e.preventDefault();
-                e.target.value = '';
-                if (idx > 0) pinInputs[idx - 1].focus();
-            } else if (e.key.length === 1 && !/^[0-9]$/.test(e.key)) {
-                e.preventDefault();
-            }
-        }
-
-        function onPinInput(e) {
-            const idx = Array.from(pinInputs).indexOf(e.target);
-            let val = e.target.value.replace(/[^0-9]/g, '');
-            if (val.length > 1) val = val.charAt(0);
-            e.target.value = val;
-            if (val && idx < pinInputs.length - 1) {
-                pinInputs[idx + 1].focus();
-            }
-            // Auto-submit when all 6 digits entered
-            const full = Array.from(pinInputs).every(el => /^[0-9]$/.test(el.value));
-            if (full) {
-                const pin = Array.from(pinInputs).map(el => el.value).join('');
-                finish(pin);
-            }
-        }
-
-        // --- Mode setup ---
-        if (mode === 'pin') {
-            pinRow.style.display = '';
-            // No confirm button for PIN (auto-submits on 6th digit)
-            confirmBtn.style.display = 'none';
-            pinInputs.forEach(el => {
-                el.addEventListener('keydown', onPinKeyDown);
-                el.addEventListener('input', onPinInput);
-            });
-            // Show and focus
-            overlay.classList.add('active');
-            requestAnimationFrame(() => pinInputs[0].focus());
-
-        } else if (mode === 'password') {
-            passwordDiv.style.display = '';
-            confirmBtn.style.display = '';
-            confirmBtn.onclick = () => {
-                const val = passwordInput.value;
-                if (val) finish(val);
-            };
-            // Enter key submits
-            passwordInput.onkeydown = (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    const val = passwordInput.value;
-                    if (val) finish(val);
-                }
-            };
-            overlay.classList.add('active');
-            requestAnimationFrame(() => passwordInput.focus());
-
-        } else if (mode === 'type-select') {
-            typeSelect.style.display = '';
-            confirmBtn.style.display = '';
-            confirmBtn.textContent = confirmText || 'Continue';
-
-            const btnPin = document.getElementById('credential-modal-type-pin');
-            const btnPwd = document.getElementById('credential-modal-type-password');
-            const descEl = document.getElementById('credential-modal-type-desc');
-
-            btnPin.classList.add('active');
-            btnPwd.classList.remove('active');
-            selectedType = 'pin';
-            descEl.textContent = 'A 6-digit code. Quick and convenient.';
-
-            btnPin.onclick = () => {
-                selectedType = 'pin';
-                btnPin.classList.add('active');
-                btnPwd.classList.remove('active');
-                descEl.textContent = 'A 6-digit code. Quick and convenient.';
-            };
-            btnPwd.onclick = () => {
-                selectedType = 'password';
-                btnPwd.classList.add('active');
-                btnPin.classList.remove('active');
-                descEl.textContent = 'A text password. More secure, but slower to enter.';
-            };
-            confirmBtn.onclick = () => finish(selectedType);
-            overlay.classList.add('active');
-        }
+        };
+        VectorSvelte.openCredentialDialog(
+            { mode, title, subtitle, confirmText: mode === 'type-select' ? (confirmText || 'Continue') : confirmText },
+            { cancel: () => finish(null), submit: (value) => finish(value) },
+        );
     });
 }
 
@@ -1596,7 +1464,7 @@ async function promptSecurityCredential(title, message) {
  * Handle changing PIN/Password (re-keying)
  */
 async function handleChangeCredential() {
-    if (fMigrationInProgress || document.getElementById('credential-modal-overlay')?.classList.contains('active')) return;
+    if (fMigrationInProgress || VectorSvelte.credentialState().open) return;
 
     // Step 1: Ask for current credential and verify it
     const currentLabel = fSecurityType === 'password' ? 'Password' : 'PIN';
@@ -1610,33 +1478,20 @@ async function handleChangeCredential() {
         });
         if (!entered) return;
 
-        // Show validating state while Argon2 hashes (keep modal visible)
-        const overlay = document.getElementById('credential-modal-overlay');
-        const titleEl = document.getElementById('credential-modal-title');
-        const subtitleEl = document.getElementById('credential-modal-subtitle');
-        const pinRow = document.getElementById('credential-modal-pin-row');
-        const passwordDiv = document.getElementById('credential-modal-password');
-        const buttonsDiv = document.getElementById('credential-modal-buttons');
-        titleEl.textContent = `Validating ${currentLabel}...`;
-        subtitleEl.textContent = 'Please wait';
-        subtitleEl.classList.add('startup-subtext-gradient');
-        pinRow.style.display = 'none';
-        passwordDiv.style.display = 'none';
-        buttonsDiv.style.display = 'none';
-        overlay.classList.add('active');
+        // The modal holds, controls gone, while Argon2 hashes.
+        VectorSvelte.openCredentialDialog(
+            { mode: 'validating', title: `Validating ${currentLabel}...`, subtitle: 'Please wait', subtitleGradient: true },
+            { cancel: () => {}, submit: () => {} },
+        );
 
         // Verify the credential without exposing key material over IPC
         try {
             await invoke('verify_credential', { credential: entered });
             oldCredential = entered;
-            overlay.classList.remove('active');
-            subtitleEl.classList.remove('startup-subtext-gradient');
-            buttonsDiv.style.display = '';
+            VectorSvelte.closeCredentialDialog();
             break;
         } catch (e) {
-            overlay.classList.remove('active');
-            subtitleEl.classList.remove('startup-subtext-gradient');
-            buttonsDiv.style.display = '';
+            VectorSvelte.closeCredentialDialog();
             subtitle = `Incorrect ${currentLabel.toLowerCase()}, try again.`;
         }
     }
@@ -1748,21 +1603,7 @@ async function setupMigrationEventListeners() {
 function showMigrationModal(encrypting) {
     fMigrationInProgress = true;
     fMigrationEncrypting = encrypting;
-
-    const overlay = document.getElementById('encryption-migration-overlay');
-    const title = document.getElementById('encryption-migration-title');
-    const phase = document.getElementById('encryption-migration-phase');
-    const progressFill = document.getElementById('encryption-migration-progress-fill');
-    const progressText = document.getElementById('encryption-migration-progress-text');
-
-    // Set title based on operation
-    title.textContent = fMigrationRekeying ? 'Changing Credential' : encrypting ? 'Enabling Encryption' : 'Disabling Encryption';
-    phase.textContent = 'Preparing...';
-    progressFill.style.width = '0%';
-    progressText.textContent = '0%';
-
-    // Show the overlay
-    overlay.classList.add('active');
+    VectorSvelte.showMigration(fMigrationRekeying ? 'Changing Credential' : encrypting ? 'Enabling Encryption' : 'Disabling Encryption');
 }
 
 /**
@@ -1770,9 +1611,7 @@ function showMigrationModal(encrypting) {
  */
 function hideMigrationModal() {
     fMigrationInProgress = false;
-
-    const overlay = document.getElementById('encryption-migration-overlay');
-    overlay.classList.remove('active');
+    VectorSvelte.hideMigration();
 }
 
 /**
@@ -1879,14 +1718,7 @@ function waitForVisibility() {
 }
 
 function updateMigrationProgress(total, completed, phase) {
-    const phaseEl = document.getElementById('encryption-migration-phase');
-    const progressFill = document.getElementById('encryption-migration-progress-fill');
-    const progressText = document.getElementById('encryption-migration-progress-text');
-
-    // Calculate percentage
     const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
-
-    // Update phase description
     let phaseText = phase;
     if (phase === 'decrypting') {
         phaseText = `Decrypting messages... ${completed.toLocaleString()} / ${total.toLocaleString()}`;
@@ -1897,10 +1729,7 @@ function updateMigrationProgress(total, completed, phase) {
     } else if (phase === 'finalizing') {
         phaseText = 'Finalizing...';
     }
-
-    phaseEl.textContent = phaseText;
-    progressFill.style.width = `${percentage}%`;
-    progressText.textContent = `${percentage}%`;
+    VectorSvelte.setMigrationProgress(phaseText, percentage);
 }
 
 // Help prompts: one explainer per info icon. A function body resolves at click
@@ -2065,4 +1894,5 @@ const SETTINGS_HELPERS = {
 // Mounted once every script is in: the sections call helpers from files that load later.
 document.addEventListener('DOMContentLoaded', () => {
     VectorSvelte.mountSettings(domSettings, { h: SETTINGS_HELPERS });
+    VectorSvelte.mountCredentialModals();
 }, { once: true });

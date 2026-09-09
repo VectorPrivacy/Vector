@@ -315,47 +315,42 @@ const domSettings = document.getElementById('settings');
  * waiting on Arti's consensus fetch. Title is restored on completion.
  */
 async function runWithTorBootstrapStatus(fn) {
-    const titleEl = domLoginEncryptTitle;
-    const original = titleEl ? titleEl.textContent : '';
-    let pollHandle = null;
+    const enc = VectorSvelte.encryptState();
+    const original = enc.title;
     let didOverride = false;
 
-    if (titleEl) {
-        const tick = async () => {
-            try {
-                const state = await invoke('tor_get_state');
-                if (!state || !state.enabled) return;
-                const status = state.status || '';
-                if (state.running) {
-                    // Bootstrap finished mid-call; restore the original title
-                    // unless we're about to be replaced by the next phase anyway.
-                    if (didOverride) {
-                        titleEl.textContent = original;
-                        didOverride = false;
-                    }
-                } else if (status.startsWith('bootstrapping')) {
-                    const pct = Number.isFinite(state.bootstrap_progress)
-                        ? state.bootstrap_progress
-                        : null;
-                    titleEl.textContent = pct != null
-                        ? `Bootstrapping Tor… ${pct}%`
-                        : 'Bootstrapping Tor…';
-                    didOverride = true;
+    const tick = async () => {
+        try {
+            const state = await invoke('tor_get_state');
+            if (!state || !state.enabled) return;
+            const status = state.status || '';
+            if (state.running) {
+                // Bootstrap finished mid-call; restore the original title
+                // unless we're about to be replaced by the next phase anyway.
+                if (didOverride) {
+                    VectorSvelte.patchEncrypt({ title: original });
+                    didOverride = false;
                 }
-            } catch (_) { /* swallow — failsafe */ }
-        };
-        // First sample now so the title flips immediately when bootstrap is
-        // already in flight, then keep up at 1Hz which matches Arti's event
-        // cadence well enough.
-        tick();
-        pollHandle = setInterval(tick, 1000);
-    }
+            } else if (status.startsWith('bootstrapping')) {
+                const pct = Number.isFinite(state.bootstrap_progress)
+                    ? state.bootstrap_progress
+                    : null;
+                VectorSvelte.patchEncrypt({ title: pct != null ? `Bootstrapping Tor… ${pct}%` : 'Bootstrapping Tor…' });
+                didOverride = true;
+            }
+        } catch (_) { /* swallow — failsafe */ }
+    };
+    // First sample now so the title flips immediately when bootstrap is
+    // already in flight, then keep up at 1Hz which matches Arti's event
+    // cadence well enough.
+    tick();
+    const pollHandle = setInterval(tick, 1000);
 
     try {
         return await fn();
     } finally {
-        if (pollHandle) clearInterval(pollHandle);
-        if (didOverride && titleEl) titleEl.textContent = original;
+        clearInterval(pollHandle);
+        if (didOverride) VectorSvelte.patchEncrypt({ title: original });
     }
 }
 
@@ -1899,11 +1894,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // Countdown is reroll-bound; once we're waiting on user approval
         // in the signer app, auto-reroll would be hostile.
         stopBunkerSessionTimer();
-        const status = document.getElementById('bunker-status-text');
-        if (status) {
-            status.textContent = 'Check your signer app to approve…';
-            status.className = 'login-bunker-status connecting';
-        }
+        VectorSvelte.bunkerStatus('Check your signer app to approve…', 'connecting');
     });
 
     // Two terminal-success events for the bunker form; the choice depends on
@@ -1916,11 +1907,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     await listen('bunker_session_staged', async (evt) => {
         stopBunkerSessionTimer();
         strPubkey = evt?.payload?.npub || strPubkey;
-        const status = document.getElementById('bunker-status-text');
-        if (status) {
-            status.textContent = 'Connected. Choosing security…';
-            status.className = 'login-bunker-status online';
-        }
+        VectorSvelte.bunkerStatus('Connected. Choosing security…', 'online');
         if (typeof window.hideBunkerForm === 'function') window.hideBunkerForm();
         openEncryptionFlow(false);
         invoke('connect').catch((err) => {
@@ -1935,11 +1922,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         // next attempt (and the countdown will resume from there).
         stopBunkerSessionTimer();
         const err = evt?.payload?.error || 'Signer connection failed';
-        const status = document.getElementById('bunker-status-text');
-        if (status) {
-            status.textContent = String(err);
-            status.className = 'login-bunker-status error';
-        }
+        VectorSvelte.bunkerStatus(String(err), 'error');
         // Only auto-reroll if the bunker form is actually visible — don't
         // start a fresh session if the user has navigated away.
         if (VectorSvelte.loginState().bunker) {
@@ -2003,11 +1986,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         const formVisible = VectorSvelte.loginState().bunker;
         if (!formVisible) return;
         const err = evt?.payload?.error || 'Re-authorization failed';
-        const status = document.getElementById('bunker-status-text');
-        if (status) {
-            status.textContent = String(err);
-            status.className = 'login-bunker-status error';
-        }
+        VectorSvelte.bunkerStatus(String(err), 'error');
         // Auto-reroll on reauth timeout too (same rationale as pairing).
         if (VectorSvelte.loginState().bunker) {
             setTimeout(() => {
@@ -2289,22 +2268,17 @@ window.addEventListener("DOMContentLoaded", async () => {
                 // input UI inside `#login-encrypt` since we're not
                 // soliciting anything; the title is the whole UX.
                 VectorSvelte.loginScreen('encrypt');
-                const typeSelect = document.getElementById('login-encrypt-type-select');
-                const pinRow = document.getElementById('login-encrypt-pins');
-                const passwordBox = document.getElementById('login-encrypt-password');
-                if (typeSelect) typeSelect.style.display = 'none';
-                if (pinRow) pinRow.style.display = 'none';
-                if (passwordBox) passwordBox.style.display = 'none';
                 // Set a neutral baseline title; `runWithTorBootstrapStatus`
                 // overrides it with "Bootstrapping Tor… NN%" when Arti is
                 // mid-consensus, and `init()` later overrides it again
                 // with "Decrypting Database…" / sync progress. For bunker
                 // accounts the 15s wait is dominated by the signer RPC, so
                 // surface that to the user.
-                domLoginEncryptTitle.textContent = window.__activeSignerType === 'bunker'
-                    ? 'Connecting to Signer…'
-                    : 'Connecting…';
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                VectorSvelte.patchEncrypt({
+                    typeSelectShown: false, pinShown: false, passwordShown: false, bioBtnShown: false,
+                    headerShown: true, lockShown: true, gradient: true,
+                    title: window.__activeSignerType === 'bunker' ? 'Connecting to Signer…' : 'Connecting…',
+                });
                 // Past the point of no return — login_from_stored_key is
                 // about to install this account's keys into the live
                 // session. A mid-flight picker swap would race the bind.
@@ -2316,7 +2290,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                         invoke("login_from_stored_key", { password: null })
                     );
                     console.timeEnd('[Boot] login_from_stored_key');
-                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    VectorSvelte.patchEncrypt({ gradient: false });
                     // domLogin (the whole lockscreen) is hidden later by
                     // login() once the chat surface is ready.
 
@@ -2325,7 +2299,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                     login(true); // skipAnimations = true
                 } catch (e) {
                     console.error('Direct login failed:', e);
-                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    VectorSvelte.patchEncrypt({ gradient: false });
                     // Bunker-unreachable case: offer re-authorization
                     // instead of bouncing the user to the start screen.
                     // The account stays intact, only the pairing needs

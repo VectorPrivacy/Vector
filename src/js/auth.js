@@ -2,22 +2,7 @@
 // invite and welcome steps, and the encryption (PIN / password) flow. One global
 // scope: this loads before main.js and shares its globals.
 
-const domLoginStart = document.getElementById('login-start');
-const domLoginAccountCreationBtn = document.getElementById('start-account-creation-btn');
-const domLoginAccountBtn = document.getElementById('start-login-btn');
-const domLoginBunkerStartBtn = document.getElementById('start-bunker-btn');
-const domLoginNip55StartBtn = document.getElementById('start-nip55-btn');
 const domLogin = document.getElementById('login-form');
-const domLoginImport = document.getElementById('login-import');
-const domLoginInput = document.getElementById('login-input');
-const domLoginBtn = document.getElementById('login-btn');
-const domLoginBunker = document.getElementById('login-bunker');
-const domLoginBunkerUrlInput = document.getElementById('bunker-url-input');
-const domLoginBunkerConnectBtn = document.getElementById('bunker-connect-btn');
-const domLoginBunkerStatus = document.getElementById('bunker-status-text');
-const domLoginBunkerQrWrap = document.querySelector('.login-bunker-qr-wrap');
-const domLoginBunkerQr = document.getElementById('bunker-qr');
-const domLoginBunkerCopyBtn = document.getElementById('bunker-copy-url-btn');
 
 // Active nostrconnect:// URL — captured when start_nostrconnect_session
 // returns so the Copy button can place it on the clipboard.
@@ -116,7 +101,7 @@ async function startBunkerSession() {
         }
         const url = await invoke(cmd);
         strBunkerNostrConnectUrl = url;
-        VectorSvelte.bunkerLink(url, renderQrInto(domLoginBunkerQr, url));
+        VectorSvelte.bunkerLink(url);
         // Start the live countdown — auto-rerolls a fresh QR when the
         // 120s backend timeout expires so the user isn't stranded.
         armBunkerSessionTimer();
@@ -167,40 +152,9 @@ window.showBunkerForm = showBunkerForm;
 function hideBunkerForm() {
     stopBunkerSessionTimer();
     VectorSvelte.loginHideBunker();
-    if (domLoginBunkerUrlInput) domLoginBunkerUrlInput.value = '';
     strBunkerNostrConnectUrl = '';
-    if (domLoginBunkerQr) domLoginBunkerQr.innerHTML = '';
 }
 window.hideBunkerForm = hideBunkerForm;
-
-const domLoginImportError = document.getElementById('login-import-error');
-
-const domLoginBackBar = document.getElementById('login-back-bar');
-const domLoginBackBtn = document.getElementById('login-back-btn');
-
-const domLoginInvite = document.getElementById('login-invite');
-const domInviteInput = document.getElementById('invite-input');
-const domInviteBtn = document.getElementById('invite-btn');
-
-const domLoginWelcome = document.getElementById('login-welcome');
-
-const domLoginEncrypt = document.getElementById('login-encrypt');
-const domLoginEncryptTitle = document.getElementById('login-encrypt-title');
-const domLoginEncryptPinRow = document.getElementById('login-encrypt-pins');
-const domLoginEncryptPassword = document.getElementById('login-encrypt-password');
-const domLoginPasswordInput = document.getElementById('login-password-input');
-const domLoginEncryptTypeSelect = document.getElementById('login-encrypt-type-select');
-
-// One reconciler paints the login shell; the flows above and below only set state.
-VectorSvelte.mountLoginChrome({
-    els: {
-        form: domLogin, backBar: domLoginBackBar, start: domLoginStart, import: domLoginImport,
-        invite: domLoginInvite, welcome: domLoginWelcome, encrypt: domLoginEncrypt, bunker: domLoginBunker,
-        logo: document.querySelector('.login-logo'), subtext: document.querySelector('.login-subtext'),
-        status: domLoginBunkerStatus, qrWrap: domLoginBunkerQrWrap, copy: domLoginBunkerCopyBtn,
-        connect: domLoginBunkerConnectBtn, urlInput: domLoginBunkerUrlInput, bunkerStart: domLoginBunkerStartBtn,
-    },
-});
 
 /**
  * Login to the Nostr network
@@ -232,29 +186,16 @@ async function login(skipAnimations = false) {
             
             switch (type) {
                 case 'start':
-                    domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.add('typing-indicator-text');
-                    domLoginEncryptTitle.style.color = '';
+                    VectorSvelte.patchEncrypt({ title: message, typing: true, error: false });
                     break;
-                    
                 case 'progress':
-                    if (current && total) {
-                        const progress = Math.round((current / total) * 100);
-                        domLoginEncryptTitle.textContent = `${message} (${progress}%)`;
-                    } else {
-                        domLoginEncryptTitle.textContent = message;
-                    }
+                    VectorSvelte.patchEncrypt({ title: current && total ? `${message} (${Math.round((current / total) * 100)}%)` : message });
                     break;
-                    
                 case 'complete':
-                    domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.remove('typing-indicator-text');
+                    VectorSvelte.patchEncrypt({ title: message, typing: false });
                     break;
-                    
                 case 'error':
-                    domLoginEncryptTitle.textContent = message;
-                    domLoginEncryptTitle.classList.remove('typing-indicator-text');
-                    domLoginEncryptTitle.style.color = 'red';
+                    VectorSvelte.patchEncrypt({ title: message, typing: false, error: true });
                     break;
             }
         });
@@ -298,7 +239,7 @@ async function login(skipAnimations = false) {
             // Helper to show the main UI after login
             const showMainUI = async () => {
                 console.time('[Boot] showMainUI:dom');
-                domLoginInput.value = "";
+                VectorSvelte.patchLogin({ importKey: '' });
                 VectorSvelte.loginHide();
 
                 // Show navbar and bookmarks
@@ -497,7 +438,7 @@ async function login(skipAnimations = false) {
         console.timeEnd('[Boot] connect + listeners');
 
         // Load and Decrypt our database; fetching the full chat state from disk for immediate bootup
-        domLoginEncryptTitle.textContent = `Decrypting Database...`;
+        VectorSvelte.patchEncrypt({ title: 'Decrypting Database...' });
 
         // Note: this also begins the Rust backend's iterative sync, thus, init should ONLY be called once, to initiate it
         init(true);
@@ -508,46 +449,22 @@ async function login(skipAnimations = false) {
  * Display the Invite code input flow.
  */
 function openInviteFlow() {
+    VectorSvelte.patchLogin({ inviteCode: '' });
     VectorSvelte.loginScreen('invite');
-    VectorSvelte.flushSync();
-    
-    // Focus on the invite input
-    domInviteInput.focus();
-    
-    // Handle invite code submission
-    domInviteBtn.onclick = async () => {
-        const inviteCode = domInviteInput.value.trim();
-        if (!inviteCode) {
-            return popupConfirm('Please enter an invite code', '', true, '', 'vector_warning.svg');
-        }
-        
-        try {
-            // Accept the invite code
-            await invoke('accept_invite_code', { inviteCode });
-            
-            showWelcomeScreen();
-        } catch (e) {
-            // Display the specific error from the backend
-            const errorMessage = e.toString() || 'Please check your invite code and try again.';
-            popupConfirm('Invalid invite code', errorMessage, true, '', 'vector_warning.svg');
-        }
-    };
-    
-    // Handle enter key on invite input
-    domInviteInput.onkeydown = async (evt) => {
-        if (evt.code === 'Enter' || evt.code === 'NumpadEnter') {
-            evt.preventDefault();
-            domInviteBtn.click();
-        }
-    };
-    
-    // Handle enter key on invite input
-    domInviteInput.onkeydown = async (evt) => {
-        if (evt.code === 'Enter' || evt.code === 'NumpadEnter') {
-            evt.preventDefault();
-            domInviteBtn.click();
-        }
-    };
+}
+
+async function submitInvite() {
+    const inviteCode = VectorSvelte.loginState().inviteCode.trim();
+    if (!inviteCode) {
+        return popupConfirm('Please enter an invite code', '', true, '', 'vector_warning.svg');
+    }
+    try {
+        await invoke('accept_invite_code', { inviteCode });
+        showWelcomeScreen();
+    } catch (e) {
+        const errorMessage = e.toString() || 'Please check your invite code and try again.';
+        popupConfirm('Invalid invite code', errorMessage, true, '', 'vector_warning.svg');
+    }
 }
 
 /**
@@ -560,6 +477,9 @@ function showWelcomeScreen() {
     setTimeout(() => openEncryptionFlow(false), 5000);
 }
 
+/** The open encrypt screen's handlers; the component's controls route here. */
+let encryptFlow = null;
+
 /**
  * Display the Encryption/Decryption flow.
  * @param {boolean} fUnlock - Whether we're unlocking an existing key, or encrypting a new one.
@@ -567,30 +487,25 @@ function showWelcomeScreen() {
  */
 function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     VectorSvelte.loginScreen('encrypt');
-    // The flows below focus an input at once; the screen has to be visible first.
-    VectorSvelte.flushSync();
     // Hide the picker only for the NEW-account PIN-setup path (fUnlock=false).
     // The unlock path keeps it visible so the user can switch between
     // existing accounts before entering their PIN/password.
     if (!fUnlock) loginPicker.hide();
-
-    // Hide all input variants initially
-    domLoginEncryptPinRow.style.display = 'none';
-    domLoginEncryptPassword.style.display = 'none';
-    domLoginEncryptTypeSelect.style.display = 'none';
+    VectorSvelte.patchEncrypt({
+        gradient: false, typing: false, error: false, headerShown: true, lockShown: true,
+        typeSelectShown: false, pinShown: false, passwordShown: false, password: '',
+        bioOptionShown: false, bioOptionLabel: 'Use Biometrics', recommended: '*Recommended Option',
+        bioBtnShown: false, bioBtnLabel: 'Unlock with Biometrics',
+    });
 
     // Track chosen security type
     let chosenSecurityType = securityType;
-
-    // AbortControllers for listener cleanup (avoids cloning DOM — mobile WebViews
-    // don't reliably handle cloned inputs)
-    let pinAbortController = null;
-    let passwordAbortController = null;
+    const setTitle = (title, patch = {}) => VectorSvelte.patchEncrypt({ title, ...patch });
+    const currentTitle = () => VectorSvelte.encryptState().title;
 
     // Android biometric fast-path. Auto-fires AT MOST once per unlock-screen
     // mount; a cancel lands the user on the PIN/password pad and only the
     // button re-triggers — never a render loop.
-    const domBiometricBtn = document.getElementById('login-biometric-btn');
     let biometricBusy = false;
     // True once the unlock button was offered this mount; processing states
     // hide it and settled states bring it back (account switching included).
@@ -600,10 +515,15 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     // biometric state, or a stuck flag leaves the user with a dead PIN pad.
     let loginDispatched = false;
     function setBiometricBtnVisible(visible) {
-        if (domBiometricBtn && biometricOffered) {
-            domBiometricBtn.style.display = visible ? '' : 'none';
-        }
+        if (biometricOffered) VectorSvelte.patchEncrypt({ bioBtnShown: visible });
     }
+
+    // A later open replaces this object, so a stale screen's controls go nowhere.
+    const flow = {
+        choose: () => {}, pinFull: () => {}, pinBackspace: () => {}, submitPassword: () => {},
+        biometric: () => { if (biometricOffered) attemptBiometricUnlock(); },
+    };
+    encryptFlow = flow;
 
     // If unlocking, go straight to the appropriate input
     if (fUnlock) {
@@ -613,7 +533,6 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         showSecurityTypeSelector();
     }
 
-    if (domBiometricBtn) domBiometricBtn.style.display = 'none';
     if (fUnlock && platformFeatures.os === 'android') {
         offerBiometricUnlock();
     }
@@ -634,17 +553,11 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         // ("Use fingerprint", "Use screen lock", ...) — Android never exposes
         // the credential type itself, but this is the honest next best.
         if (status.label) {
-            const lbl = document.getElementById('login-biometric-label');
-            if (lbl) lbl.textContent = status.label;
-            if (chosenSecurityType === 'biometric') {
-                domLoginEncryptTitle.textContent = status.label + ' to unlock Vector';
-            }
+            VectorSvelte.patchEncrypt({ bioBtnLabel: status.label });
+            if (chosenSecurityType === 'biometric') setTitle(status.label + ' to unlock Vector');
         }
-        if (domBiometricBtn) {
-            biometricOffered = true;
-            domBiometricBtn.style.display = '';
-            domBiometricBtn.onclick = () => attemptBiometricUnlock();
-        }
+        biometricOffered = true;
+        VectorSvelte.patchEncrypt({ bioBtnShown: true });
         // Auto-fire on mount: an enrolled account is biometric-ONLY (the modes
         // are mutually exclusive), so there is no credential pad for the prompt
         // to race. Once per mount — a cancel leaves the button for a manual
@@ -653,9 +566,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     }
 
     async function showBiometricRecovery() {
-        domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
-        domLoginEncryptTitle.textContent = 'Device security changed';
-        if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+        setTitle('Device security changed', { gradient: false, bioBtnShown: false });
         const yes = await popupConfirm(
             'Device Security Changed',
             'This device\'s encrypted data can no longer be unlocked: its hardware key was invalidated (screen lock removed, or the data was moved to a new device).<br><br><b>Reset this device and sign in with your keys to restore from the network.</b>',
@@ -677,10 +588,9 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         try {
             unlisten = await window.__TAURI__.event.once('biometric_unlocked', () => {
                 if (loginDispatched) return;
-                domLoginEncryptTitle.textContent = 'Decrypting your keys...';
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                setTitle('Decrypting your keys...', { gradient: true });
                 setBiometricBtnVisible(false);
-                if (typeof loginPicker !== 'undefined') loginPicker.hide();
+                loginPicker.hide();
             });
             const npub = await runWithTorBootstrapStatus(() => invoke('biometric_login'));
             // A typed credential already drove the login — don't start a second.
@@ -690,19 +600,19 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             login();
         } catch (e) {
             const msg = String(e);
-            domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+            VectorSvelte.patchEncrypt({ gradient: false });
             if (msg.includes('BIOMETRIC_INVALIDATED')) {
                 biometricOffered = false;
-                if (domBiometricBtn) domBiometricBtn.style.display = 'none';
+                VectorSvelte.patchEncrypt({ bioBtnShown: false });
                 if (chosenSecurityType === 'biometric') {
                     showBiometricRecovery();
                 } else {
-                    domLoginEncryptTitle.textContent = 'Biometrics changed. Enter your '
-                        + (chosenSecurityType === 'password' ? 'password' : 'PIN') + '.';
+                    setTitle('Biometrics changed. Enter your '
+                        + (chosenSecurityType === 'password' ? 'password' : 'PIN') + '.');
                 }
             } else if (msg.includes('BIOMETRIC_UNAVAILABLE')) {
                 if (chosenSecurityType === 'biometric') {
-                    domLoginEncryptTitle.textContent = 'Unlock unavailable right now. Restart Vector and try again.';
+                    setTitle('Unlock unavailable right now. Restart Vector and try again.');
                 }
             } else if (!msg.includes('BIOMETRIC_CANCELLED')
                 && !msg.includes('BIOMETRIC_NOT_ENROLLED')) {
@@ -720,73 +630,50 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
 
     /** Show the security type selection phase */
     function showSecurityTypeSelector() {
-        // Hide lock icon header — the type selector uses the login logo above instead
-        document.querySelector('.login-encrypt-header').style.display = 'none';
-        domLoginEncryptPinRow.style.display = 'none';
-        domLoginEncryptPassword.style.display = 'none';
-        domLoginEncryptTypeSelect.style.display = '';
-
-        const btnPin = document.getElementById('security-type-pin');
-        const btnPassword = document.getElementById('security-type-password');
-        const btnSkip = document.getElementById('security-type-skip');
-
-        btnPin.onclick = () => {
-            chosenSecurityType = 'pin';
-            domLoginEncryptTypeSelect.style.display = 'none';
-            startCredentialEntry('pin');
-        };
-
-        btnPassword.onclick = () => {
-            chosenSecurityType = 'password';
-            domLoginEncryptTypeSelect.style.display = 'none';
-            startCredentialEntry('password');
-        };
+        // The type selector uses the login logo above instead of the lock header.
+        VectorSvelte.patchEncrypt({ headerShown: false, pinShown: false, passwordShown: false, typeSelectShown: true });
 
         // Biometric-only mode (Android 11+ with capable hardware): a generated
         // 256-bit credential nobody ever knows, unlocked solely by the OS.
-        const btnBiometric = document.getElementById('security-type-biometric');
-        if (btnBiometric && platformFeatures.os === 'android') {
+        if (platformFeatures.os === 'android') {
             invoke('biometric_status')
                 .then(s => {
                     if (!s.supported) return;
-                    btnBiometric.style.display = '';
-                    // The OS's own wording for what the user will actually see
-                    // on the sheet ("Use fingerprint" / "Use screen lock").
-                    if (s.label) btnBiometric.textContent = s.label;
-                    // Two highlighted choices now — the label above them agrees.
-                    const rec = document.querySelector('.security-type-recommended');
-                    if (rec) rec.textContent = '*Recommended Options';
+                    // The OS's own wording for what the user will actually see on the
+                    // sheet; two highlighted choices now, so the label above them agrees.
+                    VectorSvelte.patchEncrypt({
+                        bioOptionShown: true, bioOptionLabel: s.label || 'Use Biometrics',
+                        recommended: '*Recommended Options',
+                    });
                 })
                 .catch(() => {});
-            btnBiometric.onclick = async () => {
+        }
+
+        flow.choose = async (type) => {
+            if (type === 'pin' || type === 'password') {
+                chosenSecurityType = type;
+                VectorSvelte.patchEncrypt({ typeSelectShown: false });
+                startCredentialEntry(type);
+                return;
+            }
+            if (type === 'biometric') {
                 if (!(await confirmBiometricOnlyWarning())) return;
-                domLoginEncryptTypeSelect.style.display = 'none';
-                document.querySelector('.login-encrypt-header').style.display = '';
-                document.querySelector('.login-lock-icon').style.display = 'none';
-                domLoginEncryptTitle.textContent = 'Setting up your account...';
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+                setTitle('Setting up your account...', { typeSelectShown: false, headerShown: true, lockShown: false, gradient: true });
                 try {
                     await invoke('setup_encryption_biometric');
                     login();
                 } catch (e) {
-                    domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                    VectorSvelte.patchEncrypt({ gradient: false });
                     const msg = String(e);
                     if (!msg.includes('BIOMETRIC_CANCELLED')) {
                         await popupConfirm('Could not enable biometrics', escapeHtml(msg), true);
                     }
-                    document.querySelector('.login-encrypt-header').style.display = 'none';
-                    domLoginEncryptTypeSelect.style.display = '';
+                    VectorSvelte.patchEncrypt({ headerShown: false, typeSelectShown: true });
                 }
-            };
-        }
-
-        btnSkip.onclick = async () => {
+                return;
+            }
             // Skip encryption — backend stores the key in plaintext (key never crosses IPC)
-            domLoginEncryptTypeSelect.style.display = 'none';
-            document.querySelector('.login-encrypt-header').style.display = '';
-            document.querySelector('.login-lock-icon').style.display = 'none';
-            domLoginEncryptTitle.textContent = 'Setting up your account...';
-            domLoginEncryptTitle.classList.add('startup-subtext-gradient');
+            setTitle('Setting up your account...', { typeSelectShown: false, headerShown: true, lockShown: false, gradient: true });
             try {
                 await invoke('skip_encryption');
                 login();
@@ -795,9 +682,9 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 // in flight, etc.) — PENDING_NSEC is preserved server-side
                 // so a retry is possible. Surface the error and bring the
                 // user back to the type-selector so they can try again.
-                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
+                VectorSvelte.patchEncrypt({ gradient: false });
                 await popupConfirm('Could not finish setup', String(e), true);
-                domLoginEncryptTypeSelect.style.display = '';
+                VectorSvelte.patchEncrypt({ typeSelectShown: true });
             }
         };
     }
@@ -805,13 +692,11 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     /** Start the credential entry phase for the chosen type */
     function startCredentialEntry(type) {
         // Re-show lock icon header (hidden during type selector phase)
-        document.querySelector('.login-encrypt-header').style.display = '';
+        VectorSvelte.patchEncrypt({ headerShown: true });
         if (type === 'biometric') {
             // Biometric-only account: no credential to type. The auto-fire
             // below owns the unlock; a dead enrollment routes to recovery.
-            domLoginEncryptPinRow.style.display = 'none';
-            domLoginEncryptPassword.style.display = 'none';
-            domLoginEncryptTitle.textContent = 'Unlock with Biometrics';
+            setTitle('Unlock with Biometrics', { pinShown: false, passwordShown: false });
         } else if (type === 'password') {
             startPasswordFlow();
         } else {
@@ -820,16 +705,10 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     }
 
     // ========================================================================
-    // PIN Flow (existing 6-digit input logic)
+    // PIN Flow (6-digit input; the boxes live in the component)
     // ========================================================================
     function startPinFlow() {
-        // Abort previous listeners if startPinFlow is called again
-        if (pinAbortController) pinAbortController.abort();
-        pinAbortController = new AbortController();
-        const signal = pinAbortController.signal;
-
         let strPinLast = [];
-        let strPinCurrent = Array(6).fill('-');
 
         const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
         const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
@@ -839,58 +718,47 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
         const MISMATCH_PIN_MSG = `Pin doesn't match, re-try`;
 
-        // Always query fresh from the live DOM
-        const pinRow = document.getElementById('login-encrypt-pins');
-        const arrPinDOMs = pinRow.querySelectorAll('input');
-
         function updateStatusMessage(message, isProcessing = false) {
-            domLoginEncryptTitle.textContent = message;
             if (isProcessing) {
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
-                pinRow.style.display = 'none';
+                setTitle(message, { gradient: true, pinShown: false });
                 setBiometricBtnVisible(false);
                 // Past the point of no return — backend is decrypting or
                 // encrypting against THIS account. Mid-flight account swap
                 // would race the in-progress crypto and bind the wrong
                 // session to the result.
-                if (typeof loginPicker !== 'undefined') loginPicker.hide();
+                loginPicker.hide();
             } else {
-                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
-                pinRow.style.display = '';
+                setTitle(message, { gradient: false, pinShown: true });
                 setBiometricBtnVisible(true);
                 // Back to input state. On the unlock path, re-show the
                 // picker so a wrong-PIN retry can swap accounts. On the
                 // new-account setup path (fUnlock=false) the picker was
                 // intentionally hidden by openEncryptionFlow and stays so.
-                if (fUnlock && typeof loginPicker !== 'undefined'
-                    && loginPicker.accounts && loginPicker.accounts.length >= 2) {
+                if (fUnlock && loginPicker.accounts && loginPicker.accounts.length >= 2) {
                     loginPicker.show(loginPicker.activeNpub);
                 }
             }
-            domLoginEncryptPassword.style.display = 'none';
+            VectorSvelte.patchEncrypt({ passwordShown: false });
+        }
+
+        function revertErrorTitle() {
+            const title = currentTitle();
+            if (title === INCORRECT_PIN_MSG || title === MISMATCH_PIN_MSG) {
+                updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT));
+            }
         }
 
         function resetPinDisplay(focusFirst = true, revertTitleFromErrorState = true) {
-            strPinCurrent = Array(6).fill('-');
-            arrPinDOMs.forEach(input => input.value = '');
-            if (revertTitleFromErrorState) {
-                const currentTitle = domLoginEncryptTitle.textContent;
-                if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
-                    const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-                    updateStatusMessage(newTitle);
-                }
-            }
-            if (focusFirst && arrPinDOMs.length > 0) {
-                arrPinDOMs[0].focus();
-            }
+            if (revertTitleFromErrorState) revertErrorTitle();
+            VectorSvelte.resetLoginPin(focusFirst);
         }
 
         let pinProcessing = false;
 
-        async function handleFullPinEntered() {
+        async function handleFullPinEntered(currentPinString) {
             if (pinProcessing) return;
             pinProcessing = true;
-            const currentPinString = strPinCurrent.join('');
+            const strPinCurrent = currentPinString.split('');
 
             if (strPinLast.length === 0) {
                 if (fUnlock) {
@@ -959,58 +827,12 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
             }
         }
 
-        // Attach listeners directly to each original input with AbortController signal
-        arrPinDOMs.forEach((input, nIndex) => {
-            input.addEventListener('keydown', (event) => {
-                if (event.key === 'Backspace') {
-                    event.preventDefault();
-                    const currentTitle = domLoginEncryptTitle.textContent;
-                    if (currentTitle === INCORRECT_PIN_MSG || currentTitle === MISMATCH_PIN_MSG) {
-                        const newTitle = fUnlock ? DECRYPTION_PROMPT : (strPinLast.length > 0 ? RE_ENTER_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-                        updateStatusMessage(newTitle);
-                    }
-                    if (input.value !== '') {
-                        input.value = '';
-                        strPinCurrent[nIndex] = '-';
-                    } else if (nIndex > 0) {
-                        const prev = arrPinDOMs[nIndex - 1];
-                        prev.value = '';
-                        strPinCurrent[nIndex - 1] = '-';
-                        prev.focus();
-                    }
-                } else if (event.key === 'ArrowLeft') {
-                    event.preventDefault();
-                    if (nIndex > 0) arrPinDOMs[nIndex - 1].focus();
-                } else if (event.key === 'ArrowRight') {
-                    event.preventDefault();
-                    if (nIndex + 1 < arrPinDOMs.length) arrPinDOMs[nIndex + 1].focus();
-                } else if (event.key.length === 1 && !event.key.match(/^[0-9]$/)) {
-                    event.preventDefault();
-                }
-            }, { signal });
-
-            input.addEventListener('input', async () => {
-                let sanitizedValue = input.value.replace(/[^0-9]/g, '');
-                if (sanitizedValue.length > 1) sanitizedValue = sanitizedValue.charAt(0);
-                input.value = sanitizedValue;
-
-                if (sanitizedValue) {
-                    strPinCurrent[nIndex] = sanitizedValue;
-                    if (nIndex + 1 < arrPinDOMs.length) arrPinDOMs[nIndex + 1].focus();
-                } else {
-                    strPinCurrent[nIndex] = '-';
-                }
-
-                if (!strPinCurrent.includes('-')) {
-                    await handleFullPinEntered();
-                }
-            }, { signal });
-
-            input.value = '';
-        });
+        flow.pinFull = handleFullPinEntered;
+        flow.pinBackspace = revertErrorTitle;
+        flow.submitPassword = () => {};
 
         updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-        if (arrPinDOMs.length > 0) arrPinDOMs[0].focus();
+        VectorSvelte.resetLoginPin(true);
     }
 
     // ========================================================================
@@ -1030,44 +852,34 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         const TOO_SHORT_MSG = `Password must be at least 4 characters`;
 
         function updateStatusMessage(message, isProcessing = false) {
-            domLoginEncryptTitle.textContent = message;
             if (isProcessing) {
-                domLoginEncryptTitle.classList.add('startup-subtext-gradient');
-                domLoginEncryptPassword.style.display = 'none';
+                setTitle(message, { gradient: true, passwordShown: false });
                 setBiometricBtnVisible(false);
                 // Past the point of no return — see PIN flow.
-                if (typeof loginPicker !== 'undefined') loginPicker.hide();
+                loginPicker.hide();
             } else {
-                domLoginEncryptTitle.classList.remove('startup-subtext-gradient');
-                domLoginEncryptPassword.style.display = '';
+                setTitle(message, { gradient: false, passwordShown: true });
                 setBiometricBtnVisible(true);
                 // See PIN flow for the rationale.
-                if (fUnlock && typeof loginPicker !== 'undefined'
-                    && loginPicker.accounts && loginPicker.accounts.length >= 2) {
+                if (fUnlock && loginPicker.accounts && loginPicker.accounts.length >= 2) {
                     loginPicker.show(loginPicker.activeNpub);
                 }
             }
-            domLoginEncryptPinRow.style.display = 'none';
+            VectorSvelte.patchEncrypt({ pinShown: false });
+        }
+
+        function clearAndFocus() {
+            VectorSvelte.patchEncrypt({ password: '' });
+            VectorSvelte.focusLoginInput();
         }
 
         updateStatusMessage(fUnlock ? DECRYPTION_PROMPT : INITIAL_ENCRYPTION_PROMPT);
-
-        // Abort previous password listeners if startPasswordFlow is called again
-        if (passwordAbortController) passwordAbortController.abort();
-        passwordAbortController = new AbortController();
-        const signal = passwordAbortController.signal;
-
-        const newInput = document.getElementById('login-password-input');
-        newInput.value = '';
-        newInput.focus();
-
-        // Login button
-        const loginBtn = document.getElementById('login-password-btn');
+        clearAndFocus();
 
         async function handlePasswordSubmit() {
             if (passwordProcessing) return;
 
-            const password = newInput.value;
+            const password = VectorSvelte.encryptState().password;
 
             if (fUnlock) {
                 // Unlock flow — single password entry
@@ -1099,8 +911,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         : false;
                     if (handled) { passwordProcessing = false; return; }
                     updateStatusMessage(INCORRECT_MSG);
-                    newInput.value = '';
-                    newInput.focus();
+                    clearAndFocus();
                     passwordProcessing = false;
                 }
             } else if (!lastPassword) {
@@ -1111,8 +922,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 }
                 lastPassword = password;
                 updateStatusMessage(RE_ENTER_PROMPT);
-                newInput.value = '';
-                newInput.focus();
+                clearAndFocus();
             } else {
                 // Confirmation entry
                 if (password === lastPassword) {
@@ -1128,263 +938,265 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     } catch (e) {
                         await popupConfirm('Could not save your password', String(e), true);
                         lastPassword = '';
-                        newInput.value = '';
-                        newInput.focus();
+                        clearAndFocus();
                         passwordProcessing = false;
                     }
                 } else {
                     updateStatusMessage(MISMATCH_MSG);
                     lastPassword = '';
-                    newInput.value = '';
-                    newInput.focus();
+                    clearAndFocus();
                 }
             }
         }
 
-        newInput.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') {
-                event.preventDefault();
-                handlePasswordSubmit();
-            }
-        }, { signal });
-
-        if (loginBtn) loginBtn.addEventListener('click', handlePasswordSubmit, { signal });
-
-        newInput.focus();
+        flow.submitPassword = handlePasswordSubmit;
+        flow.pinFull = () => {};
+        flow.pinBackspace = () => {};
     }
 }
 
-/** Wire the login screens: account creation, import, bunker and NIP-55 signers, back. */
-async function wireLoginUi() {
-    domLoginAccountCreationBtn.onclick = async () => {
-        try {
-            // Add Profile commit point: tear down the existing session
-            // before generating a new keypair, otherwise create_account's
-            // lock-and-check guard would silently reuse the old client.
-            if (addAccountFlow.active) await addAccountFlow.commit();
+// ============================================================================
+// Login screen actions (the component's controls land here through LOGIN_HELPERS)
+// ============================================================================
 
-            const { public: pubKey } = await invoke("create_account");
-            strPubkey = pubKey;
+async function createAccount() {
+    try {
+        // Add Profile commit point: tear down the existing session
+        // before generating a new keypair, otherwise create_account's
+        // lock-and-check guard would silently reuse the old client.
+        if (addAccountFlow.active) await addAccountFlow.commit();
 
-            // Connect to Nostr network
-            await invoke("connect");
+        const { public: pubKey } = await invoke("create_account");
+        strPubkey = pubKey;
 
-            // Skip invite flow - go directly to encryption (key stays backend-only)
-            openEncryptionFlow(false);
-        } catch (e) {
-            // Display the backend error
-            popupConfirm(e, '', true, '', 'vector_warning.svg');
-        }
-    };
-    domLoginAccountBtn.onclick = () => {
-        VectorSvelte.loginScreen('import', true);
-        // Hide the picker pill — once the user is entering an nsec / seed
-        // phrase, the active-account-from-marker context no longer applies.
-        loginPicker.hide();
-    };
-    // Bunker form helpers (startBunkerSession, showBunkerForm,
-    // hideBunkerForm) are now defined at module scope, near the DOM-ref
-    // block — they need to be accessible to the boot-time login catch which
-    // runs before this DOMContentLoaded handler reaches button wiring.
-    // hideBunkerForm hoisted to module scope; window.hideBunkerForm assigned there.
-    if (domLoginBunkerStartBtn) {
-        // Lives inside the Login screen (not the entry screen). Bunker is a
-        // login flow — your signer *is* the identity, so there's no "create"
-        // path. Surfacing it as a secondary action under the nsec/seed input
-        // keeps the entry screen clean for the 98% of users who don't run a
-        // remote signer.
-        domLoginBunkerStartBtn.onclick = showBunkerForm;
+        // Connect to Nostr network
+        await invoke("connect");
+
+        // Skip invite flow - go directly to encryption (key stays backend-only)
+        openEncryptionFlow(false);
+    } catch (e) {
+        // Display the backend error
+        popupConfirm(e, '', true, '', 'vector_warning.svg');
     }
+}
 
-    // NIP-55 offline signer (Amber): Android-only, and only when a signer app
-    // is actually installed — otherwise the button is a dead end. The reveal
-    // is async so the entry screen never flickers a button it can't honour.
-    if (domLoginNip55StartBtn && platformFeatures.os === 'android') {
-        invoke('is_external_signer_installed').then((installed) => {
-            if (installed) domLoginNip55StartBtn.style.display = '';
-        }).catch(() => { /* leave hidden */ });
+function openImportScreen() {
+    VectorSvelte.loginScreen('import', true);
+    // Hide the picker pill — once the user is entering an nsec / seed
+    // phrase, the active-account-from-marker context no longer applies.
+    loginPicker.hide();
+}
 
-        domLoginNip55StartBtn.onclick = async () => {
-            domLoginNip55StartBtn.disabled = true;
-            try {
-                if (addAccountFlow.active) await addAccountFlow.commit();
-                // Blocks while Amber is foregrounded and the user approves; the
-                // Activity-result bridge resolves this once they return.
-                const { public: pubKey, existing } = await invoke('login_with_nip55');
-                strPubkey = pubKey;
-                if (existing) {
-                    // Identity already on disk; backend armed session_reload.
-                    return;
-                }
-                // Reuse the shared post-login flow: pick a security mode, then
-                // connect in the background so a relay hang doesn't strand us.
-                openEncryptionFlow(false);
-                invoke('connect').catch((err) => {
-                    console.warn('[login_with_nip55] connect() failed:', err);
-                });
-            } catch (e) {
-                popupConfirm(String(e), '', true, '', 'vector_warning.svg');
-            } finally {
-                domLoginNip55StartBtn.disabled = false;
-            }
-        };
+async function importKey() {
+    // Import and derive our keys
+    try {
+        // Add Profile commit point: tear down the existing session
+        // before importing the new key.
+        if (addAccountFlow.active) await addAccountFlow.commit();
+
+        const { public: pubKey, existing } = await invoke("login", { importKey: VectorSvelte.loginState().importKey.trim() });
+        strPubkey = pubKey;
+
+        // Pasted key matches an account already on disk; the backend has
+        // armed `session_reload` to swap into it. Skip the encryption-
+        // setup flow — the boot path will load the stored credentials.
+        if (existing) return;
+
+        // Connect to Nostr
+        await invoke("connect");
+
+        // Skip invite flow - go directly to encryption (key stays backend-only)
+        openEncryptionFlow(false);
+    } catch (e) {
+        // Display the backend error
+        popupConfirm(e, '', true, '', 'vector_warning.svg');
     }
-    if (domLoginBunkerCopyBtn) {
-        domLoginBunkerCopyBtn.onclick = async () => {
-            if (!strBunkerNostrConnectUrl) return;
-            try {
-                await navigator.clipboard.writeText(strBunkerNostrConnectUrl);
-                VectorSvelte.bunkerCopied(true);
-                setTimeout(() => VectorSvelte.bunkerCopied(false), 2500);
-            } catch (err) {
-                VectorSvelte.bunkerStatus('Could not copy to clipboard', 'error');
-            }
-        };
-    }
-    // Tap the bunker QR to blow it up fullscreen — easier for a phone camera.
-    // openQrOverlay no-ops while the connection link is still generating.
-    if (domLoginBunkerQrWrap) {
-        domLoginBunkerQrWrap.onclick = () => openQrOverlay(strBunkerNostrConnectUrl);
-    }
-    domLoginBackBtn.onclick = async () => {
-        // Add Profile flow back has two cases — independent of which sub-
-        // screen the user happens to be on (start / import / encryption /
-        // welcome). Without this, backing out from the encryption screen
-        // after Create Account left both `domLoginStart` and
-        // `domLoginEncrypt` visible at the same time.
-        //
-        //   - Browsing (not committed): the original session is still alive
-        //     in memory. Soft-restore the main UI; no backend touch, no
-        //     reload, the user keeps their decrypted keys + listeners.
-        //
-        //   - Committed: enter_add_account_mode already tore the session
-        //     down. We have to write the previous-account marker back and
-        //     reload so the next boot lands on the original account.
-        if (addAccountFlow.active) {
-            if (!addAccountFlow.committed) {
-                addAccountFlow.restore();
-                return;
-            }
-            const target = addAccountFlow.backTarget();
-            try {
-                if (target) {
-                    await invoke('set_active_account', { npub: target });
-                }
-            } catch (e) {
-                console.error('[add-account] restore marker failed:', e);
-                popupConfirm('Could not return to your account', String(e), true);
-                return;
-            }
-            addAccountFlow.finish();
-            window.location.reload();
+}
+
+/** NIP-55 offline signer (Amber): the button only shows once the signer app is known to be installed. */
+async function loginWithNip55() {
+    VectorSvelte.patchLogin({ nip55Busy: true });
+    try {
+        if (addAccountFlow.active) await addAccountFlow.commit();
+        // Blocks while Amber is foregrounded and the user approves; the
+        // Activity-result bridge resolves this once they return.
+        const { public: pubKey, existing } = await invoke('login_with_nip55');
+        strPubkey = pubKey;
+        if (existing) {
+            // Identity already on disk; backend armed session_reload.
             return;
         }
-        // If the bunker form was visible, the user is bailing out of a
-        // staged-but-not-committed session — drain it on the backend so the
-        // next attempt doesn't see a leaked NOSTR_CLIENT. No-op when no
-        // staged session exists.
-        const wasOnBunkerForm = VectorSvelte.loginState().bunker;
-        if (wasOnBunkerForm) {
-            invoke('cancel_bunker_session').catch((err) => {
-                console.warn('[back] cancel_bunker_session failed:', err);
-            });
-        }
-        // Reauth path: we're inside an active session, came from Settings /
-        // Chats. Restore the panel the user was on; don't fall through to
-        // the login-start picker.
-        if (wasOnBunkerForm && bunkerReauthOrigin) {
-            const origin = bunkerReauthOrigin;
+        // Reuse the shared post-login flow: pick a security mode, then
+        // connect in the background so a relay hang doesn't strand us.
+        openEncryptionFlow(false);
+        invoke('connect').catch((err) => {
+            console.warn('[login_with_nip55] connect() failed:', err);
+        });
+    } catch (e) {
+        popupConfirm(String(e), '', true, '', 'vector_warning.svg');
+    } finally {
+        VectorSvelte.patchLogin({ nip55Busy: false });
+    }
+}
+
+async function copyBunkerLink() {
+    if (!strBunkerNostrConnectUrl) return;
+    try {
+        await navigator.clipboard.writeText(strBunkerNostrConnectUrl);
+        VectorSvelte.bunkerCopied(true);
+        setTimeout(() => VectorSvelte.bunkerCopied(false), 2500);
+    } catch (err) {
+        VectorSvelte.bunkerStatus('Could not copy to clipboard', 'error');
+    }
+}
+
+async function connectBunkerUrl() {
+    const url = (VectorSvelte.bunkerState().urlInput || '').trim();
+    if (!url.toLowerCase().startsWith('bunker://')) {
+        VectorSvelte.bunkerStatus('Must start with bunker://', 'error');
+        return;
+    }
+    // Inputs lock while the bunker handshake runs (5–10s typical while the
+    // user taps "approve" on their signer); a failure unlocks them to retry.
+    VectorSvelte.bunkerBusy(true);
+    VectorSvelte.bunkerStatus('Connecting to signer…', 'connecting');
+    try {
+        if (addAccountFlow.active) await addAccountFlow.commit();
+        const { public: pubKey, existing } = await invoke('connect_bunker', {
+            bunkerUrl: url,
+        });
+        strPubkey = pubKey;
+        VectorSvelte.patchBunker({ urlInput: '' });
+        if (existing) {
+            // Bunker identity matches an existing account; backend has
+            // armed `session_reload`. Just hide the form — the document
+            // reload will switch into the stored account.
+            VectorSvelte.bunkerStatus('Account already added — switching…', 'online');
             hideBunkerForm();
-            VectorSvelte.loginScreen('none', false);
-            VectorSvelte.loginShowForm(false);
-            bunkerReauthOrigin = null;
-            if (origin === 'settings' && typeof openSettings === 'function') {
-                openSettings();
-            } else if (typeof closeChat === 'function') {
-                closeChat();
-            }
             return;
         }
-        // Regular login back: collapse every sub-screen back to the start
-        // picker. Encrypt + welcome were missing here, which is what made
-        // the post-commit Add Profile case render two panels at once.
+        VectorSvelte.bunkerStatus('Connected. Choosing security…', 'online');
+        // UI advances first; relay connect runs in the background so a
+        // hang there doesn't strand the user on the bunker screen.
         hideBunkerForm();
-        VectorSvelte.loginScreen('start', false);
-        domLoginInput.value = '';
-        // Re-reveal the picker pill if we have ≥2 accounts on disk. The
-        // Login button's onclick hides the picker (the user is about to
-        // import a key, so it'd be confusing to show), and without this
-        // restore the picker stays hidden after the user backs out —
-        // effectively removing their ability to switch accounts from the
-        // start screen without restarting the app.
-        if (typeof loginPicker !== 'undefined'
-            && loginPicker.accounts && loginPicker.accounts.length >= 2) {
-            loginPicker.show(loginPicker.activeNpub);
+        openEncryptionFlow(false);
+        invoke('connect').catch((err) => {
+            console.warn('[connect_bunker] connect() failed:', err);
+        });
+    } catch (e) {
+        VectorSvelte.bunkerStatus(String(e), 'error');
+        VectorSvelte.bunkerBusy(false);
+    }
+}
+
+async function loginBack() {
+    // Add Profile flow back has two cases — independent of which sub-
+    // screen the user happens to be on (start / import / encryption /
+    // welcome).
+    //
+    //   - Browsing (not committed): the original session is still alive
+    //     in memory. Soft-restore the main UI; no backend touch, no
+    //     reload, the user keeps their decrypted keys + listeners.
+    //
+    //   - Committed: enter_add_account_mode already tore the session
+    //     down. We have to write the previous-account marker back and
+    //     reload so the next boot lands on the original account.
+    if (addAccountFlow.active) {
+        if (!addAccountFlow.committed) {
+            addAccountFlow.restore();
+            return;
         }
-    };
-    domLoginBtn.onclick = async () => {
-        // Import and derive our keys
+        const target = addAccountFlow.backTarget();
         try {
-            // Add Profile commit point: tear down the existing session
-            // before importing the new key.
-            if (addAccountFlow.active) await addAccountFlow.commit();
-
-            const { public: pubKey, existing } = await invoke("login", { importKey: domLoginInput.value.trim() });
-            strPubkey = pubKey;
-
-            // Pasted key matches an account already on disk; the backend has
-            // armed `session_reload` to swap into it. Skip the encryption-
-            // setup flow — the boot path will load the stored credentials.
-            if (existing) return;
-
-            // Connect to Nostr
-            await invoke("connect");
-
-            // Skip invite flow - go directly to encryption (key stays backend-only)
-            openEncryptionFlow(false);
+            if (target) {
+                await invoke('set_active_account', { npub: target });
+            }
         } catch (e) {
-            // Display the backend error
-            popupConfirm(e, '', true, '', 'vector_warning.svg');
+            console.error('[add-account] restore marker failed:', e);
+            popupConfirm('Could not return to your account', String(e), true);
+            return;
         }
+        addAccountFlow.finish();
+        window.location.reload();
+        return;
     }
-    if (domLoginBunkerConnectBtn) {
-        domLoginBunkerConnectBtn.onclick = async () => {
-            const url = (domLoginBunkerUrlInput?.value || '').trim();
-            if (!url.toLowerCase().startsWith('bunker://')) {
-                VectorSvelte.bunkerStatus('Must start with bunker://', 'error');
-                return;
-            }
-            // Inputs lock while the bunker handshake runs (5–10s typical while the
-            // user taps "approve" on their signer); a failure unlocks them to retry.
-            VectorSvelte.bunkerBusy(true);
-            VectorSvelte.bunkerStatus('Connecting to signer…', 'connecting');
-            try {
-                if (addAccountFlow.active) await addAccountFlow.commit();
-                const { public: pubKey, existing } = await invoke('connect_bunker', {
-                    bunkerUrl: url,
-                });
-                strPubkey = pubKey;
-                domLoginBunkerUrlInput.value = '';
-                if (existing) {
-                    // Bunker identity matches an existing account; backend has
-                    // armed `session_reload`. Just hide the form — the document
-                    // reload will switch into the stored account.
-                    VectorSvelte.bunkerStatus('Account already added — switching…', 'online');
-                    hideBunkerForm();
-                    return;
-                }
-                VectorSvelte.bunkerStatus('Connected. Choosing security…', 'online');
-                // UI advances first; relay connect runs in the background so a
-                // hang there doesn't strand the user on the bunker screen.
-                hideBunkerForm();
-                openEncryptionFlow(false);
-                invoke('connect').catch((err) => {
-                    console.warn('[connect_bunker] connect() failed:', err);
-                });
-            } catch (e) {
-                VectorSvelte.bunkerStatus(String(e), 'error');
-                VectorSvelte.bunkerBusy(false);
-            }
-        };
+    // If the bunker form was visible, the user is bailing out of a
+    // staged-but-not-committed session — drain it on the backend so the
+    // next attempt doesn't see a leaked NOSTR_CLIENT. No-op when no
+    // staged session exists.
+    const wasOnBunkerForm = VectorSvelte.loginState().bunker;
+    if (wasOnBunkerForm) {
+        invoke('cancel_bunker_session').catch((err) => {
+            console.warn('[back] cancel_bunker_session failed:', err);
+        });
     }
+    // Reauth path: we're inside an active session, came from Settings /
+    // Chats. Restore the panel the user was on; don't fall through to
+    // the login-start picker.
+    if (wasOnBunkerForm && bunkerReauthOrigin) {
+        const origin = bunkerReauthOrigin;
+        hideBunkerForm();
+        VectorSvelte.loginScreen('none', false);
+        VectorSvelte.loginShowForm(false);
+        bunkerReauthOrigin = null;
+        if (origin === 'settings' && typeof openSettings === 'function') {
+            openSettings();
+        } else if (typeof closeChat === 'function') {
+            closeChat();
+        }
+        return;
+    }
+    // Regular login back: collapse every sub-screen back to the start picker.
+    hideBunkerForm();
+    VectorSvelte.loginScreen('start', false);
+    VectorSvelte.patchLogin({ importKey: '' });
+    // Re-reveal the picker pill if we have ≥2 accounts on disk: the Login
+    // button hid it, and without this restore the user could no longer
+    // switch accounts from the start screen without restarting the app.
+    if (loginPicker.accounts && loginPicker.accounts.length >= 2) {
+        loginPicker.show(loginPicker.activeNpub);
+    }
+}
+
+// Handlers resolve at call time: main.js, accounts.js and the renderers hold the
+// functions, and the encrypt flow's object changes per open.
+const LOGIN_HELPERS = {
+    back: () => loginBack(),
+    createAccount: () => createAccount(),
+    openImport: () => openImportScreen(),
+    importKey: () => importKey(),
+    invite: () => submitInvite(),
+    nip55: () => loginWithNip55(),
+    picker: {
+        toggle: () => loginPicker.toggle(),
+        close: () => loginPicker.close(),
+        pick: (meta) => loginPicker.onPick(meta),
+        rowHelpers: () => accountRowHelpers,
+        avatarImg: (src) => createAvatarImg(src, 36, false),
+    },
+    bunker: {
+        // Bunker is a login flow (the signer is the identity), so it lives under Login.
+        open: () => showBunkerForm('new'),
+        copy: () => copyBunkerLink(),
+        // Blow the QR up fullscreen; openQrOverlay no-ops while the link is still generating.
+        openQr: () => openQrOverlay(strBunkerNostrConnectUrl),
+        renderQr: (node, url) => renderQrInto(node, url),
+        connect: () => connectBunkerUrl(),
+    },
+    encrypt: {
+        choose: (type) => encryptFlow?.choose(type),
+        pinFull: (pin) => encryptFlow?.pinFull(pin),
+        pinBackspace: () => encryptFlow?.pinBackspace(),
+        submitPassword: () => encryptFlow?.submitPassword(),
+        biometric: () => encryptFlow?.biometric(),
+    },
+};
+VectorSvelte.mountLoginScreen(domLogin, { h: LOGIN_HELPERS });
+
+/** The NIP-55 button (Android) shows only when a signer app is installed, so it is never a dead end. */
+async function wireLoginUi() {
+    if (platformFeatures.os !== 'android') return;
+    try {
+        if (await invoke('is_external_signer_installed')) VectorSvelte.patchLogin({ nip55Shown: true });
+    } catch (_) { /* leave hidden */ }
 }

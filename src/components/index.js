@@ -52,7 +52,9 @@ import BlossomCaps from './settings/BlossomCaps.svelte';
 import RelayLogs from './settings/RelayLogs.svelte';
 import AccountRows from './people/AccountRows.svelte';
 import EditHistory from './chat/EditHistory.svelte';
-import LoginChrome from './auth/LoginChrome.svelte';
+import LoginScreen from './auth/LoginScreen.svelte';
+import CredentialModal from './ui/CredentialModal.svelte';
+import MigrationOverlay from './ui/MigrationOverlay.svelte';
 import Popup from './ui/Popup.svelte';
 import ProcessingOverlay from './ui/ProcessingOverlay.svelte';
 import PermissionPrompt from './ui/PermissionPrompt.svelte';
@@ -60,7 +62,8 @@ import PublishDialog from './ui/PublishDialog.svelte';
 export { publishState, openPublishDialog, activatePublishDialog, closePublishDialog, unmountPublishDialog, setPublishPerms, setPublishPermsError, setPublishHint, setPublishBusy } from './lib/publish.svelte.js';
 export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt, permissionState } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
-export { loginState, bunkerState, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick } from './lib/login.svelte.js';
+export { loginState, bunkerState, pickerState as loginPickerState, encryptState, patchLogin, patchBunker, patchPicker, patchEncrypt, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick, resetLoginPin, focusLoginInput } from './lib/login.svelte.js';
+export { credentialState, openCredentialDialog, closeCredentialDialog, migrationState, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
 import NewChat from './people/NewChat.svelte';
 import CreateCommunity from './community/CreateCommunity.svelte';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
@@ -408,10 +411,16 @@ export function mountCreateCommunity(host, { h }) {
     return mount(CreateCommunity, { target: host, props: { h } });
 }
 
-/** Mount the renderless login chrome over the shell's elements. */
-export function mountLoginChrome({ els }) {
-    const host = document.createElement('div'); host.hidden = true; document.body.appendChild(host);
-    return mount(LoginChrome, { target: host, props: { els } });
+/** Mount the login screen into its container (#login-form); the flows drive the store. */
+export function mountLoginScreen(container, { h }) {
+    container.replaceChildren();
+    return mount(LoginScreen, { target: container, props: { container, h } });
+}
+
+/** Mount the credential modal and the migration overlay at body level. */
+export function mountCredentialModals() {
+    mount(CredentialModal, { target: document.body, props: {} });
+    mount(MigrationOverlay, { target: document.body, props: {} });
 }
 
 /** Mount the confirm/notice popup into its container (#popup-container). */

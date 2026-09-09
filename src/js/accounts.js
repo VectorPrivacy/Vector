@@ -72,7 +72,6 @@ const accountRowHelpers = {
     placeholder: () => { const el = createPlaceholderAvatar(false, 28); el.classList.add('profile-switcher-avatar'); return el; },
 };
 let profileSwitcherRows = null;
-let loginPickerRows = null;
 
 /**
  * In-app My Profile dropdown — full-feature: switch / add / delete.
@@ -277,22 +276,11 @@ const profileSwitcher = {
  * Single-account boot stays unchanged (picker is hidden).
  */
 const loginPicker = {
-    isOpen: false,
     accounts: [],
     activeNpub: null,
+    get isOpen() { return VectorSvelte.loginPickerState().open; },
 
     init() {
-        const trigger = document.getElementById('login-account-picker');
-        if (!trigger) return;
-        trigger.addEventListener('click', () => {
-            // Single-account form has the .single class and is non-interactive.
-            if (trigger.classList.contains('single')) return;
-            this.toggle();
-        });
-        // Close when clicking the backdrop (outside the list itself).
-        const backdrop = document.getElementById('login-account-list-backdrop');
-        if (backdrop) backdrop.addEventListener('click', () => this.close());
-        // Escape closes too.
         document.addEventListener('keydown', (ev) => {
             if (ev.key === 'Escape' && this.isOpen) this.close();
         });
@@ -307,49 +295,33 @@ const loginPicker = {
      * The picker only appears when there's an actual choice to make.
      */
     async show(activeNpub) {
-        const trigger = document.getElementById('login-account-picker');
         try {
             this.accounts = await multiAccount.list();
         } catch (e) {
             console.error('[login-picker] list failed:', e);
-            if (trigger) trigger.style.display = 'none';
+            VectorSvelte.patchPicker({ shown: false });
             return;
         }
         this.activeNpub = activeNpub;
         if (this.accounts.length < 2) {
-            if (trigger) trigger.style.display = 'none';
+            VectorSvelte.patchPicker({ shown: false });
             return;
         }
-        // When `activeNpub` is null (marker-missing recovery branch), the
-        // pill has no real "active" identity to display. Render a neutral
-        // "Select profile" affordance instead of `accounts[0]`'s avatar +
-        // name, which read like "you are signed in as accounts[0]" when
-        // the user actually has no active session. The list itself
-        // correctly shows every row as equally selectable (open() does
-        // `isActive: meta.npub === this.activeNpub` and null can't match
-        // any real npub).
+        // With no active identity (marker-missing recovery) the pill is a neutral
+        // "Select profile" affordance rather than accounts[0] posing as signed in.
         const hasActive = !!activeNpub && this.accounts.some(a => a.npub === activeNpub);
-        const meta = hasActive
-            ? this.accounts.find(a => a.npub === activeNpub)
-            : null;
+        const meta = hasActive ? this.accounts.find(a => a.npub === activeNpub) : null;
         const avatarSrc = meta
             ? (meta.avatar_cached ? convertFileSrc(meta.avatar_cached) : (meta.avatar_url || null))
             : null;
-        const oldImg = document.getElementById('login-account-picker-avatar');
-        if (oldImg && oldImg.parentNode) {
-            const replacement = createAvatarImg(avatarSrc, 36, false);
-            replacement.id = 'login-account-picker-avatar';
-            oldImg.parentNode.replaceChild(replacement, oldImg);
-        }
-        const label = meta ? (meta.display_name || meta.npub) : 'Select Profile';
-        document.getElementById('login-account-picker-name').textContent = label;
-        trigger.classList.remove('single');
-        trigger.style.display = '';
+        VectorSvelte.patchPicker({
+            shown: true, avatar: avatarSrc, label: meta ? (meta.display_name || meta.npub) : 'Select Profile',
+            accounts: this.accounts, activeNpub: this.activeNpub,
+        });
     },
 
     hide() {
-        const trigger = document.getElementById('login-account-picker');
-        if (trigger) trigger.style.display = 'none';
+        VectorSvelte.patchPicker({ shown: false });
         this.close();
     },
 
@@ -358,38 +330,13 @@ const loginPicker = {
     },
 
     open() {
-        const list = document.getElementById('login-account-list');
-        const backdrop = document.getElementById('login-account-list-backdrop');
-        const trigger = document.getElementById('login-account-picker');
-        // Active account stays anchored in the pill at the top — only
-        // alternates appear as switchable rows below it. No delete here (per design).
-        if (loginPickerRows) VectorSvelte.unmountComponent(loginPickerRows);
-        loginPickerRows = VectorSvelte.mountAccountRows(list, {
-            accounts: this.accounts.filter(m => m.npub !== this.activeNpub),
-            h: accountRowHelpers,
-            onPick: (m) => this.onPick(m),
-        });
-        // Anchor the list directly below the pill — measure the pill's
-        // current bottom edge so the list always sits flush against it,
-        // regardless of how #login-form lays out at this viewport size.
-        if (trigger) {
-            const rect = trigger.getBoundingClientRect();
-            list.style.top = `${Math.round(rect.bottom + 8)}px`;
-        }
-        list.classList.add('open');
-        if (backdrop) backdrop.classList.add('visible');
-        if (trigger) trigger.classList.add('open');
-        this.isOpen = true;
+        // The active account stays anchored in the pill; the component lists the
+        // alternates as switchable rows. No delete here (per design).
+        VectorSvelte.patchPicker({ accounts: this.accounts, activeNpub: this.activeNpub, open: true });
     },
 
     close() {
-        const list = document.getElementById('login-account-list');
-        const backdrop = document.getElementById('login-account-list-backdrop');
-        const trigger = document.getElementById('login-account-picker');
-        if (list) list.classList.remove('open');
-        if (backdrop) backdrop.classList.remove('visible');
-        if (trigger) trigger.classList.remove('open');
-        this.isOpen = false;
+        VectorSvelte.patchPicker({ open: false });
     },
 
     async onPick(meta) {
