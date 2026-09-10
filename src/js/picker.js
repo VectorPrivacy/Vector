@@ -66,6 +66,30 @@ const _pickerPanelHelpers = {
     mainScroll: () => _onMainScroll(),
     gifClick: (e) => _onGifGridClick(e),
     gifScroll: () => _onGifGridScroll(),
+    /**
+     * PickerIslandHelpers: the rail (PackSidebar), the pack sections (PackSections) and the
+     * stock grids. `mountGrid` is the one deliberately imperative leaf: a pack section is ONE
+     * canvas drawn from a shared decoded-frame cache, so a pack of 2,000 emoji costs one node
+     * and one compositor layer; a keyed each over cells tripled the DOM and stalled every
+     * hover for seconds.
+     * @typedef {Object} PickerIslandHelpers
+     * @property {(pack: object) => string} deadMessage
+     * @property {() => boolean} isLinux
+     * @property {(el: Element, pack: object) => void} packMenu       long-press menu on a section header
+     * @property {(pack: object) => void} unsubscribe
+     * @property {(pack: object) => number} sectionHeight            the section's fixed height in px, for content-visibility
+     * @property {(section: Element, pack: object) => () => void} mountGrid   appends the pack's canvas; returns its teardown
+     * @property {() => void} afterRender                            the sections are in the DOM: arm the canvases, calibrate chrome
+     * @property {(img: HTMLImageElement, url: string, kind: string) => void} bindCachedImg
+     * @property {(pack: object, x: number, y: number) => void} showTabMenu
+     * @property {() => void} closeMenu
+     * @property {(fromId: string, toId: string, isBefore: boolean) => void} reorderPack
+     * @property {(pack: object) => boolean} packIsDead
+     * @property {(pack: object) => string} packInitial
+     * @property {(id?: string) => void} openCreator
+     * @property {(el: Element) => void} twemojify
+     * @property {(e: object) => string} stockTitle
+     */
     islands: {
         deadMessage: (pack) => deadPackMessage(pack),
         isLinux: () => platformFeatures?.os === 'linux',

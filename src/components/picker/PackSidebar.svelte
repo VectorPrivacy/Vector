@@ -5,8 +5,7 @@
     import { pickerState, pickerPacks } from '../lib/picker.svelte.js';
     import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
 
-    let { h } = $props();   // h: bindCachedImg(img, url, kind), packIsDead(pack), packInitial(pack), openCreator(),
-                            //    showTabMenu(pack, x, y), closeMenu(), reorderPack(fromId, toId, isBefore)
+    let { h } = $props();   // h: PickerIslandHelpers (js/picker.js)
 
     const st = pickerState();
     const packs = $derived(pickerPacks());

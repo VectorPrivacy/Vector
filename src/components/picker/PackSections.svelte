@@ -5,9 +5,7 @@
     import { tick } from 'svelte';
     import { pickerState, pickerPacks } from '../lib/picker.svelte.js';
 
-    let { h } = $props();
-    // h: bindCachedImg, packIsDead, deadMessage, isLinux, openCreator(id), packMenu(el, pack), unsubscribe(pack),
-    //    sectionHeight(pack), mountGrid(section, pack) → cleanup, afterRender()
+    let { h } = $props();   // h: PickerIslandHelpers (js/picker.js)
 
     const st = pickerState();
     const packs = $derived(pickerPacks());
