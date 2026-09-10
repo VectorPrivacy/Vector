@@ -1,7 +1,7 @@
 <script>
     import { shellState, shellScreens } from '../lib/shell.svelte.js';
     import { setOverviewRoster } from '../lib/overview.svelte.js';
-    import MemberRoster from '../people/MemberRoster.svelte';
+    import MemberRoster from './MemberRoster.svelte';
     import MemberSearch from './MemberSearch.svelte';
     // The Community overview's scroll body, from overview state: mute, icon (with the
     // manage-metadata pencil and upload ring), name and description (inline-editable

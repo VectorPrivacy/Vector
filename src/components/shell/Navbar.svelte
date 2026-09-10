@@ -5,7 +5,7 @@
     // outside `body.ws`.
     import { shellPanes, shellState, shellHandlers, shellReveals, reveal, bindShellEl } from '../lib/shell.svelte.js';
     import AccountRow from './AccountRow.svelte';
-    import RailShortcuts from '../rail/RailShortcuts.svelte';
+    import RailShortcuts from './RailShortcuts.svelte';
     import { shellScreens } from '../lib/shell.svelte.js';
     const panes = shellPanes();
     const st = shellState();

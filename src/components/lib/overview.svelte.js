@@ -26,7 +26,7 @@ let headHandlers = {};   // { back, memberSubtext }
 export function overviewHeadHandlers() { return headHandlers; }
 export function setOverviewHeadHandlers(h) { headHandlers = h || {}; }
 
-// The mounted roster (people/MemberRoster) so community.js can feed it its lists.
+// The mounted roster (community/MemberRoster) so community.js can feed it its lists.
 let roster = $state.raw(null);
 export function overviewRoster() { return roster; }
 export function setOverviewRoster(inst) { roster = inst; }

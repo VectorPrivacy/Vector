@@ -2,7 +2,7 @@
     // One credential prompt: pick PIN or password, enter a PIN (submits on the sixth digit),
     // enter a password, or a validating hold with no controls while the backend checks.
     import { credentialState, credentialHandlers } from '../lib/credential.svelte.js';
-    import PinRow from '../auth/PinRow.svelte';
+    import PinInput from '../ui/PinInput.svelte';
     const c = credentialState();
     const h = () => credentialHandlers();
     const typeDesc = $derived(c.selectedType === 'pin'
@@ -31,7 +31,7 @@
                     <p id="credential-modal-type-desc" class="login-encrypt-description">{typeDesc}</p>
                 </div>
             {:else if c.mode === 'pin'}
-                <PinRow id="credential-modal-pin-row" cls="row pin-row" inputClass="cred-pin" resetSeq={c.pinSeq} onFull={(pin) => h()?.submit(pin)} />
+                <PinInput id="credential-modal-pin-row" cls="row pin-row" inputClass="cred-pin" resetSeq={c.pinSeq} onFull={(pin) => h()?.submit(pin)} />
             {:else if c.mode === 'password'}
                 <div id="credential-modal-password">
                     <input type="password" id="credential-modal-password-input" placeholder="Enter your password" autocomplete="off" use:focus

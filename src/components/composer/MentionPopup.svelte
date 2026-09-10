@@ -1,7 +1,7 @@
 <script>
     // The @mention autocomplete. Rows are keyed on the npub, so moving the
     // keyboard highlight repaints one class, not the list.
-    import Popup from './Popup.svelte';
+    import AnchoredPanel from './AnchoredPanel.svelte';
     import { composerPopup } from '../lib/composer.svelte.js';
 
     let { anchor } = $props();
@@ -12,7 +12,7 @@
     $effect(() => { if (open) view = composerPopup(); });
 </script>
 
-<Popup cls="mention-selector" {open} {anchor} {view}>
+<AnchoredPanel cls="mention-selector" {open} {anchor} {view}>
     <div class="mention-selector-header">Members</div>
     {#each view.items as item, i (item.npub)}
         <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla row) -->
@@ -25,4 +25,4 @@
             <span class="mention-item-name">{item.name}</span>
         </div>
     {/each}
-</Popup>
+</AnchoredPanel>

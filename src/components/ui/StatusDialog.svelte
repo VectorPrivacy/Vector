@@ -5,7 +5,7 @@
     // while the shared emoji panel is open.
     import { statusDialog } from '../lib/dialogs.svelte.js';
     import { popIn } from '../lib/popin.js';
-    import Avatar from '../ui/Avatar.svelte';
+    import Avatar from './Avatar.svelte';
     let { h } = $props();   // h: composerHost(el), renderPreview(node, text), emoji(e), save(), clear(), close(), backdrop(), key(e)
     const st = statusDialog.state();
     function host(el) { h.composerHost(el); }

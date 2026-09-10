@@ -1,7 +1,7 @@
 <script>
     // One media server: whether it is enabled, what it has been seen to accept, and
     // remove (custom) or enable / disable (default).
-    import { blossomInfoDialog } from '../lib/dialogs.svelte.js';
+    import { blossomInfoDialog } from '../../lib/dialogs.svelte.js';
     import BlossomCaps from './BlossomCaps.svelte';
     let { h } = $props();   // h: close(), action(), formatBytes
     const st = blossomInfoDialog.state();

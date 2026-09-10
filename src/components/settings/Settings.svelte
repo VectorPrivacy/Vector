@@ -10,7 +10,7 @@
     import BlockedUsers from './BlockedUsers.svelte';
     import Display from './Display.svelte';
     import Notifications from './Notifications.svelte';
-    import NetworkList from './NetworkList.svelte';
+    import NetworkList from './network/NetworkList.svelte';
     import StorageDonut from './StorageDonut.svelte';
     import Updates from './Updates.svelte';
     import SecurityCard from './SecurityCard.svelte';

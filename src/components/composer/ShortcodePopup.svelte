@@ -1,7 +1,7 @@
 <script>
     // The :shortcode autocomplete. Custom emojis go through the cached-image
     // pipeline (never a raw remote src); stock ones render their twemoji glyph.
-    import Popup from './Popup.svelte';
+    import AnchoredPanel from './AnchoredPanel.svelte';
     import { composerPopup } from '../lib/composer.svelte.js';
 
     let { anchor, h } = $props();   // h: bindCachedEmojiImg(img, url, kind), twemojiUrl(emoji)
@@ -18,7 +18,7 @@
     }
 </script>
 
-<Popup cls="emoji-shortcode-selector" {open} {anchor} {view}>
+<AnchoredPanel cls="emoji-shortcode-selector" {open} {anchor} {view}>
     <div class="emoji-shortcode-header">{view.header}</div>
     {#each view.items as item, i (key(item))}
         <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla row) -->
@@ -37,4 +37,4 @@
             <span class="emoji-shortcode-item-label">{label(item)}</span>
         </div>
     {/each}
-</Popup>
+</AnchoredPanel>

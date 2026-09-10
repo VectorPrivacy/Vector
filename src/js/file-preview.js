@@ -1,7 +1,7 @@
 /**
  * File Preview Overlay
  * Shows a preview of files before sending with options like compression for images.
- * The overlay itself is a Svelte island (components/files/FilePreview.svelte) over
+ * The overlay itself is a Svelte island (components/composer/FilePreview.svelte) over
  * VectorSvelte's file preview state; this module owns the SOURCE (a path, cached
  * bytes, a File object, a zip in progress) and the send.
  */

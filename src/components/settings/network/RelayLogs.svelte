@@ -1,6 +1,6 @@
 <script>
     // The relay info dialog's activity log, refreshed every second while it is open.
-    import { relayLogsState } from '../lib/settings.svelte.js';
+    import { relayLogsState } from '../../lib/settings.svelte.js';
     const st = relayLogsState();
 </script>
 

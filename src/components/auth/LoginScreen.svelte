@@ -4,7 +4,7 @@
     // lib/login.svelte.js; every control answers through `h` (js/auth.js).
     import { untrack } from 'svelte';
     import { loginState, bunkerState, pickerState, encryptState } from '../lib/login.svelte.js';
-    import PinRow from './PinRow.svelte';
+    import PinInput from '../ui/PinInput.svelte';
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
 
@@ -174,7 +174,7 @@
             </div>
         {/if}
         {#if e.pinShown}
-            <PinRow bind:this={pinRow} id="login-encrypt-pins" cls="row pin-row input-box" inputIds={['pin-0', 'pin-1', 'pin-2', 'pin-3', 'pin-4', 'pin-5']}
+            <PinInput bind:this={pinRow} id="login-encrypt-pins" cls="row pin-row input-box" inputIds={['pin-0', 'pin-1', 'pin-2', 'pin-3', 'pin-4', 'pin-5']}
                     onFull={(pin) => h.encrypt.pinFull(pin)} onBackspace={() => h.encrypt.pinBackspace()} />
         {/if}
         {#if e.passwordShown}

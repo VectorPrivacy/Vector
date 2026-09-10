@@ -1,7 +1,7 @@
 <script>
     // The /command picker: a loading or message state, the sectioned list
     // (recents, then one section per bot), or the armed command's hint row.
-    import Popup from './Popup.svelte';
+    import AnchoredPanel from './AnchoredPanel.svelte';
     import { composerPopup } from '../lib/composer.svelte.js';
 
     let { anchor } = $props();
@@ -21,7 +21,7 @@
     }
 </script>
 
-<Popup cls="command-selector" {open} {anchor} {view} maxWidth={420} viewportInset message={isMessage}>
+<AnchoredPanel cls="command-selector" {open} {anchor} {view} maxWidth={420} viewportInset message={isMessage}>
     {#if view.mode === 'loading'}
         <div class="command-loading"><span class="command-spinner"></span><span>{view.label}</span></div>
     {:else if view.mode === 'message'}
@@ -78,4 +78,4 @@
             </div>
         {/if}
     {/if}
-</Popup>
+</AnchoredPanel>

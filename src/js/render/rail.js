@@ -2,7 +2,7 @@
  * Widescreen rail shortcuts: unread DMs over communities, sitting between the
  * logo and the nav tabs.
  *
- * The strip itself is a Svelte island (src/components/rail/); this module mounts it,
+ * The strip itself is a Svelte island (src/components/shell/RailShortcuts.svelte); this module mounts it,
  * keeps the scroll fade and the mail badge (chrome outside the island's target), and
  * forwards the open chat as a signal.
  */
@@ -37,7 +37,7 @@ function syncRailFade() {
     domRail.style.setProperty('--ws-rail-fade-top', nTop + 'px');
 }
 
-/** The strip (src/components/rail/RailShortcuts.svelte) is registered once per page life. */
+/** The strip (src/components/shell/RailShortcuts.svelte) is registered once per page life. */
 let railIsland = false;
 
 /**

@@ -826,7 +826,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // On a live refresh (preserveSearch), keep the active filter; on a fresh open, start clean.
         if (!preserveSearch) VectorSvelte.setOverview({ memberSearch: '' });
 
-        // The roster island (src/components/people/MemberRoster.svelte) owns the member
+        // The roster island (src/components/community/MemberRoster.svelte) owns the member
         // DOM; this side seeds it, feeds it the authoritative lists, and mirrors the
         // member-driven changes it reports back into the session caches. A live refresh
         // feeds the mounted island; a fresh open or another community remounts.

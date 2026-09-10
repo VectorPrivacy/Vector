@@ -7,9 +7,9 @@
     // learns of member-driven changes (a kick, a promotion) through the onChange callback
     // so its caches stay in step. Every mutation flows: confirm → act (row pinned busy) →
     // re-read the settled truth → patch state; nothing is re-rendered by hand.
-    import MemberRow from './MemberRow.svelte';
+    import MemberRow from '../people/MemberRow.svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
-    import MemberSection from './MemberSection.svelte';
+    import MemberSection from '../people/MemberSection.svelte';
 
     let {
         communityId,

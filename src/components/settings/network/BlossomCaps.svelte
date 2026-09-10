@@ -2,7 +2,7 @@
     // What a media server has accepted and refused, learned from real uploads: accepted types
     // with their largest size, size-limited types, and rejected types, each tagged with the
     // context it was tested in.
-    import { blossomCapsState } from '../lib/settings.svelte.js';
+    import { blossomCapsState } from '../../lib/settings.svelte.js';
     let { h } = $props();
     const st = blossomCapsState();
     const caps = $derived(st.caps || []);
