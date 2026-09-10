@@ -19083,7 +19083,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .login-account-list .profile-switcher-active-dot {
   display: none;
 }
-/* Avatar size is set inline by `createAvatarImg(...)` so this rule no
+/* Avatar size is set inline by ui/Avatar.svelte so this rule no
    longer needs to override it; kept for documentation. The inline style
    wins regardless. */
 .login-account-list .profile-switcher-name {

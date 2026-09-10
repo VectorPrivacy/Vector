@@ -65,22 +65,32 @@ const _dmsgListHelpers = {
     // so a re-derive of 80 rows costs 80 lookups,
     // not 80 scans. A changed message is a new object and gets a fresh context.
     ctxFor: (msg) => {
-        let ctx = _dmsgRowCtxCache.get(msg);
-        if (ctx && ctx.currentChat?.id === strOpenChat) return ctx;
-        ctx = _dmsgRowCtx(msg);
-        _dmsgRowCtxCache.set(msg, ctx);
-        return ctx;
+        const ctx = _dmsgRowCtxCache.get(msg);
+        // Two inputs change under a mounted row: the author's block state and a reveal.
+        // Everything else in the context is fixed per message and chat.
+        if (ctx && ctx.currentChat?.id === strOpenChat) {
+            const revealed = revealedBlockedMessages.has(msg.id);
+            const isBlocked = _dmsgAuthorBlocked(msg, ctx.currentChat, ctx.isGroupChat);
+            if (ctx.blocked === (isBlocked && !revealed) && ctx.revealedBlocked === (isBlocked && revealed)) return ctx;
+        }
+        const fresh = _dmsgRowCtx(msg);
+        _dmsgRowCtxCache.set(msg, fresh);
+        return fresh;
     },
     get row() { return _dmsgRowHelpers; },
 };
 const _dmsgRowCtxCache = new WeakMap();
+/** Whether the row's author is blocked: only a group's other members can be. */
+function _dmsgAuthorBlocked(msg, currentChat, isGroupChat) {
+    const otherFullId = msg.npub || (!isGroupChat ? currentChat?.id : '') || '';
+    const p = isGroupChat && !msg.mine && otherFullId ? getProfile(otherFullId) : null;
+    return !!p?.is_blocked;
+}
 function _dmsgRowCtx(msg) {
     {
         const currentChat = arrChats.find(c => c.id === strOpenChat);
         const isGroupChat = chatIsGroup(currentChat);
-        const otherFullId = msg.npub || (!isGroupChat ? currentChat?.id : '') || '';
-        const blockedAuthorProfile = isGroupChat && !msg.mine && otherFullId ? getProfile(otherFullId) : null;
-        const blocked = !!blockedAuthorProfile?.is_blocked;
+        const blocked = _dmsgAuthorBlocked(msg, currentChat, isGroupChat);
         return {
             myNpub: strPubkey,
             isGroupChat,

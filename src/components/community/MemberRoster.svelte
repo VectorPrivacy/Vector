@@ -22,7 +22,7 @@
         banned = [],
         roleGraph = null,          // { roles: [{ role_id, name, position }], grants: [{ npub, role_ids }] }
         loading = false,           // no cached roster yet: show the loading line until setRoster
-        h,                         // vanilla helpers (see mountMemberRoster)
+        h,                         // the app's bag, registered with the roster screen (js/community.js)
         onChange = () => {},       // ({ members, admins, banned }) after a member-driven change
     } = $props();
 
