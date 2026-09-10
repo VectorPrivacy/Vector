@@ -4,11 +4,12 @@
     // the dropzone. Uploads, naming, cropping and publishing stay the app's.
     import { untrack } from 'svelte';
     import { creatorState, creatorEmojis, markCreatorBroken } from '../lib/packcreator.svelte.js';
+    import { reorderable, dragGhost, nearestByCentre } from '../lib/reorder.js';
 
     let { h } = $props();
     // h: bindCachedImg(img, url, kind, onUnavailable), unavailableMessage(reason), goneMessage(), isMobile(),
-    //    dragActive(), remove(idx), cellClick(idx, broken), installReorder(cell, idx), gridMounted(el),
-    //    pickLogo(), nameInput(value), done(), deletePack(), addFiles(files)
+    //    remove(idx), cellClick(idx, broken), cellMenu(idx, x, y), reorderEmoji(from, targetIdx, isBefore),
+    //    gridMounted(el), pickLogo(), nameInput(value), done(), deletePack(), addFiles(files)
 
     const c = creatorState();
     const emojis = $derived(creatorEmojis());
@@ -19,6 +20,7 @@
     $effect(() => { if (c.focusSeq) untrack(() => setTimeout(() => nameEl?.focus(), 50)); });
 
     function logoImg(img, url) { h.bindCachedImg(img, url, 'emoji_pack_icon'); }
+    let gridEl = $state(null);
     function grid(el) { h.gridMounted(el); }
 
     // ── dropzone ──
@@ -39,7 +41,45 @@
         h.bindCachedImg(img, e.url, 'emoji', (el, reason) => markCreatorBroken(idx, h.unavailableMessage(reason)));
         if (e.dead) markCreatorBroken(idx, h.goneMessage());
     }
-    function reorder(cell, idx) { h.installReorder(cell, idx); }
+
+    // ── drag to reorder ──
+    // The grid owns what the gesture paints: the armed cell, the dragged cell and the drop
+    // marker. The ghost under the pointer is the gesture's own.
+    const cellEls = new Map();   // idx → element
+    function cellEl(node, idx) { cellEls.set(idx, node); return { update(n) { cellEls.delete(idx); idx = n; cellEls.set(idx, node); }, destroy() { if (cellEls.get(idx) === node) cellEls.delete(idx); } }; }
+    let armed = $state(-1);
+    let dragging = $state(-1);
+    let dropAt = $state(null);   // { key: idx, before }
+    let ghost = null;
+    // Confined to the grid so a drop on the dropzone or footer never snaps to a phantom slot;
+    // then the cell whose centre is nearest, before/after by the pointer's x against its midpoint.
+    function resolve(x, y) {
+        if (!gridEl) return null;
+        const r = gridEl.getBoundingClientRect();
+        if (x < r.left || x > r.right || y < r.top || y > r.bottom) return null;
+        return nearestByCentre([...cellEls].map(([key, el]) => ({ key, el })), x, y);
+    }
+    function gestures(idx) {
+        return {
+            ignore: (ev) => !!ev.target.closest('.emoji-creator-cell-remove'),   // the remove-× is its own target
+            onMenu: (x, y) => h.cellMenu(idx, x, y),
+            onArm: (on) => { armed = on ? idx : (armed === idx ? -1 : armed); },
+            onDragStart: (ev, node) => {
+                dragging = idx;
+                hovered = -1;   // the gesture owns the cell's look now
+                ghost = dragGhost(node, 'emoji-creator-cell-ghost', (g) => g.querySelector('.emoji-creator-cell-remove')?.remove());
+            },
+            onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); dropAt = resolve(mv.clientX, mv.clientY); },
+            onDragEnd: (up) => {
+                cellEls.get(idx)?.setAttribute('data-suppress-click', '1');
+                dragging = -1;
+                ghost?.remove(); ghost = null;
+                const t = resolve(up.clientX, up.clientY);
+                dropAt = null;
+                if (t) h.reorderEmoji(idx, t.key, t.before);
+            },
+        };
+    }
     function brokenMessage(idx, e) { return c.broken[idx] || (e.dead ? h.goneMessage() : ''); }
 </script>
 
@@ -70,15 +110,17 @@
     </button>
 </div>
 <!-- `is-saving`: CSS freezes reorder, hover and rename while the publish is in flight. -->
-<div class="emoji-creator-grid" id="emoji-creator-grid" class:is-saving={c.saving} use:grid>
+<div class="emoji-creator-grid" id="emoji-creator-grid" class:is-saving={c.saving} bind:this={gridEl} use:grid>
     {#each emojis as e, idx (idx)}
         {@const broken = brokenMessage(idx, e)}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions, a11y_mouse_events_have_key_events -->
         <div class="emoji-creator-cell" data-idx={idx} data-emoji-tooltip=":{e.shortcode}:"
              class:emoji-creator-cell-broken={!!broken} class:is-hovered={hovered === idx} title={broken || undefined}
-             onmouseenter={() => { if (!h.dragActive()) hovered = idx; }} onmouseleave={() => { if (hovered === idx) hovered = -1; }}
+             class:is-drag-armed={armed === idx} class:is-dragging={dragging === idx}
+             class:drop-before={dropAt?.key === idx && dropAt.before} class:drop-after={dropAt?.key === idx && !dropAt.before}
+             onmouseenter={() => { if (dragging === -1) hovered = idx; }} onmouseleave={() => { if (hovered === idx) hovered = -1; }}
              onclick={(ev) => { if (ev.target.closest('.emoji-creator-cell-remove')) return; if (ev.currentTarget.dataset.suppressClick === '1') { delete ev.currentTarget.dataset.suppressClick; return; } h.cellClick(idx, !!broken); }}
-             use:reorder={idx}>
+             use:cellEl={idx} use:reorderable={gestures(idx)}>
             <img alt=":{e.shortcode}:" draggable="false" use:image={[e, idx]}>
             {#if !h.isMobile()}
                 <!-- Hover-revealed on desktop; touch reaches delete through the long-press menu. -->

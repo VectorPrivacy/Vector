@@ -216,144 +216,28 @@ function _pcShortcodeFromFilename(name) {
     return `${sc}_${i}`;
 }
 
-function _pcClearDropMarkers() {
-    const grid = _pickerEls.creatorGrid;
-    if (!grid) return;
-    grid.querySelectorAll('.drop-before, .drop-after').forEach(c => {
-        c.classList.remove('drop-before', 'drop-after');
+/** The cell's long-press / right-click menu. */
+function _pcCellMenu(idx, x, y) {
+    showContextMenu({
+        x, y,
+        items: [
+            { label: 'Rename Emoji', icon: 'edit',  onClick: () => _pcRenameEmoji(idx) },
+            { label: 'Delete Emoji', icon: 'trash', danger: true, onClick: () => _pcRemoveEmoji(idx) },
+        ],
     });
 }
 
-// Reorder via pointer events. We can't use the HTML5 drag API because
-// Tauri's `dragDropEnabled: true` swallows DOM drag events at the native
-// layer (it's needed for the OS file-drop → onDragDropEvent pipeline).
-const _PC_DRAG_THRESHOLD_PX = 6;
-let _pcDragActive = false;
-function _pcInstallReorderHandlers(cell, idx) {
-    let ghost = null;
-    let ghostOffsetX = 0;
-    let ghostOffsetY = 0;
-
-    installReorderGestures(cell, {
-        armClass: 'is-drag-armed',
-        // The remove-× is its own target; a press there must never become a drag.
-        ignore: (ev) => !!ev.target.closest('.emoji-creator-cell-remove'),
-        onMenu: (x, y) => {
-            if (typeof showContextMenu !== 'function') return;
-            showContextMenu({
-                x, y,
-                items: [
-                    { label: 'Rename Emoji', icon: 'edit',  onClick: () => _pcRenameEmoji(idx) },
-                    { label: 'Delete Emoji', icon: 'trash', danger: true, onClick: () => _pcRemoveEmoji(idx) },
-                ],
-            });
-        },
-        onDragStart: () => {
-            _pcDragActive = true;
-            cell.classList.add('is-dragging');
-            // Clear any stuck hover state — we own this class now, so a drag
-            // start is the right moment to normalize it.
-            const grid = _pickerEls.creatorGrid;
-            if (grid) {
-                grid.querySelectorAll('.is-hovered').forEach(c =>
-                    c.classList.remove('is-hovered'));
-            }
-            const rect = cell.getBoundingClientRect();
-            ghost = cell.cloneNode(true);
-            // Drop transient state from the clone so it reads as a static
-            // preview: kill the remove button, the hover-only chrome, and any
-            // nested pointer-capturing behaviour.
-            ghost.classList.add('emoji-creator-cell-ghost');
-            ghost.classList.remove('is-dragging', 'is-drag-armed');
-            const ghostRemove = ghost.querySelector('.emoji-creator-cell-remove');
-            if (ghostRemove) ghostRemove.remove();
-            ghost.style.position = 'fixed';
-            ghost.style.left = `${rect.left}px`;
-            ghost.style.top = `${rect.top}px`;
-            ghost.style.width = `${rect.width}px`;
-            ghost.style.height = `${rect.height}px`;
-            ghost.style.pointerEvents = 'none';
-            ghost.style.zIndex = '2200';
-            document.body.appendChild(ghost);
-            // Ghost is scaled (transform: scale 0.6) around its center, so
-            // centering the unscaled box on the cursor keeps the visible
-            // thumbnail anchored under the pointer regardless of where the
-            // user grabbed the cell.
-            ghostOffsetX = rect.width / 2;
-            ghostOffsetY = rect.height / 2;
-        },
-        onDragMove: (mv) => {
-            if (ghost) {
-                ghost.style.left = `${mv.clientX - ghostOffsetX}px`;
-                ghost.style.top  = `${mv.clientY - ghostOffsetY}px`;
-            }
-            _pcUpdateDropTarget(mv.clientX, mv.clientY);
-        },
-        onDragEnd: (up) => {
-            cell.dataset.suppressClick = '1';
-            cell.classList.remove('is-dragging');
-            _pcDragActive = false;
-            if (ghost) { ghost.remove(); ghost = null; }
-            const target = _pcResolveDropTarget(up.clientX, up.clientY);
-            _pcClearDropMarkers();
-            if (!target) return;
-            const { targetIdx, isBefore } = target;
-            let to = targetIdx + (isBefore ? 0 : 1);
-            if (idx === to || idx === to - 1) return;
-            const [moved] = _pc.emojis.splice(idx, 1);
-            if (idx < to) to--;
-            if (to < 0) to = 0;
-            if (to > _pc.emojis.length) to = _pc.emojis.length;
-            _pc.emojis.splice(to, 0, moved);
-            _pc.dirty = true;
-            _pcRenderGrid();
-        },
-    });
-}
-
-function _pcResolveDropTarget(x, y) {
-    const grid = _pickerEls.creatorGrid;
-    if (!grid) return null;
-    // Scope to cells that carry an index — skips the "+" add-cell, which
-    // sits in the grid but has no data-idx.
-    const cells = grid.querySelectorAll('.emoji-creator-cell[data-idx]');
-    if (cells.length === 0) return null;
-
-    // Confine to the grid bounds so drops on the dropzone / footer
-    // don't snap-attach to a phantom slot.
-    const gridRect = grid.getBoundingClientRect();
-    if (x < gridRect.left || x > gridRect.right) return null;
-    if (y < gridRect.top || y > gridRect.bottom) return null;
-
-    // Pick the cell whose centre is closest to the pointer. Covers
-    // direct hits, the 4px inter-cell gutters, and inter-row gaps with
-    // one rule. isBefore/after is determined by the pointer's x vs the
-    // chosen cell's horizontal midpoint.
-    let bestCell = null;
-    let bestDist = Infinity;
-    for (const c of cells) {
-        const r = c.getBoundingClientRect();
-        const cx = r.left + r.width / 2;
-        const cy = r.top + r.height / 2;
-        const dx = x - cx;
-        const dy = y - cy;
-        const d = dx * dx + dy * dy;
-        if (d < bestDist) { bestDist = d; bestCell = c; }
-    }
-    if (!bestCell) return null;
-    const r = bestCell.getBoundingClientRect();
-    const targetIdx = parseInt(bestCell.dataset.idx, 10);
-    if (Number.isNaN(targetIdx)) return null;
-    return { targetIdx, isBefore: x < r.left + r.width / 2 };
-}
-
-function _pcUpdateDropTarget(x, y) {
-    _pcClearDropMarkers();
-    const t = _pcResolveDropTarget(x, y);
-    if (!t) return;
-    const cell = _pickerEls.creatorGrid?.querySelector(`.emoji-creator-cell[data-idx="${t.targetIdx}"]`);
-    if (!cell) return;
-    cell.classList.add(t.isBefore ? 'drop-before' : 'drop-after');
+/** Move the emoji at `from` before or after the one at `targetIdx`. */
+function _pcReorderEmoji(from, targetIdx, isBefore) {
+    let to = targetIdx + (isBefore ? 0 : 1);
+    if (from === to || from === to - 1) return;
+    const [moved] = _pc.emojis.splice(from, 1);
+    if (from < to) to--;
+    if (to < 0) to = 0;
+    if (to > _pc.emojis.length) to = _pc.emojis.length;
+    _pc.emojis.splice(to, 0, moved);
+    _pc.dirty = true;
+    _pcRenderGrid();
 }
 
 function _pcRemoveEmoji(idx) {

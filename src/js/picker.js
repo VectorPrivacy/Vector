@@ -75,7 +75,9 @@ const _pickerPanelHelpers = {
         mountGrid: (section, pack) => _mountPackCanvasGrid(section, pack),
         afterRender: () => _afterPackSectionsRender(),
         bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
-        installTabGestures: (tab, pack) => _installPackTabGestures(tab, pack),
+        showTabMenu: (pack, x, y) => _showPackTabMenu(pack, x, y),
+        closeMenu: () => hideContextMenu(),
+        reorderPack: (fromId, toId, isBefore) => _applyPackTabReorder(fromId, toId, isBefore),
         packIsDead: (pack) => packIsDead(pack),
         packInitial: (pack) => _packTitleInitial(pack),
         openCreator: (id) => openEmojiPackCreator(id),
@@ -94,14 +96,14 @@ const _pickerPanelHelpers = {
         unavailableMessage: (reason) => emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '),
         goneMessage: () => _pcGoneMessage(),
         isMobile: () => typeof platformFeatures !== 'undefined' && !!platformFeatures.is_mobile,
-        dragActive: () => _pcDragActive,
         remove: (idx) => _pcRemoveEmoji(idx),
         // A broken emoji can't be renamed: explain why and how to fix it instead.
         cellClick: (idx, broken) => {
             if (broken) { _pcBrokenEmojiError(_emojiFailReason.get(_pc.emojis[idx]?.url) || ''); return; }
             _pcRenameEmoji(idx);
         },
-        installReorder: (cell, idx) => _pcInstallReorderHandlers(cell, idx),
+        cellMenu: (idx, x, y) => _pcCellMenu(idx, x, y),
+        reorderEmoji: (from, targetIdx, isBefore) => _pcReorderEmoji(from, targetIdx, isBefore),
         gridMounted: (el) => { _pickerEls.creatorGrid = el; },
         // Native picker + Rust import (content URIs, non-web-safe formats), not <input type=file>.
         pickLogo: async () => { const file = await _pcPickImage(false); if (file) _pcSetLogoFile(file); },
@@ -384,301 +386,10 @@ function _ensureEmojiPickerIslands() {
     VectorSvelte.setPickerReady();
 }
 
-// Vertical drag-to-reorder for the equipped-pack sidebar tabs. Same pointer-
-// driven approach as the in-pack emoji reorder (Tauri swallows HTML5 drag
-// events); before/after is decided by the pointer's Y vs each tab's midpoint.
-let _packTabDragActive = false;
-
-// Touch gesture budget for the pack rail. A pointer has to mean one of three
-// things and the only honest disambiguator is "did it move, and when":
-//   move early            → the rail scrolls (a rail of many packs must scroll)
-//   still at ARM, then move → reorder
-//   still at MENU         → context menu
-// Without the arm delay, the first 6px of an attempted scroll started a drag,
-// so a user with enough packs to need scrolling could never reach the ones
-// off-screen. Slop matches the long-press tolerance so the two agree on what
-// "held still" means.
-const _PT_ARM_MS = 180;
-const _PT_MENU_MS = 500;
-const _PT_SLOP_PX = 8;
-// Menu → drag promotion threshold. Deliberately larger than the plain drag
-// threshold: the wobble of a finger lifting off must not dismiss a menu the
-// user held for, while a decisive pull clearly means "actually, drag it".
-const _PT_MENU_DRAG_PX = 14;
-
-/**
- * Arbitrate the three things one press can mean on a list that both scrolls and
- * reorders. Shared by the pack rail and the pack-creator grid — each supplies its
- * own drag mechanics, but the disambiguation must be identical or the picker
- * teaches two different gestures for the same motion.
- *
- * Deliberately NOT axis-aware in the grid's case: "horizontal means drag, vertical
- * means scroll" misfires constantly on the diagonal drift of a real thumb, and
- * press-then-drag is the platform convention anyway.
- *
- * @param {HTMLElement} el
- * @param {object}   h
- * @param {(x:number,y:number)=>void} h.onMenu      long-press / right-click
- * @param {(ev:PointerEvent)=>void}   h.onDragStart threshold crossed while armed
- * @param {(ev:PointerEvent)=>void}   h.onDragMove
- * @param {(ev:PointerEvent)=>void}   h.onDragEnd
- * @param {(ev:PointerEvent)=>boolean} [h.ignore]   skip the gesture entirely
- * @param {string} [h.armClass]  toggled while a drag is possible but not started
- */
-function installReorderGestures(el, h) {
-    el.addEventListener('contextmenu', (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        h.onMenu(ev.clientX, ev.clientY);
-    });
-
-    el.addEventListener('pointerdown', (ev) => {
-        if (ev.button !== 0) return;
-        if (h.ignore?.(ev)) return;
-        const startX = ev.clientX;
-        const startY = ev.clientY;
-        const isTouch = ev.pointerType === 'touch';
-        let dragging = false;
-        // A mouse has a separate button for the menu, so it may drag at once.
-        let armed = !isTouch;
-        // Set once the gesture belongs to something else (a scroll).
-        let claimed = false;
-        // The long-press menu is showing but the finger is still down.
-        let menuOpen = false;
-        let armTimer = null;
-        let menuTimer = null;
-
-        const clearTimers = () => {
-            if (armTimer) { clearTimeout(armTimer); armTimer = null; }
-            if (menuTimer) { clearTimeout(menuTimer); menuTimer = null; }
-        };
-        const disarm = () => {
-            armed = false;
-            if (h.armClass) el.classList.remove(h.armClass);
-            // Hand panning back to the browser.
-            el.style.touchAction = '';
-        };
-
-        if (isTouch) {
-            armTimer = setTimeout(() => {
-                armTimer = null;
-                armed = true;
-                if (h.armClass) el.classList.add(h.armClass);
-                // Take the gesture from the browser: with `touch-action: pan-y` it
-                // would keep panning on vertical movement and ignore our
-                // preventDefault. Legal to flip now precisely because arming
-                // required a still finger — no pan has begun to interrupt.
-                el.style.touchAction = 'none';
-                // Confirms "you may now drag" without stealing the gesture, so
-                // letting go still just taps.
-                navigator.vibrate?.(8);
-            }, _PT_ARM_MS);
-            menuTimer = setTimeout(() => {
-                menuTimer = null;
-                menuOpen = true;
-                el.dataset.suppressClick = '1';
-                navigator.vibrate?.(14);
-                h.onMenu(startX, startY);
-                // The gesture stays live (listeners + touch-action untouched): the
-                // held press may still PROMOTE to a drag — moving past
-                // _PT_MENU_DRAG_PX closes the menu and starts dragging — while
-                // simply lifting leaves the menu open for interaction.
-            }, _PT_MENU_MS);
-        }
-
-        // Swallow the scroll once the gesture is OURS — armed, menu open, or
-        // dragging. The browser latches its pan-y right at TOUCHSTART (the
-        // inline touch-action flip at arm doesn't re-latch mid-gesture), so any
-        // un-prevented vertical move in the armed/menu windows lets the native
-        // pan claim the gesture and pointercancel us — which killed menu→drag
-        // promotion in every direction except pure-horizontal. Before the arm
-        // lands, moves stay unprevented so a quick swipe scrolls natively.
-        // Non-passive because Android WebView defaults touchmove to passive,
-        // where preventDefault is ignored and the list scrolls under the drag.
-        const onTouchMove = (te) => { if (dragging || armed || menuOpen) te.preventDefault(); };
-
-        const onMove = (mv) => {
-            if (!dragging) {
-                if (claimed) return;
-                const dist = Math.hypot(mv.clientX - startX, mv.clientY - startY);
-                if (menuOpen) {
-                    // Menu → drag promotion: a decisive pull while still holding
-                    // closes the menu and hands the press to the reorder drag.
-                    if (dist < _PT_MENU_DRAG_PX) return;
-                    h.closeMenu?.();
-                    menuOpen = false;
-                    dragging = true;
-                    h.onDragStart(mv);
-                    h.onDragMove(mv);
-                    return;
-                }
-                if (!armed) {
-                    // Moved before the hold landed: a scroll. Stand down so the
-                    // list pans natively.
-                    if (dist > _PT_SLOP_PX) {
-                        claimed = true;
-                        clearTimers();
-                        teardown();
-                    }
-                    return;
-                }
-                if (dist < _PC_DRAG_THRESHOLD_PX) return;
-                // Moving rules out the long-press menu.
-                clearTimers();
-                dragging = true;
-                h.onDragStart(mv);
-            }
-            h.onDragMove(mv);
-        };
-
-        function teardown() {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-            window.removeEventListener('pointercancel', onUp);
-            window.removeEventListener('touchmove', onTouchMove);
-        }
-
-        const onUp = (up) => {
-            clearTimers();
-            teardown();
-            const wasDragging = dragging;
-            dragging = false;
-            disarm();
-            if (wasDragging) h.onDragEnd(up);
-        };
-
-        window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp);
-        window.addEventListener('pointercancel', onUp);
-        window.addEventListener('touchmove', onTouchMove, { passive: false });
-    });
-}
-
-// Auto-scroll while a pack drag sits at (or past) the rail's vertical edges,
-// so a long rail can be traversed in one drag instead of drag-scroll-drag hops.
-// Speed is proportional to the overshoot (gentle just inside the edge, capped
-// well below flick speed); the loop self-terminates when the pointer returns
-// inside the band, the rail hits its end, or the drag ends.
-const _PT_AUTOSCROLL_ZONE_PX = 14;
-const _PT_AUTOSCROLL_MAX_PX = 9; // per frame
-let _packRailAutoRaf = null;
-let _packRailDragY = 0;
-
-function _packRailAutoScrollTick() {
-    _packRailAutoRaf = null;
-    const sidebar = _pickerEls.sidebar;
-    if (!sidebar || !_packTabDragActive) return;
-    const r = sidebar.getBoundingClientRect();
-    let v = 0;
-    if (_packRailDragY < r.top + _PT_AUTOSCROLL_ZONE_PX) {
-        v = -Math.min(_PT_AUTOSCROLL_MAX_PX, (r.top + _PT_AUTOSCROLL_ZONE_PX - _packRailDragY) * 0.25);
-    } else if (_packRailDragY > r.bottom - _PT_AUTOSCROLL_ZONE_PX) {
-        v = Math.min(_PT_AUTOSCROLL_MAX_PX, (_packRailDragY - (r.bottom - _PT_AUTOSCROLL_ZONE_PX)) * 0.25);
-    }
-    if (!v) return;
-    const before = sidebar.scrollTop;
-    sidebar.scrollTop = before + v;
-    if (sidebar.scrollTop === before) return; // rail end reached
-    // The tabs moved under a still pointer — keep the drop marker honest.
-    _updatePackTabDropTarget(_packRailDragY);
-    _packRailAutoRaf = requestAnimationFrame(_packRailAutoScrollTick);
-}
-
-function _packRailAutoScroll(y) {
-    _packRailDragY = y;
-    if (!_packRailAutoRaf) _packRailAutoRaf = requestAnimationFrame(_packRailAutoScrollTick);
-}
-
-function _packRailAutoScrollStop() {
-    if (_packRailAutoRaf) { cancelAnimationFrame(_packRailAutoRaf); _packRailAutoRaf = null; }
-}
-
-function _installPackTabGestures(tab, pack) {
-    let ghost = null;
-    let offX = 0;
-    let offY = 0;
-
-    installReorderGestures(tab, {
-        armClass: 'is-drag-armed',
-        onMenu: (x, y) => _showPackTabMenu(pack, x, y),
-        closeMenu: () => hideContextMenu(),
-        onDragStart: () => {
-            _packTabDragActive = true;
-            tab.classList.add('is-dragging');
-            const rect = tab.getBoundingClientRect();
-            ghost = tab.cloneNode(true);
-            ghost.classList.add('emoji-pack-tab-ghost');
-            ghost.classList.remove('is-dragging', 'is-drag-armed');
-            ghost.style.position = 'fixed';
-            ghost.style.left = `${rect.left}px`;
-            ghost.style.top = `${rect.top}px`;
-            ghost.style.width = `${rect.width}px`;
-            ghost.style.height = `${rect.height}px`;
-            ghost.style.pointerEvents = 'none';
-            ghost.style.zIndex = '2200';
-            document.body.appendChild(ghost);
-            offX = rect.width / 2;
-            offY = rect.height / 2;
-        },
-        onDragMove: (mv) => {
-            if (ghost) {
-                ghost.style.left = `${mv.clientX - offX}px`;
-                ghost.style.top = `${mv.clientY - offY}px`;
-            }
-            _updatePackTabDropTarget(mv.clientY);
-            _packRailAutoScroll(mv.clientY);
-        },
-        onDragEnd: (up) => {
-            _packRailAutoScrollStop();
-            tab.dataset.suppressClick = '1';
-            tab.classList.remove('is-dragging');
-            _packTabDragActive = false;
-            if (ghost) { ghost.remove(); ghost = null; }
-            const target = _resolvePackTabDropTarget(up.clientY);
-            _clearPackTabDropMarkers();
-            if (target) _applyPackTabReorder(tab, target);
-        },
-    });
-}
-
-function _packTabs() {
-    const sidebar = _pickerEls.sidebar;
-    return sidebar ? [...sidebar.querySelectorAll('.emoji-pack-tab')] : [];
-}
-
-function _clearPackTabDropMarkers() {
-    _packTabs().forEach(t => t.classList.remove('drop-above', 'drop-below'));
-}
-
-// Nearest tab by vertical-centre distance; before/after by the pointer's Y
-// against that tab's midpoint. Confined to the sidebar's vertical bounds.
-function _resolvePackTabDropTarget(y) {
-    const tabs = _packTabs();
-    if (!tabs.length) return null;
-    let best = null;
-    let bestDist = Infinity;
-    for (const t of tabs) {
-        const r = t.getBoundingClientRect();
-        const d = Math.abs(y - (r.top + r.height / 2));
-        if (d < bestDist) { bestDist = d; best = t; }
-    }
-    if (!best) return null;
-    const r = best.getBoundingClientRect();
-    return { targetTab: best, isBefore: y < r.top + r.height / 2 };
-}
-
-function _updatePackTabDropTarget(y) {
-    _clearPackTabDropMarkers();
-    const t = _resolvePackTabDropTarget(y);
-    if (t) t.targetTab.classList.add(t.isBefore ? 'drop-above' : 'drop-below');
-}
-
 // Apply the drop: reorder `arrEmojiPacks` optimistically + repaint, then
 // persist the full order (marker included) so it syncs. The theme-slot tab
 // maps to the `theme_slot` token; real tabs map to their pack id.
-function _applyPackTabReorder(draggedTab, target) {
-    const fromId = draggedTab.dataset.packId;
-    const toId = target.targetTab.dataset.packId;
+function _applyPackTabReorder(fromId, toId, isBefore) {
     if (fromId === toId) return;
 
     const arr = arrEmojiPacks.slice();
@@ -687,7 +398,7 @@ function _applyPackTabReorder(draggedTab, target) {
     const [moved] = arr.splice(fromIdx, 1);
     const toIdx = arr.findIndex(p => p.id === toId);
     if (toIdx === -1) return;
-    let insertAt = toIdx + (target.isBefore ? 0 : 1);
+    let insertAt = toIdx + (isBefore ? 0 : 1);
     if (insertAt < 0) insertAt = 0;
     if (insertAt > arr.length) insertAt = arr.length;
     arr.splice(insertAt, 0, moved);
