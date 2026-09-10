@@ -4021,6 +4021,8 @@ body.chat-bg-disabled .chat-messages::before {
 .reaction-details-popup {
   position: fixed;
   z-index: 1000;
+  -webkit-user-select: none;
+  user-select: none;
   background: #1a1a1a;
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 12px;
