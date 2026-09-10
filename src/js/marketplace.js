@@ -382,10 +382,7 @@ window.__TAURI__.event.listen('inline_image_cached', (event) => {
     VectorSvelte.mktSetIcon(url, path ? convertFileSrc(path) : false);
 });
 
-let marketplaceMounted = false;
-function ensureMarketplaceIslands() {
-    if (marketplaceMounted) return;
-    marketplaceMounted = true;
+function registerMarketplaceHandlers() {
     const h = {
         iconKey: marketplaceIconKey,
         actionText: getAppActionText,
@@ -406,14 +403,13 @@ function ensureMarketplaceIslands() {
         resetPermissions: resetAppPermissions,
         publisher: publisherProfile,
         openPublisher: openPublisherProfile,
-        openUrl: (url) => {
-            if (typeof openUrl === 'function') openUrl(url);
-            else invoke('open_url', { url }).catch(console.error);
-        },
+        openUrl,
         back: () => { hideMarketplacePanel(); },
     };
     VectorSvelte.setMarketplaceHandlers(h);
 }
+// Registered once every script is in: the bag calls helpers from files that load later.
+document.addEventListener('DOMContentLoaded', registerMarketplaceHandlers, { once: true });
 
 /** Run one action on an app with the button showing it, and a 2s "Failed" if it throws. */
 async function runAppAction(app, kind, label, failedLabel, fn) {
@@ -469,7 +465,6 @@ function closeAppDetailsPanel() {
 
 /** Open the details panel on one app. */
 function showAppDetails(app) {
-    ensureMarketplaceIslands();
     if (!VectorSvelte.mktState().detailsOpen) pushBack('app-details', () => { closeAppDetailsPanel(); });
     VectorSvelte.mktOpenDetails(app.id);
     VectorSvelte.mktOpenDetailsPanel();
@@ -565,7 +560,6 @@ function clearMarketplaceFilters() { VectorSvelte.mktClearFilters(); }
 async function initMarketplace() {
     if (_marketplaceInitInProgress) return;
     _marketplaceInitInProgress = true;
-    ensureMarketplaceIslands();
     clearMarketplaceFilters();
     VectorSvelte.mktSetAnimate(false);
 

@@ -656,9 +656,7 @@ async function runCommunityMigration() {
     }
 }
 
-let fCommunityOverviewMounted = false;
-function mountCommunityOverview() {
-    fCommunityOverviewMounted = true;
+function registerCommunityOverview() {
     const cur = () => {
         const { chatId } = VectorSvelte.overviewState();
         return arrChats.find(c => c.id === chatId) || null;
@@ -715,6 +713,8 @@ function mountCommunityOverview() {
         },
     });
 }
+// Registered once every script is in: the bag calls helpers from files that load later.
+document.addEventListener('DOMContentLoaded', registerCommunityOverview, { once: true });
 
 /** The overview header's back button. Widescreen: the roster's own close button goes through
  *  the same pair as the header's Members toggle, or the preference keeps reading "open". */
@@ -784,7 +784,6 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
     // Tag the overview with its community so the realtime `community_refreshed` listener knows to re-render
     // it when a control change (ban/role/metadata/mode) lands live.
     VectorSvelte.setOverviewGroup(communityId);
-    if (!fCommunityOverviewMounted) mountCommunityOverview();
     VectorSvelte.setOverview({
         chatId: chat.id,
         communityId,

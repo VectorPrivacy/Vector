@@ -19,20 +19,14 @@ function renderCurrentProfile(cProfile) {
  * Render the Profile tab based on a given profile
  * @param {Profile} cProfile 
  */
-let fProfileViewMounted = false;
-
 /** Show `cProfile` in the expanded profile view; the reconciler derives every field. */
 function renderProfileTab(cProfile) {
     if (!cProfile?.id) return;
-    if (!fProfileViewMounted) {
-        fProfileViewMounted = true;
-        mountProfileScreenOnce();
-    }
     VectorSvelte.setOpenProfile(cProfile.id);
     VectorSvelte.touchProfile(cProfile.id);
 }
 
-function mountProfileScreenOnce() {
+function registerProfileScreen() {
     const openId = () => VectorSvelte.profileViewState().id;
     const cur = () => getProfile(openId());
     // The shareable vectorapp.io URL; the caller paints its own copied tick.
@@ -136,6 +130,8 @@ function mountProfileScreenOnce() {
         },
     });
 }
+// Registered once every script is in: the bag calls helpers from files that load later.
+document.addEventListener('DOMContentLoaded', registerProfileScreen, { once: true });
 
 /**
  * Open the Expanded Profile view, optionally with a non-default profile

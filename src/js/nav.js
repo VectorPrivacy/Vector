@@ -101,12 +101,7 @@ function openSettings() {
     }
 }
 
-let invitesMounted = false;
-function invitesEnsureMounted() {
-    if (invitesMounted) return;
-    invitesMounted = true;
-    VectorSvelte.setScreen('invites', {});
-}
+VectorSvelte.setScreen('invites', {});
 
 async function openInvites() {
     pushBack('invites', () => openChatlist());
@@ -123,7 +118,6 @@ async function openInvites() {
     previousChatBeforeProfile = ""; // Clear when navigating away
 
     // Fetch and display the invite code
-    invitesEnsureMounted();
     VectorSvelte.setInvites({ phase: 'loading', code: '', xUrl: '' });
     try {
         const inviteCode = await invoke('get_or_create_invite_code');

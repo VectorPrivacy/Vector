@@ -1753,10 +1753,7 @@ function _isPackSubscribed(id) {
 
 // The modal is an island over lib/packdetails.svelte.js in its body-level overlay; this
 // side fetches and closes.
-let _packDetailsMounted = false;
-function _ensurePackDetailsIsland() {
-    if (_packDetailsMounted) return;
-    _packDetailsMounted = true;
+function _registerPackDetails() {
     VectorSvelte.setScreen('packDetails', {
         h: {
             bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
@@ -1782,10 +1779,11 @@ function _ensurePackDetailsIsland() {
         },
     });
 }
+// Registered once every script is in: the bag calls helpers from files that load later.
+document.addEventListener('DOMContentLoaded', _registerPackDetails, { once: true });
 
 async function openPackDetailsModal(naddr) {
     if (!naddr) return;
-    _ensurePackDetailsIsland();
     VectorSvelte.openPackDetails(naddr);
     try {
         const pack = await invoke('fetch_emoji_pack_by_naddr', { naddr });

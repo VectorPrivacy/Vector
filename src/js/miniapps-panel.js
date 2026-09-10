@@ -32,7 +32,6 @@ async function showAttachmentPanelMiniApps() {
  */
 function showMarketplacePanel() {
     pushBack('marketplace', () => { hideMarketplacePanel(); });
-    ensureMarketplaceIslands();
     VectorSvelte.mktOpenPanel();
     initMarketplace();
 }

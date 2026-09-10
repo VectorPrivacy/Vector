@@ -37,10 +37,7 @@ async function ccPickAvatar() {
     VectorSvelte.ccSetAvatar(file, await pickedImagePreviewSrc(file));
 }
 
-let ccMounted = false;
-function ccEnsureMounted() {
-    if (ccMounted) return;
-    ccMounted = true;
+function registerCreateGroupScreen() {
     VectorSvelte.setScreen('createGroup', {
         h: {
             extractNpub,
@@ -65,6 +62,8 @@ function ccEnsureMounted() {
         },
     });
 }
+// Registered once every script is in: the bag calls helpers from files that load later.
+document.addEventListener('DOMContentLoaded', registerCreateGroupScreen, { once: true });
 
 /** Open the Create Community panel. */
 function openCreateGroup() {
@@ -74,7 +73,6 @@ function openCreateGroup() {
     VectorSvelte.showPane('chatNew', false);
 
     pushBack('create-group', closeCreateGroup);
-    ccEnsureMounted();
     VectorSvelte.ccOpen();
     VectorSvelte.showPane('createGroup', true);
     VectorSvelte.showPane('chats', false);
