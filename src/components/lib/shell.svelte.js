@@ -13,7 +13,7 @@ const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, up
 // Registered by two owners: main.js (the nav actions) and widescreen.js (the list
 // resizer), so writes must merge. { openProfile, openChatlist, openSettings, openInvites,
 // openNewChat, openCreateGroup, listResizeStart, listResizeReset }
-let handlers = {};
+let handlers = $state.raw({});
 
 export function shellPanes() { return panes; }
 export function shellState() { return shell; }
@@ -96,6 +96,6 @@ const paneListeners = new Set();
 export function onPaneChange(fn) { paneListeners.add(fn); return () => paneListeners.delete(fn); }
 
 // The few elements the layout math measures, bound by the shell components.
-const shellEls = $state.raw({ chatList: null, chats: null, chat: null, navbar: null, newChat: null, profile: null });
+const shellEls = { chatList: null, chats: null, chat: null, navbar: null, newChat: null, profile: null };
 export function shellElements() { return shellEls; }
 export function bindShellEl(name) { return (node) => { shellEls[name] = node; return { destroy() { shellEls[name] = null; } }; }; }

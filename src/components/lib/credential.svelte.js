@@ -5,7 +5,7 @@ const c = $state({
     open: false, mode: 'pin', title: '', subtitle: '', subtitleGradient: false,
     confirmText: 'Confirm', selectedType: 'pin', password: '', pinSeq: 0,
 });
-let handlers = null;   // { cancel(), submit(value) }
+let handlers = $state.raw(null);   // { cancel(), submit(value) }
 
 export function credentialState() { return c; }
 export function credentialHandlers() { return handlers; }

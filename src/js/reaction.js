@@ -89,7 +89,8 @@ function _startReactionTipWatchdog(reactionEl) {
 const REACTION_HOVER_DELAY_MS = 500;
 
 // Both popups are one island; this side opens and closes them and owns the gestures.
-VectorSvelte.setScreen('reactionPopups', {
+function registerReactionPopups() {
+    VectorSvelte.setScreen('reactionPopups', {
         h: {
             findMessage: (msgId) => {
                 for (const chat of arrChats) {
@@ -107,7 +108,10 @@ VectorSvelte.setScreen('reactionPopups', {
                 return entry ? (entry.display || entry.name) : '';
             },
         },
-});
+    });
+}
+// Registered once every script is in: the bag names helpers from files that load later.
+document.addEventListener('DOMContentLoaded', registerReactionPopups, { once: true });
 const _reactionTipEl = () => VectorSvelte.reactionEls().tip;
 const _reactionDetailsEl = () => VectorSvelte.reactionEls().details;
 

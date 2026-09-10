@@ -2,7 +2,7 @@
 // community.js fills the bags and the local reads first, then flips `open`, so the modal
 // mounts in one paint.
 const st = $state({ open: false, busy: false, ctaBusy: false, name: '', status: { text: '', error: false }, selected: 0, search: '' });
-let handlers = {};      // close(), cta(), searchInput(value), links (InviteLinks h), contactProps (ContactPicker props)
+let handlers = $state.raw({});      // close(), cta(), searchInput(value), links (InviteLinks h), contactProps (ContactPicker props)
 let picker = null;      // the mounted ContactPicker's exports
 export function inviteModalState() { return st; }
 export function inviteModalHandlers() { return handlers; }

@@ -13,8 +13,8 @@ export function setMessageToolbar(view) { tb = view; }
 // children of the message list so they ride the scroll for free.
 const host = $state({ open: false, target: '', top: '', left: '' });
 const swipe = $state({ visible: false, past: false, top: '', left: '', opacity: '0', transform: 'scale(0.4)', transition: '' });
-const els = $state.raw({ host: null });
-let handlers = {};   // hoverIn, hoverOut, click
+const els = { host: null };
+let handlers = $state.raw({});   // hoverIn, hoverOut, click
 export function toolbarHost() { return host; }
 export function toolbarSwipe() { return swipe; }
 export function toolbarEls() { return els; }

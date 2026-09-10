@@ -5,7 +5,9 @@
 // How UI gets on screen, in one sentence: shell/App.svelte renders everything. A component
 // whose helpers live in a vanilla script is registered from that script with
 // `setScreen(name, { h })` (lib/shell.svelte.js) and renders once the entry lands; one that
-// needs only its store renders unconditionally. Do not add a `mount*` export: the four below
+// needs only its store renders unconditionally. Register on DOMContentLoaded when the bag
+// names helpers by value: the scripts share one scope but load in order, and a name from a
+// later file is a ReferenceError that silently registers nothing. Do not add a `mount*` export: the four below
 // exist for targets App cannot own (the message list's container, a card inside a rendered
 // row, a host placed beside the composer's editor).
 //

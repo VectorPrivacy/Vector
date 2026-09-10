@@ -11,6 +11,6 @@ export function openReactionDetails(view) { details = view; }
 export function closeReactionDetails() { if (details) details = null; }
 
 // The popups' elements while shown, for the dismiss paths' hit tests.
-const els = $state.raw({ tip: null, details: null });
+const els = { tip: null, details: null };
 export function reactionEls() { return els; }
 export function bindReactionEl(name) { return (node) => { els[name] = node; return { destroy() { els[name] = null; } }; }; }

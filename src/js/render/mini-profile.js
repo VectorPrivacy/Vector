@@ -9,7 +9,8 @@ function _miniProfilePopup() {
     return VectorSvelte.miniProfileEls().popup;
 }
 
-VectorSvelte.setScreen('miniProfile', {
+function registerMiniProfile() {
+    VectorSvelte.setScreen('miniProfile', {
         h: {
             getProfile,
             getProfileAvatarSrc,
@@ -24,7 +25,10 @@ VectorSvelte.setScreen('miniProfile', {
             onMessage: (npub) => { hideMiniProfile(); openChat(npub); },
             onView: _miniProfileOpenFull,
         },
-});
+    });
+}
+// Registered once every script is in: the bag names helpers from files that load later.
+document.addEventListener('DOMContentLoaded', registerMiniProfile, { once: true });
 
 /** Open the mini profile for `npub`, anchored to the tapped element (null = centred). */
 function showMiniProfile(npub, anchorEl) {

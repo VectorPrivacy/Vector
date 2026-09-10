@@ -8,8 +8,8 @@ const v = $state({
     zoom: { text: '100%', visible: false },
     tip: { text: '', visible: false },
 });
-const els = $state.raw({ container: null, image: null });
-let handlers = {};   // close, rotate, load, error, wheel, mouseDown, touchStart, touchMove, touchEnd
+const els = { container: null, image: null };
+let handlers = $state.raw({});   // close, rotate, load, error, wheel, mouseDown, touchStart, touchMove, touchEnd
 
 export function imageViewerState() { return v; }
 export function imageViewerEls() { return els; }

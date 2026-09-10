@@ -3,7 +3,7 @@
 // logical state, `shown` keeps the drawer in the layout through its slide-up.
 const p = $state({ open: false, shown: false, closing: false, button: false, sealed: false, canPin: false, communityId: null, channelId: null, v: 0 });
 let pins = $state.raw([]);   // verified pins, `_jumpable` resolved by the app
-let handlers = null;         // the row helpers, registered once by pins.js
+let handlers = $state.raw(null);         // the row helpers, registered once by pins.js
 const els = { drawer: null, list: null, button: null };   // for hit-tests and scroll rides
 
 export function pinsState() { return p; }

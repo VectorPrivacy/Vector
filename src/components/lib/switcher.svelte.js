@@ -8,7 +8,7 @@ const sw = $state({
     accounts: [], activeNpub: '',
     addDisabled: false, addLabel: 'Add Profile',
 });
-let handlers = {};   // { close, onPick, onDelete, onAdd, rowHelpers }
+let handlers = $state.raw({});   // { close, onPick, onDelete, onAdd, rowHelpers }
 
 export function switcherState() { return sw; }
 export function switcherHandlers() { return handlers; }

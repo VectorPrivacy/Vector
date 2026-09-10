@@ -15,6 +15,6 @@ export function closeMiniProfile() {
 }
 
 // The popup element while open, for the dismiss paths' hit tests.
-const els = $state.raw({ popup: null });
+const els = { popup: null };
 export function miniProfileEls() { return els; }
 export function bindMiniProfileEl(node) { els.popup = node; return { destroy() { els.popup = null; } }; }

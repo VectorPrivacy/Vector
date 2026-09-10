@@ -23,7 +23,13 @@ const SRC = join(ROOT, 'src');
 // The load order is index.html's; vendored and minified libraries are consumers' globals.
 const html = readFileSync(join(SRC, 'index.html'), 'utf8');
 const VENDORED = /(\.min\.js|jsqr\.js|qrcode-generator\.js|twemoji|components\.bundle\.js)$/;
-const scripts = [...html.matchAll(/<script src="\/?([^"]+)"/g)].map(m => m[1]).filter(p => !VENDORED.test(p));
+const scriptTags = [...html.matchAll(/<script src="\/?([^"]+)"([^>]*)>/g)].filter(m => !VENDORED.test(m[1]));
+const scripts = scriptTags.map(m => m[1]);
+// Execution order: a plain script runs while the document parses, every deferred one after,
+// each group in document order. A top-level call that names a helper by value reaches a
+// script that has not run yet as a ReferenceError, and the call registers nothing.
+const runOrder = new Map();
+[...scriptTags.filter(m => !/\bdefer\b/.test(m[2])), ...scriptTags.filter(m => /\bdefer\b/.test(m[2]))].forEach((m, i) => runOrder.set(m[1], i));
 
 // What the vendored scripts and the platform give the shared scope.
 const PROVIDED = new Set([
@@ -58,8 +64,10 @@ const PROVIDED = new Set([
 ]);
 
 const declared = new Set();          // every name any first-party script declares, any depth
-const declaredIn = new Map();        // name -> the scripts declaring it
+const declaredIn = new Map();        // name -> the scripts declaring it (any depth)
+const topDeclaredIn = new Map();     // name -> the scripts declaring it at top level: what the shared scope actually holds
 const perFile = new Map();           // file → Set of identifiers referenced
+const eagerCalls = [];               // { file, line, names }: top-level VectorSvelte.* calls and the identifiers their arguments pass by value
 const svelteUses = new Map();        // VectorSvelte.<name> → [files]
 
 function collectPattern(node, out) {
@@ -87,7 +95,7 @@ function walk(node, visit) {
 for (const rel of scripts) {
     const file = join(SRC, rel);
     const code = readFileSync(file, 'utf8');
-    const ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true });
+    const ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true, locations: true });
     const refs = new Set();
     const fileDeclared = new Set();
     walk(ast, (n) => {
@@ -120,6 +128,23 @@ for (const rel of scripts) {
         if (n.type === 'Identifier' && !n.__notRef) refs.add(n.name);
     });
     perFile.set(rel, refs);
+    for (const st of ast.body) {
+        const top = new Set();
+        if (st.type === 'FunctionDeclaration' || st.type === 'ClassDeclaration') { if (st.id) top.add(st.id.name); }
+        if (st.type === 'VariableDeclaration') for (const d of st.declarations) collectPattern(d.id, top);
+        for (const name of top) { const l = topDeclaredIn.get(name) || []; l.push(rel); topDeclaredIn.set(name, l); }
+        const call = st.type === 'ExpressionStatement' && st.expression.type === 'CallExpression' ? st.expression : null;
+        if (!call || call.callee.type !== 'MemberExpression' || call.callee.object.name !== 'VectorSvelte') continue;
+        // Only what the argument evaluates now: a reference inside a nested function resolves at call time.
+        const eager = new Set();
+        (function collect(n, inFn) {
+            if (!n || typeof n.type !== 'string') return;
+            const fn = inFn || n.type === 'ArrowFunctionExpression' || n.type === 'FunctionExpression';
+            if (!fn && n.type === 'Property' && n.value.type === 'Identifier') eager.add(n.value.name);
+            for (const k of Object.keys(n)) { const v = n[k]; if (Array.isArray(v)) v.forEach(c => collect(c, fn)); else if (v && typeof v.type === 'string') collect(v, fn); }
+        })({ type: 'Arguments', list: call.arguments }, false);
+        if (eager.size) eagerCalls.push({ file: rel, line: st.loc?.start.line ?? call.start, names: [...eager] });
+    }
     for (const name of fileDeclared) {
         declared.add(name);
         const list = declaredIn.get(name) || [];
@@ -146,6 +171,14 @@ for (const m of indexSrc.matchAll(/export\s*\{([^}]+)\}/g)) {
 const COMPONENT_ONLY = new Set(['flushSync', 'deriveWindow', 'profileEditDirty']);
 
 let findings = 0;
+for (const { file, line, names } of eagerCalls) {
+    const later = names.filter(n => {
+        const owners = topDeclaredIn.get(n);
+        if (!owners || owners.includes(file)) return false;
+        return owners.every(o => runOrder.get(o) > runOrder.get(file));
+    });
+    if (later.length) { findings++; console.log(`${file}:${line}: passes ${later.join(', ')} by value at load, but they are declared in a script that runs later`); }
+}
 for (const [rel, refs] of perFile) {
     const missing = [...refs].filter(n => !declared.has(n) && !PROVIDED.has(n)).sort();
     if (missing.length) { findings += missing.length; console.log(`${rel}: undeclared ${missing.join(', ')}`); }

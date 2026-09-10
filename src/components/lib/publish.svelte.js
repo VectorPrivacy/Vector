@@ -7,7 +7,7 @@ const s = $state({
     perms: [], permsError: '',
     hint: { text: 'Unique identifier (lowercase, no spaces)', accent: false },
 });
-let handlers = null;   // { cancel(), submit(), idInput() }
+let handlers = $state.raw(null);   // { cancel(), submit(), idInput() }
 
 export function publishState() { return s; }
 export function publishHandlers() { return handlers; }

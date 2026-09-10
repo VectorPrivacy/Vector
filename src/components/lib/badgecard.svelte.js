@@ -5,8 +5,8 @@ const b = $state({
     badge: { src: '', title: '', subtitle: '', html: '', tiers: null, access: '', perks: [] },
     tilt: { rx: '0deg', ry: '0deg', mx: '50%', my: '50%', holo: '0', idle: true },
 });
-const els = $state.raw({ card: null });
-let handlers = {};   // close, pointerMove(e), pointerEnd()
+const els = { card: null };
+let handlers = $state.raw({});   // close, pointerMove(e), pointerEnd()
 export function badgeCardState() { return b; }
 export function badgeCardEls() { return els; }
 export function badgeCardHandlers() { return handlers; }
