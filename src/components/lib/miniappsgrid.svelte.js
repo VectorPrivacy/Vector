@@ -13,4 +13,3 @@ export function gridSetEditMode(on) { g.editMode = !!on; }
 export function gridPatch(key, fields) {
     apps = apps.map(a => a.key === key ? { ...a, ...fields } : a);
 }
-export function gridRemove(key) { apps = apps.filter(a => a.key !== key); }

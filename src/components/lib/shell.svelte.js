@@ -32,7 +32,11 @@ export function panesSnapshot() { return { ...panes }; }
 export function restorePanes(snap) { Object.assign(panes, snap); flushSync(); for (const fn of paneListeners) fn(null, null); }
 
 export function setTab(id) { shell.tab = id; flushSync(); }
-export function setShellFlag(key, on) { shell[key] = !!on; flushSync(); }
+export function setShellFlag(key, on) {
+    if (!(key in shell)) throw new Error(`setShellFlag: unknown flag '${key}'`);
+    shell[key] = !!on;
+    flushSync();
+}
 /** The rail's mail badge text ('' hides it). */
 export function setMailBadge(text) { shell.mailBadge = text || ''; }
 
@@ -55,7 +59,7 @@ export function setScreen(name, props) {
 // One-shot entrance animations: a tick per surface; the `reveal` action adds the class
 // and drops it on animationend. `revealPane` resolves when that end fires, for the
 // flows that sequence on it (the login fade-out).
-const reveals = $state({ profile: 0, chats: 0, chat: 0, groupOverview: 0, navbar: 0, chatList: 0, newChat: 0, login: 0 });
+const reveals = $state({ profile: null, chats: null, chat: null, groupOverview: null, navbar: null, chatList: null, newChat: null, login: null });   // { n, cls } once revealed
 const revealActive = $state({});
 const revealWaiters = new Map();
 export function shellReveals() { return reveals; }
@@ -63,7 +67,12 @@ export function revealPending(name) { return !!revealActive[name]; }
 export function revealPane(name, cls = 'fadein-anim') {
     if (!(name in reveals)) throw new Error(`revealPane: unknown surface '${name}'`);
     return new Promise((resolve) => {
-        revealWaiters.set(name, resolve);
+        // A second reveal before the first settles takes its place; the first must not hang.
+        revealWaiters.get(name)?.();
+        // An animation that never ends (a hidden surface, an occluded webview) must not hang either.
+        const failsafe = setTimeout(() => { if (revealWaiters.get(name) === settle) settle(); }, 600);
+        const settle = () => { clearTimeout(failsafe); revealWaiters.delete(name); resolve(); };
+        revealWaiters.set(name, settle);
         reveals[name] = { n: (reveals[name]?.n || 0) + 1, cls };
         flushSync();
     });
@@ -78,7 +87,6 @@ export function reveal(node, [name, tick]) {
             node.classList.remove(t.cls);
             revealActive[name] = false;
             revealWaiters.get(name)?.();
-            revealWaiters.delete(name);
         }, { once: true });
     };
     play(tick);
@@ -91,7 +99,7 @@ const sync = $state({ active: false, fadeOut: false, progress: null });
 export function syncLineState() { return sync; }
 export function setSyncLine(patch) { Object.assign(sync, patch); }
 
-// Pane changes fan out to the layout controllers that used to observe the elements.
+// Pane changes fan out to the layout controllers, which measure these).
 const paneListeners = new Set();
 export function onPaneChange(fn) { paneListeners.add(fn); return () => paneListeners.delete(fn); }
 

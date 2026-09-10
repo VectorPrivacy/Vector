@@ -44,7 +44,7 @@ export function setPickerCropperOpen(open) { panel.cropperOpen = !!open; }
 // transform transition for one frame so an anchor swap while closed does not slide.
 import { flushSync } from 'svelte';
 const root = $state({ visible: false, statusMode: false, noGifs: false, messageType: false, bottom: '', teleporting: false });
-const rootEls = $state.raw({ root: null });
+const rootEls = { root: null };
 let handlers = $state.raw(null);   // the app's bag for PickerPanel
 const visibilityListeners = new Set();
 export function pickerRoot() { return root; }

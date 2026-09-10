@@ -1,4 +1,4 @@
-// Settings-screen state (Phase 4). The Tor card derives from the last TorState the
+// Settings-screen state. The Tor card derives from the last TorState the
 // backend reported (or an optimistic one the toggle handler set); the blocked-users
 // list re-fetches when its version moves.
 const tor = $state({
@@ -25,7 +25,7 @@ export function blockedVersion() { return blocked.seq; }
 export function reloadBlockedUsers() { blocked.seq++; }
 
 // The Storage breakdown: the per-extension byte map the backend last reported.
-// `v` moves on every report so the chart re-plays its slice-in animation.
+// `seq` moves on every report so the chart re-plays its slice-in animation.
 const storage = $state({ distribution: null, seq: 0 });
 export function storageState() { return storage; }
 export function setStorageDistribution(distribution) {
@@ -127,9 +127,8 @@ export function setVoiceDownloadProgress(text) {
     if (voice.download) voice.download = { progress: text };
 }
 
-// The media server info dialog's learned capabilities and the relay info dialog's log.
 
-// The Settings screen itself (Phase 5): the plain toggles and platform visibility
+// The Settings screen itself: the plain toggles and platform visibility
 // the sections render from. Nested keys merge one level deep so a caller patches
 // `{ storage: { clearing: true } }` without restating the rest.
 const screen = $state({
@@ -152,7 +151,7 @@ export function setSettingsScreen(patch) {
         else screen[k] = v;
     }
 }
-export function requestSettingsScroll(target) { screen.scroll = { target, v: screen.scroll.seq + 1 }; }
+export function requestSettingsScroll(target) { screen.scroll = { target, seq: screen.scroll.seq + 1 }; }
 
 // Section handler bags that other modules register when they are ready (the
 // updater, the relay list, voice). A section renders once its bag exists.

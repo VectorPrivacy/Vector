@@ -36,8 +36,8 @@
 
     // A requested scroll (an update is waiting) lands after the screen has been shown.
     $effect(() => {
-        const { target, v } = sc.scroll;
-        if (!v || target !== 'updates') return;
+        const { target, seq } = sc.scroll;
+        if (!seq || target !== 'updates') return;
         const t = setTimeout(async () => {
             await tick();
             updatesEl?.scrollIntoView({ behavior: 'smooth', block: 'start' });

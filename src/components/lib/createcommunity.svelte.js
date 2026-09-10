@@ -1,5 +1,5 @@
 // The Create Community panel: name, avatar, picked invitees, and the create action's
-// progress. `session` bumps per open so the panel remounts its picker fresh.
+// progress. `seq` bumps per open so the panel remounts its picker fresh.
 const s = $state({ seq: 0, name: '', filter: '', avatarPath: null, avatarPreview: '', selected: 0, busy: false, status: '', error: false, profilesSeq: 0 });
 
 export function ccState() { return s; }

@@ -71,6 +71,5 @@ function stop(id) {
 /** The transfer ended well (or was cancelled): nothing is left to show. */
 export function transferDone(id) { stop(id); map.delete(id); }
 
-// Kept for the picture and video components.
 export function uploadProgress(pendingId) { return map.get(pendingId)?.pct ?? null; }
 export function downloadProgress(attachmentId) { return map.get(attachmentId)?.pct ?? null; }

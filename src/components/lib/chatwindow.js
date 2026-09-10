@@ -1,5 +1,5 @@
 /**
- * The chat view's rendered window as a derivation (Phase 2c, CHAT_VIEW_ISLAND_DESIGN.md).
+ * The chat view's rendered window as a derivation.
  *
  * One pass over `messages.slice(start, end)` yields everything the vanilla list used
  * to compute by reading sibling DOM: each row's streak state, where a day separator

@@ -1,4 +1,4 @@
-// The composer's state (Phase 3, COMPOSER_ISLAND_DESIGN.md): one home for what six
+// The composer's state: one home for what six
 // modules used to poke into the chrome by hand. The editor itself (composer.js) is
 // an imperative leaf and is never touched from here; this is the mode it is in, the
 // draft's emptiness (mic ↔ send), the lock, and the reply/command bars' content.

@@ -13,7 +13,7 @@ const p = $state({
 export function attachmentState() { return p; }
 // The panel's own root: visible over the composer at a bottom offset the opener measures.
 // Every open and close goes through one setter, which the back stack listens to.
-const rootEls = $state.raw({ root: null });
+const rootEls = { root: null };
 let handlers = $state.raw(null);
 const visibilityListeners = new Set();
 export function attachmentEls() { return rootEls; }

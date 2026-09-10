@@ -1,4 +1,4 @@
-// The send-file preview's state (Phase 4). The vanilla module keeps the SOURCES
+// The send-file preview's state. The vanilla module keeps the SOURCES
 // (a path, cached bytes, a File object, a zip in progress) and the send; this is
 // what the overlay renders and the choices the user makes in it.
 const fp = $state({

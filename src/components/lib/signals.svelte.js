@@ -1,7 +1,7 @@
 // Per-key invalidation signals: the fine-grained half of the store layer.
 //
 // Page state stays RAW (chat and profile objects are shared by reference with
-// eventCache and the legacy arrays, mutated in place), so reactivity cannot come
+// eventCache and the app's arrays, mutated in place), so reactivity cannot come
 // from proxies. Instead every entity has a version signal: a row's view-model reads
 // its own chat's version, and the vanilla side bumps exactly that one when it
 // mutates the chat. One message arriving re-derives one row; the list's order and

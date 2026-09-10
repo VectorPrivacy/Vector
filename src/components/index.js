@@ -55,12 +55,12 @@ export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/i
 export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktAddFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
 export { gridState, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
-import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
+import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls } from './lib/pins.svelte.js';
 import { gifLoading, gifResults, gifEmpty, gifLoadingMore } from './lib/gifs.svelte.js';
-import { packDetails, openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
+import { openPackDetails, resolvePackDetails, closePackDetails } from './lib/packdetails.svelte.js';
 import { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName } from './lib/packcreator.svelte.js';
-import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, panelState, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen } from './lib/picker.svelte.js';
+import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen } from './lib/picker.svelte.js';
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewRoster, overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
@@ -122,7 +122,7 @@ export {
     setFilePreviewContent as fpContent,
     patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
-// Settings: the Tor card's state and the blocked-users list's version.
+// Settings: every section's state and the handler registries the sections read.
 export { torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
