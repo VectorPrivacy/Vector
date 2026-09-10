@@ -1265,7 +1265,7 @@ body.ws #ws-rail-shortcuts {
      community list, which is the only part that scrolls. */
   flex: 1 1 auto;
   min-height: 0;
-  padding: 14px 0 6px;
+  padding: 6px 0 6px;
 }
 
 /* New Messages holds its size: at most three rows, and it must not be the thing
@@ -1316,7 +1316,9 @@ body.ws .ws-rail-group[hidden] {
   display: none;
 }
 
-body.ws .ws-rail-group + .ws-rail-group {
+/* A hidden group is still a sibling: with no unread DMs the gap would otherwise
+   land above Communities. */
+body.ws .ws-rail-group:not([hidden]) + .ws-rail-group {
   margin-top: 10px;
 }
 
