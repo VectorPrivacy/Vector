@@ -6,7 +6,7 @@
  *   `invitesChanged`, `openChatChanged`, `paneChanged`) — the vanilla side names WHAT
  *   changed; each touches the matching signal and the island re-derives only the
  *   DOM that depends on it. Nothing calls "render" any more.
- * - `updateChatlistPreview` / `updateChatlistTimestamps` — legacy call-site shims.
+ * - `updateChatlistPreview` / `updateChatlistTimestamps` — thin call-site shims over the signals.
  * - unread counting (`computeRowBadgeCount` & co.) — shared by the island via the
  *   mount-time `h` helper bundle and by every unread indicator outside the list.
  */
@@ -232,7 +232,7 @@ function mountChatlist() {
     renderRailShortcuts();
 }
 
-// ── mutators: the vanilla side names WHAT changed ──
+// ── mutators: the app names WHAT changed ──
 
 /**
  * One chat changed in place (a message, its unread, a typer, its name, its mute):

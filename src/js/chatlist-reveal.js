@@ -9,13 +9,11 @@
  *
  * Animation is opacity-only (GPU compositor) — no layout/paint retrigger.
  *
- * Insertion vs. scroll. a full render used to rebuild the list via
- * replaceChildren(), so every render swaps in fresh DOM nodes. Both paths
- * fire their initial callback for each new row on observe, which would
- * animate the entire visible list on every render (the black flash). We
- * gate on data-cv-was-off: a row only animates on transition to visible
- * AFTER it has been observed off-screen at least once. Freshly inserted
- * rows don't have the flag, so the initial in-view callback is a no-op.
+ * Insertion vs. scroll. An observer fires its initial callback for each new row
+ * on observe, which would animate every row in view when the list first renders
+ * (the black flash). We gate on data-cv-was-off: a row only animates on the
+ * transition to visible AFTER it has been observed off-screen at least once, so
+ * a freshly inserted row's initial in-view callback is a no-op.
  */
 
 (function () {
@@ -87,9 +85,8 @@
         }
         observeAll();
 
-        // a rebuild that replaced the children — old observers
-        // become noops on detached nodes (auto-cleaned by browser), but new
-        // rows need to be observed. MutationObserver picks up added rows.
+        // New rows (a chat joining the list) need observing; the keyed list reuses
+        // the rest, so only additions matter.
         const mo = new MutationObserver((mutations) => {
             for (const m of mutations) {
                 for (const node of m.addedNodes) {

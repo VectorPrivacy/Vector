@@ -499,7 +499,7 @@ async function setupRustListeners() {
             const newName = evt.payload.nickname || evt.payload.name || evt.payload.display_name || (id.substring(0, 12) + '…');
             const newAvatarSrc = getProfileAvatarSrc(evt.payload);
             // Rows and reply quotes derive from the profile signal; mention chips are
-            // vanilla leaves patched here.
+            // built by the text pipeline and patched here.
             document.querySelectorAll(`.mention[data-npub="${id}"]`).forEach(el => {
                 el.textContent = '@' + newName;
             });
@@ -873,10 +873,8 @@ async function setupRustListeners() {
 
         // If this chat is open, then update the rendered message
         if (strOpenChat === evt.payload.chat_id) {
-            // If `message_update` arrives before `message_new` has rendered the row,
-            // `domMsg` is null and the `?.replaceWith` below is a no-op. The next
-            // `message_new` will render the up-to-date message from chat.messages,
-            // so missing the surgical update here is safe.
+            // If `message_update` arrives before `message_new` has rendered the row there
+            // is nothing to refill; the next `message_new` renders it from chat.messages.
             // The row refills its body only when the content signature changes, so a
             // reaction echo leaves video playback and spoiler reveals alone.
             updateMessageRow(evt.payload.message, evt.payload.old_id);

@@ -964,11 +964,8 @@ function insertAtCursor(text, autoSpace = false) {
     input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-// Pack-emoji selection — Phase 1 inserts the `:shortcode:` literal so
-// recipients with the same pack subscribed still see the right emoji
-// (their renderer resolves the shortcode against their own pack list).
-// Phase 2 will add the NIP-30 `emoji` tag to the outbound rumor so
-// rendering doesn't depend on the recipient already having the pack.
+// Pack-emoji selection inserts the `:shortcode:` literal; the send attaches the
+// NIP-30 `emoji` tags, so a recipient renders it without the pack equipped.
 function _onPackEmojiClick(e) {
     const span = e.target.closest('.emoji-pack-emoji');
     if (!span) return;

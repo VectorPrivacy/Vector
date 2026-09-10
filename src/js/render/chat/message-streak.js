@@ -64,7 +64,7 @@ function shouldCollapseStreak(prevMsg, currMsg) {
 
 /**
  * Look up a Message object for a given row. Prefers the cached `row._dmsgMsg`
- * (set in renderMessage) so this runs in O(1); falls back to scanning
+ * (set by the row on mount) so this runs in O(1); falls back to scanning
  * chat.messages by id only if the cache is missing (defensive).
  */
 function _dmsgLookupMessage(rowEl) {

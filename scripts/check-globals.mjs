@@ -68,6 +68,7 @@ const declaredIn = new Map();        // name -> the scripts declaring it (any de
 const topDeclaredIn = new Map();     // name -> the scripts declaring it at top level: what the shared scope actually holds
 const perFile = new Map();
 const localNames = new Map();        // file → names it declares at any depth           // file → Set of identifiers referenced
+const computedUses = [];             // VectorSvelte[expr]: a use the name-based passes cannot see
 const eagerCalls = [];               // { file, line, names }: top-level VectorSvelte.* calls and the identifiers their arguments pass by value
 const svelteUses = new Map();        // VectorSvelte.<name> → [files]
 const svelteUsesIn = new Map();      // file → Set of VectorSvelte.<name> it calls
@@ -111,6 +112,7 @@ for (const rel of scripts) {
             case 'CatchClause': collectPattern(n.param, fileDeclared); break;
             case 'ImportDeclaration': for (const s of n.specifiers) fileDeclared.add(s.local.name); break;
             case 'MemberExpression':
+                if (n.object.type === 'Identifier' && n.object.name === 'VectorSvelte' && n.computed) computedUses.push(`${rel}:${n.loc?.start.line}`);
                 if (n.object.type === 'Identifier' && n.object.name === 'VectorSvelte' && !n.computed && n.property.type === 'Identifier') {
                     const list = svelteUses.get(n.property.name) || [];
                     list.push(rel);
@@ -191,7 +193,8 @@ for (const [rel, refs] of perFile) {
 for (const [name, files] of svelteUses) {
     if (!exported.has(name)) { findings++; console.log(`VectorSvelte.${name} is not exported (used in ${[...new Set(files)].join(', ')})`); }
 }
-const dead = [...exported].filter(n => !svelteUses.has(n) && !COMPONENT_ONLY.has(n)).sort();
+if (computedUses.length) console.log(`note: computed VectorSvelte[...] access at ${computedUses.join(', ')}; the dead-export pass cannot see those uses`);
+const dead = computedUses.length ? [] : [...exported].filter(n => !svelteUses.has(n) && !COMPONENT_ONLY.has(n)).sort();
 if (dead.length) { findings += dead.length; console.log(`index.js exports nothing calls: ${dead.join(', ')}`); }
 // A script may deliberately wrap a bundle export under the same name. It is only a trap when
 // the shadowing script never calls the export it hides: the two are then different functions,

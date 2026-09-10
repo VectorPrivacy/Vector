@@ -1,5 +1,5 @@
 /**
- * Reusable context menu — singleton appended to <body>, positioned at
+ * Reusable context menu (ui/ContextMenu.svelte over lib/contextmenu), positioned at
  * cursor (right-click) or anchor rect (click). Items are arbitrary; the
  * caller hands in `{ label, icon?, danger?, onClick }`. Auto-closes on
  * outside click, Escape, or item activation.

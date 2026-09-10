@@ -61,8 +61,8 @@ const _dmsgListHelpers = {
         const chat = arrChats.find(c => c.id === strOpenChat);
         return chatIsGroup(chat) ? (msg.npub ? getProfile(msg.npub) : null) : getProfile(chat?.id);
     },
-    // Render-time facts about a row, the way the vanilla builder read them once per
-    // render: cached per message object so a re-derive of 80 rows costs 80 lookups,
+    // Render-time facts about a row, read once per render: cached per message object
+    // so a re-derive of 80 rows costs 80 lookups,
     // not 80 scans. A changed message is a new object and gets a fresh context.
     ctxFor: (msg) => {
         let ctx = _dmsgRowCtxCache.get(msg);
@@ -93,10 +93,9 @@ function _dmsgRowCtx(msg) {
 }
 
 /**
- * Update a rendered row to `msg` in place: the island re-derives its shell and
- * refills its content on the same element, so the toolbar target, jump highlight,
- * streak state and scroll position all survive. Vanilla-built rows (system events,
- * PIVX, blocked) fall back to a full replace.
+ * Update a rendered row to `msg` in place: the row re-derives its shell and refills
+ * its content on the same element, so the toolbar target, jump highlight, streak
+ * state and scroll position all survive.
  */
 function updateMessageRow(msg, oldId = '') {
     // The list derives from the array: make sure it holds `msg`, then re-derive. Same

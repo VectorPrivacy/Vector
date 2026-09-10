@@ -88,7 +88,7 @@ async function updateSelfDestructIndicator(chatId) {
     VectorSvelte.setSelfDestructSecs(secs && chatId === strOpenChat ? secs : 0);
 }
 
-/** Play the Tron "derez" dissolve on a message row, then remove it. Idempotent. */
+/** Mark a row as dissolving so the list plays its derez; the store then drops it. Idempotent. */
 function _derezRowDom(domMsg) {
     if (!domMsg || domMsg.dataset.derezzing) return;
     domMsg.dataset.derezzing = '1';
@@ -298,7 +298,7 @@ async function updateChat(chat, arrMessages = [], profile = null, fClicked = fal
  * animation, unread badge and divider, snap on an own send).
  */
 function _updateChatWindow(chat, sortedMessages, single) {
-    initMessageToolbar();   // lives inside the container; the vanilla row builder used to init it
+    initMessageToolbar();   // the toolbar host lives inside the container
     const msgs = _dmsgListHelpers.messages(chat.id);
     let lo = Infinity, hi = -1;
     for (const m of sortedMessages) {

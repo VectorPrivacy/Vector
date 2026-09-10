@@ -456,7 +456,7 @@ body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-avatar-container {
   grid-row: 1 / span 2;
 }
 
-/* Inline-sized by createAvatarImg, hence !important (as elsewhere in the rail). */
+/* Inline-sized by ui/Avatar.svelte, hence !important (as elsewhere in the rail). */
 body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-avatar-container img {
   width: 38px !important;
   height: 38px !important;
@@ -546,7 +546,7 @@ body.ws .chatlist-community-head:hover {
   background-color: var(--ws-hover);
 }
 
-/* Inline-sized by createAvatarImg, hence !important (as everywhere it's re-used). */
+/* Inline-sized by ui/Avatar.svelte, hence !important (as everywhere it's re-used). */
 body.ws .chatlist-community-head-avatar {
   width: 36px !important;
   height: 36px !important;
@@ -1271,7 +1271,7 @@ body.ws .chatlist-community-head:hover {
 }
 
 /* Communities read as rounded squares, DMs as circles: a room is not a person.
-   createAvatarImg hardcodes an inline `border-radius: 50%`, hence !important. */
+   ui/Avatar.svelte writes an inline `border-radius: 50%`, hence !important. */
 .ws-rail-item.is-community .ws-rail-item-avatar {
   border-radius: 8px !important;
 }
@@ -1364,7 +1364,7 @@ body.ws.ws-rail-collapsed #ws-rail-shortcuts::-webkit-scrollbar {
 }
 
 /* At icon-only size the avatar IS the affordance, so it fills its square.
-   createAvatarImg writes width/height inline alongside the radius, hence
+   ui/Avatar.svelte writes width/height inline alongside the radius, hence
    !important here too. */
 body.ws.ws-rail-collapsed .ws-rail-item-avatar {
   width: 32px !important;
@@ -1581,7 +1581,7 @@ body.ws.ws-rail-collapsed #ws-rail-account #account {
   border-radius: 12px;
 }
 
-/* Inline-sized by createAvatarImg, hence !important (as with the shortcuts). */
+/* Inline-sized by ui/Avatar.svelte, hence !important (as with the shortcuts). */
 body.ws.ws-rail-collapsed #ws-rail-account #account-avatar-container img {
   width: 32px !important;
   height: 32px !important;
