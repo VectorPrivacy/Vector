@@ -22,7 +22,7 @@ function hideToast() { VectorSvelte.hideToast(); }
  *
  * @param {Object} info - vector-core's DowngradeBlock: { db_schema, supported_schema, last_app_version }
  */
-async function showDowngradeBlock(info) {
+async function openDowngradeBlock(info) {
     const format = (v) => (typeof parseVersion === 'function' ? parseVersion(v).display : `v${v}`);
 
     let current = 'This build';

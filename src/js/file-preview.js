@@ -41,7 +41,7 @@ function ensureFilePreview() {
         h: {
             close: () => closeFilePreview(),
             send: () => sendPreviewedFile(),
-            publish: () => openPublishDialog(),
+            publish: () => publishPendingMiniApp(),
             readImagePreview: (path) => invoke('read_image_preview', { path }),
             thumbhash: (path) => invoke('generate_thumbhash_for_preview', { filePath: path || '' }),
             buildFileListHtml: (files, total) => buildFileListHtml(files, total),
@@ -219,10 +219,8 @@ function miniAppPreviewContent(miniAppInfo) {
     return { kind: 'miniapp', icon: validatedIcon, name: miniAppInfo?.name || 'Mini App' };
 }
 
-/**
- * Open the publish dialog for marketplace publishing
- */
-async function openPublishDialog() {
+/** Hand the pending mini app to the Nexus publish flow (the dialog itself is marketplace.js'). */
+async function publishPendingMiniApp() {
     if (!pendingFile || !pendingMiniAppInfo) {
         return console.error('No pending file or Mini App info for publishing');
     }

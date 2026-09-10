@@ -1623,7 +1623,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     try {
         const downgrade = await invoke('check_account_downgrade');
         if (downgrade) {
-            await showDowngradeBlock(downgrade);
+            await openDowngradeBlock(downgrade);
             return;
         }
     } catch (e) {

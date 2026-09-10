@@ -6,7 +6,9 @@
  * ReferenceError in another file at the moment that path runs, not at load. This parses
  * every first-party script, collects every name any of them declares (any depth), and
  * reports identifiers that none declares and the browser does not provide. It also checks
- * that every `VectorSvelte.<name>` the scripts use is exported by src/components/index.js.
+ * that every `VectorSvelte.<name>` the scripts use is exported by src/components/index.js,
+ * that nothing on that surface is dead, and that no export shares a name with a global (a
+ * bare call would then reach the vanilla one and the prefixed call the bundle's).
  *
  * Usage: node scripts/check-globals.mjs   (exit 1 on findings)
  */
@@ -56,6 +58,7 @@ const PROVIDED = new Set([
 ]);
 
 const declared = new Set();          // every name any first-party script declares, any depth
+const declaredIn = new Map();        // name -> the scripts declaring it
 const perFile = new Map();           // file → Set of identifiers referenced
 const svelteUses = new Map();        // VectorSvelte.<name> → [files]
 
@@ -86,16 +89,17 @@ for (const rel of scripts) {
     const code = readFileSync(file, 'utf8');
     const ast = acorn.parse(code, { ecmaVersion: 'latest', sourceType: 'script', allowHashBang: true });
     const refs = new Set();
+    const fileDeclared = new Set();
     walk(ast, (n) => {
         switch (n.type) {
-            case 'VariableDeclarator': collectPattern(n.id, declared); break;
+            case 'VariableDeclarator': collectPattern(n.id, fileDeclared); break;
             case 'FunctionDeclaration': case 'FunctionExpression': case 'ArrowFunctionExpression':
-                if (n.id) declared.add(n.id.name);
-                for (const p of n.params) collectPattern(p, declared);
+                if (n.id) fileDeclared.add(n.id.name);
+                for (const p of n.params) collectPattern(p, fileDeclared);
                 break;
-            case 'ClassDeclaration': case 'ClassExpression': if (n.id) declared.add(n.id.name); break;
-            case 'CatchClause': collectPattern(n.param, declared); break;
-            case 'ImportDeclaration': for (const s of n.specifiers) declared.add(s.local.name); break;
+            case 'ClassDeclaration': case 'ClassExpression': if (n.id) fileDeclared.add(n.id.name); break;
+            case 'CatchClause': collectPattern(n.param, fileDeclared); break;
+            case 'ImportDeclaration': for (const s of n.specifiers) fileDeclared.add(s.local.name); break;
             case 'MemberExpression':
                 if (n.object.type === 'Identifier' && n.object.name === 'VectorSvelte' && !n.computed && n.property.type === 'Identifier') {
                     const list = svelteUses.get(n.property.name) || [];
@@ -116,6 +120,12 @@ for (const rel of scripts) {
         if (n.type === 'Identifier' && !n.__notRef) refs.add(n.name);
     });
     perFile.set(rel, refs);
+    for (const name of fileDeclared) {
+        declared.add(name);
+        const list = declaredIn.get(name) || [];
+        list.push(rel);
+        declaredIn.set(name, list);
+    }
 }
 
 // The bundle's surface: named exports and export lists in components/index.js.
@@ -130,6 +140,11 @@ for (const m of indexSrc.matchAll(/export\s*\{([^}]+)\}/g)) {
     }
 }
 
+// Exports with no vanilla caller: either a component-only read that does not belong on the
+// bundle's surface, or the leftover of a deleted call site. Ones the components legitimately
+// share with each other through the bundle are listed here.
+const COMPONENT_ONLY = new Set(['flushSync', 'deriveWindow', 'profileEditDirty']);
+
 let findings = 0;
 for (const [rel, refs] of perFile) {
     const missing = [...refs].filter(n => !declared.has(n) && !PROVIDED.has(n)).sort();
@@ -138,5 +153,17 @@ for (const [rel, refs] of perFile) {
 for (const [name, files] of svelteUses) {
     if (!exported.has(name)) { findings++; console.log(`VectorSvelte.${name} is not exported (used in ${[...new Set(files)].join(', ')})`); }
 }
+const dead = [...exported].filter(n => !svelteUses.has(n) && !COMPONENT_ONLY.has(n)).sort();
+if (dead.length) { findings += dead.length; console.log(`index.js exports nothing calls: ${dead.join(', ')}`); }
+// A script may deliberately wrap a bundle export under the same name. It is only a trap when
+// the shadowing script never calls the export it hides: the two are then different functions,
+// and which one a call reaches depends on whether someone typed the prefix.
+for (const name of [...exported].sort()) {
+    const owners = declaredIn.get(name);
+    if (!owners) continue;
+    if (owners.some(f => (perFile.get(f), readFileSync(join(SRC, f), 'utf8').includes(`VectorSvelte.${name}`)))) continue;
+    findings++;
+    console.log(`${owners.join(', ')}: declares '${name}', which is also a different VectorSvelte export`);
+}
 if (findings) { console.log(`\n${findings} finding(s)`); process.exit(1); }
-console.log(`[check-globals] ${scripts.length} scripts, ${declared.size} declared names, ${svelteUses.size} VectorSvelte members: clean`);
+console.log(`[check-globals] ${scripts.length} scripts, ${declared.size} declared names, ${exported.size} exports, ${svelteUses.size} used: clean`);

@@ -7,14 +7,17 @@ const panes = $state({
     navbar: false, chats: true, chat: false, profile: false, settings: false,
     invites: false, groupOverview: false, chatNew: false, createGroup: false,
 });
-const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false, ws: false });
-let handlers = {};   // { openProfile, openChatlist, openSettings, openInvites }
+// Every key the panes bind to, declared up front: setShellFlag takes any name, so a key
+// that first appears in a setter call is invisible to a reader of this file.
+const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false, mailBadge: '', newChatButtons: false, ws: false });
+// Registered by two owners: main.js (the nav actions) and widescreen.js (the list
+// resizer), so writes must merge. { openProfile, openChatlist, openSettings, openInvites,
+// openNewChat, openCreateGroup, listResizeStart, listResizeReset }
+let handlers = {};
 
 export function shellPanes() { return panes; }
 export function shellState() { return shell; }
 export function shellHandlers() { return handlers; }
-export function setShellHandlers(h) { handlers = h || {}; }
-/** Add handlers from another owner (widescreen's rail and resizer) without clobbering the bag. */
 export function mergeShellHandlers(partial) { handlers = { ...handlers, ...partial }; }
 
 export function showPane(name, on) {

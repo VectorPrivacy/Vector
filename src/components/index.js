@@ -10,7 +10,6 @@
 //   chat/ composer/ settings/ ...   later phases, one directory per screen
 import { mount, unmount, flushSync } from 'svelte';
 
-import ContactPicker from './people/ContactPicker.svelte';
 import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
 import ComposerPopups from './composer/ComposerPopups.svelte';
@@ -19,7 +18,7 @@ import MiniProfile from './people/MiniProfile.svelte';
 import ReactionPopups from './chat/ReactionPopups.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
-import { uploadProgressed, downloadProgressed, transferDone, transferFailed } from './lib/attachments.svelte.js';
+import { uploadProgressed, downloadProgressed, transferDone } from './lib/attachments.svelte.js';
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
@@ -35,10 +34,10 @@ import DepositDialog from './miniapps/pivx/DepositDialog.svelte';
 import SendDialog from './miniapps/pivx/SendDialog.svelte';
 import WithdrawDialog from './miniapps/pivx/WithdrawDialog.svelte';
 import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
-export { attachmentEls, setAttachmentHandlers, onAttachmentVisibility, attachmentVisible, setAttachmentVisible, attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletState, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
+export { attachmentEls, setAttachmentHandlers, onAttachmentVisibility, attachmentVisible, setAttachmentVisible, attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
-export { setLaunchDialogHandlers, addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, qrScanner, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
+export { setLaunchDialogHandlers, addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
 import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
 import QrOverlay from './ui/QrOverlay.svelte';
 import QrScanner from './ui/QrScanner.svelte';
@@ -46,8 +45,8 @@ import App from './shell/App.svelte';
 export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte.js';
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
 export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
-export { accountState, setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
-export { setMailBadge, mergeShellHandlers, shellScreens, setScreen, revealPane, revealPending, syncLineState, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag, setShellHandlers } from './lib/shell.svelte.js';
+export { setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
+export { setMailBadge, mergeShellHandlers, setScreen, revealPane, revealPending, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag } from './lib/shell.svelte.js';
 import StatusDialog from './ui/StatusDialog.svelte';
 import DowngradeBlock from './ui/DowngradeBlock.svelte';
 import CredentialModal from './ui/CredentialModal.svelte';
@@ -56,16 +55,16 @@ import ProcessingOverlay from './ui/ProcessingOverlay.svelte';
 import PermissionPrompt from './ui/PermissionPrompt.svelte';
 import PublishDialog from './ui/PublishDialog.svelte';
 export { publishState, openPublishDialog, activatePublishDialog, closePublishDialog, unmountPublishDialog, setPublishPerms, setPublishPermsError, setPublishHint, setPublishBusy } from './lib/publish.svelte.js';
-export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt, permissionState } from './lib/overlays.svelte.js';
+export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
 export { loginState, bunkerState, pickerState as loginPickerState, encryptState, patchLogin, patchBunker, patchPicker, patchEncrypt, loginScreen, loginShowForm, loginHide, loginShowBunker, loginHideBunker, bunkerStatus, bunkerLink, bunkerCopied, bunkerBusy, bunkerDeadline, bunkerTick, resetLoginPin, focusLoginInput } from './lib/login.svelte.js';
-export { credentialState, openCredentialDialog, closeCredentialDialog, migrationState, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
+export { credentialState, openCredentialDialog, closeCredentialDialog, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
-export { editHistoryState, setEditHistory, setEditHistoryBelow, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
+export { editHistoryState, setEditHistory, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs, patchRelayStatus } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
-export { mktState, mktApps, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktSetQuery, mktAddFilter, mktRemoveFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
-export { gridState, gridApps, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch, gridRemove } from './lib/miniappsgrid.svelte.js';
+export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktAddFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
+export { gridState, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch } from './lib/miniappsgrid.svelte.js';
 export { polState, polPresets, polRuleKinds, polStored, polDraft, polSetCatalogue, polSetStored, polSetChannels, polResetChannels, polShowGallery, polOpenEditor, polSetBusy, polSetPreview, polSetPreviewError } from './lib/policy.svelte.js';
 import { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab } from './lib/moderation.svelte.js';
 import { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls } from './lib/pins.svelte.js';
@@ -82,73 +81,110 @@ import Settings from './settings/Settings.svelte';
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
 // re-derive exactly the DOM that depends on it.
-export { timeTickVersion, bumpTimeTick } from './lib/stores.js';
+export { bumpTimeTick } from './lib/stores.js';
 export {
-    ensureSignals, touchChat, touchProfile, touchCommunity, touchInvites,
-    reorderChatlist, setOpenChat, setPane,
-    profileViewState, setOpenProfile, setProfileEditing,
+    ensureSignals,
+    touchChat,
+    touchProfile,
+    touchCommunity,
+    touchInvites,
+    reorderChatlist,
+    setOpenChat,
+    setPane,
+    profileViewState,
+    setOpenProfile,
+    setProfileEditing,
 } from './lib/signals.svelte.js';
 /** Apply pending updates synchronously (for the rare caller that reads the DOM right after). */
 export { flushSync };
 export { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty };
-export { profileScreen, setProfileSwitcherOpen, profileEls } from './lib/profilescreen.svelte.js';
+export { setProfileSwitcherOpen, profileEls } from './lib/profilescreen.svelte.js';
 export { overviewRoster, overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
-export { uploadProgressed, downloadProgressed, transferDone, transferFailed, setMiniappStatus };
-export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, panelState, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen };
+export { uploadProgressed, downloadProgressed, transferDone, setMiniappStatus };
+export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen };
 export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName };
-export { packDetails, openPackDetails, resolvePackDetails, closePackDetails };
+export { openPackDetails, resolvePackDetails, closePackDetails };
 export { gifLoading, gifResults, gifEmpty, gifLoadingMore };
-export { pinsState, setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
+export { setPins, setPinsOpen, setPinsButtonVisible, setPinsHandlers, pinsEls };
 export { setChatPaneHandlers, setChatHeaderHandlers } from './lib/chatpane.svelte.js';
 export { wallpaperState, setWallpaperLayer, setWallpaperSliders, setWallpaperBusy, setWallpaperLabel, setWallpaperPreviewing } from './lib/wallpaper.svelte.js';
-export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetQuery, modSetBusy, modSetProgress, modSetTab };
+export { modState, modIntel, modKeep, modOpen, modSetIntel, modSetError, modSetBusy, modSetProgress, modSetTab };
 export { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails };
 // The chat window as a derivation (streaks, day breaks, merged system events).
 export { deriveWindow } from './lib/chatwindow.js';
 // The chat view's window state: the engine sets it, the list island derives from it.
-export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, noticeState, setNotice, clearNotices, setArrival } from './lib/chatview.svelte.js';
+export { setWindow, clearWindow, touchWindow, touchMessage, setDivider, clearDivider, setNotice, setArrival } from './lib/chatview.svelte.js';
 export { setSelfDestructSecs } from './lib/composer.svelte.js';
 export { toolbarHost, toolbarEls, setToolbarHandlers, setToolbarHost, setToolbarSwipe } from './lib/toolbar.svelte.js';
 export { showToast, hideToast } from './lib/toast.svelte.js';
-export { contextMenuState, contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/contextmenu.svelte.js';
-export { rekeyState, setRekey } from './lib/rekey.svelte.js';
-export { inviteModalState, setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
+export { contextMenuEls, setContextMenuHandlers, setContextMenu } from './lib/contextmenu.svelte.js';
+export { setRekey } from './lib/rekey.svelte.js';
+export { setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
 export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
-export { setModelDownload, modelDownloadState } from './lib/audio.svelte.js';
-export { recorderState, setVoiceState, setVoiceStatusText, setVoiceTimer, setVoiceDrag, setVoiceDot, setVoiceLockFading, setVoiceTooltip, setVoicePreview, voiceFadeIn, setVoiceHandlers, voiceEls } from './lib/voicerecorder.svelte.js';
+export { setModelDownload } from './lib/audio.svelte.js';
+export { setVoiceState, setVoiceStatusText, setVoiceTimer, setVoiceDrag, setVoiceDot, setVoiceLockFading, setVoiceTooltip, setVoicePreview, voiceFadeIn, setVoiceHandlers, voiceEls } from './lib/voicerecorder.svelte.js';
 export { setPickerHandlers, onPickerVisibility, pickerVisible, setPickerVisible, setPickerBottom, setPickerAnchor, pickerRoot, pickerEls, showPickerTip, hidePickerTip } from './lib/picker.svelte.js';
 // The send-file preview overlay's state.
 export {
-    filePreview, filePreviewContent, openFilePreview as fpOpen, closeFilePreview as fpClose,
-    setFilePreviewContent as fpContent, patchFilePreview as fpPatch,
+    filePreview,
+    openFilePreview as fpOpen,
+    closeFilePreview as fpClose,
+    setFilePreviewContent as fpContent,
+    patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
 // Settings: the Tor card's state and the blocked-users list's version.
 export {
-    torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, securityState, setSecurity, setSigner, setSignerDot, setDisplaySettings, updatesState, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress,
-    settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers,
+    torState,
+    setTorState,
+    setTorLocked,
+    setTorAdvancedOpen,
+    setTorCircuits,
+    reloadBlockedUsers,
+    setStorageDistribution,
+    setNotifSettings,
+    setSecurity,
+    setSigner,
+    setSignerDot,
+    setDisplaySettings,
+    setUpdates,
+    setNetwork,
+    voiceState,
+    setVoice,
+    setVoiceDownloadProgress,
+    settingsScreen,
+    setSettingsScreen,
+    requestSettingsScroll,
+    setSettingsHandlers,
 } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
-    startReply, cancelReply, startEdit, cancelEdit, setDraftEmpty, setLock, setComposerStatus,
-    openPopup, closePopup,
-    setCommand, clearCommand, setCommandHint, setCommandInvalid, setCommandValue, openChoiceMenu, closeChoiceMenu,
-    composerMode, setAttachmentOpen, setEmojiIcon, setScrollBadge, setComposerHandlers, composerEls,
+    startReply,
+    cancelReply,
+    startEdit,
+    cancelEdit,
+    setDraftEmpty,
+    setLock,
+    setComposerStatus,
+    openPopup,
+    closePopup,
+    setCommand,
+    clearCommand,
+    setCommandHint,
+    setCommandInvalid,
+    setCommandValue,
+    openChoiceMenu,
+    closeChoiceMenu,
+    composerMode,
+    setAttachmentOpen,
+    setEmojiIcon,
+    setScrollBadge,
+    setComposerHandlers,
+    composerEls,
 } from './lib/composer.svelte.js';
 
-/**
- * Mount the contact picker into `target`. The component owns its dialog-local state;
- * the vanilla side drives it through the methods the returned instance exports
- * (setFilter / addStranger / select / setProfiles / reset / getSelection) and receives
- * selection changes through the `onSelectionChange` callback prop. Pass the return
- * value to `unmountComponent(instance)` on dialog close.
- */
-export function mountContactList(target, props = {}) {
-    target.replaceChildren();
-    return mount(ContactPicker, { target, props });
-}
 
 
 /** Tear down a mounted island (call on dialog close / element removal). */
@@ -187,11 +223,6 @@ export function mountCommandComposer({ editor }) {
     editor.before(host);
     return mount(CommandComposer, { target: host });
 }
-
-/**
- * Mount the chat header reconciler over the existing header elements (renderless).
- * It derives name, avatar, subtext and menu visibility from the open chat's signals.
- */
 
 /** Mount the send-file preview overlay at body level; it shows itself from `fpOpen`. */
 export function mountFilePreview({ h }) {
@@ -252,16 +283,12 @@ export function mountPivxDialogs({ h }) {
 
 
 
-/** Mount the invite panel's link section into `host` (#cmt-links); the panel is built per open. */
-
 /** Mount the Network section's dialogs (add relay, relay info, media server info) at body level. */
 export function mountNetworkDialogs({ h }) {
     mount(AddRelayDialog, { target: document.body, props: { h: h.addRelay } });
     mount(RelayInfoDialog, { target: document.body, props: { h: h.relayInfo } });
     mount(BlossomInfoDialog, { target: document.body, props: { h: h.blossom } });
 }
-
-/** Mount account rows into `host`; mounted fresh per open, so props are a snapshot. */
 
 /** Mount the edit-history popup onto the body (once); it renders when opened. */
 export function mountEditHistory({ h }) {
