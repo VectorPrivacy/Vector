@@ -765,6 +765,13 @@ body.ws .chatlist-community-head-members {
   font-size: 12px;
   line-height: 14px;
   color: rgba(255, 255, 255, 0.42);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+body.ws .chatlist-community-head-members > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 body.ws .chatlist-community-head-members-icon {
