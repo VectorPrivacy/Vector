@@ -135,7 +135,9 @@
     let avatarFailed = $state(false);
     $effect(() => { avatarSrc; avatarFailed = false; });
 
-    // Chips arriving after the row's first paint pop in.
+    // Chips arriving after the row's first paint pop in. Deliberately not state: a chip reads
+    // it once at mount, and a later flip must not re-render the chips already on screen.
+    // svelte-ignore non_reactive_update
     let painted = false;
     $effect(() => { painted = true; });
     const arrival = arrivalState();

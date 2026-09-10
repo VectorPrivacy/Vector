@@ -12,7 +12,8 @@
     //    listen(event, fn) → unlisten, glowColor(), transcriptionSupported(att, msg), transcribe(path), autoTranscribe(msg),
     //    cancelUpload(pendingId), formatTime(seconds), autoTranslate(), flag(lang), twemojify(el), scrollBy(px)
 
-    const isVoiceMessage = !att.name;
+    // svelte-ignore state_referenced_locally
+    const isVoiceMessage = !att.name;   // an attachment's name never changes under a mounted player
     const info = $derived(audioInfo(att.id));
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     const up = $derived(uploading ? transfer(msg.id) : null);

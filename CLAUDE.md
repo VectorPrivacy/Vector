@@ -79,10 +79,34 @@ All business logic lives here, fully decoupled from Tauri. Any client (GUI, CLI,
 
 ### Frontend (`src/`)
 
-- **`main.js`** — Main application logic (~25k lines, bundled)
-- **`js/`** — ES modules: chat-scroll, emoji, file-preview, marketplace, settings, voice, db, platforms/
-- **`styles.css`** — All styles (~7k lines)
-- **`index.html`** — Single-page app shell
+Svelte 5 (runes) components over a set of plain scripts that share ONE global scope.
+`scripts/build-svelte.mjs` bundles `src/components/` into `src/components.bundle.js`
+(IIFE, global `VectorSvelte`); `index.html` is a head plus an empty body, and the root
+`components/shell/App.svelte` mounts synchronously before the scripts run.
+
+- **`components/`** — `lib/` stores (`*.svelte.js`, one concern per file) and actions; `ui/`
+  atoms only; `shell/` the root App and its panes; then one directory per feature
+  (`auth people chatlist chat composer community settings settings/network marketplace
+  miniapps moderation picker`).
+- **`main.js`** (~2.4k lines) + **`js/`** — the app: IPC, state arrays (`arrChats`, `arrProfiles`),
+  send pipeline, scroll engine, and the helper bags the components take. `js/emoji/` is the
+  picker's data half. Load order is `index.html`'s: plain scripts run during the parse,
+  deferred ones after, each in document order.
+- **`styles.css`** / **`widescreen.css`** — all styles; components carry no `<style>`.
+
+**Rules.** State lives in a store and flows in; the component renders; events flow out
+through a handler bag. Elements are held only for gestures and measurement. Ids stay only
+where a stylesheet selects them. One way to put UI on screen: `App.svelte` renders every
+singleton; a component whose helpers live in a script registers them with
+`VectorSvelte.setScreen(name, { h })` (see `lib/shell.svelte.js`) and renders once the entry
+lands. No `mount*` exports beyond the four for targets App cannot own. Register on
+`DOMContentLoaded` when a bag names helpers by value from a script that loads later. Every
+bag of size has a `@typedef` above the object that builds it, named on the component's
+props line. A store counter is `seq` (data changed) or `tick` (replay a one-shot).
+
+**Gate.** `npm run check:globals` after every frontend change: undeclared names, bundle
+members not exported, exports nothing calls, a script shadowing a bundle export, and a
+load-time call that names a helper a later script declares. Then `npm run svelte:build`.
 
 Frontend communicates with backend via `window.__TAURI__.core.invoke()`.
 

@@ -34,7 +34,8 @@
     // only, so it composites on the GPU.
     let countEl = $state(null);
     let valEl = $state(null);
-    let shownCount = $state(group.count);
+    // svelte-ignore state_referenced_locally
+    let shownCount = $state(group.count);   // the first count; the effect below follows the rest
     $effect(() => {
         const to = group.count;
         const from = shownCount;
@@ -61,7 +62,8 @@
     // A hover tip anchored to a chip that just left would float forever.
     $effect(() => () => h.reactionChipRemoved());
 
-    let entering = $state(painted);
+    // svelte-ignore state_referenced_locally
+    let entering = $state(painted);   // whether this chip arrived after its row: read once, on purpose
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
