@@ -32,7 +32,8 @@
 
     let container = $state(null);
     // The fullscreen previewer attaches once the picture is revealed; before that a click reveals.
-    function preview(img, revealed) { if (revealed) h.attachImagePreview(img); return { update(r) { if (r) h.attachImagePreview(img); } }; }
+    // A plain image attaches at once; a spoiler once revealed, so a click on the blur reveals.
+    function preview(img, revealed = true) { if (revealed) h.attachImagePreview(img); return { update(r) { if (r) h.attachImagePreview(img); } }; }
     function badge(img) { h.attachFileExtBadge(img, container, att.extension); }
     function badgeOnly(node) { h.attachFileExtBadge(null, container, att.extension); }
     // Uploading media pins its wrapper to the rendered width so the ring centres on it.
