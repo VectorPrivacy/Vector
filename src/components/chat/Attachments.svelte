@@ -9,8 +9,7 @@
     import { messageVersion } from '../lib/chatview.svelte.js';
 
     let { msg, sender, ctx, h } = $props();
-    // h (beyond the leaves'): isImage(ext), isAudio(ext), isVideo(ext), willAutoDownload(att, ctx), isDownloading(att),
-    //    audio (the player's bag), autoDownload(att, msg, sender), and FileBox's
+    // h: MediaHelpers (js/render/chat/message-row.js); `h.audio` is AudioPlayer's own bag
 
     const IMAGE_BLUR = ['png', 'jpeg', 'jpg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
 

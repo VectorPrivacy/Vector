@@ -4,7 +4,7 @@
     // head carries the count in its suffix.
     import { profileVersion } from '../lib/signals.svelte.js';
 
-    let { msg, merged = false, mergeCount = 1, h } = $props();
+    let { msg, merged = false, mergeCount = 1, h } = $props();   // h: RowHelpers (js/render/chat/message-row.js)
 
     // svelte-ignore state_referenced_locally
     const npub = msg.system_event?.member_npub || null;

@@ -25,8 +25,8 @@
         sender = null,     // the row author's profile as the caller resolved it
         streak = 'first',  // computed by the caller from the row above (vanilla owns streaks)
         ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
-        h,                 // vanilla helpers: getProfile, getName, getProfileAvatarSrc, twemojify,
-                           //   showTooltip, hideTooltip, formatHourMinute, replyView, and MessageContent's leaves
+        h,                 // RowHelpers (js/render/chat/message-row.js): the row's chrome, carrying
+                           //   `content` and `media` for the leaves and `pivx` for the bubble
     } = $props();
 
     // The live message. In the list island the `msg` prop itself changes (the array
@@ -221,7 +221,7 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
-        <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} {h} sig={contentSig} /></div>
+        <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} h={h.content} media={h.media} sig={contentSig} /></div>
         {#if reactions.length}
             <div class="dmsg-reactions">
                 {#each reactions as g (g.emoji)}

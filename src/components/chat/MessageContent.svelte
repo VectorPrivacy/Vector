@@ -11,11 +11,8 @@
     import CryptoAddress from './CryptoAddress.svelte';
     import { messageVersion, clockSec } from '../lib/chatview.svelte.js';
 
-    let { msg, sender, ctx, h, sig } = $props();
-    // h: buildText(msg, ctx) → span | null, commandInfo(msg), the Attachments leaves, cryptoAddress(msg) → coin | null,
-    //    renderEmojiPackPreviews(node, text), inviteKeys(text), resolveInvite(key), xdcUrl(msg, ctx),
-    //    renderXdcUrlCard(node, msg, url), webPreviewsEnabled(), linkPreviewData(msg), isAndroid(),
-    //    fmtCountdown(secs), selfDestructTooltip(el), selfDestructTooltipEnd()
+    let { msg, sender, ctx, h, media, sig } = $props();
+    // h: ContentHelpers, media: MediaHelpers (both in js/render/chat/message-row.js)
 
     // One built element into a display:contents host.
     function leaf(node, el) {
@@ -51,7 +48,7 @@
 {/key}
 <!-- Outside the key: attachments derive on their own, so a send finishing keeps its media. -->
 {#if msg.attachments?.length}
-    <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} {h} /></div>
+    <div class="dmsg-attachments"><Attachments {msg} {sender} {ctx} h={media} /></div>
 {/if}
 {#key sig}
     {@const coin = h.cryptoAddress(msg)}

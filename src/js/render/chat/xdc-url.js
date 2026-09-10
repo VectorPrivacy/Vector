@@ -57,28 +57,28 @@ async function renderXdcUrlCard(target, msg, url) {
     // resolves before attachment, and painting a dead row is harmless.
     if (info) {
         // Full parity: the downloaded card IS the attachment box.
-        VectorSvelte.mountFileBox(target, { att: xdcUrlSyntheticAttachment(url, info), msg, phase: 'downloaded', h: _dmsgRowHelpers });
+        VectorSvelte.mountFileBox(target, { att: xdcUrlSyntheticAttachment(url, info), msg, phase: 'downloaded', h: _dmsgMediaHelpers });
         return;
     }
     VectorSvelte.mountFileBox(target, {
-        att: xdcUrlSyntheticAttachment(url, null), msg, phase: 'download', h: _dmsgRowHelpers,
+        att: xdcUrlSyntheticAttachment(url, null), msg, phase: 'download', h: _dmsgMediaHelpers,
         label: `Tap to Load · ${xdcUrlHost(url)}`, onActivate: () => startXdcUrlDownload(target, msg, url),
     });
 }
 
 async function startXdcUrlDownload(target, msg, url) {
     const synth = xdcUrlSyntheticAttachment(url, null);
-    VectorSvelte.mountFileBox(target, { att: synth, msg, phase: 'downloading', h: _dmsgRowHelpers });
+    VectorSvelte.mountFileBox(target, { att: synth, msg, phase: 'downloading', h: _dmsgMediaHelpers });
     try {
         const info = await invoke('miniapp_resolve_url_xdc', { url, msgId: msg.id, download: true });
         xdcUrlResolved.set(xdcUrlCacheKey(msg, url), info);
         VectorSvelte.transferDone(url);
-        VectorSvelte.mountFileBox(target, { att: xdcUrlSyntheticAttachment(url, info), msg, phase: 'downloaded', h: _dmsgRowHelpers });
+        VectorSvelte.mountFileBox(target, { att: xdcUrlSyntheticAttachment(url, info), msg, phase: 'downloaded', h: _dmsgMediaHelpers });
     } catch (e) {
         xdcUrlResolved.delete(xdcUrlCacheKey(msg, url));
         VectorSvelte.transferDone(url);
         VectorSvelte.mountFileBox(target, {
-            att: synth, msg, phase: 'download', h: _dmsgRowHelpers,
+            att: synth, msg, phase: 'download', h: _dmsgMediaHelpers,
             label: `Failed: ${String(e).slice(0, 48)} · Tap to Retry`, onActivate: () => startXdcUrlDownload(target, msg, url),
         });
     }

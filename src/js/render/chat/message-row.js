@@ -112,17 +112,115 @@ function updateMessageRow(msg, oldId = '') {
 }
 
 /** Helpers the row island calls; the leaf builders stay here. */
-const _dmsgRowHelpers = {
+// The row family's helpers, one bag per consumer so a leaf can only reach what it uses.
+// The few lookups several bags need are repeated by reference. Each bag's contract is the
+// typedef above it; a component names the typedef it takes.
+//
+// @typedef {Object} RowLookups   shared by every bag that lists them
+// @property {(npub: string) => object|null} getProfile
+// @property {(profileOrNpub: object|string) => string} getName
+// @property {(profile: object|null) => string|null} getProfileAvatarSrc
+// @property {() => string} myNpub
+// @property {(el: Element) => void} twemojify
+// @property {(text: string, el: Element) => void} showTooltip
+// @property {() => void} hideTooltip
+// @property {() => boolean} isAndroid
+// @property {(n: number, dec?: number, short?: boolean) => string} formatBytes
+// @property {() => string} openChat            the open chat's id
+// @property {(url: string) => void} openUrl     with the link-spoof guard
+// @property {(img: HTMLImageElement, url: string) => void} backendCachedImg
+// @property {() => void} onThumbLoad           a thumbnail landed: keep the scroll anchored
+/** The subset of `obj` under `keys`, by reference. */
+function _dmsgPick(obj, keys) { return Object.fromEntries(keys.map((k) => [k, obj[k]])); }
+
+const _dmsgLookups = {
     getProfile: (npub) => getProfile(npub),
     getName: (x) => getName(x),
     getProfileAvatarSrc: (p) => getProfileAvatarSrc(p),
+    myNpub: () => strPubkey,
     twemojify: (el) => twemojify(el),
     showTooltip: (text, el) => showGlobalTooltip(text, el),
     hideTooltip: () => hideGlobalTooltip(),
-    formatHourMinute: (at) => _dmsgFormatHourMinute(at),
-    // MessageContent's leaves
+    isAndroid: () => platformFeatures.os === 'android',
+    formatBytes: (n, dec, short) => formatBytes(n, dec, short),
+    openChat: () => strOpenChat,
+    openUrl: (url) => _dmsgOpenPreviewUrl(url),
+    backendCachedImg: (img, url) => bindBackendCachedImg(img, url),
+    onThumbLoad: () => { if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad(); else softChatScroll(); },
+};
+
+/**
+ * ContentHelpers: MessageContent and its leaves (CommandLine, CryptoAddress, InviteCard, LinkPreview).
+ * @typedef {Pick<RowLookups, 'getProfile'|'getName'|'getProfileAvatarSrc'|'myNpub'|'isAndroid'|'openChat'|'openUrl'|'backendCachedImg'|'onThumbLoad'> & {
+ *   buildText: (msg: object, ctx: object) => HTMLElement|null,
+ *   commandInfo: (msg: object) => object|null,
+ *   cryptoAddress: (msg: object) => object|null,
+ *   renderEmojiPackPreviews: (node: Element, text: string) => void,
+ *   destroyEmojiPackPreviews: (node: Element) => void,
+ *   inviteKeys: (text: string) => string[],
+ *   invitePreviewSettled: (key: string) => boolean,
+ *   resolveInvite: (key: string) => Promise<void>,
+ *   joinedChat: (communityId: string) => object|null,
+ *   joinFromCard: (key: string, communityId: string) => void,
+ *   fileSrc: (path: string) => string,
+ *   showEditHistory: (msgId: string, el: Element) => void,
+ *   xdcUrl: (msg: object) => string|null,
+ *   renderXdcUrlCard: (node: Element, msg: object, url: string) => void,
+ *   webPreviewsEnabled: () => boolean,
+ *   linkPreviewData: (msg: object) => object|null,
+ *   fmtCountdown: (secs: number) => string,
+ *   selfDestructTooltip: (el: Element) => void,
+ *   selfDestructTooltipEnd: () => void,
+ * }} ContentHelpers
+ */
+const _dmsgContentHelpers = {
+    ..._dmsgPick(_dmsgLookups, ['getProfile', 'getName', 'getProfileAvatarSrc', 'myNpub', 'isAndroid', 'openChat', 'openUrl', 'backendCachedImg', 'onThumbLoad']),
     buildText: (msg, ctx) => _dmsgTextLeaf(msg, ctx),
-    // Attachments' leaves and facts
+    commandInfo: (msg) => _dmsgCommandInfo(msg),
+    cryptoAddress: (msg) => detectCryptoAddress(msg.content),
+    renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
+    destroyEmojiPackPreviews: (node) => destroyEmojiPackPreviews(node),
+    inviteKeys: (text) => communityInviteKeys(text),
+    invitePreviewSettled: (key) => { const c = _invitePreviewCache.get(key); return !!(c && c.state !== 'loading'); },
+    resolveInvite: (key) => _resolveCommunityInvitePreview(key),
+    joinedChat: (communityId) => findCommunityChat(communityId),
+    joinFromCard: (key, communityId) => _joinCommunityFromCard(key, communityId),
+    fileSrc: (path) => convertFileSrc(path),
+    showEditHistory: (id, el) => showEditHistory(id, el),
+    xdcUrl: (msg) => findXdcUrl(msg.content),
+    renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),
+    webPreviewsEnabled: () => !!fWebPreviewsEnabled,
+    linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
+    fmtCountdown: (secs) => _fmtCountdown(secs),
+    selfDestructTooltip: (el) => _selfDestructTooltip(el),
+    selfDestructTooltipEnd: () => _selfDestructTooltipEnd(),
+};
+
+/**
+ * MediaHelpers: Attachments and its leaves (Image, Video, Thumbhash, FileBox, UploadOverlay);
+ * `audio` is AudioPlayer's own bag.
+ * @typedef {Pick<RowLookups, 'getProfile'|'getProfileAvatarSrc'|'showTooltip'|'hideTooltip'|'formatBytes'|'openChat'|'backendCachedImg'|'onThumbLoad'> & {
+ *   isImage: (ext: string) => boolean, isAudio: (ext: string) => boolean, isVideo: (ext: string) => boolean,
+ *   isDownloading: (att: object) => boolean,
+ *   willAutoDownload: (att: object, ctx: object) => boolean,
+ *   autoDownload: (att: object, msg: object, sender: object|null) => void,
+ *   startDownload: (att: object, msg: object, sender: object|null) => void,
+ *   audio: object,
+ *   fileTypeInfo: (ext: string) => object,
+ *   loadMiniAppInfo: (path: string) => Promise<object|null>,
+ *   marketplaceApp: (hash: string) => Promise<object|null>,
+ *   openFile: (att: object, msg: object) => void,
+ *   assetUrl: (path: string) => string, mediaUrl: (path: string) => string,
+ *   isSpoiler: (att: object) => boolean,
+ *   thumbhash: (npub: string, msgId: string) => Promise<string|null>,
+ *   onImageLoad: () => void, onVideoMeta: (video: HTMLVideoElement) => void,
+ *   attachImagePreview: (img: HTMLImageElement) => void,
+ *   attachFileExtBadge: (img: HTMLImageElement, container: Element, ext: string) => void,
+ *   cancelUpload: (pendingId: string) => Promise<void>,
+ * }} MediaHelpers
+ */
+const _dmsgMediaHelpers = {
+    ..._dmsgPick(_dmsgLookups, ['getProfile', 'getProfileAvatarSrc', 'showTooltip', 'hideTooltip', 'formatBytes', 'openChat', 'backendCachedImg', 'onThumbLoad']),
     isImage: (ext) => ['png', 'jpeg', 'jpg', 'gif', 'webp', 'svg', 'bmp', 'tiff', 'tif', 'ico'].includes(ext),
     isAudio: (ext) => ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(ext),
     isVideo: (ext) => platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(ext),
@@ -136,45 +234,59 @@ const _dmsgRowHelpers = {
     fileTypeInfo: (ext) => getFileTypeInfo(ext),
     loadMiniAppInfo: (path) => loadMiniAppInfo(path),
     marketplaceApp: (hash) => invoke('marketplace_get_app_by_hash', { fileHash: hash }),
-    backendCachedImg: (img, url) => bindBackendCachedImg(img, url),
     openFile: (att, msg) => _dmsgOpenFile(att, msg),
     assetUrl: (path) => convertFileSrc(path),
     mediaUrl: (path) => mediaUrl(path),
     isSpoiler: (att) => isSpoilerAttachment(att),
     thumbhash: (npub, msgId) => invoke('generate_thumbhash_preview', { npub, msgId }),
     onImageLoad: () => compensateChatScrollForResize(),
-    onThumbLoad: () => { if (proceduralScrollState.isLoadingOlderMessages) correctScrollForMediaLoad(); else softChatScroll(); },
     onVideoMeta: (video) => { if (!video.isConnected) return; video.currentTime = 0.1; compensateChatScrollForResize(); },
     attachImagePreview: (img) => attachImagePreview(img),
     attachFileExtBadge: (img, container, ext) => attachFileExtBadge(img, container, ext),
     cancelUpload: (pendingId) => invoke('cancel_upload', { pendingId }),
-    openChat: () => strOpenChat,
-    formatBytes: (n, dec, short) => formatBytes(n, dec, short),
-    cryptoAddress: (msg) => detectCryptoAddress(msg.content),
-    renderEmojiPackPreviews: (node, text) => renderEmojiPackPreviews(node, text),
-    destroyEmojiPackPreviews: (node) => destroyEmojiPackPreviews(node),
-    inviteKeys: (text) => communityInviteKeys(text),
-    invitePreviewSettled: (key) => { const c = _invitePreviewCache.get(key); return !!(c && c.state !== 'loading'); },
-    resolveInvite: (key) => _resolveCommunityInvitePreview(key),
-    joinedChat: (communityId) => findCommunityChat(communityId),
-    joinFromCard: (key, communityId) => _joinCommunityFromCard(key, communityId),
-    fileSrc: (path) => convertFileSrc(path),
-    openChatById: (id) => openChat(id),
-    jumpToMessage: (id) => jumpToMessage(id),
-    showEditHistory: (id, el) => showEditHistory(id, el),
-    reactionClick: (msgId, emoji) => _dmsgReactionClick(msgId, emoji),
-    xdcUrl: (msg) => findXdcUrl(msg.content),
-    renderXdcUrlCard: (node, msg, url) => renderXdcUrlCard(node, msg, url),
-    webPreviewsEnabled: () => !!fWebPreviewsEnabled,
-    linkPreviewData: (msg) => _dmsgLinkPreviewData(msg),
-    openUrl: (url) => _dmsgOpenPreviewUrl(url),
-    isAndroid: () => typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android',
-    fmtCountdown: (secs) => _fmtCountdown(secs),
-    selfDestructTooltip: (el) => _selfDestructTooltip(el),
-    selfDestructTooltipEnd: () => _selfDestructTooltipEnd(),
+};
+
+/**
+ * RowHelpers: MessageRow's own chrome, plus ReplyQuote, ReactionChip and SystemEvent.
+ * Carries the other bags for the row to hand down.
+ * @typedef {Pick<RowLookups, 'getProfile'|'getName'|'getProfileAvatarSrc'|'myNpub'|'twemojify'|'showTooltip'|'hideTooltip'> & {
+ *   content: ContentHelpers, media: MediaHelpers,
+ *   pivx: { fiat: (amt: number) => string, ensure: (pay: object, mine: boolean) => void, claim: (code: string) => void },
+ *   formatHourMinute: (at: number) => string,
+ *   contentSig: (msg: object) => string,
+ *   replyView: (msg: object, sender: object|null) => object|null,
+ *   jumpToMessage: (id: string) => void,
+ *   revealBlocked: (msg: object) => void,
+ *   renderCustomEmojiShortcodes: (el: Element, tags: object[]|null) => void,
+ *   showMiniProfile: (npub: string, el: Element) => void,
+ *   systemEventName: (npub: string) => string, systemEventSuffix: (type: string) => string,
+ *   reactionGroups: (msg: object) => Array<{ emoji: string, count: number, mine: boolean, url?: string }>,
+ *   canAddReactionGroup: (msg: object, n: number) => boolean,
+ *   reactionClick: (msgId: string, emoji: string) => void,
+ *   customEmojiUrl: (emoji: string, url: string|null) => string|null,
+ *   bindCachedImg: (img: HTMLImageElement, url: string, onUnavailable?: () => void) => void,
+ *   reducedMotion: () => boolean,
+ *   reactionChipRemoved: () => void,
+ * }} RowHelpers
+ */
+const _dmsgRowHelpers = {
+    ..._dmsgPick(_dmsgLookups, ['getProfile', 'getName', 'getProfileAvatarSrc', 'myNpub', 'twemojify', 'showTooltip', 'hideTooltip']),
+    content: _dmsgContentHelpers,
+    media: _dmsgMediaHelpers,
+    pivx: { fiat: (amt) => pivxFiatLine(amt), ensure: (pay, mine) => pivxEnsureBubble(pay, mine), claim: (code) => claimPivxPayment(code) },
+    formatHourMinute: (at) => _dmsgFormatHourMinute(at),
     contentSig: (msg) => _dmsgContentSig(msg),
+    replyView: (msg, sender) => _dmsgReplyView(msg, sender),
+    jumpToMessage: (id) => jumpToMessage(id),
+    revealBlocked: (msg) => { revealedBlockedMessages.add(msg.id); openChat(strOpenChat); },
+    renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
+    showMiniProfile: (npub, el) => showMiniProfile(npub, el),
+    systemEventName: (npub) => systemEventName(npub),
+    systemEventSuffix: (type) => systemEventSuffix(type),
+    // Reactions
     reactionGroups: (msg) => Array.from(_dmsgAggregateReactions(msg), ([emoji, g]) => ({ emoji, ...g })),
     canAddReactionGroup: (msg, n) => _dmsgCanAddReactionGroup(msg, n),
+    reactionClick: (msgId, emoji) => _dmsgReactionClick(msgId, emoji),
     customEmojiUrl: (emoji, url) => _dmsgCustomEmojiUrl(emoji, url),
     // Reaction emoji bytes go through the Rust cache: a raw Blossom URL never lands on
     // an <img src>, so Tor traffic stays contained and repeat renders skip the network.
@@ -183,15 +295,6 @@ const _dmsgRowHelpers = {
     // A hover tip anchored to a chip that just left would float forever (mouseout
     // owns dismissal, and a removed anchor never fires it).
     reactionChipRemoved: () => { if (reactionHoverEl && !reactionHoverEl.isConnected) hideReactionHoverTip(); },
-    replyView: (msg, sender) => _dmsgReplyView(msg, sender),
-    renderCustomEmojiShortcodes: (el, tags) => renderCustomEmojiShortcodes(el, tags),
-    pivx: { fiat: (amt) => pivxFiatLine(amt), ensure: (pay, mine) => pivxEnsureBubble(pay, mine), claim: (code) => claimPivxPayment(code) },
-    revealBlocked: (msg) => { revealedBlockedMessages.add(msg.id); openChat(strOpenChat); },
-    commandInfo: (msg) => _dmsgCommandInfo(msg),
-    myNpub: () => strPubkey,
-    systemEventName: (npub) => systemEventName(npub),
-    systemEventSuffix: (type) => systemEventSuffix(type),
-    showMiniProfile: (npub, el) => showMiniProfile(npub, el),
 };
 
 /** Whether a message pings the reader: a mention of them, an authorised @everyone, or a reply to their own message. */
