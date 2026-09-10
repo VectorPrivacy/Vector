@@ -18,12 +18,12 @@
    ========================================================================= */
 
 :root {
-  --ws-rail-w: 232px;
+  --ws-rail-w: 200px;
   --ws-rail-collapsed-w: 72px;
-  --ws-list-w: 330px;           /* live value; js/widescreen.js persists it */
-  --ws-list-min: 260px;
-  --ws-list-max: 520px;
-  --ws-details-w: 300px;
+  --ws-list-w: 240px;           /* live value; js/widescreen.js persists it */
+  --ws-list-min: 200px;
+  --ws-list-max: 480px;
+  --ws-details-w: 240px;
 
   /* Surfaces are translucent white over the theme's own root background, so
      all 7 themes get a coherent rail/list without per-theme overrides. */
@@ -35,13 +35,128 @@
      is the app's "this is live/yours" signal, and spending it on every selected
      row leaves nothing to say it with. */
   --ws-active: rgba(255, 255, 255, 0.09);
+
+  /* The desktop title strip; 0 wherever the OS draws its own (js/chrome.js). */
+  --chrome-h: 0px;
+}
+
+/* ========================= 0a. The window chrome ========================= */
+/* Every desktop layout, wide or narrow, sits under this strip; its height is
+   carved out of the shell below rather than laid over it. */
+
+body.chrome {
+  --chrome-h: 32px;
+}
+
+/* Three cells so the banner centres on the window, not on what the lockup and
+   the controls leave over. */
+#window-chrome {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--chrome-h);
+  background-color: var(--ws-rail-bg);
+  border-bottom: 1px solid var(--ws-seam);
+  -webkit-user-select: none;
+  user-select: none;
+  position: relative;
+  z-index: 41;
+}
+
+/* macOS draws its traffic lights over the strip's left edge. */
+#window-chrome.is-mac {
+  padding-left: 78px;
+}
+
+#chrome-lockup {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 12px;
+  position: relative;
+  justify-self: start;
+}
+
+#chrome-lockup:hover {
+  opacity: 1;
+}
+
+#chrome-mark {
+  width: 12px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+#chrome-typeface {
+  width: 92px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+/* The banner is the strip's one line of text, in the accent because it is the
+   only thing here that asks for a click. */
+.chrome-update {
+  flex-shrink: 0;
+  grid-column: 2;
+  max-width: 60vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  height: 100%;
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: var(--primary-color, #33db98);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chrome-update:hover {
+  text-decoration: underline;
+}
+
+#chrome-controls {
+  display: flex;
+  height: 100%;
+  grid-column: 3;
+  justify-self: end;
+}
+
+.chrome-ctl {
+  width: 46px;
+  height: 100%;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: default;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.chrome-ctl svg {
+  width: 10px;
+  height: 10px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+}
+
+.chrome-ctl:hover {
+  background-color: var(--ws-hover);
+  color: #fff;
+}
+
+.chrome-close:hover {
+  background-color: #e81123;
 }
 
 /* ===================== 0. Widescreen-only furniture ====================== */
 /* These live in the markup permanently (the rail is #navbar re-dressed, so its
    extras are its children) and must be invisible in single-pane mode. */
 
-#ws-rail-head,
 #ws-rail-shortcuts,
 #ws-rail-spacer,
 #ws-rail-collapse,
@@ -58,7 +173,7 @@ body.ws main.container {
   display: grid;
   grid-template-columns: var(--ws-rail-w) var(--ws-list-w) minmax(0, 1fr) 0px;
   grid-template-rows: minmax(0, 1fr);
-  height: 100%;
+  height: calc(100% - var(--chrome-h));
   overflow: hidden;
 }
 
@@ -1049,7 +1164,7 @@ body.ws .profile-switcher-panel.ws-dropup .profile-switcher-add {
 
 body.ws #navbar {
   position: fixed;
-  top: 0;
+  top: var(--chrome-h);
   bottom: 0;
   left: 0;
   width: var(--ws-rail-w);
@@ -1066,34 +1181,6 @@ body.ws #navbar {
   /* Snaps with its grid column rather than animating out of step with it. */
 }
 
-body.ws #ws-rail-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 58px;
-  flex-shrink: 0;
-  padding: 0 16px;
-  -webkit-user-select: none;
-  user-select: none;
-  /* The pending-invite badge borrows the shortcut rows' badge, whose collapsed
-     form is a corner dot — which needs a corner to pin to. */
-  position: relative;
-}
-
-/* The lockup: layered V mark + typeface, optically balanced (the mark is a tall
-   glyph, the typeface a short wordmark, so they can't share a height). */
-#ws-rail-mark {
-  width: 15px;
-  height: 26px;
-  flex-shrink: 0;
-}
-
-#ws-rail-typeface {
-  width: 115px;
-  height: 15px;
-  flex-shrink: 0;
-}
-
 
 /* ---- Rail shortcuts: recent DMs, then the community strip ---- */
 
@@ -1104,7 +1191,7 @@ body.ws #ws-rail-shortcuts {
      community list, which is the only part that scrolls. */
   flex: 1 1 auto;
   min-height: 0;
-  padding: 2px 0 6px;
+  padding: 14px 0 6px;
 }
 
 /* New Messages holds its size: at most three rows, and it must not be the thing
@@ -1197,38 +1284,6 @@ body.ws #ws-rail-shortcuts {
   margin-bottom: 8px;
 }
 
-/* ---- Mail: the second door to the DM page ---- */
-body.ws #ws-rail-mail {
-  position: relative;
-  margin-left: auto;
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  transition: background-color 0.12s ease;
-}
-
-body.ws #ws-rail-mail .icon {
-  background-color: rgba(255, 255, 255, 0.55);
-  transition: background-color 0.12s ease;
-}
-
-body.ws #ws-rail-mail:hover {
-  background-color: var(--ws-hover);
-}
-
-body.ws #ws-rail-mail:hover .icon {
-  background-color: #fff;
-}
-
-/* Collapsed the rail has no room beside the mark, so mail steps out of the
-   head row and the lockup keeps the door on its own. */
-body.ws.ws-rail-collapsed #ws-rail-mail {
-  display: none;
-}
-
-/* The rows' badge is a pill at the end of a flex line; in a 30px square it just
-   covers the icon. On the button it becomes a corner mark instead. */
 
 
 .ws-rail-item {
@@ -1247,8 +1302,6 @@ body.ws.ws-rail-collapsed #ws-rail-mail {
    brighter name, so the fade is a second, contradictory signal — invisible on a
    photo avatar and obvious on a flat placeholder glyph. */
 .ws-rail-item:hover,
-body.ws #ws-rail-head:hover,
-body.ws #ws-rail-mail:hover,
 body.ws .chatlist-community-head:hover {
   opacity: 1;
 }
@@ -1532,17 +1585,11 @@ body.ws #ws-rail-account #account-status {
 
 /* Collapsed: icons only. The account chip keeps its avatar (that IS its icon)
    and drops just the text. */
-body.ws.ws-rail-collapsed #ws-rail-typeface,
 body.ws.ws-rail-collapsed #navbar .navbar-text,
 body.ws.ws-rail-collapsed #ws-rail-collapse .navbar-text,
 body.ws.ws-rail-collapsed #ws-rail-account #account-name,
 body.ws.ws-rail-collapsed #ws-rail-account #account-status {
   display: none;
-}
-
-body.ws.ws-rail-collapsed #ws-rail-head {
-  padding: 0;
-  justify-content: center;
 }
 
 /* Collapsed, every row in the column is the same 40px tile as a rail shortcut —

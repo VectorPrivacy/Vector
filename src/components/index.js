@@ -51,6 +51,7 @@ export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged 
 export { editHistoryState, setEditHistory, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
 export { setBlossomCaps, setRelayLogs } from './lib/network.svelte.js';
 export { patchRelayStatus } from './lib/settings.svelte.js';
+export { setChrome } from './lib/chrome.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktAddFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
 export { gridState, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch } from './lib/miniappsgrid.svelte.js';

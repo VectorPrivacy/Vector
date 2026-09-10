@@ -44,7 +44,7 @@ export function setMailBadge(text) { shell.mailBadge = text || ''; }
 // renders the component once the entry lands. Registered from the script that owns the
 // screen's helpers, so a screen appears exactly when its bag is ready.
 const screens = $state({ profile: null, settings: null, invites: null, chatNew: null, createGroup: null, chatlist: null, login: null,
-    communityHead: null, rail: null, overview: null, roster: null, packDetails: null,
+    communityHead: null, rail: null, chrome: null, overview: null, roster: null, packDetails: null,
     // Body-level singletons whose helpers live in the vanilla side; App renders each once registered.
     composerPopups: null, filePreview: null, miniProfile: null, reactionPopups: null, editHistory: null,
     qrOverlay: null, qrScanner: null, statusDialog: null, downgradeBlock: null,

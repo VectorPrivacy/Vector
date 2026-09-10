@@ -389,7 +389,7 @@ html, body {
   flex-direction: column;
   justify-content: flex-start;
   text-align: center;
-  height: 100%;
+  height: calc(100% - var(--chrome-h));
   min-height: 0;
 }
 
@@ -3423,7 +3423,7 @@ body.mobile #chat-new-scan-btn { display: block; }
 #chat {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--chrome-h));
   overflow: hidden;
 }
 
@@ -9822,7 +9822,7 @@ select:disabled:hover {
 
 #chat-new {
   position: relative;
-  height: 100vh;
+  height: calc(100vh - var(--chrome-h));
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -12491,7 +12491,7 @@ select:disabled:hover {
 .create-group-container {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: calc(100vh - var(--chrome-h));
   overflow: hidden;
 }
 

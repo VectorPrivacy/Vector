@@ -8,8 +8,19 @@
   "permissions": [
     "core:window:allow-show",
     "core:window:allow-set-focus",
+    "core:window:allow-is-maximized",
+    "core:window:allow-start-dragging",
+    "core:window:allow-close",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-unmaximize",
+    "core:window:allow-maximize",
+    "core:window:allow-minimize",
     "updater:default",
     "window-state:default"
   ],
-  "platforms": ["linux", "windows", "macOS"]
+  "platforms": [
+    "linux",
+    "windows",
+    "macOS"
+  ]
 }

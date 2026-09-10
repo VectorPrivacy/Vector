@@ -13,6 +13,7 @@
     import CreateCommunity from '../community/CreateCommunity.svelte';
     import LoginScreen from '../auth/LoginScreen.svelte';
     import Navbar from './Navbar.svelte';
+    import WindowChrome from './WindowChrome.svelte';
     import ChatListPane from './ChatListPane.svelte';
     import ChatPane from './ChatPane.svelte';
     import GroupOverviewPane from './GroupOverviewPane.svelte';
@@ -68,6 +69,7 @@
 <!-- Pack details: opened by deep link (vector://emojis/pack/<naddr>) and the share-pack flow. -->
 {#if screens.packDetails}<PackDetailsOverlay h={screens.packDetails.h} />{/if}
 
+<WindowChrome />
 <main class="container">
     <PickerRoot />
     <AttachmentPanelRoot />

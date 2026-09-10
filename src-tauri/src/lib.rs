@@ -374,6 +374,11 @@ pub fn run() {
 
             let window = app.get_webview_window("main").unwrap();
 
+            // Vector draws its own title strip. macOS keeps the native traffic lights
+            // through the overlay title bar in tauri.conf.json; the rest go undecorated.
+            #[cfg(any(windows, target_os = "linux"))]
+            let _ = window.set_decorations(false);
+
             // The window is born hidden (tauri.conf `visible: false`) so the frontend
             // can paint before it appears — which makes the frontend the ONLY thing
             // that can ever reveal it. A boot that throws, hangs or never runs leaves

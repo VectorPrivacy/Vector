@@ -33,7 +33,7 @@ function wsShouldApply() {
 
 function wsReadListWidth() {
     const stored = parseInt(localStorage.getItem(WS_KEY_LIST_W), 10);
-    return Number.isFinite(stored) ? stored : 330;
+    return Number.isFinite(stored) ? stored : 240;
 }
 
 /** Clamp to the CSS bounds and to what the window can actually spare, so a
@@ -43,9 +43,9 @@ function wsReadListWidth() {
  *  of --ws-rail-w lives on the body class. */
 function wsClampListWidth(px) {
     const css = getComputedStyle(document.body);
-    const min = parseInt(css.getPropertyValue('--ws-list-min'), 10) || 260;
-    const max = parseInt(css.getPropertyValue('--ws-list-max'), 10) || 520;
-    const rail = parseInt(css.getPropertyValue('--ws-rail-w'), 10) || 232;
+    const min = parseInt(css.getPropertyValue('--ws-list-min'), 10) || 200;
+    const max = parseInt(css.getPropertyValue('--ws-list-max'), 10) || 480;
+    const rail = parseInt(css.getPropertyValue('--ws-rail-w'), 10) || 200;
     const roomForConversation = 380;
     const fits = window.innerWidth - rail - roomForConversation;
     return Math.round(Math.max(min, Math.min(px, max, Math.max(min, fits))));
