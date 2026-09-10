@@ -153,11 +153,12 @@ function destroyEmojiPackPreviews(target) {
 // The in-chat card's thumb grid: the app's canvas grid, laid out from the grid column's
 // real width so a narrow card shows fewer, larger thumbs. Rebuilt when the column resizes.
 function _packPreviewLayout(width) {
-    const narrow = width < 240;
-    const cellPx = narrow ? 40 : 32, thumbPx = narrow ? 36 : 28, gapPx = 4;
-    // Sized to the grid's 96px clip: three rows at 32px, two at 40px.
-    const rows = narrow ? 2 : 3;
-    const cols = Math.max(3, Math.floor((width + gapPx) / (cellPx + gapPx)));
+    const cellPx = 32, thumbPx = 28, gapPx = 4;
+    // Sized to the grid's 96px clip: three rows, two where the column is too
+    // narrow to be worth a third. Never fewer than four across: a cell only
+    // grows to fill the row, so three would be three oversized thumbs.
+    const rows = width < 240 ? 2 : 3;
+    const cols = Math.max(4, Math.floor((width + gapPx) / (cellPx + gapPx)));
     return { cols, rows, cellPx, thumbPx, gapPx };
 }
 function _mountPackPreviewThumbs(left, pack) {
