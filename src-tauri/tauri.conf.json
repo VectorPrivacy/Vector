@@ -24,9 +24,7 @@
         "backgroundThrottling": "throttle",
         "backgroundColor": "#030303",
         "visible": false,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true,
-        "trafficLightPosition": { "x": 12, "y": 10 }
+        "decorations": false
       }
     ],
     "security": {

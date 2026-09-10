@@ -323,11 +323,12 @@ pub fn run() {
     #[cfg(desktop)]
     {
         // Window state plugin: saves and restores window position, size, maximized state, etc.
-        // Exclude VISIBLE flag so window starts hidden (we show it after content loads to prevent white flash)
+        // VISIBLE is excluded so the window starts hidden (shown after content loads to prevent
+        // the white flash); DECORATIONS so tauri.conf.json owns the chrome, not a saved state.
         use tauri_plugin_window_state::StateFlags;
         builder = builder.plugin(
             tauri_plugin_window_state::Builder::new()
-                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE)
+                .with_state_flags(StateFlags::all() & !StateFlags::VISIBLE & !StateFlags::DECORATIONS)
                 .build()
         );
         
@@ -373,11 +374,6 @@ pub fn run() {
             let handle = app.app_handle().clone();
 
             let window = app.get_webview_window("main").unwrap();
-
-            // Vector draws its own title strip. macOS keeps the native traffic lights
-            // through the overlay title bar in tauri.conf.json; the rest go undecorated.
-            #[cfg(any(windows, target_os = "linux"))]
-            let _ = window.set_decorations(false);
 
             // The window is born hidden (tauri.conf `visible: false`) so the frontend
             // can paint before it appears — which makes the frontend the ONLY thing

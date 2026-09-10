@@ -1,7 +1,7 @@
 <script>
     // The 32px desktop title strip: the lockup (the door home to DMs), the update
-    // banner, and on platforms without native buttons the window controls. Bare
-    // surfaces carry data-tauri-drag-region, so the strip itself moves the window.
+    // banner, help and the window controls. Bare surfaces carry data-tauri-drag-region,
+    // so the strip itself moves the window.
     import { chromeState } from '../lib/chrome.svelte.js';
     import { shellState, shellScreens } from '../lib/shell.svelte.js';
     import { updatesState } from '../lib/settings.svelte.js';
@@ -13,7 +13,7 @@
 </script>
 
 {#if chrome.on}
-<header id="window-chrome" class:is-mac={chrome.mac} data-tauri-drag-region>
+<header id="window-chrome" data-tauri-drag-region>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="chrome-lockup" class="btn" title="Direct Messages" onclick={() => h?.openDmHome()}>
     <svg id="chrome-mark" viewBox="26.2 7 29.3 50.5" xmlns="http://www.w3.org/2000/svg" aria-label="Vector">
@@ -47,8 +47,10 @@
     {#if updates.phase === 'available' && updates.newVersion}
         <button class="chrome-update" onclick={() => h?.openUpdates()}>New update · Vector v{updates.newVersion}. Download now.</button>
     {/if}
-    {#if !chrome.mac}
     <div id="chrome-controls">
+        <button class="chrome-ctl chrome-help" title="Help" aria-label="Help" onclick={() => h?.openHelp()}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="7" /><path d="M5.8 6.2a2.2 2.2 0 1 1 3.1 2c-.6.3-.9.7-.9 1.3v.4" /><circle class="dot" cx="8" cy="12.1" r=".55" /></svg>
+        </button>
         <button class="chrome-ctl" title="Minimize" aria-label="Minimize" onclick={() => h?.minimize()}>
             <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0 5h10" /></svg>
         </button>
@@ -63,6 +65,5 @@
             <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M.5 .5l9 9M9.5 .5l-9 9" /></svg>
         </button>
     </div>
-    {/if}
 </header>
 {/if}
