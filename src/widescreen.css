@@ -121,9 +121,13 @@ body.chrome {
 }
 
 .chrome-ctl {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 46px;
   height: 100%;
   border: 0;
+  border-radius: 0;
   padding: 0;
   background: none;
   color: rgba(255, 255, 255, 0.7);
@@ -153,6 +157,10 @@ body.chrome {
 
 .chrome-help {
   margin-right: 8px;
+}
+
+.chrome-help:hover {
+  background: none;
 }
 
 .chrome-ctl:hover {
