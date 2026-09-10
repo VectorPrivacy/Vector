@@ -70,7 +70,6 @@ function stop(id) {
 
 /** The transfer ended well (or was cancelled): nothing is left to show. */
 export function transferDone(id) { stop(id); map.delete(id); }
-export function transferFailed(id, error) { stop(id); patch(id, { phase: 'failed', error: error || '' }); }
 
 // Kept for the picture and video components.
 export function uploadProgress(pendingId) { return map.get(pendingId)?.pct ?? null; }

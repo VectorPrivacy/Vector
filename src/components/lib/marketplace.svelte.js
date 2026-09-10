@@ -1,3 +1,4 @@
+import { SvelteMap } from 'svelte/reactivity';
 // The Nexus (marketplace) state: the app catalogue, search and category filters, the
 // per-app action in flight (install, update, launch, uninstall), resolved icons, and the
 // details panel's app and permissions. Apps are replaced as whole objects on change.
@@ -27,8 +28,8 @@ export function mktClosingEnded(which) {
     closeWaiters.delete(which);
 }
 let apps = $state.raw([]);
-let actions = $state.raw(new Map());
-let icons = $state.raw(new Map());
+const actions = new SvelteMap();   // per-key reactive: a row re-derives only when its own entry moves
+const icons = new SvelteMap();
 let perms = $state.raw(null);
 
 export function mktState() { return m; }
@@ -54,14 +55,12 @@ export function mktSetError(err) { m.error = err ? String(err) : ''; m.loading =
 export function mktSetAnimate(on) { m.animate = !!on; }
 /** The action running on one app, or null when it is idle. `{ kind, label }`. */
 export function mktSetAction(id, action) {
-    const next = new Map(actions);
-    if (action) next.set(id, action); else next.delete(id);
-    actions = next;
+    if (action) actions.set(id, action); else actions.delete(id);
 }
 /** A resolved icon source, or false when the icon cannot be shown. */
 export function mktSetIcon(key, src) {
     if (icons.get(key) === src) return;
-    const next = new Map(icons); next.set(key, src); icons = next;
+    icons.set(key, src);
 }
 export function mktOpenDetails(id) { m.detailsId = id; perms = null; }
 export function mktCloseDetails() { m.detailsId = null; perms = null; }
