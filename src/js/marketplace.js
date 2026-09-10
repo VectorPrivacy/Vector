@@ -197,7 +197,6 @@ async function openMarketplaceApp(appId, app) {
  * @param {MarketplaceApp} app - The app requesting permissions
  * @returns {Promise<boolean>} True if user confirmed (grant or deny), false if cancelled
  */
-let permissionPromptMounted = false;
 async function showPermissionPrompt(app) {
     // Get available permissions metadata first (outside Promise to properly throw on error)
     let availablePermissions;
@@ -211,8 +210,6 @@ async function showPermissionPrompt(app) {
         const info = availablePermissions.find(p => p.id === id);
         return info ? { id, label: info.label, description: info.description } : null;
     }).filter(Boolean);
-
-    if (!permissionPromptMounted) { permissionPromptMounted = true; VectorSvelte.mountPermissionPrompt(); }
 
     // Return a Promise that resolves when the user makes a choice
     return new Promise((resolve) => {
@@ -682,9 +679,7 @@ async function publishMarketplaceApp(filePath, appId, name, description, version
  * @param {string} filePath - Path to the .xdc file
  * @param {object} miniAppInfo - Mini App info from loadMiniAppInfo
  */
-let publishDialogMounted = false;
 async function showPublishAppDialog(filePath, miniAppInfo) {
-    if (!publishDialogMounted) { publishDialogMounted = true; VectorSvelte.mountPublishDialog(); }
     const st = VectorSvelte.publishState();
     // Generate a default app ID from the name
     const defaultAppId = (miniAppInfo?.name || 'app')

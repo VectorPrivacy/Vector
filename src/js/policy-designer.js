@@ -42,11 +42,7 @@ function polName(npub) {
     return npub.slice(0, 10) + '…' + npub.slice(-4);
 }
 
-let polMounted = false;
-function polEnsureMounted() {
-    if (polMounted) return;
-    polMounted = true;
-    VectorSvelte.mountPolicyDesigner(modPoliciesPane, {
+VectorSvelte.setScreen('policyDesigner', {
         h: {
             strictness: STRICTNESS,
             parse: polParse,
@@ -71,11 +67,9 @@ function polEnsureMounted() {
                 await polRefresh();
             },
         },
-    });
-}
+});
 
 async function openPolicyDesigner(communityId) {
-    polEnsureMounted();
     if (!VectorSvelte.polPresets().length) {
         const r = await polInvoke('policy_presets');
         VectorSvelte.polSetCatalogue(r.presets || [], r.rule_kinds || []);

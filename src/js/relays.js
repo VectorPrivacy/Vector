@@ -333,9 +333,9 @@ async function handleRelayDisable() {
     }
 }
 
-/** Mount the Network section's dialogs; their handlers are fixed for the app's life. */
+/** The Network section's dialogs; their handlers are fixed for the app's life. */
 function initRelayDialogs() {
-    VectorSvelte.mountNetworkDialogs({ h: {
+    VectorSvelte.setScreen('network', { h: {
         addRelay: { close: closeAddRelayDialog, confirm: handleAddRelay },
         relayInfo: { close: closeRelayInfoDialog, disable: handleRelayDisable, setMode: handleRelayModeChange, copy: copyRelayLogs },
         blossom: { close: closeBlossomServerInfoDialog, action: handleBlossomAction, formatBytes },

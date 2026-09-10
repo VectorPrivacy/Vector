@@ -36,7 +36,7 @@ async function openDowngradeBlock(info) {
         ? format(info.last_app_version)
         : 'A newer version';
 
-    VectorSvelte.mountDowngradeBlock({
+    VectorSvelte.setScreen('downgradeBlock', {
         h: {
             getLatest: () => openUrl('https://vectorapp.io'),
             quit: async () => {

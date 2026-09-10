@@ -15,16 +15,11 @@ const modCommunityId = () => VectorSvelte.modState().communityId;
 const modIntel = () => VectorSvelte.modIntel();
 const modKeep = () => VectorSvelte.modKeep();
 
-// The Policies pane's host, handed over by the console once it mounts; the designer
-// mounts into it on the tab's first open.
-let modPoliciesPane = null;
-
-VectorSvelte.mountModConsole({
+VectorSvelte.setScreen('modConsole', {
     h: {
         ago: modAgo,
         displayName: modDisplayName,
         avatarSrc: (npub) => { const p = arrProfiles.find(x => x.id === npub); return p ? getProfileAvatarSrc(p) : null; },
-        policiesPane: (el) => { modPoliciesPane = el; },
         showTab: (which) => modShowTab(which),
         close: () => closeModerationPanel(),
         revoke: () => modRevokeInvites(),

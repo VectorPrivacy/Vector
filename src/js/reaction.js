@@ -89,10 +89,7 @@ function _startReactionTipWatchdog(reactionEl) {
 const REACTION_HOVER_DELAY_MS = 500;
 
 // Both popups are one island; this side opens and closes them and owns the gestures.
-let _reactionPopupsMounted = false;
-function _mountReactionPopups() {
-    _reactionPopupsMounted = true;
-    VectorSvelte.mountReactionPopups({
+VectorSvelte.setScreen('reactionPopups', {
         h: {
             findMessage: (msgId) => {
                 for (const chat of arrChats) {
@@ -110,8 +107,7 @@ function _mountReactionPopups() {
                 return entry ? (entry.display || entry.name) : '';
             },
         },
-    });
-}
+});
 const _reactionTipEl = () => VectorSvelte.reactionEls().tip;
 const _reactionDetailsEl = () => VectorSvelte.reactionEls().details;
 
@@ -133,7 +129,6 @@ function showReactionHoverTip(reactionEl) {
     if (!msg) return;
     const matching = msg.reactions.filter(r => r.emoji === emoji);
     if (!matching.length) return;
-    if (!_reactionPopupsMounted) _mountReactionPopups();
     VectorSvelte.openReactionTip({ emoji, names: matching.map(r => getName(r.author_id)), anchor: reactionEl });
     _startReactionTipWatchdog(reactionEl);
 }
@@ -167,7 +162,6 @@ function showReactionDetails(reactionEl) {
     const emoji = reactionEl.getAttribute('data-emoji');
     const msgId = reactionEl.getAttribute('data-msg-id');
     if (!emoji || !msgId) return;
-    if (!_reactionPopupsMounted) _mountReactionPopups();
     VectorSvelte.openReactionDetails({ emoji, msgId, anchor: reactionEl });
 }
 

@@ -482,9 +482,7 @@ function writeWallpaperSliders(blur, dim) {
 /** Full-screen "processing" overlay with a dimmed, blurred backdrop that blocks
  *  interaction while a short CPU-bound task (image decode/resize/re-encode) runs
  *  in the backend. Idempotent; pair with hideProcessingOverlay(). */
-let processingMounted = false;
 function showProcessingOverlay(message = 'Processing image...') {
-    if (!processingMounted) { processingMounted = true; VectorSvelte.mountProcessingOverlay(); }
     VectorSvelte.showProcessing(message);
 }
 function hideProcessingOverlay() {
@@ -944,7 +942,6 @@ function showEditHistory(messageId, targetElement) {
     // CURRENT revision's tags, so older revisions (which may use a different
     // `:shortcode:`) are filled from the equipped packs — same source the
     // picker/autocomplete resolve against.
-    editHistoryEnsureMounted();
     VectorSvelte.setEditHistory(messageId, msg.edit_history, mergeEmojiTags(msg.emoji_tags, equippedEmojiTags()));
 
     // The popup places itself against the bubble, above or below depending on room.
@@ -961,17 +958,12 @@ function hideEditHistory() {
     VectorSvelte.clearEditHistory();
 }
 
-let editHistoryMounted = false;
-function editHistoryEnsureMounted() {
-    if (editHistoryMounted) return;
-    editHistoryMounted = true;
-    VectorSvelte.mountEditHistory({
-        h: {
-            renderEmoji: (node, tags) => { renderCustomEmojiShortcodes(node, tags); twemojify(node); },
-            hide: hideEditHistory,
-        },
-    });
-}
+VectorSvelte.setScreen('editHistory', {
+    h: {
+        renderEmoji: (node, tags) => { renderCustomEmojiShortcodes(node, tags); twemojify(node); },
+        hide: hideEditHistory,
+    },
+});
 
 /**
  * Open a chat with a particular contact
@@ -1593,8 +1585,7 @@ VectorSvelte.setChatHeaderHandlers({
         wallpaperCancel: () => cancelWallpaperChange(),
         wallpaperSliderInput: () => onWallpaperSliderInput(),
 });
-VectorSvelte.mountComposerPopups({
-    anchor: VectorSvelte.composerEls().box,
+VectorSvelte.setScreen('composerPopups', {
     // Lazy: the helpers live in scripts that load after this one evaluates.
     h: {
         bindCachedEmojiImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),

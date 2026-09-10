@@ -8,7 +8,7 @@
     let el;
 
     function position() {
-        const rect = anchor.getBoundingClientRect();
+        const rect = (typeof anchor === 'function' ? anchor() : anchor).getBoundingClientRect();
         const margin = 10;
         const width = Math.min(rect.width, maxWidth, viewportInset ? window.innerWidth - margin * 2 : Infinity);
         const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));

@@ -9,7 +9,10 @@
     import ModList from './ModList.svelte';
     import ModFilters from './ModFilters.svelte';
     import ModStats from './ModStats.svelte';
-    // h: ago(secs), displayName(npub), avatarSrc(npub), policiesPane(el),
+    import PolicyDesigner from './PolicyDesigner.svelte';
+    import { shellScreens } from '../lib/shell.svelte.js';
+    const screens = shellScreens();
+    // h: ago(secs), displayName(npub), avatarSrc(npub),
     //    showTab(which), close(), revoke(), rotate(), banRotate()
     let { h } = $props();
 
@@ -39,7 +42,6 @@
                 + ' They start unticked, so they are the ones being removed.',
         };
     });
-    function policiesPane(el) { h.policiesPane(el); }
 </script>
 
 <svelte:window onkeydown={(e) => { if (ov.active && e.key === 'Escape') h.close(); }} />
@@ -73,7 +75,9 @@
         </div>
 
         <!-- Both panes stay mounted: the designer is mounted once, the list keeps its scroll. -->
-        <div class="mod-policies" style:display={members ? 'none' : ''} use:policiesPane></div>
+        <div class="mod-policies" style:display={members ? 'none' : ''}>
+            {#if screens.policyDesigner}<PolicyDesigner h={screens.policyDesigner.h} />{/if}
+        </div>
 
         <div id="mod-members-pane" style:display={members ? '' : 'none'}>
             <div class="mod-stats"><ModStats /></div>

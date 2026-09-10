@@ -6,7 +6,10 @@
     import CommandPopup from './CommandPopup.svelte';
     import ChoiceMenu from './ChoiceMenu.svelte';
 
-    let { anchor, h } = $props();
+    import { composerEls } from '../lib/composer.svelte.js';
+    let { h } = $props();
+    // The composer box binds after these mount, so the anchor is read at measure time.
+    const anchor = () => composerEls().box;
 </script>
 
 <MentionPopup {anchor} />

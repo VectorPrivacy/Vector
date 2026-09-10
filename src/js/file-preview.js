@@ -15,7 +15,6 @@ async function revealMetadataOptionIfPresent(filePath) {
     } catch (_) { /* leave hidden on error */ }
 }
 
-let filePreviewMounted = false;
 let pendingFile = null;
 let pendingFileBytes = null; // For Android: flag indicating bytes mode
 let pendingFileObject = null; // For Android: stores the File object directly
@@ -33,11 +32,7 @@ let pendingZipUnlisten = null; // For folder zip: unlisten function for zip_prog
 let pendingBlobUrl = null; // A video preview's object URL, revoked on close
 let filePreviewGeneration = 0; // Guards against async results landing on a newer preview
 
-/** Mount the overlay island once; the vanilla side hands it its actions. */
-function ensureFilePreview() {
-    if (filePreviewMounted) return;
-    filePreviewMounted = true;
-    VectorSvelte.mountFilePreview({
+VectorSvelte.setScreen('filePreview', {
         h: {
             close: () => closeFilePreview(),
             send: () => sendPreviewedFile(),
@@ -48,8 +43,7 @@ function ensureFilePreview() {
             initFileTreeToggles: () => initFileTreeToggles(),
             sanitizeStem: (str) => sanitizeFilenameStem(str),
         },
-    });
-}
+});
 
 // Image extensions supported by the image crate
 const SUPPORTED_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'tiff', 'tif', 'ico'];
@@ -265,7 +259,6 @@ async function checkUploadBlocked(fileSize, extension) {
 }
 
 async function openFilePreview(filepath, receiver, replyRef = '') {
-    ensureFilePreview();
     const myGeneration = ++filePreviewGeneration;
     releasePendingVideo();
 
@@ -469,7 +462,6 @@ function _b64utf8(str) {
  */
 async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver, replyRef = '') {
     if (await checkUploadBlocked(fileSize, ext)) return;
-    ensureFilePreview();
     const myGeneration = ++filePreviewGeneration;
     releasePendingVideo();
 
@@ -756,7 +748,6 @@ function initFileTreeToggles() {
  * @param {string} replyRef - Reply reference (optional)
  */
 async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
-    ensureFilePreview();
     releasePendingVideo();
 
     // Clean up any previous zip state (e.g., drag-drop while overlay is already open)
@@ -862,8 +853,6 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
  * Close file preview overlay
  */
 function closeFilePreview() {
-    if (!filePreviewMounted) return;
-
     stopCompressionPolling();
     releasePendingVideo();
 

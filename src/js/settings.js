@@ -504,11 +504,7 @@ function _ensureStatusComposer() {
 
 // The dialog's handlers belong to one open at a time; the component routes through here.
 let _statusSession = null;
-let _statusMounted = false;
-function _ensureStatusDialog() {
-    if (_statusMounted) return;
-    _statusMounted = true;
-    VectorSvelte.mountStatusDialog({
+VectorSvelte.setScreen('statusDialog', {
         h: {
             composerHost: (el) => { _statusHost = el; },
             renderPreview: (node, text) => {
@@ -525,9 +521,7 @@ function _ensureStatusDialog() {
             backdrop: () => _statusSession?.backdrop(),
             key: (e) => _statusSession?.key(e),
         },
-    });
-    VectorSvelte.flushSync();
-}
+});
 
 /** Open the Status dialog prefilled with the current status. Emoji come from
  *  the shared Emoji Panel in status mode (GIFs hidden); the live row renders
@@ -535,7 +529,6 @@ function _ensureStatusDialog() {
  *  open the card glides to the upper third so both stay fully visible. */
 function openStatusDialog(cProfile) {
     const strCurrent = cProfile?.status?.title || '';
-    _ensureStatusDialog();
     const input = _ensureStatusComposer();
     const dialog = VectorSvelte.statusDialog;
 
@@ -1882,5 +1875,4 @@ const SETTINGS_HELPERS = {
 // Mounted once every script is in: the sections call helpers from files that load later.
 document.addEventListener('DOMContentLoaded', () => {
     VectorSvelte.setScreen('settings', { h: SETTINGS_HELPERS });
-    VectorSvelte.mountCredentialModals();
 }, { once: true });

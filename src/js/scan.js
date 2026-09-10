@@ -7,7 +7,7 @@ let qrScanRafId = 0;
 let qrScanToastGate = false;
 // The scanner's video element, handed over by the component once it mounts.
 let qrScanVideo = null;
-VectorSvelte.mountQrScanner({ h: { video: (el) => { qrScanVideo = el; }, close: () => closeQrScanner() } });
+VectorSvelte.setScreen('qrScanner', { h: { video: (el) => { qrScanVideo = el; }, close: () => closeQrScanner() } });
 
 /**
  * Pick the primary rear camera. Android exposes every lens (macro, ultra-wide,

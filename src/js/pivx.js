@@ -664,9 +664,9 @@ async function mergePivxPaymentsIntoChat(contact, initialMessages) {
 
 // ========== End Chat Integration ==========
 
-// The dialogs mount once the bundle has run (this script is not deferred).
+// Registered once every script is in (this one is not deferred).
 document.addEventListener('DOMContentLoaded', function initPivxDialogs() {
-    VectorSvelte.mountPivxDialogs({ h: {
+    VectorSvelte.setScreen('pivx', { h: {
         deposit: {
             close: closePivxDepositDialog,
             copy: () => {

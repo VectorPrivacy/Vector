@@ -1,59 +1,39 @@
-// Entry for the Svelte island bundle. esbuild compiles this (+ every .svelte it pulls in)
-// into src/components.bundle.js as an IIFE exposing the `VectorSvelte` global, so the vanilla
-// one-global-scope frontend can call VectorSvelte.mountX(target, props) directly.
+// Entry for the Svelte bundle. esbuild compiles this (+ every .svelte it pulls in) into
+// src/components.bundle.js as an IIFE exposing the `VectorSvelte` global, which the vanilla
+// one-global-scope scripts call.
 //
-// Layout (SVELTE_MIGRATION_PLAN.md §3):
-//   lib/       non-visual: stores, shared logic
-//   ui/        leaf atoms (Avatar, ...)
-//   people/    everything that lists persons: the row, the picker, the roster
-//   chatlist/  the chat list island
-//   chat/ composer/ settings/ ...   later phases, one directory per screen
+// How UI gets on screen, in one sentence: shell/App.svelte renders everything. A component
+// whose helpers live in a vanilla script is registered from that script with
+// `setScreen(name, { h })` (lib/shell.svelte.js) and renders once the entry lands; one that
+// needs only its store renders unconditionally. Do not add a `mount*` export: the four below
+// exist for targets App cannot own (the message list's container, a card inside a rendered
+// row, a host placed beside the composer's editor).
+//
+// Layout:
+//   lib/       stores and shared logic, one file per concern
+//   ui/        leaf atoms (Avatar, Toast, ...)
+//   shell/     the root App and its panes
+//   people/ chat/ composer/ settings/ ...   one directory per screen or feature
 import { mount, unmount, flushSync } from 'svelte';
 
-import MessageRow from './chat/MessageRow.svelte';
 import MessageList from './chat/MessageList.svelte';
-import ComposerPopups from './composer/ComposerPopups.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
-import MiniProfile from './people/MiniProfile.svelte';
-import ReactionPopups from './chat/ReactionPopups.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
 import { uploadProgressed, downloadProgressed, transferDone } from './lib/attachments.svelte.js';
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
-import ModList from './moderation/ModList.svelte';
-import ModFilters from './moderation/ModFilters.svelte';
-import ModStats from './moderation/ModStats.svelte';
-import ModConsole from './moderation/ModConsole.svelte';
-import PolicyDesigner from './moderation/PolicyDesigner.svelte';
-import AddRelayDialog from './settings/AddRelayDialog.svelte';
-import RelayInfoDialog from './settings/RelayInfoDialog.svelte';
-import BlossomInfoDialog from './settings/BlossomInfoDialog.svelte';
-import DepositDialog from './miniapps/pivx/DepositDialog.svelte';
-import SendDialog from './miniapps/pivx/SendDialog.svelte';
-import WithdrawDialog from './miniapps/pivx/WithdrawDialog.svelte';
-import PivxSettingsDialog from './miniapps/pivx/SettingsDialog.svelte';
 export { attachmentEls, setAttachmentHandlers, onAttachmentVisibility, attachmentVisible, setAttachmentVisible, attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
 export { setLaunchDialogHandlers, addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
-import EditHistoryPopup from './chat/EditHistoryPopup.svelte';
-import QrOverlay from './ui/QrOverlay.svelte';
-import QrScanner from './ui/QrScanner.svelte';
 import App from './shell/App.svelte';
 export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte.js';
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
 export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
 export { setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
 export { setMailBadge, mergeShellHandlers, setScreen, revealPane, revealPending, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag } from './lib/shell.svelte.js';
-import StatusDialog from './ui/StatusDialog.svelte';
-import DowngradeBlock from './ui/DowngradeBlock.svelte';
-import CredentialModal from './ui/CredentialModal.svelte';
-import MigrationOverlay from './ui/MigrationOverlay.svelte';
-import ProcessingOverlay from './ui/ProcessingOverlay.svelte';
-import PermissionPrompt from './ui/PermissionPrompt.svelte';
-import PublishDialog from './ui/PublishDialog.svelte';
 export { publishState, openPublishDialog, activatePublishDialog, closePublishDialog, unmountPublishDialog, setPublishPerms, setPublishPermsError, setPublishHint, setPublishBusy } from './lib/publish.svelte.js';
 export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';
@@ -75,8 +55,6 @@ import { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPicke
 import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofile.svelte.js';
 import { overviewRoster, overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
-import FilePreview from './files/FilePreview.svelte';
-import Settings from './settings/Settings.svelte';
 
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
@@ -205,14 +183,6 @@ export function mountMessageList(target, { h }) {
 }
 
 /**
- * Mount the composer's autocomplete popups (mention, shortcode, command) at body
- * level. The controllers publish views through `openPopup`/`closePopup`.
- */
-export function mountComposerPopups({ anchor, h }) {
-    return mount(ComposerPopups, { target: document.body, props: { anchor, h } });
-}
-
-/**
  * Mount the structured command composer's argument pills in a host placed before the
  * editor (display: contents, so they are the row's flex children). The context strip
  * is the composer box's own.
@@ -222,25 +192,6 @@ export function mountCommandComposer({ editor }) {
     host.style.display = 'contents';
     editor.before(host);
     return mount(CommandComposer, { target: host });
-}
-
-/** Mount the send-file preview overlay at body level; it shows itself from `fpOpen`. */
-export function mountFilePreview({ h }) {
-    return mount(FilePreview, { target: document.body, props: { h } });
-}
-
-
-
-
-/** Mount the mini profile popup at body level; it shows itself from `openMiniProfile`. */
-export function mountMiniProfile({ h }) {
-    return mount(MiniProfile, { target: document.body, props: { h } });
-}
-
-
-/** Mount the reaction hover tip + details popups at body level. */
-export function mountReactionPopups({ h }) {
-    return mount(ReactionPopups, { target: document.body, props: { h } });
 }
 
 /** Mount one file box into `target`, replacing whatever box it held (URL-shared Mini App cards). */
@@ -254,92 +205,11 @@ export function mountFileBox(target, props) {
     return inst;
 }
 
-
 /** Mount one in-chat pack preview card into `target`; returns the instance for teardown. */
 export function mountPackPreviewCard(target, props) {
     return mount(PackPreviewCard, { target, props });
 }
 
-
-/** Mount the moderation console onto the body (once); it renders its own overlay. */
-export function mountModConsole({ h }) {
-    return mount(ModConsole, { target: document.body, props: { h } });
-}
-
-/** Mount the policy designer into the console's Policies pane. */
-export function mountPolicyDesigner(pane, { h }) {
-    pane.replaceChildren();
-    return mount(PolicyDesigner, { target: pane, props: { h } });
-}
-
-
-/** Mount the four PIVX wallet dialogs on the body; each opens through its store. */
-export function mountPivxDialogs({ h }) {
-    mount(DepositDialog, { target: document.body, props: { h: h.deposit } });
-    mount(SendDialog, { target: document.body, props: { h: h.send } });
-    mount(WithdrawDialog, { target: document.body, props: { h: h.withdraw } });
-    mount(PivxSettingsDialog, { target: document.body, props: { h: h.settings } });
-}
-
-
-
-/** Mount the Network section's dialogs (add relay, relay info, media server info) at body level. */
-export function mountNetworkDialogs({ h }) {
-    mount(AddRelayDialog, { target: document.body, props: { h: h.addRelay } });
-    mount(RelayInfoDialog, { target: document.body, props: { h: h.relayInfo } });
-    mount(BlossomInfoDialog, { target: document.body, props: { h: h.blossom } });
-}
-
-/** Mount the edit-history popup onto the body (once); it renders when opened. */
-export function mountEditHistory({ h }) {
-    return mount(EditHistoryPopup, { target: document.body, props: { h } });
-}
-
-
-/** Mount the fullscreen QR overlay onto the body (once). */
-export function mountQrOverlay({ h }) {
-    return mount(QrOverlay, { target: document.body, props: { h } });
-}
-
-/** Mount the QR scanner onto the body (once); the video element is handed to `h.video`. */
-export function mountQrScanner({ h }) {
-    return mount(QrScanner, { target: document.body, props: { h } });
-}
-
-/** Mount the Status dialog onto the body (once); the composer host is handed to `h.composerHost`. */
-export function mountStatusDialog({ h }) {
-    return mount(StatusDialog, { target: document.body, props: { h } });
-}
-
-/** Mount the downgrade block onto the body (once); it renders when shown. */
-export function mountDowngradeBlock({ h }) {
-    return mount(DowngradeBlock, { target: document.body, props: { h } });
-}
-
-
-
-
-/** Mount the credential modal and the migration overlay at body level. */
-export function mountCredentialModals() {
-    mount(CredentialModal, { target: document.body, props: {} });
-    mount(MigrationOverlay, { target: document.body, props: {} });
-}
-
-
-/** Mount the processing card onto the body (once). */
-export function mountProcessingOverlay() {
-    return mount(ProcessingOverlay, { target: document.body, props: {} });
-}
-
-/** Mount the mini app permission prompt onto the body (once). */
-export function mountPermissionPrompt() {
-    return mount(PermissionPrompt, { target: document.body, props: {} });
-}
-
-/** Mount the Nexus publish dialog onto the body (once). */
-export function mountPublishDialog() {
-    return mount(PublishDialog, { target: document.body, props: {} });
-}
 
 // The shell mounts as the bundle evaluates: it loads before main.js, whose load-time
 // getElementById handles need the screens' containers in the document already.

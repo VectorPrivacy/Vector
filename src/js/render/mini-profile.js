@@ -5,15 +5,11 @@
  * stack entry and the dismiss gestures.
  */
 
-let miniProfileMounted = false;
-
 function _miniProfilePopup() {
     return VectorSvelte.miniProfileEls().popup;
 }
 
-function _mountMiniProfile() {
-    miniProfileMounted = true;
-    VectorSvelte.mountMiniProfile({
+VectorSvelte.setScreen('miniProfile', {
         h: {
             getProfile,
             getProfileAvatarSrc,
@@ -28,14 +24,11 @@ function _mountMiniProfile() {
             onMessage: (npub) => { hideMiniProfile(); openChat(npub); },
             onView: _miniProfileOpenFull,
         },
-    });
-}
+});
 
 /** Open the mini profile for `npub`, anchored to the tapped element (null = centred). */
 function showMiniProfile(npub, anchorEl) {
     if (!npub) return;
-    if (!miniProfileMounted) _mountMiniProfile();
-
     // A mention chip INSIDE the open popup replaces it in place: keep the spot rather
     // than re-anchoring to a chip that is about to be torn down.
     let reuse = null;
