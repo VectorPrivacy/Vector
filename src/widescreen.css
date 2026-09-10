@@ -162,8 +162,8 @@ body.chrome {
   margin-right: 8px;
 }
 
-.chrome-help:hover {
-  background: none;
+.chrome-ctl.chrome-help:hover {
+  background-color: transparent;
 }
 
 .chrome-ctl:hover {
