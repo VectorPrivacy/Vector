@@ -100,6 +100,12 @@ export function setPane(communityId, dmsOnly) {
     pane.dmsOnly = !!dmsOnly;
 }
 
+// Whether the chat list rendered any row: the pane's bottom fadeout softens a scrolling
+// list, and over the empty state it would just wash out the intro.
+const chatlist = $state({ hasRows: false });
+export function listHasRows() { return chatlist.hasRows; }
+export function setListHasRows(on) { chatlist.hasRows = !!on; }
+
 // The expanded profile view: which npub it shows, and whether our own profile is
 // in Edit Mode (the reconciler leaves the screen alone while it is).
 const profileView = $state({ id: '', editing: false });

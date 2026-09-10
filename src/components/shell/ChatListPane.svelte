@@ -6,6 +6,7 @@
     import AccountRow from './AccountRow.svelte';
     import Chatlist from '../chatlist/Chatlist.svelte';
     import CommunityHead from '../chatlist/CommunityHead.svelte';
+    import { listHasRows } from '../lib/signals.svelte.js';
     const panes = shellPanes();
     const shell = shellState();
     const acct = accountState();
@@ -58,5 +59,5 @@
     <div id="chat-list" use:bindList use:reveal={['chatList', reveals.chatList]}>
         {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
     </div>
-    <div class="fadeout-bottom" style="position: fixed; bottom: 65px;"></div>
+    <div class="fadeout-bottom" style="position: fixed; bottom: 65px;" style:display={listHasRows() ? null : 'none'}></div>
 </div>

@@ -4,7 +4,7 @@
     // (muted, unread, pings) from its chat's signal, so a message repaints one row.
     import { communityVersion, chatVersion, openChatId } from '../lib/signals.svelte.js';
 
-    let { communityId, pane = false, h } = $props();
+    let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
     //    computeRowBadgeCount, countPingMessages, isPrimaryChannelId, openChannel, createChannel, deleteChannel
 
@@ -18,6 +18,9 @@
         if (!pane && (!h.channelsShown(communityId) || (channels.length < 2 && !canManage))) return null;
         return { channels, canManage };
     });
+
+    // The pane's owner dims its bottom fadeout when nothing rendered.
+    $effect(() => { onShown(!!state); });
 
     // A section is { id, label, channels, canAdd }: the day the backend grows user-defined
     // sections only this grouping changes. Today the protocol knows public vs private.

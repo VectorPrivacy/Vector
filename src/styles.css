@@ -2860,6 +2860,11 @@ body.mobile #chat-new-scan-btn { display: block; }
   padding-right: 15px;
 }
 
+/* Scroll clearance past the last row, which the fixed bottom chrome would otherwise cover. */
+#chat-list > :last-child {
+  margin-bottom: 50px;
+}
+
 /* Optimistic community join in flight: visible at the top of the list but non-interactive
  * + dimmed until the control-fold/sync makes it read/writeable. */
 .chatlist-joining {

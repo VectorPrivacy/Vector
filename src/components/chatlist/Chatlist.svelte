@@ -1,19 +1,16 @@
 <script>
-    // The chat-list island (migration Phase 1, SVELTE_MIGRATION_PLAN.md §3.2).
-    // Byte-identical DOM to the vanilla renderChatlistNow path
-    // (js/render/chatlist/{list,row,channels}.js): keyed {#each} reuses row nodes
-    // across updates, so a change inside ONE chat patches that row instead of
-    // rebuilding the list — the granularity the state-hash-gated full render
-    // could not offer.
-    // Page globals (arrChats, helpers) arrive as props: this bundle is an IIFE and
-    // does not share the classic scripts' global lexical scope.
+    // The chat list. A keyed {#each} reuses row nodes across updates, so a change inside
+    // ONE chat patches that row instead of rebuilding the list.
+    // Page globals (arrChats, helpers) arrive as props: this bundle is an IIFE and does
+    // not share the classic scripts' global lexical scope.
     let { h, snapshot } = $props();
+    let channelsShown = $state(false);   // the pane's channel list has something to show
 
     import ChannelList from './ChannelList.svelte';
     import InviteRow from './InviteRow.svelte';
     import EmptyState from './EmptyState.svelte';
     import { timeTickVersion } from '../lib/stores.js';
-    import { listVersion, invitesVersion, paneState, openChatId, communityVersion } from '../lib/signals.svelte.js';
+    import { listVersion, invitesVersion, paneState, openChatId, communityVersion, setListHasRows } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
 
     // Snapshot re-pulls the raw page state when the list's shape, the invites, the
@@ -58,22 +55,6 @@
         for (const c of chats) if (h.chatIsGroup(c)) h.ensureCommunityPreviewActivity(c);
     });
 
-    // The last row gets the scroll-past-fadeout margin boost. Rows persist, so the
-    // previous holder must be cleared (the vanilla path rebuilt everything). Hosts
-    // are display:contents (no box), so walk back to the last real element.
-    let prevLast = null;
-    $effect(() => {
-        chats;
-        invites;
-        paneCommunityId;
-        const list = document.getElementById('chat-list');
-        let last = list?.lastElementChild || null;
-        while (last && last.style.display === 'contents') last = last.previousElementSibling;
-        if (prevLast && prevLast !== last) prevLast.style.marginBottom = '';
-        if (last) last.style.marginBottom = '50px';
-        prevLast = last;
-    });
-
     // Widescreen selection stamp — the vanilla render re-stamped after every
     // rebuild; rows persist here, so re-stamp on list shape / selection changes.
     $effect(() => {
@@ -84,21 +65,13 @@
         h.wsMarkActiveRow();
     });
 
-    // The bottom fadeout exists to soften a scrolling list; over the empty
-    // state it just washes out the intro. Keyed on real rendered content so
-    // pane mode (channels, not chats) reads correctly too.
-    $effect(() => {
-        chats;
-        invites;
-        paneCommunityId;
-        const has = document.querySelector('#chat-list .chatlist-contact, #chat-list .chatlist-channels');
-        const el = document.querySelector('#chats .fadeout-bottom');
-        if (el) el.style.display = has ? '' : 'none';
-    });
+    // The pane's bottom fadeout hides over an empty list: it exists to soften a
+    // scroller, and over the empty state it just washes out the intro.
+    $effect(() => { setListHasRows(paneCommunityId ? channelsShown : (chats.length + invites.length) > 0); });
 </script>
 
 {#if paneCommunityId}
-    <ChannelList communityId={paneCommunityId} pane {h} />
+    <ChannelList communityId={paneCommunityId} pane {h} onShown={(on) => (channelsShown = on)} />
 {:else}
     {#each invites as invite (invite.community_id)}
         <InviteRow {invite} {h} />
@@ -116,5 +89,4 @@
     {/if}
 {/if}
 
-<!-- No <style>: global styles.css cascades; the DOM is byte-identical to the vanilla
-     renderChatlistNow output (display:contents hosts keep #chat-list's child structure flat). -->
+<!-- No <style>: global styles.css cascades. -->
