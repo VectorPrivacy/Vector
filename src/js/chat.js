@@ -1633,7 +1633,8 @@ function adjustSize() {
         const els = VectorSvelte.shellElements();
         const nNewChatBtnHeight = els.newChat?.getBoundingClientRect().height || 0;
         const nNavbarHeight = els.navbar?.getBoundingClientRect().height || 0;
-        if (els.chatList) els.chatList.style.maxHeight = (window.innerHeight - (els.chatList.offsetTop + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
+        // Measured against the viewport, not the pane: the window chrome sits above the pane.
+        if (els.chatList) els.chatList.style.maxHeight = (window.innerHeight - (els.chatList.getBoundingClientRect().top + nNewChatBtnHeight + nNavbarHeight)) + 50 + 'px';
     }
 
     // Re-calculate chat input size on window resize (text may reflow)

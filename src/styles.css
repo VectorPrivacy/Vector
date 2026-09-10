@@ -1105,7 +1105,7 @@ html, body {
 /* Profile Header - Fixed at top */
 .profile-header {
   position: fixed;
-  top: 0;
+  top: var(--chrome-h);
   left: 0;
   right: 0;
   height: 60px;
@@ -1168,7 +1168,7 @@ html, body {
 /* Profile Content - Scrollable */
 .profile-content {
   position: fixed;
-  top: 60px;
+  top: calc(60px + var(--chrome-h));
   bottom: 65px;
   left: 0;
   right: 0px;
@@ -2789,7 +2789,7 @@ body.mobile #chat-new-scan-btn { display: block; }
 
 #chat-list {
   position: fixed;
-  top: 120px;
+  top: calc(120px + var(--chrome-h));
   bottom: 70px;
   left: 0;
   right: 2px;
@@ -7516,7 +7516,7 @@ audio {
 
 #settings {
   position: fixed;
-  top: 10px;
+  top: calc(10px + var(--chrome-h));
   bottom: 70px;
   left: 0;
   right: 2px;
@@ -9463,7 +9463,7 @@ select:disabled:hover {
    over the messages like a sheet. */
 .pins-drawer {
   position: fixed;
-  top: 60px;
+  top: calc(60px + var(--chrome-h));
   left: 0;
   right: 0;
   /* Above the chat's own chrome (msg-top-fade sits at 100) but below every
@@ -9785,7 +9785,7 @@ select:disabled:hover {
 
 .chat-new-header {
   position: fixed;
-  top: 0;
+  top: var(--chrome-h);
   left: 0;
   right: 0;
   height: 60px;
@@ -18630,7 +18630,7 @@ textarea.command-part-input {
    plane behind the panel. */
 .profile-switcher-backdrop {
   position: fixed;
-  top: 60px;
+  top: calc(60px + var(--chrome-h));
   left: 0;
   right: 0;
   bottom: 0;
@@ -18653,7 +18653,7 @@ textarea.command-part-input {
    instead of bleeding off the viewport edge. */
 .profile-switcher-panel {
   position: fixed;
-  top: 60px;
+  top: calc(60px + var(--chrome-h));
   left: 0;
   right: 0;
   margin-left: auto;

@@ -575,7 +575,7 @@ body.ws #settings {
    being the only thing on screen, so widescreen has to give it a surface. Its
    rows are built for a phone column, hence the centred measure. */
 body.ws #settings {
-  top: 0;                 /* its 10px inset would let the list peek above it */
+  top: var(--chrome-h);   /* its 10px inset would let the list peek above it */
   right: 0;               /* the stock 2px would leave a seam at the pane's edge */
   background-color: #030303;
   padding-left: 20px;
