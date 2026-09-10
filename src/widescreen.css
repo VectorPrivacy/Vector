@@ -56,7 +56,10 @@ body.chrome {
   align-items: center;
   box-sizing: border-box;
   height: var(--chrome-h);
-  background-color: var(--ws-rail-bg);
+  /* Opaque: the tint over the themes' shared root colour, so nothing the shell
+     lifts above its top edge shows through the strip. */
+  background-color: #030303;
+  background-image: linear-gradient(var(--ws-rail-bg), var(--ws-rail-bg));
   border-bottom: 1px solid var(--ws-seam);
   -webkit-user-select: none;
   user-select: none;
@@ -398,10 +401,7 @@ body.ws #chats {
   padding-top: 12px;
 }
 
-/* The sync bar's -14px lift tucked it under the account row that used to sit
-   above it; that row now lives in the rail footer. */
 body.ws #chats > .sync-line {
-  margin-top: 0;
   margin-bottom: 8px;
 }
 
@@ -560,9 +560,6 @@ body.ws:not(.ws-rail-collapsed) #ws-rail-account #account {
   padding: 8px 10px;
   align-items: center;
   transition: background-color 0.12s ease;
-  /* The list row carries a 15px bottom margin to clear the chat beneath it; in
-     the rail footer there's nothing beneath, so it reads as the chip floating
-     off the bottom of the rail. */
   margin-bottom: 0;
 }
 

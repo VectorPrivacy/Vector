@@ -2621,7 +2621,8 @@ body.mobile #chat-new-scan-btn { display: block; }
   background-color: rgba(22, 22, 22, 0.85);
   backdrop-filter: blur(8px);
   padding: 0 10px;
-  margin-bottom: 15px;
+  /* The sync line tucks in right under the row. */
+  margin-bottom: 1px;
 }
 
 .account #account-avatar-container,
@@ -10749,7 +10750,6 @@ select:disabled:hover {
 .sync-line {
   height: 2px;
   width: 100%;
-  margin-top: -14px;
   margin-bottom: 10px;
   opacity: 1;
   transform: scaleX(0);
