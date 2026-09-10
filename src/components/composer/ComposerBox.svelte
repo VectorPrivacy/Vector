@@ -123,35 +123,48 @@
     function pressStart() { pressTimer = setTimeout(openTimer, 500); }
     function pressEnd() { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }
     let swappingOut = $state(false);
+    // Which swap class each button wears: 'out' is the one leaving, 'in' the one arriving.
+    let sendAnim = $state(null);
+    let voiceAnim = $state(null);
+    let wanted = null;   // the swap in flight, so one superseded mid-animation is dropped
 
-    function clearAnim() {
-        els.send?.classList.remove('button-swap-in', 'button-swap-out');
-        els.voice?.classList.remove('button-swap-in', 'button-swap-out');
-    }
+    function clearAnim() { sendAnim = null; voiceAnim = null; }
     function snap(want) {
         clearAnim();
+        wanted = null;
+        swappingOut = false;
         shown = want;
         sendActive = want === 'send';
         sendShown = want === 'send';
         voiceShown = want === 'voice';
     }
     function swap(want) {
-        const out = want === 'send' ? els.voice : els.send;
-        const inn = want === 'send' ? els.send : els.voice;
         clearAnim();
         shown = want;
         sendActive = want === 'send';
-        out.classList.add('button-swap-out');
+        wanted = want;
         swappingOut = want === 'voice';
-        out.addEventListener('animationend', () => {
-            if (want === 'send') voiceShown = false; else sendShown = false;
-            out.classList.remove('button-swap-out');
-            swappingOut = false;
-            if (shown !== want) return;   // superseded mid-flight
-            if (want === 'send') sendShown = true; else voiceShown = true;
-            inn.classList.add('button-swap-in');
-            inn.addEventListener('animationend', () => inn.classList.remove('button-swap-in'), { once: true });
-        }, { once: true });
+        if (want === 'send') voiceAnim = 'out'; else sendAnim = 'out';
+    }
+    /** The leaving button's animation ends the swap; the arriving one's just clears the class. */
+    function swapAnimEnd(which) {
+        if (which === 'send' && sendAnim === 'in') return void (sendAnim = null);
+        if (which === 'voice' && voiceAnim === 'in') return void (voiceAnim = null);
+        const want = wanted;
+        if (which === 'voice' && voiceAnim === 'out') {
+            voiceAnim = null;
+            voiceShown = false;
+        } else if (which === 'send' && sendAnim === 'out') {
+            sendAnim = null;
+            sendShown = false;
+        } else {
+            return;
+        }
+        swappingOut = false;
+        wanted = null;
+        if (shown !== want) return;   // superseded mid-flight
+        if (want === 'send') { sendShown = true; sendAnim = 'in'; }
+        else { voiceShown = true; voiceAnim = 'in'; }
     }
 </script>
 
@@ -177,9 +190,9 @@
         <VoiceRecorderUI part="strip" />
         <div id="chat-input-host" style:display={voiceBusy ? 'none' : null}></div>
         <button id="chat-input-emoji" style:display={locked || voiceBusy ? 'none' : null} bind:this={els.emoji} use:fadeIn={voice.fadeTick}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
-        <button id="chat-input-voice" style="margin-right: 3px;" class:pending={voice.state === 'pending'} class:recording={voice.state === 'recording'} style:display={voiceShown && !voiceHidesMic ? null : 'none'} bind:this={els.voice} use:fadeIn={voice.fadeTick} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
+        <button id="chat-input-voice" style="margin-right: 3px;" class:pending={voice.state === 'pending'} class:recording={voice.state === 'recording'} class:button-swap-in={voiceAnim === 'in'} class:button-swap-out={voiceAnim === 'out'} style:display={voiceShown && !voiceHidesMic ? null : 'none'} bind:this={els.voice} use:fadeIn={voice.fadeTick} onanimationend={() => swapAnimEnd('voice')} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
         <VoiceRecorderUI part="dot" />
-        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive || voicePreview} class:voice-preview-send={voicePreview} class:has-self-destruct={!!chrome.selfDestructSecs} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown || voicePreview ? null : 'none'} bind:this={els.send} onclick={() => h()?.send()}
+        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive || voicePreview} class:voice-preview-send={voicePreview} class:has-self-destruct={!!chrome.selfDestructSecs} class:button-swap-in={sendAnim === 'in'} class:button-swap-out={sendAnim === 'out'} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown || voicePreview ? null : 'none'} bind:this={els.send} onanimationend={() => swapAnimEnd('send')} onclick={() => h()?.send()}
                 oncontextmenu={(e) => { e.preventDefault(); openTimer(); }} ontouchstart={pressStart} ontouchend={pressEnd} ontouchmove={pressEnd} ontouchcancel={pressEnd}><span class="icon icon-send"></span></button>
         <!-- Outside the send button so it never inherits the mic/send swap rotation; it fades with the button. -->
         <span class="self-destruct-badge" class:is-visible={!!chrome.selfDestructSecs && sendShown && !swappingOut}><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg></span>
