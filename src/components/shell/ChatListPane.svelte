@@ -7,7 +7,9 @@
     import Chatlist from '../chatlist/Chatlist.svelte';
     import CommunityHead from '../chatlist/CommunityHead.svelte';
     import { listHasRows } from '../lib/signals.svelte.js';
+    import { loginState } from '../lib/login.svelte.js';
     const panes = shellPanes();
+    const login = loginState();
     const shell = shellState();
     const acct = accountState();
     const screens = shellScreens();
@@ -37,7 +39,8 @@
     {#if !shell.ws}
         <AccountRow />
     {/if}
-    <div id="sync-line" class="sync-line" class:active={sync.active} class:fade-out={sync.fadeOut} class:progress={sync.progress !== null}
+    <!-- A sync that starts under the login form waits for the list to be on screen. -->
+    <div id="sync-line" class="sync-line" class:active={sync.active && !login.shown} class:fade-out={sync.fadeOut} class:progress={sync.progress !== null}
          style:--sync-progress={sync.progress !== null ? sync.progress : null}></div>
     <div id="chat-new-actions" style="display: flex; flex-direction: row; margin: 0 15px 15px 15px;">
         <button id="new-chat-btn" class="new-chat-btn btn" style="width: 50%; margin-right: 5px;" style:display={shell.newChatButtons ? null : 'none'}
