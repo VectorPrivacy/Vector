@@ -1,7 +1,7 @@
 <script>
     // The 32px desktop title strip: the lockup (the door home to DMs), the update
-    // banner, help and the window controls. Bare surfaces carry data-tauri-drag-region,
-    // so the strip itself moves the window.
+    // banner, help and the window controls. A press on the bare strip moves the window
+    // (js/chrome.js), so nothing here needs Tauri's own drag region.
     import { chromeState } from '../lib/chrome.svelte.js';
     import { shellState, shellScreens } from '../lib/shell.svelte.js';
     import { updatesState } from '../lib/settings.svelte.js';
@@ -13,7 +13,8 @@
 </script>
 
 {#if chrome.on}
-<header id="window-chrome" data-tauri-drag-region>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<header id="window-chrome" onmousedown={(e) => { if (e.target === e.currentTarget && e.button === 0) h?.dragStart(e.detail); }}>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="chrome-lockup" class="btn" title="Direct Messages" onclick={() => h?.openDmHome()}>
     <svg id="chrome-mark" viewBox="26.2 7 29.3 50.5" xmlns="http://www.w3.org/2000/svg" aria-label="Vector">
