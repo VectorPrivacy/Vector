@@ -451,7 +451,6 @@ function _dmsgSelectReply(targetMsgId) {
 
     if (strCurrentReplyReference) {
         const prev = document.getElementById(strCurrentReplyReference);
-        if (prev) clearHighlight(prev, 'replying');
     }
 
     strCurrentReplyReference = targetMsgId;
@@ -499,7 +498,6 @@ function _dmsgSelectReply(targetMsgId) {
     domChatMessageInput.focus();
 
     const target = document.getElementById(targetMsgId);
-    if (target) applyHighlight(target, 'replying');
 }
 
 /* ──────────────────────────────────────────────────────────────────────────

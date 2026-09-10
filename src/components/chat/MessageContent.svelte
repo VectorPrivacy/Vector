@@ -11,7 +11,7 @@
     import CryptoAddress from './CryptoAddress.svelte';
     import { messageVersion, clockSec } from '../lib/chatview.svelte.js';
 
-    let { msg, sender, ctx, h, media, sig } = $props();
+    let { msg, sender, ctx, h, media, sig, lastMine = false } = $props();
     // h: ContentHelpers, media: MediaHelpers (both in js/render/chat/message-row.js)
 
     // One built element into a display:contents host.
@@ -82,7 +82,7 @@
         {:else if msg.pending}
             <span class="dmsg-status">Sending...</span>
         {:else}
-            <span class="dmsg-status">Sent <span class="icon icon-check-circle"></span></span>
+            <span class="dmsg-status" class:dmsg-status-hidden={!lastMine}>Sent <span class="icon icon-check-circle"></span></span>
         {/if}
     {/if}
     {#if msg.expiration}

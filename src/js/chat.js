@@ -97,7 +97,6 @@ function _derezRowDom(domMsg) {
     _windowReleaseAnchor(domMsg.id);
     VectorSvelte.touchWindow();
     VectorSvelte.flushSync();
-    _dmsgUpdateLastSentVisibility();
 }
 
 /** A message just vanished (deletion or self-destruct) — bail out of any UI
@@ -346,7 +345,6 @@ function _updateChatWindow(chat, sortedMessages, single) {
         clearUnreadDivider();
     }
     // Only the newest own message shows its "Sent" mark.
-    _dmsgUpdateLastSentVisibility();
 }
 
 /** The inner HTML of a day divider for `timestamp` ("Today, 4:08 pm"). */
@@ -806,7 +804,6 @@ function cancelReply() {
     // Clear the replying-to highlight on the previously-selected row.
     if (strCurrentReplyReference) {
         const domMsg = document.getElementById(strCurrentReplyReference);
-        if (domMsg) clearHighlight(domMsg, 'replying');
     }
 
     // Remove the reply ID

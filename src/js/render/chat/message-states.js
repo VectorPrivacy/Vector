@@ -21,12 +21,6 @@ let _dmsgActiveJumpTimer = null;
 function applyHighlight(rowEl, kind) {
     if (!rowEl || !kind) return;
     switch (kind) {
-        case 'pinged':
-            rowEl.dataset.pinged = 'true';
-            break;
-        case 'replying':
-            rowEl.dataset.replyingTo = 'true';
-            break;
         case 'jumped': {
             // Spam-clicks on the same row are ignored — let the in-flight
             // animation complete to prevent CSS re-trigger stutter. Jumps to
@@ -50,8 +44,6 @@ function applyHighlight(rowEl, kind) {
 function clearHighlight(rowEl, kind) {
     if (!rowEl || !kind) return;
     switch (kind) {
-        case 'pinged':       delete rowEl.dataset.pinged; break;
-        case 'replying':     delete rowEl.dataset.replyingTo; break;
         case 'jumped':       delete rowEl.dataset.jumped; break;
     }
 }

@@ -9,7 +9,7 @@
     import ChannelList from './ChannelList.svelte';
     import InviteRow from './InviteRow.svelte';
     import EmptyState from './EmptyState.svelte';
-    import { listVersion, invitesVersion, paneState, openChatId, communityVersion, setListHasRows, clockTick } from '../lib/signals.svelte.js';
+    import { listVersion, invitesVersion, paneState, openChatId, setListHasRows, clockTick } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
 
     // Snapshot re-pulls the raw page state when the list's shape, the invites, the
@@ -70,7 +70,7 @@
 </script>
 
 {#if paneCommunityId}
-    <ChannelList communityId={paneCommunityId} pane {h} onShown={(on) => (channelsShown = on)} />
+    {#key paneCommunityId}<ChannelList communityId={paneCommunityId} pane {h} onShown={(on) => (channelsShown = on)} />{/key}
 {:else}
     {#each invites as invite (invite.community_id)}
         <InviteRow {invite} {h} />

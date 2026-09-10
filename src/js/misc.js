@@ -249,15 +249,15 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
     // pinned hides; otherwise distance-from-bottom decides.
     const evaluateVisibility = () => {
         if (shouldForceVisible && shouldForceVisible()) {
-            bottomButton.classList.add('visible');
+            VectorSvelte.setScrollReturnVisible(true);
             return;
         }
         if (shouldForceHidden && shouldForceHidden()) {
-            bottomButton.classList.remove('visible');
+            VectorSvelte.setScrollReturnVisible(false);
             return;
         }
         if (isPinned && isPinned()) {
-            bottomButton.classList.remove('visible');
+            VectorSvelte.setScrollReturnVisible(false);
             return;
         }
         const currentScrollTop = scrollableDiv.scrollTop;
@@ -265,9 +265,9 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
         const distanceFromBottom = maxScroll - currentScrollTop;
 
         if (distanceFromBottom > SCROLL_THRESHOLD) {
-            bottomButton.classList.add('visible');
+            VectorSvelte.setScrollReturnVisible(true);
         } else {
-            bottomButton.classList.remove('visible');
+            VectorSvelte.setScrollReturnVisible(false);
         }
     };
     const handleScroll = throttle(evaluateVisibility, THROTTLE_TIME);
@@ -284,12 +284,12 @@ function createScrollHandler(scrollableDiv, bottomButton, options = {}) {
         // bottom isn't the data bottom — a plain scrollTo would land on stale
         // rows. Let the caller re-render the newest window + pin instead.
         if (onJumpToBottom && onJumpToBottom()) {
-            bottomButton.classList.remove('visible');
+            VectorSvelte.setScrollReturnVisible(false);
             if (onClick) onClick();
             return;
         }
         scrollToBottom(scrollableDiv, SMOOTH_SCROLL);
-        bottomButton.classList.remove('visible');
+        VectorSvelte.setScrollReturnVisible(false);
         if (onClick) onClick();
     };
 

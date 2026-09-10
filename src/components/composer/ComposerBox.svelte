@@ -170,7 +170,7 @@
 
 <div class="row input-box" id="chat-box" class:replying={isReply} class:commanding={command.active} bind:this={els.box}>
     <!-- Anchored to #chat-box's top edge so it rides up as the composer grows. -->
-    <button id="chat-scroll-return" class="corner-float scroll-return-btn" bind:this={els.scrollReturn}>
+    <button id="chat-scroll-return" class="corner-float scroll-return-btn" class:visible={chrome.scrollReturn} bind:this={els.scrollReturn}>
         <span class="icon icon-chevron-down"></span>
         <span class="scroll-return-badge" class:visible={!!chrome.scrollBadge}>{chrome.scrollBadge}</span>
     </button>

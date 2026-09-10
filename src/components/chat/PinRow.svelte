@@ -12,7 +12,6 @@
     const st = pinsState();
     let row = $state(null);
     let text = $state(null);
-    let body = $state(null);
     let clips = $state(false);
 
     // Mount-time facts: a row is born for one pin.
@@ -67,6 +66,6 @@
                 <span class="icon icon-x pins-drawer-row-unpin btn" title="Unpin" onclick={(e) => { e.stopPropagation(); h.unpin(pin.rumor_id); }}></span>
             {/if}
         </span>
-        <span class="pins-drawer-row-body" bind:this={body} use:collapsed></span>
+        <span class="pins-drawer-row-body" use:collapsed></span>
     </div>
 </div>

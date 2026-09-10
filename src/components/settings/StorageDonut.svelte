@@ -66,6 +66,7 @@
     const centre = $derived.by(() => {
         if (view === -1) return { value: h.formatBytes(total, 1), label: 'Total' };
         const s = segments[view];
+    if (!s) return { value: h.formatBytes(total, 1), label: 'Total' };   // the report shrank under the selection
         return { value: h.formatBytes(s.size, 1), label: `${s.name} · ${s.pct < 1 ? '<1' : Math.round(s.pct)}%` };
     });
     const summary = $derived(total === 0 ? "A breakdown of Vector's storage use." : `Total Storage Used: ${h.formatBytes(total, 1)}`);

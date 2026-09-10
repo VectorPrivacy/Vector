@@ -279,10 +279,10 @@
         return items;
     }
 
+    // Gated at press time: a row's moderability changes with the admin set while it stays mounted.
     function rowMenu(node, vm) {
         let cur = vm;
-        if (!cur.canModerate) return;
-        h.attachLongPressContextMenu(node, (x, y) => h.showContextMenu({ x, y, items: menuItems(cur) }));
+        h.attachLongPressContextMenu(node, (x, y) => { if (cur.canModerate) h.showContextMenu({ x, y, items: menuItems(cur) }); });
         return { update: (v) => { cur = v; } };
     }
 

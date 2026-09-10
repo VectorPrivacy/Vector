@@ -86,7 +86,6 @@ function _dmsgRowCtx(msg) {
             isGroupChat,
             currentChat,
             pinged: _dmsgIsPinged(msg, currentChat, isGroupChat),
-            replyingTo: strCurrentReplyReference === msg.id,
             blocked: blocked && !revealedBlockedMessages.has(msg.id),
             revealedBlocked: blocked && revealedBlockedMessages.has(msg.id),
         };
@@ -119,7 +118,6 @@ function updateMessageRow(msg, oldId = '') {
     if (oldId && oldId !== msg.id) VectorSvelte.touchMessage(oldId);
     VectorSvelte.touchWindow();
     VectorSvelte.flushSync();
-    if (msg.mine) _dmsgUpdateLastSentVisibility();
 }
 
 /** Helpers the row island calls; the leaf builders stay here. */
@@ -676,18 +674,6 @@ function _dmsgContentSig(msg) {
     const pm = msg.preview_metadata;
     if (pm) parts.push(pm.og_title, pm.og_image, pm.og_description, pm.title, pm.description);
     return parts.join('\u0000');
-}
-
-function _dmsgUpdateLastSentVisibility() {
-    if (!domChatMessages) return;
-    const allMine = domChatMessages.querySelectorAll('.dmsg[data-mine="true"]');
-    allMine.forEach((el, index) => {
-        const isLast = index === allMine.length - 1;
-        const statusEl = el.querySelector('.dmsg-status:not(.dmsg-status-failed)');
-        if (statusEl && !statusEl.textContent.includes('Sending')) {
-            statusEl.classList.toggle('dmsg-status-hidden', !isLast);
-        }
-    });
 }
 
 // Cached formatter — `Intl.DateTimeFormat` construction is expensive vs. .format().

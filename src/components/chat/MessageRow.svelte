@@ -13,6 +13,7 @@
     // vanilla writes after render (data-streak, data-derezzing, data-jumped, swipe
     // transforms, the has-reply class after an update) are deliberately not re-bound
     // here, so those writes persist.
+    import { composerMode } from '../lib/composer.svelte.js';
     import { profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import { messageVersion, arrivalState, setArrival } from '../lib/chatview.svelte.js';
     import ReplyQuote from './ReplyQuote.svelte';
@@ -25,9 +26,11 @@
         sender = null,     // the row author's profile as the caller resolved it
         streak = 'first',  // computed by the caller from the row above (vanilla owns streaks)
         ctx,               // { myNpub, isGroupChat, currentChat, pinged, replyingTo, revealedBlocked }
+        lastMine = false,  // the newest own message: the one that shows its Sent status
         h,                 // RowHelpers (js/render/chat/message-row.js): the row's chrome, carrying
                            //   `content` and `media` for the leaves and `pivx` for the bubble
     } = $props();
+    const mode = composerMode();
 
     // The live message. In the list island the `msg` prop itself changes (the array
     // holds the new object); mounted standalone, update() swaps it in. Either way the
@@ -45,7 +48,7 @@
     // Variants that keep the row shell but replace its body: a PIVX payment bubble,
     // and a blocked author's placeholder (until revealed).
     // svelte-ignore state_referenced_locally
-    const isPivx = !!msg.pivx_payment;
+    const isPivx = $derived(!!current.pivx_payment);
     const isBlocked = $derived(!!ctx.blocked);
 
     // Mount-time constants. Authorship never changes for a row; a changed message
@@ -148,12 +151,12 @@
     class:dmsg--has-reply={!!quote}
     id={current.id}
     data-sender={shortSender}
-    data-mine={msg.mine ? 'true' : 'false'}
+    data-mine={current.mine ? 'true' : 'false'}
     data-status={status}
     data-at={current.at ? String(current.at) : undefined}
     data-streak={streak}
     data-pinged={ctx.pinged ? 'true' : undefined}
-    data-replying-to={ctx.replyingTo ? 'true' : undefined}
+    data-replying-to={mode.kind === 'reply' && mode.id === current.id ? 'true' : undefined}
     data-reply-pending={pendingReply || undefined}
     style:opacity={ctx.revealedBlocked ? '0.4' : null}
     class:new-anim={arrival.id === current.id}
@@ -180,7 +183,7 @@
         <time class="dmsg-time-hover">{hourMinute}</time>
     </div>
     {#if isPivx}
-        <div class="dmsg-body"><PivxBubble {msg} h={h.pivx} /></div>
+        <div class="dmsg-body"><PivxBubble msg={current} h={h.pivx} /></div>
     {:else if isBlocked}
         <div class="dmsg-body">
             <div class="dmsg-header">
@@ -223,7 +226,7 @@
             {/if}
             <time class="dmsg-time">{hourMinute}</time>
         </div>
-        <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} h={h.content} media={h.media} sig={contentSig} /></div>
+        <div class="dmsg-content"><MessageContent msg={current} {sender} {ctx} {lastMine} h={h.content} media={h.media} sig={contentSig} /></div>
         {#if reactions.length}
             <div class="dmsg-reactions">
                 {#each reactions as g (g.emoji)}

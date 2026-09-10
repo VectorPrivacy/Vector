@@ -95,19 +95,6 @@ function detectAndStripSpoilerPrefix(name) {
 }
 
 /**
- * Format file size in human-readable format
- * @param {number} bytes - File size in bytes
- * @returns {string} Formatted file size
- */
-function formatFileSize(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-/**
  * Strip dangerous characters from a filename stem.
  * Permissive: allows spaces, accents, parentheses, etc. — only blocks
  * path separators, null bytes, and chars that break common filesystems.
@@ -373,7 +360,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     VectorSvelte.fpOpen({
         stem: getFileStem(displayName) || displayName,
         ext,
-        size: formatFileSize(fileSize),
+        size: formatBytes(fileSize),
         spoiler: content.kind === 'image' && detected.spoiler,
         compress: showCompress,
     });
@@ -419,7 +406,7 @@ function releasePendingVideo() {
 
 function compressionInfoText(status) {
     return status.savings_percent > 0
-        ? `~${formatFileSize(status.estimated_size)} (${status.savings_percent}% smaller)`
+        ? `~${formatBytes(status.estimated_size)} (${status.savings_percent}% smaller)`
         : 'No significant savings';
 }
 
@@ -562,7 +549,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     VectorSvelte.fpOpen({
         stem: getFileStem(displayName) || displayName,
         ext,
-        size: formatFileSize(fileSize),
+        size: formatBytes(fileSize),
         spoiler: content.kind === 'image' && detected.spoiler,
         compress: showCompress,
     });
@@ -682,7 +669,7 @@ function renderTreeNode(node, depth) {
         html += `<div class="zip-file-entry" style="padding-left: ${depth * 16 + 22}px;">
             <span class="zip-file-icon icon-file"></span>
             <span class="zip-file-name">${escapeHtml(file.name)}</span>
-            <span class="zip-file-size">${formatFileSize(file.size)}</span>
+            <span class="zip-file-size">${formatBytes(file.size)}</span>
         </div>`;
     }
 
@@ -829,12 +816,12 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
         VectorSvelte.fpContent({ kind: 'zip', files: result.file_list, total: result.file_count + result.dir_count });
         if (tooLarge) {
             VectorSvelte.fpPatch({
-                size: `${formatFileSize(result.compressed_size)} — Too Large`,
+                size: `${formatBytes(result.compressed_size)} — Too Large`,
                 sendDisabled: true,
                 sendLabel: 'Too Large',
             });
         } else {
-            const sizeLabel = `${formatFileSize(result.compressed_size)} (${result.file_count} file${result.file_count !== 1 ? 's' : ''}${result.dir_count > 0 ? `, ${result.dir_count} folder${result.dir_count !== 1 ? 's' : ''}` : ''})`;
+            const sizeLabel = `${formatBytes(result.compressed_size)} (${result.file_count} file${result.file_count !== 1 ? 's' : ''}${result.dir_count > 0 ? `, ${result.dir_count} folder${result.dir_count !== 1 ? 's' : ''}` : ''})`;
             VectorSvelte.fpPatch({ size: sizeLabel, sendDisabled: false, sendLabel: 'Send' });
         }
     } catch (e) {

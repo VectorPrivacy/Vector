@@ -46,6 +46,8 @@
     // same row must carry on (the media inside it keeps playing) rather than remount.
     function rowKey(m) { return m._key || (m._key = m.id); }
 
+    // Only the newest own message shows its Sent status.
+    const lastMineId = $derived.by(() => { for (let i = items.length - 1; i >= 0; i--) { const m = items[i].msg; if (m.mine && !m.pending && !m.failed) return m.id; } return null; });
     const dividerId = $derived(divider.targetId);
     const dividerAfter = $derived(divider.after);
 </script>
@@ -72,7 +74,7 @@
     {#if it.kind === 'system'}
         <SystemEvent msg={it.msg} merged={it.merged} mergeCount={it.mergeCount} h={h.row} />
     {:else}
-        <MessageRow msg={it.msg} sender={h.senderFor(it.msg)} streak={it.streak} ctx={h.ctxFor(it.msg)} h={h.row} />
+        <MessageRow msg={it.msg} sender={h.senderFor(it.msg)} streak={it.streak} ctx={h.ctxFor(it.msg)} lastMine={it.msg.id === lastMineId} h={h.row} />
     {/if}
     {#if dividerId === it.msg.id && dividerAfter}
         <p class="msg-inline-timestamp unread-divider">New</p>

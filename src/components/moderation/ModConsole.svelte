@@ -3,7 +3,7 @@
     // (banlist edition, key rotation). Head, raid banner (or the busy notice that borrows
     // its slot), the Members and Policies tabs, the tallies and the three actions.
     // Ticked = kept; the unticked set is what a rotation cuts.
-    import { modState, modIntel, modKeep, modSetQuery, modSetTab } from '../lib/moderation.svelte.js';
+    import { modState, modIntel, modKeep, modSetQuery } from '../lib/moderation.svelte.js';
     import { modOverlay } from '../lib/moderation.svelte.js';
     import { popIn } from '../lib/popin.js';
     import ModList from './ModList.svelte';

@@ -176,7 +176,8 @@ async function setupRustListeners() {
                 if (summary.owner_npub) f.owner_npub = summary.owner_npub;
             }
         } catch (_) {}
-        communityChanged(communityId);
+        communityChanged(v1Id);
+        communityChanged(v2Id);
         if (strOpenChat) {
             const open = arrChats.find(c => c.id === strOpenChat);
             if (open && open.metadata?.custom_fields?.community_id === v2Id) {
@@ -577,8 +578,8 @@ async function setupRustListeners() {
 
         // Reflect glow/badge changes now, then pull fresh DB counts. A sender mute
         // changes OTHER chats' (community) badges too.
-        chatChanged(chat);
-        if (!chatIsGroup(chat)) communitiesChanged();
+        if (cChat) chatChanged(cChat);
+        if (cChat && !chatIsGroup(cChat)) communitiesChanged();
         scheduleUnreadRefresh();
     });
 
@@ -901,24 +902,11 @@ async function setupRustListeners() {
             const editedMsgId = evt.payload.message.id;
             const newContent = evt.payload.message.content;
 
-            // Find all messages that reply to this edited message and update their reply preview
-            const replyElements = document.querySelectorAll(`[id="r-${editedMsgId}"]`);
-            for (const replyEl of replyElements) {
-                const replyTextSpan = replyEl.querySelector('.dmsg-reply-text');
-                if (replyTextSpan && newContent) {
-                    replyTextSpan.innerHTML = buildReplyPreviewHtml(newContent);
-                    twemojify(replyTextSpan);
-                    const editedTags = evt.payload.message.emoji_tags;
-                    if (editedTags && editedTags.length && typeof renderCustomEmojiShortcodes === 'function') {
-                        renderCustomEmojiShortcodes(replyTextSpan, editedTags);
-                    }
-                }
-            }
-
-            // Also update the replied_to_content in cached message data
+            // Every quote of the edited message re-derives from its replied_to_content.
             for (const msg of cChat.messages) {
                 if (msg.replied_to === editedMsgId) {
                     msg.replied_to_content = newContent;
+                    VectorSvelte.touchMessage(msg.id);
                 }
             }
         }
@@ -997,7 +985,6 @@ async function setupRustListeners() {
                         _windowReleaseAnchor(id);
                         VectorSvelte.touchWindow();
                         VectorSvelte.flushSync();
-                        _dmsgUpdateLastSentVisibility();
                     }, 100);
                 }
             }
@@ -1049,7 +1036,7 @@ async function setupRustListeners() {
             // non-latest message on another device).
             scheduleUnreadRefresh();
             // The row re-derives (border, font color and badge all depend on unread state).
-            chatChanged(chat);
+            chatChanged(cChat);
         }
     });
 

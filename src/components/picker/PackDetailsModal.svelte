@@ -21,6 +21,7 @@
     }
     // Oversized or unavailable emoji are hidden entirely, as if not in the pack.
     let hidden = $state({});
+    $effect(() => { pack; hidden = {}; });
     function thumb(img, e) { h.bindCachedImg(img, e.url, 'emoji', () => { hidden[e.url] = true; }); }
 
     let busy = $state(false);
