@@ -3,14 +3,15 @@
     // options, description and npub, plus our own profile's Edit Mode. Every field derives
     // from the open profile's signal; the container (#profile) stays with the nav.
     import { profileViewState, profileVersion, chatVersion } from '../lib/signals.svelte.js';
+    import { paneShown } from '../lib/shell.svelte.js';
     import { profileEdit, profileEditDirty } from '../lib/profileedit.svelte.js';
-    import { profileScreen, bindProfileEl } from '../lib/profilescreen.svelte.js';
+    import { profileScreen, bindProfileEl, setOwnProfileShown } from '../lib/profilescreen.svelte.js';
     import ProfileEditFields from './ProfileEditFields.svelte';
     import Avatar from '../ui/Avatar.svelte';
 
     const BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
-    let { root, h } = $props();
+    let { h } = $props();
     // h: getProfile, getName, getProfileAvatarSrc, getProfileBannerSrc, twemojify,
     //    renderCustomEmojiShortcodes, renderMentions, isMuted, botIcon, invitedCount, fawkesBadge,
     //    bugHunterTier, showInviteBadge, showFawkesCard, showBugHunterCard, showNavbar(on),
@@ -69,12 +70,11 @@
     // A contact without a banner gets the short light strip; our own profile keeps the dark one.
     const bannerDark = $derived(!!m && (m.mine || m.hasBanner));
 
-    // ── the container's mode classes and the navbar ──
-    $effect(() => { root.classList.toggle('is-own-profile', !!m?.mine); });
-    $effect(() => { root.classList.toggle('profile-edit-active', edit.active); });
+    // ── the container's mode class and the navbar ──
+    $effect(() => { setOwnProfileShown(!!m?.mine); });
     $effect(() => {
         // A contact's profile can land while another screen is open; only a shown screen owns the navbar.
-        if (!m || root.style.display === 'none') return;
+        if (!m || !paneShown('profile')) return;
         h.showNavbar(m.mine);
     });
 

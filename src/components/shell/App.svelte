@@ -3,6 +3,9 @@
     // (their openers mount into them by id); the screens migrated to islands are empty
     // mounts nav shows and hides through the shell store.
     import { shellPanes, shellScreens, shellReveals, shellHandlers, reveal, bindShellEl } from '../lib/shell.svelte.js';
+    import { profileScreen } from '../lib/profilescreen.svelte.js';
+    import { profileEdit } from '../lib/profileedit.svelte.js';
+    import { loginState } from '../lib/login.svelte.js';
     import ProfileScreen from '../profile/ProfileScreen.svelte';
     import Settings from '../settings/Settings.svelte';
     import InvitesScreen from '../people/InvitesScreen.svelte';
@@ -31,6 +34,9 @@
     const panes = shellPanes();
     const screens = shellScreens();
     const reveals = shellReveals();
+    const profileView = profileScreen();
+    const edit = profileEdit();
+    const login = loginState();
     let profileEl = $state(null);
     let loginEl = $state(null);
     const bindProfile = bindShellEl('profile');
@@ -46,8 +52,10 @@
     <MarketplaceRoot />
     <LaunchDialogRoot />
 
-    <div id="profile" class="chats" style:display={panes.profile ? null : 'none'} bind:this={profileEl} use:bindProfile use:reveal={['profile', reveals.profile]}>
-        {#if screens.profile && profileEl}<ProfileScreen root={profileEl} h={screens.profile.h} />{/if}
+    <div id="profile" class="chats" style:display={panes.profile ? null : 'none'}
+         class:is-own-profile={profileView.ownProfile} class:profile-edit-active={edit.active}
+         bind:this={profileEl} use:bindProfile use:reveal={['profile', reveals.profile]}>
+        {#if screens.profile}<ProfileScreen h={screens.profile.h} />{/if}
     </div>
     <GroupOverviewPane />
     <ChatListPane />
@@ -82,9 +90,11 @@
     </div>
     <Navbar />
     <!-- Boots with the fade-in; the class drops once it has played. -->
-    <div id="login-form" class="fadein-anim" bind:this={loginEl} use:reveal={['login', reveals.login]}
+    <div id="login-form" class="fadein-anim" style:display={login.shown ? null : 'none'}
+         class:has-back-bar={login.backBar} class:bunker-active={login.bunker}
+         bind:this={loginEl} use:reveal={['login', reveals.login]}
          onanimationend={(e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('fadein-anim'); }}>
-        {#if screens.login && loginEl}<LoginScreen container={loginEl} h={screens.login.h} />{/if}
+        {#if screens.login}<LoginScreen h={screens.login.h} />{/if}
     </div>
 </main>
 

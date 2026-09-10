@@ -8,18 +8,11 @@
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { container, h } = $props();
+    let { h } = $props();
     const l = loginState();
     const b = bunkerState();
     const p = pickerState();
     const e = encryptState();
-
-    // The container is the shell's #login-form: the flows fade it in and out by class.
-    $effect(() => {
-        container.style.display = l.shown ? '' : 'none';
-        container.classList.toggle('has-back-bar', l.backBar);
-        container.classList.toggle('bunker-active', l.bunker);
-    });
 
     // ── account picker ──
     let pill = $state(null);
