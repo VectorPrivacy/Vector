@@ -58,35 +58,35 @@
 </select>
 
 {#if sc.platform.voice && hs.voice}
-    <div id="settings-voice" class="settings-section">
+    <div class="settings-section">
         <hr class="divider settings-divider">
         <h2>Voice Settings</h2>
-        <div id="settings-voice-body"><Voice h={hs.voice} /></div>
+        <div><Voice h={hs.voice} /></div>
     </div>
 {/if}
 
-<div id="settings-privacy" class="settings-section">
+<div class="settings-section">
     <hr class="divider settings-divider">
     <h2>Privacy</h2>
 
     <div class="form-group">
         <label class="toggle-container">
             <span><InfoIcon onclick={() => h.help('webPreviews')} />Display Web Previews</span>
-            <input type="checkbox" id="privacy-web-previews-toggle" bind:checked={sc.privacy.webPreviews} onchange={() => h.setPrivacy('webPreviews', sc.privacy.webPreviews)}>
+            <input type="checkbox" bind:checked={sc.privacy.webPreviews} onchange={() => h.setPrivacy('webPreviews', sc.privacy.webPreviews)}>
             <span class="neon-toggle"></span>
         </label>
     </div>
     <div class="form-group">
         <label class="toggle-container">
             <span><InfoIcon onclick={() => h.help('stripTracking')} />Prevent URL Tracking</span>
-            <input type="checkbox" id="privacy-strip-tracking-toggle" bind:checked={sc.privacy.stripTracking} onchange={() => h.setPrivacy('stripTracking', sc.privacy.stripTracking)}>
+            <input type="checkbox" bind:checked={sc.privacy.stripTracking} onchange={() => h.setPrivacy('stripTracking', sc.privacy.stripTracking)}>
             <span class="neon-toggle"></span>
         </label>
     </div>
     <div class="form-group">
         <label class="toggle-container">
             <span><InfoIcon onclick={() => h.help('sendTyping')} />Send Typing Indicators</span>
-            <input type="checkbox" id="privacy-send-typing-toggle" bind:checked={sc.privacy.sendTyping} onchange={() => h.setPrivacy('sendTyping', sc.privacy.sendTyping)}>
+            <input type="checkbox" bind:checked={sc.privacy.sendTyping} onchange={() => h.setPrivacy('sendTyping', sc.privacy.sendTyping)}>
             <span class="neon-toggle"></span>
         </label>
     </div>
@@ -97,54 +97,54 @@
         <TorAdvanced h={h.tor} />
     {/if}
 
-    <div id="settings-blocked-users" style="margin-top: 25px;">
+    <div style="margin-top: 25px;">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-        <h3 id="settings-blocked-toggle" class="btn" style="font-size: 14px; color: #b2b2b2; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; -webkit-user-select: none; user-select: none;"
+        <h3 class="btn" style="font-size: 14px; color: #b2b2b2; margin-bottom: 8px; display: flex; align-items: center; justify-content: center; gap: 6px; -webkit-user-select: none; user-select: none;"
             onclick={() => { blockedOpen = !blockedOpen; }}>
             <span class="icon icon-chevron-down" style="width: 14px; height: 14px; position: relative; margin: 0; flex-shrink: 0; background-color: #b2b2b2; transition: transform 0.2s; {blockedOpen ? 'transform: rotate(180deg);' : ''}"></span>
             Blocked Users
         </h3>
         {#if blockedOpen}
-            <div id="settings-blocked-content" style="overflow: hidden; animation: blockedFadeIn 0.2s ease;">
-                <div id="settings-blocked-list"><BlockedUsers h={h.blocked} /></div>
+            <div style="overflow: hidden; animation: blockedFadeIn 0.2s ease;">
+                <div><BlockedUsers h={h.blocked} /></div>
             </div>
         {/if}
     </div>
 </div>
 
-<div id="settings-display" class="settings-section">
+<div class="settings-section">
     <hr class="divider settings-divider">
     <h2>Display</h2>
-    <div id="settings-display-body"><Display h={h.display} /></div>
+    <div><Display h={h.display} /></div>
 </div>
 
-<div id="settings-notifications" class="settings-section">
+<div class="settings-section">
     <hr class="divider settings-divider">
     <h2>Notifications</h2>
-    <div id="settings-notifications-body"><Notifications h={h.notif} /></div>
+    <div><Notifications h={h.notif} /></div>
 </div>
 
 {#if sc.battery.shown}
-    <div id="settings-battery" class="settings-section">
+    <div class="settings-section">
         <hr class="divider settings-divider">
         <h2>Battery</h2>
         <div class="form-group">
             <label class="toggle-container">
                 <span><InfoIcon onclick={() => h.help('battery')} />Run in Background</span>
-                <input type="checkbox" id="battery-bg-service-toggle" checked={sc.battery.enabled} onchange={(e) => h.setBackgroundService(e.currentTarget.checked)}>
+                <input type="checkbox" checked={sc.battery.enabled} onchange={(e) => h.setBackgroundService(e.currentTarget.checked)}>
                 <span class="neon-toggle"></span>
             </label>
         </div>
         {#if sc.battery.warning}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div id="battery-warning" class="form-group" style="margin-bottom: 0; padding-bottom: 0; cursor: pointer;" onclick={() => h.batteryWarningTap()}>
+            <div class="form-group" style="margin-bottom: 0; padding-bottom: 0; cursor: pointer;" onclick={() => h.batteryWarningTap()}>
                 <p style="color: #FCE459; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px;"><span class="icon icon-battery-full" style="position: relative; width: 16px; height: 16px; min-width: 16px; margin: 0; background-color: #FCE459;"></span>Battery Optimization is active</p>
             </div>
         {/if}
     </div>
 {/if}
 
-<div id="settings-network" class="settings-section">
+<div class="settings-section">
     <hr class="divider settings-divider">
     <h2>Network</h2>
     <div id="network-list" class="network-list">
@@ -152,15 +152,15 @@
     </div>
 </div>
 
-<div id="settings-storage" class="settings-section">
+<div class="settings-section">
     <hr class="divider settings-divider">
     <h2>Storage</h2>
-    <div id="storage-breakdown"><StorageDonut h={h.storageDonut} /></div>
+    <div><StorageDonut h={h.storageDonut} /></div>
     {#if sc.storage.galleryShown}
-        <div class="form-group" id="storage-gallery-group" style="margin-top: 15px;">
+        <div class="form-group" style="margin-top: 15px;">
             <label class="toggle-container">
                 <span><InfoIcon side="right" align="middle" onclick={() => h.help('gallery')} />Hide Media from Gallery</span>
-                <input type="checkbox" id="storage-gallery-toggle" checked={sc.storage.galleryHidden} onchange={(e) => h.setGalleryHidden(e.currentTarget.checked)}>
+                <input type="checkbox" checked={sc.storage.galleryHidden} onchange={(e) => h.setGalleryHidden(e.currentTarget.checked)}>
                 <span class="neon-toggle"></span>
             </label>
         </div>
@@ -168,7 +168,7 @@
     <div class="form-group" style="margin-top: 15px;">
         <label class="toggle-container">
             <span><InfoIcon side="right" align="middle" onclick={() => h.help('autoDownload')} />Auto-Download Media</span>
-            <input type="checkbox" id="auto-download-toggle" bind:checked={sc.storage.autoDownload} onchange={() => h.setAutoDownload(sc.storage.autoDownload)}>
+            <input type="checkbox" bind:checked={sc.storage.autoDownload} onchange={() => h.setAutoDownload(sc.storage.autoDownload)}>
             <span class="neon-toggle"></span>
         </label>
     </div>
@@ -185,19 +185,19 @@
     <div class="form-group" style="display: flex; align-items: center; margin-top: 15px;">
         <InfoIcon side="right" flex onclick={() => h.help('clearStorage')} />
         <span style="flex: 1; text-align: left; color: rgba(255, 255, 255, 0.8);">Clear Storage</span>
-        <button id="clear-storage-btn" class="btn cancel-btn" style="margin: 0;" disabled={sc.storage.clearing} onclick={() => h.clearStorage()}>{sc.storage.clearing ? 'Clearing...' : 'Clear'}</button>
+        <button class="btn cancel-btn" style="margin: 0;" disabled={sc.storage.clearing} onclick={() => h.clearStorage()}>{sc.storage.clearing ? 'Clearing...' : 'Clear'}</button>
     </div>
 </div>
 
 {#if sc.platform.updates}
-    <div id="settings-updates" class="settings-section" bind:this={updatesEl}>
+    <div class="settings-section" bind:this={updatesEl}>
         <hr class="divider settings-divider">
         <h2>Updates</h2>
-        <div id="settings-updates-body">{#if hs.updates}<Updates h={hs.updates} />{/if}</div>
+        <div>{#if hs.updates}<Updates h={hs.updates} />{/if}</div>
     </div>
 {/if}
 
-<div id="settings-security" class="settings-section">
+<div class="settings-section">
     <hr class="divider settings-divider">
     <h2>Security</h2>
     <SecurityCard h={h.security} />
@@ -214,14 +214,14 @@
                 <InfoIcon onclick={() => h.help('crashLog')} />
                 <span>Copy Logs</span>
             </div>
-            <button id="copy-crash-log-btn" class="cancel-btn" onclick={() => h.copyLogs()}>Copy</button>
+            <button class="cancel-btn" onclick={() => h.copyLogs()}>Copy</button>
         </div>
         <div class="danger-option">
             <div class="left-group">
                 <InfoIcon onclick={() => h.help('logout')} />
                 <span>Logout</span>
             </div>
-            <button id="logout-btn" class="danger-btn" onclick={() => h.logout()}>
+            <button class="danger-btn" onclick={() => h.logout()}>
                 <img class="warning-icon" alt="">
                 Logout
             </button>
@@ -233,10 +233,10 @@
     <hr class="divider settings-divider" style="background-color: #171717;">
     <div class="settings-footer" style="text-align: center; display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span id="footer-donate" onclick={() => h.openLink('donate')}>Donate</span>
+        <span onclick={() => h.openLink('donate')}>Donate</span>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span id="footer-gitbook" onclick={() => h.openLink('gitbook')}>GitBook</span>
+        <span onclick={() => h.openLink('gitbook')}>GitBook</span>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span id="footer-privacy" onclick={() => h.openLink('privacy')}>Privacy Policy</span>
+        <span onclick={() => h.openLink('privacy')}>Privacy Policy</span>
     </div>
 </div>

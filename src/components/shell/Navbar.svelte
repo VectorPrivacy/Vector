@@ -73,7 +73,7 @@
     <div id="settings-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'settings-btn'} style:display={st.settingsTab ? null : 'none'} onclick={() => h().openSettings?.()}>
         <span class="icon icon-settings navbar-icon"></span>
         <p class="navbar-text">Settings</p>
-        <span id="settings-update-dot" class="update-notification-dot" style:display={st.updateDot ? null : 'none'}></span>
+        <span class="update-notification-dot" style:display={st.updateDot ? null : 'none'}></span>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="invites-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'invites-btn'} style:display={st.invitesTab ? null : 'none'} onclick={() => h().openInvites?.()}>

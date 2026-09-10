@@ -24,12 +24,12 @@
     <label class="toggle-container" class:disabled={!canTranslate}>
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span><span class="icon icon-info btn notif-info" onclick={info('translate')}></span>Auto-Translate</span>
-        <input type="checkbox" id="auto-translate-toggle" checked={canTranslate && v.autoTranslate} disabled={!canTranslate} onchange={(e) => h.setTranslate(e.target.checked)}>
+        <input type="checkbox" checked={canTranslate && v.autoTranslate} disabled={!canTranslate} onchange={(e) => h.setTranslate(e.target.checked)}>
         <span class="neon-toggle"></span>
     </label>
 </div>
 {#if !canTranslate}
-    <div id="translate-model-warning" class="form-group" style="margin-bottom: 0; padding-bottom: 0;">
+    <div class="form-group" style="margin-bottom: 0; padding-bottom: 0;">
         <p style="color: #FCE459; font-size: 13px; display: flex; align-items: center; justify-content: center; gap: 6px;">
             <span class="icon icon-warning" style="position: relative; width: 16px; height: 16px; min-width: 16px; margin: 0; background-color: #FCE459;"></span>
             Selected model does not support translation
@@ -41,7 +41,7 @@
     <label class="toggle-container">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span><span class="icon icon-info btn notif-info" onclick={info('transcribe')}></span>Auto-Transcribe</span>
-        <input type="checkbox" id="auto-transcribe-toggle" checked={v.autoTranscribe} onchange={(e) => h.setTranscribe(e.target.checked)}>
+        <input type="checkbox" checked={v.autoTranscribe} onchange={(e) => h.setTranscribe(e.target.checked)}>
         <span class="neon-toggle"></span>
     </label>
 </div>
@@ -63,14 +63,14 @@
             {/if}
         </select>
         {#if current?.downloaded && !busy}
-            <button id="delete-model" class="btn-delete-model downloaded" title="Delete {current.model.display_name}" onclick={h.deleteModel}>
+            <button class="btn-delete-model downloaded" title="Delete {current.model.display_name}" onclick={h.deleteModel}>
                 <span class="icon-trash"></span>
             </button>
         {/if}
     </div>
     <div id="model-status" class="model-status">
         {#if busy}
-            <div class="alert alert-info"><span class="spinner"></span><span id="voice-model-download-progression"> Downloading... {v.download.progress}</span></div>
+            <div class="alert alert-info"><span class="spinner"></span><span> Downloading... {v.download.progress}</span></div>
         {:else if v.error}
             <div class="alert alert-warning">{v.error}</div>
         {:else if current?.downloaded}

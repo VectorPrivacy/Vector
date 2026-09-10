@@ -7,11 +7,11 @@
 
 {#if st.open}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="pivx-dialog-overlay" id="pivx-withdraw-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
+    <div class="pivx-dialog-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="pivx-dialog">
             <div class="pivx-dialog-header">
                 <h3>Withdraw PIVX</h3>
-                <button class="pivx-dialog-close" id="pivx-withdraw-close" onclick={h.close}>&times;</button>
+                <button class="pivx-dialog-close" onclick={h.close}>&times;</button>
             </div>
             <div class="pivx-dialog-content">
                 <div class="pivx-withdraw-section">
@@ -27,11 +27,11 @@
                     <div class="pivx-withdraw-available">
                         Available: <span id="pivx-withdraw-available-amount">{st.available.toFixed(2)}</span> PIV
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                        <span class="pivx-withdraw-max-btn" id="pivx-withdraw-max" onclick={h.max}>MAX</span>
+                        <span class="pivx-withdraw-max-btn" onclick={h.max}>MAX</span>
                     </div>
                 </div>
                 <div class="pivx-withdraw-fee-info" id="pivx-withdraw-fee-info">Network fee: ~0.0001 PIV</div>
-                <button class="pivx-settings-save-btn" id="pivx-withdraw-confirm" disabled={st.busy} onclick={h.confirm}>
+                <button class="pivx-settings-save-btn" disabled={st.busy} onclick={h.confirm}>
                     {st.busy ? 'Withdrawing...' : 'Withdraw'}
                 </button>
             </div>

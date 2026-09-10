@@ -169,8 +169,7 @@ function wsUpdate() {
             if (target) openChat(target);
         }
         wsSyncOpenChat();
-        // The rail only exists in this mode, and renderChatlist's hash gate would
-        // skip the render that normally fills it.
+        // The rail only exists in this mode, and the list must re-derive
         renderRailShortcuts();
     } else {
         document.body.classList.remove('ws-chat-open', 'ws-rail-collapsed');

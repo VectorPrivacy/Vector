@@ -48,11 +48,11 @@
 </script>
 
 {#if n.sounds}
-    <div class="form-group" id="notif-mute-group">
+    <div class="form-group">
         <label class="toggle-container">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
             <span><span class="icon icon-info btn notif-info" onclick={info('mute')}></span>Mute All Notification Sounds</span>
-            <input type="checkbox" id="notif-mute-toggle" checked={n.globalMute} onchange={(e) => { n.globalMute = e.target.checked; persistSounds(); }}>
+            <input type="checkbox" checked={n.globalMute} onchange={(e) => { n.globalMute = e.target.checked; persistSounds(); }}>
             <span class="neon-toggle"></span>
         </label>
     </div>
@@ -62,7 +62,7 @@
     <label class="toggle-container">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <span><span class="icon icon-info btn notif-info" onclick={info('everyone')}></span>Mute @Everyone Pings</span>
-        <input type="checkbox" id="notif-mute-everyone-toggle" checked={n.muteEveryone} onchange={onMuteEveryone}>
+        <input type="checkbox" checked={n.muteEveryone} onchange={onMuteEveryone}>
         <span class="neon-toggle"></span>
     </label>
 </div>
@@ -80,7 +80,7 @@
 </div>
 
 {#if n.sounds}
-    <div class="form-group" id="notif-sound-group" style="display: flex; align-items: center; gap: 5px;">
+    <div class="form-group" style="display: flex; align-items: center; gap: 5px;">
         <div class="select-container" style="margin: 0; flex: 1">
             <select id="notif-sound-select" style="margin-bottom: 0 !important;" value={choice} onchange={onSound}>
                 <option value="default">Prélude</option>
@@ -89,17 +89,17 @@
                 <option value="custom">Custom...</option>
             </select>
         </div>
-        <button id="notif-preview-btn" class="btn cancel-btn" style="margin: 0; padding: 0 10px; min-width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;" title="Preview Sound" onclick={() => h.preview(n.sound)}>
+        <button class="btn cancel-btn" style="margin: 0; padding: 0 10px; min-width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;" title="Preview Sound" onclick={() => h.preview(n.sound)}>
             <img src="./icons/speaker_volume.svg" alt="Preview" style="width: 18px; height: 18px;">
         </button>
     </div>
     {#if choice === 'custom'}
-        <div class="form-group" id="notif-custom-group">
+        <div class="form-group">
             <div class="notif-custom-container">
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <div class="notif-sound-chip" id="notif-custom-select-btn" title="Click to change sound" onclick={pick}>
+                <div class="notif-sound-chip" title="Click to change sound" onclick={pick}>
                     <span class="notif-sound-chip-icon">♪</span>
-                    <span class="notif-sound-chip-name" id="notif-custom-filename">{customName}</span>
+                    <span class="notif-sound-chip-name">{customName}</span>
                     <button class="notif-sound-chip-clear" title="Remove custom sound" onclick={clearCustom}>×</button>
                 </div>
             </div>

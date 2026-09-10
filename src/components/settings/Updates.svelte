@@ -48,7 +48,7 @@
         </div>
     {/if}
     {#if showFound && u.newVersion}
-        <p id="new-version-display">New Version: <span id="new-version">{u.newVersion}</span></p>
+        <p>New Version: <span id="new-version">{u.newVersion}</span></p>
     {/if}
     {#if showFound && u.changelog}
         <div id="update-changelog" style="margin-top: 20px; margin-bottom: 20px;">
@@ -58,11 +58,11 @@
     {/if}
 
     {#if u.betaRow}
-        <div id="beta-updates-row" class="form-group" style="margin-bottom: 15px;">
+        <div class="form-group" style="margin-bottom: 15px;">
             <label class="toggle-container">
                 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                 <span><span class="icon icon-info btn notif-info" onclick={info}></span>Beta Updates</span>
-                <input type="checkbox" id="beta-updates-toggle" checked={u.beta} onchange={(e) => h.setBeta(e.target.checked)}>
+                <input type="checkbox" checked={u.beta} onchange={(e) => h.setBeta(e.target.checked)}>
                 <span class="neon-toggle"></span>
             </label>
         </div>
@@ -79,7 +79,7 @@
         <div id="update-progress-container" style="margin-top: 20px;">
             <div class="progress-bar-track">
                 <div id="update-progress-bar" class="progress-bar-fill" style:width="{u.progress}%"></div>
-                <div class="progress-text" id="update-progress-text">{u.progress}%</div>
+                <div class="progress-text">{u.progress}%</div>
             </div>
         </div>
     {/if}

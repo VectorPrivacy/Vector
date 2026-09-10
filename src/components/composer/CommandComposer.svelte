@@ -1,5 +1,5 @@
 <script>
-    // The command composer's argument pills (Phase 3c). One pill per argument:
+    // The command composer's argument pills. One pill per argument:
     // a picker trigger for choice and bool, a growing textarea for free text, an
     // input otherwise. The controller in command-picker.js attaches each field's
     // behaviour (key walking, filtering, sizing) through `attach`, so the keyboard

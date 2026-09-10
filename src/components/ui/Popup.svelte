@@ -20,14 +20,14 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="popup-content" onclick={contentClick}>
         <img id="popupIcon" src={iconSrc} style="height: 100px;" style:display={p.icon ? '' : 'none'} class:popup-icon-circular={p.circular} alt="">
-        <h2 id="popupTitle" class={p.titleClass}>{p.title}</h2>
+        <h2 class={p.titleClass}>{p.title}</h2>
         <p id="popupSubtext">{@html p.html}</p>
         {#if p.placeholder}
-            <input id="popupInput" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder={p.placeholder} bind:value={p.value} bind:this={input}>
+            <input autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder={p.placeholder} bind:value={p.value} bind:this={input}>
         {/if}
     </div>
     <div class="popup-buttons">
-        <button id="popupConfirm" onclick={() => popupAnswer()?.confirm()}>{p.confirmText}</button><button id="popupCancel" class="cancel-btn" style:display={p.notice ? 'none' : ''} onclick={() => popupAnswer()?.cancel()}>Cancel</button>
+        <button id="popupConfirm" onclick={() => popupAnswer()?.confirm()}>{p.confirmText}</button><button class="cancel-btn" style:display={p.notice ? 'none' : ''} onclick={() => popupAnswer()?.cancel()}>Cancel</button>
     </div>
 </center>
 </div>

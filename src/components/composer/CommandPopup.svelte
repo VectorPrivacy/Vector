@@ -41,7 +41,7 @@
                     {/if}
                 </div>
                 {#each section.rows as row (row.key)}
-                    <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla row) -->
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
                         class="command-item"
                         class:active={row.index === view.active}

@@ -7,7 +7,7 @@
 </script>
 
 <div class="pivx-wallet-content">
-    <button class="pivx-close-btn" id="attachment-panel-pivx-back" aria-label="Back" onclick={h.back}>
+    <button class="pivx-close-btn" aria-label="Back" onclick={h.back}>
         <span class="icon icon-x"></span>
     </button>
     {#key pulse}

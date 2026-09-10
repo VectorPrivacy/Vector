@@ -508,7 +508,7 @@ function initCommandController() {
  *  scroll-to-bottom lands on the height it had at that instant and the rest of
  *  the transition slides out from under the reader. */
 function followPinThroughComposerResize() {
-    if (!chatPinnedToBottom || (CHAT_WINDOW_ENABLED && !isAtDataBottom())) return;
+    if (!chatPinnedToBottom || !isAtDataBottom()) return;
     const start = performance.now();
     const followPin = () => {
         beginProgrammaticScroll();

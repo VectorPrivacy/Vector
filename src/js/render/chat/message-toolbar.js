@@ -480,7 +480,7 @@ function _dmsgSelectReply(targetMsgId) {
     // bottom, a DOM-bottom scroll would cascade window extensions.
     const fBarWasHidden = VectorSvelte.composerMode().kind !== 'reply';
     const fRepin = fBarWasHidden && chatPinnedToBottom
-        && (!CHAT_WINDOW_ENABLED || isAtDataBottom());
+        && isAtDataBottom();
     // The chrome renders the bar (name, snippet, cancel offset) from the reply state.
     VectorSvelte.startReply(targetMsgId, name, snippet);
     VectorSvelte.flushSync();

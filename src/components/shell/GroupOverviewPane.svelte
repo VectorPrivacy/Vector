@@ -38,7 +38,7 @@
         </div>
         {#if shell.ws && screens.overview}<MemberSearch docked />{/if}
     </div>
-    <div id="group-overview-scroll" style="overflow-y: auto; height: 100%; position: relative;">
+    <div style="overflow-y: auto; height: 100%; position: relative;">
         {#if screens.overview}<CommunityOverview h={screens.overview.h} />{/if}
     </div>
 </div>

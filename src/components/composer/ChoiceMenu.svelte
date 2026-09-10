@@ -23,7 +23,7 @@
 
 <div bind:this={el} class="command-choice-menu" class:visible={menu.open}>
     {#each view.options as opt, i (opt.v)}
-        <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla row) -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
             class="command-choice-option"
             class:active={i === view.active}

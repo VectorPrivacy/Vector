@@ -1935,7 +1935,7 @@ const arrEmojis = [
 ];
 
 // Apply some runtime changes to our EmojiDEX
-for (cEmoji of arrEmojis) {
+for (const cEmoji of arrEmojis) {
     // Force everything in to lowercase
     cEmoji.name = cEmoji.name.toLowerCase();
 

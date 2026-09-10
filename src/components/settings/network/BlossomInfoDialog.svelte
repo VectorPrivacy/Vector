@@ -10,7 +10,7 @@
 
 {#if st.open}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="relay-dialog-overlay" id="blossom-info-overlay" class:active={st.active}
+    <div class="relay-dialog-overlay" class:active={st.active}
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="relay-dialog relay-info-dialog">
             <div class="relay-dialog-header">

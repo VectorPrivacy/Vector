@@ -38,19 +38,19 @@
 <div class="attachment-panel" id="attachment-panel" tabindex="-1" use:rootEl class:visible={st.visible} class:pivx-active={st.view === 'pivx'} style:bottom={st.bottom || null}>
 
 {#if st.view === 'main'}
-    <div class="attachment-panel-content" id="attachment-panel-main" use:stagger={st.tick.main}>
-        <button class="attachment-panel-item" id="attachment-panel-file" onclick={h.file}>
+    <div class="attachment-panel-content" use:stagger={st.tick.main}>
+        <button class="attachment-panel-item" onclick={h.file}>
             <div class="attachment-panel-btn"><span class="icon icon-file"></span></div>
             <span class="attachment-panel-label">File</span>
         </button>
         {#if st.folderShown}
-            <button class="attachment-panel-item" id="attachment-panel-folder" onclick={h.folder}>
+            <button class="attachment-panel-item" onclick={h.folder}>
                 <div class="attachment-panel-btn"><span class="icon icon-folder"></span></div>
                 <span class="attachment-panel-label">Folder</span>
             </button>
         {/if}
         {#if st.commandsShown}
-            <button class="attachment-panel-item" id="attachment-panel-commands" class:disabled={st.commandsDisabled}
+            <button class="attachment-panel-item" class:disabled={st.commandsDisabled}
                     onclick={h.commands} onmouseenter={(e) => h.commandsEnter(e.currentTarget)} onmouseleave={h.commandsLeave}>
                 <div class="attachment-panel-btn">
                     <svg class="attachment-panel-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M7 22L17 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -58,7 +58,7 @@
                 <span class="attachment-panel-label">Commands</span>
             </button>
         {/if}
-        <button class="attachment-panel-item" id="attachment-panel-miniapps" onclick={h.miniapps}>
+        <button class="attachment-panel-item" onclick={h.miniapps}>
             <div class="attachment-panel-btn"><span class="icon icon-gamepad"></span></div>
             <span class="attachment-panel-label">Mini Apps</span>
         </button>
@@ -66,13 +66,13 @@
 {:else if st.view === 'miniapps'}
     <div class="attachment-panel-content" id="attachment-panel-miniapps-view">
         <div class="miniapps-topbar">
-            <button class="miniapps-back-btn" id="attachment-panel-back" onclick={h.back}>
+            <button class="miniapps-back-btn" onclick={h.back}>
                 <span class="icon icon-chevron-double-left"></span>
                 <span>Back</span>
             </button>
             <div class="miniapps-search-container">
                 <span class="icon icon-search"></span>
-                <input type="text" class="miniapps-search-input" id="miniapps-search" placeholder="Search"
+                <input type="text" class="miniapps-search-input" placeholder="Search"
                        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
                        value={st.search} oninput={(e) => h.search(e.currentTarget.value)}>
             </div>
@@ -82,7 +82,7 @@
         </div>
     </div>
 {:else}
-    <div class="attachment-panel-content pivx-wallet-panel" id="attachment-panel-pivx-view">
+    <div class="attachment-panel-content pivx-wallet-panel">
         <PivxWallet h={h.pivx} pulse={st.tick.pivx} />
     </div>
 {/if}

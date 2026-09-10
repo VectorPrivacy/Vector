@@ -134,7 +134,7 @@
 </script>
 
 <div class="form-group">
-    <p id="storage-summary">{summary}</p>
+    <p>{summary}</p>
 </div>
 <div class="form-group">
     <div id="storage-donut-wrap">

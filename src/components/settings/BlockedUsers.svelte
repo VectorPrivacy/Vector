@@ -43,5 +43,5 @@
     </div>
 {/each}
 {#if users.length === 0}
-    <p id="settings-blocked-empty" style="color: #666; font-size: 13px;">No blocked users</p>
+    <p style="color: #666; font-size: 13px;">No blocked users</p>
 {/if}

@@ -7,16 +7,16 @@
 
 {#if st.open}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="pivx-dialog-overlay" id="pivx-deposit-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
+    <div class="pivx-dialog-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="pivx-dialog">
             <div class="pivx-dialog-header">
                 <h3>Deposit PIVX</h3>
-                <button class="pivx-dialog-close" id="pivx-deposit-close" onclick={h.close}>&times;</button>
+                <button class="pivx-dialog-close" onclick={h.close}>&times;</button>
             </div>
             <div class="pivx-dialog-content">
                 <p class="pivx-deposit-instructions">Send PIVX to this address to deposit:</p>
-                <div class="pivx-address-display" id="pivx-deposit-address">{st.address}</div>
-                <button class="pivx-copy-btn" id="pivx-copy-address" onclick={h.copy}>
+                <div class="pivx-address-display">{st.address}</div>
+                <button class="pivx-copy-btn" onclick={h.copy}>
                     <span class="icon icon-copy"></span>
                     Copy Address
                 </button>

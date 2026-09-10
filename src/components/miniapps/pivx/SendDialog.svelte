@@ -8,11 +8,11 @@
 
 {#if st.open}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="pivx-dialog-overlay" id="pivx-send-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
+    <div class="pivx-dialog-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="pivx-dialog">
             <div class="pivx-dialog-header">
                 <h3>Send PIVX</h3>
-                <button class="pivx-dialog-close" id="pivx-send-close" onclick={h.close}>&times;</button>
+                <button class="pivx-dialog-close" onclick={h.close}>&times;</button>
             </div>
             <div class="pivx-dialog-content">
                 {#if st.mode === 'quick'}
@@ -52,14 +52,14 @@
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                         <div class="pivx-send-available" id="pivx-send-available" onclick={h.max}>
                             Available: <span id="pivx-send-available-amount">{st.available.toFixed(2)}</span> PIV
-                            <span class="pivx-withdraw-max-btn" id="pivx-send-max">MAX</span>
+                            <span class="pivx-withdraw-max-btn">MAX</span>
                         </div>
                         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
                         <div class="pivx-send-back-toggle" id="pivx-send-back-toggle" onclick={h.quick}>Back to Quick Send</div>
                     </div>
                 {/if}
                 <div class="pivx-send-info">Sending to: <span id="pivx-send-recipient">{st.recipient}</span></div>
-                <button class="pivx-send-confirm-btn" id="pivx-send-confirm" class:loading={st.loading} disabled={st.loading || st.busy} onclick={h.confirm}>
+                <button class="pivx-send-confirm-btn" class:loading={st.loading} disabled={st.loading || st.busy} onclick={h.confirm}>
                     {st.busy ? 'Sending...' : 'Send to Chat'}
                 </button>
             </div>

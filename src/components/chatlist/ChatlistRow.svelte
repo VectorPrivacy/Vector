@@ -1,7 +1,7 @@
 <script>
     import { openChatId } from '../lib/signals.svelte.js';
     import { shellState } from '../lib/shell.svelte.js';
-    // One chat row (migration Phase 1 — SVELTE_MIGRATION_PLAN.md §3.2).
+    // One chat row.
     //
     // Chat objects are RAW (shared by reference with eventCache and mutated in
     // place), so the row cannot rely on reference identity for change detection:
@@ -135,14 +135,14 @@
             <!-- svelte-ignore a11y_missing_content (text is written by the h4Into action) -->
             <h4 class="cutoff" use:h4Into={vm}></h4>
             {#if vm.isGroup}
-                <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla tooltip span) -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <span
                     class="icon icon-users-multi chatlist-type-icon"
                     onmouseenter={(e) => h.showGlobalTooltip('Group Chat', e.currentTarget)}
                     onmouseleave={() => h.hideGlobalTooltip()}
                 ></span>
             {:else if vm.profile?.bot}
-                <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla tooltip span) -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <span
                     class="icon icon-bot chatlist-type-icon"
                     onmouseenter={(e) => h.showGlobalTooltip('Bot', e.currentTarget)}
@@ -150,7 +150,7 @@
                 ></span>
             {/if}
             {#if vm.pinned}
-                <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla tooltip span) -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <span
                     class="icon icon-pin chatlist-type-icon"
                     onmouseenter={(e) => h.showGlobalTooltip('Pinned', e.currentTarget)}
@@ -167,7 +167,7 @@
         <span class="chatlist-contact-count">{countText(vm)}</span>
     {/if}
     {#if vm.isGroup && vm.communityId && h.communityHasChannelList(vm.communityId)}
-        <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events (byte-identical to the vanilla expander div) -->
+        <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
         <div
             class="chatlist-expander btn"
             class:expanded={h.channelsShown(vm.communityId)}
@@ -182,5 +182,4 @@
     <ChannelList communityId={vm.communityId} {h} />
 {/if}
 
-<!-- No <style>: global styles.css cascades; the DOM is byte-identical to the vanilla
-     renderChat output (display:contents hosts keep #chat-list's child structure flat). -->
+<!-- No <style>: global styles.css cascades -->

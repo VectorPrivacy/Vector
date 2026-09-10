@@ -146,7 +146,7 @@ async function acceptCommunityInvite(communityId) {
         chat.metadata.custom_fields.community_id = communityId;
         if (!chat.metadata.custom_fields.created_at) chat.metadata.custom_fields.created_at = String(Date.now());
         chat._joining = true; // renders locked
-        // Re-sort so the fresh created_at floats the joining row to the TOP (renderChatlist itself
+        // Re-sort so the fresh created_at floats the joining row to the TOP (the list itself
         // renders arrChats in order; the new chat was pushed to the end).
         sortChats();
     }

@@ -187,7 +187,7 @@
         </svg>
     </button>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="profile-back-btn" class="btn nav-back-btn" style:display={m.mine || edit.active ? 'none' : ''} onclick={() => h.back()}>
+    <div class="btn nav-back-btn" style:display={m.mine || edit.active ? 'none' : ''} onclick={() => h.back()}>
         <span class="icon icon-chevron-double-left nav-icon"></span>
     </div>
     <div class="profile-header-info" style:display={hidden}>
@@ -269,28 +269,28 @@
         </div>
         <div id="profile-badges" style="margin-top: 5px;" style:display={hidden}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-            <img id="profile-badge-invites" src="./icons/vector_badge_hex_placeholder.svg" alt="Beta Inviter" class="btn" style="height: 30px; width: 30px;"
+            <img src="./icons/vector_badge_hex_placeholder.svg" alt="Beta Inviter" class="btn" style="height: 30px; width: 30px;"
                  style:display={badges.invites > 0 ? '' : 'none'} onclick={() => h.showInviteBadge(badges.invites)}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-            <img id="profile-badge-fawkes" src="./icons/fawkes_mask.svg" alt="Vector" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
+            <img src="./icons/fawkes_mask.svg" alt="Vector" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
                  style:display={badges.fawkes ? '' : 'none'} onclick={() => h.showFawkesCard()}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-            <img id="profile-badge-bughunter" src={'./icons/bughunter_' + (badges.bug || 1) + '.svg'} alt="Bug Hunter" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
+            <img src={'./icons/bughunter_' + (badges.bug || 1) + '.svg'} alt="Bug Hunter" class="btn" style="height: 30px; width: 30px; margin-left: 5px;"
                  style:display={badges.bug > 0 ? '' : 'none'} onclick={() => h.showBugHunterCard(badges.bug)}>
         </div>
-        <div id="profile-option-list" class="profile-options" style:display={m.mine ? 'none' : ''}>
+        <div class="profile-options" style:display={m.mine ? 'none' : ''}>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div id="profile-option-message" class="profile-option" onclick={() => h.message()}>
+            <div class="profile-option" onclick={() => h.message()}>
                 <span class="icon icon-message navbar-icon"></span>
                 <p class="navbar-text">Message</p>
             </div>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div id="profile-option-mute" class="profile-option" onclick={() => h.toggleMute()}>
+            <div class="profile-option" onclick={() => h.toggleMute()}>
                 <span class="icon navbar-icon" class:icon-volume-mute={m.muted} class:icon-volume-max={!m.muted}></span>
                 <p class="navbar-text">{m.muted ? 'Unmute' : 'Mute'}</p>
             </div>
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div id="profile-option-share" class="profile-option" onclick={() => copyLink('option')}>
+            <div class="profile-option" onclick={() => copyLink('option')}>
                 <span class="icon navbar-icon" class:icon-share={!copiedOption} class:icon-check={copiedOption}></span>
                 <p class="navbar-text">Share</p>
             </div>
@@ -300,12 +300,12 @@
                 <p class="navbar-text">More</p>
                 <div id="profile-more-dropdown" class="profile-more-dropdown" style:display={moreOpen ? 'block' : 'none'}>
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                    <div id="profile-option-nickname" class="profile-more-item" onclick={() => { moreOpen = false; h.nickname(); }}>
+                    <div class="profile-more-item" onclick={() => { moreOpen = false; h.nickname(); }}>
                         <span>Nickname</span>
                         <span class="icon icon-edit" style="width: 18px; height: 18px; background-color: white;"></span>
                     </div>
                     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                    <div id="profile-option-block" class="profile-more-item is-danger" onclick={() => { moreOpen = false; h.block(); }}>
+                    <div class="profile-more-item is-danger" onclick={() => { moreOpen = false; h.block(); }}>
                         <span class="is-danger-text">{m.blocked ? 'Unblock' : 'Block'}</span>
                         <span class="icon icon-x-user is-danger-icon" style="width: 18px; height: 18px;"></span>
                     </div>
@@ -316,11 +316,11 @@
               style="width: 90%; white-space: pre-line; overflow-wrap: break-word; font-style: normal; margin-top: 10px; text-align: center; display: block;"
               style:display={edit.active ? 'none' : 'block'} use:aboutInto={m.about}></span>
         <div style="margin: 40px 0 0 0; width: 90%; padding-left: 5%;">
-            <h3 id="profile-npub-label" style="color: #f7f4f4; margin: 0; text-align: center;" style:display={hidden}>{m.mine ? 'My nPub Key' : 'nPub Key'}</h3>
+            <h3 style="color: #f7f4f4; margin: 0; text-align: center;" style:display={hidden}>{m.mine ? 'My nPub Key' : 'nPub Key'}</h3>
         </div>
         <div id="profile-npub-container" class="profile-npub-container" style="margin-top: 5px; padding-top: 0;" style:display={hidden}>
             <span id="profile-npub" class="profile-npub" data-full-npub={m.id}>{m.id.slice(0, 16) + '...' + m.id.slice(-16)}</span>
-            <button id="profile-npub-copy" class="btn profile-npub-copy" title="Copy npub" onclick={copyNpub}>
+            <button class="btn profile-npub-copy" title="Copy npub" onclick={copyNpub}>
                 <span class="icon" class:icon-copy={!copiedNpub} class:icon-check={copiedNpub}></span>
             </button>
         </div>

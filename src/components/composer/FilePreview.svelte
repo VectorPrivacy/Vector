@@ -160,7 +160,7 @@
 </script>
 
 {#if shown}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (byte-identical to the vanilla overlay) -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="file-preview-overlay" class:active bind:this={overlay} style="display: flex;" onclick={(e) => { if (e.target === overlay) h.close(); }}>
         <div class="file-preview-container">
             <div class="file-preview-inner">
@@ -213,10 +213,10 @@
                         {:else}
                             <div class="file-preview-name" id="file-preview-name" onclick={startEdit}>{fp.stem}</div>
                         {/if}
-                        <span class="file-preview-ext-badge" id="file-preview-ext" style:display={fp.ext ? '' : 'none'}>{fp.ext ? `.${fp.ext}` : ''}</span>
+                        <span class="file-preview-ext-badge" style:display={fp.ext ? '' : 'none'}>{fp.ext ? `.${fp.ext}` : ''}</span>
                     </div>
                     <div class="file-preview-details">
-                        <span class="file-preview-detail" id="file-preview-size">{fp.size}</span>
+                        <span class="file-preview-detail">{fp.size}</span>
                     </div>
                 </div>
                 <div class="file-preview-options" id="file-preview-options">
@@ -224,21 +224,21 @@
                         <label class="file-preview-option">
                             <div>
                                 <div class="file-preview-option-label">Compress Image</div>
-                                <div class="file-preview-option-sublabel" id="file-preview-compress-info">{fp.compressInfo}</div>
+                                <div class="file-preview-option-sublabel">{fp.compressInfo}</div>
                             </div>
-                            <input type="checkbox" id="file-preview-compress" bind:checked={fp.compressChecked} />
+                            <input type="checkbox" bind:checked={fp.compressChecked} />
                             <span class="neon-toggle"></span>
                         </label>
                     {/if}
                     {#if fp.metadata}
                         <!-- Shown only when the image carries strip-worthy EXIF; the warning
                              surfaces while Keep Metadata is on (location, camera, date leave the device). -->
-                        <label class="file-preview-option" id="file-preview-metadata-option">
+                        <label class="file-preview-option">
                             <div>
-                                <div class="file-preview-option-label">Keep Metadata <img class="warning-icon" id="file-preview-metadata-warning" alt="" style="vertical-align: middle; margin-left: 4px; height: 14px; width: 14px;" style:display={fp.metadataChecked ? 'inline-block' : 'none'} /></div>
+                                <div class="file-preview-option-label">Keep Metadata <img class="warning-icon" alt="" style="vertical-align: middle; margin-left: 4px; height: 14px; width: 14px;" style:display={fp.metadataChecked ? 'inline-block' : 'none'} /></div>
                                 <div class="file-preview-option-sublabel">Includes location, camera &amp; date</div>
                             </div>
-                            <input type="checkbox" id="file-preview-metadata" bind:checked={fp.metadataChecked} />
+                            <input type="checkbox" bind:checked={fp.metadataChecked} />
                             <span class="neon-toggle"></span>
                         </label>
                     {/if}
@@ -246,12 +246,12 @@
             </div>
             <div class="file-preview-buttons">
                 {#if fp.publish}
-                    <button class="file-preview-btn file-preview-btn-publish" id="file-preview-publish" style="display: flex;" onclick={h.publish}>
+                    <button class="file-preview-btn file-preview-btn-publish" style="display: flex;" onclick={h.publish}>
                         <span class="icon icon-star"></span> Publish
                     </button>
                 {/if}
-                <button class="file-preview-btn file-preview-btn-cancel" id="file-preview-cancel" onclick={h.close}>Cancel</button>
-                <button class="file-preview-btn file-preview-btn-send" id="file-preview-send" disabled={fp.sendDisabled} onclick={h.send}>{fp.sendLabel}</button>
+                <button class="file-preview-btn file-preview-btn-cancel" onclick={h.close}>Cancel</button>
+                <button class="file-preview-btn file-preview-btn-send" disabled={fp.sendDisabled} onclick={h.send}>{fp.sendLabel}</button>
             </div>
         </div>
     </div>

@@ -33,8 +33,8 @@
                 </div>
             </div>
             <div class="permission-prompt-buttons">
-                <button class="file-preview-btn file-preview-btn-cancel" id="permission-prompt-deny" onclick={() => answer()?.deny()}>Cancel</button>
-                <button class="file-preview-btn file-preview-btn-send" id="permission-prompt-continue" onclick={() => answer()?.allow(st.items.map(i => [i.id, i.granted]))}>Continue</button>
+                <button class="file-preview-btn file-preview-btn-cancel" onclick={() => answer()?.deny()}>Cancel</button>
+                <button class="file-preview-btn file-preview-btn-send" onclick={() => answer()?.allow(st.items.map(i => [i.id, i.granted]))}>Continue</button>
             </div>
         </div>
     </div>

@@ -45,7 +45,7 @@
             <span class="icon icon-new-msg"></span>
             <span style="width: 100%">New Chat</span>
         </button>
-        <button id="create-group-btn" class="new-chat-btn btn" style="width: 50%; margin-left: 5px; margin-right: 10px;" style:display={shell.newChatButtons ? null : 'none'}
+        <button class="new-chat-btn btn" style="width: 50%; margin-left: 5px; margin-right: 10px;" style:display={shell.newChatButtons ? null : 'none'}
                 use:reveal={['newChat', reveals.newChat]} onclick={() => shellHandlers().openCreateGroup?.()}>
             <span class="icon icon-chat-circle"></span>
             <span style="width: 100%">Group Chat</span>

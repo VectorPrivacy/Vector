@@ -1,5 +1,5 @@
 <script>
-    // One message row (Phase 2, CHAT_VIEW_ISLAND_DESIGN.md). The row owns its SHELL:
+    // One message row. The row owns its SHELL:
     // root attributes, gutter avatar, header (author, bot mark, badges, time) and the
     // body layout. Those derive from the message plus the author's profile signal and
     // the community signal, so a resolved profile or a granted role repaints them with
@@ -165,7 +165,7 @@
 >
     <div class="dmsg-gutter">
         {#if avatarSrc && !avatarFailed}
-            <!-- svelte-ignore a11y_missing_attribute (byte-identical to the vanilla avatar's output) -->
+            <!-- svelte-ignore a11y_missing_attribute -->
             <img
                 class="dmsg-avatar btn"
                 src={avatarSrc}
@@ -211,7 +211,7 @@
         <div class="dmsg-header">
             <span class="dmsg-author btn" data-npub={authorFullId || undefined} use:name={displayName}></span>
             {#if isBot}
-                <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla tooltip span) -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <span
                     class="icon icon-bot dmsg-author-bot-icon"
                     onmouseenter={(e) => h.showTooltip('Bot', e.currentTarget)}

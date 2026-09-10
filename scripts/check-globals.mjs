@@ -66,7 +66,8 @@ const PROVIDED = new Set([
 const declared = new Set();          // every name any first-party script declares, any depth
 const declaredIn = new Map();        // name -> the scripts declaring it (any depth)
 const topDeclaredIn = new Map();     // name -> the scripts declaring it at top level: what the shared scope actually holds
-const perFile = new Map();           // file → Set of identifiers referenced
+const perFile = new Map();
+const localNames = new Map();        // file → names it declares at any depth           // file → Set of identifiers referenced
 const eagerCalls = [];               // { file, line, names }: top-level VectorSvelte.* calls and the identifiers their arguments pass by value
 const svelteUses = new Map();        // VectorSvelte.<name> → [files]
 const svelteUsesIn = new Map();      // file → Set of VectorSvelte.<name> it calls
@@ -131,6 +132,7 @@ for (const rel of scripts) {
         if (n.type === 'Identifier' && !n.__notRef) refs.add(n.name);
     });
     perFile.set(rel, refs);
+    localNames.set(rel, fileDeclared);
     for (const st of ast.body) {
         const top = new Set();
         if (st.type === 'FunctionDeclaration' || st.type === 'ClassDeclaration') { if (st.id) top.add(st.id.name); }
@@ -183,7 +185,7 @@ for (const { file, line, names } of eagerCalls) {
     if (later.length) { findings++; console.log(`${file}:${line}: passes ${later.join(', ')} by value at load, but they are declared in a script that runs later`); }
 }
 for (const [rel, refs] of perFile) {
-    const missing = [...refs].filter(n => !declared.has(n) && !PROVIDED.has(n)).sort();
+    const missing = [...refs].filter(n => !topDeclaredIn.has(n) && !PROVIDED.has(n) && !localNames.get(rel)?.has(n)).sort();
     if (missing.length) { findings += missing.length; console.log(`${rel}: undeclared ${missing.join(', ')}`); }
 }
 for (const [name, files] of svelteUses) {

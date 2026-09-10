@@ -65,7 +65,7 @@ import { miniProfile, openMiniProfile, closeMiniProfile } from './lib/miniprofil
 import { overviewRoster, overviewState, setOverview } from './lib/overview.svelte.js';
 import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, profileEditDirty } from './lib/profileedit.svelte.js';
 
-// Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
+// Per-entity signals and the clock.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
 // re-derive exactly the DOM that depends on it.
 export { bumpClockTick } from './lib/signals.svelte.js';

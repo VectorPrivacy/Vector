@@ -261,21 +261,19 @@ async function setupRustListeners() {
                 // freezes the window (data-only), and we paint ONLY on a genuine
                 // tail-append (this event lands immediately after the DOM's bottom row).
                 // A historical replay sorts into the middle — it must not append here.
-                const frozen = CHAT_WINDOW_ENABLED && _unreadJumpResolving;
-                const bottomIdx = CHAT_WINDOW_ENABLED ? _windowBottomRenderedIndex() : -1;
-                const newIdx = CHAT_WINDOW_ENABLED ? _windowIndexOfId(event_id) : -1;
+                const frozen = _unreadJumpResolving;
+                const bottomIdx = _windowBottomRenderedIndex();
+                const newIdx = _windowIndexOfId(event_id);
                 // Windowed: only paint at the live tail. Seeked away (windowAtTail false),
                 // a newest system event still appends to the bounded slice and would pass
                 // the index check, so require isAtDataBottom() too.
-                const tailAppend = CHAT_WINDOW_ENABLED
-                    ? (isAtDataBottom() && (bottomIdx === -1 || newIdx === bottomIdx + 1))
-                    : (atMs >= (chat?.messages || []).reduce((mx, m) => (m.id !== event_id && m.at > mx ? m.at : mx), 0) && isAtDataBottom());
+                const tailAppend = isAtDataBottom() && (bottomIdx === -1 || newIdx === bottomIdx + 1);
                 if (!frozen && tailAppend) {
                     // The list island renders it (and folds a repeat into its run's head).
                     ensureMessageList();
                     _updateChatWindow(chat, [systemMsg], null);
                     softChatScroll();
-                    if (CHAT_WINDOW_ENABLED) { _windowReseatAnchorsFromDom(); windowTrimTopIfOver(); }
+                    { _windowReseatAnchorsFromDom(); windowTrimTopIfOver(); }
                 }
                 refreshChatEmptyState(); // a "X joined" landed in the open chat → drop the start marker
             }
@@ -549,7 +547,7 @@ async function setupRustListeners() {
         }
 
         // Upgrade any message-less community whose preview shows THIS npub's join from the npub stub
-        // to the resolved name. The group row's state hash doesn't track the join actor, so renderChatlist
+        // to the resolved name. The group row's state hash doesn't track the join actor , so the list
         // alone wouldn't repaint it — patch the row directly.
         for (const chat of arrChats) {
             const se = latestPreviewSystemEvent(chat);
@@ -721,27 +719,21 @@ async function setupRustListeners() {
             // entirely — its relay-walk/DB-pull echoes are data-only (already in
             // chat.messages above), so skip ALL rendering AND badge updates; the
             // window renders once, at the jump.
-            const frozen = CHAT_WINDOW_ENABLED && _unreadJumpResolving;
+            const frozen = _unreadJumpResolving;
             // Gate on a GENUINE tail-append, not "at bottom": a row renders only if
             // it lands immediately AFTER the DOM's bottom-rendered message (or the
             // window is empty). An OLDER insert (a back-paged history echo) sorts into
             // the MIDDLE of chat.messages — it must NOT prepend into the DOM.
-            const bottomIdx = CHAT_WINDOW_ENABLED ? _windowBottomRenderedIndex() : -1;
-            const newIdx = CHAT_WINDOW_ENABLED ? _windowIndexOfId(newMessage.id) : -1;
+            const bottomIdx = _windowBottomRenderedIndex();
+            const newIdx = _windowIndexOfId(newMessage.id);
             // When seeked away (windowAtTail false) chat.messages is a bounded slice
             // whose end is NOT the live tail — a newest arrival still appends to that
             // slice and would satisfy the index check, so it must ALSO be at the tail.
-            const atTail = !CHAT_WINDOW_ENABLED || isAtDataBottom();
+            const atTail = isAtDataBottom();
             const tailAppend = atTail && (bottomIdx === -1 || newIdx === bottomIdx + 1);
             let rendered = false;
             if (frozen) {
                 // Data-only: chat.messages/cache already holds it. No DOM, no badge.
-                proceduralScrollState.totalMessageCount++;
-            } else if (!CHAT_WINDOW_ENABLED) {
-                updateChat(chat, [newMessage], null, false, true);
-                rendered = true;
-                refreshChatEmptyState();
-                proceduralScrollState.renderedMessageCount++;
                 proceduralScrollState.totalMessageCount++;
             } else if (newMessage.mine && !tailAppend) {
                 // Own send while scrolled up / seeked away: re-seat the window at the
@@ -1001,7 +993,7 @@ async function setupRustListeners() {
         // can flip the chat back to fully read.
         chatChanged(evt.payload.chat_id);
         // The in-app chat-list badge is DB-sourced (chat.unread); re-derive it so deleting an unread
-        // message drops the badge too. renderChatlist alone repaints the stale pre-deletion count.
+        // message drops the badge too. the list alone would keep the stale pre-deletion count.
         scheduleUnreadRefresh();
 
         // Recompute the OS taskbar badge — if the deleted message was unread,

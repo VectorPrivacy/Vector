@@ -9,7 +9,7 @@
  *
  * Animation is opacity-only (GPU compositor) — no layout/paint retrigger.
  *
- * Insertion vs. scroll. renderChatlist() rebuilds the list via
+ * Insertion vs. scroll. a full render used to rebuild the list via
  * replaceChildren(), so every render swaps in fresh DOM nodes. Both paths
  * fire their initial callback for each new row on observe, which would
  * animate the entire visible list on every render (the black flash). We
@@ -87,7 +87,7 @@
         }
         observeAll();
 
-        // renderChatlist() does `replaceChildren(fragment)` — old observers
+        // a rebuild that replaced the children — old observers
         // become noops on detached nodes (auto-cleaned by browser), but new
         // rows need to be observed. MutationObserver picks up added rows.
         const mo = new MutationObserver((mutations) => {

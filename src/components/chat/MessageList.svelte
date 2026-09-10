@@ -1,5 +1,5 @@
 <script>
-    // The chat view's message list (Phase 2c). Owns #chat-messages' children: one keyed
+    // The chat view's message list. Owns #chat-messages' children: one keyed
     // each over the rendered window, with day separators, the unread divider, system
     // events and rows all DERIVED from the slice (deriveWindow). The engine sets the
     // window and flushes; nothing inserts or removes rows by hand any more.

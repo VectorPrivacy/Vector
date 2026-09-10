@@ -21,7 +21,7 @@
 <AnchoredPanel cls="emoji-shortcode-selector" {open} {anchor} {view}>
     <div class="emoji-shortcode-header">{view.header}</div>
     {#each view.items as item, i (key(item))}
-        <!-- svelte-ignore a11y_no_static_element_interactions (byte-identical to the vanilla row) -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
             class="emoji-shortcode-item"
             class:active={i === view.active}

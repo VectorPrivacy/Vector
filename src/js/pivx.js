@@ -548,7 +548,7 @@ function getChatDisplayName(chatId) {
 // backend and merges historical payments into chat messages on chat-open.
 // Both depend on globals defined elsewhere in classic-script scope: arrChats,
 // strOpenChat, eventCache, getProfile, renderMessage, domChatMessages,
-// softChatScroll, renderChatlist, invoke.
+// softChatScroll, chatChanged, invoke.
 
 /**
  * Tauri event handler for inbound `pivx_payment_received`. Builds a synthetic

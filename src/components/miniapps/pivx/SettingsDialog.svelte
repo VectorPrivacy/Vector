@@ -7,11 +7,11 @@
 
 {#if st.open}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="pivx-dialog-overlay" id="pivx-settings-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
+    <div class="pivx-dialog-overlay" class:active={st.active} onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="pivx-dialog">
             <div class="pivx-dialog-header">
                 <h3>PIVX Wallet Settings</h3>
-                <button class="pivx-dialog-close" id="pivx-settings-close" onclick={h.close}>&times;</button>
+                <button class="pivx-dialog-close" onclick={h.close}>&times;</button>
             </div>
             <div class="pivx-dialog-content">
                 <div class="pivx-settings-section">
@@ -30,7 +30,7 @@
                     </select>
                     <p class="pivx-settings-hint">Choose your preferred fiat currency for balance display.</p>
                 </div>
-                <button class="pivx-settings-save-btn" id="pivx-settings-save" onclick={h.save}>Save Settings</button>
+                <button class="pivx-settings-save-btn" onclick={h.save}>Save Settings</button>
             </div>
         </div>
     </div>

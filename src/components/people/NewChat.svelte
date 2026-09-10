@@ -20,7 +20,7 @@
 
 <div class="chat-new-header">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="chat-new-back-text-btn" class="btn chat-new-back-text-btn" onclick={() => h.back()}>
+    <div class="btn chat-new-back-text-btn" onclick={() => h.back()}>
         <span class="icon icon-chevron-double-left nav-icon"></span>
         <p class="chat-new-back-text">Back</p>
     </div>

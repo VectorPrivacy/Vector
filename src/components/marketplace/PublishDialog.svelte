@@ -44,7 +44,7 @@
                     <div class="publish-app-field publish-app-toggle-field">
                         <label class="toggle-container">
                             <span>Is this app a Game?</span>
-                            <input type="checkbox" id="publish-app-is-game" bind:checked={f.isGame}>
+                            <input type="checkbox" bind:checked={f.isGame}>
                             <span class="neon-toggle"></span>
                         </label>
                         <span class="publish-app-hint">This allows Vector to present your app correctly the users.</span>
@@ -92,8 +92,8 @@
                 </div>
             </div>
             <div class="publish-app-buttons">
-                <button class="file-preview-btn file-preview-btn-cancel" id="publish-app-cancel" onclick={() => h()?.cancel()}>Cancel</button>
-                <button class="file-preview-btn file-preview-btn-send" id="publish-app-submit" disabled={st.busy} onclick={() => h()?.submit()}>
+                <button class="file-preview-btn file-preview-btn-cancel" onclick={() => h()?.cancel()}>Cancel</button>
+                <button class="file-preview-btn file-preview-btn-send" disabled={st.busy} onclick={() => h()?.submit()}>
                     <span class="icon {st.busy ? 'icon-loading' : 'icon-star'}"></span> {st.busy ? 'Publishing...' : 'Publish'}
                 </button>
             </div>

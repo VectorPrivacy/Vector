@@ -243,11 +243,6 @@ function buildRichComposer(host) {
 
 
 /**
- * Opens or closes the Attachment Panel
- *
- * The panel slides up from behind the chat box, similar to the emoji panel.
- */
-/**
  * Run an async function (typically `invoke('login_from_stored_key', ...)`)
  * while polling Tor's bootstrap state. If Tor is mid-bootstrap during the
  * call, the lockscreen title is overridden with "Bootstrapping Tor… NN%"
@@ -836,19 +831,8 @@ function chatPinRank(chat) {
     return arrPinnedChats.indexOf(chatPinKey(chat));
 }
 
-/**
- * True while a sync phase is running. The synced preference lists (pins,
- * blocks, mutes, nicknames) are whole-list newest-wins, so a change made before
- * this device has reconciled would publish its emptier view over another
- * device's. The backend refuses such a publish outright; this stops the user
- * making one and wondering why nothing happened.
- */
 let fSyncing = false;
 
-/**
- * Refuse a synced-preference action mid-sync, with a reason. Returns true when
- * the caller should stop.
- */
 /**
  * Repaint every rendered surface showing `npub`'s name: chat list, open chat
  * header, message authors, command invokers, bot names and system-event lines.
@@ -1288,11 +1272,6 @@ function chatBackDotWanted() {
     return arrChats.some(chat => chat.id !== strOpenChat && chatIsVisibleInList(chat) && computeRowBadgeCount(chat) > 0);
 }
 
-/**
- * Sets a specific message as the last read message
- * @param {Chat} chat - The Chat to update
- * @param {Message|string} message - The Message to set as last read
- */
 /** Walk a messages array backward and return the latest "contact" message —
  *  non-mine AND not a system event. System events are status notifications,
  *  not conversation, so they must not be picked as the markAsRead anchor —
@@ -1924,7 +1903,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                 renderCurrentProfile(cProfile);
                 VectorSvelte.revealAccount();
                 
-                // Mark init as complete so renderChatlist works
+                // Init complete: the chat list may render
                 fInit = false;
                 wsUpdate();
                 // Catch a share that landed between the cold-start poll and now (the live listener

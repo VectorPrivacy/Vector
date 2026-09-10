@@ -20,7 +20,7 @@
 </div>
 <div class="marketplace-search-container">
     <span class="marketplace-search-icon icon icon-search"></span>
-    <input type="text" id="marketplace-search-input" placeholder="Search apps..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+    <input type="text" placeholder="Search apps..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
            value={st.query} oninput={(e) => mktSetQuery(e.currentTarget.value)}>
 </div>
 <Filters />

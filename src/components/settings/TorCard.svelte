@@ -65,16 +65,16 @@
             <InfoIcon side="lead" onclick={() => h.help('tor')} />
             Route traffic through Tor<sup class="tor-tm">™</sup>
         </div>
-        <div id="privacy-tor-status" class="tor-card-status">{status}</div>
+        <div class="tor-card-status">{status}</div>
         <!-- Per the Tor Project's trademark guidelines: a link home, the logo unaltered. -->
         <!-- svelte-ignore a11y_invalid_attribute -->
-        <a href="#" id="tor-attribution-link" class="tor-attribution" title="Visit torproject.org"
+        <a href="#" class="tor-attribution" title="Visit torproject.org"
            onclick={(e) => { e.preventDefault(); e.stopPropagation(); h.openLink('torAttribution'); }}>
             <img src="/icons/tor-logo.svg" class="tor-attribution-logo" alt="Tor">
         </a>
     </div>
     <label class="toggle-container tor-card-toggle">
-        <input type="checkbox" id="privacy-tor-toggle" {checked} {disabled} onchange={(e) => h.setTorEnabled(e.currentTarget.checked)}>
+        <input type="checkbox" {checked} {disabled} onchange={(e) => h.setTorEnabled(e.currentTarget.checked)}>
         <span class="neon-toggle"></span>
     </label>
 </div>

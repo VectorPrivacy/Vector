@@ -33,7 +33,7 @@
                 <span>New</span>
             </button>
         </header>
-        <ol id="tor-circuits-list" class="tor-circuits"><TorCircuits /></ol>
+        <ol class="tor-circuits"><TorCircuits /></ol>
 
         <section class="tor-bridges">
             <header class="tor-bridges-head">
@@ -42,7 +42,7 @@
                     <span class="tor-bridges-head-sub">Connect via private relays. Use this if Tor is blocked on your network.</span>
                 </div>
                 <label class="toggle-container tor-bridges-toggle-wrap">
-                    <input type="checkbox" id="tor-bridges-toggle" checked={b.enabled} disabled={b.busy} onchange={(e) => h.setBridgesEnabled(e.currentTarget.checked)}>
+                    <input type="checkbox" checked={b.enabled} disabled={b.busy} onchange={(e) => h.setBridgesEnabled(e.currentTarget.checked)}>
                     <span class="neon-toggle"></span>
                 </label>
             </header>
@@ -54,13 +54,13 @@
                 {#if b.obfs4Hint}
                     <div id="tor-obfs4-banner" class="tor-obfs4-banner">
                         <span class="tor-obfs4-banner-icon">⚠</span>
-                        <span id="tor-obfs4-banner-msg">obfs4 bridges need <code>obfs4proxy</code> installed: {@html b.obfs4Hint}. Apply will fail until it's available.</span>
+                        <span>obfs4 bridges need <code>obfs4proxy</code> installed: {@html b.obfs4Hint}. Apply will fail until it's available.</span>
                     </div>
                 {/if}
                 <div class="tor-bridges-help">
                     One bridge per line. <b>obfs4</b> recommended (bypasses DPI). Vanilla <code>IP:port fingerprint</code> also works for private bridges.
                     <!-- svelte-ignore a11y_invalid_attribute -->
-                    Get bridges at <a href="#" id="tor-bridges-link" onclick={(e) => { e.preventDefault(); e.stopPropagation(); h.openLink('bridges'); }}>bridges.torproject.org</a>.
+                    Get bridges at <a href="#" onclick={(e) => { e.preventDefault(); e.stopPropagation(); h.openLink('bridges'); }}>bridges.torproject.org</a>.
                 </div>
                 <div class="tor-bridges-foot">
                     <span id="tor-bridges-status" class="tor-bridges-status {b.statusClass}">{status}</span>

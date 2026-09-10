@@ -137,11 +137,6 @@ setInterval(() => {
     for (const m of chat.messages.filter(m => m.expiration && m.expiration <= now)) derezMessageLocally(m.id, chat.id);
 }, 1000);
 
-/** Build the chat-header overflow ("hamburger") menu items for a chat.
- *  Single source of truth for both the click handler and the button's
- *  visibility — when this returns empty (e.g. group chats, which have no
- *  per-chat options yet), the button is hidden rather than opening an
- *  empty menu. */
 /** DMs and Concord v2 community channels support the Self-Destruct Timer
  *  (sender-controlled NIP-40 TTL). A v1 community's send path ignores the tag,
  *  so it's gated out here to avoid an indicator that would lie. */
@@ -472,11 +467,6 @@ function writeWallpaperSliders(blur, dim) {
     VectorSvelte.setWallpaperSliders(blur, dim);
 }
 
-/**
- * Open the image picker, hand the result to the backend, and switch the
- * chat into preview mode. Animated sources are converted to a static
- * first-frame server-side; we surface a friendly notice when that happens.
- */
 /** Full-screen "processing" overlay with a dimmed, blurred backdrop that blocks
  *  interaction while a short CPU-bound task (image decode/resize/re-encode) runs
  *  in the backend. Idempotent; pair with hideProcessingOverlay(). */
@@ -634,12 +624,6 @@ async function cancelWallpaperChange() {
     }
 }
 
-/**
- * Creates a file attachment box (the .custom-audio-player styled div) for all download states.
- * @param {Object} cAttachment - the attachment object
- * @param {'downloaded'|'download'|'downloading'} state - the download state
- * @returns {{ fileDiv: HTMLElement, isMiniApp: boolean, descriptionSpan: HTMLElement, iconElement: HTMLElement, updateMiniAppStatus: Function|null, statusSpan: HTMLElement|null }}
- */
 function isSpoilerAttachment(attachment) {
     const fileName = attachment.name || '';
     return fileName.toUpperCase().startsWith('SPOILER_');
@@ -760,9 +744,6 @@ function jumpToMessage(targetMsgId) {
     }
 }
 
-/**
- * Cancel any ongoing replies and reset the messaging interface
- */
 /**
  * Set mic/send to exactly one visible button, derived from the input's text
  * (no animation). Programmatic value changes fire no 'input' event, and a
@@ -1239,18 +1220,18 @@ async function openChat(contact) {
     // DOM windowing: render only the newest MAX rows so a large cached array
     // (prior scroll-up loads still in the cache from a previous open) doesn't
     // flood the DOM on reopen. renderWindow clears + renders the slice and sets
-    // the window anchors. Falls through to the legacy full render when disabled.
-    if (CHAT_WINDOW_ENABLED && initialMessages.length > MAX_WINDOW_ROWS) {
+    // the window anchors.
+    if (initialMessages.length > MAX_WINDOW_ROWS) {
         await renderWindow(initialMessages.length - MAX_WINDOW_ROWS, initialMessages.length);
         scrollToBottom(domChatMessages, false);
     } else {
         await updateChat(chat, initialMessages, profile, true);
         // Anchor the window to the freshly-rendered tail so isAtDataBottom() and
         // the scroll-extend paths have valid anchors.
-        if (CHAT_WINDOW_ENABLED) _windowReseatAnchorsFromDom();
+        _windowReseatAnchorsFromDom();
     }
     // Initial open lands on the newest message — the window bottom IS the live tail.
-    if (CHAT_WINDOW_ENABLED) windowAtTail = true;
+    windowAtTail = true;
     // A chat open is where the most media resolves at once, and every one of
     // those loads grows the content below the fold — hold the bottom until the
     // layout settles instead of finishing short of the newest message.
@@ -1663,11 +1644,6 @@ function adjustSize() {
 }
 
 /**
- * Scrolls the chat to the bottom if the user has not already scrolled upwards substantially.
- * 
- * This is used to correct against container resizes, i.e: if an image loads, or a message is received.
- */
-/**
  * Tracks whether the user wants to be pinned to the bottom of the chat.
  *
  * Only flipped by *user-initiated* scrolls — wheel, touch, keyboard. Pure
@@ -1843,7 +1819,7 @@ function softChatScroll() {
     // Windowing: the pin only drives scrolling in the NEWEST window. Windowed away from the live
     // tail, scrolling to the DOM bottom would trip windowExtendNewer → re-render → re-scroll, an
     // infinite down-window cascade. Stay put; the ↓ button is the way back to "now".
-    if (CHAT_WINDOW_ENABLED && !isAtDataBottom()) return;
+    if (!isAtDataBottom()) return;
     scrollToBottom(domChatMessages, false);
     // Whatever prompted this (a media load, a new message) may keep growing the
     // content below us for a few frames — ride it down.
@@ -1888,15 +1864,15 @@ async function wireChatUi() {
         // With windowing, newer messages can live below the rendered window even
         // when the DOM is "at its bottom" — keep the button up whenever we're not
         // viewing the live tail so the user can always get back to "now".
-        shouldForceVisible: () => CHAT_WINDOW_ENABLED && !isAtDataBottom(),
+        shouldForceVisible: () => !isAtDataBottom(),
         // Inverse: at the live tail, force-hide so a media-reflow scroll can't strand the button on.
-        shouldForceHidden: () => CHAT_WINDOW_ENABLED && isAtDataBottom(),
+        shouldForceHidden: () => isAtDataBottom(),
         // Click must reach the true data bottom. When windowed away, re-render the
         // newest window + pin; otherwise fall through to the default scrollTo.
         onJumpToBottom: () => {
             chatPinnedToBottom = true;
             _userScrolledAway = false;   // explicit return to "now" releases the latch
-            if (CHAT_WINDOW_ENABLED && !isAtDataBottom()) {
+            if (!isAtDataBottom()) {
                 windowJumpToBottom();   // re-renders newest MAX window, pins, clears badge
                 return true;
             }

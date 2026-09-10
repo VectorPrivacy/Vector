@@ -19,7 +19,7 @@
 
 <label class="profile-edit-label" for="profile-edit-name-input">Username</label>
 <div class="profile-edit-field-wrapper" style="position: relative;">
-    <div id="profile-edit-name" class="profile-edit-field-text"><input id="profile-edit-name-input" type="text" maxlength="50" style={field} bind:value={edit.draft.name}></div>
+    <div class="profile-edit-field-text"><input id="profile-edit-name-input" type="text" maxlength="50" style={field} bind:value={edit.draft.name}></div>
 </div>
 <label class="profile-edit-label" for="profile-edit-bio-input">Bio</label>
 <div class="profile-edit-field-wrapper profile-edit-field-bio">
