@@ -105,15 +105,6 @@ async function closeMiniApp(chatId, messageId) {
 }
 
 /**
- * List all currently open Mini App instances
- * @returns {Promise<MiniAppInfo[]>}
- */
-async function listOpenMiniApps() {
-    const { invoke } = window.__TAURI__.core;
-    return await invoke('miniapp_list_open');
-}
-
-/**
  * Listen for Mini App update events
  * @param {function} callback - Called when a Mini App sends an update
  * @returns {Promise<function>} Unsubscribe function
@@ -123,15 +114,6 @@ async function onMiniAppUpdate(callback) {
     return await listen('miniapp_update_sent', (event) => {
         callback(event.payload);
     });
-}
-
-/**
- * Check if a file is a Mini App (.xdc file)
- * @param {string} filePath - Path to check
- * @returns {boolean}
- */
-function isMiniAppFile(filePath) {
-    return filePath.toLowerCase().endsWith('.xdc');
 }
 
 // ============================================================================

@@ -23,7 +23,7 @@ const MAX_DISPLAYED_REACTIONS = 12;
 /** The mounted list island, one per page life (re-mounted if its target was replaced). */
 let _dmsgListIsland = null;
 function ensureMessageList() {
-    if (typeof domChatMessages === 'undefined' || !domChatMessages) return false;
+    if (!domChatMessages) return false;
     if (_dmsgListIsland && _dmsgListIsland._target === domChatMessages) return true;
     _dmsgListIsland = VectorSvelte.mountMessageList(domChatMessages, { h: _dmsgListHelpers });
     _dmsgListIsland._target = domChatMessages;
@@ -435,7 +435,7 @@ function _dmsgReplyView(msg, sender) {
         // The parent's tags can lose a hydration race on first paint, so the reader's own
         // equipped packs backstop them; the parent's come last so the sender's mapping wins.
         const msgTags = (cMsg?.emoji_tags?.length ? cMsg.emoji_tags : null) || msg.replied_to_emoji_tags || [];
-        const equipped = (typeof equippedEmojiTags === 'function') ? equippedEmojiTags() : [];
+        const equipped = equippedEmojiTags();
         emojiTags = [...equipped, ...msgTags];
     } else if (hasAttachment) {
         // The backend-resolved extension covers an off-screen parent (no cMsg then).
@@ -501,13 +501,9 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
     // NIP-19 naddrs for emoji packs are rendered as a preview card; strip
     // the bech32 string so it doesn't double up as a long unreadable line.
     let textBody = (displayContent || '').trim();
-    if (typeof stripEmojiPackNaddrs === 'function') {
-        textBody = stripEmojiPackNaddrs(textBody);
-    }
+            textBody = stripEmojiPackNaddrs(textBody);
     // Community invite links likewise render as their own card.
-    if (typeof stripCommunityInviteUrls === 'function') {
-        textBody = stripCommunityInviteUrls(textBody);
-    }
+            textBody = stripCommunityInviteUrls(textBody);
     // Defensive: displayContent can be null/undefined for attachment-only messages.
     span.innerHTML = parseMarkdown(textBody);
     linkifyUrls(span);
@@ -710,7 +706,7 @@ function dmsgReactOptimistic(msgId, emoji, url = null) {
     VectorSvelte.flushSync();
     // A chip can grow the row; a bottom-pinned reader stays pinned (softChatScroll
     // no-ops when they have scrolled up).
-    if (typeof softChatScroll === 'function') softChatScroll();
+    softChatScroll();
     return () => {
         const l = (pendingReactions.get(msgId) || []).filter(p => p.id !== provisional.id);
         if (l.length) pendingReactions.set(msgId, l); else pendingReactions.delete(msgId);

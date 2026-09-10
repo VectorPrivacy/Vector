@@ -281,11 +281,11 @@ function _registerPackDetails() {
                         : invoke('subscribe_emoji_pack', { naddr });
                     await Promise.all([work, minDelay]);
                     await loadEmojiPacks();
-                    if (!isSub) { if (typeof showToast === 'function') showToast('Pack equipped'); return 'added'; }
+                    if (!isSub) { showToast('Pack equipped'); return 'added'; }
                     return 'removed';
                 } catch (e) {
                     console.warn('[pack-details] toggle failed:', e);
-                    if (typeof showToast === 'function') showToast(String(e) || 'Failed');
+                    showToast(String(e) || 'Failed');
                     return false;
                 }
             },

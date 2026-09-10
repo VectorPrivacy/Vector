@@ -160,7 +160,7 @@ function isSupportedImage(filepath) {
  */
 function isSupportedVideo(filepath) {
     // Video preview not supported on Linux
-    if (typeof platformFeatures !== 'undefined' && platformFeatures.os === 'linux') {
+    if (platformFeatures?.os === 'linux') {
         return false;
     }
     const ext = getFileExtension(filepath);
@@ -270,7 +270,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
     pendingZipPath = null;
     zipInProgress = false;
 
-    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
+    const isAndroid = platformFeatures?.os === 'android';
 
     // Get file info from backend
     // On Android, use cache_android_file which reads and caches the file bytes immediately
@@ -379,9 +379,7 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
 async function checkAndShowPublishButton() {
     try {
         // isCurrentUserTrustedPublisher is provided by marketplace.js
-        const isTrusted = typeof isCurrentUserTrustedPublisher === 'function'
-            ? await isCurrentUserTrustedPublisher()
-            : false;
+        const isTrusted = await isCurrentUserTrustedPublisher();
         VectorSvelte.fpPatch({ publish: !!isTrusted });
     } catch (e) {
         console.error('Failed to check trusted publisher status:', e);
@@ -512,7 +510,7 @@ async function openFilePreviewWithBytes(bytes, fileName, ext, fileSize, receiver
     pendingMiniAppInfo = miniAppInfo;
 
     const displayName = (isMiniApp && miniAppInfo && miniAppInfo.name) ? miniAppInfo.name : fileName;
-    const isAndroid = typeof platformFeatures !== 'undefined' && platformFeatures.os === 'android';
+    const isAndroid = platformFeatures?.os === 'android';
 
     // Reset compression state
     compressionInProgress = false;

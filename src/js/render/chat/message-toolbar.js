@@ -341,7 +341,7 @@ function _dmsgHandleToolbarClick(e) {
         case 'retry': {
             const row = document.getElementById(targetId);
             const msg = row ? _dmsgLookupMessage(row) : null;
-            if (msg && typeof retryFailedMessage === 'function') retryFailedMessage(msg);
+            if (msg) retryFailedMessage(msg);
             break;
         }
         case 'cancel-upload':
@@ -350,7 +350,7 @@ function _dmsgHandleToolbarClick(e) {
         case 'delete': {
             // Failed-message delete is local cleanup only (no NIP-09).
             if (btn.dataset.mode === 'failed') {
-                if (typeof deleteFailedMessage === 'function') deleteFailedMessage(targetId);
+                deleteFailedMessage(targetId);
                 break;
             }
             const mode = btn.dataset.mode === 'hide' ? 'hide' : 'delete';

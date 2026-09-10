@@ -104,7 +104,7 @@ function registerReactionPopups() {
             twemojify,
             // The dataset's canonical `display` (CLDR tts); `name` for entries predating it.
             emojiLabel: (emoji) => {
-                const entry = typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === emoji);
+                const entry = arrEmojis.find(e => e.emoji === emoji);
                 return entry ? (entry.display || entry.name) : '';
             },
         },
@@ -199,7 +199,7 @@ function cancelReactionLongPress() {
 // don't fire the tip. mousein/mouseout via mouseover/mouseout (capture-style)
 // because mouseenter/mouseleave don't bubble.
 document.addEventListener('mouseover', (e) => {
-    if (typeof platformFeatures !== 'undefined' && platformFeatures?.is_mobile) return;
+    if (platformFeatures?.is_mobile) return;
     const reactionEl = e.target.closest('.reaction');
     if (!reactionEl) return;
     // Skip only if this exact chip already has a live timer or shown tip — a

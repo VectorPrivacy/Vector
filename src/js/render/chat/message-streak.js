@@ -63,17 +63,6 @@ function shouldCollapseStreak(prevMsg, currMsg) {
 }
 
 /**
- * Walk forward from `el` (inclusive) to find the nearest `.dmsg` row.
- */
-function _dmsgWalkForwardToRow(el) {
-    while (el) {
-        if (el.classList && el.classList.contains('dmsg')) return el;
-        el = el.nextElementSibling;
-    }
-    return null;
-}
-
-/**
  * Look up a Message object for a given row. Prefers the cached `row._dmsgMsg`
  * (set in renderMessage) so this runs in O(1); falls back to scanning
  * chat.messages by id only if the cache is missing (defensive).
@@ -82,46 +71,7 @@ function _dmsgLookupMessage(rowEl) {
     if (!rowEl) return null;
     if (rowEl._dmsgMsg) return rowEl._dmsgMsg;
     if (!rowEl.id) return null;
-    if (typeof arrChats === 'undefined' || typeof strOpenChat === 'undefined') return null;
-    const chat = arrChats.find(c => c.id === strOpenChat);
+        const chat = arrChats.find(c => c.id === strOpenChat);
     if (!chat || !chat.messages) return null;
     return chat.messages.find(m => m.id === rowEl.id) || null;
-}
-
-/**
- * Compute the streak attribute ('first' or 'continuation') for `msg` given the
- * element it sits immediately after in the DOM.
- *
- * If `anchorEl` is anything other than a `.dmsg` (timestamp, system event, day
- * separator, null), the streak is broken — return 'first'. Otherwise consult
- * shouldCollapseStreak with both message objects.
- */
-function _dmsgComputeStreakAttr(msg, anchorEl) {
-    if (!anchorEl) return 'first';
-    if (!anchorEl.classList || !anchorEl.classList.contains('dmsg')) return 'first';
-
-    const prevMsg = _dmsgLookupMessage(anchorEl);
-    return shouldCollapseStreak(prevMsg, msg) ? 'continuation' : 'first';
-}
-
-/**
- * Re-evaluate the streak attribute for `rowEl` AND the row that follows it.
- * Call after any DOM mutation that might invalidate previously-computed streak
- * state — message insertion, removal, replacement, prepending older messages.
- */
-function recomputeStreakBoundary(rowEl) {
-    if (!rowEl || !rowEl.classList || !rowEl.classList.contains('dmsg')) return;
-
-    const msg = _dmsgLookupMessage(rowEl);
-    if (msg) {
-        rowEl.dataset.streak = _dmsgComputeStreakAttr(msg, rowEl.previousElementSibling);
-    }
-
-    const nextRow = _dmsgWalkForwardToRow(rowEl.nextElementSibling);
-    if (nextRow) {
-        const nextMsg = _dmsgLookupMessage(nextRow);
-        if (nextMsg) {
-            nextRow.dataset.streak = _dmsgComputeStreakAttr(nextMsg, nextRow.previousElementSibling);
-        }
-    }
 }

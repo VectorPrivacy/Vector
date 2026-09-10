@@ -373,15 +373,6 @@ async function validateRelayUrl(url) {
 }
 
 /**
- * Get metrics for a specific relay
- * @param {string} url - The relay URL
- * @returns {Promise<RelayMetrics>} - The relay metrics
- */
-async function getRelayMetrics(url) {
-    return await invoke('get_relay_metrics', { url });
-}
-
-/**
  * Get recent logs for a specific relay
  * @param {string} url - The relay URL
  * @returns {Promise<RelayLog[]>} - Array of recent log entries

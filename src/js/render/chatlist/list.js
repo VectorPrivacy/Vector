@@ -88,7 +88,6 @@ function chatlistSnapshot() {
  * @typedef {Object} ChatlistHelpers
  * @property {(chat: object) => boolean} chatIsVisibleInList
  * @property {(chat: object) => boolean} chatIsGroup
- * @property {(chat: object) => boolean} isPrimaryChannelChat
  * @property {(npub: string) => object|null} getProfile
  * @property {(profileOrNpub: object|string) => string} getName
  * @property {(chat: object) => string} chatPinKey
@@ -108,7 +107,6 @@ function chatlistSnapshot() {
  * @property {(communityId: string) => object[]|null} getChannels
  * @property {(communityId: string) => boolean} communityHasChannelList
  * @property {(communityId: string) => boolean} channelsShown
- * @property {(communityId: string) => boolean} communityChannelsShown
  * @property {(communityId: string) => boolean} canAddChannels
  * @property {(communityId: string) => void} toggleCommunityExpanded
  * @property {(sectionId: string) => boolean} sectionClosed
@@ -134,7 +132,6 @@ function chatlistHelpers() {
         // membership + row policy
         chatIsVisibleInList,
         chatIsGroup,
-        isPrimaryChannelChat,
         getProfile,
         getName,
         chatPinKey,
@@ -157,7 +154,6 @@ function chatlistHelpers() {
         getChannels: getCommunityChannels,
         communityHasChannelList,
         channelsShown: communityChannelsShown,
-        communityChannelsShown,
         canAddChannels: communityCanAddChannels,
         toggleCommunityExpanded,
         sectionClosed: channelSectionClosed,
@@ -303,8 +299,8 @@ function openChatChanged() {
 
 /** The list pane's mode changed (widescreen entered/left, or the open community changed). */
 function paneChanged() {
-    const communityId = typeof wsListCommunityId === 'function' ? wsListCommunityId() : null;
-    const dmsOnly = !communityId && typeof wsActive === 'function' && wsActive();
+    const communityId = wsListCommunityId();
+    const dmsOnly = !communityId && wsActive();
     VectorSvelte.setPane(communityId, dmsOnly);
 }
 

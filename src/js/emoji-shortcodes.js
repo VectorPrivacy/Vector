@@ -92,9 +92,7 @@ function initEmojiShortcodeSelector(textarea) {
         // usage into their score (`searchEmojis` + `searchCustomEmojis`
         // share the USAGE_SCORE_WEIGHT constant), so frequently-picked
         // emojis on either side climb the autocomplete identically.
-        const allCustom = typeof searchCustomEmojis === 'function'
-            ? searchCustomEmojis(query)
-            : [];
+        const allCustom = searchCustomEmojis(query);
         const stockResults = searchEmojis(query);
         const results = stockResults.concat(allCustom)
             .sort((a, b) => (a.score || 0) - (b.score || 0))
@@ -157,12 +155,12 @@ function initEmojiShortcodeSelector(textarea) {
         // Text emoticon (`:)`, `:D`, `:3`, …): suggest the matching emoji on top — unless the user
         // disabled it, in which case leave it as literal text (don't hijack `:3` etc.).
         if (Object.prototype.hasOwnProperty.call(EMOTICON_MAP, query)) {
-            if (typeof emoticonSuggestionsEnabled !== 'undefined' && !emoticonSuggestionsEnabled) {
+            if (!emoticonSuggestionsEnabled) {
                 if (isVisible()) hide();
                 return;
             }
             const char = EMOTICON_MAP[query];
-            const canonical = (typeof arrEmojis !== 'undefined' && arrEmojis.find(e => e.emoji === char))
+            const canonical = (arrEmojis.find(e => e.emoji === char))
                 || { emoji: char, name: char };
             const rest = getFiltered().filter(it => it.emoji !== char);
             activeIndex = 0;

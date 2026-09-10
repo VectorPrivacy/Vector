@@ -550,7 +550,7 @@ async function uninstallFromDetails(app) {
 /** The publisher as the profile list knows them, or null for a bare npub. */
 function publisherProfile(npub) {
     try {
-        const profile = typeof getProfile === 'function' ? getProfile(npub) : null;
+        const profile = getProfile(npub);
         if (!profile) return null;
         return { name: getName(profile), avatar: getProfileAvatarSrc(profile) || null };
     } catch (error) {
@@ -560,9 +560,9 @@ function publisherProfile(npub) {
 }
 
 async function openPublisherProfile(npub) {
-    if (!npub || typeof openProfile !== 'function') return;
+    if (!npub) return;
     await Promise.all([closeAppDetailsPanel(), hideMarketplacePanel()]);
-    openProfile((typeof getProfile === 'function' ? getProfile(npub) : null) || { id: npub });
+    openProfile((getProfile(npub)) || { id: npub });
 }
 
 function addMarketplaceFilter(category) { VectorSvelte.mktAddFilter(category); }
@@ -639,10 +639,10 @@ async function isCurrentUserTrustedPublisher() {
     // strPubkey is defined in main.js
     console.log('[Marketplace] Checking trusted publisher:', {
         trustedNpub,
-        strPubkey: typeof strPubkey !== 'undefined' ? strPubkey : 'undefined',
-        match: trustedNpub && typeof strPubkey !== 'undefined' && strPubkey === trustedNpub
+        strPubkey: strPubkey,
+        match: trustedNpub && strPubkey === trustedNpub
     });
-    return trustedNpub && typeof strPubkey !== 'undefined' && strPubkey === trustedNpub;
+    return trustedNpub && strPubkey === trustedNpub;
 }
 
 /**
@@ -705,7 +705,7 @@ async function showPublishAppDialog(filePath, miniAppInfo) {
         const appId = st.form.id.trim().toLowerCase();
         if (!appId) return;
         const existingApp = marketplaceApps.find(app =>
-            app.id === appId && typeof strPubkey !== 'undefined' && app.publisher === strPubkey);
+            app.id === appId && app.publisher === strPubkey);
         if (!existingApp) return;
         const f = st.form;
         if (existingApp.description) f.description = existingApp.description;

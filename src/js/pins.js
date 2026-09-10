@@ -214,7 +214,7 @@ function pinsAttachmentChips(pin) {
 function pinsAttachmentTypeIcon(pin) {
     const first = pinsAttachmentChips(pin)[0];
     if (!first) return null;
-    return (typeof getFileTypeInfo === 'function' && getFileTypeInfo(first.ext)?.icon) || 'file';
+    return (getFileTypeInfo(first.ext)?.icon) || 'file';
 }
 
 /// Append the attachment's KIND (if any) to a rendered pin body — the same
@@ -224,7 +224,7 @@ function pinsAppendAttachmentKinds(el, pin) {
     for (const chip of pinsAttachmentChips(pin)) {
         const b = document.createElement('b');
         b.className = 'pins-drawer-row-kind';
-        b.textContent = (typeof getFileTypeInfo === 'function' && chip.ext)
+        b.textContent = (chip.ext)
             ? getFileTypeInfo(chip.ext).description
             : 'Attachment';
         el.appendChild(b);

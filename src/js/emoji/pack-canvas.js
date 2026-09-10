@@ -104,7 +104,7 @@ function _startEmojiTooltipWatchdog(anchor) {
  *  `platformFeatures.is_mobile` is Vector's canonical desktop/mobile split
  *  (set up in main.js at boot) and is used by every other hover-only path. */
 function _supportsHoverTooltip() {
-    return typeof platformFeatures !== 'undefined' && platformFeatures !== null && !platformFeatures.is_mobile;
+    return !!platformFeatures && !platformFeatures.is_mobile;
 }
 
 
@@ -172,7 +172,7 @@ document.addEventListener('mouseout', (e) => {
 // runs *after* those so a stale tooltip from a synthesized hover would
 // just get re-shown here anyway.
 function _isMobileTouchEnv() {
-    return typeof platformFeatures !== 'undefined' && platformFeatures.is_mobile;
+    return platformFeatures?.is_mobile;
 }
 
 document.addEventListener('click', (e) => {
@@ -406,7 +406,7 @@ class PackCanvasGrid {
         this._accumDt = 0;
         this._hasTween = false;
         // Min ms between whole-canvas redraws (60fps desktop, 30fps mobile).
-        const isMobile = typeof platformFeatures !== 'undefined' && platformFeatures.is_mobile;
+        const isMobile = platformFeatures?.is_mobile;
         this._frameBudget = 1000 / (isMobile ? PACK_CANVAS_FPS_MOBILE : PACK_CANVAS_FPS_DESKTOP);
 
         // Tooltip drives the shared singleton (defined at module scope so

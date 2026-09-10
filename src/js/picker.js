@@ -124,7 +124,7 @@ const _pickerPanelHelpers = {
         bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
         unavailableMessage: (reason) => emojiUnavailableMessage(reason).replace(/<br\s*\/?>/gi, ' '),
         goneMessage: () => _pcGoneMessage(),
-        isMobile: () => typeof platformFeatures !== 'undefined' && !!platformFeatures.is_mobile,
+        isMobile: () => !!platformFeatures?.is_mobile,
         remove: (idx) => _pcRemoveEmoji(idx),
         // A broken emoji can't be renamed: explain why and how to fix it instead.
         cellClick: (idx, broken) => {
@@ -337,13 +337,13 @@ async function _sharePackToClipboard(pack) {
         // Relay hints ride the shared naddr; the canonical pack.id stays bare.
         const url = `https://vectorapp.io/emojis/pack/${await _shareNaddr(pack.id)}`;
         await navigator.clipboard.writeText(url);
-        if (typeof showToast === 'function') showToast('Copied to Clipboard');
+        showToast('Copied to Clipboard');
         // Close the picker so the user lands back in their chat ready
         // to paste the link they just copied.
         VectorSvelte.setPickerVisible(false);
     } catch (e) {
         console.warn('[emoji-packs] share-copy failed:', e);
-        if (typeof showToast === 'function') showToast('Failed to Copy');
+        showToast('Failed to Copy');
     }
 }
 

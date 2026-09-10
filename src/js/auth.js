@@ -62,7 +62,7 @@ async function startBunkerSession() {
         // Reauth re-uses the existing client keypair from MY_SECRET_KEY and
         // is for already-committed accounts — no Add Profile commit step.
         const cmd = bunkerFormMode === 'reauth' ? 'reauthorize_bunker' : 'start_nostrconnect_session';
-        if (bunkerFormMode !== 'reauth' && typeof addAccountFlow !== 'undefined' && addAccountFlow.active) {
+        if (bunkerFormMode !== 'reauth' && addAccountFlow.active) {
             await addAccountFlow.commit();
         }
         // Recover from a missed `bunker_reauthorize_succeeded` — if the
@@ -84,9 +84,9 @@ async function startBunkerSession() {
                         VectorSvelte.loginScreen('none', false);
                         VectorSvelte.loginShowForm(false);
                         bunkerReauthOrigin = null;
-                        if (origin === 'settings' && typeof openSettings === 'function') {
+                        if (origin === 'settings') {
                             openSettings();
-                        } else if (typeof closeChat === 'function') {
+                        } else {
                             closeChat();
                         }
                     } else {
@@ -1081,9 +1081,9 @@ async function loginBack() {
         VectorSvelte.loginScreen('none', false);
         VectorSvelte.loginShowForm(false);
         bunkerReauthOrigin = null;
-        if (origin === 'settings' && typeof openSettings === 'function') {
+        if (origin === 'settings') {
             openSettings();
-        } else if (typeof closeChat === 'function') {
+        } else {
             closeChat();
         }
         return;

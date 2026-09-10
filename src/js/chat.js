@@ -1722,17 +1722,6 @@ let _userScrolledAway = false;
  *  `replaceWith` removes before it inserts, so the list is briefly shorter and
  *  the engine clamps `scrollTop` down by the row's height. Put it back, and mark
  *  the move as ours: a re-render is never the reader leaving the page. */
-function replaceMessageRow(domMsg, fresh) {
-    const s = domChatMessages;
-    const top = s ? s.scrollTop : 0;
-    beginProgrammaticScroll();
-    domMsg.replaceWith(fresh);
-    if (s && s.scrollTop !== top) {
-        s.scrollTop = top;
-        beginProgrammaticScroll();
-    }
-}
-
 let _programmaticScrollUntil = 0;
 /** Mark a short window during which scroll events are the app's own (not the
  *  user). Call immediately before any programmatic scrollTop change so a drop-top

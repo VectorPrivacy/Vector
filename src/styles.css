@@ -1057,12 +1057,6 @@ html, body {
   padding: 10px 20px;
 }
 
-#version {
-  display: block;
-  font-size: 14px;
-  opacity: 0.5;
-  margin-top: 10px;
-}
 
 .pin-row input {
   text-align: center;
@@ -1106,16 +1100,7 @@ html, body {
   100% { opacity: 0; }
 }
 
-.intro-anim-widen {
-  animation: IntroWiden 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
-}
 
-@keyframes IntroWiden {
-  0% { 
-    opacity: 0; 
-    transform: scaleX(0); 
-  }
-}
 
 /* Profile Header - Fixed at top */
 .profile-header {
@@ -1145,9 +1130,6 @@ html, body {
   opacity: 1 !important;
 }
 
-#profile-name-counter {
-    padding-left: 8px;
-}
 
 .profile-header-name-row {
   display: flex;
@@ -1392,30 +1374,7 @@ html, body {
   object-position: center;
 }
 
-.profile-description-editor {
-  resize: none;
-  background-color: transparent;
-  white-space: pre-line;
-  text-align: center;
-  width: 90% !important;
-  font-weight: 400;
-  padding: 0;
-  overscroll-behavior: none;
-}
 
-.profile-avatar-edit {
-  position: absolute;
-  bottom: 10px;
-  right: 10px;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background-color: rgba(0, 0, 0, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
 
 .aggro-glitch-img {
   content: url('./icons/aggro-glitch-red.gif');
@@ -1446,10 +1405,7 @@ html, body {
 }
 
 /* Style the warning icon inside danger buttons */
-.danger-btn-icon {
-  width: 16px;
-  height: 16px;
-}
+
 
 /* Left side (info icon + label) stays together */
 .danger-option .left-group {
@@ -1681,11 +1637,6 @@ html, body {
   margin-bottom: -4px !important;
 }
 
-.profile-edit-label-centered {
-    position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
-}
 
 .profile-edit-field-wrapper {
   background: rgba(255,255,255,0.05);
@@ -2285,23 +2236,9 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 
 /* Primary Device Status Dot */
-.device-status-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  margin-left: 10px;
-  display: inline-block;
-  vertical-align: middle;
-  transition: background-color 0.3s ease;
-}
 
-.device-status-dot.primary {
-  background-color: #59fcb3; /* Green for primary device */
-}
 
-.device-status-dot.not-primary {
-  background-color: var(--danger-color); /* Red or Pink for not primary device */
-}
+
 
 .profile-options {
   display: flex;
@@ -3147,28 +3084,7 @@ body.mobile #chat-new-scan-btn { display: block; }
   transition: color 0.2s ease;
 }
 
-.chatlist-member-icon-wrap {
-    position: relative;
-    display: inline-block;
-    width: 14px;
-    height: 14px;
-    vertical-align: middle;
-    flex-shrink: 0;
-    margin-right: 2px;
-    margin-top: -2px;
-}
 
-.chatlist-member-icon-wrap .icon {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    width: 100%;
-    height: 100%;
-    margin: auto;
-    background-color: rgba(255, 255, 255, 0.55);
-}
 
 .chatlist-contact:hover {
   background-color: rgba(255, 255, 255, 0.05);
@@ -6868,10 +6784,6 @@ img.emoji-img-loading {
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 /* Attachment Panel Styles */
 .attachment-panel {
   position: fixed;
@@ -7739,17 +7651,7 @@ select {
 }
 
 /* Pulse Animation */
-.progress-pulse {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  transform: translateY(-50%);
-  border-radius: 50%;
-  filter: blur(1px);
-  animation: progress-pulse-anim 1.5s infinite ease-out;
-}
+
 
 /* Percentage Text */
 .progress-text {
@@ -7769,20 +7671,6 @@ select {
   100% { transform: translateX(calc(100vw + 20px)); }
 }
 
-@keyframes progress-pulse-anim {
-  0% {
-    opacity: 0.6;
-    transform: translateY(-50%) scale(0.95);
-  }
-  50% {
-    opacity: 0.3;
-    transform: translateY(-50%) scale(1.05);
-  }
-  100% {
-    opacity: 0.6;
-    transform: translateY(-50%) scale(0.95);
-  }
-}
 
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(5px); }
@@ -8308,7 +8196,7 @@ select {
 
 /* Hidden symbol-defs SVG. We use it to share one glyph definition between
    the production card and the dev preview row. Visually invisible. */
-.tor-glyph-defs { width: 0; height: 0; overflow: hidden; }
+
 
 /* Smooth state→state transitions on every animated property. The keyframe
    animations below re-target these as needed. */
@@ -9495,15 +9383,6 @@ select:disabled:hover {
   transform: none;
 }
 
-.cancel-btn {
-  backdrop-filter: none;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  background-color: #00000000;
-  margin-left: 10px;
-  backdrop-filter: none;
-  border-color: var(--danger-color);
-  background-color: #171717;
-}
 
 .cancel-btn:disabled,
 .cancel-btn[disabled] {
@@ -10922,11 +10801,6 @@ select:disabled:hover {
   right: 25px;
 }
 
-.corner-float-bottom {
-  position: absolute;
-  bottom: 0;
-  width: 100%;
-}
 
 /* Transcription highlighting styles */
 .transcription-section {
@@ -12013,36 +11887,10 @@ select:disabled:hover {
   margin: 0;
 }
 
-.invite-benefits {
-  text-align: left;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 16px;
-  padding: 30px;
-}
 
-.invite-benefits h3 {
-  font-size: 20px;
-  margin-bottom: 20px;
-  text-align: center;
-}
 
-.invite-benefits-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
 
-.invite-benefits-list li {
-  font-size: 16px;
-  line-height: 1.8;
-  margin-bottom: 15px;
-  padding-left: 10px;
-  color: rgba(255, 255, 255, 0.85);
-}
 
-.invite-benefits-list li:last-child {
-  margin-bottom: 0;
-}
 
 /* Update UI Layout Styles */
 .update-info {
@@ -12485,13 +12333,8 @@ select:disabled:hover {
   transform: none;
   vertical-align: -1px;
 }
-.group-desc-empty {
-  color: rgba(255, 255, 255, 0.35) !important;
-  font-style: italic !important;
-}
-.group-desc-empty::before {
-  content: 'Add description...';
-}
+
+
 .group-name-input {
   font-size: 18px;
   font-weight: 600;
@@ -12549,59 +12392,15 @@ select:disabled:hover {
 *:hover > .group-avatar-edit-overlay {
   opacity: 1;
 }
-.group-admin-toggle {
-  width: 20px;
-  height: 25px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-right: 5px;
-  position: relative;
-  z-index: 1;
-  flex-shrink: 0;
-}
-.group-admin-toggle .icon {
-  width: 16px;
-  height: 16px;
-  background-color: #fce459;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-}
-.group-admin-toggle.active .icon {
-  opacity: 1;
-}
-.group-admin-toggle.toggleable {
-  cursor: pointer;
-  border-radius: 4px;
-}
-.group-admin-toggle.toggleable:not(.active) .icon {
-  opacity: 0.15;
-}
-.group-admin-toggle.toggleable:hover .icon {
-  opacity: 0.6;
-}
-.group-admin-toggle.toggleable.active:hover .icon {
-  opacity: 0.7;
-}
 
-.kick-btn {
-  padding: 4px 12px;
-  font-size: 12px;
-  border-radius: 4px;
-  border: 1px solid var(--danger-color);
-  background: none;
-  color: var(--danger-color);
-  cursor: pointer;
-  transition: background 0.2s ease;
-  position: relative;
-  z-index: 1;
-  margin-left: 10px;
-}
 
-.kick-btn:hover {
-  background: var(--danger-color);
-  color: #000;
-}
+
+
+
+
+
+
+
 
 /* MLS Group Invite Styles */
 .chatlist-invite {
@@ -12680,10 +12479,6 @@ select:disabled:hover {
     background: var(--danger-color-hover);
 }
 
-.btn-small {
-  font-size: 12px;
-  padding: 5px 10px !important;
-}
 
 .empty-state {
   text-align: center;
@@ -14791,24 +14586,7 @@ hr {
   font-weight: 600;
 }
 
-#pivx-send-message {
-  width: 100%;
-  min-height: 80px;
-  padding: 12px;
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  color: #fff;
-  font-size: 14px;
-  resize: none;
-  outline: none;
-  font-family: inherit;
-  box-sizing: border-box;
-}
 
-#pivx-send-message::placeholder {
-  color: rgba(255, 255, 255, 0.4);
-}
 
 .pivx-send-info {
   font-size: 12px;
@@ -19577,12 +19355,11 @@ body.profile-switcher-editing .profile-switcher-add {
    full-width (that variant is also used for the full-width "Create invite link" button). */
 .cmt-btn-sm { padding: 5px 11px; font-size: 12px; gap: 5px; flex-shrink: 0; width: auto; }
 .cmt-btn-sm .icon { width: 13px; height: 13px; }
-.cmt-btn-danger { background: color-mix(in srgb, var(--danger-color) 14%, transparent); color: var(--danger-color); border: 1px solid color-mix(in srgb, var(--danger-color) 30%, transparent); }
-.cmt-btn-danger .icon { background-color: var(--danger-color); }
+
+
 .cmt-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger-color) 22%, transparent); }
 
-.cmt-direct-row { display: flex; gap: 8px; align-items: stretch; }
-.cmt-direct-row input { flex: 1; margin-bottom: 0 !important; }
+
 
 /* Collapses to nothing when idle (no reserved gap above the CTA); expands with a transition when
    setStatus writes a message. Driven purely by :empty, so no JS toggling is needed. */
@@ -20477,7 +20254,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .pol-chip.on { border-color: var(--accent-color, #59fcb3); color: var(--accent-color, #59fcb3); }
 
 /* Preview — the safety rail */
-.pol-preview-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
 .pol-hint { font-size: 11.5px; color: var(--text-muted, #8b8b8b); }
 
 .pol-preview-out {

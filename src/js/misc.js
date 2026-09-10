@@ -23,7 +23,7 @@ function hideToast() { VectorSvelte.hideToast(); }
  * @param {Object} info - vector-core's DowngradeBlock: { db_schema, supported_schema, last_app_version }
  */
 async function openDowngradeBlock(info) {
-    const format = (v) => (typeof parseVersion === 'function' ? parseVersion(v).display : `v${v}`);
+    const format = (v) => parseVersion(v).display;
 
     let current = 'This build';
     try {
@@ -173,7 +173,7 @@ function scrollToBottom(domElement, fSmooth = true) {
     // Mark this as an app-initiated scroll so the chat's intent-aware pin doesn't
     // misread it as the user moving. No-op for non-chat scrollables (the guard
     // only matters for #chat-messages); harmless elsewhere.
-    if (typeof beginProgrammaticScroll === 'function') beginProgrammaticScroll();
+    beginProgrammaticScroll();
     domElement.scrollTo({
         top: domElement.scrollHeight,
         behavior: fSmooth ? 'smooth' : 'auto'
@@ -320,7 +320,7 @@ function centerInView(targetMessage) {
 
     // App-initiated jump (reply-jump / unread-jump centering) — don't let the
     // chat's intent-aware pin read this as the user scrolling.
-    if (typeof beginProgrammaticScroll === 'function') beginProgrammaticScroll();
+    beginProgrammaticScroll();
     // Smooth scroll to the calculated position
     container.scrollTo({
         top: scrollPosition,
@@ -629,51 +629,6 @@ function getFileTypeInfo(extension) {
     
     // Return the file type info if found, otherwise return default values
     return fileTypes[normalizedExt] || { description: "Unknown File", icon: "file-unknown" };
-}
-
-/**
- * Slide out an element with animation and remove it from document flow
- * @param {HTMLElement} element - The DOM element to slide out
- * @param {Object} options - Optional configuration
- * @param {string} options.animationClass - CSS class for animation (default: 'slideout-anim')
- * @param {number} options.delay - Delay before starting animation in ms (default: 0)
- * @param {boolean} options.removeAfter - Whether to set display:none after animation (default: true)
- * @returns {Promise} Resolves when animation completes
- */
-function slideout(element, options = {}) {
-    // Default options
-    const {
-        animationClass = 'slideout-anim',
-        delay = 0,
-        removeAfter = true
-    } = options;
-
-    return new Promise(resolve => {
-        // Store the initial height before starting animation
-        const initialHeight = element.offsetHeight;
-
-        // Optional delay before starting the animation
-        setTimeout(() => {
-            // Set the initial height as a CSS variable
-            element.style.setProperty('--initial-height', `${initialHeight}px`);
-
-            // Start the animation
-            element.classList.add(animationClass);
-
-            // Handle animation completion
-            element.addEventListener('animationend', () => {
-                // Clean up after animation
-                element.classList.remove(animationClass);
-                element.style.removeProperty('--initial-height');
-
-                // Optionally hide the element
-                if (removeAfter) element.style.display = 'none';
-
-                // Resolve the promise
-                resolve();
-            }, { once: true });
-        }, delay);
-    });
 }
 
 /**
@@ -1501,27 +1456,6 @@ async function processInlineImages(element) {
             console.warn('[InlineImages] Failed to cache image:', url, e);
         }
     }
-}
-
-/**
- * Get text content of an element excluding inline image containers
- * Uses efficient child walking instead of DOM cloning
- * @param {HTMLElement} element - The element to get text from
- * @returns {string} - Text content without image container content
- */
-function getTextContentWithoutImages(element) {
-    let text = '';
-    for (const node of element.childNodes) {
-        if (node.nodeType === Node.TEXT_NODE) {
-            text += node.textContent;
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-            // Skip inline image containers
-            if (!node.classList.contains('inline-image-container')) {
-                text += getTextContentWithoutImages(node);
-            }
-        }
-    }
-    return text;
 }
 
 /** Build a clickable @name mention pill for an npub. */

@@ -718,7 +718,7 @@ class EventCache {
 
             // The open chat is what the user is reading: never its entry. Move it to
             // the recent end once and evict the next-oldest instead.
-            if (typeof strOpenChat !== 'undefined' && oldestKey === strOpenChat) {
+            if (oldestKey === strOpenChat) {
                 if (spared) break;
                 spared = true;
                 this.cache.delete(oldestKey);

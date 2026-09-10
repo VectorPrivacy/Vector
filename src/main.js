@@ -403,7 +403,7 @@ function contentToPreviewText(content) {
  * (<b>, <i>, <s>, <span>) appear in the output — no user-controlled HTML is possible.
  *
  * IMPORTANT: Truncate BEFORE calling this (not after), since truncating the output
- * can break HTML tags. Use: contentToPreviewHtml(truncateGraphemes(contentToPreviewText(text), n))
+ * can break HTML tags. Use: contentToPreviewHtml(truncateEmojiAware(contentToPreviewText(text), n))
  *
  * Used by: reply context (renderMessage), reply-on-edit listener, chat list (generateChatPreviewText)
  * Counterpart: strip_content_for_preview() in notification_service.rs (plaintext only, for OS notifications)
@@ -428,17 +428,6 @@ function contentToPreviewHtml(content) {
     // unlike .spoiler in full messages which is revealable — see markdown.js click handler)
     text = text.replace(/\|\|(.+?)\|\|/g, '<span class="spoiler-wrapper"><span class="spoiler spoiler-preview">$1</span></span>');
     return text;
-}
-
-/**
- * Truncates a string to a maximum number of grapheme clusters (visual characters).
- * Unlike substring(), this properly handles emojis and other multi-byte characters.
- */
-function truncateGraphemes(text, maxLength) {
-    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
-    const segments = [...segmenter.segment(text)];
-    if (segments.length <= maxLength) return text;
-    return segments.slice(0, maxLength).map(s => s.segment).join('') + '…';
 }
 
 /**
@@ -1488,36 +1477,6 @@ function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
     return invoke('react_to_message', args);
 }
 
-/**
- * Send a file via NIP-96 server to a Nostr user or group
- * @param {string} pubkey - The user's pubkey or group_id
- * @param {string?} replied_to - The reference of the message, if any
- * @param {string} filepath - The absolute file path
- */
-async function sendFile(pubkey, replied_to, filepath) {
-    try {
-        // Community channels send through their own envelope path (multi-attachment
-        // capable). The backend drives the pending → sent/failed lifecycle, so there's
-        // no pending id to finalize here (mirrors send_community_message).
-        const chat = arrChats.find(c => c.id === pubkey);
-        if (chat && chat.chat_type === 'Community') {
-            await invoke('send_community_files', { channelId: pubkey, content: '', filePaths: [filepath], nameOverrides: [''], useCompression: false, keepMetadata: false, repliedTo: replied_to || '' });
-        } else {
-            // DMs use the protocol-agnostic file_message command.
-            const result = await invoke("file_message", { receiver: pubkey, repliedTo: replied_to, filePath: filepath, keepMetadata: false, nameOverride: '' });
-            if (result && result.event_id) {
-                finalizePendingMessage(pubkey, result.pending_id, result.event_id);
-            }
-        }
-    } catch (e) {
-        // User-initiated cancel — the pending bubble is already gone; no error toast.
-        if (e && e.toString().includes('Upload cancelled')) { nLastTypingIndicator = 0; return; }
-        const { title, body } = humanizeUploadError(String(e));
-        popupConfirm(title, body, true, '', 'vector_warning.svg');
-    }
-    nLastTypingIndicator = 0;
-}
-
 /** Raw upload error → user-friendly { title, body }. Technical detail
  *  is appended in small text for users who want to dig in. */
 function humanizeUploadError(raw) {
@@ -1593,9 +1552,7 @@ async function executeDeepLinkAction(payload) {
         // Open the Pack Details modal for the given naddr. The modal
         // owns the fetch, render, and subscribe/unsubscribe flow; we
         // just hand it the address.
-        if (typeof openPackDetailsModal === 'function') {
-            await openPackDetailsModal(target);
-        }
+                    await openPackDetailsModal(target);
     } else if (action_type === 'community_invite') {
         // Invite link (vector://invite#… or vectorapp.io/invite#…) — `target` is the full URL;
         // the join flow re-parses its fragment, previews, and accepts on confirm.
@@ -1682,7 +1639,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         const state = evt?.payload?.state;
         // Keep the Security panel's status dot in sync with live signer
         // health — cheap DOM update, no-op when the card is hidden.
-        if (typeof applyRemoteSignerDot === 'function') applyRemoteSignerDot(state);
+        applyRemoteSignerDot(state);
         // Toast is for steady-state signer health changes only. When the
         // bunker pairing form is up the form owns its own status display,
         // and the backend's Connecting/Online events during pre-commit pairing
@@ -1690,16 +1647,12 @@ window.addEventListener("DOMContentLoaded", async () => {
         const bunkerFormVisible = VectorSvelte.loginState().bunker;
         if (state === 'offline') {
             if (!bunkerFormVisible && !window.__bunkerOfflineToastShown) {
-                if (typeof showToast === 'function') {
-                    showToast('Remote signer offline. Please check your signer app.');
-                }
+                                    showToast('Remote signer offline. Please check your signer app.');
                 window.__bunkerOfflineToastShown = true;
             }
         } else if (state === 'online') {
             if (!bunkerFormVisible && window.__bunkerOfflineToastShown) {
-                if (typeof showToast === 'function') {
-                    showToast('Remote signer back online.');
-                }
+                                    showToast('Remote signer back online.');
                 window.__bunkerOfflineToastShown = false;
             }
         } else {
@@ -1713,7 +1666,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     // means Amber revoked a permission, so nudge the user to re-authorize.
     await listen('nip55_state', (evt) => {
         const state = evt?.payload?.state;
-        if (typeof applyRemoteSignerDot === 'function') {
+        {
             // Dot tracks install health, not the noisy per-op state: only a
             // genuinely-gone signer goes red. A needs_auth blip (a kind Amber
             // didn't auto-approve) leaves the dot green and is surfaced by the
@@ -1722,12 +1675,12 @@ window.addEventListener("DOMContentLoaded", async () => {
             else if (state === 'ready') applyRemoteSignerDot('online');
         }
         if (state === 'needs_auth') {
-            if (!window.__nip55NeedsAuthToastShown && typeof showToast === 'function') {
+            if (!window.__nip55NeedsAuthToastShown) {
                 showToast('Your signer needs re-authorization. Open Settings to reconnect.');
                 window.__nip55NeedsAuthToastShown = true;
             }
         } else if (state === 'missing') {
-            if (!window.__nip55MissingToastShown && typeof showToast === 'function') {
+            if (!window.__nip55MissingToastShown) {
                 showToast('Your signer app is not installed. Reinstall it to keep signing.');
                 window.__nip55MissingToastShown = true;
             }
@@ -1807,9 +1760,9 @@ window.addEventListener("DOMContentLoaded", async () => {
                 VectorSvelte.loginScreen('none', false);
                 VectorSvelte.loginShowForm(false);
                 bunkerReauthOrigin = null;
-                if (origin === 'settings' && typeof openSettings === 'function') {
+                if (origin === 'settings') {
                     openSettings();
-                } else if (typeof closeChat === 'function') {
+                } else {
                     closeChat();
                 }
             } else {
@@ -2158,8 +2111,7 @@ window.addEventListener("DOMContentLoaded", async () => {
                     VectorSvelte.loginScreen('start');
                     // Re-show picker if any other accounts exist; the
                     // user can switch to a working one.
-                    if (typeof loginPicker !== 'undefined'
-                        && loginPicker.accounts
+                    if (loginPicker.accounts
                         && loginPicker.accounts.length >= 2) {
                         loginPicker.show(loginPicker.activeNpub);
                     }
@@ -2189,7 +2141,7 @@ window.addEventListener("DOMContentLoaded", async () => {
         await getCurrentWebview().onDragDropEvent(async (event) => {
             // Emoji pack creator takes priority over chat file send while
             // its panel is open — drops land as new pack emojis instead.
-            if (typeof isEmojiPackCreatorOpen === 'function' && isEmojiPackCreatorOpen()) {
+            if (isEmojiPackCreatorOpen()) {
                 if (event.payload.type === 'drop' && Array.isArray(event.payload.paths)) {
                     await _pcAddPaths(event.payload.paths);
                 }

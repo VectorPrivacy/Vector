@@ -68,7 +68,7 @@ async function handleComposerPaste(evt) {
             const restoreInput = () => {
                 if (domChatMessageInput && inputBefore !== null && domChatMessageInput.value !== inputBefore) {
                     domChatMessageInput.value = inputBefore;
-                    if (typeof autoResizeChatInput === 'function') autoResizeChatInput();
+                    autoResizeChatInput();
                 }
             };
 
@@ -429,16 +429,14 @@ let recorder = null;
 
 /** Build the selectors over the editor and hand the composer its mention source. */
 function initComposerControllers() {
-    mentionCtrl = typeof initMentionSelector === 'function' ? initMentionSelector(
+    mentionCtrl = initMentionSelector(
         domChatMessageInput,
         getMentionCandidates
-    ) : null;
+    );
     // Hand the composer its mention source now that one exists, so an inserted
     // `@Name` renders as a pill.
     composerMentionLookup = () => (mentionCtrl && mentionCtrl.getMentions ? mentionCtrl.getMentions() : []);
-    emojiShortcodeCtrl = typeof initEmojiShortcodeSelector === 'function'
-        ? initEmojiShortcodeSelector(domChatMessageInput)
-        : null;
+    emojiShortcodeCtrl = initEmojiShortcodeSelector(domChatMessageInput);
 }
 
 /**
@@ -466,7 +464,7 @@ function _upgradeCommandRows(chatId) {
 
 /** The slash-command selector over the open chat's bot manifests. */
 function initCommandController() {
-    commandCtrl = typeof initCommandSelector === 'function' ? initCommandSelector(
+    commandCtrl = initCommandSelector(
         domChatMessageInput,
         {
             load: (chatId) => invoke('get_chat_commands', { chatId }),
@@ -501,7 +499,7 @@ function initCommandController() {
             // upgrade any untagged `/cmd args` rows once it is known (DM invocations).
             commandsReady: (chatId) => _upgradeCommandRows(chatId)
         }
-    ) : null;
+    );
 }
 
 /** Glue a bottom-pinned reader to the live tail across a composer resize.

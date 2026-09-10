@@ -396,7 +396,7 @@ const addAccountFlow = {
         // creating a new account, not picking an existing one. Without
         // this, the picker pill renders above the start screen and lets
         // the user switch to another existing account mid-import.
-        if (typeof loginPicker !== 'undefined') loginPicker.hide();
+        loginPicker.hide();
     },
 
     /**

@@ -134,7 +134,7 @@ function openEmojiPackCreator(id) {
     // desktop. On mobile the focus pops the soft keyboard, which lands
     // on top of the creator UI and is jarring when the user might not
     // even want to edit the name (e.g. just opened to add emojis).
-    const isMobile = typeof platformFeatures !== 'undefined' && platformFeatures.is_mobile;
+    const isMobile = platformFeatures?.is_mobile;
     if (!isMobile) VectorSvelte.focusCreatorName();
 }
 

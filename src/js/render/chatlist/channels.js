@@ -328,7 +328,7 @@ function communityChatTitle(chat) {
     // Widescreen names the community at the top of its own channel pane, so the
     // header only has to say which channel you're in. Bare, with no '#': there
     // the hash is drawn as a glyph beside it, and a literal one would double it.
-    if (typeof wsActive === 'function' && wsActive() && communityIdOfChat(chat)) {
+    if (wsActive() && communityIdOfChat(chat)) {
         return cf.channel_name || name;
     }
     if (isPrimaryChannelChat(chat) || !cf.channel_name) return name;

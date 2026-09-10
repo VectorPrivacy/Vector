@@ -1106,7 +1106,7 @@ async function setupRustListeners() {
     });
 
     _on('blossom_servers_updated', () => {
-        if (typeof renderRelayList === 'function') renderRelayList();
+        renderRelayList();
     });
 
     _on('blossom_capabilities_updated', () => {

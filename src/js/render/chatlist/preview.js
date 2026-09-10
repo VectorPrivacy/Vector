@@ -162,8 +162,6 @@ function generateChatPreviewText(chat) {
     // emojiTags lets the renderer swap :shortcode: for inline custom emojis (like in-chat).
     let previewSource = cLastMsg.content;
     // Invite links render as a card in-chat; the snippet shows a friendly tag, not the raw URL.
-    if (typeof replaceCommunityInviteUrlsForPreview === 'function') {
-        previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
-    }
+            previewSource = replaceCommunityInviteUrlsForPreview(previewSource);
     return { text: escapeHtml(senderPrefix) + contentToPreviewHtml(resolveMentionText(previewSource)), isTyping: false, needsTwemoji: true, isHtml: true, emojiTags: cLastMsg.emoji_tags };
 }

@@ -1229,18 +1229,7 @@ body.ws.ws-rail-collapsed #ws-rail-mail {
 
 /* The rows' badge is a pill at the end of a flex line; in a 30px square it just
    covers the icon. On the button it becomes a corner mark instead. */
-body.ws #ws-rail-mail-badge {
-  position: absolute;
-  top: -3px;
-  right: -4px;
-  min-width: 0;
-  padding: 0 4px;
-  height: 14px;
-  line-height: 14px;
-  font-size: 9.5px;
-  border-radius: 7px;
-  pointer-events: none;
-}
+
 
 .ws-rail-item {
   display: flex;
