@@ -1,7 +1,7 @@
 <script>
     // A full takeover for a build older than the account's database. There is no dismiss
     // path: continuing would write an older schema over a newer one.
-    import { downgradeBlock } from '../lib/dialogs.svelte.js';
+    import { downgradeBlock } from '../lib/overlays.svelte.js';
     let { h } = $props();   // h: getLatest(), quit()
     const st = downgradeBlock;
 </script>

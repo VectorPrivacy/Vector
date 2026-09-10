@@ -1,7 +1,7 @@
 <script>
     // One relay's settings: status, ping and last check (refreshed by the opener every
     // second), the mode for a custom relay, the activity log, and disable or remove.
-    import { relayInfoDialog } from '../../lib/dialogs.svelte.js';
+    import { relayInfoDialog } from '../../lib/network.svelte.js';
     import RelayLogs from './RelayLogs.svelte';
     let { h } = $props();   // h: close(), disable(), setMode(mode), copy()
     const st = relayInfoDialog.state();

@@ -128,12 +128,6 @@ export function setVoiceDownloadProgress(text) {
 }
 
 // The media server info dialog's learned capabilities and the relay info dialog's log.
-const blossomCaps = $state({ status: 'loading', caps: [] });
-export function blossomCapsState() { return blossomCaps; }
-export function setBlossomCaps(status, caps) { blossomCaps.status = status; blossomCaps.caps = caps || []; }
-const relayLogs = $state({ logs: [] });
-export function relayLogsState() { return relayLogs; }
-export function setRelayLogs(logs) { relayLogs.logs = logs || []; }
 
 // The Settings screen itself (Phase 5): the plain toggles and platform visibility
 // the sections render from. Nested keys merge one level deep so a caller patches

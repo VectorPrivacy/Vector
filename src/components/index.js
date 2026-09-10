@@ -29,7 +29,13 @@ import PackPreviewCard from './picker/PackPreviewCard.svelte';
 export { attachmentEls, setAttachmentHandlers, onAttachmentVisibility, attachmentVisible, setAttachmentVisible, attachmentState, attachmentSetView, attachmentPatch, attachmentPulse, pivxWalletLoading, pivxWalletSet, pivxWalletPatch } from './lib/attachmentpanel.svelte.js';
 export { pivxDeposit, pivxSend, pivxWithdraw, pivxSettings } from './lib/pivx.svelte.js';
 export { pivxBubble, setPivxBubble } from './lib/pivxbubble.svelte.js';
-export { setLaunchDialogHandlers, addRelayDialog, relayInfoDialog, blossomInfoDialog, launchDialog, qrOverlay, statusDialog, modOverlay, setQrScanner, showDowngradeBlock, setInvites } from './lib/dialogs.svelte.js';
+export { setLaunchDialogHandlers, launchDialog } from './lib/miniapps.svelte.js';
+export { addRelayDialog, relayInfoDialog, blossomInfoDialog } from './lib/network.svelte.js';
+export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
+export { statusDialog } from './lib/statusdialog.svelte.js';
+export { modOverlay } from './lib/moderation.svelte.js';
+export { showDowngradeBlock } from './lib/overlays.svelte.js';
+export { setInvites } from './lib/invitescreen.svelte.js';
 import App from './shell/App.svelte';
 export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte.js';
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
@@ -43,7 +49,8 @@ export { loginState, bunkerState, pickerState as loginPickerState, encryptState,
 export { credentialState, openCredentialDialog, closeCredentialDialog, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { editHistoryState, setEditHistory, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
-export { setBlossomCaps, setRelayLogs, patchRelayStatus } from './lib/settings.svelte.js';
+export { setBlossomCaps, setRelayLogs } from './lib/network.svelte.js';
+export { patchRelayStatus } from './lib/settings.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';
 export { mktState, mktActions, mktIcons, mktPerms, mktSetApps, mktPatchApp, mktAddFilter, mktClearFilters, mktSetLoading, mktSetError, mktSetAnimate, mktSetAction, mktSetIcon, mktOpenDetails, mktCloseDetails, mktSetPerms, setMarketplaceHandlers, mktOpenPanel, mktOpenDetailsPanel, mktClosePanel } from './lib/marketplace.svelte.js';
 export { gridState, gridSetApps, gridSetQuery, gridSetEditMode, gridPatch } from './lib/miniappsgrid.svelte.js';
@@ -116,29 +123,7 @@ export {
     patchFilePreview as fpPatch,
 } from './lib/filepreview.svelte.js';
 // Settings: the Tor card's state and the blocked-users list's version.
-export {
-    torState,
-    setTorState,
-    setTorLocked,
-    setTorAdvancedOpen,
-    setTorCircuits,
-    reloadBlockedUsers,
-    setStorageDistribution,
-    setNotifSettings,
-    setSecurity,
-    setSigner,
-    setSignerDot,
-    setDisplaySettings,
-    setUpdates,
-    setNetwork,
-    voiceState,
-    setVoice,
-    setVoiceDownloadProgress,
-    settingsScreen,
-    setSettingsScreen,
-    requestSettingsScroll,
-    setSettingsHandlers,
-} from './lib/settings.svelte.js';
+export { torState, setTorState, setTorLocked, setTorAdvancedOpen, setTorCircuits, reloadBlockedUsers, setStorageDistribution, setNotifSettings, setSecurity, setSigner, setSignerDot, setDisplaySettings, setUpdates, setNetwork, voiceState, setVoice, setVoiceDownloadProgress, settingsScreen, setSettingsScreen, requestSettingsScroll, setSettingsHandlers } from './lib/settings.svelte.js';
 // The composer's state: mode (reply/edit), draft emptiness, lock, command bar.
 export {
     startReply,

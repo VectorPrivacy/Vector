@@ -1,7 +1,7 @@
 <script>
     // The Invites screen: the account's invite code, a copy button and a share link. The
     // code is fetched by the opener; this shows whichever phase that fetch is in.
-    import { invites } from '../lib/dialogs.svelte.js';
+    import { invites } from '../lib/invitescreen.svelte.js';
     const st = invites;
     let copied = $state(false);
     async function copy() {

@@ -1,5 +1,5 @@
 <script>
-    import { launchDialogHandlers } from '../lib/dialogs.svelte.js';
+    import { launchDialogHandlers } from '../lib/miniapps.svelte.js';
     import LaunchDialog from './LaunchDialog.svelte';
     const h = $derived(launchDialogHandlers());
 </script>

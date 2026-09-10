@@ -1,6 +1,6 @@
 // The PIVX wallet dialogs. Each is a fade dialog whose form lives in the store so pivx.js
 // reads what the user typed from here rather than from the DOM.
-import { fadeDialog } from './dialogs.svelte.js';
+import { fadeDialog } from './dialog-lifecycle.svelte.js';
 
 export const pivxDeposit = fadeDialog({ address: '', received: 0 });   // received > 0 swaps the spinner for the tick
 

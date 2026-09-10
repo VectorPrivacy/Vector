@@ -1,7 +1,7 @@
 <script>
     // Fullscreen QR scanner (mobile). The camera stream and the decode loop live in
     // scan.js, which needs the video element itself; it is handed over once on mount.
-    import { qrScanner } from '../lib/dialogs.svelte.js';
+    import { qrScanner } from '../lib/qr.svelte.js';
     let { h } = $props();   // h: video(el), close()
     const st = qrScanner;
     function video(el) { h.video(el); }

@@ -1,3 +1,4 @@
+import { popOverlay } from './dialog-lifecycle.svelte.js';
 // The moderation console's state: the backend's intel for one community, the keep set
 // (ticked = kept; the unticked set is what a rotation cuts), the list filter and query,
 // and the busy lock during a publish.
@@ -26,3 +27,7 @@ export function modSetBusy(busy, title, body) { m.busy = !!busy; m.busyTitle = t
 export function modSetProgress(title, body) { if (m.busy) { m.busyTitle = title; m.busyBody = body; } }
 /** The two faces of the console: who is here, and what the rules are. */
 export function modSetTab(tab) { m.tab = tab; }
+
+// The console's overlay.
+export const modOverlay = popOverlay({});
+

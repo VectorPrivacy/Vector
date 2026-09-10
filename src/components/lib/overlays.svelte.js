@@ -16,3 +16,12 @@ export function openPermissionPrompt(appName, items, handlers) {
 export function activatePermissionPrompt() { perm.active = true; }
 export function closePermissionPrompt() { perm.active = false; permAnswer = null; }
 export function unmountPermissionPrompt() { perm.open = false; }
+
+// The downgrade block has no dismiss path: shown once, never hidden.
+export const downgradeBlock = $state({ open: false, current: '', required: '' });
+export function showDowngradeBlock(current, required) {
+    downgradeBlock.current = current;
+    downgradeBlock.required = required;
+    downgradeBlock.open = true;
+}
+

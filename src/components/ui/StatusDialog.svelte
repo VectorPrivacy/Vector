@@ -3,7 +3,7 @@
     // see, the emoji-only composer (created by the opener in the host handed over here,
     // and kept for the app's life), and Clear / Save. The card glides to the upper third
     // while the shared emoji panel is open.
-    import { statusDialog } from '../lib/dialogs.svelte.js';
+    import { statusDialog } from '../lib/statusdialog.svelte.js';
     import { popIn } from '../lib/popin.js';
     import Avatar from './Avatar.svelte';
     let { h } = $props();   // h: composerHost(el), renderPreview(node, text), emoji(e), save(), clear(), close(), backdrop(), key(e)

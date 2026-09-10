@@ -1,7 +1,7 @@
 <script>
     // The mini app launch choice: play alone, play and invite the open chat, or update
     // when the Nexus has a newer version. Owns its overlay element; a backdrop click cancels.
-    import { launchDialog } from '../lib/dialogs.svelte.js';
+    import { launchDialog } from '../lib/miniapps.svelte.js';
     let { h } = $props();   // h: cancel(), solo(), invite()
     const st = launchDialog.state();
 </script>

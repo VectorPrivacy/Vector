@@ -1,6 +1,6 @@
 <script>
     // The Add Custom Relay form: a domain (wss:// is added by the opener) and a mode.
-    import { addRelayDialog } from '../../lib/dialogs.svelte.js';
+    import { addRelayDialog } from '../../lib/network.svelte.js';
     let { h } = $props();   // h: close(), confirm({ url, mode })
     const st = addRelayDialog.state();
     function focus(node) { requestAnimationFrame(() => node.focus()); }

@@ -2,7 +2,6 @@
     // The Network section: relay rows and media server rows from network state.
     // Rows are keyed by url so a status change repaints one badge, not the list.
     import { networkState } from '../../lib/settings.svelte.js';
-
     let { h } = $props();   // h: explain(kind), addRelay, addServer, openRelay(relay), openServer(server), toggleRelay(relay, enabled) → Promise<boolean>
 
     const n = networkState();

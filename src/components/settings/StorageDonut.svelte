@@ -3,7 +3,6 @@
     // derived from the distribution the backend last reported. Hover previews a
     // slice; click sticky-selects it, which reveals Delete in the hole.
     import { storageState } from '../lib/settings.svelte.js';
-
     let { h } = $props();   // h: formatBytes, confirmDelete(cat, sizeText), deleteCategory(category, exts), refresh, onCacheCleared, toast, deleteFailed
 
     const CATEGORIES = [

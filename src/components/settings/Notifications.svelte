@@ -3,7 +3,6 @@
     // custom-sound chip, derived from notif state. Writes go through `h` so the
     // desktop (settings blob) and mobile (per-key) persistence stay in the app.
     import { notifState } from '../lib/settings.svelte.js';
-
     let { h } = $props();   // h: saveSounds({globalMute, muteEveryone, sound}), saveMuteEveryone, savePrivacy, pickCustom, preview, explain(kind)
 
     const n = notifState();

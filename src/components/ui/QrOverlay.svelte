@@ -1,7 +1,7 @@
 <script>
     // Fullscreen QR overlay, shared by the Profile QR and the bunker login QR. Closes via
     // the button, a backdrop tap or Escape; the opener owns the back stack entry.
-    import { qrOverlay } from '../lib/dialogs.svelte.js';
+    import { qrOverlay } from '../lib/qr.svelte.js';
     import { popIn } from '../lib/popin.js';
     let { h } = $props();   // h: renderQr(host, text), close()
     const st = qrOverlay.state();

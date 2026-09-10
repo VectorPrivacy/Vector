@@ -2,7 +2,6 @@
     // The Voice section body: the two toggles, the model picker with its delete
     // control, the status line and the download controls, from voice state.
     import { voiceState } from '../lib/settings.svelte.js';
-
     let { h } = $props();   // h: formatBytes, explain(kind), setTranslate, setTranscribe, selectModel, download, deleteModel, cancelDownload
 
     const v = voiceState();

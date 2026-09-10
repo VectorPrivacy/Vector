@@ -2,7 +2,6 @@
     // The Display section: toggle rows derived from display state. Each change
     // hands the new value to the app, which persists and applies it.
     import { displayState } from '../lib/settings.svelte.js';
-
     let { h } = $props();   // h: change(key, value), explain(key)
 
     const d = displayState();

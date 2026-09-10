@@ -2,7 +2,6 @@
     // The Updates section body: version, preview notice, what was found, the beta
     // toggle, the one action button and the download bar, all from updates state.
     import { updatesState } from '../lib/settings.svelte.js';
-
     let { h } = $props();   // h: check, restart, setBeta(on), explainBeta
 
     const u = updatesState();
