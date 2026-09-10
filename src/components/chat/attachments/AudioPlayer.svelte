@@ -8,8 +8,7 @@
     import { audioInfo, setAudioDuration, setAudioMeta, setTranscription, patchTranscription, modelDownloadState } from '../../lib/audio.svelte.js';
     import Transcription from './Transcription.svelte';
 
-    let { att, msg, h } = $props();
-    // h (the audio bag): probe(path), metadata(path), load(path), play(id), pause(id), seek(id, ms), stop(id),
+    let { att, msg, h } = $props();   // h: AudioPlayerHelpers (js/voice.js)
     //    listen(event, fn) → unlisten, glowColor(), transcriptionSupported(att, msg), transcribe(path), autoTranscribe(msg),
     //    cancelUpload(pendingId), formatTime(seconds), autoTranslate(), flag(lang), twemojify(el), scrollBy(px)
 

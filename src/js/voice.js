@@ -749,6 +749,29 @@ class VoiceTranscriptionUI {
 
 /** What the audio player component (components/chat/attachments/AudioPlayer.svelte) needs
  *  from the app: the Rust engine, the tag reader, the transcriber and a few facts. */
+/**
+ * AudioPlayerHelpers: the in-chat audio player and its transcription panel.
+ * @typedef {Object} AudioPlayerHelpers
+ * @property {(path: string) => Promise<object|null>} probe
+ * @property {(path: string) => Promise<object|null>} metadata
+ * @property {(path: string) => Promise<string>} load          returns the source id
+ * @property {(sourceId: string) => void} play
+ * @property {(sourceId: string) => void} pause
+ * @property {(sourceId: string, ms: number) => void} seek
+ * @property {(sourceId: string) => void} stop
+ * @property {(event: string, fn: (e: object) => void) => Promise<() => void>} listen
+ * @property {() => string} glowColor
+ * @property {(secs: number) => string} formatTime
+ * @property {(att: object, msg: object) => boolean} transcriptionSupported
+ * @property {(path: string) => Promise<void>} transcribe
+ * @property {() => void} cancelModelDownload
+ * @property {(msg: object) => boolean} autoTranscribe
+ * @property {() => boolean} autoTranslate
+ * @property {(lang: string) => string} flag
+ * @property {(el: Element) => void} twemojify
+ * @property {(pendingId: string) => Promise<void>} cancelUpload
+ * @property {(dy: number) => void} scrollBy
+ */
 const AUDIO_PLAYER_HELPERS = {
     probe: (path) => invoke('audio_probe', { path }),
     metadata: (path) => invoke('get_audio_metadata', { path }),

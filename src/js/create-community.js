@@ -37,6 +37,17 @@ async function ccPickAvatar() {
     VectorSvelte.ccSetAvatar(file, await pickedImagePreviewSrc(file));
 }
 
+/**
+ * CreateGroupHelpers: the Create Community screen.
+ * @typedef {Object} CreateGroupHelpers
+ * @property {(text: string) => string|null} extractNpub
+ * @property {() => object[]} profiles
+ * @property {(npub: string, picker: object) => void} pasteNpub
+ * @property {() => void} pickAvatar
+ * @property {() => void} close
+ * @property {(selection: string[]) => Promise<void>} create
+ * @property {() => Promise<object>} pickerProps     ContactPicker's props for this open
+ */
 function registerCreateGroupScreen() {
     VectorSvelte.setScreen('createGroup', {
         h: {

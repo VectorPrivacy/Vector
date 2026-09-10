@@ -3,7 +3,7 @@
     // playhead lit, the original language when translating. `open` slides the box in and
     // out (height, padding, margin and border together, the list scrolled to keep the
     // row in place); the sections blur in with a stagger on every open.
-    let { t, positionMs, playing, h, onSeek } = $props();
+    let { t, positionMs, playing, h, onSeek } = $props();   // h: AudioPlayerHelpers (js/voice.js)
     // t: { phase: 'ready' | 'error', sections: [{ at, text }], lang, error, open }; h: autoTranslate(), flag(lang), twemojify(el), scrollBy(px)
 
     let box = $state(null);

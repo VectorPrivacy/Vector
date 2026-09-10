@@ -1102,6 +1102,19 @@ async function loginBack() {
 
 // Handlers resolve at call time: main.js, accounts.js and the renderers hold the
 // functions, and the encrypt flow's object changes per open.
+/**
+ * LoginHelpers: the login screen's flows. Nested bags are the picker, bunker and encrypt steps.
+ * @typedef {Object} LoginHelpers
+ * @property {() => void} back
+ * @property {() => void} createAccount
+ * @property {() => void} openImport
+ * @property {() => void} importKey
+ * @property {() => void} invite
+ * @property {() => void} nip55
+ * @property {{ toggle: () => void, close: () => void, pick: (meta: object) => void, rowHelpers: () => object }} picker
+ * @property {{ open: () => void, copy: () => void, openQr: () => void, renderQr: (node: Element, url: string) => void, connect: () => void }} bunker
+ * @property {{ choose: (type: string) => void, pinFull: (pin: string) => void, pinBackspace: () => void, submitPassword: () => void, biometric: () => void }} encrypt
+ */
 const LOGIN_HELPERS = {
     back: () => loginBack(),
     createAccount: () => createAccount(),

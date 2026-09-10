@@ -54,6 +54,17 @@ const miniAppIconCache = new Map();
 // until they land: key → grid entry.
 const miniAppsPreinstalling = new Map();
 
+/**
+ * MiniAppsGridHelpers: the recent Mini Apps grid inside the attachment panel.
+ * @typedef {Object} MiniAppsGridHelpers
+ * @property {() => void} openNexus
+ * @property {(app: object) => void} open
+ * @property {(text: string, el: Element) => void} showTip
+ * @property {() => void} hideTip
+ * @property {(app: object) => void} iconFailed
+ * @property {(app: object) => void} update
+ * @property {(app: object) => void} remove
+ */
 const miniAppsGridHelpers = {
     openNexus: () => { closeAttachmentPanel(); showMarketplacePanel(); },
     open: openGridApp,
@@ -700,6 +711,22 @@ async function openMiniAppFromHistory(app) {
 
 /** Mount the attachment panel and the launch dialog. */
 async function wireMiniAppsUi() {
+    /**
+     * AttachmentPanelHelpers: the composer's attachment panel. `grid` is MiniAppsGridHelpers,
+     * `pivx` the wallet card's openers.
+     * @typedef {Object} AttachmentPanelHelpers
+     * @property {() => void} file
+     * @property {() => void} folder
+     * @property {() => void} commands
+     * @property {(el: Element) => void} commandsEnter
+     * @property {() => void} commandsLeave
+     * @property {() => void} miniapps
+     * @property {() => void} back
+     * @property {(q: string) => void} search
+     * @property {(el: Element) => () => void} bindGrid
+     * @property {MiniAppsGridHelpers} grid
+     * @property {{ back: () => void, send: () => void, deposit: () => void, withdraw: () => void, settings: () => void }} pivx
+     */
     VectorSvelte.setAttachmentHandlers({
         file: attachmentPickFile,
         folder: attachmentPickFolder,

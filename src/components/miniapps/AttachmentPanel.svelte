@@ -7,8 +7,7 @@
     import MiniAppsGrid from './MiniAppsGrid.svelte';
     import PivxWallet from './pivx/PivxWallet.svelte';
 
-    let { h } = $props();
-    // h: file(), folder(), commands(), commandsEnter(el), commandsLeave(), miniapps(), back(),
+    let { h } = $props();   // h: AttachmentPanelHelpers (js/miniapps-panel.js)
     //    search(q), bindGrid(el) → cleanup, grid: MiniAppsGrid's bag, pivx: PivxWallet's bag
     const st = attachmentState();
     function rootEl(node) { setAttachmentRootEl(node); return { destroy() { setAttachmentRootEl(null); } }; }

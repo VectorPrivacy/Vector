@@ -33,6 +33,17 @@ function ensureMessageList() {
 }
 
 /** Everything the list island derives from and hands to its rows. */
+/**
+ * ListHelpers: the message list island. `row` is RowHelpers for every row it renders.
+ * @typedef {Object} ListHelpers
+ * @property {(chatId: string) => object[]} messages
+ * @property {{ collapse: (prev: object, curr: object) => boolean, differentDay: (a: object, b: object) => boolean, isCommand: (m: object) => boolean, mergeable: (type: string) => boolean }} rules
+ * @property {(at: number) => string} dayLabel
+ * @property {number} maxRows
+ * @property {(msg: object) => object|null} senderFor
+ * @property {(msg: object) => object} ctxFor
+ * @property {RowHelpers} row
+ */
 const _dmsgListHelpers = {
     // The chat's own array is the complete one: the cache entry can be a fresh
     // post-eviction stub holding only the newest arrival.

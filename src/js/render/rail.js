@@ -47,6 +47,25 @@ let railIsland = false;
 function renderRailShortcuts() {
     if (railIsland || !wsActive()) return;
     railIsland = true;
+    /**
+     * RailHelpers: the widescreen rail's shortcut strip and its items.
+     * @typedef {Object} RailHelpers
+     * @property {(chat: object) => boolean} chatIsGroup
+     * @property {(chat: object) => boolean} isPrimaryChannelChat
+     * @property {(chat: object) => string|null} communityIdOfChat
+     * @property {(npub: string) => object|null} getProfile
+     * @property {(profileOrNpub: object|string) => string} getName
+     * @property {(profile: object|null) => string|null} getProfileAvatarSrc
+     * @property {(path: string) => string} convertFileSrc
+     * @property {(el: Element) => void} twemojify
+     * @property {(chat: object) => number} computeRowBadgeCount
+     * @property {(chat: object) => number} computeListRowBadgeCount
+     * @property {(chat: object) => number} computeCommunityPingCount
+     * @property {(chatId: string) => void} openChat
+     * @property {(communityId: string) => string|null} wsChannelForCommunity
+     * @property {() => void} syncRailFade
+     * @property {(unreadDms: number) => void} onUnreadDms
+     */
     VectorSvelte.setScreen('rail', {
         h: {
             chatIsGroup,

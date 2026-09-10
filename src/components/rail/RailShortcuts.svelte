@@ -9,7 +9,7 @@
     import { listVersion, chatVersion, openChatId } from '../lib/signals.svelte.js';
     import RailItem from './RailItem.svelte';
 
-    let { h, snapshot } = $props();
+    let { h, snapshot } = $props();   // h: RailHelpers (js/render/rail.js)
 
     /** How many unread DMs the rail surfaces. The mail badge carries the rest. */
     const DM_COUNT = 3;

@@ -8,7 +8,7 @@
     // its own signals (chat, DM profile, community) and the clock `tick` are read
     // inside the vm derivation, while the keyed parent each keeps the DOM node
     // itself alive across updates.
-    let { h, chat, pinned, tick } = $props();
+    let { h, chat, pinned, tick } = $props();   // h: ChatlistHelpers (js/render/chatlist/list.js)
 
     import ChannelList from './ChannelList.svelte';
     import Avatar from '../ui/Avatar.svelte';

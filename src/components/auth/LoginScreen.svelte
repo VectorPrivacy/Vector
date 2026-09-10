@@ -8,7 +8,7 @@
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();
+    let { h } = $props();   // h: LoginHelpers (js/auth.js)
     const l = loginState();
     const b = bunkerState();
     const p = pickerState();

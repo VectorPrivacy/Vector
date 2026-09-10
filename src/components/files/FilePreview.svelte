@@ -4,7 +4,7 @@
     // file itself and the send; this derives the overlay from lib/filepreview.svelte.js.
     import { filePreview, filePreviewContent } from '../lib/filepreview.svelte.js';
 
-    let { h } = $props();   // close, send, publish, readImagePreview(path), thumbhash(path), buildFileListHtml, initFileTreeToggles, sanitizeStem
+    let { h } = $props();   // h: FilePreviewHelpers (js/file-preview.js)
 
     const fp = filePreview();
     const content = $derived(filePreviewContent());

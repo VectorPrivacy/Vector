@@ -3,7 +3,7 @@
     // ONE chat patches that row instead of rebuilding the list.
     // Page globals (arrChats, helpers) arrive as props: this bundle is an IIFE and does
     // not share the classic scripts' global lexical scope.
-    let { h, snapshot } = $props();
+    let { h, snapshot } = $props();   // h: ChatlistHelpers (js/render/chatlist/list.js)
     let channelsShown = $state(false);   // the pane's channel list has something to show
 
     import ChannelList from './ChannelList.svelte';

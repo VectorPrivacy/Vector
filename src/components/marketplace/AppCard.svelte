@@ -3,7 +3,7 @@
     // row's width, size and date, and the install / update / play button with its action state.
     import { mktState, mktActions, mktAddFilter } from '../lib/marketplace.svelte.js';
     import AppIcon from './AppIcon.svelte';
-    let { app, h, index } = $props();
+    let { app, h, index } = $props();   // h: MarketplaceHelpers (js/marketplace.js)
     const st = mktState();
     const action = $derived(mktActions().get(app.id) || null);
     const spinning = $derived(action?.kind === 'installing' || action?.kind === 'updating');

@@ -382,6 +382,31 @@ window.__TAURI__.event.listen('inline_image_cached', (event) => {
     VectorSvelte.mktSetIcon(url, path ? convertFileSrc(path) : false);
 });
 
+/**
+ * MarketplaceHelpers: the Nexus panel, its cards and the details pane.
+ * @typedef {Object} MarketplaceHelpers
+ * @property {(app: object) => string} iconKey
+ * @property {(app: object) => string} actionText
+ * @property {(bytes: number) => string} fileSize
+ * @property {(ts: number) => string} publishDate
+ * @property {(url: string) => string} sourceUrl
+ * @property {(text: string, el: Element) => void} showTip
+ * @property {() => void} hideTip
+ * @property {(app: object) => void} showDetails
+ * @property {() => void} closeDetails
+ * @property {() => void} retry
+ * @property {(app: object) => void} cardAction
+ * @property {(app: object) => void} install
+ * @property {(app: object) => void} update
+ * @property {(app: object) => void} play
+ * @property {(app: object) => void} uninstall
+ * @property {(app: object, permissionId: string, on: boolean) => void} setPermission
+ * @property {(app: object) => void} resetPermissions
+ * @property {(npub: string) => object|null} publisher
+ * @property {(npub: string) => void} openPublisher
+ * @property {(url: string) => void} openUrl
+ * @property {() => void} back
+ */
 function registerMarketplaceHandlers() {
     const h = {
         iconKey: marketplaceIconKey,

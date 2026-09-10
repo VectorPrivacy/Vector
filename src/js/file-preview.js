@@ -32,6 +32,18 @@ let pendingZipUnlisten = null; // For folder zip: unlisten function for zip_prog
 let pendingBlobUrl = null; // A video preview's object URL, revoked on close
 let filePreviewGeneration = 0; // Guards against async results landing on a newer preview
 
+/**
+ * FilePreviewHelpers: the send-file preview overlay.
+ * @typedef {Object} FilePreviewHelpers
+ * @property {() => void} close
+ * @property {() => void} send
+ * @property {() => void} publish
+ * @property {(path: string) => Promise<string|null>} readImagePreview
+ * @property {(path: string) => Promise<string|null>} thumbhash
+ * @property {(files: object[], total: number) => string} buildFileListHtml
+ * @property {() => void} initFileTreeToggles
+ * @property {(stem: string) => string} sanitizeStem
+ */
 VectorSvelte.setScreen('filePreview', {
         h: {
             close: () => closeFilePreview(),

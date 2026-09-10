@@ -4,7 +4,7 @@
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h, chat, isCommunity, active = false } = $props();
+    let { h, chat, isCommunity, active = false } = $props();   // h: RailHelpers (js/render/rail.js)
 
     const vm = $derived.by(() => {
         chatVersion(chat.id);

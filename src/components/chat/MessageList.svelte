@@ -14,7 +14,7 @@
     import { toolbarHost, toolbarSwipe, toolbarEls, toolbarHandlers } from '../lib/toolbar.svelte.js';
     import SystemEvent from './SystemEvent.svelte';
 
-    let { h } = $props();   // vanilla helpers: messages(chatId), rules, ctxFor, senderFor, dayLabel, row helpers
+    let { h } = $props();   // h: ListHelpers (js/render/chat/message-row.js)
 
     const win = windowState();
     const divider = dividerState();

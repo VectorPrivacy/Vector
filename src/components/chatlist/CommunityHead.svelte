@@ -6,7 +6,7 @@
     import { paneState, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();
+    let { h } = $props();   // h: CommunityHeadHelpers (js/render/chatlist/list.js)
 
     const vm = $derived.by(() => {
         const id = paneState().communityId;

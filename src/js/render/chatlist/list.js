@@ -83,6 +83,52 @@ function chatlistSnapshot() {
  * prop-driven (rather than reaching for window.X) preserves one seam to audit when
  * the island takes over more of the render tree.
  */
+/**
+ * ChatlistHelpers: the chat list, its rows, channel lists, invite rows and empty state.
+ * @typedef {Object} ChatlistHelpers
+ * @property {(chat: object) => boolean} chatIsVisibleInList
+ * @property {(chat: object) => boolean} chatIsGroup
+ * @property {(chat: object) => boolean} isPrimaryChannelChat
+ * @property {(npub: string) => object|null} getProfile
+ * @property {(profileOrNpub: object|string) => string} getName
+ * @property {(chat: object) => string} chatPinKey
+ * @property {(chat: object) => number} computeListRowBadgeCount
+ * @property {(chat: object) => number} computeRowBadgeCount
+ * @property {(chat: object) => { text: string, emojiTags: object[]|null }} generateChatPreviewText
+ * @property {(path: string) => string} convertFileSrc
+ * @property {(profile: object|null) => string|null} getProfileAvatarSrc
+ * @property {(el: Element) => void} twemojify
+ * @property {(ms: number) => string} timeAgo
+ * @property {(el: Element, tags: object[]|null) => void} renderCustomEmojiShortcodes
+ * @property {(el: Element, onMenu: (x: number, y: number) => void) => void} attachLongPressContextMenu
+ * @property {(chat: object, isGroup: boolean, unread: number, x: number, y: number) => void} showChatRowContextMenu
+ * @property {(text: string, el: Element) => void} showGlobalTooltip
+ * @property {() => void} hideGlobalTooltip
+ * @property {(communityId: string) => string} communityMemberSubtext
+ * @property {(communityId: string) => object[]|null} getChannels
+ * @property {(communityId: string) => boolean} communityHasChannelList
+ * @property {(communityId: string) => boolean} channelsShown
+ * @property {(communityId: string) => boolean} communityChannelsShown
+ * @property {(communityId: string) => boolean} canAddChannels
+ * @property {(communityId: string) => void} toggleCommunityExpanded
+ * @property {(sectionId: string) => boolean} sectionClosed
+ * @property {(sectionId: string) => void} toggleSection
+ * @property {(id: string) => object|null} chatById
+ * @property {(chat: object) => number} countPingMessages
+ * @property {(id: string) => boolean} isPrimaryChannelId
+ * @property {(chatId: string) => void} openChannel
+ * @property {(vm: object) => void} rowClick
+ * @property {(communityId: string, isPrivate: boolean) => void} createChannel
+ * @property {(chatId: string) => void} deleteChannel
+ * @property {(image: string) => Promise<string|null>} cacheInviteLogo
+ * @property {(invite: object) => void} acceptInvite
+ * @property {(invite: object) => void} declineInvite
+ * @property {() => void} newChat
+ * @property {() => void} openHub
+ * @property {(el: Element) => void} bindViktor
+ * @property {() => void} wsMarkActiveRow
+ * @property {(chat: object) => void} ensureCommunityPreviewActivity
+ */
 function chatlistHelpers() {
     return {
         // membership + row policy
@@ -160,6 +206,18 @@ function mountChatlist() {
     sortChats();
     VectorSvelte.setScreen('chatlist', { h: chatlistHelpers(), snapshot: chatlistSnapshot });
     chatlistIsland = true;
+    /**
+     * CommunityHeadHelpers: the widescreen community header above the channel pane.
+     * @typedef {Object} CommunityHeadHelpers
+     * @property {(communityId: string) => object|null} primaryChat
+     * @property {(path: string) => string} convertFileSrc
+     * @property {(el: Element) => void} twemojify
+     * @property {(communityId: string) => string} communityMemberSubtext
+     * @property {(communityId: string) => object|null} raidAlert
+     * @property {(communityId: string) => void} refreshMemberCount
+     * @property {(communityId: string) => void} refreshRaidAlert
+     * @property {(chat: object, e: MouseEvent) => void} openCommunityMenu
+     */
     VectorSvelte.setScreen('communityHead', {
             h: {
                 primaryChat: (id) => arrChats.find(c => communityIdOfChat(c) === id && isPrimaryChannelChat(c))

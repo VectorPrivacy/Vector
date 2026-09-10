@@ -4,7 +4,7 @@
     // that is required; the picker remounts fresh per open.
     import { ccState, ccSetSelected } from '../lib/createcommunity.svelte.js';
     import ContactPicker from '../people/ContactPicker.svelte';
-    let { h } = $props();
+    let { h } = $props();   // h: CreateGroupHelpers (js/create-community.js)
     const st = ccState();
     let picker = $state(null);
     let nameInput = $state(null);

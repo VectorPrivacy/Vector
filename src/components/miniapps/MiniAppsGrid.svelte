@@ -2,7 +2,7 @@
     // The recent Mini Apps grid: Nexus first, then apps by last use. Search hides Nexus and
     // reveals hidden apps that match; edit mode adds a delete badge to everything but Nexus.
     import { gridState, gridApps } from '../lib/miniappsgrid.svelte.js';
-    let { h } = $props();
+    let { h } = $props();   // h: MiniAppsGridHelpers (js/miniapps-panel.js)
     const st = gridState();
     const q = $derived(st.query.toLowerCase().trim());
     const searching = $derived(q.length > 0);

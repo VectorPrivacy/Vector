@@ -3,7 +3,7 @@
     // developer, permission toggles for an installed app, publisher, and the file facts.
     import { mktState, mktApps, mktActions, mktPerms, mktAddFilter } from '../lib/marketplace.svelte.js';
     import AppIcon from './AppIcon.svelte';
-    let { h } = $props();
+    let { h } = $props();   // h: MarketplaceHelpers (js/marketplace.js)
     const st = mktState();
     const app = $derived(mktApps().find(a => a.id === st.detailsId) || null);
     const action = $derived(app ? mktActions().get(app.id) || null : null);
