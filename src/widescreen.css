@@ -67,14 +67,65 @@ body.chrome {
   z-index: 41;
 }
 
+#chrome-left {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  justify-self: start;
+}
+
+body.ws #chrome-left {
+  width: var(--ws-rail-w);
+}
+
 #chrome-lockup {
   display: flex;
   align-items: center;
   gap: 8px;
   height: 100%;
   padding: 0 12px;
+}
+
+body.ws.ws-rail-collapsed #chrome-typeface {
+  display: none;
+}
+
+/* Mail: the second door to the DM page, flush with the rail's edge. */
+#chrome-mail {
   position: relative;
-  justify-self: start;
+  margin-left: auto;
+  margin-right: 10px;
+  width: 30px;
+  height: 24px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+#chrome-mail .icon {
+  width: 18px;
+  height: 18px;
+  margin: auto;
+  background-color: rgba(255, 255, 255, 0.55);
+  transition: background-color 0.12s ease;
+}
+
+#chrome-mail:hover {
+  opacity: 1;
+}
+
+#chrome-mail:hover .icon {
+  background-color: #fff;
+}
+
+#chrome-mail .ws-rail-item-badge {
+  position: absolute;
+  top: -3px;
+  right: -8px;
+  min-width: 16px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 16px;
+  border-radius: 8px;
 }
 
 #chrome-lockup:hover {
