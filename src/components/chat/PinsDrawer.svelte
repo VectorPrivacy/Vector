@@ -33,7 +33,7 @@
         {:else if !pins.length}
             <div class="pins-drawer-notice">No pinned messages yet.</div>
         {:else if h}
-            {#key st.v}
+            {#key st.seq}
                 {#each pins as pin (pin.rumor_id)}
                     <PinRow {pin} {h} />
                 {/each}

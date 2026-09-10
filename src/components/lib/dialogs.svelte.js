@@ -40,7 +40,7 @@ export function setLaunchDialogHandlers(h) { launchHandlers = h; }
 // WebKit never starts an animation declared on a subtree emerging from display:none),
 // and `closing` runs the mirrored pop-out before the overlay actually hides.
 function popOverlay(fields) {
-    const s = $state({ active: false, closing: false, pop: 0, ...fields });
+    const s = $state({ active: false, closing: false, tick: 0, ...fields });
     let timer = null;
     return {
         state: () => s,
@@ -49,7 +49,7 @@ function popOverlay(fields) {
             Object.assign(s, view);
             s.closing = false;
             s.active = true;
-            s.pop++;
+            s.tick++;
         },
         patch(view) { Object.assign(s, view); },
         /** True when a close is already running; the caller then does nothing. */

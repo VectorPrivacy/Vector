@@ -60,7 +60,7 @@
     let selected = $state(-1);
     let busy = $state(false);
     // A new report resets the selection; the chart it pointed at is gone.
-    $effect(() => { storage.v; hovered = -1; selected = -1; });
+    $effect(() => { storage.seq; hovered = -1; selected = -1; });
 
     const view = $derived(hovered !== -1 ? hovered : selected);
     const showDelete = $derived(selected !== -1 && view === selected);
@@ -144,7 +144,7 @@
              onmousemove={(e) => { hovered = sliceAt(e); }}
              onmouseleave={() => { hovered = -1; }}
              onclick={(e) => { const i = sliceAt(e); if (i !== -1) select(i); }}>
-            {#key storage.v}
+            {#key storage.seq}
                 {#if total === 0}
                     <circle cx={CX} cy={CY} r={(R_OUT + R_IN) / 2} fill="none" stroke="rgba(255, 255, 255, 0.07)" stroke-width={R_OUT - R_IN} />
                 {:else if segments.length === 1}

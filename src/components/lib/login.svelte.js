@@ -24,7 +24,7 @@ const enc = $state({
     bioBtnShown: false, bioBtnLabel: 'Unlock with Biometrics',
     // Bumped to clear the PIN boxes (`pinFocus` says whether the first one takes focus)
     // and to focus whichever input is up.
-    pinSeq: 0, pinFocus: true, focusSeq: 0,
+    pinTick: 0, pinFocus: true, focusTick: 0,
 });
 
 export function loginState() { return l; }
@@ -63,6 +63,6 @@ export function bunkerDeadline(at) { b.deadline = at || 0; b.now = Date.now(); }
 export function bunkerTick(now) { b.now = now; }
 
 /** Empty the PIN boxes; the first takes focus when asked. */
-export function resetLoginPin(focusFirst = true) { enc.pinFocus = focusFirst; enc.pinSeq++; flushSync(); }
+export function resetLoginPin(focusFirst = true) { enc.pinFocus = focusFirst; enc.pinTick++; flushSync(); }
 /** Focus whichever encrypt input is up. Synchronous, so a flow can call it and move on. */
-export function focusLoginInput() { enc.focusSeq++; flushSync(); }
+export function focusLoginInput() { enc.focusTick++; flushSync(); }

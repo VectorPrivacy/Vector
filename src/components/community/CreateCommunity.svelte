@@ -13,15 +13,15 @@
     // Fresh picker props per open: a snapshot of profiles and chat times, like the invite panel.
     let pickerProps = $state.raw(null);
     $effect(() => {
-        const session = st.session;
+        const session = st.seq;
         pickerProps = null;
         if (!session) return;
         let live = true;
         h.pickerProps().then((props) => { if (live) pickerProps = props; });
         return () => { live = false; };
     });
-    $effect(() => { if (st.session && nameInput) nameInput.focus(); });
-    $effect(() => { const rev = st.profilesRev; if (rev && picker) picker.setProfiles(h.profiles()); });
+    $effect(() => { if (st.seq && nameInput) nameInput.focus(); });
+    $effect(() => { const rev = st.profilesSeq; if (rev && picker) picker.setProfiles(h.profiles()); });
 
     // Typing filters; a pasted valid npub is picked, or enters the list as a stranger.
     function onFilter() {
@@ -62,7 +62,7 @@
                        bind:value={st.filter} oninput={onFilter}>
             </div>
             <div id="create-group-list" class="create-group-list">
-                {#key st.session}
+                {#key st.seq}
                     {#if pickerProps}
                         <ContactPicker bind:this={picker} {...pickerProps} onSelectionChange={(sel) => ccSetSelected(sel.size)} />
                     {/if}

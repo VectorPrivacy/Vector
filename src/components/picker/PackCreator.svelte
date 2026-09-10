@@ -17,7 +17,7 @@
     const logoBroken = $derived(!!(c.logo.url && !c.logo.blobUrl && c.logo.dead));
 
     let nameEl = $state(null);
-    $effect(() => { if (c.focusSeq) untrack(() => setTimeout(() => nameEl?.focus(), 50)); });
+    $effect(() => { if (c.focusTick) untrack(() => setTimeout(() => nameEl?.focus(), 50)); });
 
     function logoImg(img, url) { h.bindCachedImg(img, url, 'emoji_pack_icon'); }
     let gridEl = $state(null);

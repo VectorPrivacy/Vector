@@ -1,7 +1,7 @@
 // The open channel's pinned messages as the drawer shows them. The app resolves the
 // context and fetches; the drawer derives rows, notices and affordances. `open` is the
 // logical state, `shown` keeps the drawer in the layout through its slide-up.
-const p = $state({ open: false, shown: false, closing: false, button: false, sealed: false, canPin: false, communityId: null, channelId: null, v: 0 });
+const p = $state({ open: false, shown: false, closing: false, button: false, sealed: false, canPin: false, communityId: null, channelId: null, seq: 0 });
 let pins = $state.raw([]);   // verified pins, `_jumpable` resolved by the app
 let handlers = $state.raw(null);         // the row helpers, registered once by pins.js
 const els = { drawer: null, list: null, button: null };   // for hit-tests and scroll rides
@@ -17,7 +17,7 @@ export function setPins({ pins: list, sealed, canPin, communityId, channelId }) 
     p.canPin = !!canPin;
     p.communityId = communityId || null;
     p.channelId = channelId || null;
-    p.v++;
+    p.seq++;
 }
 export function setPinsButtonVisible(on) { p.button = !!on; }
 export function setPinsOpen(open, instant = false) {

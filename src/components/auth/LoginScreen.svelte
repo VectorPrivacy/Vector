@@ -44,9 +44,9 @@
     // ── encrypt ──
     let pinRow = $state(null);
     let passwordEl = $state(null);
-    $effect(() => { e.pinSeq; untrack(() => pinRow?.clear(e.pinFocus)); });
+    $effect(() => { e.pinTick; untrack(() => pinRow?.clear(e.pinFocus)); });
     $effect(() => {
-        e.focusSeq;
+        e.focusTick;
         untrack(() => {
             if (e.pinShown) pinRow?.focusFirst();
             else if (e.passwordShown) passwordEl?.focus();

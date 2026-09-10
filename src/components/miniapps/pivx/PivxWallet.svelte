@@ -14,7 +14,7 @@
         <div class="pivx-balance-section pivx-panel-animate">
             <div class="pivx-balance-logo"><img src="./icons/pivx.svg" alt="PIVX" /></div>
             <div class="pivx-balance-info">
-                {#key w.v}
+                {#key w.seq}
                     <div class="pivx-balance-amount" id="pivx-balance-amount" class:pivx-fade-in={w.balance !== null}>
                         {#if w.balance === null}
                             <div class="pivx-balance-loading"><div class="pivx-spinner"></div></div>

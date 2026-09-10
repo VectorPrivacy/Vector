@@ -49,7 +49,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div id="mod-overlay" class="mod-overlay" class:active={ov.active} class:closing={ov.closing}
      onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
-    <div class="mod-card" class:busy={st.busy} use:popIn={ov.pop}>
+    <div class="mod-card" class:busy={st.busy} use:popIn={ov.tick}>
         <div class="mod-head">
             <div class="mod-head-titles">
                 <span class="mod-label">Moderation</span>

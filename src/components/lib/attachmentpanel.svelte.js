@@ -8,7 +8,7 @@ const p = $state({
     commandsShown: false,
     commandsDisabled: false,
     search: '',
-    pulse: { main: 0, grid: 0, pivx: 0 },
+    tick: { main: 0, grid: 0, pivx: 0 },
 });
 export function attachmentState() { return p; }
 // The panel's own root: visible over the composer at a bottom offset the opener measures.
@@ -31,13 +31,13 @@ export function setAttachmentVisible(on, bottom = '') {
 export function attachmentSetView(view) { p.view = view; }
 export function attachmentPatch(fields) { Object.assign(p, fields); }
 /** Replay the fade-in of a view's items: main, grid or pivx. */
-export function attachmentPulse(which) { p.pulse[which]++; }
+export function attachmentPulse(which) { p.tick[which]++; }
 
 // The wallet card: null balance = loading spinner; the deposit button locks above the cap.
-const w = $state({ balance: null, fiat: '', depositDisabled: false, depositLoading: false, v: 0 });
+const w = $state({ balance: null, fiat: '', depositDisabled: false, depositLoading: false, seq: 0 });
 export function pivxWalletState() { return w; }
 export function pivxWalletLoading() { w.balance = null; w.fiat = ''; }
 export function pivxWalletSet({ balance, fiat, depositDisabled }) {
-    w.balance = balance; w.fiat = fiat || ''; w.depositDisabled = !!depositDisabled; w.v++;
+    w.balance = balance; w.fiat = fiat || ''; w.depositDisabled = !!depositDisabled; w.seq++;
 }
 export function pivxWalletPatch(fields) { Object.assign(w, fields); }

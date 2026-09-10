@@ -26,7 +26,7 @@
     function bindHost(node) { tbEls.host = node; return { destroy() { tbEls.host = null; } }; }
 
     const items = $derived.by(() => {
-        win.rev;
+        win.seq;
         if (!win.chatId || !win.topId || !win.bottomId) return [];
         const msgs = h.messages(win.chatId) || [];
         if (!msgs.length) return [];

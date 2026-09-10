@@ -16,7 +16,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div id="qr-overlay" class="qr-overlay" class:active={st.active} class:closing={st.closing}
      onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
-    <div class="qr-overlay-card" use:popIn={st.pop}>
+    <div class="qr-overlay-card" use:popIn={st.tick}>
         <div class="qr-overlay-tile">
             <div id="qr-overlay-full" aria-label="QR code" use:qr={st.text}></div>
         </div>

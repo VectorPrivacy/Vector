@@ -22,7 +22,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div id="status-dialog" class="status-dialog-overlay" class:active={st.active} class:closing={st.closing} class:panel-open={st.panelOpen}
      onclick={(e) => { if (e.target === e.currentTarget) h.backdrop(); }}>
-    <div class="status-dialog-card" use:popIn={st.pop}>
+    <div class="status-dialog-card" use:popIn={st.tick}>
         <div class="status-dialog-head">
             <span class="status-dialog-label">Status</span>
             <button class="status-dialog-x" aria-label="Close" onclick={() => h.close()}>&#x2715;</button>

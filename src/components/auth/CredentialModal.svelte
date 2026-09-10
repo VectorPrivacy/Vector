@@ -31,7 +31,7 @@
                     <p id="credential-modal-type-desc" class="login-encrypt-description">{typeDesc}</p>
                 </div>
             {:else if c.mode === 'pin'}
-                <PinInput id="credential-modal-pin-row" cls="row pin-row" inputClass="cred-pin" resetSeq={c.pinSeq} onFull={(pin) => h()?.submit(pin)} />
+                <PinInput id="credential-modal-pin-row" cls="row pin-row" inputClass="cred-pin" resetSeq={c.pinTick} onFull={(pin) => h()?.submit(pin)} />
             {:else if c.mode === 'password'}
                 <div id="credential-modal-password">
                     <input type="password" id="credential-modal-password-input" placeholder="Enter your password" autocomplete="off" use:focus

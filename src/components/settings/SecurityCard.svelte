@@ -14,7 +14,7 @@
 
     // The box follows the user's flip until the app confirms or reverts the state.
     let checked = $state(false);
-    $effect(() => { s.v; checked = s.enabled; });
+    $effect(() => { s.seq; checked = s.enabled; });
 </script>
 
 {#if s.signer}

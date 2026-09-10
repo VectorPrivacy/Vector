@@ -21,7 +21,7 @@
     {@const dead = h.packIsDead(pack)}
     <div class="emoji-section emoji-pack-section" data-pack-id={pack.id}
          class:emoji-pack-dead={dead} class:emoji-pack-dead-noblur={dead && h.isLinux()}
-         style:contain-intrinsic-size="0 {(st.chromeV, h.sectionHeight(pack))}px" use:grid={pack}>
+         style:contain-intrinsic-size="0 {(st.chromeSeq, h.sectionHeight(pack))}px" use:grid={pack}>
         <div class="emoji-section-header">
             {#if pack.image_url}
                 <img class="emoji-pack-logo" alt="" use:logo={pack.image_url} use:menu={pack}>

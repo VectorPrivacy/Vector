@@ -38,7 +38,7 @@
 <div class="attachment-panel" id="attachment-panel" tabindex="-1" use:rootEl class:visible={st.visible} class:pivx-active={st.view === 'pivx'} style:bottom={st.bottom || null}>
 
 {#if st.view === 'main'}
-    <div class="attachment-panel-content" id="attachment-panel-main" use:stagger={st.pulse.main}>
+    <div class="attachment-panel-content" id="attachment-panel-main" use:stagger={st.tick.main}>
         <button class="attachment-panel-item" id="attachment-panel-file" onclick={h.file}>
             <div class="attachment-panel-btn"><span class="icon icon-file"></span></div>
             <span class="attachment-panel-label">File</span>
@@ -77,13 +77,13 @@
                        value={st.search} oninput={(e) => h.search(e.currentTarget.value)}>
             </div>
         </div>
-        <div class="miniapps-grid" id="miniapps-grid" class:edit-mode={gridState().editMode} use:grid use:stagger={st.pulse.grid}>
+        <div class="miniapps-grid" id="miniapps-grid" class:edit-mode={gridState().editMode} use:grid use:stagger={st.tick.grid}>
             <MiniAppsGrid h={h.grid} />
         </div>
     </div>
 {:else}
     <div class="attachment-panel-content pivx-wallet-panel" id="attachment-panel-pivx-view">
-        <PivxWallet h={h.pivx} pulse={st.pulse.pivx} />
+        <PivxWallet h={h.pivx} pulse={st.tick.pivx} />
     </div>
 {/if}
 </div>

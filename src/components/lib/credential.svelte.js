@@ -3,7 +3,7 @@
 // answers through `handlers`.
 const c = $state({
     open: false, mode: 'pin', title: '', subtitle: '', subtitleGradient: false,
-    confirmText: 'Confirm', selectedType: 'pin', password: '', pinSeq: 0,
+    confirmText: 'Confirm', selectedType: 'pin', password: '', pinTick: 0,
 });
 let handlers = $state.raw(null);   // { cancel(), submit(value) }
 
@@ -11,7 +11,7 @@ export function credentialState() { return c; }
 export function credentialHandlers() { return handlers; }
 export function openCredentialDialog(view, h) {
     Object.assign(c, { mode: 'pin', subtitle: '', subtitleGradient: false, confirmText: 'Confirm', selectedType: 'pin', password: '' }, view, { open: true });
-    c.pinSeq++;
+    c.pinTick++;
     handlers = h;
 }
 export function closeCredentialDialog() { c.open = false; handlers = null; }

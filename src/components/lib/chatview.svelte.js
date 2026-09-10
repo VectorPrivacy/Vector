@@ -7,7 +7,7 @@
 // not. `rev` says "the slice's contents changed in place" (an edit, a splice).
 import { SvelteMap } from 'svelte/reactivity';
 
-const win = $state({ chatId: null, topId: null, bottomId: null, rev: 0 });
+const win = $state({ chatId: null, topId: null, bottomId: null, seq: 0 });
 const divider = $state({ targetId: null, after: false });
 // Per-message versions: messages are mutated in place (an edit, a failed flag), so
 // the row cannot see the change through its prop; this is what refills it.
@@ -25,16 +25,16 @@ export function setWindow(chatId, topId, bottomId) {
     win.chatId = chatId || null;
     win.topId = topId || null;
     win.bottomId = bottomId || null;
-    win.rev++;
+    win.seq++;
 }
 export function clearWindow() {
     win.topId = null;
     win.bottomId = null;
-    win.rev++;
+    win.seq++;
 }
 /** The array changed under the window (insert, splice, edit): re-derive. */
 export function touchWindow() {
-    win.rev++;
+    win.seq++;
 }
 
 /** Read: a message's version (its row refills when it changes). */

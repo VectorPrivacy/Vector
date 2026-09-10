@@ -20,17 +20,17 @@ export function setTorLocked(locked) { tor.locked = !!locked; }
 export function setTorAdvancedOpen(open) { tor.advancedOpen = !!open; }
 export function setTorCircuits(circuits) { tor.circuits = circuits; }
 
-const blocked = $state({ v: 0 });
-export function blockedVersion() { return blocked.v; }
-export function reloadBlockedUsers() { blocked.v++; }
+const blocked = $state({ seq: 0 });
+export function blockedVersion() { return blocked.seq; }
+export function reloadBlockedUsers() { blocked.seq++; }
 
 // The Storage breakdown: the per-extension byte map the backend last reported.
 // `v` moves on every report so the chart re-plays its slice-in animation.
-const storage = $state({ distribution: null, v: 0 });
+const storage = $state({ distribution: null, seq: 0 });
 export function storageState() { return storage; }
 export function setStorageDistribution(distribution) {
     storage.distribution = distribution || {};
-    storage.v++;
+    storage.seq++;
 }
 
 // Notifications: the account's sound preferences plus the cross-platform toggles.
@@ -57,14 +57,14 @@ const security = $state({
     enabled: true, type: 'pin', bioSupported: false,
     signer: null,          // null (local key) | { label, hint, npub }
     dot: '',               // '' | online | offline | connecting
-    v: 0,                  // moves on every sync so a cancelled flip snaps the toggle back
+    seq: 0,                // moves on every sync so a cancelled flip snaps the toggle back
 });
 export function securityState() { return security; }
 export function setSecurity({ enabled, type, bioSupported }) {
     security.enabled = !!enabled;
     security.type = type || 'pin';
     if (bioSupported !== undefined) security.bioSupported = !!bioSupported;
-    security.v++;
+    security.seq++;
 }
 export function setSigner(signer) { security.signer = signer || null; }
 export function setSignerDot(dot) { security.dot = dot || ''; }
@@ -149,7 +149,7 @@ const screen = $state({
         status: '', statusClass: '',            // a handler's own line and its is-ok / is-error class
         busy: false, obfs4Hint: '',             // obfs4Hint: the install hint when obfs4proxy is missing
     },
-    scroll: { target: '', v: 0 },               // a section to scroll into view on open
+    scroll: { target: '', seq: 0 },               // a section to scroll into view on open
 });
 export function settingsScreen() { return screen; }
 export function setSettingsScreen(patch) {
@@ -158,7 +158,7 @@ export function setSettingsScreen(patch) {
         else screen[k] = v;
     }
 }
-export function requestSettingsScroll(target) { screen.scroll = { target, v: screen.scroll.v + 1 }; }
+export function requestSettingsScroll(target) { screen.scroll = { target, v: screen.scroll.seq + 1 }; }
 
 // Section handler bags that other modules register when they are ready (the
 // updater, the relay list, voice). A section renders once its bag exists.

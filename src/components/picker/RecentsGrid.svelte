@@ -4,6 +4,6 @@
     import EmojiGrid from './EmojiGrid.svelte';
     let { h } = $props();
     const st = pickerState();
-    const items = $derived.by(() => { st.recentsV; return h.recents(); });
+    const items = $derived.by(() => { st.recentsSeq; return h.recents(); });
 </script>
 <EmojiGrid {items} {h} />

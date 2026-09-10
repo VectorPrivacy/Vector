@@ -61,12 +61,12 @@ export function touchCommunity(id) {
 
 // The list's own shape: order and membership. Bumped after a sort, never for a
 // change inside a row.
-const list = $state({ v: 0 });
+const list = $state({ seq: 0 });
 export function listVersion() {
-    return list.v;
+    return list.seq;
 }
 export function reorderChatlist() {
-    list.v++;
+    list.seq++;
 }
 
 // Which chat is open: the rail's active shortcut and (later) the list's active row
@@ -81,12 +81,12 @@ export function setOpenChat(id) {
 
 // Pending community invites are spliced into the list above the chats; they have
 // their own signal because they are not chats and never touch a chat's row.
-const invites = $state({ v: 0 });
+const invites = $state({ seq: 0 });
 export function invitesVersion() {
-    return invites.v;
+    return invites.seq;
 }
 export function touchInvites() {
-    invites.v++;
+    invites.seq++;
 }
 
 // The list pane's mode (widescreen): inside a community the list IS that
