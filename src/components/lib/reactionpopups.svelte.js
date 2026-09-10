@@ -1,7 +1,7 @@
 // The two popups a reaction chip can raise: the hover summary and the who-reacted
 // details. Each is a raw view anchored to its chip; the app opens and closes them.
-let tip = $state.raw(null);       // { emoji, names: [...], anchor }
-let details = $state.raw(null);   // { emoji, msgId, anchor }
+let tip = $state.raw(null);       // { emoji, url, names: [...], anchor }
+let details = $state.raw(null);   // { emoji, url, msgId, anchor }; url: a custom emoji's image
 
 export function reactionTip() { return tip; }
 export function reactionDetails() { return details; }

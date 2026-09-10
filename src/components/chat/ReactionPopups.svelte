@@ -8,7 +8,7 @@
     import { reactionTip, reactionDetails, bindReactionEl } from '../lib/reactionpopups.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: findMessage(msgId), getProfile, getName, getProfileAvatarSrc, twemojify, emojiLabel(emoji)
+    let { h } = $props();   // h: findMessage(msgId), getProfile, getName, getProfileAvatarSrc, twemojify, bindCachedImg, emojiLabel(emoji)
 
     const tip = $derived(reactionTip());
     const details = $derived(reactionDetails());
@@ -45,6 +45,14 @@
         render(emoji);
         return { update: render };
     }
+    // A custom emoji that cannot load falls back to its shortcode, as the chip does to a glyph.
+    function customInto(img, [url, emoji]) {
+        h.bindCachedImg(img, url, (el) => {
+            const holder = el.parentElement;
+            el.replaceWith(document.createTextNode(emoji));
+            if (holder) h.twemojify(holder);
+        });
+    }
 
     // Above the chip, below when there is no room; clamped to the viewport.
     function place(node, [anchor, gap, centred]) {
@@ -69,7 +77,11 @@
 
 {#if tip}
     <div class="reaction-hover-tip" use:bindTip use:place={[tip.anchor, 6, true]}>
-        <span class="reaction-hover-tip-emoji" use:emojiInto={tip.emoji}></span>
+        {#if tip.url}
+            <span class="reaction-hover-tip-emoji"><img alt={tip.emoji} class="reaction-custom-emoji" use:customInto={[tip.url, tip.emoji]}></span>
+        {:else}
+            <span class="reaction-hover-tip-emoji" use:emojiInto={tip.emoji}></span>
+        {/if}
         <span class="reaction-hover-tip-text">reacted by {formatNames(tip.names)}</span>
         <span class="reaction-hover-tip-hint">Right-click for details</span>
     </div>
@@ -79,7 +91,11 @@
     <div class="reaction-details-popup" use:bindDetails use:place={[details.anchor, 4, false]}>
         <div class="reaction-details-header">
             <span class="reaction-details-count">{reactors.length}</span>
-            <span class="reaction-details-emoji" use:emojiInto={details.emoji}></span>
+            {#if details.url}
+                <span class="reaction-details-emoji"><img alt={details.emoji} class="reaction-custom-emoji" use:customInto={[details.url, details.emoji]}></span>
+            {:else}
+                <span class="reaction-details-emoji" use:emojiInto={details.emoji}></span>
+            {/if}
             {#if label}<span class="reaction-details-label">{label}</span>{/if}
         </div>
         <div class="reaction-details-body">

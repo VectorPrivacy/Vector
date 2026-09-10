@@ -102,6 +102,7 @@ function registerReactionPopups() {
             getProfile,
             getProfileAvatarSrc,
             twemojify,
+            bindCachedImg: (img, url, onUnavailable) => bindCachedEmojiImg(img, url, 'emoji', onUnavailable),
             // The dataset's canonical `display` (CLDR tts); `name` for entries predating it.
             emojiLabel: (emoji) => {
                 const entry = arrEmojis.find(e => e.emoji === emoji);
@@ -113,6 +114,20 @@ function registerReactionPopups() {
 // Registered once every script is in: the bag names helpers from files that load later.
 document.addEventListener('DOMContentLoaded', registerReactionPopups, { once: true });
 const _reactionTipEl = () => VectorSvelte.reactionEls().tip;
+
+function _reactionMessage(msgId) {
+    for (const chat of arrChats) {
+        const m = chat.messages.find(x => x.id === msgId);
+        if (m) return m;
+    }
+    return null;
+}
+
+/** The image a custom reaction shows, resolved the way its chip resolves it. */
+function _reactionCustomUrl(msg, emoji) {
+    const carried = msg.reactions.find(r => r.emoji === emoji && r.emoji_url)?.emoji_url || null;
+    return _dmsgCustomEmojiUrl(emoji, carried);
+}
 const _reactionDetailsEl = () => VectorSvelte.reactionEls().details;
 
 /**
@@ -125,15 +140,11 @@ function showReactionHoverTip(reactionEl) {
     const emoji = reactionEl.getAttribute('data-emoji');
     const msgId = reactionEl.getAttribute('data-msg-id');
     if (!emoji || !msgId) return;
-    let msg = null;
-    for (const chat of arrChats) {
-        msg = chat.messages.find(m => m.id === msgId);
-        if (msg) break;
-    }
+    const msg = _reactionMessage(msgId);
     if (!msg) return;
     const matching = msg.reactions.filter(r => r.emoji === emoji);
     if (!matching.length) return;
-    VectorSvelte.openReactionTip({ emoji, names: matching.map(r => getName(r.author_id)), anchor: reactionEl });
+    VectorSvelte.openReactionTip({ emoji, url: _reactionCustomUrl(msg, emoji), names: matching.map(r => getName(r.author_id)), anchor: reactionEl });
     _startReactionTipWatchdog(reactionEl);
 }
 
@@ -166,7 +177,8 @@ function showReactionDetails(reactionEl) {
     const emoji = reactionEl.getAttribute('data-emoji');
     const msgId = reactionEl.getAttribute('data-msg-id');
     if (!emoji || !msgId) return;
-    VectorSvelte.openReactionDetails({ emoji, msgId, anchor: reactionEl });
+    const msg = _reactionMessage(msgId);
+    VectorSvelte.openReactionDetails({ emoji, url: msg ? _reactionCustomUrl(msg, emoji) : null, msgId, anchor: reactionEl });
 }
 
 /**

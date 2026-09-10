@@ -3748,9 +3748,11 @@ body.chat-bg-disabled .chat-messages::before {
   display: inline-flex;
   align-items: center;
 }
-.reaction-hover-tip-emoji img.emoji {
+.reaction-hover-tip-emoji img.emoji,
+.reaction-hover-tip-emoji img.reaction-custom-emoji {
   width: 16px;
   height: 16px;
+  margin: 0;
 }
 
 .reaction-hover-tip-text {
@@ -4050,9 +4052,11 @@ body.chat-bg-disabled .chat-messages::before {
   align-items: center;
 }
 
-.reaction-details-emoji img.emoji {
+.reaction-details-emoji img.emoji,
+.reaction-details-emoji img.reaction-custom-emoji {
   width: 18px;
   height: 18px;
+  margin: 0;
 }
 
 .reaction-details-label {
