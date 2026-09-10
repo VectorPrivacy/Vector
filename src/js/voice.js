@@ -762,7 +762,7 @@ class VoiceTranscriptionUI {
  * @property {(event: string, fn: (e: object) => void) => Promise<() => void>} listen
  * @property {() => string} glowColor
  * @property {(secs: number) => string} formatTime
- * @property {(att: object, msg: object) => boolean} transcriptionSupported
+ * @property {(att: object) => boolean} transcriptionSupported
  * @property {(path: string) => Promise<void>} transcribe
  * @property {() => void} cancelModelDownload
  * @property {(msg: object) => boolean} autoTranscribe
@@ -796,7 +796,7 @@ const AUDIO_PLAYER_HELPERS = {
     cancelModelDownload: () => invoke('cancel_whisper_download'),
     // A received message under a minute old, with the chosen model already on disk.
     autoTranscribe: (msg) => {
-        if (!window.voiceSettings?.autoTranscribe || msg.mine || msg.at <= Date.now() - 60) return false;
+        if (!window.voiceSettings?.autoTranscribe || msg.mine || msg.at <= Date.now() - 60_000) return false;
         const selected = window.voiceSettings.selectedModel || 'small';
         return !!window.voiceSettings.models?.find(m => m.model.name === selected)?.downloaded;
     },

@@ -89,6 +89,11 @@ const _pickerPanelHelpers = {
      * @property {(id?: string) => void} openCreator
      * @property {(el: Element) => void} twemojify
      * @property {(e: object) => string} stockTitle
+     * @property {() => HTMLElement|null} scrollRoot        the panel's scroller, for the grids' observers
+     * @property {() => object[]} recents
+     * @property {() => object[]} all
+     * @property {(q: string) => object[]} search
+     * @property {(item: object, el: Element, placeholder: string|null) => void} loadMedia   a GIF tile's media with format fallback
      */
     islands: {
         deadMessage: (pack) => deadPackMessage(pack),

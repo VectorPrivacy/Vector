@@ -435,14 +435,14 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
         };
 
         // Set src and explicitly call load() for WebKit
-        video.src = `${mediaUrl}/${gifId}/${format.ext}`;
+        video.src = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
         gifItem.appendChild(video);
         video.load();
     } else {
         // Image format (GIF)
         const img = document.createElement('img');
         img.alt = gifTitle || 'GIF';
-        img.src = `${mediaUrl}/${gifId}/${format.ext}`;
+        img.src = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
 
         img.onload = () => {
             if (placeholder) placeholder.remove();

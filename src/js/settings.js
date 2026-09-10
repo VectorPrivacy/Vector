@@ -710,7 +710,7 @@ async function logoutAccount() {
     try {
         await invoke('logout');
     } catch (e) {
-        await popupConfirm('Logout failed', String(e), true);
+        await popupConfirm('Logout failed', escapeHtml(String(e)), true);
     }
 }
 

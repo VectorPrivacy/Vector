@@ -428,7 +428,7 @@ function registerMarketplaceHandlers() {
         resetPermissions: resetAppPermissions,
         publisher: publisherProfile,
         openPublisher: openPublisherProfile,
-        openUrl,
+        openUrl: (url) => confirmAndOpenUrl(url),   // a listing's source URL is relay data
         back: () => { hideMarketplacePanel(); },
     };
     VectorSvelte.setMarketplaceHandlers(h);

@@ -286,12 +286,9 @@ function sanitizeUrl(url) {
     const lower = normalized.toLowerCase();
 
     const allowedProtocols = ['http:', 'https:', 'mailto:'];
-    if (
-        allowedProtocols.some((protocol) => lower.startsWith(protocol)) ||
-        lower.startsWith('/') ||
-        lower.startsWith('./') ||
-        lower.startsWith('../')
-    ) {
+    // Absolute http(s)/mailto only: a relative href would be same-origin, which every
+    // link guard deliberately skips, and message content never legitimately links in-app.
+    if (allowedProtocols.some((protocol) => lower.startsWith(protocol))) {
         return encodeAttr(normalized);
     }
 

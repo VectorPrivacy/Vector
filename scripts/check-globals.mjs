@@ -69,6 +69,7 @@ const topDeclaredIn = new Map();     // name -> the scripts declaring it at top 
 const perFile = new Map();           // file → Set of identifiers referenced
 const eagerCalls = [];               // { file, line, names }: top-level VectorSvelte.* calls and the identifiers their arguments pass by value
 const svelteUses = new Map();        // VectorSvelte.<name> → [files]
+const svelteUsesIn = new Map();      // file → Set of VectorSvelte.<name> it calls
 
 function collectPattern(node, out) {
     if (!node) return;
@@ -113,6 +114,8 @@ for (const rel of scripts) {
                     const list = svelteUses.get(n.property.name) || [];
                     list.push(rel);
                     svelteUses.set(n.property.name, list);
+                    if (!svelteUsesIn.has(rel)) svelteUsesIn.set(rel, new Set());
+                    svelteUsesIn.get(rel).add(n.property.name);
                 }
                 break;
         }
@@ -124,7 +127,7 @@ for (const rel of scripts) {
         if (n.type === 'MethodDefinition' && !n.computed && n.key.type === 'Identifier') n.key.__notRef = true;
         if (n.type === 'PropertyDefinition' && !n.computed && n.key.type === 'Identifier') n.key.__notRef = true;
         if (n.type === 'LabeledStatement') n.label.__notRef = true;
-        if ((n.type === 'BreakStatement' || n.continueStatement) && n.label) n.label.__notRef = true;
+        if ((n.type === 'BreakStatement' || n.type === 'ContinueStatement') && n.label) n.label.__notRef = true;
         if (n.type === 'Identifier' && !n.__notRef) refs.add(n.name);
     });
     perFile.set(rel, refs);
@@ -194,7 +197,7 @@ if (dead.length) { findings += dead.length; console.log(`index.js exports nothin
 for (const name of [...exported].sort()) {
     const owners = declaredIn.get(name);
     if (!owners) continue;
-    if (owners.some(f => (perFile.get(f), readFileSync(join(SRC, f), 'utf8').includes(`VectorSvelte.${name}`)))) continue;
+    if (owners.some(f => svelteUsesIn.get(f)?.has(name))) continue;
     findings++;
     console.log(`${owners.join(', ')}: declares '${name}', which is also a different VectorSvelte export`);
 }

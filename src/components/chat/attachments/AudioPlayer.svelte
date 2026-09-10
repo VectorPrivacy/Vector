@@ -19,7 +19,7 @@
     const up = $derived(uploading ? transfer(msg.id) : null);
     const download = modelDownloadState();
     const transcription = $derived(info?.transcription ?? null);
-    const canTranscribe = $derived(!uploading && h.transcriptionSupported(att, msg));
+    const canTranscribe = $derived(!uploading && h.transcriptionSupported(att));
 
     // ── playback ──
     let sourceId = null;
@@ -238,13 +238,15 @@
         if (pendingSeekMs != null) { engineSeek(pendingSeekMs); pendingSeekMs = null; }
         if (seekTimer) { clearTimeout(seekTimer); seekTimer = null; }
     }
+    let stopDrag = null;   // the in-flight scrub's document listeners, for an unmount mid-drag
     function onMouseDown(e) {
         dragging = true;
         seekVisual(e.clientX);
         const move = (ev) => { if (dragging) seekVisual(ev.clientX); };
-        const stop = () => { dragging = false; flushSeek(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', stop); };
+        const stop = () => { stopDrag = null; dragging = false; flushSeek(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', stop); };
         document.addEventListener('mousemove', move);
         document.addEventListener('mouseup', stop);
+        stopDrag = stop;
     }
     function onTouchStart(e) { dragging = true; seekVisual(e.touches[0].clientX); }
     function onTouchMove(e) { if (dragging) { e.preventDefault(); seekVisual(e.touches[0].clientX); } }
@@ -278,6 +280,7 @@
     });
 
     $effect(() => () => {
+        stopDrag?.();
         if (animationId) cancelAnimationFrame(animationId);
         if (windDownId) cancelAnimationFrame(windDownId);
         if (seekTimer) clearTimeout(seekTimer);

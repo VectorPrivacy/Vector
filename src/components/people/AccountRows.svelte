@@ -3,7 +3,7 @@
     // (CSS ellipsises it), the active dot, and a trash button where deleting is allowed.
     import Avatar from '../ui/Avatar.svelte';
     let { accounts, activeNpub = '', onPick = null, onDelete = null, h } = $props();
-    function src(meta) { return meta.avatar_cached ? h.fileSrc(meta.avatar_cached) : (meta.avatar_url || null); }
+    function src(meta) { return meta.avatar_cached ? h.fileSrc(meta.avatar_cached) : null; }   // never the remote URL: it would bypass Tor
 </script>
 
 {#each accounts as meta (meta.npub)}

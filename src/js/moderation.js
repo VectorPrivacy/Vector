@@ -294,8 +294,3 @@ async function modBanRotate() {
     refreshCommunityMemberCount(modCommunityId(), true);
 }
 
-/// Member-supplied text (an invite label) never reaches innerHTML unescaped.
-function modEscapeText(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c =>
-        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}

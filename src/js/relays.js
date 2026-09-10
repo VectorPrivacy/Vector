@@ -24,7 +24,7 @@ async function renderRelayList() {
                         await addCustomBlossomServer(url.trim());
                         renderRelayList();
                     } catch (err) {
-                        popupConfirm('Could not add server', String(err), true, '', 'vector_warning.svg');
+                        popupConfirm('Could not add server', escapeHtml(String(err)), true, '', 'vector_warning.svg');
                     }
                 },
                 openRelay: (relay) => openRelayInfoDialog(relay),
@@ -273,7 +273,7 @@ async function handleBlossomAction() {
             renderRelayList();
         }
     } catch (err) {
-        popupConfirm('Error', String(err), true, '', 'vector_warning.svg');
+        popupConfirm('Error', escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
 }
 

@@ -173,7 +173,7 @@ const profileSwitcher = {
             // Backend emits session_reload; the listener calls window.location.reload().
         } catch (e) {
             console.error('[profile-switcher] switch failed:', e);
-            popupConfirm('Switch failed', String(e), true);
+            popupConfirm('Switch failed', escapeHtml(String(e)), true);
         }
     },
 
@@ -234,7 +234,7 @@ const profileSwitcher = {
             }
         } catch (e) {
             console.error('[profile-switcher] delete failed:', e);
-            popupConfirm('Delete failed', String(e), true);
+            popupConfirm('Delete failed', escapeHtml(String(e)), true);
         }
     },
 
@@ -287,7 +287,7 @@ const loginPicker = {
         const hasActive = !!activeNpub && this.accounts.some(a => a.npub === activeNpub);
         const meta = hasActive ? this.accounts.find(a => a.npub === activeNpub) : null;
         const avatarSrc = meta
-            ? (meta.avatar_cached ? convertFileSrc(meta.avatar_cached) : (meta.avatar_url || null))
+            ? (meta.avatar_cached ? convertFileSrc(meta.avatar_cached) : null)
             : null;
         VectorSvelte.patchPicker({
             shown: true, avatar: avatarSrc, label: meta ? (meta.display_name || meta.npub) : 'Select Profile',
@@ -321,7 +321,7 @@ const loginPicker = {
             await multiAccount.setActiveAndSwap(meta.npub);
         } catch (e) {
             console.error('[login-picker] switch failed:', e);
-            popupConfirm('Switch failed', String(e), true);
+            popupConfirm('Switch failed', escapeHtml(String(e)), true);
         }
     },
 };

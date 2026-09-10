@@ -625,7 +625,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                 // so a retry is possible. Surface the error and bring the
                 // user back to the type-selector so they can try again.
                 VectorSvelte.patchEncrypt({ gradient: false });
-                await popupConfirm('Could not finish setup', String(e), true);
+                await popupConfirm('Could not finish setup', escapeHtml(String(e)), true);
                 VectorSvelte.patchEncrypt({ typeSelectShown: true });
             }
         };
@@ -755,7 +755,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         await invoke('setup_encryption', { password: strPinLast.join(''), securityType: chosenSecurityType });
                         login();
                     } catch (e) {
-                        await popupConfirm('Could not save your PIN', String(e), true);
+                        await popupConfirm('Could not save your PIN', escapeHtml(String(e)), true);
                         strPinLast = [];
                         resetPinDisplay(true, true);
                         pinProcessing = false;
@@ -878,7 +878,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                         await invoke('setup_encryption', { password: lastPassword, securityType: chosenSecurityType });
                         login();
                     } catch (e) {
-                        await popupConfirm('Could not save your password', String(e), true);
+                        await popupConfirm('Could not save your password', escapeHtml(String(e)), true);
                         lastPassword = '';
                         clearAndFocus();
                         passwordProcessing = false;
@@ -1055,7 +1055,7 @@ async function loginBack() {
             }
         } catch (e) {
             console.error('[add-account] restore marker failed:', e);
-            popupConfirm('Could not return to your account', String(e), true);
+            popupConfirm('Could not return to your account', escapeHtml(String(e)), true);
             return;
         }
         addAccountFlow.finish();

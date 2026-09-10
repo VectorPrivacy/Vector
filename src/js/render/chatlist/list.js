@@ -94,7 +94,7 @@ function chatlistSnapshot() {
  * @property {(chat: object) => string} chatPinKey
  * @property {(chat: object) => number} computeListRowBadgeCount
  * @property {(chat: object) => number} computeRowBadgeCount
- * @property {(chat: object) => { text: string, emojiTags: object[]|null }} generateChatPreviewText
+ * @property {(chat: object) => { text: string, isHtml: boolean, isTyping: boolean, needsTwemoji: boolean, emojiTags: object[]|null }} generateChatPreviewText   isHtml picks innerHTML over textContent: text is then contentToPreviewHtml's output
  * @property {(path: string) => string} convertFileSrc
  * @property {(profile: object|null) => string|null} getProfileAvatarSrc
  * @property {(el: Element) => void} twemojify

@@ -29,6 +29,7 @@ const DRAG_PX = 6;
  */
 export function reorderable(node, h) {
     let cur = h;
+    let activeTeardown = null;   // the in-flight gesture's window listeners
     const onContextMenu = (ev) => {
         ev.preventDefault();
         ev.stopPropagation();
@@ -114,7 +115,10 @@ export function reorderable(node, h) {
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
             window.removeEventListener('touchmove', onTouchMove);
+            if (activeTeardown === teardown) activeTeardown = null;
         }
+        activeTeardown?.();
+        activeTeardown = teardown;
         const onUp = (up) => {
             clearTimers();
             teardown();
@@ -133,6 +137,7 @@ export function reorderable(node, h) {
     return {
         update(next) { cur = next; },
         destroy() {
+            activeTeardown?.();
             node.removeEventListener('contextmenu', onContextMenu);
             node.removeEventListener('pointerdown', onPointerDown);
         },

@@ -516,7 +516,7 @@ async function startWallpaperChange(chatId) {
         }
         await applyWallpaperPreview(chatId, previewResult);
     } catch (err) {
-        popupConfirm('Couldn’t use that image', String(err), true);
+        popupConfirm('Couldn’t use that image', escapeHtml(String(err)), true);
     }
 }
 
@@ -585,7 +585,7 @@ async function confirmWallpaperChange() {
             );
         }
     } catch (err) {
-        popupConfirm('Wallpaper not sent', String(err), true);
+        popupConfirm('Wallpaper not sent', escapeHtml(String(err)), true);
     } finally {
         clearWallpaperUploadProgress();
         setWallpaperEditBusy(false);
@@ -618,7 +618,7 @@ async function removeWallpaper(chatId) {
         await invoke('remove_wallpaper', { chatId });
         applyChatWallpaper(chatId, '', 0, 50, Date.now());
     } catch (err) {
-        popupConfirm('Wallpaper not removed', String(err), true, '', 'vector_warning.svg');
+        popupConfirm('Wallpaper not removed', escapeHtml(String(err)), true, '', 'vector_warning.svg');
     }
 }
 
