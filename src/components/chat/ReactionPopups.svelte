@@ -33,8 +33,10 @@
             return { id: r.author_id, src: h.getProfileAvatarSrc(p), name: p?.name || p?.display_name || r.author_id.slice(0, 12) + '...' };
         });
     });
+    // A custom emoji is named by its shortcode, which the chip and the tip no longer show.
     const label = $derived.by(() => {
         if (!details) return '';
+        if (details.url) return details.emoji;
         const name = h.emojiLabel(details.emoji) || '';
         return name ? name.charAt(0).toUpperCase() + name.slice(1) : '';
     });
@@ -90,7 +92,6 @@
 {#if details && reactors.length}
     <div class="reaction-details-popup" use:bindDetails use:place={[details.anchor, 4, false]}>
         <div class="reaction-details-header">
-            <span class="reaction-details-count">{reactors.length}</span>
             {#if details.url}
                 <span class="reaction-details-emoji"><img alt={details.emoji} class="reaction-custom-emoji" use:customInto={[details.url, details.emoji]}></span>
             {:else}

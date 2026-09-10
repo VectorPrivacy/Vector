@@ -4042,11 +4042,6 @@ body.chat-bg-disabled .chat-messages::before {
   margin-bottom: 4px;
 }
 
-.reaction-details-count {
-  font-size: 15px;
-  font-weight: 600;
-}
-
 .reaction-details-emoji {
   display: flex;
   align-items: center;
