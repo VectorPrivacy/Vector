@@ -614,5 +614,5 @@ function countPingMessages(chat) {
  * already depend on — only strings that actually changed patch the DOM.
  */
 function updateChatlistTimestamps() {
-    VectorSvelte.bumpTimeTick();
+    VectorSvelte.bumpClockTick();
 }

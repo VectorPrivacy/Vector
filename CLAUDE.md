@@ -92,7 +92,9 @@ Svelte 5 (runes) components over a set of plain scripts that share ONE global sc
   send pipeline, scroll engine, and the helper bags the components take. `js/emoji/` is the
   picker's data half. Load order is `index.html`'s: plain scripts run during the parse,
   deferred ones after, each in document order.
-- **`styles.css`** / **`widescreen.css`** — all styles; components carry no `<style>`.
+- **`styles.css`** / **`widescreen.css`** — all styles. Migrated screens carry no `<style>`: the
+  global rules cascade and the DOM matches what the stylesheet was written for. New UI may scope
+  its own (Toast does).
 
 **Rules.** State lives in a store and flows in; the component renders; events flow out
 through a handler bag. Elements are held only for gestures and measurement. Ids stay only

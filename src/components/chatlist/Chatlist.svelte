@@ -9,8 +9,7 @@
     import ChannelList from './ChannelList.svelte';
     import InviteRow from './InviteRow.svelte';
     import EmptyState from './EmptyState.svelte';
-    import { timeTickVersion } from '../lib/stores.js';
-    import { listVersion, invitesVersion, paneState, openChatId, communityVersion, setListHasRows } from '../lib/signals.svelte.js';
+    import { listVersion, invitesVersion, paneState, openChatId, communityVersion, setListHasRows, clockTick } from '../lib/signals.svelte.js';
     import ChatlistRow from './ChatlistRow.svelte';
 
     // Snapshot re-pulls the raw page state when the list's shape, the invites, the
@@ -44,7 +43,7 @@
     const empty = $derived(chats.length === 0 && invites.length === 0);
 
     // Clock tick for relative timestamps and presence-dot recency, into the rows as a prop.
-    const tick = $derived($timeTickVersion);
+    const tick = $derived(clockTick());
 
     // ── actions: leaf widgets stay the vanilla builders / DOM disciplines ──
 

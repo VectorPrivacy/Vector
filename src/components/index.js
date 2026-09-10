@@ -68,7 +68,7 @@ import { profileEdit, startProfileEdit, endProfileEdit, setProfileEditPicture, p
 // Shared store layer (SVELTE_MIGRATION_PLAN.md): the clock, and per-entity signals.
 // Nothing here says "render": the vanilla side names WHAT changed and the islands
 // re-derive exactly the DOM that depends on it.
-export { bumpTimeTick } from './lib/stores.js';
+export { bumpClockTick } from './lib/signals.svelte.js';
 export {
     ensureSignals,
     touchChat,
