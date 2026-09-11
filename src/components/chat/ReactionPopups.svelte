@@ -56,17 +56,21 @@
         });
     }
 
-    // Above the chip, below when there is no room; clamped to the viewport.
+    // Above the chip, below when there is no room; clamped to the conversation pane, so a
+    // popup never spills over the rail or the list beside it.
     function place(node, [anchor, gap, centred]) {
         const run = ([a, g, c]) => {
             if (!a) return;
             flushSync();
             const rect = a.getBoundingClientRect();
             const mine = node.getBoundingClientRect();
+            const pane = a.closest('#chat')?.getBoundingClientRect();
+            const minLeft = (pane?.left ?? 0) + 10;
+            const maxLeft = (pane?.right ?? window.innerWidth) - mine.width - 10;
             let top = rect.top - mine.height - g;
             if (top < 10) top = rect.bottom + g;
             let left = c ? rect.left + rect.width / 2 - mine.width / 2 : rect.left;
-            left = Math.max(10, Math.min(left, window.innerWidth - mine.width - 10));
+            left = Math.max(minLeft, Math.min(left, maxLeft));
             node.style.left = `${left}px`;
             node.style.top = `${top}px`;
         };
