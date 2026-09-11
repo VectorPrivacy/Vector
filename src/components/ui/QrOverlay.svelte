@@ -6,8 +6,9 @@
     let { h } = $props();   // h: renderQr(host, text), close()
     const st = qrOverlay.state();
     function qr(host, text) {
-        h.renderQr(host, text);
-        return { update(next) { h.renderQr(host, next); } };
+        const paint = (t) => { if (t) h.renderQr(host, t); };
+        paint(text);
+        return { update: paint };
     }
 </script>
 

@@ -30,7 +30,11 @@ function renderQrInto(containerEl, text, opts = {}) {
  * Fullscreen QR overlay, shared by the Profile QR and the bunker login QR.
  * Closes via the button, a backdrop tap, Escape, or Android hardware back.
  */
-VectorSvelte.setScreen('qrOverlay', { h: { renderQr: renderQrInto, close: closeQrOverlay } });
+// Registered once the file is in: the component paints on mount, and the painter reads
+// the logo constants declared below.
+document.addEventListener('DOMContentLoaded', () => {
+    VectorSvelte.setScreen('qrOverlay', { h: { renderQr: renderQrInto, close: closeQrOverlay } });
+}, { once: true });
 function openQrOverlay(text) {
     if (!text || !window.qrcode) return;
     VectorSvelte.qrOverlay.open({ text });
