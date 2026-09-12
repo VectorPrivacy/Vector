@@ -35,11 +35,29 @@
 
     // ── cells ──
     let hovered = $state(-1);
+    // Cells are keyed by position, so a reorder changes which emoji a cell shows: the
+    // action rebinds the image whenever its emoji does.
     function image(img, [e, idx]) {
-        if (e.blobUrl) { img.src = e.blobUrl; return; }
-        // The editor must never hide a failed emoji: the creator has to see it's broken.
-        h.bindCachedImg(img, e.url, 'emoji', (el, reason) => markCreatorBroken(idx, h.unavailableMessage(reason)));
-        if (e.dead) markCreatorBroken(idx, h.goneMessage());
+        const bind = () => {
+            if (e.blobUrl) {
+                // A blob is set directly; drop any cache token so a late cache resolve for a
+                // previous url cannot overwrite it.
+                delete img.dataset.cacheToken;
+                img.src = e.blobUrl;
+                return;
+            }
+            // The editor must never hide a failed emoji: the creator has to see it's broken.
+            h.bindCachedImg(img, e.url, 'emoji', (el, reason) => markCreatorBroken(idx, h.unavailableMessage(reason)));
+            if (e.dead) markCreatorBroken(idx, h.goneMessage());
+        };
+        bind();
+        return {
+            update([next, nextIdx]) {
+                const changed = next.url !== e.url || next.blobUrl !== e.blobUrl || next.dead !== e.dead;
+                e = next; idx = nextIdx;
+                if (changed) bind();
+            },
+        };
     }
 
     // ── drag to reorder ──
