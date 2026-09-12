@@ -481,6 +481,9 @@ impl MiniAppsState {
     pub async fn add_instance(&self, instance: MiniAppInstance) {
         let mut instances = self.instances.write().await;
         instances.insert(instance.window_label.clone(), instance);
+        if instances.len() == 1 {
+            super::awake::hold();
+        }
     }
     
     /// Remove an instance by window label
@@ -490,11 +493,15 @@ impl MiniAppsState {
     /// delete the successor instance out from under its live session.
     pub async fn remove_instance_if(&self, window_label: &str, instance_id: u64) -> Option<MiniAppInstance> {
         let mut instances = self.instances.write().await;
-        if instances.get(window_label).is_some_and(|i| i.instance_id == instance_id) {
+        let removed = if instances.get(window_label).is_some_and(|i| i.instance_id == instance_id) {
             instances.remove(window_label)
         } else {
             None
+        };
+        if instances.is_empty() {
+            super::awake::release();
         }
+        removed
     }
 
     pub async fn remove_instance(&self, window_label: &str) -> Option<MiniAppInstance> {
@@ -502,7 +509,11 @@ impl MiniAppsState {
         self.remove_realtime_channel(window_label).await;
 
         let mut instances = self.instances.write().await;
-        instances.remove(window_label)
+        let removed = instances.remove(window_label);
+        if instances.is_empty() {
+            super::awake::release();
+        }
+        removed
     }
     
     /// Get an instance by window label
