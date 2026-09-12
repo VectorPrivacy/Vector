@@ -113,7 +113,9 @@ body.ws.ws-rail-collapsed #chrome-typeface {
   opacity: 1;
 }
 
-#chrome-mail:hover .icon {
+/* Lit while the DM list is the pane on screen, the way a rail community lights when chosen. */
+#chrome-mail:hover .icon,
+body.ws:not(.ws-community-pane) #chrome-mail .icon {
   background-color: #fff;
 }
 

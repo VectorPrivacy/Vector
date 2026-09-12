@@ -398,6 +398,7 @@
                         src={vm.src}
                         display={vm.display}
                         hasName={vm.hasName}
+                        withStatus
                         rank={vm.rank}
                         rankLabel={vm.rankLabel}
                         {hoverBg}
@@ -453,6 +454,7 @@
             src={row.src}
             display={row.display}
             hasName={row.hasName}
+            withStatus
             dim
             onactivate={(e) => openProfile(row.npub, e)}
             {ui}

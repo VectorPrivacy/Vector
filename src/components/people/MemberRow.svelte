@@ -16,6 +16,7 @@
         hoverBg = '',             // inline background for the hover overlay ('' = the CSS default)
         dim = false,              // banned / inactive rendering
         acting = false,           // pins hover-revealed controls visible during an async action
+        withStatus = false,       // rosters show the person's status line; pickers stay name-only
         onactivate = null,        // (event) => void — row click / Enter / Space
         gutter = null,            // snippet: the left control slot
         trailing = null,          // snippet: the right control slot
@@ -50,7 +51,7 @@
         {rank}
         {rankLabel}
         bot={!!profile?.bot}
-        status={profile?.status?.title ? { title: profile.status.title, emojiTags: profile.status.emoji_tags || [] } : null}
+        status={withStatus && profile?.status?.title ? { title: profile.status.title, emojiTags: profile.status.emoji_tags || [] } : null}
         style={dim ? 'opacity:0.6;' : ''}
         {ui}
     />
