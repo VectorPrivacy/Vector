@@ -3,14 +3,17 @@
     // (twemojified) and custom pack emoji (cached image); the big All grid is AllGrid.
     // The picker's delegated click handlers read the cells' data attributes and expect
     // them as the grid's direct children, so there is no wrapper here.
-    let { items, h } = $props();   // h: twemojify(el), bindCachedImg(img, url, kind), stockTitle(e), scrollRoot()
-
+    let { items, h } = $props();   // h: twemojify(el), bindCachedImg(img, url, kind, onUnavailable), stockTitle(e), scrollRoot()
 
     function stock(span, e) {
         span.textContent = e.emoji;
         h.twemojify(span);
     }
-    function custom(img, url) { h.bindCachedImg(img, url, 'emoji'); }
+    // An emoji the backend refuses (over the size cap, gone from its host) leaves no cell
+    // behind, matching the pack sections, which compact such emoji away.
+    function custom(img, url) {
+        h.bindCachedImg(img, url, 'emoji', () => { img.parentElement.style.display = 'none'; });
+    }
 
 </script>
 

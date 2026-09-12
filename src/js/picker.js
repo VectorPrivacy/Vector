@@ -105,7 +105,7 @@ const _pickerPanelHelpers = {
         sectionHeight: (pack) => _packSectionHeightPx(pack),
         mountGrid: (section, pack) => _mountPackCanvasGrid(section, pack),
         afterRender: () => _afterPackSectionsRender(),
-        bindCachedImg: (img, url, kind) => bindCachedEmojiImg(img, url, kind),
+        bindCachedImg: (img, url, kind, onUnavailable) => bindCachedEmojiImg(img, url, kind, onUnavailable),
         showTabMenu: (pack, x, y) => _showPackTabMenu(pack, x, y),
         closeMenu: () => hideContextMenu(),
         reorderPack: (fromId, toId, isBefore) => _applyPackTabReorder(fromId, toId, isBefore),
@@ -115,11 +115,12 @@ const _pickerPanelHelpers = {
         twemojify: (el) => twemojify(el),
         stockTitle: (e) => stockEmojiTitle(e),
         scrollRoot: () => _pickerEls.main,
-        recents: () => getMostUsedEmojis().slice(0, 24).concat(getMostUsedCustomEmojis(24))
+        // Custom emoji already known to be unavailable never take a cell, as in the sections.
+        recents: () => getMostUsedEmojis().slice(0, 24).concat(getMostUsedCustomEmojis(24).filter(e => !_emojiFailReason.has(e.url)))
             .sort((a, b) => (b.used || 0) - (a.used || 0)).slice(0, 24),
         all: () => arrEmojis,
         search: (q) => searchEmojis(q).filter(e => e.name.toLowerCase().includes(q))
-            .concat(searchCustomEmojis(q)).sort((a, b) => (a.score || 0) - (b.score || 0)).slice(0, 48),
+            .concat(searchCustomEmojis(q).filter(e => !_emojiFailReason.has(e.url))).sort((a, b) => (a.score || 0) - (b.score || 0)).slice(0, 48),
         loadMedia: (item, el, placeholder) => loadGifWithFallback(el, `${GIF_API_BASE}/media`, item.id, item.title, placeholder, 0),
     },
     creator: {
