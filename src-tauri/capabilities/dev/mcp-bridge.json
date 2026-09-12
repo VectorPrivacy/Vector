@@ -1,0 +1,12 @@
+{
+  "$schema": "../../gen/schemas/desktop-schema.json",
+  "identifier": "mcp-bridge-dev",
+  "description": "The MCP debug bridge's page-side commands. Debug builds only: build.rs leaves this directory out of release.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "mcp-bridge:default"
+  ],
+  "platforms": ["linux", "windows", "macOS"]
+}

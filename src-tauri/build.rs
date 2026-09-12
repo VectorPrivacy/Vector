@@ -10,7 +10,14 @@ fn main() {
     //
     // See: https://v2.tauri.app/security/permissions/
     // See: https://docs.rs/tauri-build/latest/tauri_build/struct.AppManifest.html
-    tauri_build::try_build(tauri_build::Attributes::default().app_manifest(
+    // capabilities/dev/ holds grants for debug-only plugins (the MCP bridge); a release
+    // build reads the top level only, so those grants never ship.
+    let capabilities = if std::env::var("PROFILE").as_deref() == Ok("release") {
+        "./capabilities/*.json"
+    } else {
+        "./capabilities/**/*.json"
+    };
+    tauri_build::try_build(tauri_build::Attributes::default().capabilities_path_pattern(capabilities).app_manifest(
         tauri_build::AppManifest::default().commands(&[
             // Database commands
             "get_theme",
