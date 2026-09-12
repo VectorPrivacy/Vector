@@ -614,9 +614,16 @@ const ATLAS_MAX_PX: u64 = 16 * 1024 * 1024;
 /// shows a thumbnail, not the film.
 const MAX_SHEET_FRAMES: usize = 256;
 
-/// Column packing for sheets of equal width: each is a vertical strip, stacked until
-/// the column would overflow. Returns the atlas size and one (x, y) per sheet.
+/// Transparent gutter between strips. drawImage samples past a source rect's edge when
+/// it scales, so touching strips bleed their neighbour's pixels into the frame's border.
+const ATLAS_PAD_PX: u32 = 2;
+/// Bumped whenever the packing changes, so an atlas laid out the old way is rebuilt.
+const ATLAS_LAYOUT_VERSION: u32 = 2;
+
+/// Column packing for sheets of equal width: each is a vertical strip, stacked with a
+/// gutter until the column would overflow. Returns the atlas size and one (x, y) per sheet.
 fn atlas_layout(frame_size: u32, heights: &[u32]) -> (u32, u32, Vec<(u32, u32)>) {
+    let step_x = frame_size + ATLAS_PAD_PX;
     let (mut col, mut y, mut tallest) = (0u32, 0u32, 0u32);
     let mut at = Vec::with_capacity(heights.len());
     for &h in heights {
@@ -624,9 +631,9 @@ fn atlas_layout(frame_size: u32, heights: &[u32]) -> (u32, u32, Vec<(u32, u32)>)
             col += 1;
             y = 0;
         }
-        at.push((col * frame_size, y));
-        y += h;
-        tallest = tallest.max(y);
+        at.push((col * step_x, y));
+        tallest = tallest.max(y + h);
+        y += h + ATLAS_PAD_PX;
         // A strip taller than a column closes its column behind it.
         if y > ATLAS_COLUMN_MAX_PX {
             col += 1;
@@ -634,7 +641,7 @@ fn atlas_layout(frame_size: u32, heights: &[u32]) -> (u32, u32, Vec<(u32, u32)>)
         }
     }
     let cols = if y == 0 && col > 0 { col } else { col + 1 };
-    (cols * frame_size, tallest, at)
+    (cols * step_x - ATLAS_PAD_PX, tallest, at)
 }
 
 /// One PNG holding every sheet of a section, so the webview loads a pack in one
@@ -654,6 +661,7 @@ fn atlas_for(dir: &std::path::Path, sheets: &[EmojiSheet]) -> Option<(std::path:
     // different frame count must never be read through an atlas laid out for the old one.
     let key = {
         let mut ident = String::new();
+        ident.push_str(&format!("layout{ATLAS_LAYOUT_VERSION}\n"));
         for s in sheets {
             ident.push_str(&format!("{}|{}|{}\n", s.path, s.frame_count, s.frame_size));
         }
@@ -1334,18 +1342,23 @@ mod tests {
 
     #[test]
     fn atlas_columns_fill_to_the_cap_and_a_tall_sheet_stands_alone() {
-        // 56 px frames: 73 static sheets fill a 4088 px column, the 74th starts the next.
-        let heights: Vec<u32> = std::iter::repeat(56).take(74).collect();
+        let step = 56 + ATLAS_PAD_PX;
+        // Static 56 px strips with a gutter fill a column up to the cap; the next starts a column.
+        let per_col = ((ATLAS_COLUMN_MAX_PX + ATLAS_PAD_PX) / step) as usize;
+        let heights: Vec<u32> = std::iter::repeat(56).take(per_col + 1).collect();
         let (w, h, at) = atlas_layout(56, &heights);
-        assert_eq!((w, h), (112, 73 * 56));
-        assert_eq!(at[72], (0, 72 * 56));
-        assert_eq!(at[73], (56, 0));
+        assert_eq!(w, 2 * step - ATLAS_PAD_PX);
+        assert_eq!(h, per_col as u32 * step - ATLAS_PAD_PX);
+        assert_eq!(at[per_col - 1], (0, (per_col as u32 - 1) * step));
+        assert_eq!(at[per_col], (step, 0));
+        // Strips never touch: every neighbour sits a gutter apart.
+        assert_eq!(at[1].1 - at[0].1, step);
         // A 100-frame animation overflows a column: it stands alone, and its neighbours
         // stay in ordinary columns rather than stretching to its height.
         let (w, h, at) = atlas_layout(56, &[56, 100 * 56, 56]);
-        assert_eq!(w, 168);
+        assert_eq!(w, 3 * step - ATLAS_PAD_PX);
         assert_eq!(h, 100 * 56);
-        assert_eq!(at, vec![(0, 0), (56, 0), (112, 0)]);
+        assert_eq!(at, vec![(0, 0), (step, 0), (2 * step, 0)]);
         // Nothing but a tall sheet: one column, no empty trailing one.
         let (w, _, _) = atlas_layout(56, &[100 * 56]);
         assert_eq!(w, 56);
@@ -1366,12 +1379,14 @@ mod tests {
         let a = write_sheet(&dir, "https://x/a.png", &DecodedSheet { png: strip_png(1, 10), frame_count: 1, frame_size: 56, durations: vec![0] }).unwrap();
         let b = write_sheet(&dir, "https://x/b.gif", &DecodedSheet { png: strip_png(3, 200), frame_count: 3, frame_size: 56, durations: vec![40; 3] }).unwrap();
         let (path, at) = atlas_for(&dir, &[a.clone(), b.clone()]).expect("two cached sheets fold");
-        assert_eq!(at, vec![(0, 0), (0, 56)]);
+        let gap = ATLAS_PAD_PX;
+        assert_eq!(at, vec![(0, 0), (0, 56 + gap)]);
         let atlas = image::open(&path).unwrap().to_rgba8();
-        assert_eq!(atlas.dimensions(), (56, 56 * 4));
+        assert_eq!(atlas.dimensions(), (56, 56 * 4 + gap));
         assert_eq!(atlas.get_pixel(3, 3)[0], 10, "a's pixels at a's offset");
-        assert_eq!(atlas.get_pixel(3, 56 + 3)[0], 200, "b's first frame right below");
-        assert_eq!(atlas.get_pixel(3, 56 * 3 + 3)[0], 200, "b's last frame at the bottom");
+        assert_eq!(atlas.get_pixel(3, 56)[3], 0, "the gutter between strips is transparent");
+        assert_eq!(atlas.get_pixel(3, 56 + gap + 3)[0], 200, "b's first frame past the gutter");
+        assert_eq!(atlas.get_pixel(3, 56 + gap + 56 * 2 + 3)[0], 200, "b's last frame at the bottom");
         let (again, _) = atlas_for(&dir, &[a.clone(), b.clone()]).unwrap();
         assert_eq!(again, path, "same set, same file");
         let mut odd = b.clone();
