@@ -21,6 +21,15 @@ codegen-units = 1
 opt-level = 3
 strip = true
 
+# Shipping-speed binary that still carries the debug-only tooling (the MCP bridge,
+# dev-speed KDF): `cargo build --profile dev-opt`. For measuring, never for release.
+[profile.dev-opt]
+inherits = "release"
+debug-assertions = true
+lto = false
+codegen-units = 16
+strip = false
+
 # Dev builds run the login KDF at SHIPPING speed. Argon2id is deliberately
 # expensive (150MB, 10 iterations); unoptimized it costs seconds per unlock,
 # which is paid on every dev-loop login with Local Encryption on. These crates
