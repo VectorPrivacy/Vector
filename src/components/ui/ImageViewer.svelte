@@ -25,6 +25,8 @@
              ontouchstart={(e) => { if (e.target === e.currentTarget && e.touches.length === 1) pressStart(e.touches[0].clientX, e.touches[0].clientY); }}
              ontouchmove={(e) => { if (e.target === e.currentTarget && e.touches.length === 1) pressMove(e.touches[0].clientX, e.touches[0].clientY); }}
              ontouchend={(e) => { if (e.target === e.currentTarget) pressEnd(); }}>
+            <!-- The image is the zoom and pan gesture surface. -->
+            <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
             <img class="image-viewer-image" class:zoomed={v.zoomed} class:no-anim={v.settling || v.noAnim} class:dragging={v.dragging} draggable="false" alt=""
                  src={v.src} use:bindImage style:transform={v.transform} style:visibility={v.settling ? 'hidden' : null}
                  onload={() => h().load?.()} onerror={() => h().error?.()}

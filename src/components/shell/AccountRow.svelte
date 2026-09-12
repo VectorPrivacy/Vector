@@ -44,6 +44,8 @@
             <div id="account-avatar-container">
                 <Avatar src={st.avatarSrc} size={22} class="btn" />
             </div>
+            <!-- The name lands through the action (twemoji needs the DOM); the row's real door is the avatar. -->
+            <!-- svelte-ignore a11y_missing_content, a11y_no_noninteractive_element_interactions -->
             <h3 id="account-name" class="cutoff chat-contact-with-status btn" use:nameInto={[st.name, st.hasName, h()]} onclick={() => h().openProfile?.()}></h3>
         </div>
         <span id="account-status" class="cutoff chat-contact-status btn" use:statusInto={[st.statusText, st.emojiTags, h()]} onclick={() => h().setStatus?.()}></span>

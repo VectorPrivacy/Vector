@@ -534,7 +534,7 @@ pub fn coalesce(
 /// The base is the union of every honored snapshot ON THE LIVE EPOCH (the refound
 /// snapshot plus any addendum — within one epoch snapshots only add); the cut is
 /// the earliest of them, the refound itself.
-pub(super) struct Refound {
+pub struct Refound {
     pub cut: u64,
     pub base: BTreeSet<PublicKey>,
     pub rumor_id: [u8; 32],

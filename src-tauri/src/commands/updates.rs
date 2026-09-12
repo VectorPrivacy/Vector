@@ -67,7 +67,7 @@ fn is_preview(version: &semver::Version) -> bool {
 /// A stable build additionally refuses previews outright, rather than trusting
 /// that the release was flagged pre-release on GitHub. Mirrors the desktop
 /// comparator in `lib.rs`, so both platforms fail the same way.
-#[cfg_attr(feature = "fdroid", allow(dead_code))]
+#[cfg(test)]
 fn version_is_newer(latest: &str, current: &semver::Version) -> bool {
     version_is_newer_opts(latest, current, !current.pre.is_empty())
 }

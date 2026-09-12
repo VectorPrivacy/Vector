@@ -33,7 +33,7 @@
         <span class="chat-new-description">Enter your contact’s nPub Key below to begin a new chat with them.<br><br>This action will also add them as a contact.</span>
     </div>
     <div class="chat-new-help">
-        <a href="https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/features/add-contacts" target="_blank" class="chat-new-help-link"
+        <a href="https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/features/add-contacts" target="_blank" class="chat-new-help-link" aria-label="How to add contacts"
            onmouseenter={(e) => h.helpEnter(e.currentTarget)} onmouseleave={() => h.helpLeave()}>
             <span class="icon icon-help chat-new-help-icon"></span>
         </a>
@@ -51,7 +51,7 @@
     <div class="row chat-input-container">
         <input id="chat-new-input" type="text" placeholder="Paste nPub Key or Invite Link..." bind:value onkeydown={onKeydown}>
         {#if value.length > 0}
-            <button id="chat-new-btn" style="margin-right: 3px;" onclick={start}><span class="icon icon-add-user"></span></button>
+            <button id="chat-new-btn" style="margin-right: 3px;" aria-label="Start chat" onclick={start}><span class="icon icon-add-user"></span></button>
         {/if}
         <button id="chat-new-scan-btn" aria-label="Scan QR code" onclick={() => h.scan()}>
             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

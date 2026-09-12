@@ -306,7 +306,7 @@
                 <div class="upload-cancel-btn audio-upload-cancel" onclick={(e) => { e.stopPropagation(); h.cancelUpload(msg.id); }}></div>
             </div>
         {:else}
-            <button class="audio-play-btn" class:loading disabled={download.active} onclick={() => { if (playing) pause(); else play(); }}>
+            <button class="audio-play-btn" class:loading disabled={download.active} aria-label={playing ? 'Pause' : 'Play'} onclick={() => { if (playing) pause(); else play(); }}>
                 <span class="icon {loading ? 'icon-loading spin' : (playing ? 'icon-pause' : 'icon-play')}"></span>
             </button>
         {/if}
@@ -331,19 +331,21 @@
             <span class="current-time" style:color={positionMs > 0 ? '#ffffffb3' : null}>{currentText}</span> / <span class="duration">{durationText}</span>
         </div>
         {#if canTranscribe}
-            <button class="audio-transcribe-btn" class:loading={transcribing} class:downloading={download.active}
-                    style:cursor={transcribing ? 'default' : null} style:margin-left={download.active ? 'auto' : null} style:margin-right={download.active ? 'auto' : null}
-                    onclick={onTranscribe}>
-                {#if download.active}
+            {#if download.active}
+                <!-- A model download is progress with its own Cancel, not a button. -->
+                <div class="audio-transcribe-btn downloading" style:margin-left="auto" style:margin-right="auto">
                     <div class="transcribe-progress-container">
                         <div class="transcribe-progress-text">{download.text}</div>
                         <div class="transcribe-progress-bar"><div class="transcribe-progress-fill" style:width="{download.pct}%" style:background={download.failed ? '#ff5e5e' : null}></div></div>
                         <button class="cancel-download-inline" onclick={(e) => { e.stopPropagation(); h.cancelModelDownload(); }}>Cancel</button>
                     </div>
-                {:else}
+                </div>
+            {:else}
+                <button class="audio-transcribe-btn" class:loading={transcribing} style:cursor={transcribing ? 'default' : null}
+                        aria-label={transcription?.phase === 'ready' ? (transcription.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe'} onclick={onTranscribe}>
                     <span class="icon {transcribeIcon}"></span>
-                {/if}
-            </button>
+                </button>
+            {/if}
         {/if}
     </div>
     {#if canTranscribe}

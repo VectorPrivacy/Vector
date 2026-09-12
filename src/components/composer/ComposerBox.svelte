@@ -179,20 +179,20 @@
     <div id="chat-reply-bar" onclick={(e) => { if (e.target.closest('#chat-reply-bar-cancel')) return; h()?.jumpToReply(); }}>
         <span id="chat-reply-bar-label">Replying to <span id="chat-reply-bar-name" use:nameInto={mode.name}></span></span>
         <span id="chat-reply-bar-snippet" use:snippetInto={mode.snippet}></span>
-        <button id="chat-reply-bar-cancel" bind:this={replyCancel} style:right={cancelRight || null} onclick={() => h()?.cancelReply()}><span class="icon icon-cancel"></span></button>
+        <button id="chat-reply-bar-cancel" aria-label="Cancel reply" bind:this={replyCancel} style:right={cancelRight || null} onclick={() => h()?.cancelReply()}><span class="icon icon-cancel"></span></button>
     </div>
     <div id="chat-command-bar">
         <CommandStrip onCancel={() => h()?.cancelCommand()} />
     </div>
     <div class="row chat-input-container" bind:this={els.container}>
-        <button id="chat-input-file" class:open={chrome.attachmentOpen} style:display={isEdit || locked || voiceBusy ? 'none' : null} bind:this={els.file} use:fadeIn={voice.fadeTick} onclick={() => h()?.toggleAttachments()}><span class="icon icon-plus"></span></button>
-        <button id="chat-input-cancel" style:display={isEdit ? null : 'none'} onclick={() => h()?.cancel()}><span class="icon icon-cancel"></span></button>
+        <button id="chat-input-file" aria-label="Attach" class:open={chrome.attachmentOpen} style:display={isEdit || locked || voiceBusy ? 'none' : null} bind:this={els.file} use:fadeIn={voice.fadeTick} onclick={() => h()?.toggleAttachments()}><span class="icon icon-plus"></span></button>
+        <button id="chat-input-cancel" aria-label="Cancel edit" style:display={isEdit ? null : 'none'} onclick={() => h()?.cancel()}><span class="icon icon-cancel"></span></button>
         <VoiceRecorderUI part="strip" />
         <div id="chat-input-host" style:display={voiceBusy ? 'none' : null}></div>
-        <button id="chat-input-emoji" style:display={locked || voiceBusy ? 'none' : null} bind:this={els.emoji} use:fadeIn={voice.fadeTick}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
-        <button id="chat-input-voice" style="margin-right: 3px;" class:pending={voice.state === 'pending'} class:recording={voice.state === 'recording'} class:button-swap-in={voiceAnim === 'in'} class:button-swap-out={voiceAnim === 'out'} style:display={voiceShown && !voiceHidesMic ? null : 'none'} bind:this={els.voice} use:fadeIn={voice.fadeTick} onanimationend={() => swapAnimEnd('voice')} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
+        <button id="chat-input-emoji" aria-label="Emoji" style:display={locked || voiceBusy ? 'none' : null} bind:this={els.emoji} use:fadeIn={voice.fadeTick}><span class="icon {chrome.emojiIcon === 'wink' ? 'icon-wink-face' : 'icon-smile-face'}"></span></button>
+        <button id="chat-input-voice" aria-label="Record a voice message" style="margin-right: 3px;" class:pending={voice.state === 'pending'} class:recording={voice.state === 'recording'} class:button-swap-in={voiceAnim === 'in'} class:button-swap-out={voiceAnim === 'out'} style:display={voiceShown && !voiceHidesMic ? null : 'none'} bind:this={els.voice} use:fadeIn={voice.fadeTick} onanimationend={() => swapAnimEnd('voice')} oncontextmenu={(e) => e.preventDefault()}><span class="icon icon-mic-on"></span></button>
         <VoiceRecorderUI part="dot" />
-        <button id="chat-input-send" style="margin-right: 3px;" class:active={sendActive || voicePreview} class:voice-preview-send={voicePreview} class:has-self-destruct={!!chrome.selfDestructSecs} class:button-swap-in={sendAnim === 'in'} class:button-swap-out={sendAnim === 'out'} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown || voicePreview ? null : 'none'} bind:this={els.send} onanimationend={() => swapAnimEnd('send')} onclick={() => h()?.send()}
+        <button id="chat-input-send" aria-label="Send" style="margin-right: 3px;" class:active={sendActive || voicePreview} class:voice-preview-send={voicePreview} class:has-self-destruct={!!chrome.selfDestructSecs} class:button-swap-in={sendAnim === 'in'} class:button-swap-out={sendAnim === 'out'} data-sd-secs={chrome.selfDestructSecs || undefined} style:display={sendShown || voicePreview ? null : 'none'} bind:this={els.send} onanimationend={() => swapAnimEnd('send')} onclick={() => h()?.send()}
                 oncontextmenu={(e) => { e.preventDefault(); openTimer(); }} ontouchstart={pressStart} ontouchend={pressEnd} ontouchmove={pressEnd} ontouchcancel={pressEnd}><span class="icon icon-send"></span></button>
         <!-- Outside the send button so it never inherits the mic/send swap rotation; it fades with the button. -->
         <span class="self-destruct-badge" class:is-visible={!!chrome.selfDestructSecs && sendShown && !swappingOut}><svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg></span>

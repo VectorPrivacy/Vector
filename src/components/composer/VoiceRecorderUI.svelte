@@ -38,9 +38,9 @@
         <div class="voice-recorder-timer" style:opacity={v.timerOpacity}>{v.timer}</div>
     </div>
     <div class="voice-preview-ui" class:active={preview}>
-        <button class="voice-preview-delete" onclick={() => h()?.previewDelete()}><span class="icon icon-trash"></span></button>
+        <button class="voice-preview-delete" aria-label="Delete recording" onclick={() => h()?.previewDelete()}><span class="icon icon-trash"></span></button>
         <div class="voice-preview-center">
-            <button class="voice-preview-play" onclick={() => h()?.previewPlayPause()}><span class="icon {v.preview.playing ? 'icon-pause' : 'icon-play'}"></span></button>
+            <button class="voice-preview-play" aria-label={v.preview.playing ? 'Pause' : 'Play'} onclick={() => h()?.previewPlayPause()}><span class="icon {v.preview.playing ? 'icon-pause' : 'icon-play'}"></span></button>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <div class="voice-preview-waveform" bind:this={els.waveform} onpointerdown={(e) => h()?.waveformPointerDown(e)}>
                 <div class="voice-preview-progress" style:width="{pct}%"></div>
