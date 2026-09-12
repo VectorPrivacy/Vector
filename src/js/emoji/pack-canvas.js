@@ -760,22 +760,29 @@ class PackCanvasGrid {
         const thumb = Math.min(this.thumbPx, this.cellW, this.cellH);
         const insetX = (this.cellW - thumb) / 2;
         const insetY = (this.cellH - thumb) / 2;
+        // The hover box, sized so that even fully scaled it stays inside the row.
+        const box = Math.min(this.boxPx, Math.floor(Math.min(this.cellW, this.cellH) / PACK_CANVAS_HOVER_SCALE));
+        const stride = this.cellW + this.gapPx;
         for (const i of this.dirty) {
             const col = i % this.cols;
             const row = (i / this.cols) | 0;
-            const x = col * (this.cellW + this.gapPx);
+            const x = col * stride;
             const y = row * this.cellH;
             const cell = this.cellState[i];
             const cx = x + this.cellW / 2;
             const cy = y + this.cellH / 2;
 
-            ctx.clearRect(x, y, this.cellW + this.gapPx, this.cellH + this.gapPx);
+            // A cell owns exactly its rect: it clears nothing of its neighbours and the
+            // clip means nothing it paints, scaled or not, can land on them either.
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(x, y, stride, this.cellH);
+            ctx.clip();
+            ctx.clearRect(x, y, stride, this.cellH);
 
             // Scale around the cell centre so the thumb grows in place
             // instead of drifting toward a corner.
-            const scaled = cell.scale !== 1;
-            if (scaled) {
-                ctx.save();
+            if (cell.scale !== 1) {
                 ctx.translate(cx, cy);
                 ctx.scale(cell.scale, cell.scale);
                 ctx.translate(-cx, -cy);
@@ -786,11 +793,11 @@ class PackCanvasGrid {
             const bgProgress = Math.max(0, Math.min(1,
                 (cell.scale - 1) / (PACK_CANVAS_HOVER_SCALE - 1),
             ));
-            if (bgProgress > 0.01 && this.boxPx > 0) {
-                const boxX = x + (this.cellW - this.boxPx) / 2;
-                const boxY = y + (this.cellH - this.boxPx) / 2;
+            if (bgProgress > 0.01 && box > 0) {
+                const boxX = x + (this.cellW - box) / 2;
+                const boxY = y + (this.cellH - box) / 2;
                 ctx.fillStyle = `rgba(255, 255, 255, ${0.10 * bgProgress})`;
-                _drawRoundedRect(ctx, boxX, boxY, this.boxPx, this.boxPx, 6);
+                _drawRoundedRect(ctx, boxX, boxY, box, box, 6);
                 ctx.fill();
             }
 
@@ -812,7 +819,7 @@ class PackCanvasGrid {
                 ctx.fill();
             }
 
-            if (scaled) ctx.restore();
+            ctx.restore();
         }
         this.dirty.clear();
     }
