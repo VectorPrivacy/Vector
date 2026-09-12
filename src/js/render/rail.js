@@ -79,7 +79,7 @@ function renderRailShortcuts() {
             computeRowBadgeCount,
             computeListRowBadgeCount,
             computeCommunityPingCount,
-            openChat,
+            openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
             wsChannelForCommunity,
             syncRailFade,
             onUnreadDms: syncRailMailBadge,

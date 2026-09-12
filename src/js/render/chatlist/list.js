@@ -168,7 +168,7 @@ function chatlistHelpers() {
         rowClick: (vm) => {
             if (wasContextMenuJustDismissed()) return;
             if (Date.now() - (window._chatRowMenuAt || 0) < 500) { window._chatRowMenuAt = 0; return; }
-            if (vm.joining) return;
+            if (vm.joining || chatOnScreen(vm.chat.id)) return;
             openChat(vm.chat.id);
         },
         createChannel: promptCreateChannel,

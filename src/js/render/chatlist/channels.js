@@ -300,6 +300,7 @@ async function promptDeleteChannel(communityId, channel) {
  * the message renderer, so it's seeded from the community's primary row.
  */
 function openCommunityChannel(communityId, channel) {
+    if (chatOnScreen(channel.id)) return;
     let chat = arrChats.find(c => c.id === channel.id);
     if (!chat) {
         const primary = arrChats.find(c =>

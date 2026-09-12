@@ -1002,6 +1002,11 @@ function refreshChatEmptyState() {
 // Bumped by every open and close: an open that awaited past a newer one paints nothing.
 let _openChatSeq = 0;
 
+/** A click on the conversation already on screen: reopening it only repaints it. */
+function chatOnScreen(id) {
+    return !!id && strOpenChat === id && VectorSvelte.paneShown('chat');
+}
+
 async function openChat(contact) {
     // Safety net: a navigate-away mid-resolve clears this in jumpToUnread's finally,
     // but unfreeze the window on any chat open in case a path slipped through.
