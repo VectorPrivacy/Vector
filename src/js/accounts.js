@@ -116,7 +116,8 @@ const profileSwitcher = {
             const dropup = anchor === 'rail';
             const bottomPx = dropup && anchorEl ? window.innerHeight - anchorEl.getBoundingClientRect().top + 6 : null;
             VectorSvelte.openSwitcher(dropup, bottomPx);
-            VectorSvelte.setProfileSwitcherOpen(true);
+            // The Profile header's chevron and trash follow only the panel hung from it.
+            VectorSvelte.setProfileSwitcherOpen(!dropup);
             this.isOpen = true;
             // Android back closes the account list instead of navigating the profile screen away.
             pushBack('profile-switcher', () => profileSwitcher.close());
