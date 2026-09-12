@@ -16,6 +16,7 @@ use vector_core::community::public_invite::{parse_invite_url, PublicInvitePrevie
 use vector_core::community::transport::LiveTransport;
 use vector_core::community::{service, CommunityId};
 use vector_core::sending::{send_rumor_dm, NoOpSendCallback, SendCallback, SendConfig};
+#[cfg(debug_assertions)]
 use vector_core::ClientRelayExt;
 
 /// Write a Community's channel chats into STATE + the chats table with display metadata
