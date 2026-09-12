@@ -389,10 +389,15 @@ pub struct EmojiSheet {
 /// The sidecar next to each sheet PNG: everything the canvas needs besides the pixels.
 #[derive(Serialize, Deserialize, Clone)]
 struct SheetMeta {
+    /// Bumped when the decode changes what a sheet holds (animated PNGs were once flattened
+    /// to a frame); an older sheet is a miss and is decoded again from the image cache.
+    #[serde(default)]
+    version: u32,
     frame_count: u32,
     frame_size: u32,
     frame_durations_ms: Vec<u32>,
 }
+const SHEET_VERSION: u32 = 2;
 
 /// A decoded, presized sheet before it is written to the cache.
 struct DecodedSheet {
@@ -408,8 +413,6 @@ struct DecodedSheet {
 // metadata). Frames are decoded + resized ONCE; every later open, on every
 // launch, is a stat and a small JSON read. The previous single-container
 // format (`<key>.vspr`, "VSPR" magic) is converted on first read.
-const VSPR_MAGIC: &[u8; 4] = b"VSPR";
-const VSPR_VERSION: u8 = 1;
 static SHEET_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A tmp path no concurrent writer of the same file can share.
@@ -451,7 +454,7 @@ fn write_sheet(dir: &std::path::Path, url: &str, decoded: &DecodedSheet) -> Resu
     let tmp = sheet_tmp_path(&png);
     std::fs::write(&tmp, &decoded.png).map_err(|e| format!("sheet write: {e}"))?;
     std::fs::rename(&tmp, &png).map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("sheet place: {e}") })?;
-    let meta = SheetMeta { frame_count: decoded.frame_count, frame_size: decoded.frame_size, frame_durations_ms: decoded.durations.clone() };
+    let meta = SheetMeta { version: SHEET_VERSION, frame_count: decoded.frame_count, frame_size: decoded.frame_size, frame_durations_ms: decoded.durations.clone() };
     let body = serde_json::to_vec(&meta).map_err(|e| e.to_string())?;
     std::fs::write(&json, body).map_err(|e| format!("sheet meta write: {e}"))?;
     Ok(EmojiSheet { path: png.to_string_lossy().into_owned(), x: 0, y: 0, frame_count: meta.frame_count, frame_size: meta.frame_size, frame_durations_ms: meta.frame_durations_ms })
@@ -462,23 +465,17 @@ fn read_sheet(dir: &std::path::Path, url: &str) -> Option<EmojiSheet> {
     let (png, json) = sheet_files(dir, url);
     if let Ok(buf) = std::fs::read(&json) {
         if png.is_file() {
-            if let Ok(meta) = serde_json::from_slice::<SheetMeta>(&buf) {
+            if let Ok(meta) = serde_json::from_slice::<SheetMeta>(&buf).ok().filter(|m| m.version == SHEET_VERSION).ok_or(()) {
                 touch(&png);
                 return Some(EmojiSheet { path: png.to_string_lossy().into_owned(), x: 0, y: 0, frame_count: meta.frame_count, frame_size: meta.frame_size, frame_durations_ms: meta.frame_durations_ms });
             }
         }
     }
-    // Legacy container: split it into the two-file layout, and retire it only once
-    // the new layout is on disk.
+    // A legacy container was decoded by a version that flattened animated PNGs, so it is
+    // retired rather than converted: the emoji decodes again from the image cache.
     let legacy = dir.join(format!("{}.vspr", sheet_key(url)));
-    let buf = std::fs::read(&legacy).ok()?;
-    let Some(decoded) = deserialize_legacy_sheet(&buf) else {
-        let _ = std::fs::remove_file(&legacy);
-        return None;
-    };
-    let sheet = write_sheet(dir, url, &decoded).ok()?;
     let _ = std::fs::remove_file(&legacy);
-    Some(sheet)
+    None
 }
 
 /// A remembered descriptor is only good while its file is: the sweep may have taken it.
@@ -489,34 +486,6 @@ fn cached_sheet(url: &str) -> Option<EmojiSheet> {
     }
     spritesheet_cache().lock().unwrap().remove(url);
     None
-}
-
-/// The retired single-file layout:
-///   ["VSPR"][ver u8][frame_size u32 LE][frame_count u32 LE]
-///   [durations: frame_count × u32 LE][png_len u32 LE][png bytes]
-/// A truncated or garbage file is a cache miss, never a panic.
-fn deserialize_legacy_sheet(buf: &[u8]) -> Option<DecodedSheet> {
-    if buf.len() < 13 || &buf[0..4] != VSPR_MAGIC || buf[4] != VSPR_VERSION {
-        return None;
-    }
-    let frame_size = u32::from_le_bytes(buf[5..9].try_into().ok()?);
-    let frame_count = u32::from_le_bytes(buf[9..13].try_into().ok()?);
-    let mut off = 13usize;
-    let dur_bytes = (frame_count as usize).checked_mul(4)?;
-    if buf.len() < off + dur_bytes + 4 {
-        return None;
-    }
-    let mut durations = Vec::with_capacity(frame_count as usize);
-    for _ in 0..frame_count {
-        durations.push(u32::from_le_bytes(buf[off..off + 4].try_into().ok()?));
-        off += 4;
-    }
-    let png_len = u32::from_le_bytes(buf[off..off + 4].try_into().ok()?) as usize;
-    off += 4;
-    if buf.len() < off + png_len {
-        return None;
-    }
-    Some(DecodedSheet { png: buf[off..off + png_len].to_vec(), frame_count, frame_size, durations })
 }
 
 /// Soft cap on the on-disk spritesheet cache. Presized 56px sheets are small
@@ -851,8 +820,38 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
     Ok(sheet)
 }
 
+/// An animated PNG announces itself with an `acTL` chunk ahead of the image data; the
+/// name and content type say only "png", and a CDN serves it as one.
+fn is_animated_png(bytes: &[u8]) -> bool {
+    const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !bytes.starts_with(SIG) {
+        return false;
+    }
+    let mut off = SIG.len();
+    while off + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]) as usize;
+        let kind = &bytes[off + 4..off + 8];
+        if kind == b"acTL" {
+            return true;
+        }
+        if kind == b"IDAT" || kind == b"IEND" {
+            return false;
+        }
+        off = match off.checked_add(12 + len) { Some(n) => n, None => return false };
+    }
+    false
+}
+
 fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<DecodedSheet, String> {
-    let inferred = if content_type.contains("webp") || url.ends_with(".webp") {
+    // The bytes decide before the name or content type does: the local image cache
+    // names files by extension, and an animated PNG carries a plain `.png` name.
+    let inferred = if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if is_animated_png(bytes) {
+        "apng"
+    } else if content_type.contains("webp") || url.ends_with(".webp") {
         "webp"
     } else if content_type.contains("gif") || url.ends_with(".gif") {
         "gif"
@@ -1328,18 +1327,6 @@ mod tests {
         dir
     }
 
-    fn legacy_container(frame_size: u32, durations: &[u32], png: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(VSPR_MAGIC);
-        out.push(VSPR_VERSION);
-        out.extend_from_slice(&frame_size.to_le_bytes());
-        out.extend_from_slice(&(durations.len() as u32).to_le_bytes());
-        for d in durations { out.extend_from_slice(&d.to_le_bytes()); }
-        out.extend_from_slice(&(png.len() as u32).to_le_bytes());
-        out.extend_from_slice(png);
-        out
-    }
-
     #[test]
     fn atlas_columns_fill_to_the_cap_and_a_tall_sheet_stands_alone() {
         let step = 56 + ATLAS_PAD_PX;
@@ -1410,21 +1397,34 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_container_is_converted_once_and_retired() {
+    fn a_legacy_container_is_retired_and_an_old_sheet_is_a_miss() {
         let dir = scratch_dir("legacy");
-        let png = vec![0xCDu8; 32];
         let legacy = dir.join(format!("{}.vspr", sheet_key("https://x/old.webp")));
-        std::fs::write(&legacy, legacy_container(56, &[40, 40], &png)).unwrap();
-        let sheet = read_sheet(&dir, "https://x/old.webp").expect("legacy converts on read");
-        assert_eq!(sheet.frame_count, 2);
-        assert_eq!(std::fs::read(&sheet.path).unwrap(), png);
-        assert!(!legacy.exists(), "the container is gone after conversion");
-        assert!(read_sheet(&dir, "https://x/old.webp").is_some(), "the converted layout serves the next read");
+        std::fs::write(&legacy, b"VSPR whatever").unwrap();
+        assert!(read_sheet(&dir, "https://x/old.webp").is_none(), "a legacy sheet is decoded again");
+        assert!(!legacy.exists(), "and the container is gone");
 
-        // Truncated / garbage containers are a miss, never a panic.
-        assert!(deserialize_legacy_sheet(&legacy_container(56, &[40], &png)[..20]).is_none());
-        assert!(deserialize_legacy_sheet(b"nope").is_none());
-        assert!(deserialize_legacy_sheet(&[]).is_none());
+        let decoded = DecodedSheet { png: strip_png(1, 7), frame_count: 1, frame_size: 56, durations: vec![0] };
+        let sheet = write_sheet(&dir, "https://x/new.png", &decoded).unwrap();
+        let (_, json) = sheet_files(&dir, "https://x/new.png");
+        let mut meta: serde_json::Value = serde_json::from_slice(&std::fs::read(&json).unwrap()).unwrap();
+        meta["version"] = serde_json::json!(SHEET_VERSION - 1);
+        std::fs::write(&json, serde_json::to_vec(&meta).unwrap()).unwrap();
+        assert!(read_sheet(&dir, "https://x/new.png").is_none(), "a sheet from an older decode is a miss");
+        assert!(std::path::Path::new(&sheet.path).is_file(), "its PNG is left for the rewrite to replace");
+    }
+
+    #[test]
+    fn an_animated_png_is_told_apart_by_its_actl_chunk() {
+        let mut apng = b"\x89PNG\r\n\x1a\n".to_vec();
+        // IHDR (13 bytes of payload) then acTL, as an encoder writes them.
+        apng.extend_from_slice(&13u32.to_be_bytes()); apng.extend_from_slice(b"IHDR"); apng.extend_from_slice(&[0u8; 13 + 4]);
+        apng.extend_from_slice(&8u32.to_be_bytes()); apng.extend_from_slice(b"acTL"); apng.extend_from_slice(&[0u8; 8 + 4]);
+        assert!(is_animated_png(&apng));
+        let plain = strip_png(1, 7);
+        assert!(!is_animated_png(&plain));
+        assert!(!is_animated_png(b"GIF89a"));
+        assert!(!is_animated_png(&[]));
     }
 
     fn square_frames(dim: u32) -> Vec<(image::RgbaImage, u32)> {
