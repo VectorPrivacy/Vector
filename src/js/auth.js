@@ -159,6 +159,7 @@ window.hideBunkerForm = hideBunkerForm;
  * @param {boolean} skipAnimations - Skip intro animations (for instant login without PIN)
  */
 async function login(skipAnimations = false) {
+    console.time('[Boot] login() total');
     if (strPubkey) {
         if (addAccountFlow.committed) {
             // A new account boots the way a switch does: marker, then reload. Booting it

@@ -2065,7 +2065,6 @@ window.addEventListener("DOMContentLoaded", async () => {
                     // login() once the chat surface is ready.
 
                     strPubkey = npub;
-                    console.time('[Boot] login() total');
                     login(true); // skipAnimations = true
                 } catch (e) {
                     console.error('Direct login failed:', e);
