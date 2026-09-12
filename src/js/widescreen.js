@@ -255,8 +255,12 @@ function wsSyncMembersPane() {
     // already up and decline to restore it, so every channel click closed the
     // member list for good — which then looked like a per-community memory.
     const shown = VectorSvelte.paneShown('groupOverview');
-    if (inCommunity && wsMembersOpen && !shown) openGroupOverview(chat);
-    else if (shown && (!inCommunity || !wsMembersOpen)) wsCloseDetails();
+    if (inCommunity && wsMembersOpen) {
+        // Up already: only another community's channel re-renders it, in place.
+        if (!shown || VectorSvelte.overviewState().groupId !== communityIdOfChat(chat)) openGroupOverview(chat);
+    } else if (shown) {
+        wsCloseDetails();
+    }
 }
 
 function openCommunityDetails(chat) {

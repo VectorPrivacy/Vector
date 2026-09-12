@@ -451,6 +451,20 @@ const communityMembersCache = new Map();
 const communityRoleGraphCache = new Map();
 const _communityCountLastFetch = new Map();
 const _communityCountInFlight = new Set();
+/** One `get_community_members` per community at a time: the header count and the roster ask together. */
+const _communityMembersInFlight = new Map();
+function fetchCommunityMembers(communityId) {
+    let p = _communityMembersInFlight.get(communityId);
+    if (!p) {
+        p = invoke('get_community_members', { communityId }).finally(() => _communityMembersInFlight.delete(communityId));
+        _communityMembersInFlight.set(communityId, p);
+    }
+    return p;
+}
+/** Capabilities per community, so a repaint of the head starts with the last known gates. */
+const _communityCapsCache = new Map();
+/** Bumped per overview render: a render that awaited past a newer one paints nothing. */
+let _overviewRenderSeq = 0;
 
 /** Render text for a community's member count, or '' if not yet known. */
 function communityMemberSubtext(communityId) {
@@ -468,7 +482,7 @@ async function refreshCommunityMemberCount(communityId, force = false) {
     _communityCountInFlight.add(communityId);
     let members;
     try {
-        members = await invoke('get_community_members', { communityId });
+        members = await fetchCommunityMembers(communityId);
     } catch (_) {
         _communityCountInFlight.delete(communityId);
         return;
@@ -561,8 +575,8 @@ async function openGroupOverview(chat) {
         VectorSvelte.showPane('chat', false);
     }
 
-    // Store which group is being viewed
-    VectorSvelte.setOverviewGroup(chat.id);
+    // The pane carries the community id: every guard and live listener compares against it.
+    VectorSvelte.setOverviewGroup(chat.metadata?.custom_fields?.community_id || chat.id);
 
     // Show the shell BEFORE rendering: the renderer's header/avatar paint
     // synchronously and its awaited fetches (members can be network-bound) fill
@@ -777,13 +791,13 @@ let groupRosterSeq = 0;
 async function renderCommunityOverview(chat, preserveSearch = false) {
     const cf = chat.metadata?.custom_fields || {};
     const communityId = cf.community_id;
-    // Role-engine capabilities (NOT an owner check — the owner is just the top role). Each management
-    // affordance gates on the matching bit. Falls back to no-caps on error (hide everything management).
-    let caps = {};
-    try { caps = await invoke('get_community_capabilities', { communityId }); } catch (_) {}
+    const seq = ++_overviewRenderSeq;
+    // Still the render the pane is waiting on, for the community it shows.
+    const live = () => seq === _overviewRenderSeq && VectorSvelte.overviewState().groupId === communityId;
     // Tag the overview with its community so the realtime `community_refreshed` listener knows to re-render
     // it when a control change (ban/role/metadata/mode) lands live.
     VectorSvelte.setOverviewGroup(communityId);
+    // The head paints from memory before anything is awaited; the gates it needs land below.
     VectorSvelte.setOverview({
         chatId: chat.id,
         communityId,
@@ -793,11 +807,18 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         muted: !!chat.muted,
         isOwner: cf.is_owner === 'true',
         isV2: cf.proto_version === '2',
-        caps,
+        caps: _communityCapsCache.get(communityId) || {},
         raid: null,
         migration: null,
         upload: null,
     });
+    // Role-engine capabilities (NOT an owner check — the owner is just the top role). Each management
+    // affordance gates on the matching bit. Falls back to no-caps on error (hide everything management).
+    let caps = {};
+    try { caps = await invoke('get_community_capabilities', { communityId }); } catch (_) {}
+    if (!live()) return;
+    _communityCapsCache.set(communityId, caps);
+    VectorSvelte.setOverview({ caps });
     // The narrow layout has no community header to hang a pip on, so the Moderate button carries the alarm.
     if (caps.ban) {
         invoke('check_community_raid', { communityId }).then(v => {
@@ -865,7 +886,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
             roleGraph,
         ]);
         const cachedPrint = rosterPrint();
-        try { memberList = await invoke('get_community_members', { communityId }); } catch (_) {}
+        try { memberList = await fetchCommunityMembers(communityId); } catch (_) {}
         // Cache the count for the header/overview subtext (the overview's own authoritative fetch).
         communityMembersCache.set(communityId, memberList);
         communityMemberCounts.set(communityId, memberList.length);
@@ -883,7 +904,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // The user may have switched to another community's overview mid-fetch — don't
         // paint this one's roster (or subtext) over it. The panel carries the COMMUNITY
         // id (re-tagged right after open for the realtime listener), never chat.id here.
-        if (VectorSvelte.overviewState().groupId !== communityId || groupRoster !== roster) return;
+        if (!live() || groupRoster !== roster) return;
         VectorSvelte.touchCommunity(communityId);
         if (!hadCache || rosterPrint() !== cachedPrint) {
             roster.setRoster({ members: memberList, admins: adminNpubs, banned: bannedList, roleGraph });
@@ -1127,7 +1148,7 @@ async function openCommunityInvitePanel(chat) {
     // members ∪ owner ∪ admins (owner/admins may predate activity-based membership).
     const memberSet = new Set();
     try {
-        for (const m of await invoke('get_community_members', { communityId })) memberSet.add(m.npub);
+        for (const m of await fetchCommunityMembers(communityId)) memberSet.add(m.npub);
     } catch (_) {}
     const ownerNpub = chat.metadata?.custom_fields?.owner_npub;
     if (ownerNpub) memberSet.add(ownerNpub);

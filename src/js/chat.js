@@ -999,6 +999,9 @@ function refreshChatEmptyState() {
     VectorSvelte.setNotice('empty', isEmptyCommunity ? (chat.metadata?.custom_fields?.name || 'this community') : '');
 }
 
+// Bumped by every open and close: an open that awaited past a newer one paints nothing.
+let _openChatSeq = 0;
+
 async function openChat(contact) {
     // Safety net: a navigate-away mid-resolve clears this in jumpToUnread's finally,
     // but unfreeze the window on any chat open in case a path slipped through.
@@ -1027,7 +1030,11 @@ async function openChat(contact) {
     VectorSvelte.showPane('chatNew', false);
     VectorSvelte.showPane('createGroup', false);
     VectorSvelte.showPane('chats', false);
-    VectorSvelte.showPane('groupOverview', false);
+    // Widescreen docks the roster beside the conversation: moving between community
+    // channels keeps it up, and the pane sync re-renders it only when the community changes.
+    const keepDetails = wsActive() && VectorSvelte.paneShown('groupOverview')
+        && !!communityIdOfChat(arrChats.find(c => c.id === contact));
+    if (!keepDetails) VectorSvelte.showPane('groupOverview', false);
     // Hide the Settings/Invites tabs too — a chat opened from inside one of them (deep-link join,
     // notification tap) must fully take over, not paint underneath the still-visible menu.
     VectorSvelte.showPane('settings', false);
@@ -1036,7 +1043,7 @@ async function openChat(contact) {
     // Details for good — drop its back entry so back-nav doesn't land on a dead re-hide step.
     // Same for the two composers: opening a conversation abandons them, so leaving their
     // entries behind would send back-nav to a panel that is no longer on screen.
-    popBack('group-overview');
+    if (!keepDetails) popBack('group-overview');
     popBack('create-group');
     popBack('new-chat');
     VectorSvelte.showPane('chat', true);
@@ -1074,6 +1081,7 @@ async function openChat(contact) {
     const isGroup = chatIsGroup(chat);
     const profile = !isGroup ? getProfile(contact) : null;
     strOpenChat = contact;
+    const openSeq = ++_openChatSeq;
     wsSyncOpenChat();
     updateSelfDestructIndicator(contact);
     // Warm the command-bot snapshot so the attachment menu's Commands item
@@ -1152,9 +1160,11 @@ async function openChat(contact) {
         contact,
         proceduralScrollState.messagesPerBatch
     );
+    if (openSeq !== _openChatSeq) return;
 
     // Merge any historical PIVX payments — helper in pivx.js
     await mergePivxPaymentsIntoChat(contact, initialMessages);
+    if (openSeq !== _openChatSeq) return;
 
     // No on-open Community sync: NIP-17-parity means catch-up happens at boot (sync_communities_boot)
     // and on relay reconnect, with realtime delivering everything in between. Opening a channel reads
@@ -1166,6 +1176,7 @@ async function openChat(contact) {
     // messages into view (same on-demand windowing as messages).
     try {
         const systemEvents = await invoke('get_system_events', { conversationId: contact });
+        if (openSeq !== _openChatSeq) return;
         // Index once: dedup-vs-loaded-messages and the known-profile check were each O(n) per
         // system event (O(systemEvents * messages) + O(systemEvents * profiles)) on chat open.
         const initialMsgIds = new Set(initialMessages.map(m => m.id));
@@ -1223,9 +1234,11 @@ async function openChat(contact) {
     // the window anchors.
     if (initialMessages.length > MAX_WINDOW_ROWS) {
         await renderWindow(initialMessages.length - MAX_WINDOW_ROWS, initialMessages.length);
+        if (openSeq !== _openChatSeq) return;
         scrollToBottom(domChatMessages, false);
     } else {
         await updateChat(chat, initialMessages, profile, true);
+        if (openSeq !== _openChatSeq) return;
         // Anchor the window to the freshly-rendered tail so isAtDataBottom() and
         // the scroll-extend paths have valid anchors.
         _windowReseatAnchorsFromDom();
@@ -1476,6 +1489,7 @@ async function closeChat() {
     if (strCurrentEditMessageId) cancelEdit();
     stashComposerDraft();
     strOpenChat = "";
+    _openChatSeq++;
     wsSyncOpenChat();
     previousChatBeforeProfile = ""; // Clear when closing chat
     nLastTypingIndicator = 0;
