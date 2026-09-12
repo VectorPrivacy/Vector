@@ -1158,7 +1158,20 @@ pub async fn miniapp_open(
         }
     
         let window = Arc::new(window_builder.build()?);
-    
+
+        // A covered game must keep its socket: WebKit throttles a page whose window is
+        // occluded (timers at 1 Hz, no animation frames, a suppressed process), and a
+        // multiplayer session times out behind another window. Occlusion is ignored here;
+        // minimising still counts as hidden.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = window.with_webview(|wv| unsafe {
+                use objc2::{msg_send, runtime::AnyObject};
+                let view = wv.inner() as *mut AnyObject;
+                let _: () = msg_send![view, _setWindowOcclusionDetectionEnabled: false];
+            });
+        }
+
         // Set up window close handler
         let window_label_for_handler = window_label.clone();
         let app_handle_for_handler = app.app_handle().clone();
