@@ -704,10 +704,10 @@ async function setupRustListeners() {
             }
         }
 
-        // Newest-first chat list sort (independent of how the message landed
-        // in chat.messages).
+        // Newest-first chat list order (independent of how the message landed in
+        // chat.messages): the list re-diffs only if a row actually moved.
         if (newMessage.at >= (chat.messages[chat.messages.length - 1]?.at ?? 0)) {
-            sortChats();
+            reorderChatlist();
         }
 
         // If this user has the open chat, then update the chat too
