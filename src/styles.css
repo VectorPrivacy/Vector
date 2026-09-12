@@ -2881,15 +2881,9 @@ body.mobile #chat-new-scan-btn { display: block; }
     border: none;
 }
 
-/* Fade-in when a row transitions from content-visibility:auto skipped → visible.
-   Toggled by the listener in chatlist-reveal.js. Opacity-only so it stays on
-   the compositor and doesn't retrigger layout/paint. */
-@keyframes chatlist-row-reveal {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
-.chatlist-contact.cv-revealed {
-  animation: chatlist-row-reveal 0.18s ease-out both;
+/* A row within reach of the viewport renders before it arrives (js/chatlist-window.js). */
+.chatlist-contact.cv-near {
+  content-visibility: visible;
 }
 
 .chatlist-contact p {
