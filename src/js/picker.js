@@ -26,6 +26,8 @@ VectorSvelte.onPickerVisibility((visible) => {
             VectorSvelte.setPickerVisible(false);
             VectorSvelte.setPickerBottom('');
         });
+        // Every way the panel appears wakes the grids on screen; they sleep while hidden.
+        _rearmVisiblePackCanvases();
     } else {
         hideEmojiTooltip();
         popBack('emoji-picker');

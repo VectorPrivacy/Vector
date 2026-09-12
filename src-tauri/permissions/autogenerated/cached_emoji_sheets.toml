@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cached-emoji-sheets"
+description = "Enables the cached_emoji_sheets command without any pre-configured scope."
+commands.allow = ["cached_emoji_sheets"]
+
+[[permission]]
+identifier = "deny-cached-emoji-sheets"
+description = "Denies the cached_emoji_sheets command without any pre-configured scope."
+commands.deny = ["cached_emoji_sheets"]

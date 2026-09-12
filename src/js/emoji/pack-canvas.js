@@ -11,20 +11,18 @@
 // — not by the browser's native animated-image pipeline. This is what
 // Discord (on Electron/Chromium) gets for free; on WKWebView we build it.
 //
-// Decoding: ImageDecoder (WebCodecs) extracts each frame as an
-// ImageBitmap, resized down to 56×56 so memory stays bounded
-// (54 emojis × ~30 frames × ~12KB ≈ 20MB). Frames are cached globally by
-// URL so reopening the panel reuses the decode.
+// Decoding happens in Rust: each emoji becomes a presized PNG strip of 56×56 frames
+// on disk, and a section's strips fold into one atlas file, so the webview loads a
+// pack in one asset request and slices it with drawImage. Descriptors are cached
+// globally by URL so reopening the panel reuses everything.
 //
 // Activation: IntersectionObserver toggles each section's slot in the
 // global active set; the rAF loop self-terminates when the set is empty.
 // Panel hide manually drains the set so we don't keep ticking under
 // opacity:0. Single shared rAF for ALL pack sections in the picker.
 
-// WKWebView doesn't ship the WebCodecs `ImageDecoder` API, so frame
-// decoding runs in Rust via a Tauri command and ships a single
-// PNG spritesheet per emoji over IPC. Frontend just slices the loaded
-// `<img>` into the canvas via drawImage(src, sx, sy, sw, sh, ...).
+// WKWebView doesn't ship the WebCodecs `ImageDecoder` API, so frame decoding
+// runs in Rust; nothing but small descriptors crosses IPC.
 const PACK_CANVAS_THUMB_PX = 28;
 /** Row stride. Slightly taller than the thumb's 28+pad to give rows a
  *  bit of breathing room between them, matching the stock grid's 4px
@@ -213,30 +211,75 @@ document.addEventListener('keydown', () => {
 /** url → Promise<{img: HTMLImageElement, frameCount, frameSize, durations: number[]} | null> */
 const _packEmojiSheetCache = new Map();
 
+/** path → Promise<HTMLImageElement|null>: a pack atlas is one file shared by every emoji
+ *  in it, so it is fetched and decoded once however many strips point into it. Bounded
+ *  by insertion order; a session that browses every pack still holds a few dozen. */
+const _sheetImageCache = new Map();
+const SHEET_IMAGE_CACHE_MAX = 256;
+
+function _sheetImage(path) {
+    if (_sheetImageCache.has(path)) return _sheetImageCache.get(path);
+    const promise = (async () => {
+        const img = new Image();
+        img.src = convertFileSrc(path);
+        // decode() blocks until the PNG is fully ready to draw — avoids
+        // a flash of placeholder when the canvas calls drawImage().
+        try {
+            if (typeof img.decode === 'function') await img.decode();
+            else await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
+        } catch (_e) {}
+        // A broken image throws inside drawImage and would take the shared loop down
+        // with it: a file that failed to load is not cached, it is retried next time.
+        if (!img.complete || !img.naturalWidth) {
+            _sheetImageCache.delete(path);
+            return null;
+        }
+        return img;
+    })();
+    if (_sheetImageCache.size >= SHEET_IMAGE_CACHE_MAX) {
+        _sheetImageCache.delete(_sheetImageCache.keys().next().value);
+    }
+    _sheetImageCache.set(path, promise);
+    return promise;
+}
+
+/** A sheet descriptor from the backend → the frames the canvas draws, or null when its
+ *  file did not load (the grid compacts the cell away). The PNG is a file in the app
+ *  cache (its own sheet, or a pack atlas the strip sits inside), so it loads through
+ *  the asset route: no pixels in IPC, and the decode happens off the main thread. */
+async function _sheetFrames(sheet) {
+    if (!sheet || !sheet.path) return null;
+    const img = await _sheetImage(sheet.path);
+    if (!img) return null;
+    return {
+        img,
+        x: sheet.x || 0,
+        y: sheet.y || 0,
+        frameCount: sheet.frame_count,
+        frameSize: sheet.frame_size,
+        durations: sheet.frame_durations_ms || [],
+    };
+}
+
+/** Everything the on-disk sheet cache already holds for these urls, in one crossing.
+ *  Misses stay unknown, so the per-emoji path fetches them one by one as they land. */
+async function primePackEmojiSheets(urls) {
+    const unknown = [...new Set(urls.filter(u => !_packEmojiSheetCache.has(u) && !_emojiFailReason.has(u)))];
+    if (!unknown.length) return;
+    let hits;
+    try { hits = await invoke('cached_emoji_sheets', { urls: unknown }); }
+    catch (e) { console.warn('[emoji-packs] cached sheets lookup failed:', e); return; }
+    unknown.forEach((url, i) => {
+        const sheet = Array.isArray(hits) ? hits[i] : null;
+        if (sheet) _packEmojiSheetCache.set(url, _sheetFrames(sheet));
+    });
+}
+
 async function decodePackEmojiFrames(url) {
     if (_packEmojiSheetCache.has(url)) return _packEmojiSheetCache.get(url);
     const promise = (async () => {
         try {
-            const sheet = await invoke('decode_animated_emoji', { url });
-            if (!sheet || !sheet.png_base64) return null;
-            const img = new Image();
-            img.src = `data:image/png;base64,${sheet.png_base64}`;
-            // decode() blocks until the PNG is fully ready to draw — avoids
-            // a flash of placeholder when the canvas calls drawImage().
-            if (typeof img.decode === 'function') {
-                try { await img.decode(); } catch (_e) {}
-            } else {
-                await new Promise((res, rej) => {
-                    img.onload = res;
-                    img.onerror = rej;
-                });
-            }
-            return {
-                img,
-                frameCount: sheet.frame_count,
-                frameSize: sheet.frame_size,
-                durations: sheet.frame_durations_ms || [],
-            };
+            return await _sheetFrames(await invoke('decode_animated_emoji', { url }));
         } catch (e) {
             console.warn('[emoji-packs] frame decode failed:', url, e);
             _emojiFailReason.set(url, String(e && e.message ? e.message : e));
@@ -260,7 +303,13 @@ function _packCanvasTick(now) {
         // still in the active set, before its IO reports the removal — reap it
         // here so we don't tick a detached canvas or leak its observers.
         if (!section.canvas.isConnected) { section.destroy(); continue; }
-        if (section._advance(dt)) anyActive = true;
+        // One section's failure must not stop every other canvas in the app.
+        try {
+            if (section._advance(dt)) anyActive = true;
+        } catch (e) {
+            console.warn('[emoji-packs] section tick failed, dropping it:', e);
+            section.destroy();
+        }
     }
     // Pause when nothing needs animating (all visible packs static + idle).
     // Sections stay in the active set; hover / frame-load / re-intersect restart
@@ -302,6 +351,8 @@ function _stopPackCanvasLoop() {
 function _rearmVisiblePackCanvases() {
     const main = _pickerEls.main;
     if (!main || _packCanvasGrids.size === 0) return;
+    // A hidden panel's grids stay asleep: nothing decodes and nothing ticks until an open.
+    if (!VectorSvelte.pickerVisible()) return;
     // main + each canvas share the panel's transform, so this viewport-space
     // overlap test stays correct even mid open-transition.
     const mainRect = main.getBoundingClientRect();
@@ -541,14 +592,19 @@ class PackCanvasGrid {
         return idx < this.emojis.length ? idx : -1;
     }
 
-    // Decode this section's frames once, the first time it becomes visible.
+    // Decode this section's frames once, the first time it becomes visible. The panel's
+    // grids are in the DOM from login on, so their observer fires while the panel is
+    // still hidden; the open re-arms what is on screen, so nothing decodes before then.
     _requestFrames() {
         if (this._framesRequested) return;
+        if (!this.isPreview && !VectorSvelte.pickerVisible()) return;
         this._framesRequested = true;
         this._loadFrames();
     }
 
-    _loadFrames() {
+    async _loadFrames() {
+        // One call for what is already local, one call each for what is not.
+        await primePackEmojiSheets(this.emojis.map(e => e.url));
         let pending = this.emojis.length;
         for (let i = 0; i < this.emojis.length; i++) {
             const url = this.emojis[i].url;
@@ -629,6 +685,8 @@ class PackCanvasGrid {
     // a hover tween in flight, or frames still loading). The shared loop pauses
     // itself when every active section returns false.
     _advance(dt) {
+        // Frames never asked for (the panel has not been opened yet) → nothing to tick.
+        if (!this._framesRequested) return false;
         // Settled + nothing animated → no work until a hover / frame-load wakes us.
         if (!this._hasTween && this._nextDue === Infinity) return false;
         this._accumDt += Math.max(dt, 0);
@@ -740,10 +798,10 @@ class PackCanvasGrid {
             if (sheet && sheet.img) {
                 // Source rect: vertical strip of frames, each `frameSize`
                 // pixels tall, indexed by the current frame.
-                const sy = cell.frame * sheet.frameSize;
+                const sy = sheet.y + cell.frame * sheet.frameSize;
                 ctx.drawImage(
                     sheet.img,
-                    0, sy, sheet.frameSize, sheet.frameSize,
+                    sheet.x, sy, sheet.frameSize, sheet.frameSize,
                     x + insetX, y + insetY, thumb, thumb,
                 );
             } else if (sheet === undefined) {

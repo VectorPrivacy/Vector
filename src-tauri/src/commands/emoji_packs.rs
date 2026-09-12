@@ -332,20 +332,16 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
         // single file read: no fetch, no decode. Icons render as plain <img> and
         // skip this. Detached + best-effort — the bytes are already in hand.
         if !matches!(kind.as_deref(), Some("emoji_pack_icon")) {
-            if let Some(sheet_path) = emoji_spritesheet_path(&handle, &url) {
-                if !sheet_path.exists() {
+            if let Some(dir) = sheet_cache_dir(&handle) {
+                if read_sheet(&dir, &url).is_none() {
                     let warm_bytes = bytes_arc.clone();
                     let warm_ct = mime_ref.to_string();
                     let warm_url = url.clone();
+                    // spawn-detached: global sheet cache maintenance on bytes in hand, no account state
                     tokio::task::spawn_blocking(move || {
                         if let Ok(decoded) = decode_to_spritesheet(&warm_bytes[..], &warm_ct, &warm_url) {
-                            let blob = serialize_spritesheet(
-                                decoded.frame_size, &decoded.durations, &decoded.png,
-                            );
-                            if std::fs::write(&sheet_path, &blob).is_ok() {
-                                if let Some(dir) = sheet_path.parent() {
-                                    prune_spritesheet_cache(dir);
-                                }
+                            if write_sheet(&dir, &warm_url, &decoded).is_ok() {
+                                prune_spritesheet_cache(&dir);
                             }
                         }
                     });
@@ -365,29 +361,40 @@ pub async fn emoji_pack_upload_image<R: tauri::Runtime>(
 // The picker's per-section canvas renderer needs decoded frames + per-frame
 // durations. WKWebView ships neither ImageDecoder nor WebP-frame access via
 // `<img>`, so we decode in Rust (image crate handles animated WebP + GIF +
-// APNG out of the box) and serve a single PNG spritesheet per emoji over
-// IPC. The frontend creates one Image element per emoji and draws sub-rects.
+// APNG out of the box) into a presized PNG strip on disk. The webview loads the
+// file (or the pack atlas it sits in) through the asset route and draws sub-rects;
+// only a small descriptor crosses IPC.
 //
 // Spritesheet layout: frames stacked vertically, each cell `frame_size` ×
 // `frame_size`, scaled to fit within `frame_size` while preserving aspect
-// (letterboxed). Output is base64-encoded PNG so we can ship it through
-// Tauri's JSON IPC without a binary protocol; emoji PNGs are tiny so the
-// base64 overhead is negligible.
+// (letterboxed).
 
 /// Square pixel size for each frame in the output spritesheet — chosen
 /// to look crisp at the picker's 28px display target on retina displays.
 const EMOJI_FRAME_SIZE: u32 = 56;
 
 #[derive(Serialize, Deserialize, Clone)]
-pub struct EmojiSpritesheet {
-    pub png_base64: String,
+pub struct EmojiSheet {
+    /// The PNG on disk holding this emoji's frames; the webview loads it through the
+    /// asset route, so no pixel ever crosses IPC. Either the emoji's own sheet or a
+    /// pack atlas shared with its neighbours, in which case `x`/`y` locate the strip.
+    pub path: String,
+    pub x: u32,
+    pub y: u32,
     pub frame_count: u32,
     pub frame_size: u32,
     pub frame_durations_ms: Vec<u32>,
 }
 
-/// Internal decode result before base64/IPC encoding — carries the raw PNG so
-/// it can be written to the on-disk spritesheet cache without a base64 detour.
+/// The sidecar next to each sheet PNG: everything the canvas needs besides the pixels.
+#[derive(Serialize, Deserialize, Clone)]
+struct SheetMeta {
+    frame_count: u32,
+    frame_size: u32,
+    frame_durations_ms: Vec<u32>,
+}
+
+/// A decoded, presized sheet before it is written to the cache.
 struct DecodedSheet {
     png: Vec<u8>,
     frame_count: u32,
@@ -396,31 +403,99 @@ struct DecodedSheet {
 }
 
 // --- On-disk presized-spritesheet cache --------------------------------------
-// One container file per emoji: frames are decoded + resized ONCE, then this
-// file is read on every later open and across app launches (the in-memory LRU
-// sits on top for the hot path). Layout:
-//   ["VSPR"][ver u8][frame_size u32 LE][frame_count u32 LE]
-//   [durations: frame_count × u32 LE][png_len u32 LE][png bytes]
-// Self-healing: a truncated/garbage file fails validation in
-// `deserialize_spritesheet` and is simply treated as a cache miss.
+// Two files per emoji, keyed by sha256(url): `<key>.png` (the vertically stacked
+// frames, a plain PNG so the asset route can serve it) and `<key>.json` (frame
+// metadata). Frames are decoded + resized ONCE; every later open, on every
+// launch, is a stat and a small JSON read. The previous single-container
+// format (`<key>.vspr`, "VSPR" magic) is converted on first read.
 const VSPR_MAGIC: &[u8; 4] = b"VSPR";
 const VSPR_VERSION: u8 = 1;
+static SHEET_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn serialize_spritesheet(frame_size: u32, durations: &[u32], png: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(13 + durations.len() * 4 + 4 + png.len());
-    out.extend_from_slice(VSPR_MAGIC);
-    out.push(VSPR_VERSION);
-    out.extend_from_slice(&frame_size.to_le_bytes());
-    out.extend_from_slice(&(durations.len() as u32).to_le_bytes());
-    for d in durations {
-        out.extend_from_slice(&d.to_le_bytes());
-    }
-    out.extend_from_slice(&(png.len() as u32).to_le_bytes());
-    out.extend_from_slice(png);
-    out
+/// A tmp path no concurrent writer of the same file can share.
+fn sheet_tmp_path(target: &std::path::Path) -> std::path::PathBuf {
+    let seq = SHEET_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    target.with_extension(format!("png.tmp-{}-{seq}", std::process::id()))
 }
 
-fn deserialize_spritesheet(buf: &[u8]) -> Option<EmojiSpritesheet> {
+/// A cache hit is a use: bump the file's mtime so the age-ordered sweep keeps a pack
+/// that is opened every day ahead of one that was added and forgotten.
+fn touch(path: &std::path::Path) {
+    if let Ok(f) = std::fs::File::options().write(true).open(path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+fn sheet_cache_dir<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) -> Option<std::path::PathBuf> {
+    let dir = handle.path().app_data_dir().ok()?.join("cache").join("emoji_spritesheets");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Blossom URLs embed the content hash, so a content edit changes the key and
+/// auto-reprocesses; other URLs use the URL itself as their identity.
+fn sheet_key(url: &str) -> String {
+    vector_core::crypto::sha256_hex(url.as_bytes())
+}
+
+fn sheet_files(dir: &std::path::Path, url: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let key = sheet_key(url);
+    (dir.join(format!("{key}.png")), dir.join(format!("{key}.json")))
+}
+
+/// Persist a decoded sheet: PNG via tmp+rename, then the sidecar. The sidecar is
+/// written last, so its presence means the PNG is complete. Callers sweep the dir
+/// once per batch (`prune_spritesheet_cache`), not per file.
+fn write_sheet(dir: &std::path::Path, url: &str, decoded: &DecodedSheet) -> Result<EmojiSheet, String> {
+    let (png, json) = sheet_files(dir, url);
+    let tmp = sheet_tmp_path(&png);
+    std::fs::write(&tmp, &decoded.png).map_err(|e| format!("sheet write: {e}"))?;
+    std::fs::rename(&tmp, &png).map_err(|e| { let _ = std::fs::remove_file(&tmp); format!("sheet place: {e}") })?;
+    let meta = SheetMeta { frame_count: decoded.frame_count, frame_size: decoded.frame_size, frame_durations_ms: decoded.durations.clone() };
+    let body = serde_json::to_vec(&meta).map_err(|e| e.to_string())?;
+    std::fs::write(&json, body).map_err(|e| format!("sheet meta write: {e}"))?;
+    Ok(EmojiSheet { path: png.to_string_lossy().into_owned(), x: 0, y: 0, frame_count: meta.frame_count, frame_size: meta.frame_size, frame_durations_ms: meta.frame_durations_ms })
+}
+
+/// A sheet already on disk, or None. Never touches the network.
+fn read_sheet(dir: &std::path::Path, url: &str) -> Option<EmojiSheet> {
+    let (png, json) = sheet_files(dir, url);
+    if let Ok(buf) = std::fs::read(&json) {
+        if png.is_file() {
+            if let Ok(meta) = serde_json::from_slice::<SheetMeta>(&buf) {
+                touch(&png);
+                return Some(EmojiSheet { path: png.to_string_lossy().into_owned(), x: 0, y: 0, frame_count: meta.frame_count, frame_size: meta.frame_size, frame_durations_ms: meta.frame_durations_ms });
+            }
+        }
+    }
+    // Legacy container: split it into the two-file layout, and retire it only once
+    // the new layout is on disk.
+    let legacy = dir.join(format!("{}.vspr", sheet_key(url)));
+    let buf = std::fs::read(&legacy).ok()?;
+    let Some(decoded) = deserialize_legacy_sheet(&buf) else {
+        let _ = std::fs::remove_file(&legacy);
+        return None;
+    };
+    let sheet = write_sheet(dir, url, &decoded).ok()?;
+    let _ = std::fs::remove_file(&legacy);
+    Some(sheet)
+}
+
+/// A remembered descriptor is only good while its file is: the sweep may have taken it.
+fn cached_sheet(url: &str) -> Option<EmojiSheet> {
+    let hit = spritesheet_cache().lock().unwrap().get(url)?;
+    if std::path::Path::new(&hit.path).is_file() {
+        return Some(hit);
+    }
+    spritesheet_cache().lock().unwrap().remove(url);
+    None
+}
+
+/// The retired single-file layout:
+///   ["VSPR"][ver u8][frame_size u32 LE][frame_count u32 LE]
+///   [durations: frame_count × u32 LE][png_len u32 LE][png bytes]
+/// A truncated or garbage file is a cache miss, never a panic.
+fn deserialize_legacy_sheet(buf: &[u8]) -> Option<DecodedSheet> {
     if buf.len() < 13 || &buf[0..4] != VSPR_MAGIC || buf[4] != VSPR_VERSION {
         return None;
     }
@@ -441,31 +516,7 @@ fn deserialize_spritesheet(buf: &[u8]) -> Option<EmojiSpritesheet> {
     if buf.len() < off + png_len {
         return None;
     }
-    Some(EmojiSpritesheet {
-        png_base64: base64_simd::STANDARD.encode_to_string(&buf[off..off + png_len]),
-        frame_count,
-        frame_size,
-        frame_durations_ms: durations,
-    })
-}
-
-/// On-disk path for an emoji's presized spritesheet (creates the dir as needed).
-/// Keyed by sha256(url): Blossom URLs embed the content hash, so a content edit
-/// changes the key and auto-reprocesses; non-Blossom URLs use the URL itself as
-/// their (best-effort) identity.
-fn emoji_spritesheet_path<R: tauri::Runtime>(
-    handle: &tauri::AppHandle<R>,
-    url: &str,
-) -> Option<std::path::PathBuf> {
-    let dir = handle
-        .path()
-        .app_data_dir()
-        .ok()?
-        .join("cache")
-        .join("emoji_spritesheets");
-    std::fs::create_dir_all(&dir).ok()?;
-    let key = vector_core::crypto::sha256_hex(url.as_bytes());
-    Some(dir.join(format!("{}.vspr", key)))
+    Some(DecodedSheet { png: buf[off..off + png_len].to_vec(), frame_count, frame_size, durations })
 }
 
 /// Soft cap on the on-disk spritesheet cache. Presized 56px sheets are small
@@ -487,7 +538,7 @@ fn prune_spritesheet_cache(dir: &std::path::Path) {
     let mut total: u64 = 0;
     for e in rd.flatten() {
         let p = e.path();
-        if p.extension().and_then(|x| x.to_str()) != Some("vspr") {
+        if !matches!(p.extension().and_then(|x| x.to_str()), Some("png") | Some("vspr")) {
             continue;
         }
         if let Ok(m) = e.metadata() {
@@ -505,40 +556,39 @@ fn prune_spritesheet_cache(dir: &std::path::Path) {
             break;
         }
         if std::fs::remove_file(&path).is_ok() {
+            let _ = std::fs::remove_file(path.with_extension("json"));
             total = total.saturating_sub(len);
         }
     }
 }
 
-/// Cache decoded spritesheets in-memory by URL. Picker reopens reuse the
-/// decode — round-tripping a 50-frame WebP through libwebp + PNG encode
-/// is ~50ms; doing that 54× per open is precisely what we're avoiding.
-///
-/// Bounded LRU: an unbounded HashMap kept the per-emoji PNG bytes
-/// (typ. tens of KB each) around forever, so long sessions browsing many
-/// packs leaked memory. Cap at MAX_SPRITESHEET_CACHE entries with simple
-/// usage-order eviction — newest insertion goes to the back, oldest gets
-/// dropped when we exceed the cap.
-const MAX_SPRITESHEET_CACHE: usize = 500;
+/// URL → sheet descriptor (path + metadata, no pixels), so a picker reopen is a
+/// map lookup rather than a stat and a JSON read. Bounded so long sessions
+/// browsing many packs stay flat.
+const MAX_SPRITESHEET_CACHE: usize = 2000;
 
 struct SpritesheetCache {
     /// URL → sheet. Insertion order doubles as access order: every `get`
     /// promotes to the back, every miss inserts at the back.
-    entries: std::collections::VecDeque<(String, EmojiSpritesheet)>,
+    entries: std::collections::VecDeque<(String, EmojiSheet)>,
 }
 
 impl SpritesheetCache {
     fn new() -> Self {
         Self { entries: std::collections::VecDeque::with_capacity(MAX_SPRITESHEET_CACHE) }
     }
-    fn get(&mut self, url: &str) -> Option<EmojiSpritesheet> {
+    fn get(&mut self, url: &str) -> Option<EmojiSheet> {
         let pos = self.entries.iter().position(|(k, _)| k == url)?;
         let (k, v) = self.entries.remove(pos).unwrap();
         let clone = v.clone();
         self.entries.push_back((k, v));
         Some(clone)
     }
-    fn insert(&mut self, url: String, sheet: EmojiSpritesheet) {
+    fn remove(&mut self, url: &str) {
+        self.entries.retain(|(u, _)| u != url);
+    }
+
+    fn insert(&mut self, url: String, sheet: EmojiSheet) {
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == &url) {
             self.entries.remove(pos);
         }
@@ -554,34 +604,162 @@ fn spritesheet_cache() -> &'static Mutex<SpritesheetCache> {
     CACHE.get_or_init(|| Mutex::new(SpritesheetCache::new()))
 }
 
-/// Decode an animated emoji URL into a vertically-stacked PNG
-/// spritesheet. Idempotent + cached.
+/// Sheets stack into columns of at most this height; a single sheet taller than it
+/// stands alone in its column. Keeps every column inside common texture limits.
+const ATLAS_COLUMN_MAX_PX: u32 = 4096;
+/// Total pixel budget of one atlas (64 MB of RGBA decoded). Past it the section is
+/// served as separate sheets, which is what it was before atlases existed.
+const ATLAS_MAX_PX: u64 = 16 * 1024 * 1024;
+/// Frames per emoji sheet. A 1 MB GIF can carry thousands of tiny frames; the picker
+/// shows a thumbnail, not the film.
+const MAX_SHEET_FRAMES: usize = 256;
+
+/// Column packing for sheets of equal width: each is a vertical strip, stacked until
+/// the column would overflow. Returns the atlas size and one (x, y) per sheet.
+fn atlas_layout(frame_size: u32, heights: &[u32]) -> (u32, u32, Vec<(u32, u32)>) {
+    let (mut col, mut y, mut tallest) = (0u32, 0u32, 0u32);
+    let mut at = Vec::with_capacity(heights.len());
+    for &h in heights {
+        if y > 0 && y + h > ATLAS_COLUMN_MAX_PX {
+            col += 1;
+            y = 0;
+        }
+        at.push((col * frame_size, y));
+        y += h;
+        tallest = tallest.max(y);
+        // A strip taller than a column closes its column behind it.
+        if y > ATLAS_COLUMN_MAX_PX {
+            col += 1;
+            y = 0;
+        }
+    }
+    let cols = if y == 0 && col > 0 { col } else { col + 1 };
+    (cols * frame_size, tallest, at)
+}
+
+/// One PNG holding every sheet of a section, so the webview loads a pack in one
+/// request instead of one per emoji. Keyed by the sheet set, cached next to the
+/// sheets, rebuilt only when the set changes (an emoji arriving, a pack edit).
+fn atlas_for(dir: &std::path::Path, sheets: &[EmojiSheet]) -> Option<(std::path::PathBuf, Vec<(u32, u32)>)> {
+    let frame_size = sheets.first()?.frame_size;
+    if sheets.iter().any(|s| s.frame_size != frame_size) {
+        return None;
+    }
+    let heights: Vec<u32> = sheets.iter().map(|s| s.frame_count * frame_size).collect();
+    let (width, height, at) = atlas_layout(frame_size, &heights);
+    if width as u64 * height as u64 > ATLAS_MAX_PX {
+        return None;
+    }
+    // The layout inputs are part of the key: a sheet rewritten at the same path with a
+    // different frame count must never be read through an atlas laid out for the old one.
+    let key = {
+        let mut ident = String::new();
+        for s in sheets {
+            ident.push_str(&format!("{}|{}|{}\n", s.path, s.frame_count, s.frame_size));
+        }
+        vector_core::crypto::sha256_hex(ident.as_bytes())
+    };
+    let path = dir.join(format!("atlas-{key}.png"));
+    if path.is_file() {
+        touch(&path);
+        return Some((path, at));
+    }
+    let mut atlas = image::RgbaImage::new(width, height);
+    for (sheet, &(x, y)) in sheets.iter().zip(&at) {
+        let bytes = std::fs::read(&sheet.path).ok()?;
+        let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+        image::imageops::overlay(&mut atlas, &img, x as i64, y as i64);
+    }
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut png,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(atlas.as_raw(), width, height, image::ExtendedColorType::Rgba8)
+    .ok()?;
+    let tmp = sheet_tmp_path(&path);
+    std::fs::write(&tmp, &png).ok()?;
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        if !path.is_file() {
+            return None;
+        }
+    }
+    Some((path, at))
+}
+
+/// Every sheet the on-disk cache already holds, in one crossing, and when two or
+/// more are present, folded into one atlas so the webview fetches one file. A miss
+/// is `None`: the caller fetches those one by one with `decode_animated_emoji`, so a
+/// freshly added pack still streams in emoji by emoji while a known pack lands at once.
+#[tauri::command]
+pub async fn cached_emoji_sheets<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    urls: Vec<String>,
+) -> Result<Vec<Option<EmojiSheet>>, String> {
+    let Some(dir) = sheet_cache_dir(&handle) else { return Ok(vec![None; urls.len()]) };
+    tokio::task::spawn_blocking(move || {
+        let mut converted = false;
+        let mut out: Vec<Option<EmojiSheet>> = urls
+            .iter()
+            .map(|url| {
+                if let Some(hit) = cached_sheet(url) {
+                    return Some(hit);
+                }
+                let sheet = read_sheet(&dir, url)?;
+                converted = true;
+                spritesheet_cache().lock().unwrap().insert(url.clone(), sheet.clone());
+                Some(sheet)
+            })
+            .collect();
+        if converted {
+            prune_spritesheet_cache(&dir);
+        }
+        let hit_idx: Vec<usize> = out.iter().enumerate().filter(|(_, s)| s.is_some()).map(|(i, _)| i).collect();
+        if hit_idx.len() >= 2 {
+            let hits: Vec<EmojiSheet> = hit_idx.iter().map(|&i| out[i].clone().unwrap()).collect();
+            if let Some((atlas, at)) = atlas_for(&dir, &hits) {
+                let atlas = atlas.to_string_lossy().into_owned();
+                for (k, &i) in hit_idx.iter().enumerate() {
+                    if let Some(s) = out[i].as_mut() {
+                        s.path = atlas.clone();
+                        s.x = at[k].0;
+                        s.y = at[k].1;
+                    }
+                }
+            }
+        }
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Decode one emoji URL into a presized spritesheet on disk. Idempotent + cached.
 ///
 /// Lookup order:
-///   1. In-memory spritesheet cache (decoded PNG bytes ready to ship).
-///   2. Local filesystem cache (emojis + emoji_pack_icons subdirs) —
+///   1. In-memory descriptor cache.
+///   2. The on-disk sheet cache (a stat and a small JSON read).
+///   3. Local image cache (emojis + emoji_pack_icons subdirs) —
 ///      pre-populated by `emoji_pack_upload_image` and by every
 ///      `bindCachedEmojiImg` hit on the same URL. Critical for
 ///      freshly-uploaded packs: Blossom may not have propagated the
 ///      URL yet, but we have the bytes in hand.
-///   3. HTTP fetch from the URL (the original slow path).
+///   4. HTTP fetch from the URL (the original slow path).
 #[tauri::command]
 pub async fn decode_animated_emoji<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
     url: String,
-) -> Result<EmojiSpritesheet, String> {
-    if let Some(cached) = spritesheet_cache().lock().unwrap().get(&url) {
+) -> Result<EmojiSheet, String> {
+    if let Some(cached) = cached_sheet(&url) {
         return Ok(cached);
     }
-
-    // Persistent presized-spritesheet cache: a single file read, no decode and
-    // no resize. Populated on first decode below and survives app restarts.
-    if let Some(path) = emoji_spritesheet_path(&handle, &url) {
-        if let Ok(buf) = std::fs::read(&path) {
-            if let Some(sheet) = deserialize_spritesheet(&buf) {
-                spritesheet_cache().lock().unwrap().insert(url.clone(), sheet.clone());
-                return Ok(sheet);
-            }
+    let sheet_dir = sheet_cache_dir(&handle);
+    if let Some(dir) = &sheet_dir {
+        if let Some(sheet) = read_sheet(dir, &url) {
+            spritesheet_cache().lock().unwrap().insert(url.clone(), sheet.clone());
+            return Ok(sheet);
         }
     }
 
@@ -646,29 +824,21 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
     };
 
     let url_for_blocking = url.clone();
+    let url_for_sheet = url.clone();
     let decoded = tokio::task::spawn_blocking(move || decode_to_spritesheet(&bytes, &content_type, &url_for_blocking))
         .await
         .map_err(|e| format!("decode join: {}", e))??;
 
-    // Persist the presized spritesheet so future opens / launches skip the
-    // decode + resize entirely. Best-effort: a write failure just means we
-    // decode again next time. Written directly (no temp) — a partial file fails
-    // validation on read and is treated as a miss.
-    if let Some(path) = emoji_spritesheet_path(&handle, &url) {
-        let blob = serialize_spritesheet(decoded.frame_size, &decoded.durations, &decoded.png);
-        if std::fs::write(&path, &blob).is_ok() {
-            if let Some(dir) = path.parent() {
-                prune_spritesheet_cache(dir);
-            }
-        }
-    }
-
-    let sheet = EmojiSpritesheet {
-        png_base64: base64_simd::STANDARD.encode_to_string(&decoded.png),
-        frame_count: decoded.frame_count,
-        frame_size: decoded.frame_size,
-        frame_durations_ms: decoded.durations,
-    };
+    // The sheet lives on disk from here on: future opens and launches are a stat,
+    // and the webview reads the PNG itself.
+    let dir = sheet_dir.ok_or_else(|| "no sheet cache directory".to_string())?;
+    let sheet = tokio::task::spawn_blocking(move || {
+        let sheet = write_sheet(&dir, &url_for_sheet, &decoded)?;
+        prune_spritesheet_cache(&dir);
+        Ok::<_, String>(sheet)
+    })
+    .await
+    .map_err(|e| format!("sheet write join: {}", e))??;
     spritesheet_cache().lock().unwrap().insert(url, sheet.clone());
     Ok(sheet)
 }
@@ -687,7 +857,7 @@ fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<
         "auto"
     };
 
-    let frames: Vec<(image::RgbaImage, u32)> = match inferred {
+    let mut frames: Vec<(image::RgbaImage, u32)> = match inferred {
         "webp" => decode_webp_frames(bytes)?,
         "gif" => decode_gif_frames(bytes)?,
         "apng" => decode_apng_frames(bytes)?,
@@ -697,6 +867,7 @@ fn decode_to_spritesheet(bytes: &[u8], content_type: &str, url: &str) -> Result<
     if frames.is_empty() {
         return Err("no frames decoded".to_string());
     }
+    frames.truncate(MAX_SHEET_FRAMES);
 
     let frame_size = EMOJI_FRAME_SIZE;
     let cols = 1u32;
@@ -1142,22 +1313,103 @@ fn encode_static(rgba: &image::RgbaImage, format: &str) -> Result<Vec<u8>, Strin
 mod tests {
     use super::*;
 
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vector-sheets-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn legacy_container(frame_size: u32, durations: &[u32], png: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(VSPR_MAGIC);
+        out.push(VSPR_VERSION);
+        out.extend_from_slice(&frame_size.to_le_bytes());
+        out.extend_from_slice(&(durations.len() as u32).to_le_bytes());
+        for d in durations { out.extend_from_slice(&d.to_le_bytes()); }
+        out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        out.extend_from_slice(png);
+        out
+    }
+
     #[test]
-    fn spritesheet_roundtrip_and_truncation() {
-        let durations = vec![100u32, 120, 80];
-        let png = vec![0xABu8; 64];
-        let buf = serialize_spritesheet(48, &durations, &png);
+    fn atlas_columns_fill_to_the_cap_and_a_tall_sheet_stands_alone() {
+        // 56 px frames: 73 static sheets fill a 4088 px column, the 74th starts the next.
+        let heights: Vec<u32> = std::iter::repeat(56).take(74).collect();
+        let (w, h, at) = atlas_layout(56, &heights);
+        assert_eq!((w, h), (112, 73 * 56));
+        assert_eq!(at[72], (0, 72 * 56));
+        assert_eq!(at[73], (56, 0));
+        // A 100-frame animation overflows a column: it stands alone, and its neighbours
+        // stay in ordinary columns rather than stretching to its height.
+        let (w, h, at) = atlas_layout(56, &[56, 100 * 56, 56]);
+        assert_eq!(w, 168);
+        assert_eq!(h, 100 * 56);
+        assert_eq!(at, vec![(0, 0), (56, 0), (112, 0)]);
+        // Nothing but a tall sheet: one column, no empty trailing one.
+        let (w, _, _) = atlas_layout(56, &[100 * 56]);
+        assert_eq!(w, 56);
+    }
 
-        let sheet = deserialize_spritesheet(&buf).expect("valid container round-trips");
-        assert_eq!(sheet.frame_size, 48);
-        assert_eq!(sheet.frame_count, 3);
-        assert_eq!(sheet.frame_durations_ms, durations);
-        assert_eq!(sheet.png_base64, base64_simd::STANDARD.encode_to_string(&png));
+    fn strip_png(frames: u32, shade: u8) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(56, 56 * frames, image::Rgba([shade, shade, shade, 255]));
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut out)
+            .write_image(img.as_raw(), 56, 56 * frames, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        out
+    }
 
-        // Truncated / garbage buffers are a cache miss, never a panic.
-        assert!(deserialize_spritesheet(&buf[..buf.len() - 5]).is_none());
-        assert!(deserialize_spritesheet(b"nope").is_none());
-        assert!(deserialize_spritesheet(&[]).is_none());
+    #[test]
+    fn an_atlas_places_each_strip_where_its_descriptor_says() {
+        let dir = scratch_dir("atlas");
+        let a = write_sheet(&dir, "https://x/a.png", &DecodedSheet { png: strip_png(1, 10), frame_count: 1, frame_size: 56, durations: vec![0] }).unwrap();
+        let b = write_sheet(&dir, "https://x/b.gif", &DecodedSheet { png: strip_png(3, 200), frame_count: 3, frame_size: 56, durations: vec![40; 3] }).unwrap();
+        let (path, at) = atlas_for(&dir, &[a.clone(), b.clone()]).expect("two cached sheets fold");
+        assert_eq!(at, vec![(0, 0), (0, 56)]);
+        let atlas = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(atlas.dimensions(), (56, 56 * 4));
+        assert_eq!(atlas.get_pixel(3, 3)[0], 10, "a's pixels at a's offset");
+        assert_eq!(atlas.get_pixel(3, 56 + 3)[0], 200, "b's first frame right below");
+        assert_eq!(atlas.get_pixel(3, 56 * 3 + 3)[0], 200, "b's last frame at the bottom");
+        let (again, _) = atlas_for(&dir, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(again, path, "same set, same file");
+        let mut odd = b.clone();
+        odd.frame_size = 48;
+        assert!(atlas_for(&dir, &[a.clone(), odd]).is_none(), "mixed frame sizes are not folded");
+        std::fs::remove_file(&b.path).unwrap();
+        let c = write_sheet(&dir, "https://x/c.png", &DecodedSheet { png: strip_png(1, 90), frame_count: 1, frame_size: 56, durations: vec![0] }).unwrap();
+        assert!(atlas_for(&dir, &[a, b, c]).is_none(), "a missing member means no atlas, not a hole");
+    }
+
+    #[test]
+    fn a_sheet_round_trips_through_the_two_file_layout() {
+        let dir = scratch_dir("roundtrip");
+        let decoded = DecodedSheet { png: strip_png(3, 7), frame_count: 3, frame_size: 56, durations: vec![100, 120, 80] };
+        let written = write_sheet(&dir, "https://x/a.gif", &decoded).unwrap();
+        let read = read_sheet(&dir, "https://x/a.gif").expect("a written sheet reads back");
+        assert_eq!(read.path, written.path);
+        assert_eq!((read.frame_count, read.frame_size, read.frame_durations_ms.clone()), (3, 56, vec![100, 120, 80]));
+        assert_eq!(std::fs::read(&read.path).unwrap(), decoded.png, "the PNG is served as-is");
+        assert!(read_sheet(&dir, "https://x/missing.gif").is_none(), "a miss is None, not an error");
+    }
+
+    #[test]
+    fn a_legacy_container_is_converted_once_and_retired() {
+        let dir = scratch_dir("legacy");
+        let png = vec![0xCDu8; 32];
+        let legacy = dir.join(format!("{}.vspr", sheet_key("https://x/old.webp")));
+        std::fs::write(&legacy, legacy_container(56, &[40, 40], &png)).unwrap();
+        let sheet = read_sheet(&dir, "https://x/old.webp").expect("legacy converts on read");
+        assert_eq!(sheet.frame_count, 2);
+        assert_eq!(std::fs::read(&sheet.path).unwrap(), png);
+        assert!(!legacy.exists(), "the container is gone after conversion");
+        assert!(read_sheet(&dir, "https://x/old.webp").is_some(), "the converted layout serves the next read");
+
+        // Truncated / garbage containers are a miss, never a panic.
+        assert!(deserialize_legacy_sheet(&legacy_container(56, &[40], &png)[..20]).is_none());
+        assert!(deserialize_legacy_sheet(b"nope").is_none());
+        assert!(deserialize_legacy_sheet(&[]).is_none());
     }
 
     fn square_frames(dim: u32) -> Vec<(image::RgbaImage, u32)> {

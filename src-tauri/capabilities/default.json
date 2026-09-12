@@ -195,6 +195,7 @@
     "allow-get-emoji-usage",
     "allow-set-theme-emoji-pack",
     "allow-decode-animated-emoji",
+    "allow-cached-emoji-sheets",
     "allow-emoji-pack-create",
     "allow-emoji-pack-delete",
     "allow-emoji-pack-delete-blob",

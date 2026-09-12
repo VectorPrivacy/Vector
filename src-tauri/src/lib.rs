@@ -853,6 +853,7 @@ pub fn run() {
             commands::emoji_packs::get_emoji_usage,
             commands::emoji_packs::set_theme_emoji_pack,
             commands::emoji_packs::decode_animated_emoji,
+            commands::emoji_packs::cached_emoji_sheets,
             commands::emoji_packs::emoji_pack_create,
             commands::emoji_packs::emoji_pack_delete,
             commands::emoji_packs::emoji_pack_delete_blob,
