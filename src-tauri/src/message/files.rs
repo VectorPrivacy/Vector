@@ -28,14 +28,142 @@ pub(crate) static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<Vec<u8>>,
 pub(crate) static JS_COMPRESSION_CACHE: LazyLock<TokioMutex<Option<CachedCompressedImage>>> =
     LazyLock::new(|| TokioMutex::new(None));
 
-/// Response from caching file bytes, includes preview for images
+/// Longest side of a composer preview. Enough for a retina overlay, a few hundred KB
+/// at most, and the webview never decodes the original's full resolution for it.
+const PREVIEW_MAX_DIM: u32 = 1024;
+const PREVIEW_JPEG_QUALITY: u8 = 70;
+/// A GIF is kept verbatim so the preview animates, but only a small one: past this it
+/// is decoded like a photo and the preview is its first frame.
+const PREVIEW_GIF_VERBATIM_MAX: usize = 4 * 1024 * 1024;
+/// Previews outlive one preview dialog only by accident; anything this old is litter.
+const PREVIEW_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+static PREVIEW_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn is_previewable_extension(extension: &str) -> bool {
+    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico")
+}
+
+fn preview_cache_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))?
+        .join("cache")
+        .join("previews");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create preview cache: {}", e))?;
+    Ok(dir)
+}
+
+/// Write a downscaled copy of an image into the preview cache and return its path.
+/// Blocking CPU work: call from `spawn_blocking`, never inline in a command.
+pub(crate) fn write_preview_file(app: &tauri::AppHandle, bytes: &[u8]) -> Result<String, String> {
+    let dir = preview_cache_dir(app)?;
+    // The directory stays a handful of files, so sweeping it on every write is cheaper
+    // than letting cancelled previews sit until the next boot.
+    prune_dir(&dir);
+    write_preview_into(&dir, bytes).map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The preview itself: a small GIF is copied verbatim so it animates; everything else is
+/// bounded to `PREVIEW_MAX_DIM` and re-encoded (PNG when transparent, JPEG otherwise).
+/// Keyed by content hash, so re-previewing the same bytes is a stat, not a decode.
+fn write_preview_into(dir: &std::path::Path, bytes: &[u8]) -> Result<std::path::PathBuf, String> {
+    use crate::shared::image::{animated_dims, encode_rgba_auto};
+    use sha2::{Digest, Sha256};
+
+    let key = crate::util::bytes_to_hex_string(&Sha256::digest(bytes)[..16]);
+    let verbatim_gif = crate::util::mime_from_magic_bytes(bytes) == "image/gif"
+        && bytes.len() <= PREVIEW_GIF_VERBATIM_MAX
+        && animated_dims(bytes).is_some_and(|(w, h)| w.max(h) <= PREVIEW_MAX_DIM);
+    // encode_rgba_auto picks PNG or JPEG from the pixels, so the extension is only known
+    // after encoding; a hit on either spelling is the same preview.
+    for ext in if verbatim_gif { &["gif"][..] } else { &["jpg", "png"][..] } {
+        let hit = dir.join(format!("{key}.{ext}"));
+        if hit.is_file() {
+            // A hit is a use: keep it out of the age sweep while the overlay may show it.
+            if let Ok(f) = std::fs::File::open(&hit) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+            return Ok(hit);
+        }
+    }
+
+    let (ext, out): (&str, std::borrow::Cow<[u8]>) = if verbatim_gif {
+        ("gif", std::borrow::Cow::Borrowed(bytes))
+    } else {
+        let img = vector_core::crypto::decode_image_bounded(bytes)?;
+        let (w, h) = (img.width(), img.height());
+        let scale = (PREVIEW_MAX_DIM as f32 / w.max(h) as f32).min(1.0);
+        let (nw, nh) = (((w as f32 * scale) as u32).max(1), ((h as f32 * scale) as u32).max(1));
+        let (rgba, ow, oh) = crate::simd::image::fast_resize_to_rgba(&img, nw, nh);
+        let encoded = encode_rgba_auto(&rgba, ow, oh, PREVIEW_JPEG_QUALITY)?;
+        (encoded.extension, std::borrow::Cow::Owned(encoded.bytes))
+    };
+
+    let path = dir.join(format!("{key}.{ext}"));
+    let seq = PREVIEW_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!("{key}.{ext}.tmp-{}-{seq}", std::process::id()));
+    std::fs::write(&tmp, &out).map_err(|e| format!("Failed to write preview: {}", e))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        // A concurrent writer of the same key already placed identical content.
+        if !path.is_file() {
+            return Err(format!("Failed to place preview: {}", e));
+        }
+    }
+    Ok(path)
+}
+
+/// Delete stale composer previews. Runs with the other cache sweeps at boot.
+pub fn prune_preview_cache(app: &tauri::AppHandle) -> usize {
+    let Ok(dir) = preview_cache_dir(app) else { return 0 };
+    prune_dir(&dir)
+}
+
+fn prune_dir(dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| now.duration_since(t).unwrap_or_default() > PREVIEW_MAX_AGE)
+            .unwrap_or(false);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// The preview for the file the composer just cached: the clipboard-paste bytes when
+/// `file_path` is empty, else the Android pick cached under that content URI. Separate
+/// from the caching commands so the decode runs off the IPC thread.
+#[tauri::command]
+pub async fn preview_cached_file(app: tauri::AppHandle, file_path: String) -> Result<Option<String>, String> {
+    let cached: Option<(Arc<Vec<u8>>, String)> = if file_path.is_empty() {
+        JS_FILE_CACHE.lock().unwrap().as_ref().map(|(b, _, ext)| (b.clone(), ext.clone()))
+    } else {
+        ANDROID_FILE_CACHE.lock().unwrap().get(&file_path).map(|(b, ext, _, _)| (b.clone(), ext.clone()))
+    };
+    let Some((bytes, ext)) = cached else { return Ok(None) };
+    if !is_previewable_extension(&ext) {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(move || write_preview_file(&app, &bytes).map(Some))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Response from caching file bytes. The preview is a second call
+/// (`preview_cached_file`) so the decode never runs on the IPC thread.
 #[derive(serde::Serialize)]
 pub struct CacheFileBytesResult {
     pub size: u64,
     pub name: String,
     pub extension: String,
-    /// Base64 data URL for image preview (only for supported image types)
-    pub preview: Option<String>,
 }
 
 /// Cache file bytes received from JavaScript (for Android)
@@ -50,13 +178,6 @@ pub fn cache_file_bytes(request: tauri::ipc::Request<'_>) -> Result<CacheFileByt
     let extension = crate::shared::ipc::header(&request, "extension").unwrap_or_default();
     let size = bytes.len() as u64;
 
-    // Generate preview for supported image types
-    let preview = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        generate_image_preview_from_bytes(&bytes).ok()
-    } else {
-        None
-    };
-
     let bytes = Arc::new(bytes);
 
     let mut cache = JS_FILE_CACHE.lock().unwrap();
@@ -66,7 +187,6 @@ pub fn cache_file_bytes(request: tauri::ipc::Request<'_>) -> Result<CacheFileByt
         size,
         name: file_name,
         extension,
-        preview,
     })
 }
 
@@ -82,28 +202,6 @@ pub fn get_cached_file_info() -> Result<Option<FileInfo>, String> {
         })),
         None => Ok(None),
     }
-}
-
-/// Get base64 preview of cached image bytes
-#[tauri::command]
-pub fn get_cached_image_preview(quality: u32) -> Result<String, String> {
-    use crate::shared::image::{calculate_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-
-    let cache = JS_FILE_CACHE.lock().unwrap();
-    let (bytes, _, _) = cache.as_ref().ok_or("No cached file")?;
-    let bytes = bytes.clone();
-    drop(cache);
-
-    let img = vector_core::crypto::decode_image_bounded(&bytes)?;
-
-    let (width, height) = (img.width(), img.height());
-    let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
-
-    // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
-    let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
-    let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
-
-    Ok(encoded.to_data_uri())
 }
 
 /// Generate a thumbhash data-URL from an image: the file at `file_path`, or the
@@ -262,60 +360,6 @@ pub fn clear_all_android_file_cache() -> Result<(), String> {
     Ok(())
 }
 
-/// Send file bytes directly from the frontend (used for Android optimized flow)
-/// This receives the file bytes from JavaScript and sends them as an attachment
-#[tauri::command]
-pub async fn send_file_bytes(
-    receiver: String,
-    replied_to: String,
-    file_bytes: Vec<u8>,
-    file_name: String,
-    use_compression: bool,
-    keep_metadata: bool,
-    name_override: String
-) -> Result<MessageSendResult, String> {
-    use super::compression::process_image_for_send;
-
-    // Extract extension from filename
-    let extension = file_name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
-
-    let is_image = matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
-
-    // For images: process per compress + keep-metadata choice (no pre-compression here).
-    let mut attachment_file = if is_image {
-        match process_image_for_send(Arc::new(file_bytes), &extension, use_compression, keep_metadata, None) {
-            Ok(result) => AttachmentFile {
-                bytes: result.bytes,
-                extension: result.extension,
-                img_meta: result.img_meta,
-                name: file_name.clone(),
-            },
-            Err(e) => {
-                eprintln!("Image processing failed: {}", e);
-                return Err(e);
-            }
-        }
-    } else {
-        // Non-image file - send as-is
-        AttachmentFile {
-            bytes: Arc::new(file_bytes),
-            extension,
-            img_meta: None,
-            name: file_name,
-        }
-    };
-    if !name_override.is_empty() {
-        let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
-        if !sanitized.is_empty() { attachment_file.name = sanitized; }
-    }
-
-    message(receiver, String::new(), replied_to, Some(attachment_file)).await
-}
-
 #[tauri::command]
 pub async fn file_message(receiver: String, replied_to: String, file_path: String, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
     // Extract filename from the path
@@ -415,20 +459,18 @@ pub struct FileInfo {
     pub extension: String,
 }
 
-/// Response from caching an Android file, includes preview for images
+/// Response from caching an Android file. The preview is a second call
+/// (`preview_cached_file` with the same URI) so the decode never runs on the IPC thread.
 #[derive(serde::Serialize)]
 pub struct AndroidFileCacheResult {
     pub size: u64,
     pub name: String,
     pub extension: String,
-    /// Base64 data URL for image preview (only for supported image types)
-    pub preview: Option<String>,
 }
 
 /// Cache an Android content URI's bytes immediately after file selection.
 /// This must be called immediately after the file picker returns, before the permission expires.
 /// On non-Android platforms, this just returns file info without caching.
-/// For Android, also generates a compressed base64 preview for images.
 #[tauri::command]
 pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, String> {
     #[cfg(not(target_os = "android"))]
@@ -453,7 +495,6 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
             size: metadata.len(),
             name,
             extension,
-            preview: None, // Desktop doesn't need preview from this function
         })
     }
     #[cfg(target_os = "android")]
@@ -472,12 +513,6 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
             attachment.name.clone()
         };
 
-        // Generate preview for supported image types
-        let preview = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-            generate_image_preview_from_bytes(&bytes).ok()
-        } else {
-            None
-        };
 
         // Cache the bytes - already Arc from read_android_uri
         let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
@@ -487,40 +522,8 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
             size,
             name,
             extension,
-            preview,
         })
     }
-}
-
-/// Generate a compressed base64 preview from image bytes
-/// Preview is capped to UI display size (300x400 mobile, 512x512 desktop)
-/// For files smaller than 5MB or GIFs, returns the original image as base64
-fn generate_image_preview_from_bytes(bytes: &[u8]) -> Result<String, String> {
-    use crate::shared::image::{calculate_capped_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-
-    const SKIP_RESIZE_THRESHOLD: usize = 5 * 1024 * 1024; // 5MB
-
-    let detected = crate::util::mime_from_magic_bytes(bytes);
-    let is_gif = detected == "image/gif";
-
-    // For small files or GIFs, just return the original as base64 (skip resizing)
-    if bytes.len() < SKIP_RESIZE_THRESHOLD || is_gif {
-        // Fall back to image/jpeg if unrecognized (we know it's an image at this point)
-        let mime_type = if detected == "application/octet-stream" { "image/jpeg" } else { detected };
-
-        return Ok(crate::util::data_uri(mime_type, bytes));
-    }
-
-    let img = vector_core::crypto::decode_image_bounded(bytes)?;
-
-    let (width, height) = (img.width(), img.height());
-    let (new_width, new_height) = calculate_capped_preview_dimensions(width, height);
-
-    // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
-    let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
-    let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
-
-    Ok(encoded.to_data_uri())
 }
 
 /// Get file information (size, name, extension)
@@ -564,56 +567,6 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
         
         // Fall back to querying the URI directly (may fail if permission expired)
         filesystem::get_android_uri_info(file_path)
-    }
-}
-
-/// Get a base64 preview of an image (for Android where convertFileSrc doesn't work)
-/// The quality parameter (1-100) determines the resize percentage
-#[tauri::command]
-pub fn get_image_preview_base64(file_path: String, quality: u32) -> Result<String, String> {
-    use crate::shared::image::{calculate_preview_dimensions, encode_rgba_auto, JPEG_QUALITY_PREVIEW};
-
-    #[cfg(not(target_os = "android"))]
-    {
-        let file_data = std::fs::read(&file_path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-
-        let img = vector_core::crypto::decode_image_bounded(&file_data)?;
-
-        let (width, height) = (img.width(), img.height());
-        let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
-
-        // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
-        let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
-        let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
-
-        Ok(encoded.to_data_uri())
-    }
-
-    #[cfg(target_os = "android")]
-    {
-        // First check if we have cached bytes for this URI
-        let bytes = {
-            let cache = ANDROID_FILE_CACHE.lock().unwrap();
-            if let Some((cached_bytes, _, _, _)) = cache.get(&file_path) {
-                cached_bytes.clone()
-            } else {
-                drop(cache);
-                // Fall back to reading directly (may fail if permission expired)
-                Arc::new(filesystem::read_android_uri_bytes(file_path)?.0)
-            }
-        };
-
-        let img = vector_core::crypto::decode_image_bounded(&bytes)?;
-
-        let (width, height) = (img.width(), img.height());
-        let (new_width, new_height) = calculate_preview_dimensions(width, height, quality);
-
-        // Use SIMD-accelerated resize (10-15x faster for large JPEGs)
-        let (rgba_pixels, out_w, out_h) = crate::simd::image::fast_resize_to_rgba(&img, new_width, new_height);
-        let encoded = encode_rgba_auto(&rgba_pixels, out_w, out_h, JPEG_QUALITY_PREVIEW)?;
-
-        Ok(encoded.to_data_uri())
     }
 }
 
@@ -746,13 +699,13 @@ pub fn is_directory(path: String) -> bool {
     std::path::Path::new(&path).is_dir()
 }
 
-/// Inline base64 preview for an image OUTSIDE the asset-protocol scope (pasted
-/// via a clipboard manager, dragged from an arbitrary folder) — the webview's
-/// asset:// route refuses those paths by design. Image-only (sniffed from magic
-/// bytes, never the extension) and size-capped, so it can't grow into a general
-/// file-read primitive.
+/// Preview for an image OUTSIDE the asset-protocol scope (pasted via a clipboard
+/// manager, dragged from an arbitrary folder): the webview's asset:// route refuses
+/// those paths by design, so a downscaled copy is written into the app cache, which
+/// it does serve. Image-only (sniffed from magic bytes, never the extension) and
+/// size-capped, so it can't grow into a general file-read primitive.
 #[tauri::command]
-pub async fn read_image_preview(path: String) -> Result<String, String> {
+pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<String, String> {
     const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
     let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
     if !meta.is_file() {
@@ -761,15 +714,17 @@ pub async fn read_image_preview(path: String) -> Result<String, String> {
     if meta.len() > MAX_PREVIEW_BYTES {
         return Err("file too large for an inline preview".to_string());
     }
-    let bytes = tokio::task::spawn_blocking(move || std::fs::read(&path))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-    let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
-    if !mime.starts_with("image/") {
-        return Err("not an image".to_string());
-    }
-    Ok(format!("data:{};base64,{}", mime, base64_simd::STANDARD.encode_to_string(&bytes)))
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        // An explicit list, not a prefix: the sniffer also names SVG (any XML) an image.
+        let mime = vector_core::crypto::mime_from_magic_bytes(&bytes);
+        if !matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/tiff" | "image/x-icon" | "image/bmp") {
+            return Err("not an image".to_string());
+        }
+        write_preview_file(&app, &bytes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Zip a directory and return metadata about the result
@@ -1085,4 +1040,92 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
         if !sanitized.is_empty() { attachment_file.name = sanitized; }
     }
     message(receiver, String::new(), replied_to, Some(attachment_file)).await
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vector-preview-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 90]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80).encode_image(&img).unwrap();
+        out.into_inner()
+    }
+
+    fn transparent_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(40, 30, |x, _| image::Rgba([200, 20, 20, if x < 20 { 0 } else { 255 }]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    fn gif(w: u32, h: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut out);
+            let frame = image::Frame::new(image::RgbaImage::from_pixel(w, h, image::Rgba([1, 2, 3, 255])));
+            enc.encode_frame(frame).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn a_large_photo_is_bounded_and_a_hit_keeps_its_spelling() {
+        let dir = scratch_dir("photo");
+        let bytes = jpeg(2000, 1500);
+        let first = write_preview_into(&dir, &bytes).unwrap();
+        assert_eq!(first.extension().unwrap(), "jpg");
+        let dims = image::image_dimensions(&first).unwrap();
+        assert!(dims.0 <= PREVIEW_MAX_DIM && dims.1 <= PREVIEW_MAX_DIM, "not bounded: {dims:?}");
+        assert_eq!(dims.0, 1024, "longest side lands exactly on the cap");
+        let again = write_preview_into(&dir, &bytes).unwrap();
+        assert_eq!(first, again, "the second call is a hit, not a fresh file");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "no tmp litter, no duplicate");
+    }
+
+    #[test]
+    fn a_transparent_image_stays_png_and_hits_as_png() {
+        let dir = scratch_dir("png");
+        let bytes = transparent_png();
+        let first = write_preview_into(&dir, &bytes).unwrap();
+        assert_eq!(first.extension().unwrap(), "png");
+        assert_eq!(write_preview_into(&dir, &bytes).unwrap(), first);
+    }
+
+    #[test]
+    fn a_small_gif_is_kept_verbatim_and_a_huge_one_is_not() {
+        let dir = scratch_dir("gif");
+        let small = gif(64, 48);
+        let path = write_preview_into(&dir, &small).unwrap();
+        assert_eq!(path.extension().unwrap(), "gif");
+        assert_eq!(std::fs::read(&path).unwrap(), small, "the animation must survive untouched");
+
+        let wide = gif(PREVIEW_MAX_DIM + 1, 8);
+        let path = write_preview_into(&dir, &wide).unwrap();
+        assert_ne!(path.extension().unwrap(), "gif", "over the cap it is decoded like a photo");
+        let dims = image::image_dimensions(&path).unwrap();
+        assert!(dims.0 <= PREVIEW_MAX_DIM);
+    }
+
+    #[test]
+    fn the_sweep_removes_only_stale_files() {
+        let dir = scratch_dir("prune");
+        let stale = dir.join("old.jpg");
+        let fresh = dir.join("new.jpg");
+        std::fs::write(&stale, b"x").unwrap();
+        std::fs::write(&fresh, b"y").unwrap();
+        let long_ago = std::time::SystemTime::now() - PREVIEW_MAX_AGE - std::time::Duration::from_secs(60);
+        std::fs::File::open(&stale).unwrap().set_modified(long_ago).unwrap();
+        assert_eq!(prune_dir(&dir), 1);
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+    }
 }

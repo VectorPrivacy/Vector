@@ -19,17 +19,13 @@ async function loadMiniAppInfo(filePath) {
 }
 
 /**
- * Load information about a Mini App from bytes (in-memory)
- * This is more efficient for preview when the file is already in memory
- * @param {Uint8Array|number[]} bytes - The .xdc file bytes
- * @param {string} fileName - The file name (used as fallback for app name)
+ * Load information about the Mini App whose bytes the composer just cached
+ * (`cache_file_bytes`), so the archive never crosses IPC a second time.
  * @returns {Promise<MiniAppInfo>} Information about the Mini App
  */
-async function loadMiniAppInfoFromBytes(bytes, fileName) {
+async function loadMiniAppInfoFromCachedFile() {
     const { invoke } = window.__TAURI__.core;
-    // Convert to array if it's a Uint8Array
-    const byteArray = bytes instanceof Uint8Array ? Array.from(bytes) : bytes;
-    return await invoke('miniapp_load_info_from_bytes', { bytes: byteArray, fileName });
+    return await invoke('miniapp_load_info_from_cached_file');
 }
 
 // Once-per-session consent for launching realtime (Iroh) Mini Apps with Tor on

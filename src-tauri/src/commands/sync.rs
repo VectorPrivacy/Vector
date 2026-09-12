@@ -548,6 +548,7 @@ pub async fn fetch_messages<R: Runtime>(
                             let _ = tokio::task::spawn_blocking(move || {
                                 crate::image_cache::backfill_animated_cache(&handle);
                                 crate::image_cache::backfill_avatar_thumbs(&handle);
+                                crate::message::files::prune_preview_cache(&handle);
                             })
                             .await;
                         }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-cached-file"
+description = "Enables the preview_cached_file command without any pre-configured scope."
+commands.allow = ["preview_cached_file"]
+
+[[permission]]
+identifier = "deny-preview-cached-file"
+description = "Denies the preview_cached_file command without any pre-configured scope."
+commands.deny = ["preview_cached_file"]

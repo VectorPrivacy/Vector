@@ -1010,15 +1010,16 @@ function ensureCommunityPreviewActivity(chat) {
 /**
  * Resolve a just-picked image path to a webview-displayable <img> src. On Android the file picker
  * returns a content:// URI that convertFileSrc can't render (broken preview), so cache_android_file
- * reads it and hands back a base64 preview; desktop uses the asset path directly. Returns null when
+ * reads it and writes a preview file the asset route can serve; desktop uses the picked path directly. Returns null when
  * no preview is available, so the caller can keep its placeholder instead of showing a broken image.
  */
 async function pickedImagePreviewSrc(path) {
     if (!path) return null;
     if (platformFeatures.os !== 'android') return convertFileSrc(path);
     try {
-        const info = await invoke('cache_android_file', { filePath: path });
-        if (info?.preview) return info.preview;
+        await invoke('cache_android_file', { filePath: path });
+        const previewPath = await invoke('preview_cached_file', { filePath: path });
+        if (previewPath) return convertFileSrc(previewPath);
     } catch (e) {
         console.error('[preview] cache_android_file failed:', e);
     }

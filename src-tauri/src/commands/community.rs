@@ -1433,23 +1433,6 @@ pub async fn send_community_files(
     dispatch_community_attachment_message(channel_id, content, replied_to, prepared).await
 }
 
-/// Like [`send_community_files`] but for a single file delivered as raw bytes + filename
-/// (clipboard paste / Android File object — no on-disk source). Same multi-attachment
-/// envelope + optimistic lifecycle; one attachment per call.
-#[tauri::command]
-pub async fn send_community_file_bytes(
-    channel_id: String,
-    content: String,
-    file_bytes: Vec<u8>,
-    file_name: String,
-    use_compression: bool,
-    keep_metadata: bool,
-    replied_to: Option<String>,
-) -> Result<CommunityAttachmentSendResult, String> {
-    let prepared = vec![process_outbound_community_attachment_bytes(file_bytes, &file_name, use_compression, keep_metadata).await?];
-    dispatch_community_attachment_message(channel_id, content, replied_to, prepared).await
-}
-
 /// Send a voice note to a Community channel. Same upload path as a file, but the attachment's
 /// `name` is blanked so the renderer treats it as a voice message (waveform + transcription) rather
 /// than a named audio file — mirroring DM voice notes, which also carry an empty name. The WAV

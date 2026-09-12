@@ -670,7 +670,7 @@ pub async fn miniapp_load_info(
         if file_path.starts_with("content://") {
             let (bytes, _ext) = crate::android::filesystem::read_android_uri_bytes(file_path.clone())
                 .map_err(|e| Error::InvalidPackage(format!("Failed to read content URI: {}", e)))?;
-            return miniapp_load_info_from_bytes(bytes, "app.xdc".to_string()).await;
+            return load_info_from_bytes(&bytes, "app.xdc");
         }
     }
 
@@ -708,28 +708,37 @@ pub async fn miniapp_load_info(
     }
 }
 
-/// Load Mini App info from bytes (in-memory, no file needed)
-/// This is more efficient for preview when the file is already cached in memory
+/// Load Mini App info for the file the composer just cached (`cache_file_bytes`):
+/// the bytes are already in the backend, so nothing crosses IPC again.
 #[tauri::command]
-pub async fn miniapp_load_info_from_bytes(
-    bytes: Vec<u8>,
-    file_name: String,
-) -> Result<MiniAppInfo, Error> {
+pub async fn miniapp_load_info_from_cached_file() -> Result<MiniAppInfo, Error> {
+    let (bytes, file_name) = {
+        let cache = crate::message::files::JS_FILE_CACHE.lock().unwrap();
+        let (bytes, name, _) = cache
+            .as_ref()
+            .ok_or_else(|| Error::Anyhow(anyhow::anyhow!("no cached file to inspect")))?;
+        (bytes.clone(), name.clone())
+    };
+    load_info_from_bytes(&bytes[..], &file_name)
+}
+
+/// Mini App info from an in-memory archive (a cached paste, or an Android content URI).
+fn load_info_from_bytes(bytes: &[u8], file_name: &str) -> Result<MiniAppInfo, Error> {
     // Extract name without extension for fallback
     let fallback_name = file_name
         .rsplit('.')
         .skip(1)
         .next()
-        .unwrap_or(&file_name)
+        .unwrap_or(file_name)
         .to_string();
 
     // Compute SHA-256 hash of the bytes for permission identification
     use sha2::{Sha256, Digest};
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    hasher.update(bytes);
     let file_hash = bytes_to_hex_string(&hasher.finalize());
 
-    let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback_name)?;
+    let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(bytes, &fallback_name)?;
 
     // Convert icon bytes to base64 data URL
     let icon_data = icon_bytes.map(|bytes| {
@@ -738,7 +747,7 @@ pub async fn miniapp_load_info_from_bytes(
     });
 
     Ok(MiniAppInfo {
-        id: format!("miniapp_preview_{}", md5_hash(&file_name)),
+        id: format!("miniapp_preview_{}", md5_hash(file_name)),
         name: manifest.name,
         description: manifest.description,
         version: manifest.version,

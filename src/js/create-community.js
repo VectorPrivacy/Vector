@@ -33,7 +33,7 @@ async function ccPickAvatar() {
         filters: [{ name: 'Image', extensions: ['png', 'jpeg', 'jpg', 'gif', 'webp'] }],
     });
     if (!file) return;
-    // On Android a content:// URI needs cache_android_file's base64 preview, not convertFileSrc.
+    // On Android a content:// URI needs cache_android_file's preview file, not convertFileSrc.
     VectorSvelte.ccSetAvatar(file, await pickedImagePreviewSrc(file));
 }
 

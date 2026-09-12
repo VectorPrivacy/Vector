@@ -19,12 +19,6 @@ pub const JPEG_QUALITY_STANDARD: u8 = 85;
 pub const JPEG_QUALITY_HIGH: u8 = 95;
 /// JPEG quality for higher compression (smaller files)
 pub const JPEG_QUALITY_COMPRESSED: u8 = 70;
-/// JPEG quality for UI previews (fast encoding, small size)
-/// Mobile uses lower quality (25) since screens are smaller - faster encode + smaller base64
-#[cfg(target_os = "android")]
-pub const JPEG_QUALITY_PREVIEW: u8 = 25;
-#[cfg(not(target_os = "android"))]
-pub const JPEG_QUALITY_PREVIEW: u8 = 50;
 
 /// Result of image encoding with format metadata
 pub struct EncodedImage {
@@ -881,63 +875,6 @@ pub fn calculate_resize_dimensions(width: u32, height: u32, max_dimension: u32) 
         let ratio = max_dimension as f32 / height as f32;
         ((width as f32 * ratio) as u32, max_dimension)
     }
-}
-
-/// Calculate preview dimensions based on a quality percentage.
-///
-/// # Arguments
-/// * `width` - Original image width
-/// * `height` - Original image height
-/// * `quality` - Percentage (1-100) of original size
-///
-/// # Returns
-/// Tuple of (new_width, new_height), both at least 1
-#[inline]
-pub fn calculate_preview_dimensions(width: u32, height: u32, quality: u32) -> (u32, u32) {
-    let quality = quality.clamp(1, 100);
-    (
-        ((width * quality) / 100).max(1),
-        ((height * quality) / 100).max(1),
-    )
-}
-
-/// Maximum preview dimensions for UI display
-/// Mobile: 300x400 (chat bubbles are small)
-/// Desktop: 512x512 (larger display area)
-#[cfg(target_os = "android")]
-pub const PREVIEW_MAX_WIDTH: u32 = 300;
-#[cfg(target_os = "android")]
-pub const PREVIEW_MAX_HEIGHT: u32 = 400;
-
-#[cfg(not(target_os = "android"))]
-pub const PREVIEW_MAX_WIDTH: u32 = 800;
-#[cfg(not(target_os = "android"))]
-pub const PREVIEW_MAX_HEIGHT: u32 = 800;
-
-/// Calculate preview dimensions capped to UI display size.
-///
-/// Only downscales, never upscales:
-/// - Large photos are scaled to fit within max bounds
-/// - Small photos keep original dimensions
-///
-/// Maintains aspect ratio.
-#[inline]
-pub fn calculate_capped_preview_dimensions(width: u32, height: u32) -> (u32, u32) {
-    // If already smaller than max, keep original (never upscale)
-    if width <= PREVIEW_MAX_WIDTH && height <= PREVIEW_MAX_HEIGHT {
-        return (width, height);
-    }
-
-    // Scale down to fit within bounds while maintaining aspect ratio
-    let width_ratio = PREVIEW_MAX_WIDTH as f32 / width as f32;
-    let height_ratio = PREVIEW_MAX_HEIGHT as f32 / height as f32;
-    // Use smaller ratio to fit within both bounds, cap at 1.0 to never upscale
-    let ratio = width_ratio.min(height_ratio).min(1.0);
-
-    (
-        ((width as f32 * ratio) as u32).max(1),
-        ((height as f32 * ratio) as u32).max(1),
-    )
 }
 
 /// Read a file into memory with a 0-byte corruption check.
