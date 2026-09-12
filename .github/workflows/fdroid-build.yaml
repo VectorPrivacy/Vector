@@ -1,0 +1,134 @@
+name: fdroid-build
+
+# The reference build for F-Droid's reproducible-builds check: `fdroid build`
+# run inside F-Droid's own buildserver image on our metadata, so every host
+# tool that feeds the native build (cmake, perl, JDK, NDK) is the one their
+# builder uses. Optionally signed with the release key and uploaded as the
+# Vector-fdroid.apk asset their verifier compares against.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to build
+        required: true
+        type: string
+      release_tag:
+        description: Sign and upload Vector-fdroid.apk to this release ("" = artifact only)
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to build
+        required: true
+      release_tag:
+        description: Sign and upload Vector-fdroid.apk to this release ("" = artifact only)
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: registry.gitlab.com/fdroid/fdroidserver:buildserver-trixie
+    env:
+      ANDROID_HOME: /opt/android-sdk
+    steps:
+      # The metadata comes from the dispatching ref (master); the source F-Droid
+      # builds is inputs.ref, named in the metadata's commit field.
+      - uses: actions/checkout@v4
+
+      # Same fdroidserver their pipeline runs: the master tarball.
+      - name: fdroidserver
+        shell: bash
+        run: |
+          test -n "$fdroidserver" || source /etc/profile.d/bsenv.sh
+          mkdir -p "$fdroidserver"
+          curl --silent https://gitlab.com/fdroid/fdroidserver/-/archive/master/fdroidserver-master.tar.gz \
+            | tar -xz --directory="$fdroidserver" --strip-components=1
+          echo "fdroidserver=$fdroidserver" >> "$GITHUB_ENV"
+
+      # Our metadata, building exactly the requested commit. Binaries is
+      # dropped: this job PRODUCES the reference, it must not compare to one.
+      # Laid out and run as their pipeline does: /home/vagrant/fdroiddata, as
+      # user vagrant, source fetched first, then an --on-server build.
+      - name: Metadata
+        shell: bash
+        run: |
+          # Their CI checks fdroiddata out under /builds/<user>/fdroiddata and
+          # reaches it through a /home/vagrant/fdroiddata symlink. Same here,
+          # so canonicalised paths come out identical.
+          mkdir -p /builds/JSKitty/fdroiddata/metadata
+          ln -sfn /builds/JSKitty/fdroiddata /home/vagrant/fdroiddata
+          sed -e 's|^    commit: .*|    commit: ${{ inputs.ref }}|' \
+              -e '/^Binaries:/d' \
+              docs/fdroid/io.vectorapp.yml > /home/vagrant/fdroiddata/metadata/io.vectorapp.yml
+          grep -n "commit:\|Binaries" /home/vagrant/fdroiddata/metadata/io.vectorapp.yml || true
+          chown -R vagrant:vagrant /builds/JSKitty /home/vagrant/fdroiddata "$fdroidserver"
+          echo "vercode=$(sed -n 's/^    versionCode: //p' /home/vagrant/fdroiddata/metadata/io.vectorapp.yml | tail -1)" >> "$GITHUB_ENV"
+
+      - name: fdroid build
+        shell: bash
+        working-directory: /home/vagrant
+        run: |
+          unset CI
+          cd fdroiddata
+          run_as_vagrant() {
+            sudo --preserve-env --user vagrant \
+              env PATH="$fdroidserver:$PATH" \
+              env PYTHONPATH="$fdroidserver:$fdroidserver/examples" \
+              env PYTHONUNBUFFERED=true env TERM=dumb env HOME=/home/vagrant "$@"
+          }
+          run_as_vagrant fdroid fetchsrclibs "io.vectorapp:$vercode" --verbose
+          run_as_vagrant fdroid build --verbose --test --refresh-scanner --on-server --no-tarball "io.vectorapp:$vercode"
+          ls -l tmp/*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vector-fdroid-unsigned
+          path: /builds/JSKitty/fdroiddata/tmp/io.vectorapp_*.apk
+          if-no-files-found: error
+
+  sign:
+    if: inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Vector-fdroid-unsigned
+          path: apk
+
+      # The runner image ships build-tools; no SDK action needed.
+      - name: build-tools
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          test -x "$BT/apksigner"
+          echo "BT=$BT" >> "$GITHUB_ENV"
+
+      # apksigner on the unsigned APK exactly as built: F-Droid's verifier
+      # copies this signature onto its own build, so the archive underneath
+      # must not be rewritten: v2/v3 only, and alignment preserved so nothing
+      # is re-padded. Gradle already aligns it; only check.
+      - name: Sign
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$HOME/upload-keystore.jks"
+          IN=$(ls apk/io.vectorapp_*.apk)
+          "$BT/zipalign" -c -p 4 "$IN"
+          "$BT/apksigner" sign \
+            --alignment-preserved \
+            --v1-signing-enabled false --v2-signing-enabled true --v3-signing-enabled true \
+            --ks "$HOME/upload-keystore.jks" \
+            --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --out apk/Vector-fdroid.apk "$IN"
+          "$BT/apksigner" verify --print-certs apk/Vector-fdroid.apk
+
+      - name: Upload to the release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ inputs.release_tag }}" apk/Vector-fdroid.apk --clobber --repo "$GITHUB_REPOSITORY"

@@ -75,12 +75,28 @@ Once merged, `AutoUpdateMode: Version` makes their bot add a build entry for eve
 ## Reproducible
 
 F-Droid decides signing when an app is included and cannot switch afterwards, so `Binaries` and
-`AllowedAPKSigningKeys` are set from the first submission. The CI job `publish-android-fdroid`
-builds the flavour with the same script, signs it with the release key using `apksigner`, and
-uploads it as `Vector-fdroid.apk`; F-Droid rebuilds the tag, strips both signatures and compares.
-A match publishes with Vector's own signature and the reproducible badge. For a version released
-before that job existed, the `fdroid` workflow can be dispatched with the commit and the release
-tag to produce the asset.
+`AllowedAPKSigningKeys` are set from the first submission. The reference asset is produced by
+`fdroid-build.yaml`: `fdroid build` run on our metadata inside F-Droid's own `buildserver-trixie`
+image, so every host tool feeding the native build is the one their builder uses, then signed with
+the release key using `apksigner` and uploaded as `Vector-fdroid.apk`. `publish.yaml` calls it for
+each release; it can also be dispatched by hand with a commit and a release tag. F-Droid rebuilds
+the tag, strips both signatures and compares; a match publishes with Vector's own signature and
+the reproducible badge.
+
+One reproducibility trap already hit: Tauri keeps `plugins` in a hash map, so the embedded
+`tauri.conf.json` (an APK asset, and compiled into the library) lists plugin configs in a random
+order per build. The flavour config deletes `plugins.updater` (desktop-only anyway) so exactly one
+plugin config remains. Adding a second plugin config to `tauri.conf.json` reopens this.
+
+A second trap, also hit: cargo hashes a path dependency outside the workspace root (`../crates/vector-core`,
+the `../crates/vendor/saturating-time` patch) by absolute path, and that hash lands in every mangled
+symbol of the crates depending on it. F-Droid's production builder, its CI and ours all check out to
+different directories, so the recipe copies the tree to `$HOME/vector-fdroid-build` and builds there.
+
+A third, fixed in a Tauri fork: `tauri-codegen` walks the asset directory in filesystem order and
+emits the CSP script hashes from hash maps, so the generated context differs per build. `[patch]`
+pins `tauri-codegen` and `tauri-utils` to `VectorPrivacy/tauri` branch `deterministic-codegen-2.6.3`,
+which sorts all three; upstreaming is the way to drop the patch.
 
 What already holds the two builds together: the Rust toolchain and `tauri-cli` versions pinned at
 the top of `scripts/fdroid-build.sh`, NDK `29.0.14206865`, `--remap-path-prefix` on every path that differs between
