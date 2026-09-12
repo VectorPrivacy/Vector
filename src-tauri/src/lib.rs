@@ -621,7 +621,6 @@ pub fn run() {
             message::get_message_delete_options,
             message::get_message_delete_meta_bulk,
             message::cancel_upload,
-            message::paste_message,
             message::file_message,
             message::forward_attachment,
             message::get_file_info,

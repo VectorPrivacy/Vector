@@ -27,9 +27,7 @@ pub use vector_core::simd::hex::{
     hex_string_to_bytes,
 };
 
-pub use crate::simd::{
-    has_alpha_transparency, set_all_alpha_opaque,
-};
+pub use crate::simd::has_alpha_transparency;
 
 #[cfg(target_os = "windows")]
 pub use crate::simd::has_all_alpha_near_zero;
@@ -333,58 +331,6 @@ pub fn get_file_type_description(extension: &str) -> String {
 /// Calculate SHA-256 hash of file data
 pub fn calculate_file_hash(data: &[u8]) -> String {
     vector_core::crypto::sha256_hex(data)
-}
-
-/// Ultra-fast nearest-neighbor downsampling for RGBA8 pixel data
-///
-/// This is significantly faster than image crate's resize functions because:
-/// - No interpolation calculations (just picks nearest pixel)
-/// - No filter kernel convolutions
-/// - Simple memory access pattern
-///
-/// # Arguments
-/// * `pixels` - Source RGBA8 pixel data (4 bytes per pixel)
-/// * `src_width` - Source image width
-/// * `src_height` - Source image height
-/// * `dst_width` - Target width
-/// * `dst_height` - Target height
-///
-/// # Returns
-/// Downsampled RGBA8 pixel data
-/// Fast nearest-neighbor downsampling for RGBA images.
-///
-/// Delegates to SIMD-optimized implementation in `crate::simd::image`.
-#[inline]
-pub fn nearest_neighbor_downsample(
-    pixels: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Vec<u8> {
-    crate::simd::image::nearest_neighbor_downsample(pixels, src_width, src_height, dst_width, dst_height)
-}
-
-/// Generate a thumbhash from RGBA8 image data.
-///
-/// Downscales to fit within 100x100 (ThumbHash's max) while preserving aspect ratio.
-/// Returns the base91-encoded thumbhash string, or None if encoding fails.
-pub fn generate_thumbhash_from_rgba(pixels: &[u8], width: u32, height: u32) -> Option<String> {
-    const MAX_DIM: u32 = 100;
-
-    let (thumb_w, thumb_h) = if width <= MAX_DIM && height <= MAX_DIM {
-        (width, height)
-    } else if width > height {
-        (MAX_DIM, (MAX_DIM * height / width).max(1))
-    } else {
-        ((MAX_DIM * width / height).max(1), MAX_DIM)
-    };
-
-    // Use fast nearest-neighbor downsampling
-    let thumbnail_pixels = nearest_neighbor_downsample(pixels, width, height, thumb_w, thumb_h);
-
-    let hash = rgba_to_thumb_hash(thumb_w as usize, thumb_h as usize, &thumbnail_pixels);
-    Some(base91_encode(&hash))
 }
 
 /// Generate a thumbhash from a DynamicImage with minimal memory allocation.

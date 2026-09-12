@@ -39,7 +39,6 @@ fn main() {
             "toggle_chat_mute",
             // Message commands
             "message",
-            "paste_message",
             "file_message",
             "file_message_compressed",
             "get_file_info",

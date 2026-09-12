@@ -2,29 +2,22 @@
 //!
 //! This module handles:
 //! - Sending DM messages
-//! - Paste message from clipboard
 //! - Voice message sending
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::Emitter;
 
 /// Cancel flags for in-progress uploads, keyed by pending message ID.
 pub(crate) static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-#[cfg(not(target_os = "android"))]
-use ::image::{ImageBuffer, Rgba};
-#[cfg(not(target_os = "android"))]
-use tauri_plugin_clipboard_manager::ClipboardExt;
-
 use crate::{STATE, nostr_client};
-use crate::util;
 use crate::TAURI_APP;
 
-use super::types::{AttachmentFile, ImageMetadata, Message};
+use super::types::{AttachmentFile, Message};
 
 use vector_core::sending::{SendCallback, SendConfig};
 
@@ -724,78 +717,6 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
     // Group chats are no longer supported.
     Err("Group chats are no longer supported".to_string())
-}
-
-#[tauri::command]
-pub async fn paste_message<R: Runtime>(handle: AppHandle<R>, receiver: String, replied_to: String, transparent: bool) -> Result<MessageSendResult, String> {
-    // Platform-specific clipboard reading
-    #[cfg(target_os = "android")]
-    let img = {
-        let _ = &handle; // Unused on Android
-        use crate::android::clipboard::read_image_from_clipboard;
-        read_image_from_clipboard()?
-    };
-
-    #[cfg(not(target_os = "android"))]
-    let img = {
-        let tauri_img = handle.clipboard().read_image()
-            .map_err(|e| format!("Failed to read clipboard: {:?}", e))?;
-
-        // Get RGBA data - this returns &[u8], not a Result
-        let rgba_data = tauri_img.rgba();
-
-        // Convert to ImageBuffer
-        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(
-            tauri_img.width(),
-            tauri_img.height(),
-            rgba_data.to_vec()
-        ).ok_or_else(|| "Failed to create image buffer".to_string())?
-    };
-
-    // Get original pixels
-    let original_pixels = img.as_raw();
-
-    // Windows: check if clipboard corrupted alpha channel (all values near zero)
-    let mut _transparency_bug_search = false;
-    #[cfg(target_os = "windows")]
-    {
-        _transparency_bug_search = util::has_all_alpha_near_zero(original_pixels);
-    }
-
-    // For non-transparent images: set alpha to opaque
-    let pixels = if !transparent || _transparency_bug_search {
-        let mut modified = original_pixels.to_vec();
-        util::set_all_alpha_opaque(&mut modified);
-        std::borrow::Cow::Owned(modified)
-    } else {
-        std::borrow::Cow::Borrowed(original_pixels)
-    };
-
-    // Encode image, choosing PNG (with alpha) or JPEG (without)
-    let encoded = crate::shared::image::encode_rgba_auto(&pixels, img.width(), img.height(), 85)?;
-    let (encoded_bytes, extension) = (encoded.bytes, encoded.extension);
-
-    // Generate image metadata with ThumbHash and dimensions
-    let img_meta: Option<ImageMetadata> = util::generate_thumbhash_from_rgba(
-        img.as_raw(),
-        img.width(),
-        img.height()
-    ).map(|thumbhash| ImageMetadata {
-        thumbhash,
-        width: img.width(),
-        height: img.height(),
-    });
-
-    // Generate an Attachment File
-    let attachment_file = AttachmentFile {
-        bytes: Arc::new(encoded_bytes),
-        img_meta,
-        extension: extension.to_string(),
-        name: String::new(),
-    };
-
-    // Message the file to the intended user
-    message(receiver, String::new(), replied_to, Some(attachment_file)).await
 }
 
 pub async fn voice_message(receiver: String, replied_to: String, bytes: Vec<u8>) -> Result<MessageSendResult, String> {

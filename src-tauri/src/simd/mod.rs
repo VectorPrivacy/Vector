@@ -12,7 +12,7 @@ pub mod html_meta;
 pub mod image;
 pub mod url;
 
-pub use image::{has_alpha_transparency, set_all_alpha_opaque};
+pub use image::has_alpha_transparency;
 
 #[cfg(target_os = "windows")]
 pub use image::has_all_alpha_near_zero;

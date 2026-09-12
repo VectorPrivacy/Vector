@@ -43,7 +43,6 @@
     "allow-is-message-deletable",
     "allow-get-message-delete-options",
     "allow-get-message-delete-meta-bulk",
-    "allow-paste-message",
     "allow-file-message",
     "allow-forward-attachment",
     "allow-get-file-info",

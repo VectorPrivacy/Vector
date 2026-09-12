@@ -1,6 +1,5 @@
 pub mod background_sync;
 pub mod biometric;
-pub mod clipboard;
 pub mod external_signer;
 pub mod filesystem;
 pub mod media_server;
