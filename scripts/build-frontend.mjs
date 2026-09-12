@@ -107,7 +107,7 @@ async function minifyJs(filePath) {
     const result = await minify(code, {
         compress: {
             dead_code: true,
-            drop_console: false, // keep console.log for debugging in production
+            drop_console: true, // the inspector is off in release, so nothing reads them
             passes: 3,
             pure_getters: true,
         },
