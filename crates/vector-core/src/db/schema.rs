@@ -68,6 +68,8 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
+-- Covers the community member fold (authors + newest activity per channel) without touching rows.
+CREATE INDEX IF NOT EXISTS idx_events_chat_kind_npub ON events(chat_id, kind, npub, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_reference ON events(reference_id) WHERE reference_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_events_wrapper ON events(wrapper_event_id) WHERE wrapper_event_id IS NOT NULL;
 

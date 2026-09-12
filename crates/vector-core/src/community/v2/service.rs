@@ -2883,6 +2883,13 @@ fn mark_guestbook_observed_since(cid_hex: &str) {
 pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, String> {
     let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let (events, _cursor) = crate::db::community::get_guestbook(&cid_hex)?;
+    stored_memberlist_from(community, &events)
+}
+
+/// [`stored_memberlist`] over a guestbook the caller already holds, so a read that needs
+/// the cursor too decrypts and parses the plane once.
+pub fn stored_memberlist_from(community: &CommunityV2, events: &[guestbook::GuestbookEvent]) -> Result<Vec<PublicKey>, String> {
+    let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
     let mut observed: std::collections::BTreeMap<PublicKey, u64> = std::collections::BTreeMap::new();
     for (npub, last_active_secs) in crate::db::community::community_member_activity(&cid_hex).unwrap_or_default() {
         if let Ok(pk) = PublicKey::parse(&npub) {
@@ -2902,7 +2909,7 @@ pub fn stored_memberlist(community: &CommunityV2) -> Result<Vec<PublicKey>, Stri
         .into_iter()
         .filter_map(|(h, at)| PublicKey::from_hex(&h).ok().map(|pk| (pk, at)))
         .collect();
-    fold_members(community, &events, observed, &roles, &banlist, &banned_at)
+    fold_members(community, events, observed, &roles, &banlist, &banned_at)
 }
 
 /// Fold the Complete Memberlist from the Guestbook plane. The proven owner is

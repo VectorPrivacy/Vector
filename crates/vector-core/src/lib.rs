@@ -2963,7 +2963,7 @@ impl VectorCore {
         match Self::load_v2_if_v2(community_id) {
             Ok(Some(community)) => {
                 let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
-                let (_, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
+                let (events, cursor) = crate::db::community::get_guestbook(&cid_hex).unwrap_or_default();
                 if cursor == 0 {
                     if crate::community::v2::realtime::follow_worker_running() {
                         crate::community::v2::realtime::enqueue_follow(community.id());
@@ -2977,7 +2977,7 @@ impl VectorCore {
                         });
                     }
                 }
-                return crate::community::v2::service::stored_memberlist(&community)
+                return crate::community::v2::service::stored_memberlist_from(&community, &events)
                     .unwrap_or_default()
                     .into_iter()
                     .filter_map(|pk| pk.to_bech32().ok())
