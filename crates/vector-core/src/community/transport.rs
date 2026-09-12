@@ -1621,6 +1621,10 @@ pub(crate) mod memory {
 /// failing scenario reproduces exactly from its seed.
 #[cfg(test)]
 pub(crate) mod adversarial {
+    // A fault-injection toolkit: each scenario uses the rules it needs, and the rest
+    // of the surface waits for the next scenario rather than being trimmed to fit.
+    #![allow(dead_code)]
+
     use super::memory::MemoryRelay;
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};

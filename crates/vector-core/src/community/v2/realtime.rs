@@ -1055,7 +1055,6 @@ mod tests {
         let out = prioritize_by_activity(batch.clone(), |_| 0);
         assert_eq!(out, batch, "equal activity is a stable sort, not a reshuffle");
     }
-    use super::*;
     use super::super::control::{genesis, CommunityMetadata};
     use crate::community::Epoch;
     use nostr_sdk::prelude::Keys;
