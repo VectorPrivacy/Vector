@@ -533,8 +533,11 @@ try {
             }
         }
 
+        // The MCP debug bridge's own commands pass in debug builds only; release also
+        // grants them no capability.
+        const debugBridge = __VECTOR_DEBUG_BRIDGE__;
         wrappedCore.invoke = async (cmd, args) => {
-            if (allowedCommands.includes(cmd)) {
+            if (allowedCommands.includes(cmd) || (debugBridge && cmd.startsWith('plugin:mcp-bridge|'))) {
                 return originalInvoke.call(originalCore, cmd, args);
             }
             console.warn('Mini App tried to invoke blocked Tauri command:', cmd);
@@ -1102,6 +1105,10 @@ pub async fn miniapp_open(
             .as_ref()
             .map_err(|_| Error::BlackholeProxyUnavailable)?;
     
+        let init_script = INIT_SCRIPT.replace(
+            "__VECTOR_DEBUG_BRIDGE__",
+            if cfg!(debug_assertions) { "true" } else { "false" },
+        );
         let mut window_builder = WebviewWindowBuilder::new(
             &app,
             &window_label,
@@ -1113,7 +1120,7 @@ pub async fn miniapp_open(
         .resizable(true)
         .focused(true)
         // Use initialization_script_for_all_frames like DeltaChat does
-        .initialization_script_for_all_frames(INIT_SCRIPT)
+        .initialization_script_for_all_frames(&init_script)
         // Enable devtools in debug mode only
         .devtools(cfg!(debug_assertions))
         .on_navigation({
