@@ -427,8 +427,8 @@ async function playMiniAppSolo() {
 
     try {
         // Open the Mini App directly using the cached file path (openMiniApp
-        // runs the Tor IP-exposure consent gate).
-        // Use a placeholder chat_id and message_id for solo play
+        // runs the Tor IP-exposure consent gate). The 'solo' chat keys the window
+        // per package; the message id only seeds a realtime topic.
         await openMiniApp(app.src_url, 'solo', `solo_${Date.now()}`, null, null);
     } catch (e) {
         console.error('Failed to open Mini App:', e);
@@ -520,6 +520,7 @@ async function playMiniAppAndInvite() {
         sendPromise.then((result) => {
             if (!isGroup && result && result.pending_id && result.event_id) {
                 finalizePendingMessage(targetChatId, result.pending_id, result.event_id);
+                noteMiniAppIdSwap(result.pending_id, result.event_id);
             }
         }).catch((e) => {
             // The bubble shows the failed state with its own retry — the open

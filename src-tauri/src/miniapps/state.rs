@@ -1,6 +1,6 @@
 //! State management for Mini App instances
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -330,6 +330,22 @@ pub struct MiniAppsState {
     /// Preconnect completion signals — joinRealtimeChannel awaits these
     /// before attaching the event listener. Sender lives in the preconnect task.
     preconnect_signals: RwLock<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
+    /// Window labels whose open is in flight, between the instance check and the window.
+    opening: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+/// Holds a label in the opening set for the length of one `miniapp_open`.
+pub struct OpeningGuard {
+    set: Arc<std::sync::Mutex<HashSet<String>>>,
+    label: String,
+}
+
+impl Drop for OpeningGuard {
+    fn drop(&mut self) {
+        if let Ok(mut set) = self.set.lock() {
+            set.remove(&self.label);
+        }
+    }
 }
 
 impl MiniAppsState {
@@ -341,6 +357,7 @@ impl MiniAppsState {
             realtime_channels: RwLock::new(HashMap::new()),
             peer_addrs: RwLock::new(HashMap::new()),
             session_peers: RwLock::new(HashMap::new()),
+            opening: Arc::new(std::sync::Mutex::new(HashSet::new())),
             preconnect_signals: RwLock::new(HashMap::new()),
         }
     }
@@ -489,6 +506,15 @@ impl MiniAppsState {
     }
     
     /// Get an instance by window label
+    /// Claim a label for an open in progress; `None` when another open holds it.
+    pub fn begin_opening(&self, window_label: &str) -> Option<OpeningGuard> {
+        let mut set = self.opening.lock().ok()?;
+        if !set.insert(window_label.to_string()) {
+            return None;
+        }
+        Some(OpeningGuard { set: Arc::clone(&self.opening), label: window_label.to_string() })
+    }
+
     pub async fn get_instance(&self, window_label: &str) -> Option<MiniAppInstance> {
         let instances = self.instances.read().await;
         instances.get(window_label).cloned()

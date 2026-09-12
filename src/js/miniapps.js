@@ -89,8 +89,19 @@ async function openMiniApp(filePath, chatId = '', messageId = '', href = null, t
     if (!(await confirmMiniAppTorExposure(filePath))) {
         return false; // user declined the Tor IP-exposure prompt — nothing opened
     }
+    messageId = miniAppLaunchIds.get(messageId) || messageId;
     await invoke('miniapp_open', { filePath, chatId, messageId, href, topicId });
     return true;
+}
+
+/**
+ * The window of an app launched with a DM send is keyed under the send's pending id, and the
+ * bubble carries the final id once the send settles; the row's click has to find that window.
+ * @type {Map<string, string>} final id -> pending id
+ */
+const miniAppLaunchIds = new Map();
+function noteMiniAppIdSwap(pendingId, eventId) {
+    if (pendingId && eventId && pendingId !== eventId) miniAppLaunchIds.set(eventId, pendingId);
 }
 
 /**

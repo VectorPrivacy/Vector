@@ -769,9 +769,9 @@ pub async fn miniapp_open(
 
         // Generate unique ID from file hash
         let id = format!("miniapp_{:x}", md5_hash(&file_path));
-        // For marketplace apps (empty chat/message), use the app id as the window label
-        // This ensures a valid label like "miniapp:solo:abc123" instead of "miniapp::"
-        let window_label = if chat_id.is_empty() && message_id.is_empty() {
+        // A solo launch is one window per package, whatever placeholder message id the
+        // launcher minted; a chat launch is one per message.
+        let window_label = if chat_id == "solo" || (chat_id.is_empty() && message_id.is_empty()) {
             format!("miniapp:solo:{}", id)
         } else {
             format!("miniapp:{}:{}", chat_id, message_id)
@@ -783,7 +783,8 @@ pub async fn miniapp_open(
 
         // Check if already open
         log_trace!("[MiniApp] Checking for existing instance...");
-        if let Some((existing_label, _existing_instance)) = state.get_instance_by_message(&chat_id, &message_id).await {
+        if let Some(_existing_instance) = state.get_instance(&window_label).await {
+            let existing_label = window_label.clone();
             #[cfg(target_os = "android")]
             {
                 // On Android, navigate the existing overlay if open
@@ -839,6 +840,13 @@ pub async fn miniapp_open(
             }
         }
     
+        // The package load can take seconds; a second click meanwhile must not race a
+        // second window under the same label.
+        let Some(_opening) = state.begin_opening(&window_label) else {
+            log_trace!("[MiniApp] Already opening {}, ignoring", window_label);
+            return Ok(());
+        };
+
         // Load the package (with timeout to prevent infinite hang)
         log_trace!("[MiniApp] Loading package for {}...", window_label);
         let package = tokio::time::timeout(
