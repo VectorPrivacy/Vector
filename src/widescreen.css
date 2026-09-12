@@ -1511,16 +1511,30 @@ body.ws.ws-rail-collapsed .ws-rail-item-name {
 
 body.ws.ws-rail-collapsed .ws-rail-item-badge {
   position: absolute;
-  /* Hugs the avatar's corner, which now sits 4px inside the square row. */
-  top: 2px;
-  right: 2px;
-  min-width: 9px;
-  height: 9px;
+  /* Centred on the avatar's corner (the avatar sits 4px inside the square row),
+     cut out from it by a ring in the rail's own colour. */
+  top: 0;
+  right: 0;
+  min-width: 10px;
+  width: 10px;
+  height: 10px;
   padding: 0;
+  margin: 0;
   border-radius: 50%;
+  /* The rail's painted colour: the app's #030303 under the rail tint. */
+  box-shadow: 0 0 0 2px #090909;
   font-size: 0;
   line-height: 0;
   overflow: hidden;
+}
+
+/* With no name beside it, the quiet dot has to carry the whole signal itself. */
+body.ws.ws-rail-collapsed .ws-rail-item-badge.is-dot {
+  background-color: rgba(255, 255, 255, 0.9);
+}
+
+body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
+  background-color: rgba(255, 255, 255, 0.45);
 }
 
 /* Nav rows: icon-left + label, with a neutral pill on the active tab. */
@@ -1592,10 +1606,21 @@ body.ws #ws-rail-collapse:hover {
   background-color: var(--ws-hover);
 }
 
-/* The window is too narrow for the rail to expand: nothing to toggle. */
+/* The window is too narrow for the rail to expand: nothing to toggle. Coming back is
+   a fade, not a pop: the rail's width jumps at the same moment and the toggle
+   arriving with it read as a flash. */
 body.ws.ws-rail-locked #ws-rail-collapse {
   opacity: 0;
   pointer-events: none;
+}
+
+@keyframes ws-rail-toggle-in {
+  from { opacity: 0; }
+  to { opacity: 0.4; }
+}
+
+body.ws:not(.ws-rail-locked) #ws-rail-collapse {
+  animation: ws-rail-toggle-in 0.4s ease;
 }
 
 body.ws #ws-rail-collapse .navbar-icon {
