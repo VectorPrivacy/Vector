@@ -3,12 +3,12 @@
     // `strip` (the recording readout and the preview) sits where the editor does,
     // `dot` (the red record dot) rides beside the mic button, `overlays` (the hold hint
     // and the lock target) float over the box. All paint lib/voicerecorder.
-    import { recorderState, voiceHandlers, voiceEls } from '../lib/voicerecorder.svelte.js';
+    import { recorderState, voiceHandlers, bindVoiceEl } from '../lib/voicerecorder.svelte.js';
 
     let { part } = $props();   // 'strip' | 'dot' | 'overlays'
 
     const v = recorderState();
-    const els = voiceEls();
+    const bindWaveform = bindVoiceEl('waveform');
     const h = () => voiceHandlers();
 
     const recording = $derived(v.state === 'recording');
@@ -42,7 +42,7 @@
         <div class="voice-preview-center">
             <button class="voice-preview-play" aria-label={v.preview.playing ? 'Pause' : 'Play'} onclick={() => h()?.previewPlayPause()}><span class="icon {v.preview.playing ? 'icon-pause' : 'icon-play'}"></span></button>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="voice-preview-waveform" bind:this={els.waveform} onpointerdown={(e) => h()?.waveformPointerDown(e)}>
+            <div class="voice-preview-waveform" use:bindWaveform onpointerdown={(e) => h()?.waveformPointerDown(e)}>
                 <div class="voice-preview-progress" style:width="{pct}%"></div>
                 <div class="voice-preview-handle" style:left={pct ? `calc(${pct}% - 7px)` : '0'}></div>
             </div>

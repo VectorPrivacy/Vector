@@ -52,3 +52,5 @@ export function voiceHandlers() { return handlers; }
 export function setVoiceHandlers(h) { handlers = h; }
 const els = {};
 export function voiceEls() { return els; }
+/** An action that registers its node under `name`; a plain object, so no bind:this. */
+export function bindVoiceEl(name) { return (node) => { els[name] = node; return { destroy() { els[name] = null; } }; }; }

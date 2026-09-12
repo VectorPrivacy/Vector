@@ -146,3 +146,5 @@ export function setComposerHandlers(h) { handlers = h; }
 // gesture, the picker's hit-tests and the scroll handler. Bound by the box.
 const els = {};
 export function composerEls() { return els; }
+/** An action that registers its node under `name`; a plain object, so no bind:this. */
+export function bindComposerEl(name) { return (node) => { els[name] = node; return { destroy() { els[name] = null; } }; }; }
