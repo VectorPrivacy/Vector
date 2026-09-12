@@ -342,6 +342,8 @@ class PackCanvasGrid {
         // Exclude emoji already known to be unavailable (oversized / 404 / etc.) so they never take a
         // blank slot. First-time failures are dropped post-decode by _compact().
         this.emojis = (opts.emojis || pack.emojis).filter(e => !_emojiFailReason.has(e.url));
+        // Fires after a compaction changed the row count: the section's height follows it.
+        this.onRowsChange = opts.onRowsChange || null;
         this.cols = opts.cols || 6;
         this.rows = Math.ceil(this.emojis.length / this.cols) || 1;
         this.dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -579,6 +581,7 @@ class PackCanvasGrid {
         if (!failed) return;
         this.emojis = e; this.frames = f; this.cellState = s;
         this.rows = Math.ceil(this.emojis.length / this.cols) || 1;
+        if (this.onRowsChange) this.onRowsChange();
         this.hoveredIndex = -1;
         this.dirty.clear();
         for (let i = 0; i < this.emojis.length; i++) this.dirty.add(i);

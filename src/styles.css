@@ -5015,16 +5015,9 @@ textarea#chat-input::placeholder {
   opacity: 1;
 }
 
-/* Fade-in when a pack section transitions from the cv:auto-skipped state
-   back into render. Mirrors the chatlist row reveal pattern — see
-   js/picker.js' emoji-pack-reveal init for the data-cv-was-off gate that
-   keeps initial-render and re-render paths silent. */
-@keyframes emoji-pack-section-reveal {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
-.emoji-pack-section.cv-revealed {
-  animation: emoji-pack-section-reveal 0.18s ease-out both;
+/* A section within reach of the viewport renders before it arrives (js/picker.js). */
+.emoji-pack-section.cv-near {
+  content-visibility: visible;
 }
 
 .emoji-pack-emoji {

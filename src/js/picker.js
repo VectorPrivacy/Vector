@@ -192,7 +192,7 @@ function openEmojiPanelForStatus(onInsert) {
             loadEmojiPacks();
         }
         loadEmojiPacks({ refresh: true });
-        _attachEmojiPackReveal();
+        _attachEmojiPackWindow();
         _rearmVisiblePackCanvases();
     }));
 }
@@ -293,7 +293,7 @@ function _openPanel({ isDefaultPanel, reactionId }) {
                 loadEmojiPacks();
             }
             loadEmojiPacks({ refresh: true });
-            _attachEmojiPackReveal();
+            _attachEmojiPackWindow();
             // Re-activate the on-screen pack canvases (the close drained the
             // active set). Persisted grids keep their frames, so this resumes
             // animation immediately.
@@ -522,89 +522,29 @@ function renderCustomEmojiShortcodes(rootEl, emojiTags) {
     }
 }
 
-// ============================================================================
-// Pack-section reveal fade (chatlist pattern)
-// ============================================================================
-//
-// `content-visibility: auto` makes the browser skip off-screen pack
-// sections entirely. When they scroll back in, we play a 180ms opacity
-// fade so the reveal feels intentional instead of popping.
-//
-// Critical: the fade ONLY plays on the off→on transition. Initial render
-// (the section was just inserted, never went off-screen) and re-render
-// (pack subscription changes) must NOT animate — the chatlist solves
-// this with a `data-cv-was-off` flag set the first time the section is
-// observed off-screen; without it, animations would fire every time the
-// pack list updates and every time the picker opens.
-//
-// Two paths: `contentvisibilityautostatechange` (Chromium) is the
-// preferred trigger; IntersectionObserver is the WebKit fallback.
+// Overscan for the pack sections' skipped rendering: a section within NEAR_PX of the
+// viewport is forced visible while still off screen, so a scroll never reaches one
+// that has yet to render.
+let _emojiPackWindowAttached = false;
+const EMOJI_PACK_NEAR_PX = 400;
 
-let _emojiPackRevealAttached = false;
-let _emojiPackRevealObserver = null;
-let _emojiPackCvEventSeen = false;
-
-function _emojiPackReveal_trigger(el) {
-    // remove → reflow → add restarts the CSS animation on the same element.
-    el.classList.remove('cv-revealed');
-    void el.offsetWidth;
-    el.classList.add('cv-revealed');
-}
-
-function _emojiPackReveal_observeAll(main) {
-    if (!_emojiPackRevealObserver) return;
-    main.querySelectorAll('.emoji-pack-section').forEach(el => {
-        _emojiPackRevealObserver.observe(el);
-    });
-}
-
-function _attachEmojiPackReveal() {
-    if (_emojiPackRevealAttached) return;
+function _attachEmojiPackWindow() {
+    if (_emojiPackWindowAttached) return;
     const main = _pickerEls.main;
     if (!main) return;
-    _emojiPackRevealAttached = true;
+    _emojiPackWindowAttached = true;
 
-    main.addEventListener('contentvisibilityautostatechange', (e) => {
-        _emojiPackCvEventSeen = true;
-        const target = e.target;
-        if (!(target instanceof HTMLElement)) return;
-        if (!target.classList.contains('emoji-pack-section')) return;
-        if (e.skipped) {
-            target.dataset.cvWasOff = '1';
-            target.classList.remove('cv-revealed');
-        } else if (target.dataset.cvWasOff === '1') {
-            _emojiPackReveal_trigger(target);
-        }
-        // Else: initial render after insertion → no animation.
-    });
+    const io = new IntersectionObserver((entries) => {
+        for (const entry of entries) entry.target.classList.toggle('cv-near', entry.isIntersecting);
+    }, { root: main, rootMargin: `${EMOJI_PACK_NEAR_PX}px 0px`, threshold: 0 });
+    main.querySelectorAll('.emoji-pack-section').forEach(el => io.observe(el));
+    for (const ev of ['wheel', 'touchstart', 'pointerdown']) main.addEventListener(ev, () => { _jumpAlign = null; }, { passive: true });
 
-    _emojiPackRevealObserver = new IntersectionObserver((entries) => {
-        if (_emojiPackCvEventSeen) return; // Chromium path is driving things.
-        for (const entry of entries) {
-            const el = entry.target;
-            if (!(el instanceof HTMLElement)) continue;
-            if (!el.classList.contains('emoji-pack-section')) continue;
-            if (entry.isIntersecting) {
-                if (el.dataset.cvWasOff === '1') {
-                    _emojiPackReveal_trigger(el);
-                }
-            } else {
-                el.dataset.cvWasOff = '1';
-            }
-        }
-    }, { root: main, threshold: 0 });
-
-    _emojiPackReveal_observeAll(main);
-
-    // Pack sections come and go on subscribe/unsubscribe — re-observe new ones.
+    // Pack sections come and go on subscribe/unsubscribe — observe new ones.
     const mo = new MutationObserver((mutations) => {
         for (const m of mutations) {
             for (const node of m.addedNodes) {
-                if (node instanceof HTMLElement
-                    && node.classList.contains('emoji-pack-section')
-                    && _emojiPackRevealObserver) {
-                    _emojiPackRevealObserver.observe(node);
-                }
+                if (node instanceof HTMLElement && node.classList.contains('emoji-pack-section')) io.observe(node);
             }
         }
     });
@@ -699,12 +639,16 @@ function renderEmojiPackSections() {
  * its parent and the section hosts the cell tooltip). Returns the teardown.
  */
 function _mountPackCanvasGrid(section, pack) {
-    const grid = new PackCanvasGrid(pack);
+    // A compaction (failed emoji dropped post-decode) shrinks the grid; the sections'
+    // intrinsic sizes re-derive so a jump-scroll over skipped sections still lands.
+    const grid = new PackCanvasGrid(pack, { onRowsChange: () => { VectorSvelte.bumpPickerChrome(); _realignJump(); } });
     _packCanvasGrids.set(pack.id, grid);
     section.appendChild(grid.canvas);
     if (_pickerEls.main) grid.attachVisibilityObserver(_pickerEls.main);
     return () => {
         grid.destroy();
+        // The section outlives a rebuild of its grid; the old canvas must not stay behind.
+        grid.canvas.remove();
         if (_packCanvasGrids.get(pack.id) === grid) _packCanvasGrids.delete(pack.id);
     };
 }
@@ -915,15 +859,48 @@ async function _onRailClick(e) {
             `.emoji-pack-section[data-pack-id="${CSS.escape(btn.dataset.packId)}"]`,
         );
     }
-    // Pixel-accurate contain-intrinsic-size on every pack section (see
-    // renderEmojiPackSections) means nothing resizes under the scroll, so a
-    // single smooth scroll lands on target — no post-jump correction needed.
-    if (section) {
-        // Hold the spy off while the smooth scroll travels, so the highlight
-        // stays on the tab that was clicked instead of chasing the animation.
-        _emojiSpyMuteUntil = Date.now() + 700;
-        section.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    if (section) _jumpToPickerSection(section);
+}
+
+/**
+ * Smooth-scroll a section to the top of the panel, then square up. The sections'
+ * intrinsic sizes are pixel-accurate, but a section the scroll passes can still
+ * shrink under it: its emoji decode for the first time on the way and the failed
+ * ones compact out. The final instant scroll absorbs that.
+ */
+let _jumpAlign = null;   // { section, until }: the section a jump should still sit on
+
+function _jumpToPickerSection(section) {
+    const main = _pickerEls.main;
+    // Hold the spy off while the scroll travels, so the highlight stays on the tab
+    // that was clicked instead of chasing the animation.
+    _emojiSpyMuteUntil = Date.now() + 900;
+    section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // A compaction in the next couple of seconds (sections above still decoding)
+    // re-squares the landing; the user taking the scroll ends that.
+    _jumpAlign = { section, until: Date.now() + 2500 };
+    let settled = false;
+    const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        _realignJump();
+    };
+    // `scrollend` where it exists; the timer covers the engines without it.
+    main?.addEventListener('scrollend', settle, { once: true });
+    const timer = setTimeout(settle, 750);
+}
+
+function _realignJump() {
+    const main = _pickerEls.main;
+    const j = _jumpAlign;
+    if (!j || !main) return;
+    if (Date.now() > j.until || !j.section.isConnected) { _jumpAlign = null; return; }
+    requestAnimationFrame(() => {
+        if (_jumpAlign !== j) return;
+        const off = j.section.getBoundingClientRect().top - main.getBoundingClientRect().top;
+        if (Math.abs(off) > 1) j.section.scrollIntoView({ block: 'start' });
+    });
 }
 
 /**

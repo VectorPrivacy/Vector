@@ -12,7 +12,28 @@
 
     function logo(img, url) { h.bindCachedImg(img, url, 'emoji_pack_icon'); }
     function menu(el, pack) { h.packMenu(el, pack); }
-    function grid(section, pack) { return { destroy: h.mountGrid(section, pack) }; }
+    // The grid follows its pack's emoji: a pack that arrives fuller later (the same id, a
+    // new object) rebuilds the canvas, so the drawn cells and the section's size agree. A
+    // reload that changes nothing keeps the decoded frames.
+    function sameEmojis(a, b) {
+        const x = a.emojis || [], y = b.emojis || [];
+        return x.length === y.length && x.every((e, i) => e.url === y[i].url && e.shortcode === y[i].shortcode);
+    }
+    function grid(section, pack) {
+        let current = pack;
+        let teardown = h.mountGrid(section, pack);
+        return {
+            update(next) {
+                if (next === current) return;
+                const rebuild = !sameEmojis(next, current);
+                current = next;
+                if (!rebuild) return;
+                teardown();
+                teardown = h.mountGrid(section, next);
+            },
+            destroy() { teardown(); },
+        };
+    }
     // The canvases arm and the header chrome calibrates once the sections are in the DOM.
     $effect(() => { packs; tick().then(() => h.afterRender()); });
 </script>
