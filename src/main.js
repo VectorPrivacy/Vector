@@ -1079,12 +1079,20 @@ function getProfile(npub) {
  * @param {Profile} profile - The profile object
  * @returns {string|null} - The avatar src to use, or null if none available
  */
-function getProfileAvatarSrc(profile) {
+/** The avatar's URL: the display-sized still the cache writes beside it (image_cache.rs)
+ *  unless `full`, which the profile page's hero needs. */
+function getProfileAvatarSrc(profile, full = false) {
     if (!profile) return null;
     if (profile.avatar_cached) {
-        return convertFileSrc(profile.avatar_cached);
+        return convertFileSrc(full ? profile.avatar_cached : avatarThumbPath(profile.avatar_cached));
     }
     return null;
+}
+
+/** `.../avatars/<file>` → `.../avatars/thumbs/<file>`, whichever separator the platform uses. */
+function avatarThumbPath(path) {
+    const m = path.match(/^(.*[\\/])avatars([\\/])([^\\/]+)$/);
+    return m ? `${m[1]}avatars${m[2]}thumbs${m[2]}${m[3]}` : path;
 }
 
 /**

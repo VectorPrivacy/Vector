@@ -433,11 +433,78 @@ pub async fn cache_image<R: Runtime>(
     if let Err(e) = std::fs::write(&file_path, &bytes) {
         return CacheResult::Failed(format!("Failed to write cache file: {}", e));
     }
+    let url_owned = url.to_string();
 
     let path_str = file_path.to_string_lossy().to_string();
     log_info!("[ImageCache] Cached {} -> {}", url, path_str);
 
+    if image_type == ImageType::Avatar {
+        // Blocking pool: a decode and resize per avatar must not pin a runtime worker.
+        // spawn-detached: global image cache maintenance, no account state
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = write_avatar_thumb(&file_path, &bytes) {
+                log_debug!("[ImageCache] thumb skipped for {}: {}", url_owned, e);
+            }
+        });
+    }
+
     CacheResult::Cached(path_str)
+}
+
+/// Longest side of the still the cache writes beside every avatar. A list face
+/// is at most 80 CSS px, so this covers 2x displays; a full-size read decodes the
+/// original.
+pub const AVATAR_THUMB_DIM: u32 = 160;
+
+/// `avatars/thumbs/<same filename>`: the frontend derives it from the cached path.
+pub fn avatar_thumb_path(avatar_path: &std::path::Path) -> Option<PathBuf> {
+    let name = avatar_path.file_name()?;
+    Some(avatar_path.parent()?.join("thumbs").join(name))
+}
+
+/// Write the display-sized still for a cached avatar. An animation is already
+/// normalized to the display ceiling, and a vector or undecodable file costs
+/// nothing to draw small, so those are copied as they are.
+pub fn write_avatar_thumb(avatar_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let dest = avatar_thumb_path(avatar_path).ok_or("avatar path has no file name")?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("thumb dir: {e}"))?;
+    }
+    let mut out: Option<Vec<u8>> = None;
+    if crate::shared::image::animated_format(bytes).is_none() {
+        if let Ok(img) = image::load_from_memory(bytes) {
+            if img.width() > AVATAR_THUMB_DIM || img.height() > AVATAR_THUMB_DIM {
+                out = Some(crate::shared::image::compress_image(&img, AVATAR_THUMB_DIM, 85)?.bytes);
+            }
+        }
+    }
+    let tmp = dest.with_extension("tmp");
+    std::fs::write(&tmp, out.as_deref().unwrap_or(bytes))
+        .and_then(|_| std::fs::rename(&tmp, &dest))
+        .map_err(|e| format!("thumb write: {e}"))
+}
+
+/// Thumbs for every cached avatar that has none yet (a cache that predates them).
+/// Returns how many were written.
+pub fn backfill_avatar_thumbs<R: Runtime>(handle: &AppHandle<R>) -> usize {
+    let Ok(dir) = get_cache_dir(handle, ImageType::Avatar) else { return 0 };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return 0 };
+    let mut written = 0usize;
+    for path in entries.flatten().map(|e| e.path()).filter(|p| p.is_file()) {
+        let Some(dest) = avatar_thumb_path(&path) else { continue };
+        if dest.exists() {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        match write_avatar_thumb(&path, &bytes) {
+            Ok(()) => written += 1,
+            Err(e) => log_debug!("[ImageCache] thumb skipped {:?}: {}", path.file_name(), e),
+        }
+    }
+    if written > 0 {
+        log_info!("[ImageCache] backfill: {} avatar thumbs written", written);
+    }
+    written
 }
 
 /// Display-size ceiling for a cached ANIMATION of this type, or None for types

@@ -11,7 +11,7 @@ function renderCurrentProfile(cProfile) {
         hasName: !!(cProfile?.nickname || cProfile?.name),
         statusText: cProfile?.status?.title || 'Set a Status',
         emojiTags: cProfile?.status?.emoji_tags || [],
-        avatarSrc: getProfileAvatarSrc(cProfile) || null,
+        avatarSrc: getProfileAvatarSrc(cProfile, true) || null,
     });
 }
 
@@ -205,7 +205,7 @@ function enterProfileEditMode() {
     VectorSvelte.startProfileEdit({
         name: cProfile.name || '',
         about: typeof cProfile.about === 'string' ? cProfile.about : '',
-        avatar: getProfileAvatarSrc(cProfile) || null,
+        avatar: getProfileAvatarSrc(cProfile, true) || null,
         banner: getProfileBannerSrc(cProfile) || null,
     });
 }

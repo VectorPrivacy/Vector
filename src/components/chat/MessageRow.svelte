@@ -20,6 +20,7 @@
     import MessageContent from './MessageContent.svelte';
     import ReactionChip from './ReactionChip.svelte';
     import PivxBubble from './PivxBubble.svelte';
+    import { avatarFallback } from '../lib/avatar.js';
 
     let {
         msg,               // raw message, shared by reference with the chat's array
@@ -136,7 +137,13 @@
     // The avatar is a direct child of the gutter; a load failure swaps in the
     // placeholder the way the Avatar atom does.
     let avatarFailed = $state(false);
-    $effect(() => { avatarSrc; avatarFailed = false; });
+    let avatarFell = $state(false);   // the thumb failed; showing the original
+    $effect(() => { avatarSrc; avatarFailed = false; avatarFell = false; });
+    const avatarShown = $derived(avatarFell ? avatarFallback(avatarSrc) : avatarSrc);
+    function onAvatarError() {
+        if (!avatarFell && avatarFallback(avatarSrc)) avatarFell = true;
+        else avatarFailed = true;
+    }
 
     // Chips arriving after the row's first paint pop in. Deliberately not state: a chip reads
     // it once at mount, and a later flip must not re-render the chips already on screen.
@@ -168,10 +175,10 @@
             <!-- svelte-ignore a11y_missing_attribute -->
             <img
                 class="dmsg-avatar btn"
-                src={avatarSrc}
+                src={avatarShown}
                 data-npub={authorFullId || undefined}
                 style="width: 40px; height: 40px; object-fit: cover; border-radius: 50%; margin: 0px;"
-                onerror={() => (avatarFailed = true)}
+                onerror={onAvatarError}
             />
         {:else}
             <div

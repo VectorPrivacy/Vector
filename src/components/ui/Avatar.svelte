@@ -11,8 +11,16 @@
         style = '',
     } = $props();
 
+    import { avatarFallback } from '../lib/avatar.js';
+
     let failed = $state(false);
-    $effect(() => { src; failed = false; });
+    let fell = $state(false);   // the thumb failed; showing the original
+    $effect(() => { src; failed = false; fell = false; });
+    const shown = $derived(fell ? avatarFallback(src) : src);
+    function onError() {
+        if (!fell && avatarFallback(src)) fell = true;
+        else failed = true;
+    }
 
     const dims = $derived(size == null ? '' : `width:${size}px;height:${size}px;`);
     const box = $derived(size == null ? '' : `min-width:${size}px;min-height:${size}px;max-width:${size}px;max-height:${size}px;`);
@@ -21,11 +29,11 @@
 {#if src && !failed}
     <img
         class={cls}
-        {src}
+        src={shown}
         alt=""
         draggable="false"
         style="{dims}object-fit:cover;border-radius:50%;{style}"
-        onerror={() => (failed = true)}
+        onerror={onError}
     />
 {:else}
     <div class="placeholder-avatar {cls}" style="{box}background-image:url(&quot;icons/{group ? 'group' : 'user'}-placeholder.svg&quot;);background-size:cover;background-position:center;{style}"></div>
