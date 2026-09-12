@@ -446,6 +446,22 @@ body.ws #chat-list {
   padding-left: 8px;
   padding-right: 8px;
   padding-bottom: 8px;
+  /* The rail's fade, as a mask for the same reason: the depth tracks what is left to
+     scroll (ChatListPane.svelte), so the last row is only dim while there is more. */
+  --ws-list-fade: 0px;
+  --ws-list-fade-top: 0px;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--ws-list-fade-top),
+    #000 calc(100% - var(--ws-list-fade)),
+    transparent 100%
+  );
+}
+
+/* The narrow layout's bottom chrome is what the last row clears; there is none here. */
+body.ws #chat-list > :last-child {
+  margin-bottom: 0;
 }
 
 body.ws #chats {

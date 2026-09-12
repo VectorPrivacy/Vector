@@ -16,6 +16,31 @@
     const reveals = shellReveals();
     const sync = syncLineState();
     const bindList = bindShellEl('chatList');
+
+    // The scroller's end fades track the scroll that is left in each direction, so a
+    // row you have reached is never dimmed. Rows come and go, so the content's height
+    // is watched as well as the box's.
+    const FADE_MAX = 24;
+    function listFade(node) {
+        let depth = -1, top = -1;
+        const sync = () => {
+            const below = node.scrollHeight - node.clientHeight - node.scrollTop;
+            const d = Math.round(Math.max(0, Math.min(FADE_MAX, below)));
+            const t = Math.round(Math.max(0, Math.min(FADE_MAX, node.scrollTop)));
+            if (d === depth && t === top) return;
+            depth = d; top = t;
+            node.style.setProperty('--ws-list-fade', d + 'px');
+            node.style.setProperty('--ws-list-fade-top', t + 'px');
+        };
+        const later = () => requestAnimationFrame(sync);
+        node.addEventListener('scroll', sync, { passive: true });
+        const ro = new ResizeObserver(sync);
+        ro.observe(node);
+        const mo = new MutationObserver(later);
+        mo.observe(node, { childList: true, subtree: true });
+        sync();
+        return { destroy() { node.removeEventListener('scroll', sync); ro.disconnect(); mo.disconnect(); } };
+    }
     const bindNewChat = bindShellEl('newChat');
     const bindChats = bindShellEl('chats');
 
@@ -59,7 +84,7 @@
     <div id="ws-community-head">
         {#if screens.communityHead}<CommunityHead h={screens.communityHead.h} />{/if}
     </div>
-    <div id="chat-list" use:bindList use:reveal={['chatList', reveals.chatList]}>
+    <div id="chat-list" use:bindList use:listFade use:reveal={['chatList', reveals.chatList]}>
         {#if screens.chatlist}<Chatlist h={screens.chatlist.h} snapshot={screens.chatlist.snapshot} />{/if}
     </div>
     <div class="fadeout-bottom" style="position: fixed; bottom: 65px;" style:display={listHasRows() ? null : 'none'}></div>
