@@ -8,8 +8,8 @@
     // so its caches stay in step. Every mutation flows: confirm → act (row pinned busy) →
     // re-read the settled truth → patch state; nothing is re-rendered by hand.
     import MemberRow from '../people/MemberRow.svelte';
+    import { untrack } from 'svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
-    import MemberSection from '../people/MemberSection.svelte';
 
     let {
         communityId,
@@ -175,6 +175,77 @@
 
     const shown = $derived(sections.reduce((n, s) => n + s.rows.length, 0));
 
+    // ── the window: only the rows near the viewport exist in the DOM ──
+    //
+    // Every item has a fixed height, so the list is a spacer of the total height with
+    // the visible items placed absolutely inside it. Scrolling swaps which items are
+    // mounted; nothing else moves. Section collapse lives here (it is a property of
+    // the layout now, not of a section element) and is remembered per community.
+    const ROW_H = 46, HEAD_H = 36, SECTION_GAP = 12, OVERSCAN_PX = 300;
+    // svelte-ignore state_referenced_locally
+    let closedIds = $state(new Set());
+    $effect.pre(() => {
+        // Seed from the remembered state whenever the set of sections changes.
+        const ids = sections.map((s) => s.id);
+        untrack(() => {
+            const next = new Set(ids.filter((id) => h.memberSectionClosed(communityId, id)));
+            if (next.size !== closedIds.size || [...next].some((id) => !closedIds.has(id))) closedIds = next;
+        });
+    });
+    function toggleSection(id) {
+        const next = new Set(closedIds);
+        const closing = !next.has(id);
+        if (closing) next.add(id); else next.delete(id);
+        closedIds = next;
+        h.setMemberSectionClosed(communityId, id, closing);
+    }
+    const layout = $derived.by(() => {
+        const items = [];
+        let y = 0;
+        sections.forEach((section, i) => {
+            if (i) y += SECTION_GAP;
+            const closed = closedIds.has(section.id) && !f;
+            items.push({ key: 'h:' + section.id, kind: 'head', top: y, h: HEAD_H, section, closed });
+            y += HEAD_H;
+            if (closed) return;
+            for (const vm of section.rows) {
+                items.push({ key: vm.npub, kind: 'row', top: y, h: ROW_H, vm });
+                y += ROW_H;
+            }
+        });
+        return { items, total: y };
+    });
+    let scrollTop = $state(0);
+    let viewH = $state(0);
+    let listTop = $state(0);   // the list's offset inside the scroller
+    const visible = $derived.by(() => {
+        const from = scrollTop - listTop - OVERSCAN_PX;
+        const to = scrollTop - listTop + viewH + OVERSCAN_PX;
+        const out = [];
+        for (const it of layout.items) {
+            if (it.top + it.h < from) continue;
+            if (it.top > to) break;
+            out.push(it);
+        }
+        return out;
+    });
+    // Tracks the nearest scrolling ancestor: its scroll position and its height.
+    function windowOn(node) {
+        let sc = node.parentElement;
+        while (sc && !/auto|scroll/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement;
+        if (!sc) { viewH = window.innerHeight; return; }
+        const read = () => {
+            scrollTop = sc.scrollTop;
+            viewH = sc.clientHeight;
+            listTop = node.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
+        };
+        read();
+        sc.addEventListener('scroll', read, { passive: true });
+        const ro = new ResizeObserver(read);
+        ro.observe(sc);
+        return { destroy() { sc.removeEventListener('scroll', read); ro.disconnect(); } };
+    }
+
     // Owner-only banlist: banned members are excluded above, so this is the only place
     // they surface, with the unban affordance.
     const bannedRows = $derived.by(() => {
@@ -307,16 +378,20 @@
         {f ? 'No matches.' : 'No one has spoken yet. Members appear here once they post.'}
     </p>
 {:else}
-    {#each sections as section (section.id)}
-        <MemberSection
-            label={section.label}
-            count={section.rows.length}
-            closed={h.memberSectionClosed(communityId, section.id)}
-            forceOpen={!!f}
-            ontoggle={(closing) => h.setMemberSectionClosed(communityId, section.id, closing)}
-        >
-            {#each section.rows as vm (vm.npub)}
-                <div style="display:contents;" use:rowMenu={vm}>
+    <div class="member-roster-window" style:height="{layout.total}px" use:windowOn>
+        {#each visible as it (it.key)}
+            {#if it.kind === 'head'}
+                <div class="member-section-head btn" class:is-closed={it.closed} role="button" tabindex="0"
+                     style:top="{it.top}px"
+                     onclick={() => toggleSection(it.section.id)}
+                     onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), toggleSection(it.section.id))}>
+                    <span class="member-section-label">{it.section.label}</span>
+                    <span class="member-section-count">{it.section.rows.length}</span>
+                    <span class="member-section-caret"><span class="icon icon-chevron-down"></span></span>
+                </div>
+            {:else}
+                {@const vm = it.vm}
+                <div class="member-roster-slot" style:top="{it.top}px" use:rowMenu={vm}>
                     <MemberRow
                         npub={vm.npub}
                         profile={vm.profile}
@@ -362,9 +437,9 @@
                         {/snippet}
                     </MemberRow>
                 </div>
-            {/each}
-        </MemberSection>
-    {/each}
+            {/if}
+        {/each}
+    </div>
 {/if}
 
 {#if bannedRows.length}

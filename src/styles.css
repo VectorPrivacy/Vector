@@ -12218,6 +12218,33 @@ select:disabled:hover {
   display: none;
 }
 
+/* The windowed roster: a spacer of the whole list's height, with only the items
+   near the viewport mounted and placed absolutely. Fixed item heights are what the
+   layout is computed from (MemberRoster.svelte). */
+.member-roster-window {
+  position: relative;
+}
+.member-roster-window .member-section-head,
+.member-roster-window .member-roster-slot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+}
+.member-roster-window .member-section-head {
+  height: 36px;
+}
+.member-roster-window .member-section-head.is-closed .member-section-caret .icon {
+  transform: rotate(-90deg);
+}
+.member-roster-window .member-roster-slot,
+.member-roster-window .member-pick-row {
+  height: 46px;
+}
+.member-roster-window .member-pick-row {
+  box-sizing: border-box;
+}
+
 /* An emoji in a name or status is inline text, not a picture: unconstrained it
    renders at its natural size and stretches the row around it. */
 #group-overview .member-pick-status .emoji,
