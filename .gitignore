@@ -44,3 +44,9 @@ TODO-v0.4.0.md
 
 # Svelte island bundle (generated from src/components/*.svelte by build-svelte.mjs)
 src/components.bundle.js
+
+# Local session scratch (agent memory store and stray-file tracker)
+memory.sqlite
+memory.sqlite-shm
+memory.sqlite-wal
+stray.toml
