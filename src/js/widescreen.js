@@ -60,6 +60,12 @@ function wsApplyRailState() {
     const pref = localStorage.getItem(WS_KEY_RAIL) === 'true';
     const forced = window.innerWidth < WS_RAIL_AUTO_COLLAPSE_W;
     document.body.classList.toggle('ws-rail-collapsed', pref || forced);
+    // Too narrow to expand: the toggle has nothing to offer and fades away.
+    document.body.classList.toggle('ws-rail-locked', forced);
+    // Resize ticks land here; a flag write flushes, so only a change writes.
+    const st = VectorSvelte.shellState();
+    if (st.railCollapsed !== (pref || forced)) VectorSvelte.setShellFlag('railCollapsed', pref || forced);
+    if (st.railLocked !== forced) VectorSvelte.setShellFlag('railLocked', forced);
 }
 
 /* ---- The list pane's two modes ----------------------------------------------

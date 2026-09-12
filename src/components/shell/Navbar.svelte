@@ -43,7 +43,8 @@
     </div>
     <div id="ws-rail-spacer"></div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="ws-rail-collapse" class="btn" title="Collapse the sidebar" onclick={() => h().toggleRailCollapse?.()}>
+    <div id="ws-rail-collapse" class="btn" title={st.railLocked ? null : st.railCollapsed ? 'Expand the sidebar' : 'Collapse the sidebar'}
+         onclick={() => { if (!st.railLocked) h().toggleRailCollapse?.(); }}>
         <span class="icon icon-chevron-double-left navbar-icon"></span>
         <p class="navbar-text">Collapse</p>
     </div>

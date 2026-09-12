@@ -1592,6 +1592,12 @@ body.ws #ws-rail-collapse:hover {
   background-color: var(--ws-hover);
 }
 
+/* The window is too narrow for the rail to expand: nothing to toggle. */
+body.ws.ws-rail-locked #ws-rail-collapse {
+  opacity: 0;
+  pointer-events: none;
+}
+
 body.ws #ws-rail-collapse .navbar-icon {
   width: 20px;
   height: 20px;
