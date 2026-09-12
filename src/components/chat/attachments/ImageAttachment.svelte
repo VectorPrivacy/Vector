@@ -4,15 +4,15 @@
     import UploadOverlay from './UploadOverlay.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, h } = $props();
-    // h: assetUrl(path), isSpoiler(att), thumbhash(npub, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
+    // h: assetUrl(path), isSpoiler(att), thumbhash(chatId, msgId), onImageLoad(), onThumbLoad(), attachImagePreview(img),
     //    attachFileExtBadge(img, container, ext), cancelUpload
 
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     // svelte-ignore state_referenced_locally
     const spoiler = h.isSpoiler(att);
-    // Mount-time: a row's chat and author never change under it.
-    // svelte-ignore state_referenced_locally
-    const npub = ctx.isGroupChat ? h.openChat() : (sender?.id || h.openChat());
+    // Mount-time: a row's chat never changes under it. The blur is keyed by chat, not
+    // author: an own message's author is not a participant of its DM.
+    const chatId = h.openChat();
     const real = $derived(h.assetUrl(att.path));
 
     // Spoiler: the blur arrives async; a failed blur shows the real image instead.
@@ -21,7 +21,7 @@
     let revealed = $state(false);
     if (spoiler) {
         // svelte-ignore state_referenced_locally
-    h.thumbhash(npub, msg.id).then((b64) => { blur = b64; }).catch(() => { blurFailed = true; });
+    h.thumbhash(chatId, msg.id).then((b64) => { blur = b64; }).catch(() => { blurFailed = true; });
     }
     const fit = $derived.by(() => {
         const m = att.img_meta;

@@ -6,17 +6,17 @@
     import FileBox from './FileBox.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, auto, h } = $props();
-    // h: thumbhash(npub, msgId), onThumbLoad(), formatBytes, startDownload(att, msg, sender), openChat(), and FileBox's
+    // h: thumbhash(chatId, msgId), onThumbLoad(), formatBytes, startDownload(att, msg, sender), openChat(), and FileBox's
 
-    // Mount-time: a row's chat and author never change under it.
-    // svelte-ignore state_referenced_locally
-    const npub = ctx.isGroupChat ? h.openChat() : (sender?.id || h.openChat());
+    // Mount-time: a row's chat never changes under it. The blur is keyed by chat, not
+    // author: an own message's author is not a participant of its DM.
+    const chatId = h.openChat();
     const downloading = $derived.by(() => { messageVersion(msg.id); return !!att.downloading || auto || started; });
     let started = $state(false);
     let blur = $state(null);
     let blurFailed = $state(false);
     // svelte-ignore state_referenced_locally
-    h.thumbhash(npub, msg.id).then((b64) => { blur = b64; }).catch(() => { blurFailed = true; });
+    h.thumbhash(chatId, msg.id).then((b64) => { blur = b64; }).catch(() => { blurFailed = true; });
 
     const fit = $derived.by(() => {
         const m = att.img_meta;

@@ -130,9 +130,9 @@ pub async fn generate_thumbhash_preview(npub: String, msg_id: String) -> Result<
         let mut found_attachment = None;
 
         for chat in &state.chats {
-            // Check if this is the target chat (works for both DMs and group chats)
-            let is_target_chat = match &chat.chat_type {
-                ChatType::Community => chat.id == npub,
+            // The chat id for either type; a DM also answers to a participant's npub.
+            let is_target_chat = chat.id == npub || match &chat.chat_type {
+                ChatType::Community => false,
                 ChatType::DirectMessage => chat.has_participant(&npub, &state.interner),
             };
 
