@@ -19,4 +19,5 @@ export function openSwitcher(dropup, bottomPx) {
     sw.dropup = !!dropup; sw.bottomPx = Number.isFinite(bottomPx) ? bottomPx : null; sw.open = true;
     flushSync();
 }
-export function closeSwitcher() { sw.open = false; sw.dropup = false; sw.bottomPx = null; flushSync(); }
+// The anchor outlives the close: the backdrop fades out in the shape it opened with.
+export function closeSwitcher() { sw.open = false; flushSync(); }
