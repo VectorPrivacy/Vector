@@ -102,20 +102,33 @@ console.log(`  Copied src/ → dist/`);
 
 const { minify } = await import('terser');
 
+// A bare property read is never dead code here: a Svelte subscription is `store.seq;` on a
+// state proxy, and a forced reflow is `void el.offsetHeight;`. `pure_getters` must stay at
+// terser's default, which keeps a read whose object may be null.
+// A fresh object per call: terser mutates the nested `compress` options it is given.
+const terserOptions = () => ({
+    compress: {
+        dead_code: true,
+        drop_console: true, // the inspector is off in release, so nothing reads them
+        passes: 3,
+    },
+    mangle: true,
+    format: {
+        comments: false,
+    },
+});
+
+// Fail the build if the options ever drop such a read again.
+{
+    const probe = await minify('export function f(o) { o.seq; return 1; }', { ...terserOptions(), module: true });
+    if (!/\.seq/.test(probe.code)) {
+        throw new Error('[build-frontend] terser options drop bare property reads; Svelte subscriptions would vanish');
+    }
+}
+
 async function minifyJs(filePath) {
     const code = readFileSync(filePath, 'utf-8');
-    const result = await minify(code, {
-        compress: {
-            dead_code: true,
-            drop_console: true, // the inspector is off in release, so nothing reads them
-            passes: 3,
-            pure_getters: true,
-        },
-        mangle: true,
-        format: {
-            comments: false,
-        },
-    });
+    const result = await minify(code, terserOptions());
     if (result.code) {
         writeFileSync(filePath, result.code);
         return { before: code.length, after: result.code.length };
