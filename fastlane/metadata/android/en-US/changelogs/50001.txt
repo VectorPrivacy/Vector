@@ -1,0 +1,6 @@
+First preview of 0.5.0.
+- New desktop layout: rail, chat list and chat side by side
+- The interface rebuilt on Svelte: snappier screens everywhere
+- Custom emoji packs load in one pass from the local cache
+- Faster image previews when attaching and pasting
+- Fixes: sent status, self-destruct dissolve, spoilers on your own images, custom emoji reactions
