@@ -29,7 +29,10 @@ impl ProgressTrackingStream {
         // bytes already in hand into a channel and never touches account state.
         // spawn-detached: byte-pump into a channel; the bytes are already in hand.
         tokio::spawn(async move {
-            let chunk_size = 64 * 1024; // 64 KB chunks - only unavoidable copy
+            // Progress is observed per chunk pulled, so the chunk is the slowest
+            // rate that still reads as progress: 16 KB in a 60 s stall window is
+            // about 2 kbit/s. Only unavoidable copy.
+            let chunk_size = 16 * 1024;
             let mut position = 0;
 
             while position < data.len() {
@@ -72,6 +75,134 @@ impl Stream for ProgressTrackingStream {
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+/// After the last byte is handed to the socket there is nothing left to watch:
+/// what remains is buffered bytes draining and the server storing the blob,
+/// neither of which is visible from here. This bounds that wait.
+const RESPONSE_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Why an upload was abandoned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stall {
+    /// The socket accepted nothing for the whole stall window.
+    NoProgress { idle: std::time::Duration },
+    /// Every byte was handed over and the server never answered.
+    NoResponse { waited: std::time::Duration },
+}
+
+/// Progress-based watchdog for an upload: gives up on a transfer that stops
+/// moving, never on one that is merely slow.
+struct StallWatch {
+    total: u64,
+    last_bytes: u64,
+    last_progress: tokio::time::Instant,
+    stall_limit: std::time::Duration,
+    response_limit: std::time::Duration,
+}
+
+impl StallWatch {
+    fn new(total: u64, stall_limit: std::time::Duration, response_limit: std::time::Duration) -> Self {
+        Self {
+            total,
+            last_bytes: 0,
+            last_progress: tokio::time::Instant::now(),
+            stall_limit,
+            response_limit,
+        }
+    }
+
+    /// Feed the latest byte count; `Some` means give up.
+    fn observe(&mut self, bytes_sent: u64) -> Option<Stall> {
+        let now = tokio::time::Instant::now();
+        if bytes_sent > self.last_bytes {
+            self.last_bytes = bytes_sent;
+            self.last_progress = now;
+            return None;
+        }
+        let idle = now.duration_since(self.last_progress);
+        if bytes_sent >= self.total {
+            (idle > self.response_limit).then_some(Stall::NoResponse { waited: idle })
+        } else {
+            (idle > self.stall_limit).then_some(Stall::NoProgress { idle })
+        }
+    }
+}
+
+/// Send `file_data` as the body of `request`, watching progress rather than
+/// the clock.
+///
+/// There is no total time limit. A transfer moving at any rate runs to
+/// completion; one that stops for `stall_limit` is abandoned, as is one whose
+/// server goes silent after receiving everything.
+async fn send_upload(
+    request: reqwest::RequestBuilder,
+    server_url: &Url,
+    file_data: Arc<Vec<u8>>,
+    stall_limit: std::time::Duration,
+    cancel_flag: Option<&Arc<AtomicBool>>,
+    progress_callback: Option<&ProgressCallback>,
+) -> Result<reqwest::Response, String> {
+    let total_size = file_data.len() as u64;
+    let bytes_sent = Arc::new(Mutex::new(0u64));
+    let tracking_stream = ProgressTrackingStream::new(file_data, Arc::clone(&bytes_sent));
+    let mut request_future = Box::pin(request.body(Body::wrap_stream(tracking_stream)).send());
+
+    let mut watch = StallWatch::new(total_size, stall_limit, RESPONSE_WAIT);
+    let mut last_percentage = 0;
+    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+
+    let response = loop {
+        tokio::select! {
+            response = &mut request_future => {
+                break response.map_err(|e| format!("Upload request failed: {}", e))?;
+            },
+            _ = poll_interval.tick() => {
+                if let Some(flag) = cancel_flag {
+                    if flag.load(Ordering::Relaxed) {
+                        return Err("Upload cancelled".to_string());
+                    }
+                }
+
+                let current_bytes = *bytes_sent.lock().unwrap();
+                match watch.observe(current_bytes) {
+                    Some(Stall::NoProgress { idle }) => {
+                        return Err(format!(
+                            "Upload stalled: {} accepted nothing for {}s ({} of {} bytes sent)",
+                            server_url, idle.as_secs(), current_bytes, total_size,
+                        ));
+                    }
+                    Some(Stall::NoResponse { waited }) => {
+                        return Err(format!(
+                            "Upload stalled: {} received all {} bytes but gave no answer in {}s",
+                            server_url, total_size, waited.as_secs(),
+                        ));
+                    }
+                    None => {}
+                }
+
+                if let Some(cb) = progress_callback {
+                    let percentage = if total_size > 0 {
+                        ((current_bytes as f64 / total_size as f64) * 100.0) as u8
+                    } else {
+                        0
+                    };
+                    if percentage != last_percentage {
+                        cb(Some(percentage), Some(current_bytes))?;
+                        last_percentage = percentage;
+                    }
+                }
+            }
+        }
+    };
+
+    if let Some(cb) = progress_callback {
+        let final_bytes = *bytes_sent.lock().unwrap();
+        if final_bytes == total_size && last_percentage < 100 {
+            cb(Some(100), Some(total_size))?;
+        }
+    }
+    Ok(response)
 }
 
 /// Builds the Blossom authorization header
@@ -224,12 +355,9 @@ where
     // One auth event covers both HEAD preflight and PUT.
     let auth_header = build_auth_header(&signer, hash).await?;
 
+    // No deadlines: the upload is bounded by progress in `send_upload`.
     // Redirects disabled: a 3xx mid-PUT would re-issue as GET and drop the body.
-    let client = crate::net::build_http_client_with_options(
-        std::time::Duration::from_secs(300),
-        None,
-        false,
-    )?;
+    let client = crate::net::build_http_client_with_options(None, None, false)?;
 
     // BUD-06 preflight (best-effort; non-supporting servers 404/405).
     {
@@ -306,10 +434,6 @@ where
         }
     }
 
-    let bytes_sent = Arc::new(Mutex::new(0u64));
-    let tracking_stream = ProgressTrackingStream::new(file_data, Arc::clone(&bytes_sent));
-    let body = Body::wrap_stream(tracking_stream);
-
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, auth_header);
     if let Some(ct) = mime_type {
@@ -323,48 +447,14 @@ where
     // blossom.data.haus) then 411.
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
 
-    let mut request_future = Box::pin(client
-        .put(upload_url.clone())
-        .headers(headers)
-        .body(body)
-        .send());
-
-    let mut last_percentage = 0;
-    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
-
-    let response = loop {
-        tokio::select! {
-            response = &mut request_future => {
-                break response.map_err(|e| format!("Upload request failed: {}", e))?;
-            },
-            _ = poll_interval.tick() => {
-                if let Some(ref flag) = cancel_flag {
-                    if flag.load(Ordering::Relaxed) {
-                        return Err("Upload cancelled".to_string());
-                    }
-                }
-
-                let current_bytes = *bytes_sent.lock().unwrap();
-                let percentage = if total_size > 0 {
-                    ((current_bytes as f64 / total_size as f64) * 100.0) as u8
-                } else {
-                    0
-                };
-
-                if percentage != last_percentage {
-                    if let Err(e) = progress_callback(Some(percentage), Some(current_bytes)) {
-                        return Err(e);
-                    }
-                    last_percentage = percentage;
-                }
-            }
-        }
-    };
-
-    let final_bytes = *bytes_sent.lock().unwrap();
-    if final_bytes == total_size && last_percentage < 100 {
-        progress_callback(Some(100), Some(total_size)).map_err(|e| e)?;
-    }
+    let response = send_upload(
+        client.put(upload_url.clone()).headers(headers),
+        server_url,
+        file_data,
+        crate::net::TRANSFER_STALL,
+        cancel_flag.as_ref(),
+        Some(progress_callback),
+    ).await?;
 
     // BUD-02: accept any 2xx (200 OK or 201 Created).
     let status = response.status();
@@ -400,15 +490,18 @@ where
     }
 }
 
-/// Simple upload without progress tracking. `read_timeout` fast-fails a dead server
-/// (see `build_http_client_with_options`); pass it for small uploads (emoji, avatars)
-/// so failover is quick, `None` for large blobs whose server may go quiet mid-store.
+/// Simple upload without progress reporting.
+///
+/// `stall_timeout` is how long the server may accept nothing before it is
+/// treated as dead and failover moves on; `None` is [`crate::net::TRANSFER_STALL`].
+/// Small uploads (emoji, avatars) pass a short one so a broken host costs
+/// seconds. There is no total time limit at any size.
 pub async fn upload_blob<T>(
     signer: T,
     server_url: &Url,
     file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
-    read_timeout: Option<std::time::Duration>,
+    stall_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
     T: VectorSigner,
@@ -432,21 +525,16 @@ where
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
 
     // Redirects disabled so a 3xx mid-PUT doesn't re-issue as GET.
-    let client = crate::net::build_http_client_with_options(
-        std::time::Duration::from_secs(300),
-        read_timeout,
-        false,
-    )?;
+    let client = crate::net::build_http_client_with_options(None, None, false)?;
 
-    let body_data: Vec<u8> = Arc::try_unwrap(file_data)
-        .unwrap_or_else(|arc| (*arc).clone());
-    let response = client
-        .put(upload_url)
-        .headers(headers)
-        .body(body_data)
-        .send()
-        .await
-        .map_err(|e| format!("Upload request failed: {}", e))?;
+    let response = send_upload(
+        client.put(upload_url).headers(headers),
+        server_url,
+        file_data,
+        stall_timeout.unwrap_or(crate::net::TRANSFER_STALL),
+        None,
+        None,
+    ).await?;
 
     // BUD-02: accept any 2xx (200 OK or 201 Created).
     let status = response.status();
@@ -526,7 +614,7 @@ pub async fn upload_blob_with_failover<T>(
     server_urls: Vec<String>,
     file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
-    read_timeout: Option<std::time::Duration>,
+    stall_timeout: Option<std::time::Duration>,
 ) -> Result<String, String>
 where
     T: VectorSigner + Clone,
@@ -546,7 +634,7 @@ where
         crate::log_info!("[Blossom] Attempting upload to server {} of {}: {}",
             index + 1, server_urls.len(), server_url_str);
 
-        match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type, read_timeout).await {
+        match upload_blob(signer.clone(), &server_url, file_data.clone(), mime_type, stall_timeout).await {
             Ok(url) => {
                 if !uploaded_blob_serves(&url).await {
                     crate::log_warn!(
@@ -1240,5 +1328,67 @@ mod hash_extract_tests {
             crate::simd::hex::bytes_to_hex_32(&hash.to_byte_array()),
             format!("{:x}", hash),
         );
+    }
+}
+
+#[cfg(test)]
+mod stall_watch_tests {
+    use super::{Stall, StallWatch};
+    use std::time::Duration;
+
+    const STALL: Duration = Duration::from_secs(60);
+    const RESPONSE: Duration = Duration::from_secs(180);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transfer_moving_at_any_rate_is_never_abandoned() {
+        // One 16 KB chunk every 50 s is under 3 kbit/s, and the watchdog is
+        // content: 300 s of wall time here would have killed it under a deadline.
+        let mut w = StallWatch::new(1 << 20, STALL, RESPONSE);
+        let mut sent = 0u64;
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(50)).await;
+            sent += 16 * 1024;
+            assert_eq!(w.observe(sent), None);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transfer_that_stops_is_abandoned_after_the_window() {
+        let mut w = StallWatch::new(1 << 20, STALL, RESPONSE);
+        assert_eq!(w.observe(4096), None);
+        tokio::time::advance(Duration::from_secs(59)).await;
+        assert_eq!(w.observe(4096), None, "inside the window it is only slow");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(matches!(w.observe(4096), Some(Stall::NoProgress { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn progress_resets_the_window() {
+        let mut w = StallWatch::new(1 << 20, STALL, RESPONSE);
+        w.observe(100);
+        tokio::time::advance(Duration::from_secs(55)).await;
+        w.observe(200);
+        tokio::time::advance(Duration::from_secs(55)).await;
+        assert_eq!(w.observe(200), None, "the clock restarted at the second byte");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn after_the_last_byte_the_server_gets_longer_but_not_forever() {
+        let total = 1 << 20;
+        let mut w = StallWatch::new(total, STALL, RESPONSE);
+        w.observe(total);
+        tokio::time::advance(Duration::from_secs(120)).await;
+        assert_eq!(w.observe(total), None, "buffers drain and the blob is stored");
+        tokio::time::advance(Duration::from_secs(61)).await;
+        assert!(matches!(w.observe(total), Some(Stall::NoResponse { .. })));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_upload_is_waiting_on_the_server_from_the_start() {
+        let mut w = StallWatch::new(0, STALL, RESPONSE);
+        tokio::time::advance(STALL + Duration::from_secs(1)).await;
+        assert_eq!(w.observe(0), None, "nothing to send is not a stall");
+        tokio::time::advance(RESPONSE).await;
+        assert!(matches!(w.observe(0), Some(Stall::NoResponse { .. })));
     }
 }

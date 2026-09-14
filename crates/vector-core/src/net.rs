@@ -54,7 +54,15 @@ fn is_ipv6_private(ip: &std::net::Ipv6Addr) -> bool {
 /// same name, and the error says nothing useful about why.
 pub use reqwest;
 
-/// Build an HTTP client with the given timeout.
+/// How long a transfer may go without moving a byte before it is given up on.
+///
+/// This is the only time limit a large transfer has. A total deadline caps the
+/// file size a slow link can ever move (300 s at 1 Mbit/s is 36 MB), so
+/// uploads and downloads are bounded by progress instead: any rate at all
+/// keeps them alive, and only a dead connection is abandoned.
+pub const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Build an HTTP client with the given total timeout.
 ///
 /// Honors the Tor failsafe: when the user has Tor enabled, every connection
 /// goes through Tor — period. If Tor is enabled but not currently running
@@ -68,28 +76,35 @@ pub use reqwest;
 /// clippy lint enforces this everywhere except this one canonical call site.
 #[allow(clippy::disallowed_methods)]
 pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
-    build_http_client_with_options(timeout, None, true)
+    build_http_client_with_options(Some(timeout), None, true)
 }
 
-/// Like `build_http_client`, optionally without redirect-following.
-/// Blossom PUT uses `false`: a 3xx mid-upload would re-issue as GET and
-/// drop the body, so we surface the 3xx as the real failure status.
+/// Like `build_http_client`, with the total timeout optional and
+/// redirect-following switchable.
+///
+/// `timeout` is a deadline on the whole request; `None` for large transfers,
+/// which are bounded by progress instead (see [`TRANSFER_STALL`]).
+///
+/// `read_timeout` resets on every byte of the response *body*. Before the
+/// headers arrive it is a single deadline from the start of the request that
+/// nothing resets — including bytes of a request body going out — so it must
+/// stay `None` on an upload whose body may take longer than it.
+///
+/// Blossom PUT uses `follow_redirects = false`: a 3xx mid-upload would
+/// re-issue as GET and drop the body, so the 3xx surfaces as the real status.
 #[allow(clippy::disallowed_methods)]
 pub fn build_http_client_with_options(
-    timeout: std::time::Duration,
+    timeout: Option<std::time::Duration>,
     read_timeout: Option<std::time::Duration>,
     follow_redirects: bool,
 ) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
-        .timeout(timeout)
         // Bounded connect: a black-holed host (SYN swallowed, never refused) must
         // fail in seconds instead of silently consuming the whole request budget.
         .connect_timeout(std::time::Duration::from_secs(15));
-    // Idle read timeout (opt-in): a server that accepts the connection but streams
-    // nothing back for this long is treated as dead, so upload failover moves on fast
-    // instead of waiting out the whole `timeout`. It resets on every received byte, so
-    // a slow-but-progressing transfer survives. Left None for large uploads, whose
-    // server can legitimately go quiet while it stores the blob.
+    if let Some(t) = timeout {
+        builder = builder.timeout(t);
+    }
     if let Some(rt) = read_timeout {
         builder = builder.read_timeout(rt);
     }

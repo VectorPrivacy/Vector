@@ -632,7 +632,13 @@ impl VectorCore {
         if attachment.url.is_empty() {
             return Err(VectorError::Other("attachment has no URL".into()));
         }
-        let client = crate::net::build_http_client(std::time::Duration::from_secs(120)).map_err(VectorError::Other)?;
+        // Bounded by progress, not by a deadline: any rate finishes, a stall fails over.
+        let client = crate::net::build_http_client_with_options(
+            None,
+            Some(crate::net::TRANSFER_STALL),
+            true,
+        )
+        .map_err(VectorError::Other)?;
         let mut last_err = String::from("download failed");
         let mut candidates: Vec<String> = vec![attachment.url.clone()];
         candidates.extend(attachment.fallback_urls.iter().cloned());
@@ -1134,8 +1140,8 @@ impl VectorCore {
         if servers.is_empty() {
             return Err(VectorError::Other("No Blossom servers configured".into()));
         }
-        // Avatars/banners run larger than emojis (up to ~1MB), so give a more generous
-        // 20s idle window before treating a silent server as dead and failing over.
+        // Avatars/banners run larger than emojis (up to ~1MB): a server may accept
+        // nothing for 20s before it is treated as dead and failover moves on.
         crate::blossom::upload_blob_with_failover(
             signer,
             servers,

@@ -2337,7 +2337,7 @@ async fn resolve_url_xdc_inner(
 /// is current and must re-download.
 async fn fetch_url_validator(url: &str) -> Option<String> {
     let client = vector_core::net::build_http_client_with_options(
-        std::time::Duration::from_secs(20),
+        Some(std::time::Duration::from_secs(20)),
         Some(std::time::Duration::from_secs(10)),
         true,
     )
