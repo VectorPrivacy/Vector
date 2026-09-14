@@ -78,9 +78,15 @@ impl Stream for ProgressTrackingStream {
 }
 
 /// After the last byte is handed to the socket there is nothing left to watch:
-/// what remains is buffered bytes draining and the server storing the blob,
-/// neither of which is visible from here. This bounds that wait.
-const RESPONSE_WAIT: std::time::Duration = std::time::Duration::from_secs(180);
+/// what remains is buffered bytes draining, an ingress relay forwarding the
+/// blob to its origin, and the origin storing it — none of which is visible
+/// from here. This bounds that wait.
+///
+/// Five minutes because the relay hop is real work: a gigabyte across a
+/// datacenter backhaul at the ~6 MB/s a single stream manages is nearly three
+/// of them, and giving up then would discard an upload that had in fact
+/// arrived.
+const RESPONSE_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Why an upload was abandoned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1337,7 +1343,7 @@ mod stall_watch_tests {
     use std::time::Duration;
 
     const STALL: Duration = Duration::from_secs(60);
-    const RESPONSE: Duration = Duration::from_secs(180);
+    const RESPONSE: Duration = Duration::from_secs(300);
 
     #[tokio::test(start_paused = true)]
     async fn a_transfer_moving_at_any_rate_is_never_abandoned() {
@@ -1377,7 +1383,8 @@ mod stall_watch_tests {
         let total = 1 << 20;
         let mut w = StallWatch::new(total, STALL, RESPONSE);
         w.observe(total);
-        tokio::time::advance(Duration::from_secs(120)).await;
+        // Long enough for a relay to push a large blob to its origin.
+        tokio::time::advance(Duration::from_secs(240)).await;
         assert_eq!(w.observe(total), None, "buffers drain and the blob is stored");
         tokio::time::advance(Duration::from_secs(61)).await;
         assert!(matches!(w.observe(total), Some(Stall::NoResponse { .. })));
