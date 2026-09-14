@@ -60,7 +60,13 @@ pub use reqwest;
 /// file size a slow link can ever move (300 s at 1 Mbit/s is 36 MB), so
 /// uploads and downloads are bounded by progress instead: any rate at all
 /// keeps them alive, and only a dead connection is abandoned.
-pub const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(60);
+///
+/// Two minutes rather than one because TCP's own retransmit backoff on a
+/// lossy long-haul path reaches that between attempts: a shorter window
+/// abandons a connection the kernel is still recovering. Servers we run keep
+/// their gap timers above this, so the client is the one that gives up and
+/// can say why, instead of meeting a socket the proxy already closed.
+pub const TRANSFER_STALL: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Build an HTTP client with the given total timeout.
 ///
