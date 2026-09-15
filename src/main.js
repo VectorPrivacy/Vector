@@ -1468,40 +1468,39 @@ function reactToMessageRouted(referenceId, chatId, emoji, emojiUrl) {
 /** Raw upload error → user-friendly { title, body }. Technical detail
  *  is appended in small text for users who want to dig in. */
 function humanizeUploadError(raw) {
-    const lower = raw.toLowerCase();
-    const technical = `<br><br><span style="opacity: 0.5; font-size: 12px;">${escapeHtml(raw)}</span>`;
+    const msg = String(raw).replace(/^Upload failed:\s*/i, '').trim();
+    const lower = msg.toLowerCase();
+    const settings = '<br><br><span style="opacity: 0.5; font-size: 12px;">Your media servers are in Settings → Network.</span>';
 
-    if (/status\s+413/.test(lower) || /payload too large/.test(lower)) {
+    // The backend already wrote one sentence per server it tried; the title
+    // just names the kind of refusal.
+    if (msg.startsWith('No media server accepted the file:')) {
+        const items = msg.split('\n').slice(1)
+            .map(l => `<li>${escapeHtml(l.replace(/^•\s*/, ''))}</li>`).join('');
         return {
-            title: 'File too large',
-            body: 'None of your media servers will accept a file this big. Try a smaller file, or add a server that supports larger uploads in Settings → Network.' + technical,
+            title: 'No media server accepted the file',
+            body: `<ul style="text-align: left; margin: 0; padding-left: 18px;">${items}</ul>` + settings,
         };
     }
-    if (/status\s+415/.test(lower)
-        || /file could not be processed/.test(lower)
-        || /file type not detected/.test(lower)
-        || /not allowed/.test(lower)
-        || /unsupported/.test(lower)) {
-        return {
-            title: 'File type not supported',
-            body: 'Your media servers don\'t accept this kind of file. Try a different file format, or add a server with broader file type support in Settings → Network.' + technical,
-        };
-    }
-    if (/status\s+401/.test(lower) || /unauthorized/.test(lower)) {
-        return {
-            title: 'Media server rejected your account',
-            body: 'This server refused Vector\'s upload signature. It may require allowlisting or paid access. Open Settings → Network to swap in a server that accepts your account.' + technical,
-        };
-    }
-    if (/all blossom servers failed/.test(lower)) {
-        return {
-            title: 'No media server could take this file',
-            body: 'Every media server you have configured rejected the upload. Open Settings → Network to see which servers you have enabled, or add one that supports your file.' + technical,
-        };
+    const titles = [
+        [/upload allowance/, 'Upload allowance used up'],
+        [/storage on .+ is full|out of space/, 'Storage full'],
+        [/allows files up to|won't accept a file this large|status\s+413|payload too large/, 'File too large'],
+        [/doesn't accept|status\s+415|could not be processed|file type not detected|not allowed|unsupported/, 'File type not supported'],
+        [/accounts it recognises/, 'Media server doesn’t recognise your account'],
+        [/clock may be wrong/, 'Check this device’s clock'],
+        [/rate-limiting/, 'Slow down a moment'],
+        [/upload signature|upload authorization|status\s+401|unauthorized/, 'Media server rejected your account'],
+        [/could not be reached|stopped accepting|stalled/, 'Media server unreachable'],
+        [/no media server is configured/, 'No media server configured'],
+    ];
+    for (const [re, title] of titles) {
+        if (re.test(lower)) return { title, body: escapeHtml(msg) + settings };
     }
     return {
         title: 'File send failed',
-        body: 'Vector could not send this file. Check your connection and try again, or pick a different file.' + technical,
+        body: 'Vector could not send this file. Check your connection and try again, or pick a different file.'
+            + `<br><br><span style="opacity: 0.5; font-size: 12px;">${escapeHtml(msg)}</span>`,
     };
 }
 

@@ -1,4 +1,5 @@
 use crate::signer::VectorSigner;
+use crate::blossom_error::{host_of, summarise_failures, Refusal, UploadFailure};
 use nostr_sdk::prelude::{Event, FinalizeEventAsync, Timestamp, Url};
 use bitcoin_hashes::sha256::Hash as Sha256Hash;
 use nostr_blossom::prelude::*;
@@ -135,6 +136,17 @@ impl StallWatch {
     }
 }
 
+/// A progress callback's refusal, as an upload failure: it says "Upload
+/// cancelled" when the user pressed stop, and that must stay a cancellation
+/// rather than an error.
+fn callback_failure(e: String) -> UploadFailure {
+    if e == "Upload cancelled" {
+        UploadFailure::Cancelled
+    } else {
+        UploadFailure::Other(e)
+    }
+}
+
 /// Send `file_data` as the body of `request`, watching progress rather than
 /// the clock.
 ///
@@ -148,7 +160,7 @@ async fn send_upload(
     stall_limit: std::time::Duration,
     cancel_flag: Option<&Arc<AtomicBool>>,
     progress_callback: Option<&ProgressCallback>,
-) -> Result<reqwest::Response, String> {
+) -> Result<reqwest::Response, UploadFailure> {
     let total_size = file_data.len() as u64;
     let bytes_sent = Arc::new(Mutex::new(0u64));
     let tracking_stream = ProgressTrackingStream::new(file_data, Arc::clone(&bytes_sent));
@@ -161,28 +173,28 @@ async fn send_upload(
     let response = loop {
         tokio::select! {
             response = &mut request_future => {
-                break response.map_err(|e| format!("Upload request failed: {}", e))?;
+                break response.map_err(|e| UploadFailure::Transport(format!("Upload request failed: {}", e)))?;
             },
             _ = poll_interval.tick() => {
                 if let Some(flag) = cancel_flag {
                     if flag.load(Ordering::Relaxed) {
-                        return Err("Upload cancelled".to_string());
+                        return Err(UploadFailure::Cancelled);
                     }
                 }
 
                 let current_bytes = *bytes_sent.lock().unwrap();
                 match watch.observe(current_bytes) {
                     Some(Stall::NoProgress { idle }) => {
-                        return Err(format!(
+                        return Err(UploadFailure::Transport(format!(
                             "Upload stalled: {} accepted nothing for {}s ({} of {} bytes sent)",
                             server_url, idle.as_secs(), current_bytes, total_size,
-                        ));
+                        )));
                     }
                     Some(Stall::NoResponse { waited }) => {
-                        return Err(format!(
+                        return Err(UploadFailure::Transport(format!(
                             "Upload stalled: {} received all {} bytes but gave no answer in {}s",
                             server_url, total_size, waited.as_secs(),
-                        ));
+                        )));
                     }
                     None => {}
                 }
@@ -194,7 +206,7 @@ async fn send_upload(
                         0
                     };
                     if percentage != last_percentage {
-                        cb(Some(percentage), Some(current_bytes))?;
+                        cb(Some(percentage), Some(current_bytes)).map_err(callback_failure)?;
                         last_percentage = percentage;
                     }
                 }
@@ -205,7 +217,7 @@ async fn send_upload(
     if let Some(cb) = progress_callback {
         let final_bytes = *bytes_sent.lock().unwrap();
         if final_bytes == total_size && last_percentage < 100 {
-            cb(Some(100), Some(total_size))?;
+            cb(Some(100), Some(total_size)).map_err(callback_failure)?;
         }
     }
     Ok(response)
@@ -253,7 +265,7 @@ pub async fn upload_blob_with_progress<T>(
     retry_count: Option<u32>,
     retry_spacing: Option<std::time::Duration>,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<String, String>
+) -> Result<String, UploadFailure>
 where
     T: VectorSigner + Clone,
 {
@@ -261,15 +273,17 @@ where
     let retry_spacing = retry_spacing.unwrap_or(std::time::Duration::from_secs(1));
 
     let mut last_error = None;
+    let mut next_delay = retry_spacing;
 
     for attempt in 0..=retry_count {
         if attempt > 0 {
-            tokio::time::sleep(retry_spacing).await;
+            tokio::time::sleep(next_delay).await;
+            next_delay = retry_spacing;
         }
 
         if let Some(ref flag) = cancel_flag {
             if flag.load(Ordering::Relaxed) {
-                return Err("Upload cancelled".to_string());
+                return Err(UploadFailure::Cancelled);
             }
         }
 
@@ -282,52 +296,43 @@ where
             cancel_flag.clone(),
         ).await {
             Ok(url) => return Ok(url),
+            Err(UploadFailure::Cancelled) => return Err(UploadFailure::Cancelled),
             Err(e) => {
-                if e == "Upload cancelled" {
-                    return Err(e);
-                }
                 crate::log_warn!(
                     "[Blossom] Attempt {}/{} to {} failed: {}",
                     attempt + 1, retry_count + 1, server_url, e,
                 );
-                // Deterministic rejections (413/415 etc.) — outer failover handles them.
-                let status = parse_status_from_error(&e);
-                let permanent = crate::blossom_capabilities::is_mime_rejection(status, &e)
-                    || crate::blossom_capabilities::is_size_rejection(status);
-                if permanent {
+                let again = match &e {
+                    // The server said what it meant; believe it. A coded
+                    // `later` names how long, and a plain server is retried
+                    // unless its status is one that never changes.
+                    UploadFailure::Refused(r) => r.worth_retrying_here(),
+                    // On large uploads, mid-stream drops are almost always a
+                    // size policy; don't burn retries. Below 8MB, treat as a
+                    // genuine transient blip and retry.
+                    UploadFailure::Transport(_) => {
+                        !(e.is_mid_stream_drop() && file_data.len() > 8 * 1024 * 1024)
+                    }
+                    UploadFailure::Integrity(_) | UploadFailure::Other(_) | UploadFailure::Cancelled => false,
+                };
+                if !again {
+                    if let Some(r) = e.refusal() {
+                        if crate::blossom_error::is_gateway_status(r.status) && r.code().is_none() {
+                            crate::log_warn!(
+                                "[Blossom] {} origin unreachable (status {}) on {} bytes; routing to the next server",
+                                server_url, r.status, file_data.len(),
+                            );
+                        }
+                    } else if e.is_mid_stream_drop() {
+                        crate::log_warn!(
+                            "[Blossom] {} dropped the connection mid-upload of {} bytes, treating as permanent",
+                            server_url, file_data.len(),
+                        );
+                    }
                     return Err(e);
                 }
-                // 502 bad-gateway / 503 unavailable / 504 timeout and Cloudflare 52x
-                // (520 unknown / 521 down / 522 timeout / 523 unreachable / 524 timeout /
-                // 525 TLS-handshake-failed / 526 bad-cert): the origin can't ingest the
-                // upload, and retrying the same server just repeats the failure, so route
-                // around to the next server immediately.
-                if matches!(status, Some(502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 525 | 526)) {
-                    crate::log_warn!(
-                        "[Blossom] {} origin unreachable (status {}) on {} bytes; routing to the next server",
-                        server_url, status.unwrap_or(0), file_data.len(),
-                    );
-                    return Err(e);
-                }
-                // On large uploads, mid-stream drops are almost always a
-                // size policy; don't burn retries. Below 8MB, treat as a
-                // genuine transient blip and retry.
-                let looks_like_mid_stream_drop = (
-                    e.contains("Upload request failed")
-                    || e.contains("error sending request")
-                    || e.contains("connection reset")
-                    || e.contains("connection closed")
-                    || e.contains("connection refused")
-                    || e.contains("body write")
-                    || e.contains("IncompleteMessage")
-                    || e.contains("broken pipe")
-                ) && file_data.len() > 8 * 1024 * 1024;
-                if looks_like_mid_stream_drop {
-                    crate::log_warn!(
-                        "[Blossom] {} dropped the connection mid-upload of {} bytes, treating as permanent",
-                        server_url, file_data.len(),
-                    );
-                    return Err(e);
+                if let Some(wait) = e.refusal().and_then(|r| r.retry_after()) {
+                    next_delay = next_delay.max(wait);
                 }
                 last_error = Some(e);
             }
@@ -335,7 +340,141 @@ where
     }
 
     // All attempts failed, return the last error
-    Err(last_error.unwrap_or_else(|| "No upload attempts were made".to_string()))
+    Err(last_error.unwrap_or_else(|| UploadFailure::Other("No upload attempts were made".to_string())))
+}
+
+/// What the server said before the body was sent.
+enum Preflight {
+    /// Send it.
+    Proceed,
+    /// The server already holds this exact blob and named its URL; there is
+    /// nothing to send.
+    AlreadyStored(String),
+}
+
+/// BUD-06 preflight: `HEAD /upload` with the blob's hash, size and type, so a
+/// server that will refuse can say so before the bytes go out.
+///
+/// Best-effort: a server without BUD-06 answers 404/405 and is sent the body
+/// regardless. A server with Magnitude's vocabulary puts `X-Error-Code` on the
+/// refusal, and every such code is final for this server — a quota, a closed
+/// client gate, a blocked hash are as final as a size limit, and sending the
+/// body would only earn the same answer after the transfer. A plain server is
+/// believed only on the two statuses BUD-06 defines (413, 415) and on a body
+/// that reads as a type rejection.
+///
+/// A 2xx with `X-Already-Stored: true` and `X-Blob-URL` means the server has
+/// these bytes already and the caller can stop here with the link.
+async fn preflight(
+    client: &reqwest::Client,
+    upload_url: &Url,
+    server_url: &Url,
+    auth_header: &HeaderValue,
+    hash: Sha256Hash,
+    total_size: u64,
+    mime_type: Option<&str>,
+) -> Result<Preflight, UploadFailure> {
+    let mut head_headers = HeaderMap::new();
+    head_headers.insert(AUTHORIZATION, auth_header.clone());
+    head_headers.insert(
+        "X-Content-Length",
+        HeaderValue::from_str(&total_size.to_string())
+            .map_err(|e| UploadFailure::Other(format!("Invalid X-Content-Length: {}", e)))?,
+    );
+    // BUD-06 requires lowercase hex. SIMD encode of the 32-byte digest (sha256::Hash displays
+    // in forward byte order, matching to_byte_array — see the parity test).
+    head_headers.insert(
+        "X-SHA-256",
+        HeaderValue::from_str(&crate::simd::hex::bytes_to_hex_32(&hash.to_byte_array()))
+            .map_err(|e| UploadFailure::Other(format!("Invalid X-SHA-256: {}", e)))?,
+    );
+    if let Some(ct) = mime_type {
+        head_headers.insert(
+            "X-Content-Type",
+            HeaderValue::from_str(ct).map_err(|e| UploadFailure::Other(format!("Invalid X-Content-Type: {}", e)))?,
+        );
+    }
+    let resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.head(upload_url.clone()).headers(head_headers).send(),
+    ).await {
+        Ok(Ok(resp)) => resp,
+        Ok(Err(e)) => {
+            crate::log_debug!("[Blossom Preflight] {} HEAD failed: {}, falling through to PUT", server_url, e);
+            return Ok(Preflight::Proceed);
+        }
+        Err(_) => {
+            crate::log_debug!("[Blossom Preflight] {} HEAD timed out (5s), falling through to PUT", server_url);
+            return Ok(Preflight::Proceed);
+        }
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        let already = resp.headers().get("x-already-stored")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+        let url = resp.headers().get("x-blob-url")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        if let (true, Some(url)) = (already, url) {
+            // The link must name our hash: a server pointing at some other blob
+            // would have us embed a stranger's bytes in a message.
+            match parse_blob_url(&url) {
+                Ok((_, stored)) if stored == hash => {
+                    crate::log_info!(
+                        "[Blossom Preflight] {} already holds {} ({} bytes); nothing to send",
+                        server_url, hash, total_size,
+                    );
+                    return Ok(Preflight::AlreadyStored(url));
+                }
+                _ => crate::log_warn!(
+                    "[Blossom Preflight] {} claims to hold the blob at {} which is not {}; uploading anyway",
+                    server_url, url, hash,
+                ),
+            }
+        }
+        crate::log_debug!(
+            "[Blossom Preflight] {} → {} ({} bytes); proceeding to PUT",
+            server_url, status, total_size,
+        );
+        return Ok(Preflight::Proceed);
+    }
+
+    // A HEAD has no body: the headers are the whole answer. BUD-02 says the
+    // prose in X-Reason is display-only; a body, if any, feeds the keyword
+    // classifier for servers that 400 instead of 415.
+    let headers = resp.headers().clone();
+    let body = resp.text().await.unwrap_or_default();
+    let refusal = Refusal::from_response(status.as_u16(), &headers, &body);
+    let is_413 = status == StatusCode::PAYLOAD_TOO_LARGE;
+    let is_415 = status == StatusCode::UNSUPPORTED_MEDIA_TYPE;
+    let final_here = refusal.code().is_some()
+        || is_413
+        || is_415
+        || (status.is_client_error() && refusal.is_mime());
+    if final_here {
+        crate::log_warn!(
+            "[Blossom Preflight] {} REJECTED {} ({} bytes, {}): {}",
+            server_url, status, total_size,
+            mime_type.unwrap_or("(no mime)"), refusal.message,
+        );
+        return Err(UploadFailure::Refused(refusal));
+    }
+    crate::log_debug!(
+        "[Blossom Preflight] {} → {} ({} bytes); proceeding to PUT",
+        server_url, status, total_size,
+    );
+    Ok(Preflight::Proceed)
+}
+
+/// Read a rejected PUT into a refusal. The body feeds the classifier; the
+/// headers carry the code when the server has one.
+async fn refusal_from(response: reqwest::Response) -> Refusal {
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let body = response.text().await.unwrap_or_default();
+    Refusal::from_response(status, &headers, &body)
 }
 
 /// Internal function that performs a single upload attempt with progress tracking
@@ -346,97 +485,31 @@ async fn upload_attempt<T>(
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<String, String>
+) -> Result<String, UploadFailure>
 where
     T: VectorSigner,
 {
     let upload_url = server_url.join("upload")
-        .map_err(|e| format!("Invalid server URL: {}", e))?;
+        .map_err(|e| UploadFailure::Other(format!("Invalid server URL: {}", e)))?;
 
     let total_size = file_data.len() as u64;
     let hash = Sha256Hash::hash(&*file_data);
 
-    progress_callback(Some(0), Some(0)).map_err(|e| e)?;
+    progress_callback(Some(0), Some(0)).map_err(callback_failure)?;
 
     // One auth event covers both HEAD preflight and PUT.
-    let auth_header = build_auth_header(&signer, hash).await?;
+    let auth_header = build_auth_header(&signer, hash).await.map_err(UploadFailure::Other)?;
 
     // No deadlines: the upload is bounded by progress in `send_upload`.
     // Redirects disabled: a 3xx mid-PUT would re-issue as GET and drop the body.
-    let client = crate::net::build_http_client_with_options(None, None, false)?;
+    let client = crate::net::build_http_client_with_options(None, None, false)
+        .map_err(UploadFailure::Other)?;
 
-    // BUD-06 preflight (best-effort; non-supporting servers 404/405).
-    {
-        let mut head_headers = HeaderMap::new();
-        head_headers.insert(AUTHORIZATION, auth_header.clone());
-        head_headers.insert(
-            "X-Content-Length",
-            HeaderValue::from_str(&total_size.to_string())
-                .map_err(|e| format!("Invalid X-Content-Length: {}", e))?,
-        );
-        // BUD-06 requires lowercase hex. SIMD encode of the 32-byte digest (sha256::Hash displays
-        // in forward byte order, matching to_byte_array — see the parity test).
-        head_headers.insert(
-            "X-SHA-256",
-            HeaderValue::from_str(&crate::simd::hex::bytes_to_hex_32(&hash.to_byte_array()))
-                .map_err(|e| format!("Invalid X-SHA-256: {}", e))?,
-        );
-        if let Some(ct) = mime_type {
-            head_headers.insert(
-                "X-Content-Type",
-                HeaderValue::from_str(ct).map_err(|e| format!("Invalid X-Content-Type: {}", e))?,
-            );
-        }
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.head(upload_url.clone()).headers(head_headers).send(),
-        ).await {
-            Ok(Ok(resp)) => {
-                let status = resp.status();
-                // BUD-02: X-Reason is display-only. Body IS fed to the classifier
-                // to catch non-compliant servers that 400 instead of 415.
-                let x_reason = resp.headers().get("X-Reason")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string());
-                let body = resp.text().await.unwrap_or_default();
-                let diag = if !body.is_empty() {
-                    if let Some(r) = &x_reason {
-                        format!("{} (X-Reason: {})", body, r)
-                    } else {
-                        body
-                    }
-                } else if let Some(r) = x_reason {
-                    r
-                } else {
-                    format!("rejected at preflight ({})", status)
-                };
-                let is_413 = status == StatusCode::PAYLOAD_TOO_LARGE;
-                let is_415 = status == StatusCode::UNSUPPORTED_MEDIA_TYPE;
-                let mime_hinted = status.is_client_error() && !is_413 && {
-                    crate::blossom_capabilities::is_mime_rejection(Some(status.as_u16()), &diag)
-                };
-                if is_413 || is_415 || mime_hinted {
-                    crate::log_warn!(
-                        "[Blossom Preflight] {} REJECTED {} ({} bytes, {}): {}",
-                        server_url, status, total_size,
-                        mime_type.unwrap_or("(no mime)"), diag,
-                    );
-                    return Err(format!(
-                        "Upload failed with status {}: {}",
-                        status, diag,
-                    ));
-                }
-                crate::log_debug!(
-                    "[Blossom Preflight] {} → {} ({} bytes); proceeding to PUT",
-                    server_url, status, total_size,
-                );
-            }
-            Ok(Err(e)) => {
-                crate::log_debug!("[Blossom Preflight] {} HEAD failed: {}, falling through to PUT", server_url, e);
-            }
-            Err(_) => {
-                crate::log_debug!("[Blossom Preflight] {} HEAD timed out (5s), falling through to PUT", server_url);
-            }
+    match preflight(&client, &upload_url, server_url, &auth_header, hash, total_size, mime_type).await? {
+        Preflight::Proceed => {}
+        Preflight::AlreadyStored(url) => {
+            progress_callback(Some(100), Some(total_size)).map_err(callback_failure)?;
+            return Ok(url);
         }
     }
 
@@ -445,7 +518,7 @@ where
     if let Some(ct) = mime_type {
         headers.insert(
             CONTENT_TYPE,
-            HeaderValue::from_str(ct).map_err(|e| format!("Invalid content type: {}", e))?
+            HeaderValue::from_str(ct).map_err(|e| UploadFailure::Other(format!("Invalid content type: {}", e)))?
         );
     }
     // `Body::wrap_stream` is unknown-length so reqwest would default to
@@ -466,33 +539,28 @@ where
     let status = response.status();
     if status.is_success() {
         let descriptor: BlobDescriptor = response.json().await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| UploadFailure::Other(format!("Failed to parse response: {}", e)))?;
         // Integrity gate: a compliant server stores our bytes verbatim, so the
         // returned descriptor hash MUST equal what we uploaded. A mismatch means
         // the server transformed/re-encoded the blob, which is fatal for an
-        // encrypted upload (corrupts the ciphertext). `[INTEGRITY]` marks it so
-        // the failover loop routes around the server like a hard rejection.
+        // encrypted upload (corrupts the ciphertext). The failover loop routes
+        // around the server like a hard rejection.
         if descriptor.sha256 != hash {
-            return Err(format!(
+            return Err(UploadFailure::Integrity(format!(
                 "[INTEGRITY] {} transformed the upload (returned {}, expected {})",
                 server_url, descriptor.sha256, hash,
-            ));
+            )));
         }
         Ok(descriptor.url.to_string())
     } else {
-        // BUD-02: X-Reason is display-only; body feeds the classifier.
-        let x_reason = response.headers().get("X-Reason")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        let display = match (error_text.is_empty(), x_reason) {
-            (false, Some(r)) => format!("{} (X-Reason: {})", error_text, r),
-            (false, None)    => error_text,
-            (true, Some(r))  => r,
-            (true, None)     => "Unknown error".to_string(),
-        };
-        crate::log_net_fail!("[Blossom] upload rejected: HTTP {} — {}", status, display);
-        Err(format!("Upload failed with status {}: {}", status, display))
+        let refusal = refusal_from(response).await;
+        crate::log_net_fail!(
+            "[Blossom] upload rejected: HTTP {}{} — {}",
+            status,
+            refusal.code().map(|c| format!(" [{}]", c)).unwrap_or_default(),
+            refusal.message,
+        );
+        Err(UploadFailure::Refused(refusal))
     }
 }
 
@@ -508,30 +576,37 @@ pub async fn upload_blob<T>(
     file_data: Arc<Vec<u8>>,
     mime_type: Option<&str>,
     stall_timeout: Option<std::time::Duration>,
-) -> Result<String, String>
+) -> Result<String, UploadFailure>
 where
     T: VectorSigner,
 {
     let upload_url = server_url.join("upload")
-        .map_err(|e| format!("Invalid server URL: {}", e))?;
+        .map_err(|e| UploadFailure::Other(format!("Invalid server URL: {}", e)))?;
 
     let hash = Sha256Hash::hash(&*file_data);
     let total_size = file_data.len() as u64;
 
-    let auth_header = build_auth_header(&signer, hash).await?;
+    let auth_header = build_auth_header(&signer, hash).await.map_err(UploadFailure::Other)?;
+
+    // Redirects disabled so a 3xx mid-PUT doesn't re-issue as GET.
+    let client = crate::net::build_http_client_with_options(None, None, false)
+        .map_err(UploadFailure::Other)?;
+
+    if let Preflight::AlreadyStored(url) =
+        preflight(&client, &upload_url, server_url, &auth_header, hash, total_size, mime_type).await?
+    {
+        return Ok(url);
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, auth_header);
     if let Some(ct) = mime_type {
         headers.insert(
             CONTENT_TYPE,
-            HeaderValue::from_str(ct).map_err(|e| format!("Invalid content type: {}", e))?
+            HeaderValue::from_str(ct).map_err(|e| UploadFailure::Other(format!("Invalid content type: {}", e)))?
         );
     }
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
-
-    // Redirects disabled so a 3xx mid-PUT doesn't re-issue as GET.
-    let client = crate::net::build_http_client_with_options(None, None, false)?;
 
     let response = send_upload(
         client.put(upload_url).headers(headers),
@@ -546,19 +621,18 @@ where
     let status = response.status();
     if status.is_success() {
         let descriptor: BlobDescriptor = response.json().await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+            .map_err(|e| UploadFailure::Other(format!("Failed to parse response: {}", e)))?;
         // Integrity gate (see upload_attempt): reject a server that returns a
         // different hash than we uploaded — it re-encoded the blob.
         if descriptor.sha256 != hash {
-            return Err(format!(
+            return Err(UploadFailure::Integrity(format!(
                 "[INTEGRITY] {} transformed the upload (returned {}, expected {})",
                 server_url, descriptor.sha256, hash,
-            ));
+            )));
         }
         Ok(descriptor.url.to_string())
     } else {
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-        Err(format!("Upload failed with status {}: {}", status, error_text))
+        Err(UploadFailure::Refused(refusal_from(response).await))
     }
 }
 
@@ -625,14 +699,15 @@ pub async fn upload_blob_with_failover<T>(
 where
     T: VectorSigner + Clone,
 {
-    let mut last_error = String::from("No servers available");
+    let mut failures: Vec<(String, UploadFailure)> = Vec::new();
 
     for (index, server_url_str) in server_urls.iter().enumerate() {
+        let host = host_of(server_url_str);
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
                 crate::log_net_fail!("[Blossom] invalid server URL '{}': {}", server_url_str, e);
-                last_error = format!("Invalid server URL: {}", e);
+                failures.push((host, UploadFailure::Other(format!("Invalid server URL: {}", e))));
                 continue;
             }
         };
@@ -647,7 +722,9 @@ where
                         "[Blossom Error] {} ACKed the upload but does not serve {} — failing over",
                         server_url_str, url,
                     );
-                    last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
+                    failures.push((host, UploadFailure::Other(format!(
+                        "{} accepted the upload but the blob is not retrievable", server_url_str,
+                    ))));
                     continue;
                 }
                 crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
@@ -655,16 +732,16 @@ where
             }
             Err(e) => {
                 crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
-                last_error = e;
+                failures.push((host, e));
             }
         }
     }
 
-    crate::log_net_fail!("[Blossom] ALL servers failed; last error: {}", last_error);
-    Err(format!("All Blossom servers failed. Last error: {}", last_error))
+    let summary = summarise_failures(&failures);
+    crate::log_net_fail!("[Blossom] ALL servers failed: {}", summary);
+    Err(summary)
 }
 
-/// Upload with progress + failover, cache-aware routing, and capability learning.
 /// An upload that a server accepted.
 ///
 /// `url` is the descriptor the server returned; `server` is the address Vector
@@ -679,6 +756,7 @@ pub struct AcceptedUpload {
     pub server: String,
 }
 
+/// Upload with progress + failover, cache-aware routing, and capability learning.
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
     server_urls: Vec<String>,
@@ -693,7 +771,7 @@ pub async fn upload_blob_with_progress_and_failover<T>(
 where
     T: VectorSigner + Clone,
 {
-    let mut last_error = String::from("No servers available");
+    let mut failures: Vec<(String, UploadFailure)> = Vec::new();
 
     // Known-good first, unknown second, MIME-rejected last. Stable within
     // tier so the user's BUD-03 trust order wins ties.
@@ -709,11 +787,12 @@ where
             }
         }
 
+        let host = host_of(server_url_str);
         let server_url = match Url::parse(server_url_str) {
             Ok(url) => url,
             Err(e) => {
                 crate::log_net_fail!("[Blossom] invalid server URL '{}': {}", server_url_str, e);
-                last_error = format!("Invalid server URL: {}", e);
+                failures.push((host, UploadFailure::Other(format!("Invalid server URL: {}", e))));
                 continue;
             }
         };
@@ -737,7 +816,9 @@ where
                         "[Blossom Error] {} ACKed the upload but does not serve {} — failing over",
                         server_url_str, url,
                     );
-                    last_error = format!("{} accepted the upload but the blob is not retrievable", server_url_str);
+                    failures.push((host, UploadFailure::Other(format!(
+                        "{} accepted the upload but the blob is not retrievable", server_url_str,
+                    ))));
                     let _ = progress_callback(Some(0), Some(0));
                     continue;
                 }
@@ -752,37 +833,53 @@ where
                     server: server_url_str.clone(),
                 });
             }
+            Err(UploadFailure::Cancelled) => {
+                return Err("Upload cancelled".to_string());
+            }
             Err(e) => {
-                if e == "Upload cancelled" {
-                    return Err(e);
-                }
                 crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
-                let status = parse_status_from_error(&e);
-                // `[INTEGRITY]` = server stored a different hash (transformed the
-                // blob); route around it exactly like a hard MIME rejection.
-                if e.contains("[INTEGRITY]") || crate::blossom_capabilities::is_mime_rejection(status, &e) {
-                    if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
-                        server_url_str, mime_for_routing, is_encrypted,
-                    ) {
-                        crate::log_warn!("[Blossom Cap] record_rejected_mime failed: {}", err);
+                // Worth remembering about this server: a type it does not
+                // take, a size it does not take, bytes it does not keep intact.
+                // A quota, a rate limit, a closed gate or a bad clock say
+                // nothing about the NEXT upload and are not cached.
+                match &e {
+                    UploadFailure::Integrity(_) => {
+                        if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
+                            server_url_str, mime_for_routing, is_encrypted,
+                        ) {
+                            crate::log_warn!("[Blossom Cap] record_rejected_mime failed: {}", err);
+                        }
                     }
-                } else if crate::blossom_capabilities::is_size_rejection(status) {
-                    if let Err(err) = crate::blossom_capabilities::record_rejected_size(
-                        server_url_str, mime_for_routing, is_encrypted, size_bytes,
-                    ) {
-                        crate::log_warn!("[Blossom Cap] record_rejected_size failed: {}", err);
+                    UploadFailure::Refused(r) if r.is_mime() => {
+                        if let Err(err) = crate::blossom_capabilities::record_rejected_mime(
+                            server_url_str, mime_for_routing, is_encrypted,
+                        ) {
+                            crate::log_warn!("[Blossom Cap] record_rejected_mime failed: {}", err);
+                        }
                     }
+                    UploadFailure::Refused(r) if r.is_size_limit() => {
+                        // A server that named its limit has told us the exact
+                        // edge; one that only said 413 has told us this size.
+                        let rejects_from = r.limit().map(|l| l.saturating_add(1)).unwrap_or(size_bytes).min(size_bytes);
+                        if let Err(err) = crate::blossom_capabilities::record_rejected_size(
+                            server_url_str, mime_for_routing, is_encrypted, rejects_from,
+                        ) {
+                            crate::log_warn!("[Blossom Cap] record_rejected_size failed: {}", err);
+                        }
+                    }
+                    // Mid-stream drops aren't cached (too ambiguous); only
+                    // an explicit size refusal sets min_rejected_size.
+                    _ => {}
                 }
-                // Mid-stream drops aren't cached (too ambiguous); only
-                // an explicit 413 sets min_rejected_size.
-                last_error = e;
+                failures.push((host, e));
                 let _ = progress_callback(Some(0), Some(0));
             }
         }
     }
 
-    crate::log_net_fail!("[Blossom] ALL servers failed; last error: {}", last_error);
-    Err(format!("All Blossom servers failed. Last error: {}", last_error))
+    let summary = summarise_failures(&failures);
+    crate::log_net_fail!("[Blossom] ALL servers failed: {}", summary);
+    Err(summary)
 }
 
 // ============================================================================
@@ -1234,10 +1331,13 @@ where
                 }
             }
             Ok(Err(e)) => {
-                let status = parse_status_from_error(&e);
-                // `[INTEGRITY]` = the server accepted but transformed our probe
-                // blob; treat it as unsuitable, same as a hard MIME rejection.
-                if e.contains("[INTEGRITY]") || crate::blossom_capabilities::is_mime_rejection(status, &e) {
+                // A transformed probe blob is as unsuitable as a hard MIME
+                // rejection. A closed gate, a quota or a bad clock is not: the
+                // server may take the next upload, so its reputation is left
+                // alone and the probe runs again later.
+                let unsuitable = matches!(e, UploadFailure::Integrity(_))
+                    || e.refusal().is_some_and(|r| r.is_mime());
+                if unsuitable {
                     if !crate::blossom_servers::is_enabled_server(server_url_str) {
                         continue;
                     }

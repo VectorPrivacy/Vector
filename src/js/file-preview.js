@@ -1051,7 +1051,8 @@ async function sendPreviewedFile() {
             return;
         }
         console.error('Failed to send file:', e);
-        popupConfirm(e.toString(), '', true, '', 'vector_warning.svg');
+        const { title, body } = humanizeUploadError(String(e));
+        popupConfirm(title, body, true, '', 'vector_warning.svg');
         // Clean up temp zip on error too
         if (isZipSend) {
             invoke('cleanup_zip').catch(() => {});
