@@ -1105,6 +1105,12 @@ async function setupRustListeners() {
         }
     });
 
+    _on('blossom_info_updated', () => {
+        if (currentBlossomInfo) {
+            renderBlossomInfo(currentBlossomInfo.url, ++_blossomCapsToken);
+        }
+    });
+
     // Listen for relay status changes
     _on('relay_status_change', (evt) => {
         VectorSvelte.patchRelayStatus(evt.payload.url, evt.payload.status);

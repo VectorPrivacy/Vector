@@ -49,7 +49,7 @@ export { loginState, bunkerState, pickerState as loginPickerState, encryptState,
 export { credentialState, openCredentialDialog, closeCredentialDialog, showMigration, hideMigration, setMigrationProgress } from './lib/credential.svelte.js';
 export { ccState, ccOpen, ccSetAvatar, ccSetBusy, ccSetError, ccProfilesChanged } from './lib/createcommunity.svelte.js';
 export { editHistoryState, setEditHistory, openEditHistory, clearEditHistory } from './lib/edithistory.svelte.js';
-export { setBlossomCaps, setRelayLogs } from './lib/network.svelte.js';
+export { setBlossomCaps, setBlossomInfo, setRelayLogs } from './lib/network.svelte.js';
 export { patchRelayStatus } from './lib/settings.svelte.js';
 export { setChrome } from './lib/chrome.svelte.js';
 export { ilSet, ilSetBusy, ilSetCreating, ilSetRevoking, ilReset } from './lib/invitelinks.svelte.js';

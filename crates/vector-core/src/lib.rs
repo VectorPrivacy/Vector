@@ -74,6 +74,7 @@ pub mod blossom;
 pub mod blossom_servers;
 pub mod blossom_capabilities;
 pub mod blossom_error;
+pub mod blossom_info;
 pub mod inbox_relays;
 pub mod emoji_packs;
 pub mod emoji_usage;

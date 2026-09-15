@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-blossom-server-info"
+description = "Enables the get_blossom_server_info command without any pre-configured scope."
+commands.allow = ["get_blossom_server_info"]
+
+[[permission]]
+identifier = "deny-get-blossom-server-info"
+description = "Denies the get_blossom_server_info command without any pre-configured scope."
+commands.deny = ["get_blossom_server_info"]

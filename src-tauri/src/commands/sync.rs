@@ -1052,6 +1052,16 @@ pub async fn fetch_messages<R: Runtime>(
                 let _client = match crate::nostr_client() { Some(c) => c, None => return };
                 let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
                 let enabled_servers = vector_core::state::get_blossom_servers();
+                // A server's own document first: it settles routing for that
+                // server without a probe upload, and the dialog reads it.
+                let documented = vector_core::blossom_info::refresh_all(
+                    signer.clone(), enabled_servers.clone(), std::time::Duration::from_secs(60),
+                ).await;
+                if documented > 0 {
+                    vector_core::log_info!("[Blossom Info] {} server(s) publish an information document", documented);
+                    vector_core::traits::emit_event("blossom_info_updated", &());
+                }
+                if !session.is_live() { return; }
                 match vector_core::blossom::probe_servers_for_octet_stream(
                     signer, enabled_servers,
                 ).await {

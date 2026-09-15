@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-blossom-upload-verdict"
+description = "Enables the blossom_upload_verdict command without any pre-configured scope."
+commands.allow = ["blossom_upload_verdict"]
+
+[[permission]]
+identifier = "deny-blossom-upload-verdict"
+description = "Denies the blossom_upload_verdict command without any pre-configured scope."
+commands.deny = ["blossom_upload_verdict"]

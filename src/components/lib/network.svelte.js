@@ -15,6 +15,10 @@ export const blossomInfoDialog = fadeDialog({ url: '', enabled: true, isCustom: 
 const blossomCaps = $state({ status: 'loading', caps: [] });
 export function blossomCapsState() { return blossomCaps; }
 export function setBlossomCaps(status, caps) { blossomCaps.status = status; blossomCaps.caps = caps || []; }
+// The server's own information document, or null when it publishes none.
+const blossomInfo = $state({ status: 'loading', info: null });
+export function blossomInfoState() { return blossomInfo; }
+export function setBlossomInfo(status, info) { blossomInfo.status = status; blossomInfo.info = info || null; }
 const relayLogs = $state({ logs: [] });
 export function relayLogsState() { return relayLogs; }
 export function setRelayLogs(logs) { relayLogs.logs = logs || []; }

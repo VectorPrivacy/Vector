@@ -501,6 +501,11 @@ fn spawn_probe_for_server(server_url: String) {
         // device key).
         let _client = match crate::nostr_client() { Some(c) => c, None => return };
         let signer = match vector_core::signer::active_signer() { Ok(s) => s, Err(_) => return };
+        if vector_core::blossom_info::refresh_all(
+            signer.clone(), vec![server_url.clone()], std::time::Duration::from_secs(60),
+        ).await > 0 {
+            vector_core::traits::emit_event("blossom_info_updated", &());
+        }
         match vector_core::blossom::probe_servers_for_octet_stream(
             signer, vec![server_url],
         ).await {
@@ -620,19 +625,29 @@ pub async fn get_blossom_server_capabilities(url: String) -> Result<Vec<vector_c
     vector_core::blossom_capabilities::list_for_server(&url)
 }
 
-/// Pre-flight: returns false only when every enabled server has already
-/// rejected this MIME or has a known size cap at-or-below `size_bytes`.
-/// MIME is resolved server-side via the same `mime_from_extension` table
-/// the upload uses, so the pre-flight key matches the upload's cache row.
+/// Pre-flight: whether any enabled server would take this file, and if not,
+/// why each one refuses. MIME is resolved server-side via the same
+/// `mime_from_extension` table the upload uses, so the pre-flight key
+/// matches the upload's cache row.
 #[tauri::command]
-pub async fn blossom_can_likely_upload(
+pub async fn blossom_upload_verdict(
     extension: String,
     size_bytes: u64,
     is_encrypted: bool,
-) -> bool {
+) -> vector_core::blossom_capabilities::UploadVerdict {
     let mime = vector_core::crypto::mime_from_extension(&extension);
     let servers = vector_core::state::get_blossom_servers();
-    vector_core::blossom_capabilities::any_server_likely_accepts(&servers, mime, is_encrypted, size_bytes)
+    vector_core::blossom_capabilities::upload_verdict(&servers, mime, is_encrypted, size_bytes)
+}
+
+/// A media server's information document, personalised for this account:
+/// tier, per-file limit, storage and daily allowances. `None` when the server
+/// publishes none. Refetched when the held copy is older than half a minute,
+/// which is what the dialog wants; ranking reads the cache directly.
+#[tauri::command]
+pub async fn get_blossom_server_info(url: String) -> Result<Option<vector_core::blossom_info::ServerInfo>, String> {
+    let signer = vector_core::signer::active_signer()?;
+    vector_core::blossom_info::refresh(&signer, &url, std::time::Duration::from_secs(30)).await
 }
 
 /// Get the list of custom relays from settings (Tauri command)

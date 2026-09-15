@@ -227,8 +227,10 @@ function openBlossomServerInfoDialog(server) {
     });
     // Reset synchronously so stale data doesn't flash mid-fetch.
     VectorSvelte.setBlossomCaps('loading', []);
+    VectorSvelte.setBlossomInfo('loading', null);
     const token = ++_blossomCapsToken;
     renderBlossomCapabilities(server.url, token);
+    renderBlossomInfo(server.url, token);
 }
 
 /** Monotonic token — rapid open(A) → open(B) races resolve in B's favour. */
@@ -243,6 +245,18 @@ async function renderBlossomCapabilities(url, token) {
         console.error('Failed to load blossom capabilities:', err);
         if (token !== _blossomCapsToken) return;
         VectorSvelte.setBlossomCaps('error', []);
+    }
+}
+
+async function renderBlossomInfo(url, token) {
+    try {
+        const info = await invoke('get_blossom_server_info', { url });
+        if (token !== _blossomCapsToken) return;
+        VectorSvelte.setBlossomInfo('ok', info);
+    } catch (err) {
+        console.warn('Failed to load blossom server info:', err);
+        if (token !== _blossomCapsToken) return;
+        VectorSvelte.setBlossomInfo('error', null);
     }
 }
 

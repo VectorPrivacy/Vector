@@ -204,18 +204,32 @@ pub struct CapabilityState {
 }
 
 /// Pure tier-classification (DB-free, unit-testable). Reorders into
-/// known-good → unknown → too-large → MIME-rejected, stable within tier.
+/// informed-yes → known-good → unknown → too-large → MIME-rejected →
+/// informed-no, stable within tier.
+///
+/// `verdicts` is what a server's own information document says about this
+/// size for this account. A server that has told us outranks one we have
+/// only learned by bouncing uploads, and one that has told us no goes last:
+/// its preflight would only confirm it.
 pub fn classify(
     cache: &HashMap<String, CapabilityState>,
+    verdicts: &HashMap<String, bool>,
     servers: Vec<String>,
     size_bytes: u64,
 ) -> Vec<String> {
+    let mut informed_yes = Vec::new();
     let mut known_good = Vec::new();
     let mut unknown = Vec::new();
     let mut too_large = Vec::new();
     let mut mime_rejected = Vec::new();
+    let mut informed_no = Vec::new();
     for s in servers {
         let key = norm_url(&s);
+        match verdicts.get(&key) {
+            Some(true) => { informed_yes.push(s); continue; }
+            Some(false) => { informed_no.push(s); continue; }
+            None => {}
+        }
         match cache.get(&key) {
             Some(st) if st.outcome == OUTCOME_REJECTED_MIME => mime_rejected.push(s),
             Some(st) => {
@@ -235,39 +249,88 @@ pub fn classify(
             None => unknown.push(s),
         }
     }
-    known_good.extend(unknown);
-    known_good.extend(too_large);
-    known_good.extend(mime_rejected);
-    known_good
+    informed_yes.extend(known_good);
+    informed_yes.extend(unknown);
+    informed_yes.extend(too_large);
+    informed_yes.extend(mime_rejected);
+    informed_yes.extend(informed_no);
+    informed_yes
+}
+
+/// What each server's information document says about `size_bytes`, keyed
+/// like the capability cache. Servers without a document are absent.
+fn info_verdicts(servers: &[String], size_bytes: u64) -> HashMap<String, bool> {
+    servers
+        .iter()
+        .filter_map(|s| {
+            let verdict = crate::blossom_info::cached(s)?.accepts_size(size_bytes)?;
+            Some((norm_url(s), verdict))
+        })
+        .collect()
 }
 
 /// Reorder `servers` for an upload of `(mime, encrypted, size_bytes)`.
 pub fn rank_servers(servers: Vec<String>, mime: &str, is_encrypted: bool, size_bytes: u64) -> Vec<String> {
     if servers.is_empty() { return servers; }
     let cache = load_cache_for(&servers, mime, is_encrypted).unwrap_or_default();
-    classify(&cache, servers, size_bytes)
+    let verdicts = info_verdicts(&servers, size_bytes);
+    classify(&cache, &verdicts, servers, size_bytes)
 }
 
-/// Pre-flight check: is there any enabled server we haven't already
-/// learned will reject this size/MIME/context? Unknown servers count
-/// as "likely accepts" so we stay optimistic.
-pub fn any_server_likely_accepts(servers: &[String], mime: &str, is_encrypted: bool, size_bytes: u64) -> bool {
-    if servers.is_empty() { return false; }
-    let cache = match load_cache_for(servers, mime, is_encrypted) { Ok(c) => c, Err(_) => return true };
+/// Whether an upload is worth attempting, and if not, why each server would
+/// refuse it — in the words of its own document where it has one.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct UploadVerdict {
+    pub likely: bool,
+    pub reasons: Vec<String>,
+}
+
+/// Pre-flight check across the enabled servers. A server's document is
+/// believed outright; a server we have only learned from bounces counts
+/// against only when it has rejected this size or type before. Unknown
+/// servers count as "likely accepts" so the check stays optimistic.
+pub fn upload_verdict(servers: &[String], mime: &str, is_encrypted: bool, size_bytes: u64) -> UploadVerdict {
+    if servers.is_empty() {
+        return UploadVerdict {
+            likely: false,
+            reasons: vec!["No media server is configured.".to_string()],
+        };
+    }
+    let cache = load_cache_for(servers, mime, is_encrypted).unwrap_or_default();
+    let mut reasons = Vec::new();
     for s in servers {
-        let key = norm_url(s);
-        match cache.get(&key) {
-            Some(st) if st.outcome == OUTCOME_REJECTED_MIME => continue,
-            Some(st) => {
-                if let Some(min_rej) = st.min_rejected_size {
-                    if size_bytes >= min_rej { continue; }
+        let host = crate::blossom_error::host_of(s);
+        if let Some(info) = crate::blossom_info::cached(s) {
+            match info.accepts_size(size_bytes) {
+                Some(true) => return UploadVerdict { likely: true, reasons: Vec::new() },
+                Some(false) => {
+                    if let Some(why) = info.refusal_reason(&host, size_bytes) {
+                        reasons.push(why);
+                    }
+                    continue;
                 }
-                return true;
+                None => {}
             }
-            None => return true,
+        }
+        match cache.get(&norm_url(s)) {
+            Some(st) if st.outcome == OUTCOME_REJECTED_MIME => {
+                reasons.push(format!("{} doesn't accept {} files.", host, mime));
+            }
+            Some(st) if st.min_rejected_size.is_some_and(|min| size_bytes >= min) => {
+                reasons.push(format!(
+                    "{} has refused files of {} before.",
+                    host, crate::crypto::format_bytes(st.min_rejected_size.unwrap_or(size_bytes)),
+                ));
+            }
+            _ => return UploadVerdict { likely: true, reasons: Vec::new() },
         }
     }
-    false
+    UploadVerdict { likely: false, reasons }
+}
+
+/// `upload_verdict` as a yes/no.
+pub fn any_server_likely_accepts(servers: &[String], mime: &str, is_encrypted: bool, size_bytes: u64) -> bool {
+    upload_verdict(servers, mime, is_encrypted, size_bytes).likely
 }
 
 fn load_cache_for(servers: &[String], mime: &str, is_encrypted: bool) -> Result<HashMap<String, CapabilityState>, String> {
@@ -395,28 +458,28 @@ mod tests {
     #[test]
     fn classify_empty_input_returns_empty() {
         let cache = HashMap::new();
-        assert!(classify(&cache, vec![], 1024).is_empty());
+        assert!(classify(&cache, &HashMap::new(), vec![], 1024).is_empty());
     }
 
     #[test]
     fn classify_all_unknown_preserves_order() {
         let cache = HashMap::new();
         let servers = vec!["https://a".to_string(), "https://b".to_string(), "https://c".to_string()];
-        assert_eq!(classify(&cache, servers.clone(), 1024), servers);
+        assert_eq!(classify(&cache, &HashMap::new(), servers.clone(), 1024), servers);
     }
 
     #[test]
     fn classify_known_good_floats_to_top() {
         let cache = cache_of(&[("https://b", OUTCOME_ACCEPTED, 10_000)]);
         let servers = vec!["https://a".to_string(), "https://b".to_string(), "https://c".to_string()];
-        assert_eq!(classify(&cache, servers, 5_000), vec!["https://b", "https://a", "https://c"]);
+        assert_eq!(classify(&cache, &HashMap::new(), servers, 5_000), vec!["https://b", "https://a", "https://c"]);
     }
 
     #[test]
     fn classify_known_good_falls_to_unknown_when_over_size_ceiling() {
         let cache = cache_of(&[("https://b", OUTCOME_ACCEPTED, 10_000)]);
         let servers = vec!["https://a".to_string(), "https://b".to_string(), "https://c".to_string()];
-        let out = classify(&cache, servers, 20_000);
+        let out = classify(&cache, &HashMap::new(), servers, 20_000);
         assert_eq!(out, vec!["https://a", "https://b", "https://c"]);
     }
 
@@ -424,7 +487,7 @@ mod tests {
     fn classify_mime_rejected_sinks_to_bottom() {
         let cache = cache_of(&[("https://b", OUTCOME_REJECTED_MIME, 0)]);
         let servers = vec!["https://a".to_string(), "https://b".to_string(), "https://c".to_string()];
-        let out = classify(&cache, servers, 1024);
+        let out = classify(&cache, &HashMap::new(), servers, 1024);
         assert_eq!(out, vec!["https://a", "https://c", "https://b"]);
     }
 
@@ -440,7 +503,7 @@ mod tests {
             "https://c".to_string(), "https://d".to_string(),
         ];
         assert_eq!(
-            classify(&cache, servers, 5_000),
+            classify(&cache, &HashMap::new(), servers, 5_000),
             vec!["https://b", "https://a", "https://d", "https://c"],
         );
     }
@@ -449,7 +512,7 @@ mod tests {
     fn classify_demotes_servers_above_known_size_ceiling() {
         let cache = cache_with_size_cap(&[("https://b", OUTCOME_ACCEPTED, 10_000, 50_000)]);
         let servers = vec!["https://a".to_string(), "https://b".to_string(), "https://c".to_string()];
-        let out = classify(&cache, servers, 60_000);
+        let out = classify(&cache, &HashMap::new(), servers, 60_000);
         assert_eq!(out, vec!["https://a", "https://c", "https://b"]);
     }
 
@@ -466,10 +529,26 @@ mod tests {
     }
 
     #[test]
+    fn a_server_whose_document_says_yes_outranks_everything_learned() {
+        let cache = cache_of(&[("https://b", OUTCOME_ACCEPTED, 10_000)]);
+        let verdicts: HashMap<String, bool> = [("https://c".to_string(), true)].into_iter().collect();
+        let servers = vec!["https://a".to_string(), "https://b".to_string(), "https://c".to_string()];
+        assert_eq!(classify(&cache, &verdicts, servers, 5_000), vec!["https://c", "https://b", "https://a"]);
+    }
+
+    #[test]
+    fn a_server_whose_document_says_no_goes_last_even_when_learned_good() {
+        let cache = cache_of(&[("https://b", OUTCOME_ACCEPTED, 10_000)]);
+        let verdicts: HashMap<String, bool> = [("https://b".to_string(), false)].into_iter().collect();
+        let servers = vec!["https://a".to_string(), "https://b".to_string()];
+        assert_eq!(classify(&cache, &verdicts, servers, 5_000), vec!["https://a", "https://b"]);
+    }
+
+    #[test]
     fn classify_keys_are_normalized_against_cache() {
         let cache = cache_of(&[("https://b.example.com", OUTCOME_ACCEPTED, 10_000)]);
         let servers = vec!["https://a".to_string(), "https://B.Example.com/".to_string()];
-        let out = classify(&cache, servers, 5_000);
+        let out = classify(&cache, &HashMap::new(), servers, 5_000);
         assert_eq!(out, vec!["https://B.Example.com/", "https://a"]);
     }
 

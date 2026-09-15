@@ -231,20 +231,24 @@ async function publishPendingMiniApp() {
 
 /**
  * Pre-flight: returns true (and shows a popup) only when every enabled
- * server is known to size-reject this magnitude or MIME-reject this type.
- * Unknown servers count as likely-accept, so the check is optimistic.
+ * server would refuse this file — by its own account where it publishes
+ * one, else from what earlier uploads taught us. Unknown servers count as
+ * likely-accept, so the check is optimistic.
  */
 async function checkUploadBlocked(fileSize, extension) {
     try {
-        const likely = await invoke('blossom_can_likely_upload', {
+        const verdict = await invoke('blossom_upload_verdict', {
             extension: extension || 'bin',
             sizeBytes: fileSize,
             isEncrypted: true,
         });
-        if (!likely) {
+        if (!verdict.likely) {
+            const reasons = (verdict.reasons || []).map(r => `<li>${escapeHtml(r)}</li>`).join('');
             popupConfirm(
-                'File Too Large',
-                `No configured media server is known to accept files of <b>${formatBytes(fileSize, 1)}</b>. Add a server that supports larger uploads, or shrink the file.`,
+                'No media server will take this file',
+                `This file is <b>${formatBytes(fileSize, 1)}</b>.`
+                    + (reasons ? `<ul style="text-align: left; margin: 10px 0 0; padding-left: 18px;">${reasons}</ul>` : '')
+                    + '<br><span style="opacity: 0.5; font-size: 12px;">Shrink the file, or add a server in Settings → Network.</span>',
                 true, '', 'vector_warning.svg',
             );
             return true;
@@ -813,12 +817,12 @@ async function openFolderZipPreview(dirPath, receiver, replyRef = '') {
         // Same pre-flight as `checkUploadBlocked`, scoped to .zip.
         let tooLarge = false;
         try {
-            const likely = await invoke('blossom_can_likely_upload', {
+            const verdict = await invoke('blossom_upload_verdict', {
                 extension: 'zip',
                 sizeBytes: result.compressed_size,
                 isEncrypted: true,
             });
-            tooLarge = !likely;
+            tooLarge = !verdict.likely;
         } catch (_) { /* fall open */ }
         if (filePreviewGeneration !== myGeneration) return;
 

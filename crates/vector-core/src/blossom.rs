@@ -828,6 +828,7 @@ where
                 ) {
                     crate::log_warn!("[Blossom Cap] record_accepted failed: {}", err);
                 }
+                crate::blossom_info::note_upload(server_url_str, size_bytes);
                 return Ok(AcceptedUpload {
                     url,
                     server: server_url_str.clone(),
