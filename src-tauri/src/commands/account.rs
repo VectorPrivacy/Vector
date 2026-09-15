@@ -127,6 +127,9 @@ pub async fn login<R: Runtime>(
     handle: AppHandle<R>,
     mut import_key: String,
 ) -> Result<LoginResult, String> {
+    // Not account creation: an abandoned creation must not stamp
+    // an empty kind-0 over this identity's real profile (login (import / paste)).
+    disarm_fresh_account_stamp();
     let keys: Keys;
 
     // If we're already logged in (i.e: Developer Mode with frontend hot-loading), just return the existing keys.
@@ -618,6 +621,9 @@ pub async fn get_nip55_status() -> Result<Option<Nip55StatusInfo>, String> {
 /// secret is stored on this device at any point.
 #[tauri::command]
 pub async fn login_with_nip55<R: Runtime>(handle: AppHandle<R>) -> Result<LoginResult, String> {
+    // Not account creation: an abandoned creation must not stamp
+    // an empty kind-0 over this identity's real profile (NIP-55 offline signer).
+    disarm_fresh_account_stamp();
     // Refuse if any account is mid-encryption-migration — a fresh setup would
     // tear the DB pool out from under the open migration transaction.
     account_manager::refuse_if_migration_in_progress("login nip55")?;
@@ -1273,6 +1279,10 @@ pub async fn create_account() -> Result<LoginResult, String> {
     // This prevents creating "dead accounts" if user quits before setting a PIN
     account_manager::set_pending_account(npub.clone())?;
 
+    // Arm the profile stamp for THIS npub, consumed when setup completes.
+    // create_account is the only place this is ever set.
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = Some(npub.clone());
+
     full_session_flag().store(true, std::sync::atomic::Ordering::Release);
     Ok(LoginResult { public: npub, existing: false })
 }
@@ -1402,6 +1412,9 @@ pub async fn decrypt(ciphertext: String, password: Option<String>) -> Result<Str
 /// `reset_session()` to clean the slate before re-running the cold path.
 #[tauri::command]
 pub async fn login_from_stored_key(password: Option<String>) -> Result<String, String> {
+    // Not account creation: an abandoned creation must not stamp
+    // an empty kind-0 over this identity's real profile (stored-key unlock).
+    disarm_fresh_account_stamp();
     // Defense-in-depth: seed the encryption atomic from the current
     // account's DB at the top of every login. boot_select_account also
     // seeds, but the atomic is process-wide and could be stale after a
@@ -1789,6 +1802,7 @@ pub async fn setup_encryption<R: Runtime>(
         crate::state::set_encryption_enabled(true);
         vector_core::blossom_servers::refresh_cache();
         broadcast_pending_invite_if_any();
+    stamp_fresh_account_profile();
         return Ok(());
     }
 
@@ -1896,6 +1910,7 @@ pub async fn setup_encryption<R: Runtime>(
     // Broadcast pending invite acceptance — consume up-front so a re-entry
     // can't re-broadcast the same invite.
     broadcast_pending_invite_if_any();
+    stamp_fresh_account_profile();
 
     Ok(())
 }
@@ -1937,6 +1952,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
         crate::state::set_encryption_enabled(false);
         vector_core::blossom_servers::refresh_cache();
         broadcast_pending_invite_if_any();
+    stamp_fresh_account_profile();
         return Ok(());
     }
 
@@ -2020,6 +2036,7 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
 
     // Broadcast pending invite acceptance.
     broadcast_pending_invite_if_any();
+    stamp_fresh_account_profile();
 
     Ok(())
 }
@@ -2028,6 +2045,85 @@ pub async fn skip_encryption<R: Runtime>(handle: AppHandle<R>) -> Result<(), Str
 /// First-invite-wins: the invite is consumed before the spawn so a
 /// double-fire of `setup_encryption`/`skip_encryption` can't broadcast
 /// twice.
+/// The npub of an identity whose keypair was generated on this device moments
+/// ago. Set by [`create_account`] and nowhere else; consumed once that
+/// account's setup completes.
+///
+/// Keyed on the pubkey rather than a bare flag, and explicitly disarmed by
+/// every other entry point, because the setup endpoints that consume it are
+/// shared. A user can begin creating an account, abandon it before the PIN
+/// step, and then import an existing nsec — which lands in the same
+/// `setup_encryption` / `skip_encryption`. A bool would still be armed and
+/// would stamp an empty kind-0 over that imported identity's real profile. A
+/// pubkey cannot match, and the disarms mean it is not even still set.
+static FRESH_ACCOUNT_NPUB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Forget any armed stamp. Called by every sign-in path that is not account
+/// creation, so an abandoned creation cannot leak into someone else's session.
+fn disarm_fresh_account_stamp() {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
+}
+
+/// Publish a kind-0 for an account created seconds ago, so it carries
+/// `["client","vector"]` from the start.
+///
+/// Magnitude (and anything reading NIP-89) recognises a Vector user by that tag
+/// on their profile. Vector writes it only when someone edits and saves a
+/// profile, so a brand-new user who has never opened that screen is
+/// indistinguishable from a stranger and is refused an upload. Publishing once
+/// at creation closes that window.
+///
+/// ONLY ever for a freshly generated keypair. A kind-0 is replaceable, so
+/// publishing one for an existing identity REPLACES whatever that person has,
+/// and this event is deliberately empty — it carries the tag and nothing else.
+/// That is safe here for exactly one reason: the key was generated moments ago
+/// and has never had a profile to destroy. It must never be reachable from a
+/// login, an import, or a stored-key unlock, which is what `FRESH_ACCOUNT_NPUB`
+/// and `disarm_fresh_account_stamp` between them guarantee.
+/// Whether the armed stamp belongs to the account that just finished setup.
+///
+/// Split out so the rule can be tested without a signer, a client or relays.
+/// It says no unless an npub was armed AND it is exactly the account now
+/// signed in — nothing else may ever publish an empty kind-0.
+fn should_stamp(armed: Option<&str>, current: Option<&str>) -> bool {
+    match (armed, current) {
+        (Some(a), Some(c)) => a == c,
+        _ => false,
+    }
+}
+
+fn stamp_fresh_account_profile() {
+    // Peek -> verify -> THEN clear, mirroring `broadcast_pending_invite_if_any`:
+    // clearing before the client check would drop the stamp during the window
+    // where setup returns before `connect()` has populated NOSTR_CLIENT.
+    let armed = FRESH_ACCOUNT_NPUB.lock().unwrap().clone();
+    let Some(client) = nostr_client() else { return; };
+    let current = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok());
+    if !should_stamp(armed.as_deref(), current.as_deref()) {
+        if armed.is_some() {
+            eprintln!("[Account] new-account profile stamp skipped: setup finished for a different account");
+            disarm_fresh_account_stamp();
+        }
+        return;
+    }
+    disarm_fresh_account_stamp();
+    vector_core::db::spawn_bound(async move {
+        // Empty metadata: asserts no fields, carries only the tag. The first
+        // real profile save merges and republishes normally.
+        let builder = EventBuilder::new(Kind::Metadata, "{}")
+            .tag(Tag::custom("client", vec!["vector"]));
+        match vector_core::sign_builder(builder).await {
+            Ok(event) => {
+                match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
+                    Ok(_) => println!("Stamped the new account's profile as a Vector client"),
+                    Err(e) => eprintln!("Failed to stamp the new account's profile: {}", e),
+                }
+            }
+            Err(e) => eprintln!("Failed to sign the new account's profile stamp: {}", e),
+        }
+    });
+}
+
 fn broadcast_pending_invite_if_any() {
     // Order matters: peek → check client → THEN clear. Clearing before
     // the client check would silently drop invites during the transient
@@ -2072,3 +2168,38 @@ fn broadcast_pending_invite_if_any() {
 // - export_keys
 // - encrypt
 // - decrypt
+
+#[cfg(test)]
+mod fresh_account_stamp_tests {
+    use super::should_stamp;
+
+    const NEW: &str = "npub1newaccountcreatedsecondsago";
+    const EXISTING: &str = "npub1someoneelsewhoalreadyhasaprofile";
+
+    #[test]
+    fn the_account_we_just_created_is_stamped() {
+        assert!(should_stamp(Some(NEW), Some(NEW)));
+    }
+
+    #[test]
+    fn an_account_that_was_merely_logged_into_is_never_stamped() {
+        // Nothing armed: every login, import and stored-key unlock disarms on
+        // entry, so this is the state they reach setup in.
+        assert!(!should_stamp(None, Some(EXISTING)));
+    }
+
+    #[test]
+    fn an_abandoned_creation_cannot_stamp_an_imported_account() {
+        // The case the pubkey guard exists for: a creation is started and
+        // dropped before the PIN step, then an existing nsec is imported and
+        // finishes in the same shared setup endpoint. A bare bool would fire
+        // here and replace that identity's real kind-0 with an empty one.
+        assert!(!should_stamp(Some(NEW), Some(EXISTING)));
+    }
+
+    #[test]
+    fn nothing_is_stamped_when_no_account_is_signed_in() {
+        assert!(!should_stamp(Some(NEW), None));
+        assert!(!should_stamp(None, None));
+    }
+}
