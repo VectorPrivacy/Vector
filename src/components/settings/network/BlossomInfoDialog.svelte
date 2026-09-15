@@ -30,7 +30,6 @@
                 </div>
                 {#if doc.status === 'loading'}
                     <div class="relay-metrics-section">
-                        <div class="relay-metrics-header"><h4>Your account</h4></div>
                         <span style="opacity: 0.6;">Asking the server…</span>
                     </div>
                 {:else if personalised}

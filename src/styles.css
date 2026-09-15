@@ -11692,79 +11692,150 @@ select:disabled:hover {
   margin-left: auto;
 }
 
-/* Media server: the account's own limits, from the server's document */
-.blossom-account-refused {
-  margin: 8px 0 0;
-  font-size: 13px;
-  line-height: 1.45;
-  color: var(--danger-color);
-}
-.blossom-server-line {
-  font-size: 12px;
-  opacity: 0.6;
-  font-variant-numeric: tabular-nums;
-}
-.blossom-quota-grid {
+/* Media server: the account's plan, from the server's own document */
+.blossom-plan {
+  border-radius: 12px;
+  padding: 14px 16px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
   flex-direction: column;
+  gap: 16px;
+}
+.blossom-plan-premium {
+  border-color: transparent;
+  background:
+    linear-gradient(rgba(28, 24, 20, 0.98), rgba(28, 24, 20, 0.98)) padding-box,
+    linear-gradient(135deg, #ffd166, #ff8fab) border-box;
+}
+.blossom-plan-none {
+  border-color: rgba(252, 89, 92, 0.35);
+}
+.blossom-plan-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
-  margin-top: 10px;
 }
-.blossom-quota {
+.blossom-plan-title {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 2px;
+  min-width: 0;
 }
-.blossom-quota-inline {
-  flex-direction: row;
-  align-items: baseline;
-  justify-content: space-between;
-}
-.blossom-quota-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-}
-.blossom-quota-label {
+.blossom-plan-eyebrow {
   color: rgba(255, 255, 255, 0.5);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
-.blossom-quota-value {
+.blossom-plan-name {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #fff;
+}
+.blossom-plan-premium .blossom-plan-name {
+  background: linear-gradient(135deg, #ffd166, #ff8fab);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.blossom-plan-none .blossom-plan-name { color: var(--danger-color); }
+.blossom-plan-blurb {
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.55;
+  margin-top: 4px;
+}
+.blossom-plan-perfile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex-shrink: 0;
+  text-align: right;
+}
+.blossom-plan-perfile-value {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
   color: #59fcb3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.blossom-plan-perfile-label {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 3px;
+}
+.blossom-plan-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.blossom-plan-refused {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.75);
+}
+.blossom-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.blossom-meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.blossom-meter-label {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.blossom-meter-value {
+  color: #fff;
   font-weight: 600;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
-.blossom-quota-of {
+.blossom-meter-of {
   color: rgba(255, 255, 255, 0.45);
   font-weight: 400;
 }
-.blossom-quota-track {
+.blossom-meter-track {
   height: 6px;
   width: 100%;
-  background: rgba(30, 30, 30, 0.8);
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 3px;
   overflow: hidden;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
 }
-.blossom-quota-fill {
+.blossom-meter-fill {
   height: 100%;
-  min-width: 2px;
+  min-width: 3px;
   border-radius: 3px;
   background: linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%);
   transition: width 0.3s cubic-bezier(0.65, 0, 0.35, 1);
 }
-.blossom-quota-fill.blossom-quota-high {
+.blossom-meter-fill.blossom-meter-high {
   background: linear-gradient(90deg, #ffc107 0%, #ff9800 100%);
 }
-.blossom-quota-fill.blossom-quota-full {
+.blossom-meter-fill.blossom-meter-full {
   background: var(--danger-color);
 }
-.blossom-quota-note {
+.blossom-meter-note {
   font-size: 11px;
   opacity: 0.45;
+}
+.blossom-server-line {
+  font-size: 12px;
+  opacity: 0.6;
+  font-variant-numeric: tabular-nums;
 }
 
 .relay-add-btn {
