@@ -26,6 +26,23 @@ use crate::signer::VectorSigner;
 /// and a `caller` block.
 pub const INFO_EXTENSION: &str = "magnitude-info";
 
+/// A plan label is brief vanity at most. Anything past these is dropped
+/// whole rather than trimmed, so a server cannot half-render into the card.
+pub const PLAN_TITLE_MAX: usize = 24;
+pub const PLAN_DESCRIPTION_MAX: usize = 100;
+
+/// One line of plain text within `max` characters, or nothing.
+pub fn plan_text(raw: Option<&str>, max: usize) -> Option<String> {
+    let cleaned: String = raw?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let ok = !cleaned.is_empty()
+        && cleaned.chars().count() <= max
+        && !cleaned.chars().any(|c| c.is_control());
+    ok.then_some(cleaned)
+}
+
 /// What this server will do for the account that asked.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct CallerInfo {
@@ -39,6 +56,10 @@ pub struct CallerInfo {
     /// Whether an upload would be admitted at all; `reasons` says why not.
     pub allowed: bool,
     pub reasons: Vec<String>,
+    /// The operator's name for this tier, bounded by [`PLAN_TITLE_MAX`].
+    pub plan_title: Option<String>,
+    /// One line under it, bounded by [`PLAN_DESCRIPTION_MAX`].
+    pub plan_description: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -86,6 +107,8 @@ impl ServerInfo {
         let caller = obj.get("caller").and_then(|c| {
             let allowed = c.get("allowed")?.as_bool()?;
             let n = |key: &str| c.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+            let plan = c.get("plan");
+            let plan_str = |key: &str| plan.and_then(|p| p.get(key)).and_then(|v| v.as_str());
             Some(CallerInfo {
                 tier: c.get("tier").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 max_blob: n("max_blob"),
@@ -96,6 +119,8 @@ impl ServerInfo {
                 daily_limit: n("daily_limit"),
                 allowed,
                 reasons: strings(c.get("reasons")),
+                plan_title: plan_text(plan_str("title"), PLAN_TITLE_MAX),
+                plan_description: plan_text(plan_str("description"), PLAN_DESCRIPTION_MAX),
             })
         });
         Some(ServerInfo {
@@ -394,6 +419,29 @@ mod tests {
             info.refusal_reason("m.example", 1),
             Some("m.example: Uploads require a profile published from Vector".to_string()),
         );
+    }
+
+    #[test]
+    fn a_plan_label_is_taken_within_bounds_and_dropped_whole_beyond_them() {
+        let mut doc = magnitude_doc();
+        doc["caller"]["plan"] = json!({ "title": "  Premium ", "description": "Earned by\nearly  supporters." });
+        let c = ServerInfo::parse(&doc).unwrap().caller.unwrap();
+        assert_eq!(c.plan_title.as_deref(), Some("Premium"));
+        assert_eq!(c.plan_description.as_deref(), Some("Earned by early supporters."));
+
+        doc["caller"]["plan"] = json!({ "title": "x".repeat(25), "description": "y".repeat(101) });
+        let c = ServerInfo::parse(&doc).unwrap().caller.unwrap();
+        assert_eq!(c.plan_title, None, "not truncated: dropped");
+        assert_eq!(c.plan_description, None);
+
+        doc["caller"]["plan"] = json!({ "title": "Bad\u{7}", "description": "" });
+        let c = ServerInfo::parse(&doc).unwrap().caller.unwrap();
+        assert_eq!(c.plan_title, None);
+        assert_eq!(c.plan_description, None);
+
+        doc["caller"].as_object_mut().unwrap().remove("plan");
+        let c = ServerInfo::parse(&doc).unwrap().caller.unwrap();
+        assert_eq!(c.plan_title, None);
     }
 
     #[test]

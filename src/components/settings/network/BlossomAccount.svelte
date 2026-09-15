@@ -3,18 +3,19 @@
     // words: the plan it puts the account on, the per-file limit, and the storage and
     // daily allowances with how much of each is used. Rendered only when the server
     // publishes a document.
-    let { info, h } = $props();
+    let { info, host = '', h } = $props();
     const caller = $derived(info.caller);
-    // Server tiers are named for the policy that grants them; the person sees the plan.
-    const PLANS = {
-        badged: { name: 'Premium', kind: 'premium', blurb: 'Earned by early Vector supporters and bug hunters.' },
-        recognised: { name: 'Free', kind: 'free', blurb: '' },
-        default: { name: 'No access', kind: 'none', blurb: '' },
-    };
+    // The server names the plan (already bounded by the backend); Vector only decides
+    // the treatment. The premium effects are a statement of trust, so they are reserved
+    // for Vector's own servers — any other server saying "Premium" gets a plain card.
+    const OFFICIAL_DOMAINS = ['vectorapp.io', 'jskitty.com'];
+    const official = $derived(OFFICIAL_DOMAINS.some(d => host === d || host.endsWith('.' + d)));
     const plan = $derived.by(() => {
         if (!caller) return null;
-        if (!caller.allowed) return PLANS.default;
-        return PLANS[caller.tier] || { name: caller.tier || 'Member', kind: 'free', blurb: '' };
+        if (!caller.allowed) return { name: 'No access', kind: 'none', blurb: '' };
+        const name = caller.plan_title || caller.tier || 'Member';
+        const kind = official && caller.tier === 'badged' ? 'premium' : 'free';
+        return { name, kind, blurb: caller.plan_description || '' };
     });
     const serverLine = $derived.by(() => {
         const name = info.name || info.software || '';

@@ -290,6 +290,7 @@ mod tests {
         CallerInfo {
             tier: "recognised".into(), max_blob: 1, storage_used: storage.0, storage_limit: storage.1,
             blobs: 0, daily_used: daily.0, daily_limit: daily.1, allowed, reasons: vec![],
+            plan_title: None, plan_description: None,
         }
     }
 

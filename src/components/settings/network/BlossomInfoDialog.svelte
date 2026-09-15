@@ -50,10 +50,10 @@
                         <span style="opacity: 0.6;">Asking the server…</span>
                     </div>
                 {:else if personalised}
-                    <BlossomAccount info={doc.info} {h} />
+                    <BlossomAccount info={doc.info} host={st.url} {h} />
                 {:else}
                     {#if doc.status === 'ok' && doc.info}
-                        <BlossomAccount info={doc.info} {h} />
+                        <BlossomAccount info={doc.info} host={st.url} {h} />
                     {/if}
                     <div class="relay-metrics-section">
                         <div class="relay-metrics-header">
