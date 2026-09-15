@@ -224,10 +224,12 @@ function openBlossomServerInfoDialog(server) {
     currentBlossomInfo = server;
     VectorSvelte.blossomInfoDialog.open({
         url: server.url.replace(/^https?:\/\//, ''), enabled: !!server.enabled, isCustom: !!server.is_custom,
+        status: server.status || null,
     });
     // Reset synchronously so stale data doesn't flash mid-fetch.
     VectorSvelte.setBlossomCaps('loading', []);
     VectorSvelte.setBlossomInfo('loading', null);
+    VectorSvelte.setBlossomStats(null);
     const token = ++_blossomCapsToken;
     renderBlossomCapabilities(server.url, token);
     renderBlossomInfo(server.url, token);
@@ -257,6 +259,16 @@ async function renderBlossomInfo(url, token) {
         console.warn('Failed to load blossom server info:', err);
         if (token !== _blossomCapsToken) return;
         VectorSvelte.setBlossomInfo('error', null);
+    }
+    // After the document, so the status reflects what it just said.
+    try {
+        const enabled = !!currentBlossomInfo?.enabled;
+        const { stats, status } = await invoke('get_blossom_server_stats', { url, enabled });
+        if (token !== _blossomCapsToken) return;
+        VectorSvelte.setBlossomStats(stats);
+        VectorSvelte.blossomInfoDialog.patch({ status });
+    } catch (err) {
+        console.warn('Failed to load blossom server stats:', err);
     }
 }
 

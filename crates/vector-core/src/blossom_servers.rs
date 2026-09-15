@@ -59,6 +59,7 @@ pub struct BlossomServerInfo {
     pub is_default: bool,
     pub is_custom: bool,
     pub enabled: bool,
+    pub status: crate::blossom_stats::ServerStatus,
 }
 
 // ============================================================================
@@ -152,19 +153,23 @@ pub fn list_all_servers() -> Vec<BlossomServerInfo> {
     let mut out: Vec<BlossomServerInfo> = Vec::new();
     for d in DEFAULT_BLOSSOM_SERVERS {
         let key = d.trim_end_matches('/').to_lowercase();
+        let enabled = !disabled_lower.contains(&key);
         out.push(BlossomServerInfo {
             url: (*d).to_string(),
             is_default: true,
             is_custom: false,
-            enabled: !disabled_lower.contains(&key),
+            enabled,
+            status: crate::blossom_stats::status_for(d, enabled),
         });
     }
     for c in load_custom_blossom_servers().unwrap_or_default() {
+        let status = crate::blossom_stats::status_for(&c.url, c.enabled);
         out.push(BlossomServerInfo {
             url: c.url,
             is_default: false,
             is_custom: true,
             enabled: c.enabled,
+            status,
         });
     }
     out

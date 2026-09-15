@@ -394,11 +394,15 @@ async fn preflight(
             HeaderValue::from_str(ct).map_err(|e| UploadFailure::Other(format!("Invalid X-Content-Type: {}", e)))?,
         );
     }
+    let asked_at = std::time::Instant::now();
     let resp = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         client.head(upload_url.clone()).headers(head_headers).send(),
     ).await {
-        Ok(Ok(resp)) => resp,
+        Ok(Ok(resp)) => {
+            crate::blossom_stats::record_latency(server_url.as_str(), asked_at.elapsed().as_secs_f64() * 1000.0);
+            resp
+        }
         Ok(Err(e)) => {
             crate::log_debug!("[Blossom Preflight] {} HEAD failed: {}, falling through to PUT", server_url, e);
             return Ok(Preflight::Proceed);
@@ -526,6 +530,7 @@ where
     // blossom.data.haus) then 411.
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
 
+    let started = std::time::Instant::now();
     let response = send_upload(
         client.put(upload_url.clone()).headers(headers),
         server_url,
@@ -538,6 +543,7 @@ where
     // BUD-02: accept any 2xx (200 OK or 201 Created).
     let status = response.status();
     if status.is_success() {
+        crate::blossom_stats::record_upload(server_url.as_str(), total_size, started.elapsed().as_secs_f64() * 1000.0);
         let descriptor: BlobDescriptor = response.json().await
             .map_err(|e| UploadFailure::Other(format!("Failed to parse response: {}", e)))?;
         // Integrity gate: a compliant server stores our bytes verbatim, so the
@@ -608,6 +614,7 @@ where
     }
     headers.insert(CONTENT_LENGTH, HeaderValue::from(total_size));
 
+    let started = std::time::Instant::now();
     let response = send_upload(
         client.put(upload_url).headers(headers),
         server_url,
@@ -620,6 +627,7 @@ where
     // BUD-02: accept any 2xx (200 OK or 201 Created).
     let status = response.status();
     if status.is_success() {
+        crate::blossom_stats::record_upload(server_url.as_str(), total_size, started.elapsed().as_secs_f64() * 1000.0);
         let descriptor: BlobDescriptor = response.json().await
             .map_err(|e| UploadFailure::Other(format!("Failed to parse response: {}", e)))?;
         // Integrity gate (see upload_attempt): reject a server that returns a
@@ -683,6 +691,25 @@ async fn uploaded_blob_serves(url: &str) -> bool {
     false
 }
 
+/// What a failure says about the server's state for the status pill: gone
+/// (nothing arrived) or full (a quota or the disk). A refusal about the file
+/// itself says nothing about the server.
+fn note_failure(server_url: &str, e: &UploadFailure) {
+    match e {
+        UploadFailure::Transport(_) => {
+            crate::blossom_stats::record_failure(server_url, crate::blossom_stats::FAIL_OFFLINE)
+        }
+        UploadFailure::Refused(r) => {
+            if matches!(r.code(), Some("quota_storage_exceeded" | "quota_daily_exceeded" | "server_full")) {
+                crate::blossom_stats::record_failure(server_url, crate::blossom_stats::FAIL_MAXED);
+            } else {
+                crate::blossom_stats::record_ok(server_url);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Upload to multiple Blossom servers with failover, in input order.
 ///
 /// **Does NOT participate in the capability cache.** Used by the
@@ -728,10 +755,12 @@ where
                     continue;
                 }
                 crate::log_net_info!("[Blossom] upload OK via {}", server_url_str);
+                crate::blossom_stats::record_ok(server_url_str);
                 return Ok(url);
             }
             Err(e) => {
                 crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
+                note_failure(server_url_str, &e);
                 failures.push((host, e));
             }
         }
@@ -829,6 +858,7 @@ where
                     crate::log_warn!("[Blossom Cap] record_accepted failed: {}", err);
                 }
                 crate::blossom_info::note_upload(server_url_str, size_bytes);
+                crate::blossom_stats::record_ok(server_url_str);
                 return Ok(AcceptedUpload {
                     url,
                     server: server_url_str.clone(),
@@ -839,6 +869,7 @@ where
             }
             Err(e) => {
                 crate::log_net_fail!("[Blossom] upload failed to {}: {}", server_url_str, e);
+                note_failure(server_url_str, &e);
                 // Worth remembering about this server: a type it does not
                 // take, a size it does not take, bytes it does not keep intact.
                 // A quota, a rate limit, a closed gate or a bad clock say

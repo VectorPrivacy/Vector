@@ -221,6 +221,7 @@
     "allow-get-blossom-server-capabilities",
     "allow-blossom-upload-verdict",
     "allow-get-blossom-server-info",
+    "allow-get-blossom-server-stats",
     "allow-get-custom-relays",
     "allow-add-custom-relay",
     "allow-remove-custom-relay",

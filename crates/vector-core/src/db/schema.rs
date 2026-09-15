@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 91;
+pub const HIGHEST_MIGRATION_ID: u32 = 92;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1361,6 +1361,10 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         tx.execute("DELETE FROM chats WHERE chat_identifier = ''", [])
             .map_err(|e| format!("drop phantom chats: {e}"))?;
         Ok(())
+    })?;
+
+    run_atomic_migration(conn, 92, "Create blossom_server_stats table", |tx| {
+        crate::blossom_stats::migrate(tx)
     })?;
 
     Ok(())

@@ -9,7 +9,7 @@ export const relayInfoDialog = fadeDialog({
     ping: '--', pingColor: '', lastCheck: '--', copied: false,
 });
 
-export const blossomInfoDialog = fadeDialog({ url: '', enabled: true, isCustom: false });
+export const blossomInfoDialog = fadeDialog({ url: '', enabled: true, isCustom: false, status: null });
 
 
 const blossomCaps = $state({ status: 'loading', caps: [] });
@@ -19,6 +19,10 @@ export function setBlossomCaps(status, caps) { blossomCaps.status = status; blos
 const blossomInfo = $state({ status: 'loading', info: null });
 export function blossomInfoState() { return blossomInfo; }
 export function setBlossomInfo(status, info) { blossomInfo.status = status; blossomInfo.info = info || null; }
+// This device's latency / speed / reachability history with the open server.
+const blossomStats = $state({ stats: null });
+export function blossomStatsState() { return blossomStats; }
+export function setBlossomStats(stats) { blossomStats.stats = stats || null; }
 const relayLogs = $state({ logs: [] });
 export function relayLogsState() { return relayLogs; }
 export function setRelayLogs(logs) { relayLogs.logs = logs || []; }

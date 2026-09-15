@@ -644,6 +644,22 @@ pub async fn blossom_upload_verdict(
 /// tier, per-file limit, storage and daily allowances. `None` when the server
 /// publishes none. Refetched when the held copy is older than half a minute,
 /// which is what the dialog wants; ranking reads the cache directly.
+/// This device's history with a media server — latency, speed, reachability —
+/// and the status the list shows for it.
+#[derive(serde::Serialize)]
+pub struct BlossomServerStats {
+    pub stats: Option<vector_core::blossom_stats::ServerStats>,
+    pub status: vector_core::blossom_stats::ServerStatus,
+}
+
+#[tauri::command]
+pub async fn get_blossom_server_stats(url: String, enabled: bool) -> BlossomServerStats {
+    BlossomServerStats {
+        stats: vector_core::blossom_stats::stats_for(&url),
+        status: vector_core::blossom_stats::status_for(&url, enabled),
+    }
+}
+
 #[tauri::command]
 pub async fn get_blossom_server_info(url: String) -> Result<Option<vector_core::blossom_info::ServerInfo>, String> {
     let signer = vector_core::signer::active_signer()?;

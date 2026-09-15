@@ -260,13 +260,22 @@ where
         .map_err(|e| format!("Invalid server URL: {}", e))?;
     let auth = build_info_auth_header(signer, &base).await?;
     let client = crate::net::build_http_client(Duration::from_secs(8))?;
-    let resp = client
+    let asked_at = Instant::now();
+    let resp = match client
         .get(doc_url)
         .header(ACCEPT, "application/json")
         .header(AUTHORIZATION, auth)
         .send()
         .await
-        .map_err(|e| format!("Info request failed: {}", e))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            crate::blossom_stats::record_failure(server_url, crate::blossom_stats::FAIL_OFFLINE);
+            return Err(format!("Info request failed: {}", e));
+        }
+    };
+    // Any answer, document or not, is the server being there.
+    crate::blossom_stats::record_latency(server_url, asked_at.elapsed().as_secs_f64() * 1000.0);
     if !resp.status().is_success() {
         return Ok(None);
     }

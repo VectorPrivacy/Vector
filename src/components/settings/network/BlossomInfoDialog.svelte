@@ -2,12 +2,15 @@
     // One media server: whether it is enabled, what it will do for this account, and
     // remove (custom) or enable / disable (default). A server that publishes its own
     // document speaks for itself; otherwise the view is what uploads have taught us.
-    import { blossomInfoDialog, blossomInfoState } from '../../lib/network.svelte.js';
+    import { blossomInfoDialog, blossomInfoState, blossomStatsState } from '../../lib/network.svelte.js';
     import BlossomCaps from './BlossomCaps.svelte';
     import BlossomAccount from './BlossomAccount.svelte';
+    import BlossomPerformance from './BlossomPerformance.svelte';
     let { h } = $props();   // h: close(), action(), formatBytes
     const st = blossomInfoDialog.state();
     const doc = blossomInfoState();
+    const perf = blossomStatsState();
+    const pill = $derived(st.status || { label: st.enabled ? 'Online' : 'Disabled', tone: st.enabled ? 'connected' : 'disabled' });
     const actionLabel = $derived(st.isCustom ? 'Remove Server' : (st.enabled ? 'Disable Server' : 'Enable Server'));
     const personalised = $derived(doc.status === 'ok' && doc.info && doc.info.caller);
 </script>
@@ -25,9 +28,12 @@
                 <div class="relay-metrics-section">
                     <div class="relay-metrics-header">
                         <h4>Status</h4>
-                        <span class="relay-status relay-status-small" class:connected={st.enabled} class:disabled={!st.enabled}>{st.enabled ? 'enabled' : 'disabled'}</span>
+                        <span class="relay-status relay-status-small {pill.tone}">{pill.label}</span>
                     </div>
                 </div>
+                {#if perf.stats}
+                    <BlossomPerformance stats={perf.stats} {h} />
+                {/if}
                 {#if doc.status === 'loading'}
                     <div class="relay-metrics-section">
                         <span style="opacity: 0.6;">Asking the server…</span>

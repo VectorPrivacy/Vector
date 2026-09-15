@@ -11705,8 +11705,9 @@ select:disabled:hover {
 .blossom-plan-premium {
   border-color: transparent;
   background:
-    linear-gradient(rgba(28, 24, 20, 0.98), rgba(28, 24, 20, 0.98)) padding-box,
-    linear-gradient(135deg, #ffd166, #ff8fab) border-box;
+    linear-gradient(rgba(20, 20, 20, 0.98), rgba(20, 20, 20, 0.98)) padding-box,
+    linear-gradient(135deg, var(--primary-color, #33DB98), var(--accent-color, #59fcb3)) border-box;
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent-color, #59fcb3) 18%, transparent);
 }
 .blossom-plan-none {
   border-color: rgba(252, 89, 92, 0.35);
@@ -11736,7 +11737,7 @@ select:disabled:hover {
   color: #fff;
 }
 .blossom-plan-premium .blossom-plan-name {
-  background: linear-gradient(135deg, #ffd166, #ff8fab);
+  background: linear-gradient(135deg, var(--primary-color, #33DB98), var(--accent-color, #59fcb3));
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -11759,7 +11760,7 @@ select:disabled:hover {
   font-size: 22px;
   font-weight: 700;
   line-height: 1.1;
-  color: #59fcb3;
+  color: var(--accent-color, #59fcb3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -11819,7 +11820,7 @@ select:disabled:hover {
   height: 100%;
   min-width: 3px;
   border-radius: 3px;
-  background: linear-gradient(90deg, #59fcb3 0%, #00d4ff 100%);
+  background: linear-gradient(90deg, var(--primary-color, #33DB98) 0%, var(--accent-color, #59fcb3) 100%);
   transition: width 0.3s cubic-bezier(0.65, 0, 0.35, 1);
 }
 .blossom-meter-fill.blossom-meter-high {
@@ -11835,6 +11836,66 @@ select:disabled:hover {
 .blossom-server-line {
   font-size: 12px;
   opacity: 0.6;
+  font-variant-numeric: tabular-nums;
+}
+.relay-latency {
+  font-size: 11px;
+  opacity: 0.45;
+  font-variant-numeric: tabular-nums;
+  margin-right: 8px;
+  white-space: nowrap;
+}
+
+/* Media server: this device's history with it */
+.blossom-perf {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+.blossom-perf-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+}
+.blossom-perf-label {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.blossom-perf-value {
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.blossom-perf-unit {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  font-weight: 400;
+}
+.blossom-perf-spark {
+  display: block;
+  width: 100%;
+  height: 34px;
+  margin-top: 10px;
+}
+.blossom-perf-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  opacity: 0.45;
+  margin-top: 6px;
   font-variant-numeric: tabular-nums;
 }
 

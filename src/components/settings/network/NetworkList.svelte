@@ -51,6 +51,7 @@
             {#if server.is_default}<span class="relay-default-badge">default</span>{/if}
             <span class="relay-url">{host(server.url)}</span>
         </div>
-        <span class="relay-status {server.enabled ? 'connected' : 'disabled'}">{server.enabled ? 'active' : 'disabled'}</span>
+        {#if server.status?.latency_ms != null && server.enabled}<span class="relay-latency">{server.status.latency_ms} ms</span>{/if}
+        <span class="relay-status {server.status?.tone || (server.enabled ? 'connected' : 'disabled')}">{server.status?.label || (server.enabled ? 'Online' : 'Disabled')}</span>
     </div>
 {/each}
