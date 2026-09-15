@@ -11834,8 +11834,9 @@ select:disabled:hover {
   opacity: 0.45;
 }
 .blossom-server-line {
-  font-size: 12px;
-  opacity: 0.6;
+  font-size: 11px;
+  opacity: 0.4;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 .relay-latency {

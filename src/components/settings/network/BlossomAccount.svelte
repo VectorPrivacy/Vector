@@ -74,15 +74,9 @@
         {/if}
     </div>
 {/if}
-{#if serverLine || info.description || (!caller && info.max_blob)}
-    <div class="relay-metrics-section">
-        <div class="relay-metrics-header">
-            <h4>Server</h4>
-            {#if serverLine}<span class="blossom-server-line">{serverLine}</span>{/if}
-        </div>
-        {#if info.description}<p class="blossom-cap-blurb">{info.description}</p>{/if}
-        {#if !caller && info.max_blob}
-            <p class="blossom-cap-blurb">Accepts files up to {h.formatBytes(info.max_blob, 1)}.</p>
-        {/if}
-    </div>
+{#if !caller && info.max_blob}
+    <p class="blossom-cap-blurb">Accepts files up to {h.formatBytes(info.max_blob, 1)}.</p>
+{/if}
+{#if serverLine || info.description}
+    <div class="blossom-server-line">{[serverLine, info.description].filter(Boolean).join(' · ')}</div>
 {/if}
