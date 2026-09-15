@@ -32,7 +32,6 @@
 
 {#if latency != null || stats.mbps != null}
     <div class="relay-metrics-section">
-        <div class="relay-metrics-header"><h4>From this device</h4></div>
         <div class="blossom-perf">
             <div class="blossom-perf-stat">
                 <span class="blossom-perf-label">Latency</span>

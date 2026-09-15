@@ -11846,12 +11846,28 @@ select:disabled:hover {
   white-space: nowrap;
 }
 
+/* Media server: shown only when something is wrong */
+.blossom-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.blossom-notice-connecting { border-color: rgba(255, 193, 7, 0.35); background: rgba(255, 193, 7, 0.06); }
+.blossom-notice-disconnected { border-color: rgba(255, 82, 82, 0.35); background: rgba(255, 82, 82, 0.06); }
+.blossom-notice .relay-status { flex-shrink: 0; }
+.blossom-notice-text { opacity: 0.8; }
+
 /* Media server: this device's history with it */
 .blossom-perf {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
-  margin-top: 10px;
 }
 .blossom-perf-stat {
   display: flex;

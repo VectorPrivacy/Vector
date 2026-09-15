@@ -10,7 +10,18 @@
     const st = blossomInfoDialog.state();
     const doc = blossomInfoState();
     const perf = blossomStatsState();
-    const pill = $derived(st.status || { label: st.enabled ? 'Online' : 'Disabled', tone: st.enabled ? 'connected' : 'disabled' });
+    // The list already shows the state; here it appears only when something is wrong.
+    const NOTICES = {
+        offline: 'Vector couldn’t reach this server recently. Uploads are routed elsewhere until it answers again.',
+        maxed: 'An allowance on this server is used up. Uploads are routed elsewhere until it frees up.',
+        no_access: 'This server won’t take uploads from your account.',
+        disabled: 'Disabled — uploads aren’t routed here.',
+    };
+    const notice = $derived.by(() => {
+        const state = st.status?.state || (st.enabled ? 'online' : 'disabled');
+        const text = NOTICES[state];
+        return text ? { label: st.status?.label || 'Disabled', tone: st.status?.tone || 'disabled', text } : null;
+    });
     const actionLabel = $derived(st.isCustom ? 'Remove Server' : (st.enabled ? 'Disable Server' : 'Enable Server'));
     const personalised = $derived(doc.status === 'ok' && doc.info && doc.info.caller);
 </script>
@@ -25,12 +36,12 @@
                 <button class="relay-dialog-close" onclick={h.close}>&times;</button>
             </div>
             <div class="relay-dialog-content">
-                <div class="relay-metrics-section">
-                    <div class="relay-metrics-header">
-                        <h4>Status</h4>
-                        <span class="relay-status relay-status-small {pill.tone}">{pill.label}</span>
+                {#if notice}
+                    <div class="blossom-notice blossom-notice-{notice.tone}">
+                        <span class="relay-status relay-status-small {notice.tone}">{notice.label}</span>
+                        <span class="blossom-notice-text">{notice.text}</span>
                     </div>
-                </div>
+                {/if}
                 {#if perf.stats}
                     <BlossomPerformance stats={perf.stats} {h} />
                 {/if}
