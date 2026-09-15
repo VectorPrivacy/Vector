@@ -275,6 +275,14 @@ async function renderBlossomInfo(url, token) {
 function closeBlossomServerInfoDialog() {
     VectorSvelte.blossomInfoDialog.close();
     currentBlossomInfo = null;
+    renderRelayList();
+}
+
+/** Coalesce a burst of status changes into one list render. */
+let _relayListTimer = null;
+function renderRelayListSoon() {
+    clearTimeout(_relayListTimer);
+    _relayListTimer = setTimeout(() => { _relayListTimer = null; renderRelayList(); }, 250);
 }
 
 async function handleBlossomAction() {

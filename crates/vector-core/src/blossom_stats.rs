@@ -157,6 +157,9 @@ fn update(server_url: &str, f: impl FnOnce(&mut ServerStats)) {
     if let Err(e) = save(&conn, &server, &s) {
         crate::log_warn!("[Blossom Stats] {}: {}", server, e);
     }
+    drop(conn);
+    // The list's pill is derived from this row.
+    crate::traits::emit_event("blossom_status_updated", &());
 }
 
 /// A small request answered in `ms`.

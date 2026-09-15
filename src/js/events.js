@@ -1109,7 +1109,11 @@ async function setupRustListeners() {
         if (currentBlossomInfo) {
             renderBlossomInfo(currentBlossomInfo.url, ++_blossomCapsToken);
         }
+        renderRelayListSoon();
     });
+
+    // Fires per preflight, upload and failure; the rows are recomputed once per burst.
+    _on('blossom_status_updated', () => renderRelayListSoon());
 
     // Listen for relay status changes
     _on('relay_status_change', (evt) => {
