@@ -665,6 +665,20 @@ where
 }
 
 /// Upload with progress + failover, cache-aware routing, and capability learning.
+/// An upload that a server accepted.
+///
+/// `url` is the descriptor the server returned; `server` is the address Vector
+/// actually talked to. They are frequently NOT the same host: an ingress relay
+/// takes the bytes on a regional name and the origin hands back its own
+/// canonical `public_url`. Both name the same server, and mirroring needs to
+/// know that — a BUD-04 mirror aimed at either one asks a server to fetch a
+/// blob it is already holding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedUpload {
+    pub url: String,
+    pub server: String,
+}
+
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
     server_urls: Vec<String>,
@@ -675,7 +689,7 @@ pub async fn upload_blob_with_progress_and_failover<T>(
     retry_count: Option<u32>,
     retry_spacing: Option<std::time::Duration>,
     cancel_flag: Option<Arc<AtomicBool>>,
-) -> Result<String, String>
+) -> Result<AcceptedUpload, String>
 where
     T: VectorSigner + Clone,
 {
@@ -733,7 +747,10 @@ where
                 ) {
                     crate::log_warn!("[Blossom Cap] record_accepted failed: {}", err);
                 }
-                return Ok(url);
+                return Ok(AcceptedUpload {
+                    url,
+                    server: server_url_str.clone(),
+                });
             }
             Err(e) => {
                 if e == "Upload cancelled" {
@@ -993,6 +1010,47 @@ where
     Ok(url)
 }
 
+/// Which of the user's servers are worth mirroring to.
+///
+/// A server that already holds the blob gains nothing from being told to fetch
+/// it, and mirroring exists for redundancy across DISTINCT servers — a server
+/// that just accepted the upload is by definition not adding any.
+///
+/// The source URL alone does not identify those servers. An upload sent to an
+/// ingress relay comes back carrying the origin's canonical `public_url`, so
+/// `asia.magnitude.jskitty.com` and `magnitude.jskitty.com` are one server
+/// wearing two names, and no amount of string comparison relates them. The
+/// caller knows which address it actually uploaded to, so it passes that in
+/// via `already_held_by` and both names are excluded.
+fn mirror_targets(
+    source_url: &str,
+    server_urls: &[String],
+    max_mirrors: usize,
+    already_held_by: &[String],
+) -> Vec<Url> {
+    let source_origin = match parse_blob_url(source_url) {
+        Ok((origin, _)) => origin,
+        Err(e) => {
+            crate::log_debug!("[Blossom Mirror] unparseable source {}: {}", source_url, e);
+            return Vec::new();
+        }
+    };
+    let excluded: Vec<url::Origin> = std::iter::once(source_origin.origin())
+        .chain(
+            already_held_by
+                .iter()
+                .filter_map(|s| Url::parse(s).ok())
+                .map(|u| u.origin()),
+        )
+        .collect();
+    server_urls
+        .iter()
+        .filter_map(|s| Url::parse(s).ok())
+        .filter(|u| !excluded.contains(&u.origin()))
+        .take(max_mirrors)
+        .collect()
+}
+
 /// Best-effort BUD-04 fan-out: mirror `source_url` onto up to `max_mirrors`
 /// of the user's other servers, concurrently, under one wall-clock `budget`.
 /// Returns only the mirror URLs that verifiably serve — the caller embeds
@@ -1004,23 +1062,12 @@ pub async fn mirror_blob_to_servers<T>(
     server_urls: Vec<String>,
     max_mirrors: usize,
     budget: std::time::Duration,
+    already_held_by: &[String],
 ) -> Vec<String>
 where
     T: VectorSigner + Clone,
 {
-    let source_origin = match parse_blob_url(source_url) {
-        Ok((origin, _)) => origin,
-        Err(e) => {
-            crate::log_debug!("[Blossom Mirror] unparseable source {}: {}", source_url, e);
-            return Vec::new();
-        }
-    };
-    let targets: Vec<Url> = server_urls
-        .iter()
-        .filter_map(|s| Url::parse(s).ok())
-        .filter(|u| u.origin() != source_origin.origin())
-        .take(max_mirrors)
-        .collect();
+    let targets = mirror_targets(source_url, &server_urls, max_mirrors, already_held_by);
     if targets.is_empty() {
         return Vec::new();
     }
@@ -1334,6 +1381,98 @@ mod hash_extract_tests {
             crate::simd::hex::bytes_to_hex_32(&hash.to_byte_array()),
             format!("{:x}", hash),
         );
+    }
+}
+
+#[cfg(test)]
+mod mirror_target_tests {
+    use super::mirror_targets;
+
+    /// `parse_blob_url` demands a full 64-hex SHA-256, so the fixture carries
+    /// a real one; a truncated hash makes every call return no targets.
+    const BLOB: &str = "3ad3648700bc0000000000000000000000000000000000000000000000000000.bin";
+
+    fn servers(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn names(t: Vec<url::Url>) -> Vec<String> {
+        t.into_iter().map(|u| u.host_str().unwrap_or("").to_string()).collect()
+    }
+
+    #[test]
+    fn the_server_that_accepted_the_upload_is_not_a_mirror_target() {
+        // The case observed in production: the bytes went to the regional
+        // ingress name and the descriptor came back on the origin's canonical
+        // name. Both are the same server, and neither is worth mirroring to.
+        // Comparing the descriptor's host alone does NOT catch this — the two
+        // strings differ — which is why the accepting address is passed in.
+        let t = mirror_targets(
+            &format!("https://magnitude.jskitty.com/{BLOB}"),
+            &servers(&["https://asia.magnitude.jskitty.com", "https://blossom.band"]),
+            2,
+            &["https://asia.magnitude.jskitty.com".to_string()],
+        );
+        assert_eq!(names(t), vec!["blossom.band"]);
+    }
+
+    #[test]
+    fn genuinely_different_servers_are_still_mirrored_to() {
+        let t = mirror_targets(
+            &format!("https://magnitude.jskitty.com/{BLOB}"),
+            &servers(&["https://blossom.band", "https://nostr.download"]),
+            2,
+            &["https://asia.magnitude.jskitty.com".to_string()],
+        );
+        assert_eq!(names(t), vec!["blossom.band", "nostr.download"]);
+    }
+
+    #[test]
+    fn the_source_origin_is_excluded_even_with_nothing_passed_in() {
+        // The pre-existing guarantee, unchanged by the new argument.
+        let t = mirror_targets(
+            &format!("https://magnitude.jskitty.com/{BLOB}"),
+            &servers(&["https://magnitude.jskitty.com", "https://blossom.band"]),
+            2,
+            &[],
+        );
+        assert_eq!(names(t), vec!["blossom.band"]);
+    }
+
+    #[test]
+    fn max_mirrors_is_applied_after_exclusion_not_before() {
+        // Taking first and filtering second would yield nothing here, and the
+        // message would ship with no fallback sources at all.
+        let t = mirror_targets(
+            &format!("https://magnitude.jskitty.com/{BLOB}"),
+            &servers(&[
+                "https://asia.magnitude.jskitty.com",
+                "https://magnitude.jskitty.com",
+                "https://blossom.band",
+            ]),
+            1,
+            &["https://asia.magnitude.jskitty.com".to_string()],
+        );
+        assert_eq!(names(t), vec!["blossom.band"]);
+    }
+
+    #[test]
+    fn a_port_or_scheme_difference_is_a_different_server() {
+        // Origin comparison, not host comparison: a self-hosted server on
+        // another port is genuinely somewhere else.
+        let t = mirror_targets(
+            &format!("https://example.com/{BLOB}"),
+            &servers(&["https://example.com:8443"]),
+            2,
+            &[],
+        );
+        assert_eq!(names(t), vec!["example.com"]);
+    }
+
+    #[test]
+    fn an_unparseable_source_mirrors_nowhere() {
+        let t = mirror_targets("not a url", &servers(&["https://blossom.band"]), 2, &[]);
+        assert!(t.is_empty());
     }
 }
 

@@ -363,7 +363,9 @@ pub async fn publish_wallpaper(chat_npub: &str, blur: u8, dim: u8) -> Result<(),
         None, // no cancel flag (the picker flow doesn't expose cancel mid-upload)
     )
     .await
-    .map_err(|e| format!("Wallpaper upload failed: {}", e))?;
+    .map_err(|e| format!("Wallpaper upload failed: {}", e))?
+    // This flow never mirrors, so only the descriptor matters.
+    .url;
 
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

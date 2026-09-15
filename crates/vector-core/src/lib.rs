@@ -2214,7 +2214,7 @@ impl VectorCore {
                 return Err(VectorError::Other("No Blossom servers configured".into()));
             }
             let noop_progress: crate::blossom::ProgressCallback = std::sync::Arc::new(|_, _| Ok(()));
-            let url = crate::blossom::upload_blob_with_progress_and_failover(
+            let accepted = crate::blossom::upload_blob_with_progress_and_failover(
                 signer.clone(),
                 servers,
                 std::sync::Arc::new(encrypted),
@@ -2225,6 +2225,8 @@ impl VectorCore {
                 Some(std::time::Duration::from_secs(2)),
                 None,
             ).await.map_err(VectorError::Other)?;
+            // This flow never mirrors, so only the descriptor matters.
+            let url = accepted.url;
 
             let attachment = crate::types::Attachment {
                 id: file_hash.clone(),

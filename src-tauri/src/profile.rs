@@ -283,7 +283,9 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
         None, // Default retry spacing
         None, // No cancel flag
     )
-    .await?;
+    .await?
+    // Avatars and banners are never mirrored, so only the descriptor matters.
+    .url;
 
     // Pre-cache the uploaded image so it displays immediately without re-downloading
     let image_type = if upload_type == "banner" {

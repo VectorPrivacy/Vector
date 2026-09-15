@@ -1605,7 +1605,7 @@ async fn dispatch_community_attachment_message(
                         let _ = vector_core::blossom::mirror_blob_to_servers(
                             signer_bg, &url_bg,
                             vector_core::blossom_servers::compute_enabled_servers(),
-                            1, Duration::from_secs(8),
+                            1, Duration::from_secs(8), &[],
                         ).await;
                     });
                 }
@@ -1623,7 +1623,7 @@ async fn dispatch_community_attachment_message(
                     )
                 });
 
-            let upload_url = match vector_core::blossom::upload_blob_with_progress_and_failover(
+            let accepted = match vector_core::blossom::upload_blob_with_progress_and_failover(
                 signer.clone(),
                 servers.clone(),
                 std::sync::Arc::new(encrypted),
@@ -1643,6 +1643,7 @@ async fn dispatch_community_attachment_message(
                     return Err(format!("Upload failed: {e}"));
                 }
             };
+            let upload_url = accepted.url.clone();
 
             attachment.url = upload_url.clone();
             // Reflect the uploaded URL on the optimistic bubble's attachment.
@@ -1662,6 +1663,7 @@ async fn dispatch_community_attachment_message(
                 servers.clone(),
                 2,
                 Duration::from_secs(5),
+                std::slice::from_ref(&accepted.server),
             )
             .await;
             if !mirror_urls.is_empty() {
@@ -4438,7 +4440,9 @@ pub async fn set_community_image(
             None,
             None,
         )
-        .await?;
+        .await?
+        // Community images are never mirrored, so only the descriptor matters.
+        .url;
 
 
         // v2: the image is a field of the vsk-0 metadata document. Overlay onto the

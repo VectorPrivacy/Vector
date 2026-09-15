@@ -901,20 +901,20 @@ pub async fn send_file_dm(
                 crate::db::spawn_bound(async move {
                     let _ = crate::blossom::mirror_blob_to_servers(
                         signer_bg, &url_bg, crate::state::get_blossom_servers(),
-                        1, std::time::Duration::from_secs(8),
+                        1, std::time::Duration::from_secs(8), &[],
                     ).await;
                 });
             }
             (att_url.clone(), Vec::new())
         }
         Some(encrypted) => {
-            let upload_url = match crate::blossom::upload_blob_with_progress_and_failover(
+            let accepted = match crate::blossom::upload_blob_with_progress_and_failover(
                 signer.clone(), servers, Arc::new(encrypted), Some(mime_type),
                 /* is_encrypted */ true,
                 progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
                 config.cancel_token.clone(),
             ).await {
-                Ok(url) => url,
+                Ok(accepted) => accepted,
                 Err(e) => {
                     let failed_msg = {
                         let mut state = STATE.lock().await;
@@ -931,6 +931,7 @@ pub async fn send_file_dm(
                 }
             };
 
+            let upload_url = accepted.url.clone();
             {
                 let mut state = STATE.lock().await;
                 state.update_message(&pending_id, |msg| {
@@ -950,6 +951,7 @@ pub async fn send_file_dm(
                 crate::state::get_blossom_servers(),
                 2,
                 std::time::Duration::from_secs(5),
+                std::slice::from_ref(&accepted.server),
             ).await;
             if !mirror_urls.is_empty() {
                 let mut state = STATE.lock().await;
