@@ -85,7 +85,7 @@
                     <path d={area} fill="url(#blossom-perf-fill)" />
                     <path d={curve} fill="none" stroke="var(--accent-color, #59fcb3)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.75" vector-effect="non-scaling-stroke" />
                     {#each points as p, i}
-                        <path d="M{p.x.toFixed(1)},{p.y.toFixed(1)}h0.01" stroke="var(--accent-color, #59fcb3)" stroke-width={hover === p ? 7 : (i === points.length - 1 ? 6 : 4)} stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                        <path class="blossom-perf-dot" d="M{p.x.toFixed(1)},{p.y.toFixed(1)}h0.01" stroke="var(--accent-color, #59fcb3)" style="stroke-width: {hover === p ? 7 : (i === points.length - 1 ? 6 : 4)}px" stroke-linecap="round" vector-effect="non-scaling-stroke" />
                     {/each}
                 </svg>
                 {#if hover}

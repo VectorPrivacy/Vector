@@ -11969,9 +11969,12 @@ select:disabled:hover {
   overflow: visible;
 }
 /* The hovered upload's numbers, floated above its dot. */
+.blossom-perf-dot { transition: stroke-width 0.15s ease-out; }
 .blossom-perf-tip {
   position: absolute;
   transform: translate(-50%, calc(-100% - 8px));
+  /* One element that glides between dots, rather than one per dot. */
+  transition: left 0.15s ease-out, top 0.15s ease-out, transform 0.15s ease-out;
   padding: 3px 7px;
   border-radius: 6px;
   background: rgba(20, 20, 20, 0.96);
