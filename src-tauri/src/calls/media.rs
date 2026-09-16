@@ -13,7 +13,7 @@ use super::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};
 use crate::audio_engine::{AudioEngine, LiveLink};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use iroh::endpoint::Connection;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,8 +25,11 @@ const FLAG_MUTED: u16 = 1;
 const PREFILL: usize = 2;
 /// Deeper than this and playout jumps forward: latency costs more than the gap.
 const MAX_DEPTH: usize = 10;
-/// How far ahead of the speaker the decoder keeps the play ring.
-const PLAY_AHEAD_MS: u32 = 60;
+/// Above this the buffer sheds one frame per pop; it grew on underruns that are over.
+const SHRINK_DEPTH: usize = 6;
+/// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
+/// the jitter buffer holds the margin, the ring only covers the callback's stride.
+const PLAY_AHEAD_MS: u32 = 30;
 /// Concealed frames in a row before playout stops guessing and waits.
 const MAX_PLC_RUN: u32 = 5;
 
@@ -137,6 +140,61 @@ impl Drop for MediaEngine {
     }
 }
 
+/// Debug builds only: `VECTOR_CALL_NETSIM=delay_ms,jitter_ms,loss_pct` holds each outgoing
+/// datagram for delay plus a random share of jitter, drops the given percentage, and lets
+/// the random delays reorder, so a bad link can be heard on a good one.
+struct NetSim {
+    delay: Duration,
+    jitter: Duration,
+    loss: f32,
+    queue: VecDeque<(Instant, bytes::Bytes)>,
+}
+
+impl NetSim {
+    fn from_env() -> Option<Self> {
+        if !cfg!(debug_assertions) {
+            return None;
+        }
+        let spec = std::env::var("VECTOR_CALL_NETSIM").ok()?;
+        let mut parts = spec.split(',').map(|p| p.trim().parse::<f32>().unwrap_or(0.0));
+        let delay = parts.next().unwrap_or(0.0);
+        let jitter = parts.next().unwrap_or(0.0);
+        let loss = parts.next().unwrap_or(0.0);
+        log_info!("[CALLS] NetSim on: delay {delay} ms, jitter {jitter} ms, loss {loss}%");
+        Some(Self {
+            delay: Duration::from_millis(delay as u64),
+            jitter: Duration::from_millis(jitter as u64),
+            loss: loss / 100.0,
+            queue: VecDeque::new(),
+        })
+    }
+
+    fn offer(&mut self, datagram: bytes::Bytes) {
+        if rand::random::<f32>() < self.loss {
+            return;
+        }
+        let extra = self.jitter.mul_f32(rand::random::<f32>());
+        self.queue.push_back((Instant::now() + self.delay + extra, datagram));
+    }
+
+    /// Sends what is due, in due order, so random delays can overtake each other.
+    fn pump(&mut self, conn: &Connection, stats: &MediaStats) {
+        let now = Instant::now();
+        let mut i = 0;
+        while i < self.queue.len() {
+            if self.queue[i].0 <= now {
+                let (_, d) = self.queue.remove(i).unwrap();
+                match conn.send_datagram(d) {
+                    Ok(()) => stats.sent.fetch_add(1, Ordering::Relaxed),
+                    Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
+                };
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
 fn capture_thread(
     conn: Connection,
     link: Arc<LiveLink>,
@@ -214,6 +272,7 @@ fn capture_thread(
     let mut packet = [0u8; 1500];
     let started = Instant::now();
     let mut seq: u16 = 0;
+    let mut netsim = NetSim::from_env();
     // Far-end may run ahead of near-end by this much before the excess is dropped.
     let far_slack = FRAME * 5;
 
@@ -253,11 +312,19 @@ fn capture_thread(
                     Err(_) => pack(seq, ts, FLAG_MUTED, &[]),
                 }
             };
-            match conn.send_datagram(datagram) {
-                Ok(()) => stats.sent.fetch_add(1, Ordering::Relaxed),
-                Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
-            };
+            match netsim.as_mut() {
+                Some(sim) => sim.offer(datagram),
+                None => {
+                    match conn.send_datagram(datagram) {
+                        Ok(()) => stats.sent.fetch_add(1, Ordering::Relaxed),
+                        Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
+                    };
+                }
+            }
             seq = seq.wrapping_add(1);
+        }
+        if let Some(sim) = netsim.as_mut() {
+            sim.pump(&conn, &stats);
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -416,6 +483,15 @@ impl Jitter {
                 first
             }
         };
+        if self.frames.len() > SHRINK_DEPTH {
+            // Underruns stretched the buffer; take the latency back a frame at a time.
+            if let Some(oldest) = self.frames.keys().next().copied() {
+                self.frames.remove(&oldest);
+                stats.lost.fetch_add(1, Ordering::Relaxed);
+                self.next = Some(oldest + 1);
+                return self.pop(plc_run, stats);
+            }
+        }
         if let Some(f) = self.frames.remove(&next) {
             self.next = Some(next + 1);
             return if f.muted { Pop::Muted } else { Pop::Frame(f.payload) };
@@ -437,8 +513,9 @@ impl Jitter {
                 }
             }
             None => {
+                // Nothing has arrived: fill the time without giving up on this frame, so
+                // its late arrival still plays and the buffer grows by the underrun.
                 if plc_run < MAX_PLC_RUN {
-                    self.next = Some(next + 1);
                     Pop::Conceal
                 } else {
                     Pop::Wait
@@ -473,7 +550,24 @@ mod tests {
         // Late arrival is dropped.
         j.push(2, false, &frame(2), &stats);
         assert_eq!(stats.late.load(Ordering::Relaxed), 1);
+        // An underrun conceals but keeps waiting for frame 4, which then plays.
         assert!(matches!(j.pop(0, &stats), Pop::Conceal));
+        assert_eq!(j.next, Some(4));
+        j.push(4, false, &frame(4), &stats);
+        assert!(matches!(j.pop(1, &stats), Pop::Frame(p) if p == frame(4)));
+    }
+
+    #[test]
+    fn a_stretched_buffer_sheds_frames_until_it_is_back_in_range() {
+        let stats = MediaStats::default();
+        let mut j = Jitter::default();
+        for s in 0..=(SHRINK_DEPTH as u16 + 1) {
+            j.push(s, false, &frame(s as u8), &stats);
+        }
+        // Two frames shed, the third plays, and the buffer is back under the line.
+        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(2)));
+        assert_eq!(stats.lost.load(Ordering::Relaxed), 2);
+        assert_eq!(j.frames.len(), SHRINK_DEPTH - 1);
     }
 
     #[test]

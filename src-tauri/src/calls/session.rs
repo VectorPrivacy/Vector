@@ -289,9 +289,10 @@ pub async fn hangup() -> Result<(), String> {
         let mut send = control.lock().await;
         let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut send, &Control::Bye)).await;
     }
+    // Local teardown first: the peer's close must not be what ends our side.
+    end(&id, "hangup");
     // The signal reaches a peer whose connection never came up, or one still ringing.
     send_signal(&peer, &id, "hangup", None).await;
-    end(&id, "hangup");
     Ok(())
 }
 
@@ -517,8 +518,13 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
     let closed_id = id.to_string();
     let closed_conn = conn.clone();
     let closed = vector_core::db::spawn_bound(async move {
-        closed_conn.closed().await;
-        end(&closed_id, "disconnected");
+        // A close carrying our own "bye" is a hangup; the Bye on the control stream can
+        // still be in flight when the close lands.
+        let reason = match closed_conn.closed().await {
+            iroh::endpoint::ConnectionError::ApplicationClosed(ac) if ac.reason.as_ref() == b"bye" => "hangup",
+            _ => "disconnected",
+        };
+        end(&closed_id, reason);
     });
     // A stats line every second.
     let stats_id = id.to_string();
