@@ -1783,6 +1783,27 @@ body.ws.ws-rail-collapsed #ws-rail-account .profile-header-name-row {
   align-items: center;
 }
 
+/* Collapsed, the column's own controls are bare glyphs: no fill at rest, on hover
+   or when selected, and no fade out of the expanded fill. Standing is the glyph's
+   colour alone. The shortcuts keep their tiles; an avatar needs its plate. */
+body.ws.ws-rail-collapsed #navbar .navbar-btn,
+body.ws.ws-rail-collapsed #navbar .navbar-btn:hover,
+body.ws.ws-rail-collapsed .ws-rail-messages,
+body.ws.ws-rail-collapsed .ws-rail-messages:hover,
+body.ws.ws-rail-collapsed #ws-rail-collapse,
+body.ws.ws-rail-collapsed #ws-rail-collapse:hover,
+body.ws.ws-rail-collapsed #ws-rail-account #account,
+body.ws.ws-rail-collapsed #ws-rail-account #account:hover {
+  background-color: transparent;
+  border: 0;
+  box-shadow: none;
+  transition: none;
+}
+
+body.ws.ws-rail-collapsed #ws-rail-collapse {
+  transition: opacity 0.12s ease;
+}
+
 /* ========================= 6. The list resizer =========================== */
 
 body.ws #ws-list-resize {
