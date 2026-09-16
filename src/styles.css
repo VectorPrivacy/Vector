@@ -11847,6 +11847,7 @@ select:disabled:hover {
   gap: 12px;
 }
 .blossom-dialog-host {
+  flex-shrink: 0;
   padding-top: 4px;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.5);
