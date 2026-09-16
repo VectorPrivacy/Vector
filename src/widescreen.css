@@ -1271,7 +1271,6 @@ body.ws .ws-rail-messages {
   padding: 0 10px 0 14px;
   height: 40px;
   border-radius: 6px;
-  background-color: var(--ws-hover);
   color: rgba(255, 255, 255, 0.7);
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
   font-size: 14px;
@@ -1281,14 +1280,15 @@ body.ws .ws-rail-messages {
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 
+/* The same three states as a tab below it: bare at rest, one fill for hover and lit. */
 body.ws .ws-rail-messages:hover {
   opacity: 1;
-  background-color: var(--ws-active);
+  background-color: var(--ws-hover);
   color: #fff;
 }
 
 body.ws:not(.ws-community-pane) .ws-rail-messages {
-  background-color: var(--ws-active);
+  background-color: var(--ws-hover);
   color: #fff;
 }
 
