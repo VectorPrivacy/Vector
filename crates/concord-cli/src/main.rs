@@ -288,14 +288,22 @@ async fn print_relay(c: &vector_core::community::Community) {
             let evs = tx.fetch(&q, &c.relays).await.unwrap_or_default();
             let mut roles: Vec<String> = Vec::new();
             let mut grants: Vec<String> = Vec::new();
+            let mut metas: Vec<String> = Vec::new();
             let mut other = 0usize;
             for ev in &evs {
                 match control::open_control_edition(ev, &group) {
-                    Ok((ed, _)) => {
-                        let row = format!("{}v{}/by{}", &hexpref(&ed.entity_id)[..9], ed.version, &ed.author.to_hex()[..8]);
+                    Ok((ed, os)) => {
+                        // Seal time is when the author signed; wrap time is when THIS copy was
+                        // published. A gap of months on a fresh epoch is a re-wrapped old seal.
+                        let row = format!(
+                            "{}v{}/by{} sealed {} wrapped {}",
+                            &hexpref(&ed.entity_id)[..9], ed.version, &ed.author.to_hex()[..8],
+                            fmt_ts(os.seal.created_at.as_secs()), fmt_ts(ev.created_at.as_secs())
+                        );
                         match ed.vsk.as_str() {
                             vector_core::community::v2::vsk::ROLE => roles.push(row),
                             vector_core::community::v2::vsk::GRANT => grants.push(row),
+                            vector_core::community::v2::vsk::COMMUNITY_METADATA => metas.push(row),
                             _ => other += 1,
                         }
                     }
@@ -303,14 +311,13 @@ async fn print_relay(c: &vector_core::community::Community) {
                 }
             }
             println!(
-                "      epoch {}: {} wrap(s) — {} role(s) {} grant(s), {} other/unopenable",
-                pe.0, evs.len(), roles.len(), grants.len(), other
+                "      epoch {}: {} wrap(s) — {} role(s) {} grant(s) {} metadata, {} other/unopenable",
+                pe.0, evs.len(), roles.len(), grants.len(), metas.len(), other
             );
-            if !roles.is_empty() {
-                println!("         roles:  {}", roles.join("  "));
-            }
-            if !grants.is_empty() {
-                println!("         grants: {}", grants.join("  "));
+            for (label, rows) in [("roles", &roles), ("grants", &grants), ("metadata", &metas)] {
+                for row in rows {
+                    println!("         {label}: {row}");
+                }
             }
         }
     }
@@ -753,4 +760,14 @@ fn default_dir() -> PathBuf {
         return PathBuf::from(home).join(".local/share/io.vectorapp/agent");
     }
     PathBuf::from("/tmp/vector-data")
+}
+
+/// Local wall-clock for a unix time, minute precision.
+fn fmt_ts(secs: u64) -> String {
+    use std::process::Command;
+    // `date` keeps the CLI free of a timezone crate; this is a diagnostic.
+    Command::new("date").args(["-r", &secs.to_string(), "+%Y-%m-%d %H:%M"]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| secs.to_string())
 }
