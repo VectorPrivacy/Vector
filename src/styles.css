@@ -11793,17 +11793,24 @@ select:disabled:hover {
   justify-content: space-between;
   gap: 8px;
 }
+/* The number never wraps; the label gives way and ellipsises its note. */
 .blossom-meter-label {
   color: rgba(255, 255, 255, 0.5);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .blossom-meter-value {
   color: #fff;
   font-weight: 600;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .blossom-meter-of {
   color: rgba(255, 255, 255, 0.45);
@@ -11920,8 +11927,9 @@ select:disabled:hover {
 }
 .blossom-perf-foot {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 8px;
+  gap: 2px 8px;
   font-size: 11px;
   opacity: 0.45;
   margin-top: 4px;

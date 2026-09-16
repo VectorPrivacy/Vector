@@ -22,7 +22,8 @@
         const text = NOTICES[state];
         return text ? { label: st.status?.label || 'Disabled', tone: st.status?.tone || 'disabled', text } : null;
     });
-    const actionLabel = $derived(st.isCustom ? 'Remove Server' : (st.enabled ? 'Disable Server' : 'Enable Server'));
+    // The dialog is the server; the verb alone fits a phone-width button.
+    const actionLabel = $derived(st.isCustom ? 'Remove' : (st.enabled ? 'Disable' : 'Enable'));
     const personalised = $derived(doc.status === 'ok' && doc.info && doc.info.caller);
 </script>
 

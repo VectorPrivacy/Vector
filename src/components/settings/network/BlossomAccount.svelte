@@ -33,7 +33,7 @@
 {#snippet meter(label, used, limit, note)}
     <div class="blossom-meter">
         <div class="blossom-meter-head">
-            <span class="blossom-meter-label">{label}{#if note}<span class="blossom-meter-note"> · {note}</span>{/if}</span>
+            <span class="blossom-meter-label">{label}{#if note}<span class="blossom-meter-note">{' · '}{note}</span>{/if}</span>
             <span class="blossom-meter-value">{h.formatBytes(used, 1)} <span class="blossom-meter-of">of {h.formatBytes(limit, 1)}</span></span>
         </div>
         <div class="blossom-meter-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={pct(used, limit)} aria-label={label}>
@@ -60,7 +60,7 @@
         {#if caller.allowed}
             <div class="blossom-plan-meters">
                 {@render meter('Storage', caller.storage_used, caller.storage_limit, `${caller.blobs} file${caller.blobs === 1 ? '' : 's'}`)}
-                {@render meter('Today', caller.daily_used, caller.daily_limit, 'resets at midnight UTC')}
+                {@render meter('Today', caller.daily_used, caller.daily_limit, 'resets 00:00 UTC')}
             </div>
         {:else}
             <p class="blossom-plan-refused">
