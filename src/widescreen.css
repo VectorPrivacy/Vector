@@ -1270,7 +1270,7 @@ body.ws .ws-rail-messages {
   margin: 0 8px;
   padding: 0 10px 0 14px;
   height: 40px;
-  border-radius: 10px;
+  border-radius: 6px;
   background-color: var(--ws-hover);
   color: rgba(255, 255, 255, 0.7);
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
@@ -1585,7 +1585,7 @@ body.ws #navbar .navbar-btn {
   margin: 0 8px;
   height: 40px;
   padding: 0 10px 0 14px;
-  border-radius: 10px;
+  border-radius: 6px;
   flex-shrink: 0;
   transition: background-color 0.12s ease, opacity 0.12s ease;
 }
@@ -1640,7 +1640,7 @@ body.ws #ws-rail-collapse {
   margin: 0 8px;
   height: 40px;
   padding: 0 10px 0 14px;
-  border-radius: 10px;
+  border-radius: 6px;
   flex-shrink: 0;
   opacity: 0.4;
   transition: opacity 0.12s ease, background-color 0.12s ease;
