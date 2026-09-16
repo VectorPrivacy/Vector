@@ -24,7 +24,7 @@
         hangup: 'Call ended', rejected: 'Declined', busy: 'Busy', no_answer: 'No answer',
         missed: 'Missed call', connect_failed: 'Could not connect', disconnected: 'Connection lost',
         audio_failed: 'Microphone unavailable', send_failed: 'Could not reach the relays',
-        account_changed: 'Call ended',
+        account_changed: 'Call ended', answered_elsewhere: 'Answered on another device',
     };
 
     const peer = $derived.by(() => {

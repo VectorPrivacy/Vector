@@ -396,6 +396,8 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
             if let Some(s) = snapshot() {
                 emit_state(&s);
             }
+            // The peer's other devices are still ringing; tell them which one answered.
+            send_signal(sender, call_id, "taken", node_addr).await;
             let id = call_id.to_string();
             let peer = sender.to_string();
             let task = vector_core::db::spawn_bound(async move {
@@ -413,6 +415,13 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
         "reject" | "busy" | "hangup" => {
             if with_call_id(call_id, |c| c.peer == sender).unwrap_or(false) {
                 end(call_id, signal);
+            }
+        }
+        // Another of our devices answered: only a device still ringing stands down.
+        "taken" => {
+            let ringing = with_call_id(call_id, |c| c.peer == sender && !c.outgoing && c.phase == Phase::Ringing).unwrap_or(false);
+            if ringing {
+                end(call_id, "answered_elsewhere");
             }
         }
         other => log_warn!("[CALLS] Unknown signal {other}"),
