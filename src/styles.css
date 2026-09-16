@@ -11149,6 +11149,9 @@ select:disabled:hover {
   align-items: center;
   justify-content: space-between;
   padding: 12px 15px;
+  /* A row is a button, not a paragraph. */
+  -webkit-user-select: none;
+  user-select: none;
   background: rgba(0, 0, 0, 0.3);
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
