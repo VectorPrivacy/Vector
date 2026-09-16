@@ -20,14 +20,6 @@
         }));
     });
     const spark = $derived(points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
-    function ago(ts) {
-        if (!ts) return '';
-        const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-        if (s < 60) return 'just now';
-        if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-        if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-        return `${Math.floor(s / 86400)} d ago`;
-    }
 </script>
 
 {#if latency != null || stats.mbps != null}
@@ -60,7 +52,6 @@
             <span>
                 {#if points.length}Speed of your last {recent.length} uploads{:else}{stats.uploads} upload{stats.uploads === 1 ? '' : 's'}{/if}{#if stats.bytes_total}{' · '}{h.formatBytes(stats.bytes_total, 1)}{/if}
             </span>
-            {#if stats.last_ok_at}<span>last seen {ago(stats.last_ok_at)}</span>{/if}
         </div>
     </div>
 {/if}
