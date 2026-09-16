@@ -11701,6 +11701,18 @@ select:disabled:hover {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+.blossom-plan-skeleton {
+  opacity: 0.5;
+}
+.blossom-plan-skeleton .blossom-plan-name,
+.blossom-plan-skeleton .blossom-plan-perfile-value,
+.blossom-plan-skeleton .blossom-meter-value {
+  display: inline-block;
+  min-width: 4em;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
 }
 .blossom-plan-premium {
   border-color: transparent;

@@ -884,6 +884,7 @@ pub fn run() {
             commands::relays::blossom_upload_verdict,
             commands::relays::get_blossom_server_info,
             commands::relays::get_blossom_server_stats,
+            commands::relays::get_blossom_server_snapshot,
             commands::relays::get_custom_relays,
             commands::relays::add_custom_relay,
             commands::relays::remove_custom_relay,

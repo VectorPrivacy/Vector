@@ -44,8 +44,28 @@
                     <BlossomPerformance stats={perf.stats} {h} />
                 {/if}
                 {#if doc.status === 'loading'}
-                    <div class="relay-metrics-section">
-                        <span style="opacity: 0.6;">Asking the server…</span>
+                    <!-- The loaded layout's shape, so the answer changes text, not geometry. -->
+                    <div class="blossom-plan blossom-plan-skeleton" aria-busy="true">
+                        <div class="blossom-plan-head">
+                            <div class="blossom-plan-title">
+                                <span class="blossom-plan-eyebrow">Your plan</span>
+                                <span class="blossom-plan-name">&nbsp;</span>
+                            </div>
+                            <div class="blossom-plan-perfile">
+                                <span class="blossom-plan-perfile-value">&nbsp;</span>
+                                <span class="blossom-plan-perfile-label">per file</span>
+                            </div>
+                        </div>
+                        <div class="blossom-plan-meters">
+                            <div class="blossom-meter">
+                                <div class="blossom-meter-head"><span class="blossom-meter-label">Storage</span><span class="blossom-meter-value">&nbsp;</span></div>
+                                <div class="blossom-meter-track"></div>
+                            </div>
+                            <div class="blossom-meter">
+                                <div class="blossom-meter-head"><span class="blossom-meter-label">Today</span><span class="blossom-meter-value">&nbsp;</span></div>
+                                <div class="blossom-meter-track"></div>
+                            </div>
+                        </div>
                     </div>
                 {:else if personalised}
                     <BlossomAccount info={doc.info} host={st.url} {h} />

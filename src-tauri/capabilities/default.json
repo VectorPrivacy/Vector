@@ -222,6 +222,7 @@
     "allow-blossom-upload-verdict",
     "allow-get-blossom-server-info",
     "allow-get-blossom-server-stats",
+    "allow-get-blossom-server-snapshot",
     "allow-get-custom-relays",
     "allow-add-custom-relay",
     "allow-remove-custom-relay",

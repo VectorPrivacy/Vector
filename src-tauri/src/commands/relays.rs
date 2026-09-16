@@ -660,6 +660,26 @@ pub async fn get_blossom_server_stats(url: String, enabled: bool) -> BlossomServ
     }
 }
 
+/// Everything the dialog can paint without asking the network: the last
+/// document held for this account, this device's history, and the status
+/// they imply. The dialog opens on this so its first frame is its final
+/// shape; a refresh then changes numbers in place.
+#[derive(serde::Serialize)]
+pub struct BlossomServerSnapshot {
+    pub info: Option<vector_core::blossom_info::ServerInfo>,
+    pub stats: Option<vector_core::blossom_stats::ServerStats>,
+    pub status: vector_core::blossom_stats::ServerStatus,
+}
+
+#[tauri::command]
+pub async fn get_blossom_server_snapshot(url: String, enabled: bool) -> BlossomServerSnapshot {
+    BlossomServerSnapshot {
+        info: vector_core::blossom_info::cached(&url),
+        stats: vector_core::blossom_stats::stats_for(&url),
+        status: vector_core::blossom_stats::status_for(&url, enabled),
+    }
+}
+
 #[tauri::command]
 pub async fn get_blossom_server_info(url: String) -> Result<Option<vector_core::blossom_info::ServerInfo>, String> {
     let signer = vector_core::signer::active_signer()?;

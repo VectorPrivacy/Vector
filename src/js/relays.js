@@ -251,6 +251,18 @@ async function renderBlossomCapabilities(url, token) {
 }
 
 async function renderBlossomInfo(url, token) {
+    const enabled = !!currentBlossomInfo?.enabled;
+    // What is already known paints first, so the dialog's first frame is its
+    // final shape; the network then changes numbers, never layout.
+    try {
+        const snap = await invoke('get_blossom_server_snapshot', { url, enabled });
+        if (token !== _blossomCapsToken) return;
+        VectorSvelte.setBlossomStats(snap.stats);
+        VectorSvelte.blossomInfoDialog.patch({ status: snap.status });
+        if (snap.info) VectorSvelte.setBlossomInfo('ok', snap.info);
+    } catch (err) {
+        console.warn('Failed to load blossom server snapshot:', err);
+    }
     try {
         const info = await invoke('get_blossom_server_info', { url });
         if (token !== _blossomCapsToken) return;
@@ -262,7 +274,6 @@ async function renderBlossomInfo(url, token) {
     }
     // After the document, so the status reflects what it just said.
     try {
-        const enabled = !!currentBlossomInfo?.enabled;
         const { stats, status } = await invoke('get_blossom_server_stats', { url, enabled });
         if (token !== _blossomCapsToken) return;
         VectorSvelte.setBlossomStats(stats);
