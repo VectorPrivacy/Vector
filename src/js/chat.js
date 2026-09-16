@@ -755,19 +755,25 @@ function syncSendMicToInput() {
     VectorSvelte.flushSync();
 }
 
-/** Per-chat composer drafts, runtime-only (chat id → unsent text). */
+/** Per-chat composer drafts, runtime-only (chat id → { text, replyRef }). */
 const chatDrafts = new Map();
 
 /**
- * Stash the open chat's composer text as its draft and clear the input, so
- * the next chat starts clean and restores its own draft. Edit text is not a
+ * Stash the open chat's composer text and reply target as its draft and clear
+ * both, so the next chat starts clean and restores its own. Edit text is not a
  * draft — callers cancel an in-progress edit first.
  */
 function stashComposerDraft() {
     if (!strOpenChat) return;
     const text = domChatMessageInput.value;
-    if (text) chatDrafts.set(strOpenChat, text);
+    const replyRef = strCurrentReplyReference;
+    if (text || replyRef) chatDrafts.set(strOpenChat, { text, replyRef });
     else chatDrafts.delete(strOpenChat);
+    // Drop the bar without the focus a user cancel implies.
+    if (replyRef) {
+        strCurrentReplyReference = '';
+        VectorSvelte.cancelReply();
+    }
     domChatMessageInput.value = '';
     autoResizeChatInput();
     syncSendMicToInput();
@@ -1316,8 +1322,13 @@ async function openChat(contact) {
         // Restore this chat's draft (runtime-only). Skip when the input still
         // holds live text — a same-chat re-open must not clobber typing.
         if (domChatMessageInput.value === '') {
-            domChatMessageInput.value = chatDrafts.get(contact) || '';
+            const draft = chatDrafts.get(contact);
+            domChatMessageInput.value = draft?.text || '';
             autoResizeChatInput();
+            // A drafted reply returns with its text, while its target still exists.
+            if (draft?.replyRef && !strCurrentReplyReference && chat.messages.some(m => m.id === draft.replyRef)) {
+                _dmsgSelectReply(draft.replyRef, { focus: false });
+            }
         }
         // Programmatic value sets fire no 'input' event; derive mic/send here.
         syncSendMicToInput();

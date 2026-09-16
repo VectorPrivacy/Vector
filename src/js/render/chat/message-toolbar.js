@@ -445,7 +445,7 @@ function _dmsgOpenReactionPicker(targetMsgId) {
  * composer (accent name + one-line snippet, Discord-style). Replaces the
  * prior row's highlight (so only one row is ever highlighted as the target).
  */
-function _dmsgSelectReply(targetMsgId) {
+function _dmsgSelectReply(targetMsgId, { focus = true } = {}) {
     // Editing and replying are mutually exclusive composer states
     if (strCurrentEditMessageId) cancelEdit();
 
@@ -494,8 +494,8 @@ function _dmsgSelectReply(targetMsgId) {
         requestAnimationFrame(followPin);
     }
     // Focus on every platform: replying implies typing intent, so mobile
-    // should open the virtual keyboard right away
-    domChatMessageInput.focus();
+    // should open the virtual keyboard right away. A restored draft skips it.
+    if (focus) domChatMessageInput.focus();
 
     const target = document.getElementById(targetMsgId);
 }
