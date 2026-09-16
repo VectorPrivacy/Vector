@@ -26,15 +26,20 @@ const PREFILL: usize = 2;
 /// Deeper than this and playout jumps forward: latency costs more than the gap.
 const MAX_DEPTH: usize = 25;
 /// The deepest target the jitter estimate may ask for.
-const MAX_TARGET: usize = 12;
+const MAX_TARGET: usize = 20;
+/// How fast a remembered delay swing fades, in milliseconds per frame received:
+/// a 200 ms burst still shapes the target ten seconds later.
+const PEAK_DECAY_MS: f32 = 0.4;
 /// How long the buffer must sit above its target before it trims a frame. A burst
 /// leaves it deep; trimming at once would meet the next burst empty again.
 const SHED_AFTER: Duration = Duration::from_secs(3);
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
 const PLAY_AHEAD_MS: u32 = 30;
-/// Concealed frames in a row before playout stops guessing and waits.
-const MAX_PLC_RUN: u32 = 5;
+/// Concealed frames in a row before playout stops guessing and waits. Each one
+/// stretches the last sound a little further; past three that reads as a slur,
+/// and a clean gap is easier on the ear.
+const MAX_PLC_RUN: u32 = 3;
 
 #[derive(Default)]
 pub struct MediaStats {
@@ -389,7 +394,13 @@ fn playout_thread(
             Pop::Conceal => {
                 plc_run += 1;
                 stats.concealed.fetch_add(1, Ordering::Relaxed);
-                dec.conceal(&mut pcm).is_ok()
+                let ok = dec.conceal(&mut pcm).is_ok();
+                // Fade the guesses out so a run ends in silence, not a held vowel.
+                let gain = 1.0 - plc_run as f32 / (MAX_PLC_RUN as f32 + 1.0);
+                for s in pcm.iter_mut() {
+                    *s = (*s as f32 * gain) as i16;
+                }
+                ok
             }
             Pop::Wait => {
                 std::thread::sleep(Duration::from_millis(5));
@@ -432,16 +443,20 @@ struct Jitter {
     last_arrival: Option<(Instant, u64)>,
     /// RFC 3550 style smoothed inter-arrival jitter, in milliseconds.
     jitter_ms: f32,
+    /// The largest recent inter-arrival swing, decaying: bursts, not the average.
+    peak_ms: f32,
     /// Since when the buffer has been deeper than its target.
     over_since: Option<Instant>,
     shed_after: Option<Duration>,
 }
 
 impl Jitter {
-    /// Frames to hold: enough to ride out three times the smoothed jitter.
+    /// Frames to hold: enough for three times the smoothed jitter, or for the
+    /// biggest swing seen lately with a little to spare, whichever is more.
     fn target_frames(&self) -> usize {
-        let from_jitter = (self.jitter_ms * 3.0 / FRAME_MS as f32).ceil() as usize;
-        (PREFILL + from_jitter).clamp(PREFILL, MAX_TARGET)
+        let need_ms = (self.jitter_ms * 3.0).max(self.peak_ms * 1.2);
+        let frames = (need_ms / FRAME_MS as f32).ceil() as usize;
+        (PREFILL + frames).clamp(PREFILL, MAX_TARGET)
     }
 
     fn unwrap_seq(&mut self, seq: u16) -> u64 {
@@ -466,6 +481,7 @@ impl Jitter {
             let actual = now.duration_since(at).as_secs_f32() * 1000.0;
             let d = (actual - expected).abs();
             self.jitter_ms += (d - self.jitter_ms) / 16.0;
+            self.peak_ms = d.max(self.peak_ms - PEAK_DECAY_MS);
             stats.jitter_ms.store(self.jitter_ms as u32, Ordering::Relaxed);
         }
         self.last_arrival = Some((now, s));
@@ -523,6 +539,11 @@ impl Jitter {
         }
         match self.frames.keys().next().copied() {
             Some(min) if min == next + 1 => {
+                // One slot of grace: on a jittery path the frame is usually just behind
+                // its successor. Only when the buffer is already full enough is it lost.
+                if plc_run == 0 && self.frames.len() < self.target_frames() {
+                    return Pop::Conceal;
+                }
                 self.next = Some(min);
                 Pop::Fec(self.frames[&min].payload.clone())
             }
@@ -568,9 +589,11 @@ mod tests {
         j.push(1, false, &frame(1), &stats);
         assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(0)));
         assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(1)));
-        // Frame 2 lost, 3 arrives: 2 is rebuilt from 3's FEC, then 3 plays.
+        // Frame 2 lost, 3 arrives: one frame of grace, then 2 is rebuilt from 3's FEC,
+        // then 3 plays.
         j.push(3, false, &frame(3), &stats);
-        assert!(matches!(j.pop(0, &stats), Pop::Fec(p) if p == frame(3)));
+        assert!(matches!(j.pop(0, &stats), Pop::Conceal));
+        assert!(matches!(j.pop(1, &stats), Pop::Fec(p) if p == frame(3)));
         assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(3)));
         // Late arrival is dropped.
         j.push(2, false, &frame(2), &stats);
@@ -591,6 +614,7 @@ mod tests {
         }
         // Instant pushes read as jitter to the estimator; pin it so the target is PREFILL.
         j.jitter_ms = 0.0;
+        j.peak_ms = 0.0;
         // A fresh overshoot is kept.
         assert_eq!(j.target_frames(), PREFILL);
         assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(0)));
@@ -604,10 +628,12 @@ mod tests {
     }
 
     #[test]
-    fn the_target_grows_with_jitter() {
+    fn the_target_grows_with_jitter_and_remembers_bursts() {
         let mut j = Jitter::default();
         j.jitter_ms = 43.0;
         assert_eq!(j.target_frames(), PREFILL + 7);
+        j.peak_ms = 300.0;
+        assert_eq!(j.target_frames(), PREFILL + 18);
         j.jitter_ms = 1000.0;
         assert_eq!(j.target_frames(), MAX_TARGET);
     }

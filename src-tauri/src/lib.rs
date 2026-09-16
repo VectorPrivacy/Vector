@@ -1013,8 +1013,15 @@ pub fn run() {
             #[cfg(feature = "whisper")]
             whisper::cancel_whisper_download
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // A clean quit mid-call tells the peer, instead of leaving them to the
+            // silence timeout.
+            if let tauri::RunEvent::Exit = event {
+                calls::session::hangup_blocking();
+            }
+        });
 }
 
 /// Append one line to the user-copyable `vector.log` (Settings > Copy Logs),

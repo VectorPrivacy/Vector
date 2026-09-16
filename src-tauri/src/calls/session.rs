@@ -24,6 +24,8 @@ use vector_core::event_ext::FinalizeUnsignedWithId;
 const OFFER_TTL_SECS: u64 = 60;
 const RING_TIMEOUT: Duration = Duration::from_secs(45);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Seconds without a single frame from the peer before the call is declared dead.
+const PEER_SILENCE_SECS: u32 = 8;
 
 #[derive(Serialize, Clone, Copy, PartialEq, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -298,6 +300,14 @@ pub async fn hangup() -> Result<(), String> {
     Ok(())
 }
 
+/// Hang up from a synchronous context, waiting briefly for the Bye and the signal.
+pub fn hangup_blocking() {
+    if snapshot().is_none() {
+        return;
+    }
+    let _ = tauri::async_runtime::block_on(tokio::time::timeout(Duration::from_secs(3), hangup()));
+}
+
 pub async fn set_muted(on: bool) -> Result<(), String> {
     let control = with_call(|c| {
         c.muted = on;
@@ -528,12 +538,23 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
         };
         end(&closed_id, reason);
     });
-    // A stats line every second.
+    // A stats line every second, and the liveness check: the peer sends fifty frames
+    // a second even muted, so a silent stretch means they are gone long before the
+    // transport's idle timeout would say so.
     let stats_id = id.to_string();
     let stats_conn = conn.clone();
     let stats_task = vector_core::db::spawn_bound(async move {
+        let mut last_received = 0u64;
+        let mut silent_secs = 0u32;
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            let received = stats.received.load(Ordering::Relaxed);
+            silent_secs = if received == last_received { silent_secs + 1 } else { 0 };
+            last_received = received;
+            if silent_secs >= PEER_SILENCE_SECS {
+                end(&stats_id, "disconnected");
+                return;
+            }
             let (rtt_ms, path) = {
                 let paths = stats_conn.paths();
                 match paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next()) {
