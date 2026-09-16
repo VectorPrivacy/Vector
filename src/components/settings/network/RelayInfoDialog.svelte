@@ -2,6 +2,7 @@
     // One relay's settings: status, ping and last check (refreshed by the opener every
     // second), the mode for a custom relay, the activity log, and disable or remove.
     import { relayInfoDialog } from '../../lib/network.svelte.js';
+    import { popIn } from '../../lib/popin.js';
     import RelayLogs from './RelayLogs.svelte';
     let { h } = $props();   // h: close(), disable(), setMode(mode), copy()
     const st = relayInfoDialog.state();
@@ -9,18 +10,16 @@
     const disableLabel = $derived(st.isDefault && !st.enabled ? 'Enable' : 'Disable');
 </script>
 
-{#if st.open}
+<svelte:window onkeydown={(e) => { if (st.active && e.key === 'Escape') h.close(); }} />
+
+{#if st.active}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="relay-dialog-overlay" class:active={st.active}
+    <div class="pop-dialog-overlay" class:closing={st.closing}
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
-        <div class="relay-dialog relay-info-dialog">
-            <div class="relay-dialog-header">
-                <h3>Relay Settings</h3>
-                <button class="relay-dialog-close" onclick={h.close}>&times;</button>
-            </div>
+        <div class="relay-dialog relay-info-dialog pop-dialog" use:popIn={st.tick}>
             <div class="relay-dialog-content">
                 <div class="relay-info-header-row">
-                    <p id="relay-info-url">{st.url}</p>
+                    <p id="relay-info-url" class="pop-dialog-host">{st.url}</p>
                     <span class="relay-status relay-status-small {st.status}">{st.status}</span>
                 </div>
                 <div class="relay-metrics-inline">

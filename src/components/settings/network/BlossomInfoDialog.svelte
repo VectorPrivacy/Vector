@@ -32,11 +32,11 @@
 
 {#if st.active}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="blossom-overlay" class:closing={st.closing}
+    <div class="pop-dialog-overlay" class:closing={st.closing}
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
-        <div class="relay-dialog relay-info-dialog blossom-dialog" use:popIn={st.tick}>
+        <div class="relay-dialog relay-info-dialog pop-dialog" use:popIn={st.tick}>
             <div class="relay-dialog-content blossom-dialog-content">
-                <div class="blossom-dialog-host">{st.url}</div>
+                <div class="pop-dialog-host">{st.url}</div>
                 {#if notice}
                     <div class="blossom-notice blossom-notice-{notice.tone}">
                         <span class="relay-status relay-status-small {notice.tone}">{notice.label}</span>

@@ -11376,21 +11376,11 @@ select:disabled:hover {
   transition: transform 0.25s ease;
 }
 
-#relay-info-url {
-    text-align: left;
-    color: #fff;
-    font-size: 16px;
-    margin: 0 0 16px 0;
-}
-
 .relay-info-header-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-}
-
-.relay-info-header-row #relay-info-url {
-    margin: 0;
+    gap: 8px;
 }
 
 #relay-info-done {
@@ -11863,8 +11853,8 @@ select:disabled:hover {
   white-space: nowrap;
 }
 
-/* Media server dialog: the QR overlay's pop in and out, on the relay dialog's card */
-.blossom-overlay {
+/* Network dialogs: the QR overlay's pop in and out, on the relay dialog's card */
+.pop-dialog-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.85);
@@ -11876,26 +11866,21 @@ select:disabled:hover {
 }
 /* Hidden until `pop-in` lands a frame later, so the card's first painted
    frame is the start of its animation, not a flash of the end state. */
-.blossom-dialog { opacity: 0; }
-.blossom-dialog.pop-in { animation: qr-overlay-pop 0.16s ease-out forwards; }
-.blossom-overlay.closing {
+.pop-dialog { opacity: 0; }
+.pop-dialog.pop-in { animation: qr-overlay-pop 0.16s ease-out forwards; }
+.pop-dialog-overlay.closing {
   animation: modal-overlay-fade-out 0.15s ease-out forwards;
   pointer-events: none;
 }
-.blossom-overlay.closing .blossom-dialog {
+.pop-dialog-overlay.closing .pop-dialog {
   animation: modal-card-pop-out 0.15s ease-out forwards;
 }
 
-/* Media server dialog: no header bar — the host is a quiet line above the tiles */
-.blossom-dialog-content {
-  padding-top: 12px;
-  gap: 10px;
-  /* A tooltip past the edge must not summon a horizontal scrollbar. */
-  overflow-x: hidden;
-}
-.blossom-dialog-host {
+/* The server or relay this dialog is about, in place of a titled header bar. */
+.pop-dialog-host {
   flex-shrink: 0;
-  padding-top: 4px;
+  margin: 0;
+  min-width: 0;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.5);
   font-variant-numeric: tabular-nums;
@@ -11904,6 +11889,13 @@ select:disabled:hover {
   white-space: nowrap;
 }
 
+/* Media server dialog: no header bar — the host is a quiet line above the tiles */
+.blossom-dialog-content {
+  padding-top: 16px;
+  gap: 10px;
+  /* A tooltip past the edge must not summon a horizontal scrollbar. */
+  overflow-x: hidden;
+}
 /* Media server: shown only when something is wrong */
 .blossom-notice {
   display: flex;

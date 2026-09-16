@@ -173,13 +173,13 @@ async function openRelayInfoDialog(relay) {
         ping: '--', pingColor: '', lastCheck: '--', copied: false,
     });
 
-    // Initial data load
+    // Open on the relay we already hold; ping, last check and logs fill in.
+    VectorSvelte.relayInfoDialog.open({});
+
     await refreshRelayInfoDialog();
 
     // Start refresh interval (every 1 second)
     relayInfoRefreshInterval = setInterval(refreshRelayInfoDialog, 1000);
-
-    VectorSvelte.relayInfoDialog.open({});
 }
 
 /**

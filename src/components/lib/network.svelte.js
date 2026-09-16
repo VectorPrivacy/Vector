@@ -4,7 +4,7 @@ import { fadeDialog, popOverlay } from './dialog-lifecycle.svelte.js';
 
 export const addRelayDialog = fadeDialog({ url: '', mode: 'both' });
 
-export const relayInfoDialog = fadeDialog({
+export const relayInfoDialog = popOverlay({
     url: '', status: '', isDefault: false, enabled: true, mode: 'both',
     ping: '--', pingColor: '', lastCheck: '--', copied: false,
 });
