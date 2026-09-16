@@ -11982,8 +11982,8 @@ select:disabled:hover {
   font-variant-numeric: tabular-nums;
 }
 .blossom-perf-tip b { color: var(--accent-color, #59fcb3); font-weight: 600; }
-.blossom-perf-tip-left { transform: translate(-8px, calc(-100% - 8px)); }
-.blossom-perf-tip-right { transform: translate(calc(-100% + 8px), calc(-100% - 8px)); }
+.blossom-perf-tip-left { transform: translate(-4px, calc(-100% - 8px)); }
+.blossom-perf-tip-right { transform: translate(calc(-100% + 4px), calc(-100% - 8px)); }
 .blossom-perf-foot {
   display: flex;
   flex-wrap: wrap;
