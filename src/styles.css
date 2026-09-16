@@ -11846,14 +11846,8 @@ select:disabled:hover {
   padding-top: 12px;
   gap: 12px;
 }
-.blossom-dialog-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 32px;
-}
 .blossom-dialog-host {
+  padding-top: 4px;
   font-size: 13px;
   color: rgba(255, 255, 255, 0.5);
   font-variant-numeric: tabular-nums;

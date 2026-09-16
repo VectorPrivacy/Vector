@@ -32,10 +32,7 @@
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="relay-dialog relay-info-dialog">
             <div class="relay-dialog-content blossom-dialog-content">
-                <div class="blossom-dialog-top">
-                    <span class="blossom-dialog-host">{st.url}</span>
-                    <button class="relay-dialog-close" onclick={h.close} aria-label="Close">&times;</button>
-                </div>
+                <div class="blossom-dialog-host">{st.url}</div>
                 {#if notice}
                     <div class="blossom-notice blossom-notice-{notice.tone}">
                         <span class="relay-status relay-status-small {notice.tone}">{notice.label}</span>
