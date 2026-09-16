@@ -88,7 +88,7 @@
                 {/if}
                 <div class="relay-dialog-buttons">
                     <button class="btn danger-btn" onclick={h.action}>{actionLabel}</button>
-                    <button class="btn primary-btn" onclick={h.close}>Done</button>
+                    <button class="btn cancel-btn" onclick={h.close}>Close</button>
                 </div>
             </div>
         </div>
