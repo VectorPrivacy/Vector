@@ -11704,7 +11704,7 @@ select:disabled:hover {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+  transition: border-color 0.25s ease;
 }
 .blossom-plan-skeleton {
   opacity: 0.5;
@@ -11722,7 +11722,6 @@ select:disabled:hover {
   background:
     linear-gradient(rgba(20, 20, 20, 0.98), rgba(20, 20, 20, 0.98)) padding-box,
     linear-gradient(135deg, var(--primary-color, #33DB98), var(--accent-color, #59fcb3)) border-box;
-  box-shadow: 0 0 18px color-mix(in srgb, var(--accent-color, #59fcb3) 18%, transparent);
 }
 .blossom-plan-none {
   border-color: rgba(252, 89, 92, 0.35);
