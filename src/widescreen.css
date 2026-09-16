@@ -1800,10 +1800,6 @@ body.ws.ws-rail-collapsed #ws-rail-account #account:hover {
   transition: none;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-collapse {
-  transition: opacity 0.12s ease;
-}
-
 /* ========================= 6. The list resizer =========================== */
 
 body.ws #ws-list-resize {
