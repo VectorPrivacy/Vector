@@ -52,8 +52,8 @@
             if (!hover) return;
             const dx = hover.x - tip.x, dy = hover.y - tip.y;
             if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) { tip.x = hover.x; tip.y = hover.y; return; }
-            tip.x += dx * 0.28;
-            tip.y += dy * 0.28;
+            tip.x += dx * 0.22;
+            tip.y += dy * 0.22;
             raf = requestAnimationFrame(step);
         };
         raf = requestAnimationFrame(step);
