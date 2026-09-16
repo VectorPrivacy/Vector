@@ -11695,12 +11695,12 @@ select:disabled:hover {
 /* Media server: the account's plan, from the server's own document */
 .blossom-plan {
   border-radius: 12px;
-  padding: 14px 16px 16px;
+  padding: 12px 14px 14px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 .blossom-plan-premium {
   border-color: transparent;
@@ -11774,7 +11774,7 @@ select:disabled:hover {
 .blossom-plan-meters {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
 }
 .blossom-plan-refused {
   margin: 0;
@@ -11830,8 +11830,9 @@ select:disabled:hover {
   background: var(--danger-color);
 }
 .blossom-meter-note {
-  font-size: 11px;
-  opacity: 0.45;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.7;
 }
 .relay-latency {
   font-size: 11px;
@@ -11844,7 +11845,7 @@ select:disabled:hover {
 /* Media server dialog: no header bar — the host is a quiet line above the tiles */
 .blossom-dialog-content {
   padding-top: 12px;
-  gap: 12px;
+  gap: 10px;
 }
 .blossom-dialog-host {
   flex-shrink: 0;
@@ -11883,8 +11884,8 @@ select:disabled:hover {
 .blossom-perf-stat {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 10px 12px;
+  gap: 2px;
+  padding: 8px 10px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -11910,18 +11911,11 @@ select:disabled:hover {
   font-size: 11px;
   font-weight: 400;
 }
-.blossom-perf-spark-label {
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-top: 12px;
-}
 .blossom-perf-spark {
   display: block;
   width: 100%;
-  height: 34px;
-  margin-top: 4px;
+  height: 30px;
+  margin-top: 8px;
   overflow: visible;
 }
 .blossom-perf-foot {
@@ -11930,7 +11924,7 @@ select:disabled:hover {
   gap: 8px;
   font-size: 11px;
   opacity: 0.45;
-  margin-top: 6px;
+  margin-top: 4px;
   font-variant-numeric: tabular-nums;
 }
 

@@ -47,7 +47,6 @@
             </div>
         </div>
         {#if points.length}
-            <div class="blossom-perf-spark-label">Speed of your last {recent.length} uploads</div>
             <!-- Stretched to the box; strokes don't scale, so the line stays thin and a
                  zero-length round-capped stroke stays a round dot. -->
             <svg class="blossom-perf-spark" viewBox="0 0 300 34" preserveAspectRatio="none" aria-label="Speed of recent uploads, oldest to newest">
@@ -58,7 +57,9 @@
             </svg>
         {/if}
         <div class="blossom-perf-foot">
-            <span>{stats.uploads} upload{stats.uploads === 1 ? '' : 's'}{#if stats.bytes_total}{' · '}{h.formatBytes(stats.bytes_total, 1)}{/if}</span>
+            <span>
+                {#if points.length}Speed of your last {recent.length} uploads{:else}{stats.uploads} upload{stats.uploads === 1 ? '' : 's'}{/if}{#if stats.bytes_total}{' · '}{h.formatBytes(stats.bytes_total, 1)}{/if}
+            </span>
             {#if stats.last_ok_at}<span>last seen {ago(stats.last_ok_at)}</span>{/if}
         </div>
     </div>
