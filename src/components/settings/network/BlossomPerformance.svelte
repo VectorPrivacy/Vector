@@ -9,17 +9,17 @@
         return v >= 10 ? v.toFixed(0) : v.toFixed(1);
     }
     const recent = $derived(stats.recent || []);
-    // Polyline over the sparkline's box; a single sample is a flat line.
-    const spark = $derived.by(() => {
-        if (recent.length < 2) return '';
-        const w = 300, hgt = 34, pad = 3;
+    // One point per recent upload, oldest left, scaled to the fastest of them.
+    const points = $derived.by(() => {
+        if (recent.length < 2) return [];
+        const w = 300, hgt = 34, pad = 4;
         const max = Math.max(...recent, 0.001);
-        return recent.map((v, i) => {
-            const x = (i / (recent.length - 1)) * w;
-            const y = hgt - pad - (v / max) * (hgt - pad * 2);
-            return `${x.toFixed(1)},${y.toFixed(1)}`;
-        }).join(' ');
+        return recent.map((v, i) => ({
+            x: pad + (i / (recent.length - 1)) * (w - pad * 2),
+            y: hgt - pad - (v / max) * (hgt - pad * 2),
+        }));
     });
+    const spark = $derived(points.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' '));
     function ago(ts) {
         if (!ts) return '';
         const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
@@ -46,13 +46,17 @@
                 <span class="blossom-perf-value">{#if stats.best_mbps != null}{mbit(stats.best_mbps)} <span class="blossom-perf-unit">Mbit/s</span>{:else}–{/if}</span>
             </div>
         </div>
-        {#if spark}
-            <svg class="blossom-perf-spark" viewBox="0 0 300 34" preserveAspectRatio="none" aria-label="Recent upload speeds">
-                <polyline points={spark} fill="none" stroke="var(--accent-color, #59fcb3)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+        {#if points.length}
+            <div class="blossom-perf-spark-label">Speed of your last {recent.length} uploads</div>
+            <svg class="blossom-perf-spark" viewBox="0 0 300 34" aria-label="Speed of recent uploads, oldest to newest">
+                <polyline points={spark} fill="none" stroke="var(--accent-color, #59fcb3)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.6" />
+                {#each points as p}
+                    <circle cx={p.x} cy={p.y} r="2.5" fill="var(--accent-color, #59fcb3)" />
+                {/each}
             </svg>
         {/if}
         <div class="blossom-perf-foot">
-            <span>{stats.uploads} upload{stats.uploads === 1 ? '' : 's'}{#if stats.bytes_total} · {h.formatBytes(stats.bytes_total, 1)}{/if}</span>
+            <span>{stats.uploads} upload{stats.uploads === 1 ? '' : 's'}{#if stats.bytes_total}{' · '}{h.formatBytes(stats.bytes_total, 1)}{/if}</span>
             {#if stats.last_ok_at}<span>last seen {ago(stats.last_ok_at)}</span>{/if}
         </div>
     </div>

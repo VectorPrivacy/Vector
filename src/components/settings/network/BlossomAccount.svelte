@@ -17,11 +17,6 @@
         const kind = official && caller.tier === 'badged' ? 'premium' : 'free';
         return { name, kind, blurb: caller.plan_description || '' };
     });
-    const serverLine = $derived.by(() => {
-        const name = info.name || info.software || '';
-        const version = info.version ? ` ${info.version}` : '';
-        return name ? `${name}${version}` : '';
-    });
     function pct(used, limit) {
         if (!limit) return 0;
         return Math.min(100, Math.round((used / limit) * 100));
@@ -78,6 +73,4 @@
 {#if !caller && info.max_blob}
     <p class="blossom-cap-blurb">Accepts files up to {h.formatBytes(info.max_blob, 1)}.</p>
 {/if}
-{#if serverLine || info.description}
-    <div class="blossom-server-line">{[serverLine, info.description].filter(Boolean).join(' · ')}</div>
-{/if}
+
