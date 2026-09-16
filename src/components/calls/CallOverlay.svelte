@@ -63,7 +63,9 @@
     const line = $derived.by(() => {
         if (c.phase !== 'active' || !c.stats) return c.peerMuted ? 'muted' : '';
         const bits = [`${c.stats.rtt_ms} ms`, c.stats.path];
-        if (c.stats.lost) bits.push(`${c.stats.lost} lost`);
+        // Concealment is the only counter you can hear; a percent under one is noise.
+        const pct = c.stats.received ? Math.round(100 * c.stats.concealed / c.stats.received) : 0;
+        if (pct >= 1) bits.push(`${pct}% concealed`);
         if (c.peerMuted) bits.push('muted');
         return bits.join(' · ');
     });

@@ -24,9 +24,12 @@ const FLAG_MUTED: u16 = 1;
 /// Frames buffered before playout starts.
 const PREFILL: usize = 2;
 /// Deeper than this and playout jumps forward: latency costs more than the gap.
-const MAX_DEPTH: usize = 10;
-/// Above this the buffer sheds one frame per pop; it grew on underruns that are over.
-const SHRINK_DEPTH: usize = 6;
+const MAX_DEPTH: usize = 25;
+/// The deepest target the jitter estimate may ask for.
+const MAX_TARGET: usize = 12;
+/// How long the buffer must sit above its target before it trims a frame. A burst
+/// leaves it deep; trimming at once would meet the next burst empty again.
+const SHED_AFTER: Duration = Duration::from_secs(3);
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
 const PLAY_AHEAD_MS: u32 = 30;
@@ -38,7 +41,12 @@ pub struct MediaStats {
     pub sent: AtomicU64,
     pub send_dropped: AtomicU64,
     pub received: AtomicU64,
+    /// Frames skipped over: a hole wider than FEC covers, or a jump past a backlog.
     pub lost: AtomicU64,
+    /// Frames the buffer discarded on purpose to take latency back.
+    pub shed: AtomicU64,
+    /// Frames rebuilt from the FEC data in their successor.
+    pub rebuilt: AtomicU64,
     pub concealed: AtomicU64,
     pub late: AtomicU64,
     pub depth_ms: AtomicU32,
@@ -370,7 +378,7 @@ fn playout_thread(
             }
             Pop::Fec(successor) => {
                 plc_run = 0;
-                stats.lost.fetch_add(1, Ordering::Relaxed);
+                stats.rebuilt.fetch_add(1, Ordering::Relaxed);
                 dec.decode_fec(&successor, &mut pcm).is_ok()
             }
             Pop::Muted => {
@@ -424,9 +432,18 @@ struct Jitter {
     last_arrival: Option<(Instant, u64)>,
     /// RFC 3550 style smoothed inter-arrival jitter, in milliseconds.
     jitter_ms: f32,
+    /// Since when the buffer has been deeper than its target.
+    over_since: Option<Instant>,
+    shed_after: Option<Duration>,
 }
 
 impl Jitter {
+    /// Frames to hold: enough to ride out three times the smoothed jitter.
+    fn target_frames(&self) -> usize {
+        let from_jitter = (self.jitter_ms * 3.0 / FRAME_MS as f32).ceil() as usize;
+        (PREFILL + from_jitter).clamp(PREFILL, MAX_TARGET)
+    }
+
     fn unwrap_seq(&mut self, seq: u16) -> u64 {
         let s = match self.newest {
             None => seq as u64,
@@ -483,14 +500,22 @@ impl Jitter {
                 first
             }
         };
-        if self.frames.len() > SHRINK_DEPTH {
-            // Underruns stretched the buffer; take the latency back a frame at a time.
-            if let Some(oldest) = self.frames.keys().next().copied() {
-                self.frames.remove(&oldest);
-                stats.lost.fetch_add(1, Ordering::Relaxed);
-                self.next = Some(oldest + 1);
-                return self.pop(plc_run, stats);
+        if self.frames.len() > self.target_frames() {
+            // Underruns stretched the buffer; once that has held for a while, take the
+            // latency back a frame at a time.
+            let now = Instant::now();
+            let since = *self.over_since.get_or_insert(now);
+            if now.duration_since(since) >= self.shed_after.unwrap_or(SHED_AFTER) {
+                if let Some(oldest) = self.frames.keys().next().copied() {
+                    self.frames.remove(&oldest);
+                    stats.shed.fetch_add(1, Ordering::Relaxed);
+                    self.next = Some(oldest + 1);
+                    self.over_since = Some(now);
+                    return self.pop(plc_run, stats);
+                }
             }
+        } else {
+            self.over_since = None;
         }
         if let Some(f) = self.frames.remove(&next) {
             self.next = Some(next + 1);
@@ -558,16 +583,33 @@ mod tests {
     }
 
     #[test]
-    fn a_stretched_buffer_sheds_frames_until_it_is_back_in_range() {
+    fn a_stretched_buffer_keeps_its_depth_at_first_then_sheds_to_target() {
         let stats = MediaStats::default();
         let mut j = Jitter::default();
-        for s in 0..=(SHRINK_DEPTH as u16 + 1) {
+        for s in 0..8u16 {
             j.push(s, false, &frame(s as u8), &stats);
         }
-        // Two frames shed, the third plays, and the buffer is back under the line.
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(2)));
-        assert_eq!(stats.lost.load(Ordering::Relaxed), 2);
-        assert_eq!(j.frames.len(), SHRINK_DEPTH - 1);
+        // Instant pushes read as jitter to the estimator; pin it so the target is PREFILL.
+        j.jitter_ms = 0.0;
+        // A fresh overshoot is kept.
+        assert_eq!(j.target_frames(), PREFILL);
+        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(0)));
+        assert_eq!(stats.shed.load(Ordering::Relaxed), 0);
+        // Once the overshoot has lasted long enough, frames go one per pop until in range.
+        j.shed_after = Some(Duration::ZERO);
+        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(6)));
+        assert_eq!(stats.shed.load(Ordering::Relaxed), 5);
+        assert_eq!(stats.lost.load(Ordering::Relaxed), 0);
+        assert_eq!(j.frames.len(), 1);
+    }
+
+    #[test]
+    fn the_target_grows_with_jitter() {
+        let mut j = Jitter::default();
+        j.jitter_ms = 43.0;
+        assert_eq!(j.target_frames(), PREFILL + 7);
+        j.jitter_ms = 1000.0;
+        assert_eq!(j.target_frames(), MAX_TARGET);
     }
 
     #[test]
