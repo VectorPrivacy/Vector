@@ -41,7 +41,7 @@ export { setOverviewGroup, setOverviewHeadHandlers } from './lib/overview.svelte
 export { switcherState, setSwitcherHandlers, setSwitcherRows, setSwitcherAdd, openSwitcher, closeSwitcher } from './lib/switcher.svelte.js';
 export { showTooltip, hideTooltip } from './lib/tooltip.svelte.js';
 export { setAccount, revealAccount, setAccountHandlers } from './lib/account.svelte.js';
-export { setMailBadge, mergeShellHandlers, setScreen, revealPane, revealPending, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag } from './lib/shell.svelte.js';
+export { setChatBadge, mergeShellHandlers, setScreen, revealPane, revealPending, setSyncLine, onPaneChange, shellElements, shellState, showPane, paneShown, panesSnapshot, restorePanes, setTab, setShellFlag } from './lib/shell.svelte.js';
 export { publishState, openPublishDialog, activatePublishDialog, closePublishDialog, unmountPublishDialog, setPublishPerms, setPublishPermsError, setPublishHint, setPublishBusy } from './lib/publish.svelte.js';
 export { showProcessing, hideProcessing, openPermissionPrompt, activatePermissionPrompt, closePermissionPrompt, unmountPermissionPrompt } from './lib/overlays.svelte.js';
 export { popupState, openPopupDialog, closePopupDialog } from './lib/popup.svelte.js';

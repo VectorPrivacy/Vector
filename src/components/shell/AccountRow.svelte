@@ -41,10 +41,12 @@
 <div id="account" class="account" bind:this={row} style:display={st.visible ? null : 'none'} use:fadeIn={st.revealTick}>
     <div class="profile-header-info">
         <div class="profile-header-name-row">
-            <div id="account-avatar-container">
+            <!-- Collapsed, the caret is gone and the avatar is the only way to the switcher. -->
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div id="account-avatar-container" onclick={(e) => { if (shell.ws) { e.stopPropagation(); h().switchAccount?.(row); } }}>
                 <Avatar src={st.avatarSrc} size={22} class="btn" />
             </div>
-            <!-- The name lands through the action (twemoji needs the DOM); the row's real door is the avatar. -->
+            <!-- The name lands through the action (twemoji needs the DOM). -->
             <!-- svelte-ignore a11y_missing_content, a11y_no_noninteractive_element_interactions -->
             <h3 id="account-name" class="cutoff chat-contact-with-status btn" use:nameInto={[st.name, st.hasName, h()]} onclick={() => h().openProfile?.()}></h3>
         </div>

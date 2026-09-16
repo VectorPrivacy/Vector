@@ -318,6 +318,10 @@
   mask-image: url("./icons/message.svg");
 }
 
+.icon-grid {
+  mask-image: url("./icons/grid.svg");
+}
+
 .icon-help {
   mask-image: url("./icons/help.svg");
   -webkit-mask-image: url("./icons/help.svg");

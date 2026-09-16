@@ -1,12 +1,11 @@
 <script>
-    // The 32px desktop title strip: the lockup (the door home to DMs), the update
+    // The 32px desktop title strip: the lockup (a door home to DMs), the update
     // banner, help and the window controls. A press on the bare strip moves the window
     // (js/chrome.js), so nothing here needs Tauri's own drag region.
     import { chromeState } from '../lib/chrome.svelte.js';
-    import { shellState, shellScreens } from '../lib/shell.svelte.js';
+    import { shellScreens } from '../lib/shell.svelte.js';
     import { updatesState } from '../lib/settings.svelte.js';
     const chrome = chromeState();
-    const st = shellState();
     const screens = shellScreens();
     const updates = updatesState();
     const h = $derived(screens.chrome?.h);   // h: ChromeHelpers (js/chrome.js)
@@ -15,7 +14,7 @@
 {#if chrome.on}
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <header id="window-chrome" onmousedown={(e) => { if ((e.target === e.currentTarget || e.target.id === 'chrome-left') && e.button === 0) h?.dragStart(e.detail); }}>
-    <!-- The left cell spans the rail while widescreen, so the mail button sits on its edge. -->
+    <!-- The left cell spans the rail while widescreen. -->
     <div id="chrome-left">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <div id="chrome-lockup" class="btn" title="Direct Messages" onclick={() => h?.openDmHome()}>
@@ -46,13 +45,6 @@
             <path fill="#fff" d="M80.0595,1.4924h-3.4416c-.2785,0-.5456.1105-.7425.3076l-.9025.9026v-.1625c0-.58-.4701-1.05-1.05-1.05s-1.05.47-1.05,1.05v7.1166c0,.58.4701,1.05,1.05,1.05s1.05-.47,1.05-1.05v-3.9843l2.08-2.08h1.9566v.8984c0,.58.4701,1.05,1.05,1.05s1.05-.47,1.05-1.05v-1.9484c0-.58-.4701-1.05-1.05-1.05Z"/>
         </svg>
         </div>
-        {#if st.ws}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div id="chrome-mail" class="btn" title="Messages" onclick={() => h?.openDmHome()}>
-            <span class="icon icon-mail"></span>
-            {#if st.mailBadge}<span class="ws-rail-item-badge">{st.mailBadge}</span>{/if}
-        </div>
-        {/if}
     </div>
     {#if updates.phase === 'available' && updates.newVersion}
         <button class="chrome-update" onclick={() => h?.openUpdates()}>New update · Vector v{updates.newVersion}. Download now.</button>

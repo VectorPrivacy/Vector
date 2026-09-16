@@ -90,46 +90,6 @@ body.ws.ws-rail-collapsed #chrome-typeface {
   display: none;
 }
 
-/* Mail: the second door to the DM page, flush with the rail's edge. */
-#chrome-mail {
-  position: relative;
-  margin-left: auto;
-  margin-right: 2px;
-  width: 30px;
-  height: 24px;
-  border-radius: 6px;
-  flex-shrink: 0;
-}
-
-#chrome-mail .icon {
-  width: 18px;
-  height: 18px;
-  margin: auto;
-  background-color: rgba(255, 255, 255, 0.55);
-  transition: background-color 0.12s ease;
-}
-
-#chrome-mail:hover {
-  opacity: 1;
-}
-
-/* Lit while the DM list is the pane on screen, the way a rail community lights when chosen. */
-#chrome-mail:hover .icon,
-body.ws:not(.ws-community-pane) #chrome-mail .icon {
-  background-color: #fff;
-}
-
-#chrome-mail .ws-rail-item-badge {
-  position: absolute;
-  top: -3px;
-  right: -8px;
-  min-width: 16px;
-  padding: 0 4px;
-  font-size: 10px;
-  line-height: 16px;
-  border-radius: 8px;
-}
-
 #chrome-lockup:hover {
   opacity: 1;
 }
@@ -626,7 +586,8 @@ body.ws #ws-rail-account #account {
 body.ws:not(.ws-rail-collapsed) #ws-rail-account #account {
   background-color: var(--ws-hover);
   border-radius: 12px;
-  padding: 8px 10px;
+  /* 9px left: the avatar lands on the same pixel the collapsed tile centres it on. */
+  padding: 8px 10px 8px 9px;
   align-items: center;
   transition: background-color 0.12s ease;
   margin-bottom: 0;
@@ -656,8 +617,14 @@ body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-avatar-container {
   grid-row: 1 / span 2;
 }
 
-/* Inline-sized by ui/Avatar.svelte, hence !important (as elsewhere in the rail). */
-body.ws:not(.ws-rail-collapsed) #ws-rail-account #account-avatar-container img {
+/* One size in both rail states: collapsing changes what stands beside the avatar,
+   never the avatar. Flex, so the image carries no baseline gap to shift it by.
+   Inline-sized by ui/Avatar.svelte, hence !important. */
+body.ws #ws-rail-account #account-avatar-container {
+  display: flex;
+}
+
+body.ws #ws-rail-account #account-avatar-container img {
   width: 38px !important;
   height: 38px !important;
 }
@@ -1292,6 +1259,62 @@ body.ws #ws-rail-dms {
   flex-shrink: 0;
 }
 
+/* The Messages tile: a labelled door in the unread rows' slot, lit while the DM
+   list is the pane on screen the way a chosen community's shortcut lights. */
+body.ws .ws-rail-messages {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin: 0 8px;
+  padding: 0 10px;
+  height: 36px;
+  border-radius: 10px;
+  background-color: var(--ws-hover);
+  color: rgba(255, 255, 255, 0.7);
+  font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+body.ws .ws-rail-messages:hover {
+  opacity: 1;
+  background-color: var(--ws-active);
+  color: #fff;
+}
+
+body.ws:not(.ws-community-pane) .ws-rail-messages {
+  background-color: var(--ws-active);
+  color: #fff;
+}
+
+body.ws .ws-rail-messages svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+body.ws.ws-rail-collapsed .ws-rail-messages {
+  justify-content: center;
+  gap: 0;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  margin: 0 auto;
+  border-radius: 12px;
+}
+
+body.ws.ws-rail-collapsed .ws-rail-messages svg {
+  width: 24px;
+  height: 24px;
+}
+
+body.ws.ws-rail-collapsed .ws-rail-messages-label {
+  display: none;
+}
+
 /* Communities takes what's left, and scrolls inside it. */
 body.ws #ws-rail-spaces {
   display: flex;
@@ -1334,9 +1357,9 @@ body.ws .ws-rail-group[hidden] {
   display: none;
 }
 
-/* A hidden group is still a sibling: with no unread DMs the gap would otherwise
-   land above Communities. */
-body.ws .ws-rail-group:not([hidden]) + .ws-rail-group {
+/* A hidden group is still a sibling: the gap belongs between two SHOWN groups,
+   whichever they are. */
+body.ws .ws-rail-group:not([hidden]) ~ .ws-rail-group:not([hidden]) {
   margin-top: 10px;
 }
 
@@ -1352,10 +1375,9 @@ body.ws .ws-rail-group-label {
   user-select: none;
 }
 
-/* One rule between the two groups, not one under each label. It belongs to the
-   seam BETWEEN them, so it only exists while both sides do — `hidden` on the
-   DM group takes it with them. */
-body.ws #ws-rail-dms:not([hidden]) + #ws-rail-spaces::before {
+/* One rule above Communities, not one under each label. It belongs to the seam
+   BETWEEN the groups, so it only exists while something shows above. */
+body.ws .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
   content: "";
   flex-shrink: 0;
   height: 1px;
@@ -1368,7 +1390,7 @@ body.ws.ws-rail-collapsed .ws-rail-group-label {
   display: none;
 }
 
-body.ws.ws-rail-collapsed #ws-rail-dms:not([hidden]) + #ws-rail-spaces::before {
+body.ws.ws-rail-collapsed .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
   margin: 6px 12px 12px;
 }
 
@@ -1593,6 +1615,10 @@ body.ws #navbar .navbar-text {
   text-align: left;
 }
 
+body.ws #navbar .navbar-btn .ws-rail-item-badge {
+  margin-left: auto;
+}
+
 /* The dot rides the row's right edge here, not the icon's corner. */
 body.ws #navbar .navbar-btn .update-notification-dot {
   top: 50%;
@@ -1688,6 +1714,8 @@ body.ws #ws-rail-account .profile-header-name-row {
   gap: 8px;
   width: 100%;
   min-width: 0;
+  /* The list row's top margin would sit the avatar 5px low in the collapsed tile. */
+  margin: 0;
 }
 
 body.ws #ws-rail-account #account-name {
@@ -1742,21 +1770,16 @@ body.ws.ws-rail-collapsed #ws-rail-account {
   justify-content: center;
 }
 
-/* The account is the same tile, and its avatar carries it the way a shortcut's
-   does — the name and status are already hidden at this width. */
+/* The account is a tile the width of the others and the height of its expanded
+   self, so the avatar sits on the same pixel in both states; the name and status
+   are already hidden at this width. */
 body.ws.ws-rail-collapsed #ws-rail-account #account {
   justify-content: center;
   width: 40px;
-  height: 40px;
+  height: 54px;
   padding: 0;
   margin: 0 auto;
   border-radius: 12px;
-}
-
-/* Inline-sized by ui/Avatar.svelte, hence !important (as with the shortcuts). */
-body.ws.ws-rail-collapsed #ws-rail-account #account-avatar-container img {
-  width: 32px !important;
-  height: 32px !important;
 }
 
 body.ws.ws-rail-collapsed #ws-rail-account .profile-header-info,

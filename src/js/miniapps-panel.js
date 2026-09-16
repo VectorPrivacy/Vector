@@ -30,8 +30,13 @@ async function showAttachmentPanelMiniApps() {
 /**
  * Shows the marketplace panel
  */
+/** The tab lit before the marketplace took over, so closing hands it back. */
+let strMarketplacePrevTab = '';
+
 function showMarketplacePanel() {
     pushBack('marketplace', () => { hideMarketplacePanel(); });
+    strMarketplacePrevTab = VectorSvelte.shellState().tab;
+    navbarSelect('miniapps-btn');
     VectorSvelte.mktOpenPanel();
     initMarketplace();
 }
@@ -43,6 +48,7 @@ function showMarketplacePanel() {
 function hideMarketplacePanel() {
     if (!VectorSvelte.mktState().panelOpen) return Promise.resolve();
     popBack('marketplace');
+    navbarSelect(strMarketplacePrevTab);
     return VectorSvelte.mktClosePanel('panel');
 }
 

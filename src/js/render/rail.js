@@ -3,8 +3,8 @@
  * logo and the nav tabs.
  *
  * The strip itself is a Svelte island (src/components/shell/RailShortcuts.svelte); this module mounts it,
- * keeps the scroll fade and the mail badge (chrome outside the island's target), and
- * forwards the open chat as a signal.
+ * keeps the scroll fade and the Chat tab's badge (chrome outside the island's target),
+ * and forwards the open chat as a signal.
  */
 
 /** Depth of the strip's bottom fade with a full screen of scroll still below. */
@@ -62,6 +62,7 @@ function renderRailShortcuts() {
      * @property {(chat: object) => number} computeListRowBadgeCount
      * @property {(chat: object) => number} computeCommunityPingCount
      * @property {(chatId: string) => void} openChat
+     * @property {() => void} openDmHome
      * @property {(communityId: string) => string|null} wsChannelForCommunity
      * @property {() => void} syncRailFade
      * @property {(unreadDms: number) => void} onUnreadDms
@@ -80,9 +81,10 @@ function renderRailShortcuts() {
             computeListRowBadgeCount,
             computeCommunityPingCount,
             openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
+            openDmHome: wsOpenDmHome,
             wsChannelForCommunity,
             syncRailFade,
-            onUnreadDms: syncRailMailBadge,
+            onUnreadDms: syncChatTabBadge,
         },
         snapshot: () => ({ chats: arrChats, myNpub: strPubkey }),
     });
@@ -90,21 +92,21 @@ function renderRailShortcuts() {
 }
 
 /**
- * Everything waiting behind the mail button: unread DMs plus unanswered invites.
+ * Everything waiting behind the Chat tab: unread DMs plus unanswered invites.
  *
- * The rows below show three, so this is the only thing that can say there are
- * more — and invites render nowhere but the DM list, so inside a community
+ * The strip shows three unread rows, so this is the only thing that can say there
+ * are more — and invites render nowhere but the DM list, so inside a community
  * they'd otherwise be out of sight with nothing pointing back at them.
  *
- * Wears the shortcut rows' own badge class, so it's a count beside the icon
+ * Wears the shortcut rows' own badge class, so it's a count beside the label
  * expanded and a corner dot collapsed without a second set of rules.
  */
-function syncRailMailBadge(nUnreadDms) {
+function syncChatTabBadge(nUnreadDms) {
     // Invites stay silent while the DM list is the pane on screen, where they are
     // in view already. Unread DMs count wherever you are.
     const away = !!wsListCommunityId();
     const count = (nUnreadDms || 0) + (away ? arrCommunityInvites.length : 0);
-    VectorSvelte.setMailBadge(!count ? '' : count > 99 ? '99+' : String(count));
+    VectorSvelte.setChatBadge(!count ? '' : count > 99 ? '99+' : String(count));
 }
 
 /** The open chat changed: the rail's active shortcut derives from the signal. */

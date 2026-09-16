@@ -9,7 +9,7 @@ const panes = $state({
 });
 // Every key the panes bind to, declared up front: setShellFlag takes any name, so a key
 // that first appears in a setter call is invisible to a reader of this file.
-const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false, mailBadge: '', newChatButtons: false, ws: false, railCollapsed: false, railLocked: false });
+const shell = $state({ tab: 'chat-btn', invitesTab: false, settingsTab: true, updateDot: false, chatBadge: '', newChatButtons: false, ws: false, railCollapsed: false, railLocked: false });
 // Registered by two owners: main.js (the nav actions) and widescreen.js (the list
 // resizer), so writes must merge. { openProfile, openChatlist, openSettings, openInvites,
 // openNewChat, openCreateGroup, listResizeStart, listResizeReset }
@@ -38,7 +38,7 @@ export function setShellFlag(key, on) {
     flushSync();
 }
 /** The rail's mail badge text ('' hides it). */
-export function setMailBadge(text) { shell.mailBadge = text || ''; }
+export function setChatBadge(text) { shell.chatBadge = text || ''; }
 
 // The screens the app registers: each entry is the props its component takes, and App
 // renders the component once the entry lands. Registered from the script that owns the

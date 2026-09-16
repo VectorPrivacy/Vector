@@ -29,6 +29,12 @@
     <div id="chat-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'chat-btn'} onclick={() => h().openChatlist?.()}>
         <span class="icon icon-chats navbar-icon"></span>
         <p class="navbar-text">Chat</p>
+        {#if st.ws && st.chatBadge}<span class="ws-rail-item-badge">{st.chatBadge}</span>{/if}
+    </div>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div id="miniapps-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'miniapps-btn'} style:display={st.ws ? null : 'none'} onclick={() => h().openMiniApps?.()}>
+        <span class="icon icon-grid navbar-icon"></span>
+        <p class="navbar-text">Mini Apps</p>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div id="settings-btn" class="btn navbar-btn" class:navbar-btn-inactive={st.tab !== 'settings-btn'} style:display={st.settingsTab ? null : 'none'} onclick={() => h().openSettings?.()}>
