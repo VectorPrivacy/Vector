@@ -48,10 +48,12 @@
         </div>
         {#if points.length}
             <div class="blossom-perf-spark-label">Speed of your last {recent.length} uploads</div>
-            <svg class="blossom-perf-spark" viewBox="0 0 300 34" aria-label="Speed of recent uploads, oldest to newest">
-                <polyline points={spark} fill="none" stroke="var(--accent-color, #59fcb3)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.6" />
+            <!-- Stretched to the box; strokes don't scale, so the line stays thin and a
+                 zero-length round-capped stroke stays a round dot. -->
+            <svg class="blossom-perf-spark" viewBox="0 0 300 34" preserveAspectRatio="none" aria-label="Speed of recent uploads, oldest to newest">
+                <polyline points={spark} fill="none" stroke="var(--accent-color, #59fcb3)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.6" vector-effect="non-scaling-stroke" />
                 {#each points as p}
-                    <circle cx={p.x} cy={p.y} r="2.5" fill="var(--accent-color, #59fcb3)" />
+                    <path d="M{p.x.toFixed(1)},{p.y.toFixed(1)}h0.01" stroke="var(--accent-color, #59fcb3)" stroke-width="5" stroke-linecap="round" vector-effect="non-scaling-stroke" />
                 {/each}
             </svg>
         {/if}
