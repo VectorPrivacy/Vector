@@ -18,7 +18,8 @@
    ========================================================================= */
 
 :root {
-  --ws-rail-w: 200px;
+  --ws-rail-open-w: 200px;
+  --ws-rail-w: var(--ws-rail-open-w);
   --ws-rail-collapsed-w: 72px;
   --ws-list-w: 240px;           /* live value; js/widescreen.js persists it */
   --ws-list-min: 200px;
@@ -1180,7 +1181,8 @@ body.ws .profile-switcher-panel.ws-dropup {
   top: auto;
   left: 8px;
   right: auto;
-  width: calc(var(--ws-rail-w) - 16px);
+  /* The open rail's width even from a collapsed rail: it pops out over the list. */
+  width: calc(var(--ws-rail-open-w) - 16px);
   max-width: none;
   max-height: min(50vh, 420px);
   border-radius: 12px;
@@ -1266,8 +1268,8 @@ body.ws .ws-rail-messages {
   align-items: center;
   gap: 11px;
   margin: 0 8px;
-  padding: 0 10px;
-  height: 36px;
+  padding: 0 10px 0 16px;
+  height: 40px;
   border-radius: 10px;
   background-color: var(--ws-hover);
   color: rgba(255, 255, 255, 0.7);
@@ -1291,8 +1293,8 @@ body.ws:not(.ws-community-pane) .ws-rail-messages {
 }
 
 body.ws .ws-rail-messages svg {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   flex-shrink: 0;
 }
 
@@ -1304,11 +1306,6 @@ body.ws.ws-rail-collapsed .ws-rail-messages {
   padding: 0;
   margin: 0 auto;
   border-radius: 12px;
-}
-
-body.ws.ws-rail-collapsed .ws-rail-messages svg {
-  width: 24px;
-  height: 24px;
 }
 
 body.ws.ws-rail-collapsed .ws-rail-messages-label {
@@ -1577,14 +1574,17 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
   background-color: rgba(255, 255, 255, 0.45);
 }
 
-/* Nav rows: icon-left + label, with a neutral pill on the active tab. */
+/* Nav rows: icon-left + label, with a neutral pill on the active tab. The row
+   is the collapsed tile's height, and its 16px left inset puts the glyph on the
+   pixel a 40px tile centres it on, so collapsing moves nothing but the label. */
 body.ws #navbar .navbar-btn {
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 11px;
   margin: 0 8px;
-  padding: 6px 10px;
+  height: 40px;
+  padding: 0 10px 0 16px;
   border-radius: 10px;
   flex-shrink: 0;
   transition: background-color 0.12s ease, opacity 0.12s ease;
@@ -1601,8 +1601,8 @@ body.ws #navbar .navbar-btn:not(.navbar-btn-inactive) {
 }
 
 body.ws #navbar .navbar-icon {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   margin: 0;
   flex-shrink: 0;
 }
@@ -1638,7 +1638,8 @@ body.ws #ws-rail-collapse {
   align-items: center;
   gap: 11px;
   margin: 0 8px;
-  padding: 6px 10px;
+  height: 40px;
+  padding: 0 10px 0 16px;
   border-radius: 10px;
   flex-shrink: 0;
   opacity: 0.4;
@@ -1668,8 +1669,8 @@ body.ws:not(.ws-rail-locked) #ws-rail-collapse {
 }
 
 body.ws #ws-rail-collapse .navbar-icon {
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   margin: 0;
   flex-shrink: 0;
   transition: transform 0.18s cubic-bezier(0.33, 1, 0.68, 1);
@@ -1757,12 +1758,6 @@ body.ws.ws-rail-collapsed #ws-rail-collapse {
   padding: 0;
   margin: 0 auto;
   border-radius: 12px;
-}
-
-/* A 20px glyph drawn for a labelled row looks lost beside a 32px avatar tile. */
-body.ws.ws-rail-collapsed #navbar .navbar-icon {
-  width: 24px;
-  height: 24px;
 }
 
 body.ws.ws-rail-collapsed #ws-rail-account {
