@@ -246,8 +246,8 @@ const _dmsgMediaHelpers = {
     willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && att.size > 0
         && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed,
     // Once per attachment id across renders, or every repaint would re-fire the download.
-    autoDownload: (att, msg, sender) => _dmsgStartDownload(att, msg, sender),
-    startDownload: (att, msg, sender) => _dmsgStartDownload(att, msg, sender),
+    autoDownload: (att, msg) => _dmsgStartDownload(att, msg),
+    startDownload: (att, msg) => _dmsgStartDownload(att, msg),
     get audio() { return AUDIO_PLAYER_HELPERS; },
     fileTypeInfo: (ext) => getFileTypeInfo(ext),
     loadMiniAppInfo: (path) => loadMiniAppInfo(path),
@@ -536,12 +536,12 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
 }
 
 /** Start an attachment download once; the backend's result event clears the gate. */
-function _dmsgStartDownload(att, msg, sender) {
+function _dmsgStartDownload(att, msg) {
     if (downloadingAttachmentIds.has(att.id)) return;
     downloadingAttachmentIds.add(att.id);
-    const isGroupChat = chatIsGroup(getChat(strOpenChat));
-    const npub = isGroupChat ? strOpenChat : (sender?.id || strOpenChat);
-    invoke('download_attachment', { npub, msgId: msg.id, attachmentId: att.id })
+    // The chat, never the sender: a file you sent from another device has you as its
+    // sender, and the backend files it under the conversation it belongs to.
+    invoke('download_attachment', { npub: strOpenChat, msgId: msg.id, attachmentId: att.id })
         .catch(() => downloadingAttachmentIds.delete(att.id));
 }
 
