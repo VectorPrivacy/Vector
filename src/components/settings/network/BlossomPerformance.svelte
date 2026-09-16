@@ -41,13 +41,37 @@
 
     // The nearest upload to the pointer, shown while hovering or after a tap.
     let hover = $state(null);
+    // Where the tooltip is drawn: it follows `hover` by closing a fixed share of the
+    // remaining distance each frame, so a new target mid-flight bends the path rather
+    // than restarting an easing curve.
+    let tip = $state({ x: 0, y: 0 });
+    let raf = 0;
+    function follow() {
+        cancelAnimationFrame(raf);
+        const step = () => {
+            if (!hover) return;
+            const dx = hover.x - tip.x, dy = hover.y - tip.y;
+            if (Math.abs(dx) < 0.05 && Math.abs(dy) < 0.05) { tip.x = hover.x; tip.y = hover.y; return; }
+            tip.x += dx * 0.28;
+            tip.y += dy * 0.28;
+            raf = requestAnimationFrame(step);
+        };
+        raf = requestAnimationFrame(step);
+    }
     function pick(e) {
         if (!points.length) return;
         const r = e.currentTarget.getBoundingClientRect();
         const x = ((e.clientX - r.left) / r.width) * W;
         let best = points[0];
         for (const p of points) if (Math.abs(p.x - x) < Math.abs(best.x - x)) best = p;
+        if (best === hover) return;
+        const entering = !hover;
         hover = best;
+        if (entering) { tip.x = best.x; tip.y = best.y; } else follow();
+    }
+    function leave() {
+        cancelAnimationFrame(raf);
+        hover = null;
     }
     // A tooltip near either edge hangs inward from its dot instead of centring on it,
     // so it never leaves the chart's box.
@@ -72,7 +96,7 @@
         </div>
         {#if points.length}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <div class="blossom-perf-chart" onpointermove={pick} onpointerdown={pick} onpointerleave={() => hover = null}>
+            <div class="blossom-perf-chart" onpointermove={pick} onpointerdown={pick} onpointerleave={leave}>
                 <!-- Stretched to the box; strokes don't scale, so the line stays thin and a
                      zero-length round-capped stroke stays a round dot. -->
                 <svg class="blossom-perf-spark" viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-label="Speed of recent uploads, oldest to newest">
@@ -89,7 +113,7 @@
                     {/each}
                 </svg>
                 {#if hover}
-                    <div class="blossom-perf-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(1)}%; top: {(hover.y / H * 100).toFixed(1)}%">
+                    <div class="blossom-perf-tip {tipSide}" style="left: {(tip.x / W * 100).toFixed(2)}%; top: {(tip.y / H * 100).toFixed(2)}%">
                         <b>{mbit(hover.mbps)} Mbit/s</b>{#if hover.bytes}{' · '}{h.formatBytes(hover.bytes, 1)}{/if}
                     </div>
                 {/if}
