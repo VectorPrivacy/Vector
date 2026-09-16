@@ -1346,9 +1346,15 @@ body.ws #ws-rail-spaces .ws-rail-rows {
   );
 }
 
-/* The chat list's chunky 10px thumb is too much furniture inside a 232px rail. */
+/* No scrollbar in either state: a thumb shrinks the content box and pushes every
+   avatar off the nav tabs' axis. The bottom fade says there is more; the wheel
+   still scrolls it. */
+body.ws #ws-rail-spaces .ws-rail-rows {
+  scrollbar-width: none;
+}
+
 body.ws #ws-rail-spaces .ws-rail-rows::-webkit-scrollbar {
-  width: 6px;
+  width: 0;
 }
 
 /* ---- Group headings ----------------------------------------------------
@@ -1517,17 +1523,6 @@ body.ws.ws-rail-collapsed .ws-rail-item {
   padding: 0;
   margin: 0 auto;
   border-radius: 12px;
-}
-
-/* The strip's 6px scrollbar shrinks its content box, which pushed every avatar
-   3px left of the nav tabs' axis. Collapsed, the rail is too narrow to spend on
-   furniture — the wheel still scrolls it. */
-body.ws.ws-rail-collapsed #ws-rail-shortcuts {
-  scrollbar-width: none;
-}
-
-body.ws.ws-rail-collapsed #ws-rail-shortcuts::-webkit-scrollbar {
-  width: 0;
 }
 
 /* At icon-only size the avatar IS the affordance, so it fills its square.
