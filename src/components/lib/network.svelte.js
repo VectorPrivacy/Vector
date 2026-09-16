@@ -1,6 +1,6 @@
 // The Network section's dialogs and the data behind them: the Add Relay form, the relay
 // and media server info dialogs, a media server's capabilities and a relay's log lines.
-import { fadeDialog } from './dialog-lifecycle.svelte.js';
+import { fadeDialog, popOverlay } from './dialog-lifecycle.svelte.js';
 
 export const addRelayDialog = fadeDialog({ url: '', mode: 'both' });
 
@@ -9,7 +9,9 @@ export const relayInfoDialog = fadeDialog({
     ping: '--', pingColor: '', lastCheck: '--', copied: false,
 });
 
-export const blossomInfoDialog = fadeDialog({ url: '', enabled: true, isCustom: false, status: null });
+// Pops like the QR overlay: the content is ready in the first frame, so the motion is
+// the only cue that something opened.
+export const blossomInfoDialog = popOverlay({ url: '', enabled: true, isCustom: false, status: null });
 
 
 const blossomCaps = $state({ status: 'loading', caps: [] });

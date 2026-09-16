@@ -3,6 +3,7 @@
     // remove (custom) or enable / disable (default). A server that publishes its own
     // document speaks for itself; otherwise the view is what uploads have taught us.
     import { blossomInfoDialog, blossomInfoState, blossomStatsState } from '../../lib/network.svelte.js';
+    import { popIn } from '../../lib/popin.js';
     import BlossomCaps from './BlossomCaps.svelte';
     import BlossomAccount from './BlossomAccount.svelte';
     import BlossomPerformance from './BlossomPerformance.svelte';
@@ -27,11 +28,13 @@
     const personalised = $derived(doc.status === 'ok' && doc.info && doc.info.caller);
 </script>
 
-{#if st.open}
+<svelte:window onkeydown={(e) => { if (st.active && e.key === 'Escape') h.close(); }} />
+
+{#if st.active}
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div class="relay-dialog-overlay" class:active={st.active}
+    <div class="blossom-overlay" class:closing={st.closing}
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
-        <div class="relay-dialog relay-info-dialog">
+        <div class="relay-dialog relay-info-dialog blossom-dialog" use:popIn={st.tick}>
             <div class="relay-dialog-content blossom-dialog-content">
                 <div class="blossom-dialog-host">{st.url}</div>
                 {#if notice}
