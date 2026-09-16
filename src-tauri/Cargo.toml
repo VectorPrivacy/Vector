@@ -60,6 +60,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
+cc = "1"
 
 [dependencies]
 # Vector Core — the single source of truth for all Vector logic
@@ -109,6 +110,9 @@ webp = "0.3"
 fast-thumbhash = "0.2"
 base64-simd = "0.8"
 cpal = "0.16.0"
+# Calls: libopus built from the bundled source (cmake, as whisper already needs)
+opus = "0.4"
+bytes = "1"
 hound = "3.5.1"
 symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis"] }
 rustfft = "6.2"

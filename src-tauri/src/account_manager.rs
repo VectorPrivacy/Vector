@@ -698,6 +698,7 @@ pub async fn reset_session() {
     // Mid-flight voice recording — drop the buffer AND any stashed
     // "pending" recording so a voice note prepared for account A doesn't
     // surface in account B's compose box.
+    crate::calls::session::end_all("account_changed");
     if let Some(rec) = crate::voice::RECORDER.get() {
         rec.cancel();
     }

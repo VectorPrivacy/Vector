@@ -167,7 +167,7 @@ impl IrohState {
 
         let endpoint = Endpoint::builder(RelayOnly)
             .secret_key(secret_key)
-            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .alpns(vec![GOSSIP_ALPN.to_vec(), crate::calls::transport::CALL_ALPN.to_vec()])
             .transport_config(transport_config)
             .bind()
             .await?;
@@ -212,6 +212,8 @@ impl IrohState {
                                         if let Err(e) = gossip.handle_connection(conn).await {
                                             log_error!("[WEBXDC] Failed to handle gossip connection: {}", e);
                                         }
+                                    } else if conn.alpn() == crate::calls::transport::CALL_ALPN {
+                                        crate::calls::session::on_incoming(conn).await;
                                     }
                                 }
                                 Err(e) => {

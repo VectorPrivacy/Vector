@@ -134,6 +134,12 @@
               use:statusInto={[status.text, status.tags, status.gradient]}></span>
     </div>
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="btn call-header-btn" title="Call" style:display={vm && !vm.notes && !vm.group ? null : 'none'} onclick={() => h()?.startCall(vm.id)}>
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+    </div>
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="btn pins-header-btn" class:pins-open={pins.open} title="Pinned Messages" style:display={pins.button ? null : 'none'}
          bind:this={pinsButton} onclick={() => h()?.togglePins()}>
         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">

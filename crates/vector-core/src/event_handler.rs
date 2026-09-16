@@ -745,8 +745,9 @@ pub async fn commit_prepared_event(
                 }
                 RumorProcessingResult::LeaveRequest { .. } => false,
                 RumorProcessingResult::WebxdcPeerAdvertisement { .. } |
-                RumorProcessingResult::WebxdcPeerLeft { .. } => {
-                    // WebXDC is platform-specific — handled by src-tauri directly
+                RumorProcessingResult::WebxdcPeerLeft { .. } |
+                RumorProcessingResult::CallSignal { .. } => {
+                    // WebXDC and calls ride Iroh — handled by src-tauri directly
                     false
                 }
                 RumorProcessingResult::WallpaperChanged {

@@ -28,6 +28,7 @@
     import InviteModal from '../community/InviteModal.svelte';
     import Tooltip from './Tooltip.svelte';
     import ComposerPopups from '../composer/ComposerPopups.svelte';
+import CallOverlay from '../calls/CallOverlay.svelte';
     import FilePreview from '../composer/FilePreview.svelte';
     import MiniProfile from '../people/MiniProfile.svelte';
     import ReactionPopups from '../chat/ReactionPopups.svelte';
@@ -142,6 +143,7 @@
 {#if screens.qrOverlay}<QrOverlay h={screens.qrOverlay.h} />{/if}
 {#if screens.qrScanner}<QrScanner h={screens.qrScanner.h} />{/if}
 {#if screens.statusDialog}<StatusDialog h={screens.statusDialog.h} />{/if}
+{#if screens.call}<CallOverlay h={screens.call.h} />{/if}
 {#if screens.downgradeBlock}<DowngradeBlock h={screens.downgradeBlock.h} />{/if}
 {#if screens.modConsole}<ModConsole h={screens.modConsole.h} />{/if}
 {#if screens.network}

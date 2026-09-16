@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-set-muted"
+description = "Enables the call_set_muted command without any pre-configured scope."
+commands.allow = ["call_set_muted"]
+
+[[permission]]
+identifier = "deny-call-set-muted"
+description = "Denies the call_set_muted command without any pre-configured scope."
+commands.deny = ["call_set_muted"]

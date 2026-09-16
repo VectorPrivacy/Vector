@@ -98,6 +98,12 @@ fn main() {
             "encrypt",
             "decrypt",
             "start_recording",
+            "call_start",
+            "call_accept",
+            "call_reject",
+            "call_hangup",
+            "call_set_muted",
+            "call_status",
             "stop_recording",
             "update_unread_counter",
             "logout",
@@ -224,4 +230,18 @@ fn main() {
         ]),
     ))
     .expect("failed to run tauri-build");
+
+    // SpeexDSP's echo canceller and preprocessor for calls, compiled from the vendored
+    // sources: a plain C build every target's compiler handles, no cmake or bindgen.
+    let speex = std::path::Path::new("csrc/speexdsp");
+    println!("cargo:rerun-if-changed=csrc/speexdsp");
+    cc::Build::new()
+        .include(speex)
+        .files(["mdf.c", "preprocess.c", "fftwrap.c", "filterbank.c", "kiss_fft.c", "kiss_fftr.c"].iter().map(|f| speex.join(f)))
+        .define("FLOATING_POINT", "1")
+        .define("USE_KISS_FFT", "1")
+        .define("EXPORT", "")
+        .opt_level(2)
+        .warnings(false)
+        .compile("speexdsp_calls");
 }

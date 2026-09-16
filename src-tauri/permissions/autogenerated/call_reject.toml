@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-reject"
+description = "Enables the call_reject command without any pre-configured scope."
+commands.allow = ["call_reject"]
+
+[[permission]]
+identifier = "deny-call-reject"
+description = "Denies the call_reject command without any pre-configured scope."
+commands.deny = ["call_reject"]

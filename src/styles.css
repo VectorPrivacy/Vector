@@ -3335,9 +3335,9 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 
 .chat-header .profile-header-info {
-  /* Centered, so BOTH sides must clear the wider rail: pins + menu occupy
-     the right 90px. 200 = 2 x (90 + 10px breathing room). */
-  max-width: min(70%, calc(100% - 200px));
+  /* Centered, so BOTH sides must clear the wider rail: call + pins + menu
+     occupy the right 130px. 280 = 2 x (130 + 10px breathing room). */
+  max-width: min(70%, calc(100% - 280px));
   overflow: hidden;
 }
 
@@ -21249,4 +21249,207 @@ body.profile-switcher-editing .profile-switcher-add {
 .pol-seconds-unit {
     font-size: 12.5px;
     color: rgba(255, 255, 255, 0.42);
+}
+
+/* ── Calls ────────────────────────────────────────────────────────────────── */
+
+/* Header call button: a twin of the pin toggle, one slot further left. */
+.call-header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  top: 10px;
+  right: 90px;
+  width: 40px;
+  height: 40px;
+  color: #b2b2b2;
+}
+
+.call-header-btn svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* The hung-up phone is the phone turned about its own box, so it stays centred. */
+.call-glyph-down path {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: rotate(135deg);
+}
+
+/* The floating bar: above every pane, under nothing, so a call survives navigation. */
+.call-bar {
+  position: fixed;
+  top: calc(var(--chrome-h, 0px) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, calc(100% - 24px));
+  padding: 6px 8px 6px 6px;
+  border-radius: 999px;
+  background: rgba(20, 20, 20, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  color: #fff;
+  animation: qr-overlay-pop 0.16s ease-out;
+}
+
+.call-bar-active {
+  border-color: rgba(89, 252, 179, 0.35);
+}
+
+.call-bar-ended {
+  opacity: 0.7;
+}
+
+.call-bar-peer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.call-bar-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.15;
+}
+
+.call-bar-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.call-bar-status {
+  font-size: 11.5px;
+  color: #b2b2b2;
+  font-variant-numeric: tabular-nums;
+}
+
+.call-bar-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+
+.call-bar-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.call-bar-btn .icon {
+  width: 55%;
+  height: 55%;
+}
+
+.call-bar-btn-on {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.call-bar-btn-on .icon {
+  background-color: #111;
+}
+
+.call-bar-hangup {
+  background: #e5484d;
+}
+
+.call-bar-hangup:hover {
+  background: #f0555a;
+}
+
+.call-bar-hangup svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* The incoming ring: the pop overlay recipe, one card, two round answers. */
+.call-ring-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+}
+
+.call-ring-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 240px;
+  padding: 28px 32px 24px;
+  border-radius: 20px;
+  background: #1b1b1b;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  animation: qr-overlay-pop 0.16s ease-out;
+}
+
+.call-ring-name {
+  margin-top: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  color: #fff;
+}
+
+.call-ring-sub {
+  font-size: 13px;
+  color: #b2b2b2;
+}
+
+.call-ring-actions {
+  display: flex;
+  gap: 40px;
+  margin-top: 18px;
+}
+
+.call-round {
+  width: 60px;
+  height: 60px;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.call-round svg {
+  width: 28px;
+  height: 28px;
+}
+
+.call-round-decline {
+  background: #e5484d;
+}
+
+.call-round-accept {
+  background: var(--accent-color);
+  color: #111;
+  animation: call-ring-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes call-ring-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(89, 252, 179, 0.45); }
+  50% { box-shadow: 0 0 0 12px rgba(89, 252, 179, 0); }
 }

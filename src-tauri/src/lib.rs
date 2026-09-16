@@ -80,6 +80,9 @@ mod audio;
 // Unified audio engine: persistent cpal stream, mixing, precomputed FFT waveform
 mod audio_engine;
 
+// Native calls: Opus over Iroh datagrams, echo cancelled
+mod calls;
+
 // Shared utilities module (error handling, image encoding, state access)
 mod shared;
 
@@ -665,6 +668,12 @@ pub fn run() {
             commands::realtime::notifs,
             commands::realtime::start_typing,
             commands::realtime::send_webxdc_peer_advertisement,
+            calls::commands::call_start,
+            calls::commands::call_accept,
+            calls::commands::call_reject,
+            calls::commands::call_hangup,
+            calls::commands::call_set_muted,
+            calls::commands::call_status,
             commands::relays::connect,
             // Account crypto commands (commands/account.rs)
             commands::account::encrypt,

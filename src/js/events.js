@@ -1150,6 +1150,10 @@ async function setupRustListeners() {
     // they catch events fired during the pre-login bunker / reauth flows
     // before setupRustListeners has run.
 
+    // Native calls: the backend owns the state machine; the overlay mirrors it.
+    _on('call_state', (evt) => VectorSvelte.setCallState(evt.payload));
+    _on('call_stats', (evt) => VectorSvelte.setCallStats(evt.payload));
+
     await Promise.all(_p);
 
     // Note: Deep link listener is set up early in DOMContentLoaded, before login flow

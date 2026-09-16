@@ -119,6 +119,15 @@ pub enum RumorProcessingResult {
         sender_npub: String,
         created_at: u64,
     },
+    /// Call signalling (offer, answer, reject, hangup, busy) between two devices
+    CallSignal {
+        event_id: String,
+        call_id: String,
+        signal: String,
+        node_addr: Option<String>,
+        sender_npub: String,
+        created_at: u64,
+    },
     /// Unknown event type - stored for future compatibility
     /// The frontend will render this as "Unknown Event" placeholder
     UnknownEvent(StoredEvent),
@@ -968,8 +977,38 @@ fn process_app_specific(
         });
     }
 
+    if is_call_signal(&rumor) {
+        // Our own signals echo back from our other devices; the caller's session already knows.
+        if context.is_mine {
+            return Ok(RumorProcessingResult::Ignored);
+        }
+        let tag = |kind: &str| rumor.tags.find_kind(kind).and_then(|t| t.content()).map(|s| s.to_string());
+        let call_id = tag("call-id").ok_or("Call signal missing call-id tag")?;
+        let signal = tag("call-signal").ok_or("Call signal missing call-signal tag")?;
+        let sender_npub = rumor.pubkey.to_bech32().unwrap_or_default();
+        return Ok(RumorProcessingResult::CallSignal {
+            event_id: rumor.id.to_hex(),
+            call_id,
+            signal,
+            node_addr: tag("call-node-addr"),
+            sender_npub,
+            created_at: rumor.created_at.as_secs(),
+        });
+    }
+
     // Unknown application-specific data
     Ok(RumorProcessingResult::Ignored)
+}
+
+/// Check if a rumor is a call signal
+fn is_call_signal(rumor: &RumorEvent) -> bool {
+    rumor.tags
+        .find_kind("d")
+        .and_then(|tag| tag.content())
+        .map(|content| content == "vector-call")
+        .unwrap_or(false)
+        && rumor.tags.find_kind("call-id").is_some()
+        && rumor.tags.find_kind("call-signal").is_some()
 }
 
 /// Check if a rumor is a WebXDC peer advertisement

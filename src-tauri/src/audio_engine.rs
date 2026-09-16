@@ -73,8 +73,16 @@ pub struct AudioEngine {
 unsafe impl Send for AudioEngine {}
 unsafe impl Sync for AudioEngine {}
 
+/// A live call on the mixer: `play` is what the call wants heard, `tap` is what the
+/// speaker actually gets (everything mixed), the echo canceller's reference.
+pub struct LiveLink {
+    pub play: crate::calls::ring::SpscRing,
+    pub tap: crate::calls::ring::SpscRing,
+}
+
 struct SharedState {
     sources: std::sync::Mutex<HashMap<u32, AudioSource>>,
+    live: std::sync::RwLock<Option<Arc<LiveLink>>>,
     device_sample_rate: u32,
     #[allow(dead_code)]
     device_channels: u16,
@@ -224,6 +232,7 @@ impl AudioEngine {
 
         let shared = Arc::new(SharedState {
             sources: std::sync::Mutex::new(HashMap::new()),
+            live: std::sync::RwLock::new(None),
             device_sample_rate,
             device_channels,
             next_id: AtomicU32::new(1),
@@ -252,6 +261,20 @@ impl AudioEngine {
             shared,
             _stream: stream,
         })
+    }
+
+    /// One call at a time on the mixer.
+    pub fn attach_live(&self, link: Arc<LiveLink>) -> Result<(), String> {
+        let mut slot = self.shared.live.write().unwrap_or_else(|e| e.into_inner());
+        if slot.is_some() {
+            return Err("A call is already on the mixer".into());
+        }
+        *slot = Some(link);
+        Ok(())
+    }
+
+    pub fn detach_live(&self) {
+        *self.shared.live.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     /// Load audio from file path. WAV uses instant decode; other formats stream-decode
@@ -721,13 +744,33 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
         }
     }
 
+    // Drop the lock — file sources are mixed
+    drop(sources);
+
+    // A live call: its samples onto every channel, then the finished mix back to it.
+    // try_read: the callback never waits on the attach/detach writer.
+    if let Ok(slot) = shared.live.try_read() {
+        if let Some(link) = slot.as_ref() {
+            let mut mono = [0f32; 512];
+            for block in output.chunks_mut(channels * mono.len()) {
+                let frames = block.len() / channels;
+                let got = link.play.pop(&mut mono[..frames]);
+                mono[got..frames].fill(0.0);
+                for (i, frame) in block.chunks_mut(channels).enumerate() {
+                    for out in frame.iter_mut() {
+                        *out = (*out + mono[i]).clamp(-1.0, 1.0);
+                    }
+                    mono[i] = frame.iter().sum::<f32>() / channels as f32;
+                }
+                link.tap.push(&mono[..frames]);
+            }
+        }
+    }
+
     // Clamp output to [-1.0, 1.0] before any non-audio work
     for s in output.iter_mut() {
         *s = s.clamp(-1.0, 1.0);
     }
-
-    // Drop the lock — audio buffer is finalized
-    drop(sources);
 
     // Defer audio_ended events to background thread (no allocations on RT thread)
     for i in 0..finished_count {

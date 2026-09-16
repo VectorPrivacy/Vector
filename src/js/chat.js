@@ -1582,6 +1582,7 @@ VectorSvelte.setChatHeaderHandlers({
         backDotWanted: () => chatBackDotWanted(),
         closeChat: () => closeChat(),
         togglePins: () => pinsToggleDrawer(),
+        startCall: (npub) => startCall(npub),
         // Chat-scoped actions; only rendered when the open chat has any.
         openMenu: (rect) => {
             lastChatMenuRect = rect;
