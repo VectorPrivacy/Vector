@@ -31,11 +31,11 @@
     <div class="relay-dialog-overlay" class:active={st.active}
          onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
         <div class="relay-dialog relay-info-dialog">
-            <div class="relay-dialog-header">
-                <h3>{st.url}</h3>
-                <button class="relay-dialog-close" onclick={h.close}>&times;</button>
-            </div>
-            <div class="relay-dialog-content">
+            <div class="relay-dialog-content blossom-dialog-content">
+                <div class="blossom-dialog-top">
+                    <span class="blossom-dialog-host">{st.url}</span>
+                    <button class="relay-dialog-close" onclick={h.close} aria-label="Close">&times;</button>
+                </div>
                 {#if notice}
                     <div class="blossom-notice blossom-notice-{notice.tone}">
                         <span class="relay-status relay-status-small {notice.tone}">{notice.label}</span>

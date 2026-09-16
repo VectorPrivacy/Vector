@@ -11841,6 +11841,27 @@ select:disabled:hover {
   white-space: nowrap;
 }
 
+/* Media server dialog: no header bar — the host is a quiet line above the tiles */
+.blossom-dialog-content {
+  padding-top: 12px;
+  gap: 12px;
+}
+.blossom-dialog-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+}
+.blossom-dialog-host {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Media server: shown only when something is wrong */
 .blossom-notice {
   display: flex;
