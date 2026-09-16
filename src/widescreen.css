@@ -1268,13 +1268,13 @@ body.ws .ws-rail-messages {
   align-items: center;
   gap: 11px;
   margin: 0 8px;
-  padding: 0 10px 0 16px;
+  padding: 0 10px 0 14px;
   height: 40px;
   border-radius: 10px;
   background-color: var(--ws-hover);
   color: rgba(255, 255, 255, 0.7);
   font-family: 'Rubik', Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   -webkit-user-select: none;
   user-select: none;
@@ -1293,8 +1293,8 @@ body.ws:not(.ws-community-pane) .ws-rail-messages {
 }
 
 body.ws .ws-rail-messages svg {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
 }
 
@@ -1575,7 +1575,7 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
 }
 
 /* Nav rows: icon-left + label, with a neutral pill on the active tab. The row
-   is the collapsed tile's height, and its 16px left inset puts the glyph on the
+   is the collapsed tile's height, and its 14px left inset puts the glyph on the
    pixel a 40px tile centres it on, so collapsing moves nothing but the label. */
 body.ws #navbar .navbar-btn {
   display: flex;
@@ -1584,7 +1584,7 @@ body.ws #navbar .navbar-btn {
   gap: 11px;
   margin: 0 8px;
   height: 40px;
-  padding: 0 10px 0 16px;
+  padding: 0 10px 0 14px;
   border-radius: 10px;
   flex-shrink: 0;
   transition: background-color 0.12s ease, opacity 0.12s ease;
@@ -1601,15 +1601,15 @@ body.ws #navbar .navbar-btn:not(.navbar-btn-inactive) {
 }
 
 body.ws #navbar .navbar-icon {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   margin: 0;
   flex-shrink: 0;
 }
 
 body.ws #navbar .navbar-text {
   margin: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   white-space: nowrap;
   text-align: left;
@@ -1639,7 +1639,7 @@ body.ws #ws-rail-collapse {
   gap: 11px;
   margin: 0 8px;
   height: 40px;
-  padding: 0 10px 0 16px;
+  padding: 0 10px 0 14px;
   border-radius: 10px;
   flex-shrink: 0;
   opacity: 0.4;
@@ -1669,8 +1669,8 @@ body.ws:not(.ws-rail-locked) #ws-rail-collapse {
 }
 
 body.ws #ws-rail-collapse .navbar-icon {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   margin: 0;
   flex-shrink: 0;
   transition: transform 0.18s cubic-bezier(0.33, 1, 0.68, 1);
