@@ -11955,13 +11955,31 @@ select:disabled:hover {
   font-size: 11px;
   font-weight: 400;
 }
+.blossom-perf-chart {
+  position: relative;
+  margin-top: 8px;
+  touch-action: pan-y;
+}
 .blossom-perf-spark {
   display: block;
   width: 100%;
-  height: 30px;
-  margin-top: 8px;
+  height: 44px;
   overflow: visible;
 }
+/* The hovered upload's numbers, floated above its dot. */
+.blossom-perf-tip {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 8px));
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(20, 20, 20, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.blossom-perf-tip b { color: var(--accent-color, #59fcb3); font-weight: 600; }
 .blossom-perf-foot {
   display: flex;
   flex-wrap: wrap;

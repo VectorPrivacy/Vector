@@ -10,7 +10,7 @@
 //! Speed is this device's throughput to the server, which the uplink caps:
 //! shown as a number, never graded.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Weight of a new sample against the running average.
 const ALPHA: f64 = 0.3;
@@ -26,6 +26,36 @@ const MAXED_WINDOW_SECS: i64 = 24 * 3600;
 pub const FAIL_OFFLINE: &str = "offline";
 pub const FAIL_MAXED: &str = "maxed";
 
+/// One recent upload: its speed and its size, stored as `[mbps, bytes]`.
+/// Rows written before sizes were kept hold a bare number and read back with
+/// `bytes: 0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sample {
+    pub mbps: f32,
+    pub bytes: u64,
+}
+
+impl Serialize for Sample {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        (self.mbps, self.bytes).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Sample {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Shape {
+            Pair(f32, u64),
+            Bare(f32),
+        }
+        Ok(match Shape::deserialize(d)? {
+            Shape::Pair(mbps, bytes) => Sample { mbps, bytes },
+            Shape::Bare(mbps) => Sample { mbps, bytes: 0 },
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct ServerStats {
     pub latency_ms: Option<f64>,
@@ -36,8 +66,8 @@ pub struct ServerStats {
     pub last_ok_at: Option<i64>,
     pub last_fail_at: Option<i64>,
     pub last_fail_kind: Option<String>,
-    /// Recent upload speeds in Mbit/s, oldest first.
-    pub recent: Vec<f32>,
+    /// Recent uploads, oldest first.
+    pub recent: Vec<Sample>,
 }
 
 /// The list's one-word answer to "will my next upload here work?".
@@ -182,7 +212,7 @@ pub fn record_upload(server_url: &str, bytes: u64, ms: f64) {
         s.uploads += 1;
         s.bytes_total += bytes;
         s.last_ok_at = Some(now_secs());
-        s.recent.push(mbps as f32);
+        s.recent.push(Sample { mbps: mbps as f32, bytes });
         if s.recent.len() > RECENT_MAX {
             let drop = s.recent.len() - RECENT_MAX;
             s.recent.drain(..drop);
@@ -274,7 +304,8 @@ mod tests {
         ServerStats {
             latency_ms: Some(48.4), mbps: Some(12.0), best_mbps: Some(20.0), uploads: 3,
             bytes_total: 3_000_000, last_ok_at: Some(1000), last_fail_at: None,
-            last_fail_kind: None, recent: vec![10.0, 12.0],
+            last_fail_kind: None,
+            recent: vec![Sample { mbps: 10.0, bytes: 0 }, Sample { mbps: 12.0, bytes: 2_000_000 }],
         }
     }
 
@@ -336,6 +367,15 @@ mod tests {
     fn nothing_known_is_untested_and_a_document_alone_is_online() {
         assert_eq!(derive_status(true, None, None, 0).state, "untested");
         assert_eq!(derive_status(true, Some(&doc(None)), None, 0).state, "online");
+    }
+
+    #[test]
+    fn samples_round_trip_as_pairs_and_read_old_bare_numbers() {
+        let ring = vec![Sample { mbps: 4.5, bytes: 300 }];
+        let json = serde_json::to_string(&ring).unwrap();
+        assert_eq!(json, "[[4.5,300]]");
+        let back: Vec<Sample> = serde_json::from_str("[[4.5,300],7.25]").unwrap();
+        assert_eq!(back, vec![Sample { mbps: 4.5, bytes: 300 }, Sample { mbps: 7.25, bytes: 0 }]);
     }
 
     #[test]
