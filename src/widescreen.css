@@ -1262,7 +1262,12 @@ body.ws #ws-rail-dms {
 }
 
 /* The Messages tile: a labelled door in the unread rows' slot, lit while the DM
-   list is the pane on screen the way a chosen community's shortcut lights. */
+   list is the pane on screen the way a chosen community's shortcut lights. It
+   stands as far under the header seam as it does above the divider. */
+body.ws #ws-rail-messages {
+  padding-top: 10px;
+}
+
 body.ws .ws-rail-messages {
   display: flex;
   align-items: center;
@@ -1385,10 +1390,6 @@ body.ws .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
 /* Collapsed: the words go, the divider between the groups carries the rhythm. */
 body.ws.ws-rail-collapsed .ws-rail-group-label {
   display: none;
-}
-
-body.ws.ws-rail-collapsed .ws-rail-group:not([hidden]) ~ #ws-rail-spaces::before {
-  margin: 6px 12px 12px;
 }
 
 /* The seam between the shortcut strip and the nav tabs below it. */
