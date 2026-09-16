@@ -78,6 +78,9 @@ pub struct ServerInfo {
     pub caller: Option<CallerInfo>,
     /// Unix seconds.
     pub fetched_at: i64,
+    /// The document as received, for persisting; not sent to the UI.
+    #[serde(skip)]
+    pub raw: Value,
 }
 
 impl ServerInfo {
@@ -140,6 +143,7 @@ impl ServerInfo {
             capacity_limit: u64_at(&["capacity", "limit_bytes"]),
             caller,
             fetched_at: now_secs(),
+            raw: v.clone(),
         })
     }
 
@@ -206,8 +210,26 @@ fn cache() -> Arc<Mutex<HashMap<String, Cached>>> {
 
 /// The last document fetched for `server_url`, at any age. `None` when the
 /// server has none or was never asked.
+///
+/// Memory first; failing that, the copy persisted by the last fetch, so a
+/// fresh process paints the dialog's final shape before it has asked anyone.
 pub fn cached(server_url: &str) -> Option<ServerInfo> {
-    cache().lock().ok()?.get(&norm_url(server_url))?.info.clone()
+    let key = norm_url(server_url);
+    if let Ok(c) = cache().lock() {
+        if let Some(entry) = c.get(&key) {
+            return entry.info.clone();
+        }
+    }
+    load_persisted(&key)
+}
+
+fn persist_key(key: &str) -> String {
+    format!("blossom_info:{}", key)
+}
+
+fn load_persisted(key: &str) -> Option<ServerInfo> {
+    let json = crate::db::get_sql_setting(persist_key(key)).ok().flatten()?;
+    serde_json::from_str::<Value>(&json).ok().and_then(|v| ServerInfo::parse(&v))
 }
 
 /// Whether `server_url` has been asked at all this session.
@@ -220,15 +242,21 @@ fn age_of(server_url: &str) -> Option<Duration> {
 }
 
 fn store(server_url: &str, info: Option<ServerInfo>) {
+    let key = norm_url(server_url);
     if let Ok(mut c) = cache().lock() {
-        c.insert(norm_url(server_url), Cached { info, at: Instant::now() });
+        c.insert(key.clone(), Cached { info: info.clone(), at: Instant::now() });
     }
+    // The raw document is what parse() reads back, so it is what is kept.
+    let persisted = info.as_ref().and_then(|i| serde_json::to_string(&i.raw).ok()).unwrap_or_default();
+    let _ = crate::db::set_sql_setting(persist_key(&key), persisted);
 }
 
 pub fn invalidate(server_url: &str) {
+    let key = norm_url(server_url);
     if let Ok(mut c) = cache().lock() {
-        c.remove(&norm_url(server_url));
+        c.remove(&key);
     }
+    let _ = crate::db::set_sql_setting(persist_key(&key), String::new());
 }
 
 /// An upload of `bytes` just landed on `server_url`: move the caller's usage

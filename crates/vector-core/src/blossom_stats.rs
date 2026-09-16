@@ -282,7 +282,7 @@ mod tests {
         ServerInfo {
             name: None, software: None, version: None, description: None, buds: vec![],
             extensions: vec![], max_blob: None, mime: vec![], capacity_used: None,
-            capacity_limit: None, caller, fetched_at: 0,
+            capacity_limit: None, caller, fetched_at: 0, raw: serde_json::Value::Null,
         }
     }
 
