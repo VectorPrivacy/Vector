@@ -13,7 +13,7 @@
     const samples = $derived((stats.recent || []).map(s => Array.isArray(s) ? { mbps: s[0], bytes: s[1] } : { mbps: s, bytes: 0 }));
 
     const W = 300, H = 44, PAD = 4;
-    const scale = $derived(Math.max(...samples.map(s => s.mbps), stats.mbps || 0, 0.001));
+    const scale = $derived(Math.max(...samples.map(s => s.mbps), 0.001));
     const yOf = (v) => H - PAD - (v / scale) * (H - PAD * 2);
     const points = $derived.by(() => {
         if (samples.length < 2) return [];
@@ -38,7 +38,6 @@
         return d;
     });
     const area = $derived(curve ? `${curve} L${points[points.length - 1].x.toFixed(1)},${H} L${points[0].x.toFixed(1)},${H} Z` : '');
-    const avgY = $derived(stats.mbps != null && points.length ? yOf(stats.mbps) : null);
 
     // The nearest upload to the pointer, shown while hovering or after a tap.
     let hover = $state(null);
@@ -50,6 +49,9 @@
         for (const p of points) if (Math.abs(p.x - x) < Math.abs(best.x - x)) best = p;
         hover = best;
     }
+    // A tooltip near either edge hangs inward from its dot instead of centring on it,
+    // so it never leaves the chart's box.
+    const tipSide = $derived(!hover ? '' : hover.x < W * 0.2 ? 'blossom-perf-tip-left' : hover.x > W * 0.8 ? 'blossom-perf-tip-right' : '');
 </script>
 
 {#if latency != null || stats.mbps != null}
@@ -81,16 +83,13 @@
                         </linearGradient>
                     </defs>
                     <path d={area} fill="url(#blossom-perf-fill)" />
-                    {#if avgY != null}
-                        <line x1="0" y1={avgY.toFixed(1)} x2={W} y2={avgY.toFixed(1)} stroke="currentColor" stroke-width="1" stroke-dasharray="3 4" opacity="0.28" vector-effect="non-scaling-stroke" />
-                    {/if}
                     <path d={curve} fill="none" stroke="var(--accent-color, #59fcb3)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.75" vector-effect="non-scaling-stroke" />
                     {#each points as p, i}
                         <path d="M{p.x.toFixed(1)},{p.y.toFixed(1)}h0.01" stroke="var(--accent-color, #59fcb3)" stroke-width={hover === p ? 7 : (i === points.length - 1 ? 6 : 4)} stroke-linecap="round" vector-effect="non-scaling-stroke" />
                     {/each}
                 </svg>
                 {#if hover}
-                    <div class="blossom-perf-tip" style="left: {(hover.x / W * 100).toFixed(1)}%; top: {(hover.y / H * 100).toFixed(1)}%">
+                    <div class="blossom-perf-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(1)}%; top: {(hover.y / H * 100).toFixed(1)}%">
                         <b>{mbit(hover.mbps)} Mbit/s</b>{#if hover.bytes}{' · '}{h.formatBytes(hover.bytes, 1)}{/if}
                     </div>
                 {/if}
@@ -100,7 +99,6 @@
             <span>
                 {#if points.length}Speed of your last {samples.length} uploads{:else}{stats.uploads} upload{stats.uploads === 1 ? '' : 's'}{/if}{#if stats.bytes_total}{' · '}{h.formatBytes(stats.bytes_total, 1)}{/if}
             </span>
-            {#if avgY != null}<span>dashed: average</span>{/if}
         </div>
     </div>
 {/if}
