@@ -293,6 +293,11 @@ async fn print_relay(c: &vector_core::community::Community) {
             for ev in &evs {
                 match control::open_control_edition(ev, &group) {
                     Ok((ed, os)) => {
+                        // CONCORD_DUMP_SEALS=1 prints each verified seal as signed, so an
+                        // outside tool can check the signature again.
+                        if std::env::var("CONCORD_DUMP_SEALS").is_ok() {
+                            println!("SEAL epoch={} vsk={} entity={} v{} {}", pe.0, ed.vsk, &hexpref(&ed.entity_id)[..9], ed.version, os.seal.as_json());
+                        }
                         // Seal time is when the author signed; wrap time is when THIS copy was
                         // published. A gap of months on a fresh epoch is a re-wrapped old seal.
                         let row = format!(
