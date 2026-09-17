@@ -21579,8 +21579,34 @@ body.profile-switcher-editing .profile-switcher-add {
   stroke-width: 6px;
 }
 
-/* Hovering swaps the legend for the sample's readout: same line, so nothing floats. */
+/* The readout: a tip inside the chart's top edge, never past its sides, and the
+   same words on the legend line beneath. */
+.call-graph-tip {
+  position: absolute;
+  top: 4px;
+  transform: translateX(-50%);
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(20, 20, 20, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  font-size: 11px;
+  color: var(--text-color, #f6f6f6);
+  white-space: nowrap;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+  z-index: 1;
+}
+
+.call-graph-tip b {
+  color: var(--accent-color, #59fcb3);
+  font-weight: 600;
+}
+
+.call-graph-tip-left { left: 4px !important; transform: none; }
+.call-graph-tip-right { left: auto !important; right: 4px; transform: none; }
+
 .call-graph-readout {
+  font-size: 11.5px;
   color: var(--text-color, #f6f6f6);
   font-variant-numeric: tabular-nums;
 }

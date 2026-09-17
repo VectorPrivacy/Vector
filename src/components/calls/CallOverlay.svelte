@@ -198,6 +198,8 @@
         hover = best;
     }
     function leave() { hover = null; }
+    // The tip sits inside the chart's top edge; near either side it hangs from that side.
+    const tipSide = $derived(!hover ? '' : hover.x < W * 0.25 ? 'call-graph-tip-left' : hover.x > W * 0.75 ? 'call-graph-tip-right' : '');
     function lostWord(v) { return v < 0.05 ? 'nothing lost' : v < 1 ? 'under 1% lost' : `${v.toFixed(v < 10 ? 1 : 0)}% lost`; }
 </script>
 
@@ -308,6 +310,11 @@
                                 <path d="M{hover.x.toFixed(1)},{hover.y.toFixed(1)}h0.01" class="call-graph-dot" stroke-linecap="round" vector-effect="non-scaling-stroke" />
                             {/if}
                         </svg>
+                        {#if hover}
+                            <div class="call-graph-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(2)}%">
+                                <b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}
+                            </div>
+                        {/if}
                         <div class="call-graph-legend">
                             {#if hover}
                                 <span class="call-graph-readout"><b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}</span>
