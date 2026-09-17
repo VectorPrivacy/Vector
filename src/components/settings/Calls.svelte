@@ -13,21 +13,21 @@
 
 <div class="form-group">
     <label class="toggle-container">
-        <span>Automatic gain<span class="settings-hint">Lifts a quiet microphone so nobody has to shout</span></span>
+        <span class="settings-label">Automatic gain<span class="settings-hint">Lifts a quiet microphone so nobody has to shout</span></span>
         <input type="checkbox" checked={a.autoGain} onchange={(e) => h.setAudio({ autoGain: e.currentTarget.checked })}>
         <span class="neon-toggle"></span>
     </label>
 </div>
 <div class="form-group">
     <label class="toggle-container">
-        <span>Echo cancellation<span class="settings-hint">Keeps your speaker out of your microphone</span></span>
+        <span class="settings-label">Echo cancellation<span class="settings-hint">Keeps your speaker out of your microphone</span></span>
         <input type="checkbox" checked={a.echoCancel} onchange={(e) => h.setAudio({ echoCancel: e.currentTarget.checked })}>
         <span class="neon-toggle"></span>
     </label>
 </div>
 <div class="form-group">
     <label class="toggle-container">
-        <span>Noise suppression<span class="settings-hint">Fans, keyboards and hum, taken down</span></span>
+        <span class="settings-label">Noise suppression<span class="settings-hint">Fans, keyboards and hum, taken down</span></span>
         <input type="checkbox" checked={a.noiseSuppress} onchange={(e) => h.setAudio({ noiseSuppress: e.currentTarget.checked })}>
         <span class="neon-toggle"></span>
     </label>
@@ -35,7 +35,7 @@
 
 <div class="form-group calls-mic-test">
     <div class="calls-mic-test-row">
-        <span>Your voice<span class="settings-hint">{inCall ? 'Shown on the call while one is up' : a.micTest ? 'Speak normally: this is what they hear' : 'Test how you sound with the switches above'}</span></span>
+        <span class="settings-label">Your voice<span class="settings-hint">{inCall ? 'Shown on the call while one is up' : a.micTest ? 'Speak normally: this is what they hear' : 'Test how you sound with the switches above'}</span></span>
         {#if !inCall}
             <button class="calls-mic-test-btn" class:calls-mic-test-on={a.micTest} onclick={() => a.micTest ? h.micTestStop() : h.micTestStart()}>
                 {a.micTest ? 'Stop' : 'Test microphone'}

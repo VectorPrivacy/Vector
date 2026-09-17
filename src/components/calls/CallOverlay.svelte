@@ -214,9 +214,21 @@
                 </div>
                 <div class="call-panel-section">Voice processing</div>
                 <div class="call-panel-switches">
-                    <label class="call-switch"><input type="checkbox" checked={a.autoGain} onchange={(e) => h.setAudio({ autoGain: e.currentTarget.checked })}><span>Automatic gain</span></label>
-                    <label class="call-switch"><input type="checkbox" checked={a.echoCancel} onchange={(e) => h.setAudio({ echoCancel: e.currentTarget.checked })}><span>Echo cancellation</span></label>
-                    <label class="call-switch"><input type="checkbox" checked={a.noiseSuppress} onchange={(e) => h.setAudio({ noiseSuppress: e.currentTarget.checked })}><span>Noise suppression</span></label>
+                    <label class="toggle-container call-switch">
+                        <span>Automatic gain</span>
+                        <input type="checkbox" checked={a.autoGain} onchange={(e) => h.setAudio({ autoGain: e.currentTarget.checked })}>
+                        <span class="neon-toggle"></span>
+                    </label>
+                    <label class="toggle-container call-switch">
+                        <span>Echo cancellation</span>
+                        <input type="checkbox" checked={a.echoCancel} onchange={(e) => h.setAudio({ echoCancel: e.currentTarget.checked })}>
+                        <span class="neon-toggle"></span>
+                    </label>
+                    <label class="toggle-container call-switch">
+                        <span>Noise suppression</span>
+                        <input type="checkbox" checked={a.noiseSuppress} onchange={(e) => h.setAudio({ noiseSuppress: e.currentTarget.checked })}>
+                        <span class="neon-toggle"></span>
+                    </label>
                 </div>
                 <div class="call-panel-section">Connection</div>
                 <div class="call-panel-grid">
