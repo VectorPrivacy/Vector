@@ -198,7 +198,6 @@
         hover = best;
     }
     function leave() { hover = null; }
-    const tipSide = $derived(!hover ? '' : hover.x < W * 0.2 ? 'call-graph-tip-left' : hover.x > W * 0.8 ? 'call-graph-tip-right' : '');
     function lostWord(v) { return v < 0.05 ? 'nothing lost' : v < 1 ? 'under 1% lost' : `${v.toFixed(v < 10 ? 1 : 0)}% lost`; }
 </script>
 
@@ -309,14 +308,13 @@
                                 <path d="M{hover.x.toFixed(1)},{hover.y.toFixed(1)}h0.01" class="call-graph-dot" stroke-linecap="round" vector-effect="non-scaling-stroke" />
                             {/if}
                         </svg>
-                        {#if hover}
-                            <div class="call-graph-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(2)}%; top: {(hover.y / H * 100).toFixed(2)}%">
-                                <b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}
-                            </div>
-                        {/if}
                         <div class="call-graph-legend">
-                            <span><i class="call-graph-key call-graph-key-delay"></i>delay, up to {graph.maxRtt} ms</span>
-                            <span><i class="call-graph-key call-graph-key-lost"></i>lost audio</span>
+                            {#if hover}
+                                <span class="call-graph-readout"><b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}</span>
+                            {:else}
+                                <span><i class="call-graph-key call-graph-key-delay"></i>delay, up to {graph.maxRtt} ms</span>
+                                <span><i class="call-graph-key call-graph-key-lost"></i>lost audio</span>
+                            {/if}
                         </div>
                     {:else}
                         <div class="call-graph-empty">Measuring the connection…</div>

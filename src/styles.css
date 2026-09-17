@@ -21579,28 +21579,16 @@ body.profile-switcher-editing .profile-switcher-add {
   stroke-width: 6px;
 }
 
-/* The Blossom chart's readout: one line, pinned above the sample. */
-.call-graph-tip {
-  position: absolute;
-  transform: translate(-50%, calc(-100% - 8px));
-  padding: 3px 7px;
-  border-radius: 6px;
-  background: rgba(20, 20, 20, 0.96);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  font-size: 11px;
+/* Hovering swaps the legend for the sample's readout: same line, so nothing floats. */
+.call-graph-readout {
   color: var(--text-color, #f6f6f6);
-  white-space: nowrap;
-  pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
 
-.call-graph-tip b {
+.call-graph-readout b {
   color: var(--accent-color, #59fcb3);
   font-weight: 600;
 }
-
-.call-graph-tip-left { transform: translate(-4px, calc(-100% - 8px)); }
-.call-graph-tip-right { transform: translate(calc(-100% + 4px), calc(-100% - 8px)); }
 
 .call-graph svg {
   display: block;
@@ -21626,6 +21614,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .call-graph-legend {
   display: flex;
   justify-content: space-between;
+  min-height: 14px;
   font-size: 10.5px;
   color: #8a8a8a;
 }
