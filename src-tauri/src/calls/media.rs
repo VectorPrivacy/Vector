@@ -7,6 +7,7 @@
 use super::aec::{EchoCanceller, SpeexAec};
 use super::codec::{Decoder, Encoder};
 use super::declick::Declicker;
+use super::rate::RateControl;
 use super::resample::Resampler;
 use super::ring::SpscRing;
 use super::settings;
@@ -60,6 +61,10 @@ pub struct MediaStats {
     pub jitter_ms: AtomicU32,
     /// Cable clicks cut out of the microphone before encoding.
     pub clicks_cut: AtomicU64,
+    /// What the encoder is sending at, in kbit/s.
+    pub bitrate_kbps: AtomicU32,
+    /// Packets the network dropped on the way out, percent of the last second (f32 bits).
+    pub net_loss: AtomicU32,
     /// Loudness of what the microphone sends after processing, 0 to 1 (f32 bits).
     pub mic_level: AtomicU32,
     /// Loudness of what the peer sends, 0 to 1 (f32 bits).
@@ -72,6 +77,9 @@ impl MediaStats {
     }
     pub fn peer_level(&self) -> f32 {
         f32::from_bits(self.peer_level.load(Ordering::Relaxed))
+    }
+    pub fn net_loss(&self) -> f32 {
+        f32::from_bits(self.net_loss.load(Ordering::Relaxed))
     }
 }
 
@@ -342,6 +350,9 @@ fn capture_thread(
     let started = Instant::now();
     let mut seq: u16 = 0;
     let mut netsim = NetSim::from_env();
+    let mut rate = RateControl::new();
+    stats.bitrate_kbps.store(rate.kbps(), Ordering::Relaxed);
+    let mut rate_tick = Instant::now();
     // Far-end may run ahead of near-end by this much before the excess is dropped.
     let far_slack = FRAME * 5;
 
@@ -406,6 +417,19 @@ fn capture_thread(
         }
         if let (Some(sim), Some(conn)) = (netsim.as_mut(), conn.as_ref()) {
             sim.pump(conn, &stats);
+        }
+        if let Some(conn) = conn.as_ref() {
+            if rate_tick.elapsed() >= Duration::from_secs(1) {
+                rate_tick = Instant::now();
+                // Every QUIC packet goes out as one UDP datagram, so this is packets sent.
+                let net = conn.stats();
+                if let Some(setting) = rate.observe(net.udp_tx.datagrams, net.lost_packets) {
+                    if enc.set_rate(setting.kbps, setting.fec_pct).is_ok() {
+                        stats.bitrate_kbps.store(setting.kbps, Ordering::Relaxed);
+                    }
+                }
+                stats.net_loss.store(rate.loss_pct().to_bits(), Ordering::Relaxed);
+            }
         }
         std::thread::sleep(Duration::from_millis(5));
     }

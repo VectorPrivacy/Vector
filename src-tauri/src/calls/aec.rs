@@ -153,11 +153,12 @@ impl Drop for SpeexAec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calls::{AEC_TAIL_MS, ENGINE_RATE, FRAME};
 
     #[test]
     fn a_pure_echo_is_attenuated() {
-        let frame = 320;
-        let mut aec = SpeexAec::new(16_000, frame, 200).unwrap();
+        let frame = FRAME;
+        let mut aec = SpeexAec::new(ENGINE_RATE, frame, AEC_TAIL_MS).unwrap();
         let mut phase = 0f32;
         let mut residual = 0f64;
         let mut input = 0f64;
@@ -166,7 +167,7 @@ mod tests {
         for _ in 0..300 {
             let far: Vec<i16> = (0..frame)
                 .map(|_| {
-                    phase += 2.0 * std::f32::consts::PI * 440.0 / 16_000.0;
+                    phase += 2.0 * std::f32::consts::PI * 440.0 / ENGINE_RATE as f32;
                     (phase.sin() * 12_000.0) as i16
                 })
                 .collect();
@@ -183,8 +184,8 @@ mod tests {
 
     #[test]
     fn a_quiet_voice_is_lifted() {
-        let frame = 320;
-        let mut aec = SpeexAec::new(16_000, frame, 200).unwrap();
+        let frame = FRAME;
+        let mut aec = SpeexAec::new(ENGINE_RATE, frame, AEC_TAIL_MS).unwrap();
         let far = vec![0i16; frame];
         let mut phase = 0f32;
         let rms = |s: &[i16]| (s.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
@@ -196,7 +197,7 @@ mod tests {
             let on = (i % 25) < 15;
             let near: Vec<i16> = (0..frame)
                 .map(|_| {
-                    phase += 2.0 * std::f32::consts::PI * 140.0 / 16_000.0;
+                    phase += 2.0 * std::f32::consts::PI * 140.0 / ENGINE_RATE as f32;
                     let v: f32 = (1..=8).map(|h| (phase * h as f32).sin() / h as f32).sum();
                     if on { (v * 500.0) as i16 } else { 0 }
                 })

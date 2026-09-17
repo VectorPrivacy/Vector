@@ -173,6 +173,15 @@
         return recent.reduce((a, r) => a + r.lost, 0) / recent.length;
     });
     const lostText = $derived(lostPct < 0.05 ? 'none' : lostPct < 1 ? 'under 1%' : `${lostPct.toFixed(lostPct < 10 ? 1 : 0)}%`);
+    // The sending bitrate, which follows the connection: the top of the ladder on a
+    // clean link, lower while the network is dropping our packets.
+    const bitrate = $derived(c.stats?.bitrate_kbps || null);
+    const bitrateHint = $derived.by(() => {
+        const loss = c.stats?.net_loss ?? 0;
+        if (loss >= 4) return 'lowered, the network is dropping packets';
+        if (bitrate && bitrate >= 48) return 'full quality';
+        return '';
+    });
     // Graph: delay as a line, lost audio as bars, over the last minute. The top
     // HEAD pixels are headroom for the tip, so it can sit above the highest sample.
     const W = 240, H = 72, HEAD = 34;
@@ -298,6 +307,8 @@
                     <span class="call-panel-value">{delayMs == null ? '…' : `${delayMs} ms`}{#if path} <span class="call-panel-hint">{path}</span>{/if}</span>
                     <span class="call-panel-label" title="Moments the speaker had to fill in because the audio was late or missing">Lost audio</span>
                     <span class="call-panel-value">{lostText}</span>
+                    <span class="call-panel-label" title="How much data your voice uses. It rises on a clean connection and drops when packets are being lost">Bitrate</span>
+                    <span class="call-panel-value">{bitrate == null ? '…' : `${bitrate} kbit/s`}{#if bitrateHint} <span class="call-panel-hint">{bitrateHint}</span>{/if}</span>
                 </div>
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div class="call-graph">

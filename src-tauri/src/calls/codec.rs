@@ -1,5 +1,6 @@
 //! Opus for calls: one 20 ms mono frame per packet at the engine rate.
 
+use super::rate::START_KBPS;
 use super::{ENGINE_RATE, FRAME};
 
 pub struct Encoder(opus::Encoder);
@@ -8,12 +9,19 @@ impl Encoder {
     pub fn new() -> Result<Self, String> {
         let mut enc = opus::Encoder::new(ENGINE_RATE, opus::Channels::Mono, opus::Application::Voip)
             .map_err(|e| format!("opus encoder: {e}"))?;
-        enc.set_bitrate(opus::Bitrate::Bits(24_000)).map_err(|e| e.to_string())?;
         enc.set_vbr(true).map_err(|e| e.to_string())?;
         // In-band FEC lets the decoder rebuild a lost frame from its successor.
         enc.set_inband_fec(true).map_err(|e| e.to_string())?;
-        enc.set_packet_loss_perc(10).map_err(|e| e.to_string())?;
-        Ok(Self(enc))
+        let mut enc = Self(enc);
+        enc.set_rate(START_KBPS, 10)?;
+        Ok(enc)
+    }
+
+    /// The bitrate and the loss the encoder should expect: more expected loss and
+    /// Opus spends more of the bitrate on FEC, less on the frame itself.
+    pub fn set_rate(&mut self, kbps: u32, loss_pct: u32) -> Result<(), String> {
+        self.0.set_bitrate(opus::Bitrate::Bits((kbps * 1000) as i32)).map_err(|e| e.to_string())?;
+        self.0.set_packet_loss_perc(loss_pct as i32).map_err(|e| e.to_string())
     }
 
     /// Encodes one frame into `out`, returning the packet length.

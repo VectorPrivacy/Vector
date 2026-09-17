@@ -74,6 +74,9 @@ pub struct CallStats {
     pub depth_ms: u32,
     pub jitter_ms: u32,
     pub clicks_cut: u64,
+    pub bitrate_kbps: u32,
+    /// Percent of our packets the network dropped in the last second.
+    pub net_loss: f32,
 }
 
 struct Call {
@@ -714,6 +717,8 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 clicks_cut: stats.clicks_cut.load(Ordering::Relaxed),
                 depth_ms: stats.depth_ms.load(Ordering::Relaxed),
                 jitter_ms: stats.jitter_ms.load(Ordering::Relaxed),
+                bitrate_kbps: stats.bitrate_kbps.load(Ordering::Relaxed),
+                net_loss: stats.net_loss(),
             };
             vector_core::traits::emit_event("call_stats", &payload);
         }
