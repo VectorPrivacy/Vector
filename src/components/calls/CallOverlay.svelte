@@ -121,7 +121,27 @@
         const moved = drag.moved;
         drag = null;
         if (moved) savePos();
-        else expanded = !expanded;
+        else toggle();
+    }
+
+    // Width is animated by hand: the closed pill hugs its content, which CSS cannot
+    // tween from, so the width is pinned for the transition and released after.
+    const OPEN_W = 300;
+    let width = $state(null);
+    let collapsedW = 0;
+    $effect(() => {
+        if (!expanded && width == null && pill) collapsedW = pill.offsetWidth;
+    });
+    function toggle() {
+        if (!pill) { expanded = !expanded; return; }
+        const from = pill.offsetWidth;
+        if (!expanded) collapsedW = from;
+        width = from;
+        expanded = !expanded;
+        requestAnimationFrame(() => requestAnimationFrame(() => { width = expanded ? OPEN_W : collapsedW; }));
+    }
+    function onWidthDone(e) {
+        if (e.propertyName === 'width' && !expanded) width = null;
     }
     $effect(() => {
         const keep = () => { if (pos) pos = clamp(pos); };
@@ -134,7 +154,7 @@
         expanded;
         queueMicrotask(() => untrack(() => { if (pos) pos = clamp(pos); }));
     });
-    const placement = $derived(pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : '');
+    const placement = $derived((pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : '') + (width != null ? ` width:${width}px;` : ''));
 
     // ── the connection in words and a picture ──
     const delayMs = $derived(c.stats?.rtt_ms ?? null);
@@ -197,7 +217,7 @@
 {:else if c.id}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live}
-         style={placement} bind:this={pill}>
+         style={placement} bind:this={pill} ontransitionend={onWidthDone}>
         <!-- Only the header row drags or toggles; the panel below is for its controls. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="call-pill-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>

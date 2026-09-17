@@ -21331,6 +21331,10 @@ body.profile-switcher-editing .profile-switcher-add {
   width: 300px;
 }
 
+.call-pill {
+  transition: width 0.18s ease;
+}
+
 .call-pill,
 .call-pill-live {
   border-color: #333333;
