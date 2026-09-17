@@ -3,12 +3,17 @@
     // microphone test that shows what the other side would hear.
     import { callAudio, callState } from '../lib/calls.svelte.js';
     import VoiceMeter from '../calls/VoiceMeter.svelte';
-    let { h } = $props();   // h: setAudio(patch), micTestStart(), micTestStop()
+    let { h } = $props();   // h: setAudio(patch), micTestStart(), micTestStop(), loadDevices(), setDevice(kind, name)
     const a = callAudio();
     const c = callState();
     const inCall = $derived(!!c.id && c.phase !== 'ended');
+    const dev = $derived(a.devices);
+    // The pickers only make sense where the OS exposes devices to pick from.
+    const hasDevices = $derived(dev.inputs.length > 0 || dev.outputs.length > 0);
     // Leaving the screen stops the test.
     $effect(() => () => { if (a.micTest) h.micTestStop(); });
+    $effect(() => { h.loadDevices(); });
+    const pick = (kind) => (e) => h.setDevice(kind, e.currentTarget.value === '' ? null : e.currentTarget.value);
 </script>
 
 <div class="form-group">
@@ -32,6 +37,27 @@
         <span class="neon-toggle"></span>
     </label>
 </div>
+
+{#if hasDevices}
+    <div class="form-group calls-device-row">
+        <label for="calls-mic-device" class="settings-label">Microphone<span class="settings-hint">System default follows the OS; a named device is used whenever it is plugged in</span></label>
+        <select id="calls-mic-device" class="form-control" value={dev.input ?? ''} onchange={pick('input')}>
+            <option value="">System default{dev.defaultInput ? ` (${dev.defaultInput})` : ''}</option>
+            {#each dev.inputs as name (name)}
+                <option value={name}>{name}</option>
+            {/each}
+        </select>
+    </div>
+    <div class="form-group calls-device-row">
+        <label for="calls-speaker-device" class="settings-label">Speaker</label>
+        <select id="calls-speaker-device" class="form-control" value={dev.output ?? ''} onchange={pick('output')}>
+            <option value="">System default{dev.defaultOutput ? ` (${dev.defaultOutput})` : ''}</option>
+            {#each dev.outputs as name (name)}
+                <option value={name}>{name}</option>
+            {/each}
+        </select>
+    </div>
+{/if}
 
 <div class="form-group calls-mic-test">
     <div class="calls-mic-test-row">

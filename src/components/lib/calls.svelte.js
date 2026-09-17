@@ -8,7 +8,9 @@ const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: n
     stats: null, history: [], quality: null, levels: { mic: 0, peer: 0 }, tick: 0 });
 // The voice processing switches and the microphone test, shared by the pill and Settings.
 const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, loaded: false,
-    micTest: false, micLevel: 0 });
+    micTest: false, micLevel: 0,
+    // Every microphone and speaker on the machine, the defaults, and the preference (null = default).
+    devices: { inputs: [], outputs: [], defaultInput: '', defaultOutput: '', input: null, output: null } });
 let endedTimer = null;
 
 export function callState() { return c; }
@@ -25,6 +27,16 @@ export function setCallAudio(s) {
     if (!s) return;
     audio.autoGain = !!s.auto_gain; audio.echoCancel = !!s.echo_cancel; audio.noiseSuppress = !!s.noise_suppress;
     audio.loaded = true;
+}
+
+/** The backend's device list and preference. */
+export function setAudioDevices(l) {
+    if (!l) return;
+    audio.devices = {
+        inputs: l.inputs || [], outputs: l.outputs || [],
+        defaultInput: l.default_input || '', defaultOutput: l.default_output || '',
+        input: l.prefs?.input ?? null, output: l.prefs?.output ?? null,
+    };
 }
 
 export function setMicTest(on, level) {

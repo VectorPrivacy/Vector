@@ -378,6 +378,8 @@
     "allow-call-audio-settings-set",
     "allow-call-mic-test-start",
     "allow-call-mic-test-stop",
+    "allow-audio-devices-list",
+    "allow-audio-devices-set",
     "allow-call-status",
     "allow-audio-pause",
     "allow-audio-seek",

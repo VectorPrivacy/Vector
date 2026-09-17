@@ -108,6 +108,8 @@ fn main() {
             "call_audio_settings_set",
             "call_mic_test_start",
             "call_mic_test_stop",
+            "audio_devices_list",
+            "audio_devices_set",
             "call_status",
             "stop_recording",
             "update_unread_counter",

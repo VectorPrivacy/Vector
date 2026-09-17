@@ -1,4 +1,4 @@
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -133,55 +133,97 @@ impl AudioRecorder {
             return Err("Audio unavailable: Android context not registered".to_string());
         }
 
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("No input device found")?;
-
-        let supported_config = device.default_input_config().map_err(|e| e.to_string())?;
-
-        *self.device_sample_rate.lock().unwrap() = supported_config.sample_rate().0;
-
-        let config: cpal::StreamConfig = supported_config.into();
-        let channels = config.channels as usize;
+        // Every stream this recording opens converts to the FIRST device's rate, so a
+        // microphone swap mid-note appends at the same rate instead of ending it.
+        let base_rate = {
+            let device = crate::audio_devices::resolve_input().ok_or("No input device found")?;
+            device.default_input_config().map_err(|e| e.to_string())?.sample_rate().0
+        };
+        *self.device_sample_rate.lock().unwrap() = base_rate;
 
         let samples = Arc::clone(&self.samples);
         let recording = Arc::clone(&self.recording);
-
         self.recording.store(true, Ordering::SeqCst);
 
         let recording_flag = Arc::clone(&self.recording);
         std::thread::spawn(move || {
-            let stream = match device.build_input_stream(
-                &config,
-                move |data: &[f32], _: &_| {
-                    if recording.load(Ordering::SeqCst) {
-                        if let Ok(mut guard) = samples.lock() {
-                            guard.extend(data.chunks(channels).map(|chunk| {
-                                let sum: f32 = chunk.iter().sum();
-                                let avg = sum / channels as f32;
-                                (avg.clamp(-1.0, 1.0) * 32767.0) as i16
-                            }));
-                        }
-                    }
-                },
-                |err| eprintln!("Error: {}", err),
-                None,
-            ) {
+            let dead = Arc::new(AtomicBool::new(false));
+            let open = |samples: &Arc<Mutex<Vec<i16>>>, recording: &Arc<AtomicBool>, dead: &Arc<AtomicBool>| -> Result<cpal::Stream, String> {
+                let device = crate::audio_devices::resolve_input().ok_or("No input device found")?;
+                let supported = device.default_input_config().map_err(|e| e.to_string())?;
+                let rate = supported.sample_rate().0;
+                let config: cpal::StreamConfig = supported.into();
+                let channels = config.channels.max(1) as usize;
+                let samples = Arc::clone(samples);
+                let recording = Arc::clone(recording);
+                let dead = Arc::clone(dead);
+                let mut resampler = (rate != base_rate).then(|| crate::calls::resample::Resampler::new(rate, base_rate));
+                let mut mono: Vec<f32> = Vec::new();
+                let mut out: Vec<f32> = Vec::new();
+                let stream = device
+                    .build_input_stream(
+                        &config,
+                        move |data: &[f32], _: &_| {
+                            if !recording.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            mono.clear();
+                            mono.extend(data.chunks(channels).map(|c| c.iter().sum::<f32>() / channels as f32));
+                            let block: &[f32] = match resampler.as_mut() {
+                                Some(r) => { out.clear(); r.process(&mono, &mut out); &out }
+                                None => &mono,
+                            };
+                            if let Ok(mut guard) = samples.lock() {
+                                guard.extend(block.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16));
+                            }
+                        },
+                        move |err| {
+                            eprintln!("[Voice] input stream error: {err}");
+                            dead.store(true, Ordering::SeqCst);
+                        },
+                        None,
+                    )
+                    .map_err(|e| format!("Failed to build input stream: {e}"))?;
+                stream.play().map_err(|e| format!("Failed to start audio stream: {e}"))?;
+                Ok(stream)
+            };
+
+            let mut stream = match open(&samples, &recording, &dead) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[Voice] Failed to build input stream: {}", e);
+                    eprintln!("[Voice] {e}");
                     recording_flag.store(false, Ordering::SeqCst);
                     return;
                 }
             };
-
-            if let Err(e) = stream.play() {
-                eprintln!("[Voice] Failed to start audio stream: {}", e);
-                recording_flag.store(false, Ordering::SeqCst);
-                return;
+            let mut generation = AudioEngine::input_generation();
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(250)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let gen = AudioEngine::input_generation();
+                if dead.swap(false, Ordering::SeqCst) || gen != generation {
+                    // The microphone changed or vanished: carry on with whichever is current.
+                    generation = gen;
+                    drop(stream);
+                    let mut reopened = None;
+                    for _ in 0..8 {
+                        match open(&samples, &recording, &dead) {
+                            Ok(s) => { reopened = Some(s); break; }
+                            Err(_) => std::thread::sleep(std::time::Duration::from_millis(250)),
+                        }
+                    }
+                    match reopened {
+                        Some(s) => { stream = s; println!("[Voice] Recording moved to the current microphone"); }
+                        None => {
+                            eprintln!("[Voice] No microphone came back; keeping what was recorded");
+                            recording_flag.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                }
             }
-
-            // Wait for stop signal
-            rx.recv().unwrap_or(());
         });
 
         Ok(())

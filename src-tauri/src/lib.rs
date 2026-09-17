@@ -80,6 +80,9 @@ mod audio;
 // Unified audio engine: persistent cpal stream, mixing, precomputed FFT waveform
 mod audio_engine;
 
+// Which microphone and speaker every audio path opens
+mod audio_devices;
+
 // Native calls: Opus over Iroh datagrams, echo cancelled
 mod calls;
 
@@ -810,6 +813,8 @@ pub fn run() {
             commands::audio::audio_seek,
             commands::audio::audio_stop,
             commands::audio::audio_stop_all,
+            commands::audio::audio_devices_list,
+            commands::audio::audio_devices_set,
             commands::audio::audio_set_volume,
             commands::audio::send_recording,
             // Tor (Arti) commands

@@ -31,11 +31,31 @@ async function micTestStop() {
     await invoke('call_mic_test_stop').catch(() => {});
 }
 
+async function loadAudioDevices() {
+    try {
+        VectorSvelte.setAudioDevices(await invoke('audio_devices_list'));
+    } catch (_) {}
+}
+
+/** `name` null means the system default; the change applies to live streams at once. */
+async function setAudioDevice(kind, name) {
+    const d = VectorSvelte.callAudio().devices;
+    const prefs = { input: kind === 'input' ? name : d.input, output: kind === 'output' ? name : d.output };
+    try {
+        await invoke('audio_devices_set', { prefs });
+    } catch (e) {
+        VectorSvelte.showToast(String(e));
+    }
+    await loadAudioDevices();
+}
+
 // The Settings screen's Calls section takes the same helpers; the bag is settings.js's.
 SETTINGS_HELPERS.calls = {
     setAudio: (patch) => setCallAudioSettings(patch),
     micTestStart: () => micTestStart(),
     micTestStop: () => micTestStop(),
+    loadDevices: () => loadAudioDevices(),
+    setDevice: (kind, name) => setAudioDevice(kind, name),
 };
 
 function registerCallScreen() {
@@ -57,6 +77,7 @@ function registerCallScreen() {
     // A reloaded webview finds the call the backend still holds, and the switches it saved.
     invoke('call_status').then((s) => { if (s) VectorSvelte.setCallState(s); }).catch(() => {});
     invoke('call_audio_settings_get').then((s) => VectorSvelte.setCallAudio(s)).catch(() => {});
+    loadAudioDevices();
 }
 
 /** Ring a DM contact. The Chat header's call button lands here. */

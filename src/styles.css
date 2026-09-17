@@ -21880,3 +21880,20 @@ body.profile-switcher-editing .profile-switcher-add {
   border-color: var(--accent-color, #59fcb3);
   color: var(--accent-color, #59fcb3);
 }
+
+.calls-device-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+
+.calls-device-row .settings-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.calls-device-row select.form-control {
+  width: 100%;
+}

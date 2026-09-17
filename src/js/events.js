@@ -1155,6 +1155,8 @@ async function setupRustListeners() {
     _on('call_stats', (evt) => VectorSvelte.setCallStats(evt.payload));
     _on('call_level', (evt) => VectorSvelte.setCallLevels(evt.payload));
     _on('mic_level', (evt) => VectorSvelte.setMicTest(null, evt.payload?.mic || 0));
+    // A device came or went: the pickers show what is there now.
+    _on('audio_devices_changed', () => loadAudioDevices());
 
     await Promise.all(_p);
 

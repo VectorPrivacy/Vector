@@ -9,11 +9,11 @@
 //! - FFT waveform precomputed after decode completes, sent via Tauri event
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -68,8 +68,12 @@ pub struct AudioEngine {
     /// Names of the default devices the streams were opened on, for the watchdog.
     output_name: std::sync::Mutex<String>,
     input_name: std::sync::Mutex<String>,
-    /// Told when either default device changes, after the output is rebuilt.
+    /// Told when either device changes, after the output is rebuilt.
     device_listeners: std::sync::Mutex<Vec<Box<dyn Fn() + Send + Sync>>>,
+    /// The watchdog sleeps on this; a dying stream wakes it at once.
+    wake: (std::sync::Mutex<bool>, std::sync::Condvar),
+    /// Bumped whenever the input device changes, for capture loops to notice.
+    input_generation: AtomicU64,
 }
 
 // SAFETY: cpal::Stream stores a boxed callback that is !Send+!Sync. The stream
@@ -207,12 +211,9 @@ impl AudioEngine {
         ENGINE.get().ok_or_else(|| "Audio engine not initialized".to_string())
     }
 
-    /// Opens the mixer's output stream on the current default device.
+    /// Opens the mixer's output stream on the resolved output device.
     fn open_output(shared: &Arc<SharedState>) -> Result<(cpal::Stream, u32, String), String> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("No audio output device found")?;
+        let device = crate::audio_devices::resolve_output().ok_or("No audio output device found")?;
         let name = device.name().unwrap_or_default();
 
         let default_config = device
@@ -237,7 +238,11 @@ impl AudioEngine {
                 move |output: &mut [f32], _: &_| {
                     mixer_callback(output, &shared_for_callback, channels);
                 },
-                |err| eprintln!("[AudioEngine] Stream error: {}", err),
+                |err| {
+                    // The device went away under us: reopen now, not at the next poll.
+                    eprintln!("[AudioEngine] Stream error: {}", err);
+                    AudioEngine::kick();
+                },
                 None,
             )
             .map_err(|e| format!("Failed to build output stream: {}", e))?;
@@ -248,11 +253,17 @@ impl AudioEngine {
         Ok((stream, device_sample_rate, name))
     }
 
-    fn default_input_name() -> String {
-        cpal::default_host()
-            .default_input_device()
-            .and_then(|d| d.name().ok())
-            .unwrap_or_default()
+    /// Wakes the watchdog: a stream reported its device gone, or a preference changed.
+    pub fn kick() {
+        if let Some(engine) = ENGINE.get() {
+            let (lock, cv) = &engine.wake;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            cv.notify_all();
+        }
+    }
+
+    pub fn input_generation() -> u64 {
+        ENGINE.get().map_or(0, |e| e.input_generation.load(Ordering::Relaxed))
     }
 
     fn create() -> Result<Self, String> {
@@ -294,22 +305,31 @@ impl AudioEngine {
             shared,
             stream: std::sync::Mutex::new(Some(stream)),
             output_name: std::sync::Mutex::new(output_name),
-            input_name: std::sync::Mutex::new(Self::default_input_name()),
+            input_name: std::sync::Mutex::new(crate::audio_devices::resolved_input_name()),
             device_listeners: std::sync::Mutex::new(Vec::new()),
+            wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+            input_generation: AtomicU64::new(0),
         })
     }
 
-    /// Polls the default devices: the OS does not tell cpal when the user picks
+    /// Watches the resolved devices: the OS does not tell cpal when the user picks
     /// another output or microphone, and a stream opened on the old one plays to
-    /// nothing. On a change the output is reopened and the listeners told.
+    /// nothing. It polls every second and wakes at once when a stream dies or a
+    /// preference changes; on a change the output is reopened and the listeners told.
     fn start_device_watchdog(&'static self) {
         std::thread::Builder::new()
             .name("audio-devices".into())
             .spawn(move || loop {
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                let host = cpal::default_host();
-                let output_now = host.default_output_device().and_then(|d| d.name().ok()).unwrap_or_default();
-                let input_now = Self::default_input_name();
+                let kicked = {
+                    let (lock, cv) = &self.wake;
+                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let (mut guard, _) = cv
+                        .wait_timeout_while(guard, std::time::Duration::from_secs(1), |k| !*k)
+                        .unwrap_or_else(|e| e.into_inner());
+                    std::mem::replace(&mut *guard, false)
+                };
+                let output_now = crate::audio_devices::resolved_output_name();
+                let input_now = crate::audio_devices::resolved_input_name();
                 let output_changed = {
                     let mut held = self.output_name.lock().unwrap_or_else(|e| e.into_inner());
                     if *held != output_now && !output_now.is_empty() {
@@ -328,18 +348,23 @@ impl AudioEngine {
                         false
                     }
                 };
-                if output_changed {
+                // A kick with no visible change still means a stream died: reopen anyway.
+                if output_changed || kicked {
                     match self.rebuild_output() {
-                        Ok(()) => println!("[AudioEngine] Output moved to {output_now}"),
-                        Err(e) => eprintln!("[AudioEngine] Could not follow the output device: {e}"),
+                        Ok(()) => println!("[AudioEngine] Output on {output_now}"),
+                        Err(e) => eprintln!("[AudioEngine] Could not open the output device: {e}"),
                     }
                 }
-                if input_changed {
-                    println!("[AudioEngine] Input moved to {input_now}");
+                if input_changed || kicked {
+                    self.input_generation.fetch_add(1, Ordering::Relaxed);
+                    println!("[AudioEngine] Input on {input_now}");
                 }
-                if output_changed || input_changed {
+                if output_changed || input_changed || kicked {
                     for f in self.device_listeners.lock().unwrap_or_else(|e| e.into_inner()).iter() {
                         f();
+                    }
+                    if let Some(app) = TAURI_APP.get() {
+                        let _ = app.emit("audio_devices_changed", ());
                     }
                 }
             })

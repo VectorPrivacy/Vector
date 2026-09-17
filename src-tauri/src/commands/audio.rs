@@ -7,6 +7,22 @@
 //! - Sending voice recordings without IPC audio data transfer
 
 use crate::audio_engine::{self, AudioEngine, AudioLoadResult};
+use crate::audio_devices::{self, DeviceList, DevicePrefs};
+
+/// Every microphone and speaker on the machine, the defaults, and what is preferred.
+#[tauri::command]
+pub async fn audio_devices_list() -> DeviceList {
+    audio_devices::load();
+    audio_devices::list()
+}
+
+/// Saves the preference and switches the live streams at once.
+#[tauri::command]
+pub async fn audio_devices_set(prefs: DevicePrefs) -> Result<(), String> {
+    audio_devices::set(prefs)?;
+    AudioEngine::kick();
+    Ok(())
+}
 
 /// Probe an audio file for its duration without loading it for playback.
 /// Fast: reads file headers only, no decoding.

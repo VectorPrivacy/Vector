@@ -12,7 +12,7 @@ use super::settings;
 use super::transport::{pack, unpack};
 use super::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};
 use crate::audio_engine::{AudioEngine, LiveLink};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use iroh::endpoint::Connection;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -263,9 +263,9 @@ fn capture_thread(
     stats: Arc<MediaStats>,
     ready: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
+    let dead = Arc::new(AtomicBool::new(false));
     let setup = || -> Result<(cpal::Stream, Arc<SpscRing>, u32), String> {
-        let host = cpal::default_host();
-        let device = host.default_input_device().ok_or("No input device found")?;
+        let device = crate::audio_devices::resolve_input().ok_or("No input device found")?;
         let supported = device.default_input_config().map_err(|e| e.to_string())?;
         let in_rate = supported.sample_rate().0;
         let config: cpal::StreamConfig = supported.into();
@@ -286,7 +286,13 @@ fn capture_thread(
                         cb_ring.push(&mono[..n]);
                     }
                 },
-                |err| eprintln!("[Calls] input stream error: {err}"),
+                {
+                    let dead = Arc::clone(&dead);
+                    move |err| {
+                        eprintln!("[Calls] input stream error: {err}");
+                        dead.store(true, Ordering::Relaxed);
+                    }
+                },
                 None,
             )
             .map_err(|e| format!("Failed to build input stream: {e}"))?;
@@ -336,6 +342,10 @@ fn capture_thread(
     let far_slack = FRAME * 5;
 
     while !stop.load(Ordering::Relaxed) {
+        if dead.swap(false, Ordering::Relaxed) {
+            // The microphone vanished: the mixer's watchdog reopens everything.
+            AudioEngine::kick();
+        }
         let n = cap_ring.pop(&mut scratch);
         if n > 0 {
             near_rs.process(&scratch[..n], &mut near);

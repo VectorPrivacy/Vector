@@ -12,7 +12,7 @@ use std::fs::File;
 
 // Desktop-only imports for notification sound playback
 #[cfg(desktop)]
-use cpal::traits::{DeviceTrait, HostTrait};
+use cpal::traits::DeviceTrait;
 #[cfg(desktop)]
 use serde::{Deserialize, Serialize};
 #[cfg(desktop)]
@@ -102,11 +102,8 @@ fn get_device_sample_rate() -> Result<u32, String> {
         return Err("Audio unavailable: Android context not registered".to_string());
     }
 
-    // Query the device
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("No output device found")?;
+    // Query the device Vector plays through
+    let device = crate::audio_devices::resolve_output().ok_or("No output device found")?;
     let config = device
         .default_output_config()
         .map_err(|e| format!("Failed to get output config: {}", e))?;
