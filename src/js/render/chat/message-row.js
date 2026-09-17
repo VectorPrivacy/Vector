@@ -539,10 +539,18 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
 function _dmsgStartDownload(att, msg) {
     if (downloadingAttachmentIds.has(att.id)) return;
     downloadingAttachmentIds.add(att.id);
+    // The box derives its phase under the message's version, so the start has to
+    // move it, or the box shows nothing until the finished result lands.
+    att.downloading = true;
+    VectorSvelte.touchMessage(msg.id);
     // The chat, never the sender: a file you sent from another device has you as its
     // sender, and the backend files it under the conversation it belongs to.
     invoke('download_attachment', { npub: strOpenChat, msgId: msg.id, attachmentId: att.id })
-        .catch(() => downloadingAttachmentIds.delete(att.id));
+        .catch(() => {
+            downloadingAttachmentIds.delete(att.id);
+            att.downloading = false;
+            VectorSvelte.touchMessage(msg.id);
+        });
 }
 
 /** Open a downloaded file: a Mini App launches (and reports its session), a file reveals or opens. */
