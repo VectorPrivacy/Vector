@@ -15,6 +15,7 @@
     import Updates from './Updates.svelte';
     import SecurityCard from './SecurityCard.svelte';
     import Voice from './Voice.svelte';
+    import Calls from './Calls.svelte';
 
     let { h } = $props();
     // h: setTheme(theme), setPrivacy(key, on), help(key), openLink(key), tor: {...}, blocked: {...},
@@ -123,6 +124,14 @@
     <h2>Notifications</h2>
     <div><Notifications h={h.notif} /></div>
 </div>
+
+{#if h.calls}
+    <div class="settings-section">
+        <hr class="divider settings-divider">
+        <h2>Calls</h2>
+        <div><Calls h={h.calls} /></div>
+    </div>
+{/if}
 
 {#if sc.battery.shown}
     <div class="settings-section">

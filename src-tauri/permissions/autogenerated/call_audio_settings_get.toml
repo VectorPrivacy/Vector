@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-audio-settings-get"
+description = "Enables the call_audio_settings_get command without any pre-configured scope."
+commands.allow = ["call_audio_settings_get"]
+
+[[permission]]
+identifier = "deny-call-audio-settings-get"
+description = "Denies the call_audio_settings_get command without any pre-configured scope."
+commands.deny = ["call_audio_settings_get"]

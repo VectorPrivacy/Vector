@@ -8,6 +8,7 @@ use super::aec::{EchoCanceller, SpeexAec};
 use super::codec::{Decoder, Encoder};
 use super::resample::Resampler;
 use super::ring::SpscRing;
+use super::settings;
 use super::transport::{pack, unpack};
 use super::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};
 use crate::audio_engine::{AudioEngine, LiveLink};
@@ -56,6 +57,30 @@ pub struct MediaStats {
     pub late: AtomicU64,
     pub depth_ms: AtomicU32,
     pub jitter_ms: AtomicU32,
+    /// Loudness of what the microphone sends after processing, 0 to 1 (f32 bits).
+    pub mic_level: AtomicU32,
+    /// Loudness of what the peer sends, 0 to 1 (f32 bits).
+    pub peer_level: AtomicU32,
+}
+
+impl MediaStats {
+    pub fn mic_level(&self) -> f32 {
+        f32::from_bits(self.mic_level.load(Ordering::Relaxed))
+    }
+    pub fn peer_level(&self) -> f32 {
+        f32::from_bits(self.peer_level.load(Ordering::Relaxed))
+    }
+}
+
+/// A frame's loudness on a 0 to 1 scale: -60 dBFS is silence, 0 dBFS full.
+fn level_of(frame: &[i16]) -> f32 {
+    let sum: f64 = frame.iter().map(|s| (*s as f64).powi(2)).sum();
+    let rms = (sum / frame.len().max(1) as f64).sqrt() / 32768.0;
+    if rms <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * rms.log10();
+    ((db + 60.0) / 60.0).clamp(0.0, 1.0) as f32
 }
 
 pub struct MediaEngine {
@@ -63,12 +88,15 @@ pub struct MediaEngine {
     pub muted: Arc<AtomicBool>,
     pub stats: Arc<MediaStats>,
     pub link: Arc<LiveLink>,
+    on_mixer: bool,
     threads: Vec<std::thread::JoinHandle<()>>,
-    rx_task: tokio::task::JoinHandle<()>,
+    rx_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MediaEngine {
-    pub fn start(conn: Connection, volume: f32) -> Result<Self, String> {
+    /// With a connection this is a call; without one it is a microphone test: the
+    /// same capture chain, levels only, nothing sent and nothing played.
+    pub fn start(conn: Option<Connection>, volume: f32) -> Result<Self, String> {
         let mixer = AudioEngine::get()?;
         let out_rate = mixer.device_sample_rate();
         let link = Arc::new(LiveLink {
@@ -76,7 +104,11 @@ impl MediaEngine {
             tap: SpscRing::new(out_rate as usize),
             gain: std::sync::atomic::AtomicU32::new(volume.to_bits()),
         });
-        mixer.attach_live(Arc::clone(&link))?;
+        let on_mixer = conn.is_some();
+        if on_mixer {
+            mixer.attach_live(Arc::clone(&link))?;
+        }
+        settings::load();
 
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
@@ -99,17 +131,25 @@ impl MediaEngine {
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                mixer.detach_live();
+                if on_mixer {
+                    mixer.detach_live();
+                }
                 stop.store(true, Ordering::SeqCst);
                 let _ = capture.join();
                 return Err(e);
             }
             Err(_) => {
-                mixer.detach_live();
+                if on_mixer {
+                    mixer.detach_live();
+                }
                 stop.store(true, Ordering::SeqCst);
                 return Err("microphone did not start".into());
             }
         }
+
+        let Some(conn) = conn else {
+            return Ok(Self { stop, muted, stats, link, on_mixer, threads: vec![capture], rx_task: None });
+        };
 
         // Receive: datagrams into the jitter buffer until the connection closes.
         let rx_task = {
@@ -138,19 +178,23 @@ impl MediaEngine {
                 .map_err(|e| e.to_string())?
         };
 
-        Ok(Self { stop, muted, stats, link, threads: vec![capture, playout], rx_task })
+        Ok(Self { stop, muted, stats, link, on_mixer, threads: vec![capture, playout], rx_task: Some(rx_task) })
     }
 }
 
 impl Drop for MediaEngine {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.rx_task.abort();
+        if let Some(t) = self.rx_task.take() {
+            t.abort();
+        }
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
-        if let Ok(mixer) = AudioEngine::get() {
-            mixer.detach_live();
+        if self.on_mixer {
+            if let Ok(mixer) = AudioEngine::get() {
+                mixer.detach_live();
+            }
         }
     }
 }
@@ -211,7 +255,7 @@ impl NetSim {
 }
 
 fn capture_thread(
-    conn: Connection,
+    conn: Option<Connection>,
     link: Arc<LiveLink>,
     out_rate: u32,
     stop: Arc<AtomicBool>,
@@ -316,8 +360,14 @@ fn capture_thread(
             } else {
                 far_i16.fill(0);
             }
+            aec.configure(settings::current());
             aec.process(&near_i16, &far_i16, &mut clean);
+            stats.mic_level.store(level_of(&clean).to_bits(), Ordering::Relaxed);
 
+            let Some(conn) = conn.as_ref() else {
+                seq = seq.wrapping_add(1);
+                continue;
+            };
             let ts = started.elapsed().as_millis() as u32;
             let datagram = if muted.load(Ordering::Relaxed) {
                 pack(seq, ts, FLAG_MUTED, &[])
@@ -338,8 +388,8 @@ fn capture_thread(
             }
             seq = seq.wrapping_add(1);
         }
-        if let Some(sim) = netsim.as_mut() {
-            sim.pump(&conn, &stats);
+        if let (Some(sim), Some(conn)) = (netsim.as_mut(), conn.as_ref()) {
+            sim.pump(conn, &stats);
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -412,6 +462,7 @@ fn playout_thread(
         if !decoded {
             pcm.fill(0);
         }
+        stats.peer_level.store(level_of(&pcm).to_bits(), Ordering::Relaxed);
         for (dst, src) in pcm_f32.iter_mut().zip(pcm.iter()) {
             *dst = *src as f32 / 32768.0;
         }

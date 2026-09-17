@@ -4,12 +4,15 @@
 //! The default is SpeexDSP's MDF canceller plus its preprocessor for residual echo
 //! and noise, compiled from the vendored C sources in `csrc/speexdsp`.
 
+use super::settings::AudioSettings;
 use std::ffi::c_void;
 
 /// Removes what the speaker played from what the microphone heard.
 /// `near`, `far` and `out` are one engine frame each, at the engine rate.
 pub trait EchoCanceller: Send {
     fn process(&mut self, near: &[i16], far: &[i16], out: &mut [i16]);
+    /// Applies the user's switches; called every frame, so it must be cheap when nothing changed.
+    fn configure(&mut self, _s: AudioSettings) {}
 }
 
 #[repr(C)]
@@ -52,6 +55,7 @@ pub struct SpeexAec {
     echo: *mut SpeexEchoState,
     pre: *mut SpeexPreprocessState,
     frame: usize,
+    applied: AudioSettings,
 }
 
 // The states are only ever touched from the capture thread that owns the canceller.
@@ -96,7 +100,7 @@ impl SpeexAec {
             let mut echo_active_db: i32 = -20;
             speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE, &mut echo_active_db as *mut i32 as *mut c_void);
 
-            Ok(Self { echo, pre, frame })
+            Ok(Self { echo, pre, frame, applied: AudioSettings::default() })
         }
     }
 }
@@ -105,9 +109,35 @@ impl EchoCanceller for SpeexAec {
     fn process(&mut self, near: &[i16], far: &[i16], out: &mut [i16]) {
         debug_assert!(near.len() == self.frame && far.len() == self.frame && out.len() == self.frame);
         unsafe {
-            speex_echo_cancellation(self.echo, near.as_ptr(), far.as_ptr(), out.as_mut_ptr());
+            if self.applied.echo_cancel {
+                speex_echo_cancellation(self.echo, near.as_ptr(), far.as_ptr(), out.as_mut_ptr());
+            } else {
+                out.copy_from_slice(near);
+            }
             speex_preprocess_run(self.pre, out.as_mut_ptr());
         }
+    }
+
+    fn configure(&mut self, s: AudioSettings) {
+        if s == self.applied {
+            return;
+        }
+        unsafe {
+            if s.auto_gain != self.applied.auto_gain {
+                let mut on: i32 = s.auto_gain as i32;
+                speex_preprocess_ctl(self.pre, SPEEX_PREPROCESS_SET_AGC, &mut on as *mut i32 as *mut c_void);
+            }
+            if s.noise_suppress != self.applied.noise_suppress {
+                let mut on: i32 = s.noise_suppress as i32;
+                speex_preprocess_ctl(self.pre, SPEEX_PREPROCESS_SET_DENOISE, &mut on as *mut i32 as *mut c_void);
+            }
+            if s.echo_cancel != self.applied.echo_cancel {
+                // Detached, the preprocessor stops suppressing residual echo too.
+                let state = if s.echo_cancel { self.echo as *mut c_void } else { std::ptr::null_mut() };
+                speex_preprocess_ctl(self.pre, SPEEX_PREPROCESS_SET_ECHO_STATE, state);
+            }
+        }
+        self.applied = s;
     }
 }
 

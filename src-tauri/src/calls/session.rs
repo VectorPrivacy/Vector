@@ -52,6 +52,13 @@ pub struct CallState {
 }
 
 #[derive(Serialize, Clone, Debug)]
+pub struct LevelPayload {
+    pub id: String,
+    pub mic: f32,
+    pub peer: f32,
+}
+
+#[derive(Serialize, Clone, Debug)]
 pub struct CallStats {
     pub id: String,
     pub rtt_ms: u32,
@@ -348,11 +355,60 @@ pub async fn set_volume(volume: f32) -> Result<(), String> {
     Ok(())
 }
 
+/// The microphone test outside a call: the capture chain alone, feeding the meter.
+struct MicTest {
+    engine: MediaEngine,
+    task: JoinHandle<()>,
+}
+
+static MIC_TEST: OnceLock<Mutex<Option<MicTest>>> = OnceLock::new();
+
+fn mic_test_slot() -> &'static Mutex<Option<MicTest>> {
+    MIC_TEST.get_or_init(|| Mutex::new(None))
+}
+
+pub fn mic_test_running() -> bool {
+    mic_test_slot().lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
+pub async fn mic_test_start() -> Result<(), String> {
+    mic_test_stop();
+    let engine = tokio::task::spawn_blocking(|| MediaEngine::start(None, 1.0))
+        .await
+        .map_err(|e| e.to_string())??;
+    let stats = Arc::clone(&engine.stats);
+    let task = vector_core::db::spawn_bound(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            vector_core::traits::emit_event("mic_level", &LevelPayload {
+                id: String::new(),
+                mic: stats.mic_level(),
+                peer: 0.0,
+            });
+        }
+    });
+    *mic_test_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(MicTest { engine, task });
+    Ok(())
+}
+
+pub fn mic_test_stop() {
+    let taken = mic_test_slot().lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(t) = taken {
+        t.task.abort();
+        drop(t.engine);
+    }
+}
+
 /// Called once at startup: when the default microphone or speaker changes, an
 /// active call reopens its audio on the new devices.
 pub fn install_device_follow() {
     if let Ok(mixer) = crate::audio_engine::AudioEngine::get() {
         mixer.on_device_change(Box::new(|| {
+            if mic_test_running() {
+                vector_core::db::spawn_bound(async move {
+                    let _ = mic_test_start().await;
+                });
+            }
             let Some((id, conn)) = with_call(|c| (c.id.clone(), c.conn.clone())) else { return };
             let Some(conn) = conn else { return };
             vector_core::db::spawn_bound(async move {
@@ -369,7 +425,7 @@ async fn restart_media(id: &str, conn: Connection) {
         None => return,
     };
     drop(old);
-    let media = tokio::task::spawn_blocking(move || MediaEngine::start(conn, volume)).await;
+    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(conn), volume)).await;
     match media {
         Ok(Ok(m)) => {
             m.muted.store(muted, Ordering::Relaxed);
@@ -536,7 +592,7 @@ pub async fn on_incoming(conn: Connection) {
 async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStream) {
     let media_conn = conn.clone();
     let volume = with_call_id(id, |c| c.volume).unwrap_or(1.0);
-    let media = tokio::task::spawn_blocking(move || MediaEngine::start(media_conn, volume)).await;
+    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(media_conn), volume)).await;
     let media = match media {
         Ok(Ok(m)) => m,
         Ok(Err(e)) => {
@@ -615,8 +671,19 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
     let stats_task = vector_core::db::spawn_bound(async move {
         let mut last_received = 0u64;
         let mut silent_secs = 0u32;
+        let mut tick = 0u32;
         loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Meters ten times a second; the rest once a second.
+            vector_core::traits::emit_event("call_level", &LevelPayload {
+                id: stats_id.clone(),
+                mic: stats.mic_level(),
+                peer: stats.peer_level(),
+            });
+            tick += 1;
+            if tick % 10 != 0 {
+                continue;
+            }
             let received = stats.received.load(Ordering::Relaxed);
             silent_secs = if received == last_received { silent_secs + 1 } else { 0 };
             last_received = received;

@@ -21253,16 +21253,26 @@ body.profile-switcher-editing .profile-switcher-add {
 
 /* ── Calls ────────────────────────────────────────────────────────────────── */
 
-/* Header call button: a twin of the pin toggle, one slot further left. */
-.call-header-btn {
+/* The header's right-hand actions: call, pins, menu, as one row of 40px boxes. */
+.chat-header .chat-header-actions {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+}
+
+.chat-header .chat-header-actions .call-header-btn,
+.chat-header .chat-header-actions .pins-header-btn,
+.chat-header .chat-header-actions .nav-menu-btn {
+  position: static;
   display: flex;
   align-items: center;
   justify-content: center;
-  position: absolute;
-  top: 10px;
-  right: 90px;
   width: 40px;
   height: 40px;
+  margin: 0;
+  padding: 0;
   color: #b2b2b2;
 }
 
@@ -21278,61 +21288,90 @@ body.profile-switcher-editing .profile-switcher-add {
   transform: rotate(135deg);
 }
 
-/* The floating bar: above every pane, under nothing, so a call survives navigation. */
-.call-bar {
+/* ── The pill: above every pane, draggable, remembered ── */
+.call-pill {
   position: fixed;
   top: calc(var(--chrome-h, 0px) + 10px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 9000;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: min(420px, calc(100% - 24px));
-  padding: 6px 8px 6px 6px;
-  border-radius: 999px;
-  background: rgba(20, 20, 20, 0.92);
+  flex-direction: column;
+  width: max-content;
+  max-width: min(320px, calc(100% - 24px));
+  border-radius: 16px;
+  background: rgba(22, 22, 22, 0.94);
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(10px);
-  color: #fff;
+  color: var(--text-color, #f6f6f6);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
   animation: qr-overlay-pop 0.16s ease-out;
 }
 
-.call-bar-active {
-  border-color: rgba(89, 252, 179, 0.35);
+.call-pill:active {
+  cursor: grabbing;
 }
 
-.call-bar-ended {
+.call-pill-open {
+  width: 300px;
+}
+
+.call-pill-live {
+  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 35%, transparent);
+}
+
+.call-pill-ended {
   opacity: 0.7;
 }
 
-.call-bar-peer {
+.call-pill-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
+  padding: 6px 8px 6px 6px;
 }
 
-.call-bar-text {
+.call-pill-text {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  flex: 1 1 auto;
   line-height: 1.15;
 }
 
-.call-bar-name {
+.call-pill-name {
   font-size: 13px;
   font-weight: 600;
 }
 
-.call-bar-status {
+.call-pill-status {
   font-size: 11.5px;
   color: #b2b2b2;
   font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
-.call-bar-btn {
+/* One dot says how the call is going; the words are in the panel. */
+.call-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.call-dot-excellent { background: var(--status-excellent); }
+.call-dot-good { background: var(--status-good); }
+.call-dot-fair { background: var(--status-fair); }
+.call-dot-poor { background: var(--status-poor); }
+
+.call-btn {
   position: relative;
   display: flex;
   align-items: center;
@@ -21348,37 +21387,240 @@ body.profile-switcher-editing .profile-switcher-add {
   padding: 0;
 }
 
-.call-bar-btn:hover {
+.call-btn:hover {
   background: rgba(255, 255, 255, 0.16);
 }
 
-.call-bar-btn .icon {
+.call-btn .icon {
   width: 55%;
   height: 55%;
 }
 
-.call-bar-btn-on {
+.call-btn-on {
   background: rgba(255, 255, 255, 0.85);
 }
 
-.call-bar-btn-on .icon {
+.call-btn-on .icon {
   background-color: #111;
 }
 
-.call-bar-hangup {
-  background: #e5484d;
+.call-btn-hangup {
+  background: var(--danger-color, #FC595C);
 }
 
-.call-bar-hangup:hover {
-  background: #f0555a;
+.call-btn-hangup:hover {
+  background: color-mix(in srgb, var(--danger-color, #FC595C) 85%, white);
 }
 
-.call-bar-hangup svg {
+.call-btn-hangup svg {
   width: 20px;
   height: 20px;
 }
 
-/* The incoming ring: the pop overlay recipe, one card, two round answers. */
+/* ── The panel under the row ── */
+.call-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: default;
+}
+
+.call-panel-label {
+  font-size: 12px;
+  color: #b2b2b2;
+}
+
+.call-panel-value {
+  font-size: 12.5px;
+  color: var(--text-color, #f6f6f6);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.call-panel-hint {
+  font-size: 11px;
+  color: #8a8a8a;
+}
+
+.call-panel-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+}
+
+.call-panel-slider .call-panel-label {
+  flex: none;
+  width: 84px;
+}
+
+.call-panel-slider .call-panel-value {
+  flex: none;
+  width: 40px;
+  justify-content: flex-end;
+}
+
+.call-panel-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  cursor: pointer;
+  outline: none;
+}
+
+.call-panel-slider input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(
+    to right,
+    var(--accent-color, #59fcb3) 0%,
+    var(--accent-color, #59fcb3) var(--slider-pct, 50%),
+    rgba(255, 255, 255, 0.1) var(--slider-pct, 50%),
+    rgba(255, 255, 255, 0.1) 100%
+  );
+}
+
+.call-panel-slider input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -3px;
+  border-radius: 50%;
+  background: #fff;
+  border: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.call-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-color, #f6f6f6);
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.call-panel-toggle:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.call-panel-toggle .icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.call-panel-toggle .call-panel-hint {
+  margin-left: auto;
+}
+
+.call-panel-section {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #8a8a8a;
+  margin-top: 2px;
+}
+
+.call-panel-grid {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  row-gap: 6px;
+  align-items: center;
+}
+
+.call-graph {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.call-graph svg {
+  display: block;
+  width: 100%;
+  height: 44px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.call-graph-delay {
+  fill: none;
+  stroke: var(--accent-color, #59fcb3);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.call-graph-lost {
+  fill: var(--status-fair);
+  opacity: 0.85;
+}
+
+.call-graph-legend {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: #8a8a8a;
+}
+
+.call-graph-key {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  margin-right: 5px;
+  vertical-align: middle;
+  border-radius: 2px;
+}
+
+.call-graph-key-delay { background: var(--accent-color, #59fcb3); }
+.call-graph-key-lost { background: var(--status-fair); height: 7px; }
+
+.call-graph-empty {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  color: #8a8a8a;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.call-panel-hangup {
+  width: 100%;
+  padding: 9px 0;
+  border: 0;
+  border-radius: 10px;
+  background: var(--danger-color, #FC595C);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.call-panel-hangup:hover {
+  background: color-mix(in srgb, var(--danger-color, #FC595C) 85%, white);
+}
+
+/* ── The incoming ring: the pop overlay recipe, one card, two round answers ── */
 .call-ring-overlay {
   position: fixed;
   inset: 0;
@@ -21440,16 +21682,122 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-round-decline {
-  background: #e5484d;
+  background: var(--danger-color, #FC595C);
 }
 
 .call-round-accept {
-  background: var(--accent-color);
+  background: var(--accent-color, #59fcb3);
   color: #111;
   animation: call-ring-pulse 1.2s ease-in-out infinite;
 }
 
 @keyframes call-ring-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(89, 252, 179, 0.45); }
-  50% { box-shadow: 0 0 0 12px rgba(89, 252, 179, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-color, #59fcb3) 45%, transparent); }
+  50% { box-shadow: 0 0 0 12px transparent; }
+}
+
+/* ── Meters and switches ── */
+.voice-meter {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.voice-meter-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent-color, #59fcb3);
+  transition: width 60ms linear, background-color 120ms linear;
+}
+
+/* Near the top the bar turns amber: loud enough to clip. */
+.voice-meter-hot .voice-meter-fill {
+  background: var(--status-fair);
+}
+
+.voice-meter:not(.voice-meter-active) .voice-meter-fill {
+  opacity: 0.35;
+}
+
+.voice-meter-peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  opacity: 0.8;
+}
+
+.call-panel-meters {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  row-gap: 8px;
+  align-items: center;
+}
+
+.call-panel-switches {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.call-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-color, #f6f6f6);
+  cursor: pointer;
+}
+
+.call-switch input {
+  accent-color: var(--accent-color, #59fcb3);
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Settings: the Calls section */
+.settings-hint {
+  display: block;
+  font-size: 11.5px;
+  color: #8a8a8a;
+  margin-top: 2px;
+}
+
+.calls-mic-test {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.calls-mic-test-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.calls-mic-test-btn {
+  flex: none;
+  padding: 7px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-color, #f6f6f6);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.calls-mic-test-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.calls-mic-test-on {
+  border-color: var(--accent-color, #59fcb3);
+  color: var(--accent-color, #59fcb3);
 }

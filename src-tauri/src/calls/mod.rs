@@ -11,6 +11,7 @@ pub mod media;
 pub mod resample;
 pub mod ring;
 pub mod session;
+pub mod settings;
 pub mod transport;
 
 pub const ENGINE_RATE: u32 = 16_000;

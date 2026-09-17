@@ -133,6 +133,8 @@
         <span id="chat-contact-status" class="cutoff chat-contact-status btn" class:status-hidden={status.hidden} class:typing-indicator-text={status.gradient}
               use:statusInto={[status.text, status.tags, status.gradient]}></span>
     </div>
+    <!-- The right-hand actions sit in one row, so a hidden pin toggle leaves no gap. -->
+    <div class="chat-header-actions">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="btn call-header-btn" title="Call" style:display={vm && !vm.notes && !vm.group ? null : 'none'} onclick={() => h()?.startCall(vm.id)}>
         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -149,6 +151,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <div class="btn nav-menu-btn" title="Chat Options" style:display={vm?.menu ? null : 'none'} onclick={openMenu}>
         <span class="icon icon-dots-horizontal nav-icon"></span>
+    </div>
     </div>
     <!-- Mirrors the Profile edit bar over the header while a wallpaper preview is staged. -->
     {#if wp.editShown}

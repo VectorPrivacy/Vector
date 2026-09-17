@@ -675,6 +675,10 @@ pub fn run() {
             calls::commands::call_hangup,
             calls::commands::call_set_muted,
             calls::commands::call_set_volume,
+            calls::commands::call_audio_settings_get,
+            calls::commands::call_audio_settings_set,
+            calls::commands::call_mic_test_start,
+            calls::commands::call_mic_test_stop,
             calls::commands::call_status,
             commands::relays::connect,
             // Account crypto commands (commands/account.rs)

@@ -1,6 +1,7 @@
 //! The call commands. Each one is a thin door into the session state machine.
 
 use super::session::{self, CallState};
+use super::settings::{self, AudioSettings};
 
 #[cfg(target_os = "android")]
 fn ensure_microphone() -> Result<(), String> {
@@ -51,6 +52,34 @@ pub async fn call_set_muted(muted: bool) -> Result<(), String> {
 #[tauri::command]
 pub async fn call_set_volume(volume: f32) -> Result<(), String> {
     session::set_volume(volume).await
+}
+
+/// The voice processing switches, as saved for this account.
+#[tauri::command]
+pub async fn call_audio_settings_get() -> AudioSettings {
+    settings::load()
+}
+
+/// Applies mid-call and saves.
+#[tauri::command]
+pub async fn call_audio_settings_set(settings: AudioSettings) -> Result<(), String> {
+    settings::set(settings)
+}
+
+/// Runs the microphone through the call's processing and streams `mic_level`
+/// events until stopped. Refused during a call: the call's own meter serves then.
+#[tauri::command]
+pub async fn call_mic_test_start() -> Result<(), String> {
+    if session::snapshot().is_some() {
+        return Err("A call is in progress".into());
+    }
+    ensure_microphone()?;
+    session::mic_test_start().await
+}
+
+#[tauri::command]
+pub async fn call_mic_test_stop() {
+    session::mic_test_stop();
 }
 
 /// The call in progress, if any: what a reloaded webview asks first.

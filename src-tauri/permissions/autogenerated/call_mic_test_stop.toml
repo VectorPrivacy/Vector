@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-mic-test-stop"
+description = "Enables the call_mic_test_stop command without any pre-configured scope."
+commands.allow = ["call_mic_test_stop"]
+
+[[permission]]
+identifier = "deny-call-mic-test-stop"
+description = "Denies the call_mic_test_stop command without any pre-configured scope."
+commands.deny = ["call_mic_test_stop"]

@@ -1153,6 +1153,8 @@ async function setupRustListeners() {
     // Native calls: the backend owns the state machine; the overlay mirrors it.
     _on('call_state', (evt) => VectorSvelte.setCallState(evt.payload));
     _on('call_stats', (evt) => VectorSvelte.setCallStats(evt.payload));
+    _on('call_level', (evt) => VectorSvelte.setCallLevels(evt.payload));
+    _on('mic_level', (evt) => VectorSvelte.setMicTest(null, evt.payload?.mic || 0));
 
     await Promise.all(_p);
 
