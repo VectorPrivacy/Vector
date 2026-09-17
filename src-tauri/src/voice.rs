@@ -158,8 +158,10 @@ impl AudioRecorder {
                 let recording = Arc::clone(recording);
                 let dead = Arc::clone(dead);
                 let mut resampler = (rate != base_rate).then(|| crate::calls::resample::Resampler::new(rate, base_rate));
+                let mut declick = crate::calls::declick::Declicker::new(base_rate);
                 let mut mono: Vec<f32> = Vec::new();
                 let mut out: Vec<f32> = Vec::new();
+                let mut pcm: Vec<i16> = Vec::new();
                 let stream = device
                     .build_input_stream(
                         &config,
@@ -173,8 +175,11 @@ impl AudioRecorder {
                                 Some(r) => { out.clear(); r.process(&mono, &mut out); &out }
                                 None => &mono,
                             };
+                            pcm.clear();
+                            pcm.extend(block.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16));
+                            declick.process(&mut pcm);
                             if let Ok(mut guard) = samples.lock() {
-                                guard.extend(block.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16));
+                                guard.extend_from_slice(&pcm);
                             }
                         },
                         move |err| {

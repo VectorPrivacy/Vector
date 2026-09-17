@@ -73,6 +73,7 @@ pub struct CallStats {
     pub late: u64,
     pub depth_ms: u32,
     pub jitter_ms: u32,
+    pub clicks_cut: u64,
 }
 
 struct Call {
@@ -710,6 +711,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 rebuilt: stats.rebuilt.load(Ordering::Relaxed),
                 concealed: stats.concealed.load(Ordering::Relaxed),
                 late: stats.late.load(Ordering::Relaxed),
+                clicks_cut: stats.clicks_cut.load(Ordering::Relaxed),
                 depth_ms: stats.depth_ms.load(Ordering::Relaxed),
                 jitter_ms: stats.jitter_ms.load(Ordering::Relaxed),
             };

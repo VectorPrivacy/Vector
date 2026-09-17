@@ -6,6 +6,7 @@
 
 pub mod aec;
 pub mod codec;
+pub mod declick;
 pub mod commands;
 pub mod media;
 pub mod resample;

@@ -6,6 +6,7 @@
 
 use super::aec::{EchoCanceller, SpeexAec};
 use super::codec::{Decoder, Encoder};
+use super::declick::Declicker;
 use super::resample::Resampler;
 use super::ring::SpscRing;
 use super::settings;
@@ -57,6 +58,8 @@ pub struct MediaStats {
     pub late: AtomicU64,
     pub depth_ms: AtomicU32,
     pub jitter_ms: AtomicU32,
+    /// Cable clicks cut out of the microphone before encoding.
+    pub clicks_cut: AtomicU64,
     /// Loudness of what the microphone sends after processing, 0 to 1 (f32 bits).
     pub mic_level: AtomicU32,
     /// Loudness of what the peer sends, 0 to 1 (f32 bits).
@@ -327,6 +330,7 @@ fn capture_thread(
     let _ = ready.send(Ok(()));
 
     let mut near_rs = Resampler::new(in_rate, ENGINE_RATE);
+    let mut declick = Declicker::new(ENGINE_RATE);
     let mut far_rs = Resampler::new(out_rate, ENGINE_RATE);
     let mut near = Vec::with_capacity(ENGINE_RATE as usize);
     let mut far = Vec::with_capacity(ENGINE_RATE as usize);
@@ -370,6 +374,8 @@ fn capture_thread(
             } else {
                 far_i16.fill(0);
             }
+            declick.process(&mut near_i16);
+            stats.clicks_cut.store(declick.triggers() as u64, Ordering::Relaxed);
             aec.configure(settings::current());
             aec.process(&near_i16, &far_i16, &mut clean);
             stats.mic_level.store(level_of(&clean).to_bits(), Ordering::Relaxed);
