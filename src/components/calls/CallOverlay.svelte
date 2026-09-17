@@ -2,6 +2,7 @@
     // The call on screen: a ring card while a call comes in, otherwise a pill that
     // floats above every pane, drags anywhere, remembers where it was left, and opens
     // into volume, microphone and a plain-language view of the connection.
+    import { untrack } from 'svelte';
     import { callState, callAudio } from '../lib/calls.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
@@ -87,10 +88,10 @@
     function clamp(p) {
         const w = pill?.offsetWidth || 300;
         const hgt = pill?.offsetHeight || 48;
-        return {
-            x: Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8)),
-            y: Math.min(Math.max(8, p.y), Math.max(8, window.innerHeight - hgt - 8)),
-        };
+        const x = Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8));
+        const y = Math.min(Math.max(8, p.y), Math.max(8, window.innerHeight - hgt - 8));
+        // The same object when nothing moved, so a re-clamp never counts as a change.
+        return x === p.x && y === p.y ? p : { x, y };
     }
     function onPointerDown(e) {
         if (e.button !== 0 || e.target.closest('button, input, a')) return;
@@ -119,8 +120,12 @@
         window.addEventListener('resize', keep);
         return () => window.removeEventListener('resize', keep);
     });
-    // Opening the panel can push the pill off the bottom; pull it back in.
-    $effect(() => { expanded; if (pos) queueMicrotask(() => { pos = clamp(pos); }); });
+    // Opening the panel can push the pill off the bottom; pull it back in. The
+    // position is read untracked: writing it from an effect that depends on it loops.
+    $effect(() => {
+        expanded;
+        queueMicrotask(() => untrack(() => { if (pos) pos = clamp(pos); }));
+    });
     const placement = $derived(pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : '');
 
     // ── the connection in words and a picture ──
