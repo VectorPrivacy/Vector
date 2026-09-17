@@ -164,6 +164,10 @@
     });
     const placement = $derived((pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : '') + (width != null ? ` width:${width}px;` : ''));
 
+    // How brightly the peer's avatar ring glows, 0 to 1. Levels sit on a -60 dB scale,
+    // so the floor is lifted above room noise and speech spans the rest.
+    const talk = $derived(live && !c.peerMuted ? Math.min(1, Math.max(0, (c.levels.peer - 0.3) / 0.55)) : 0);
+
     // ── the connection in words and a picture ──
     const delayMs = $derived(c.stats?.rtt_ms ?? null);
     const path = $derived(c.stats?.path === 'relay' ? 'via relay' : c.stats?.path === 'direct' ? 'direct' : '');
@@ -240,7 +244,9 @@
         <!-- Only the header row drags or toggles; the panel below is for its controls. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="call-pill-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>
-            <Avatar src={peer?.avatar} size={30} />
+            <span class="call-pill-avatar" style="--talk: {talk.toFixed(2)}">
+                <Avatar src={peer?.avatar} size={30} />
+            </span>
             <div class="call-pill-text">
                 <span class="call-pill-name cutoff">{peer?.name || ''}</span>
                 <span class="call-pill-status cutoff">
@@ -268,16 +274,9 @@
                            oninput={(e) => h.setVolume(e.currentTarget.value / 100)} />
                     <span class="call-panel-value">{Math.round(c.volume * 100)}%</span>
                 </label>
-                <button class="call-panel-toggle" onclick={() => h.setMuted(!c.muted)}>
-                    <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
-                    <span>{c.muted ? 'Microphone muted' : 'Microphone on'}</span>
-                    <span class="call-panel-hint">{c.muted ? 'tap to unmute' : 'tap to mute'}</span>
-                </button>
                 <div class="call-panel-meters">
                     <span class="call-panel-label">Your voice</span>
                     <VoiceMeter level={c.muted ? 0 : c.levels.mic} active={live && !c.muted} />
-                    <span class="call-panel-label">Their voice</span>
-                    <VoiceMeter level={c.levels.peer} active={live} />
                 </div>
                 <div class="call-panel-section">Voice processing</div>
                 <div class="call-panel-switches">
@@ -342,7 +341,6 @@
                         <div class="call-graph-empty">Measuring the connection…</div>
                     {/if}
                 </div>
-                <button class="call-panel-hangup" onclick={() => h.hangup()}>Hang up</button>
             </div>
         {/if}
     </div>

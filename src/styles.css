@@ -21327,6 +21327,17 @@ body.profile-switcher-editing .profile-switcher-add {
   border-bottom: 1px solid #333333;
 }
 
+/* The peer's ring: a green that brightens with their voice. */
+.call-pill-avatar {
+  display: flex;
+  flex: none;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 2px rgba(89, 252, 179, calc(0.12 + var(--talk, 0) * 0.88)),
+    0 0 calc(var(--talk, 0) * 12px) rgba(89, 252, 179, calc(var(--talk, 0) * 0.7));
+  transition: box-shadow 0.1s linear;
+}
+
 .call-pill-open {
   width: 300px;
 }
@@ -21518,36 +21529,6 @@ body.profile-switcher-editing .profile-switcher-add {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
 }
 
-.call-panel-toggle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  border: 0;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-color, #f6f6f6);
-  font-size: 12.5px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.call-panel-toggle:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.call-panel-toggle .icon {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  flex: none;
-}
-
-.call-panel-toggle .call-panel-hint {
-  margin-left: auto;
-}
-
 /* Each section starts with its own rule and title, the dialog's way of separating things. */
 .call-panel-section {
   font-size: 11px;
@@ -21669,22 +21650,6 @@ body.profile-switcher-editing .profile-switcher-add {
   color: #8a8a8a;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
-}
-
-.call-panel-hangup {
-  width: 100%;
-  padding: 9px 0;
-  border: 0;
-  border-radius: 10px;
-  background: var(--danger-color, #FC595C);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.call-panel-hangup:hover {
-  background: color-mix(in srgb, var(--danger-color, #FC595C) 85%, white);
 }
 
 /* ── The incoming ring: the pop overlay recipe, one card, two round answers ── */
