@@ -21766,11 +21766,19 @@ body.profile-switcher-editing .profile-switcher-add {
   min-width: 0;
 }
 
-.settings-hint {
+.settings-label {
+  line-height: 1.15;
+}
+
+/* Outranks the container's span rule, so the hint stays dim and snug under its title. */
+.settings-hint,
+.toggle-container .settings-label .settings-hint,
+.calls-mic-test-row .settings-label .settings-hint {
   display: block;
-  font-size: 11.5px;
+  font-size: 12px;
+  line-height: 1.2;
   color: #8a8a8a;
-  margin-top: 2px;
+  margin: 1px 0 0;
 }
 
 .calls-mic-test {
