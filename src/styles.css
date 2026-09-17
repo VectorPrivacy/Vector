@@ -21312,7 +21312,9 @@ body.profile-switcher-editing .profile-switcher-add {
   animation: qr-overlay-pop 0.16s ease-out;
 }
 
+/* The header row is the dialog's grey band, open or closed. */
 .call-pill-row {
+  background: #262626;
   cursor: grab;
   touch-action: none;
 }
@@ -21321,17 +21323,17 @@ body.profile-switcher-editing .profile-switcher-add {
   cursor: grabbing;
 }
 
-/* Open or closed, the pill is one surface; the panel starts under a plain rule. */
 .call-pill-open .call-pill-row {
-  border-bottom: 1px solid #262626;
+  border-bottom: 1px solid #333333;
 }
 
 .call-pill-open {
   width: 300px;
 }
 
+.call-pill,
 .call-pill-live {
-  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 35%, #262626);
+  border-color: #333333;
 }
 
 .call-pill-ended {
