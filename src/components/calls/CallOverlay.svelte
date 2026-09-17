@@ -127,21 +127,29 @@
     // Width is animated by hand: the closed pill hugs its content, which CSS cannot
     // tween from, so the width is pinned for the transition and released after.
     const OPEN_W = 300;
+    const WIDTH_MS = 180;
     let width = $state(null);
     let collapsedW = 0;
+    let release = null;
+    // Measured only while unpinned, so a mid-flight width never poses as the resting one.
     $effect(() => {
         if (!expanded && width == null && pill) collapsedW = pill.offsetWidth;
     });
     function toggle() {
         if (!pill) { expanded = !expanded; return; }
+        clearTimeout(release);
         const from = pill.offsetWidth;
-        if (!expanded) collapsedW = from;
+        if (!expanded && width == null) collapsedW = from;
         width = from;
         expanded = !expanded;
-        requestAnimationFrame(() => requestAnimationFrame(() => { width = expanded ? OPEN_W : collapsedW; }));
-    }
-    function onWidthDone(e) {
-        if (e.propertyName === 'width' && !expanded) width = null;
+        const opening = expanded;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (opening !== expanded) return;
+            width = opening ? OPEN_W : (collapsedW || from);
+            // Released on a clock, not the transition's end event: a close that lands
+            // on its current width never transitions, and the meters' end events bubble.
+            if (!opening) release = setTimeout(() => { if (!expanded) width = null; }, WIDTH_MS + 40);
+        }));
     }
     $effect(() => {
         const keep = () => { if (pos) pos = clamp(pos); };
@@ -217,7 +225,7 @@
 {:else if c.id}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live}
-         style={placement} bind:this={pill} ontransitionend={onWidthDone}>
+         style={placement} bind:this={pill}>
         <!-- Only the header row drags or toggles; the panel below is for its controls. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="call-pill-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>
