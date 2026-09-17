@@ -3,6 +3,7 @@
     // floats above every pane, drags anywhere, remembers where it was left, and opens
     // into volume, microphone and a plain-language view of the connection.
     import { untrack } from 'svelte';
+    import { slide } from 'svelte/transition';
     import { callState, callAudio } from '../lib/calls.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
@@ -85,11 +86,17 @@
     function savePos() {
         try { localStorage.setItem(POS_KEY, JSON.stringify(pos)); } catch (_) {}
     }
+    // The window chrome's strip is off limits: the pill must never cover its buttons.
+    function chromeHeight() {
+        const v = parseFloat(getComputedStyle(document.body).getPropertyValue('--chrome-h'));
+        return Number.isFinite(v) ? v : 0;
+    }
     function clamp(p) {
         const w = pill?.offsetWidth || 300;
         const hgt = pill?.offsetHeight || 48;
+        const top = chromeHeight() + 8;
         const x = Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8));
-        const y = Math.min(Math.max(8, p.y), Math.max(8, window.innerHeight - hgt - 8));
+        const y = Math.min(Math.max(top, p.y), Math.max(top, window.innerHeight - hgt - 8));
         // The same object when nothing moved, so a re-clamp never counts as a change.
         return x === p.x && y === p.y ? p : { x, y };
     }
@@ -146,10 +153,24 @@
         const step = W / (n - 1);
         const off = n - hist.length;
         const maxRtt = Math.max(200, ...hist.map(r => r.rtt));
-        const line = hist.map((r, i) => `${((off + i) * step).toFixed(1)},${(H - 2 - (r.rtt / maxRtt) * (H - 6)).toFixed(1)}`).join(' ');
-        const bars = hist.map((r, i) => ({ x: (off + i) * step, hgt: Math.min(H - 4, (r.lost / 10) * (H - 4)) })).filter(b => b.hgt > 0.5);
-        return { line, bars, maxRtt, step };
+        const pts = hist.map((r, i) => ({ x: (off + i) * step, y: H - 2 - (r.rtt / maxRtt) * (H - 6), rtt: r.rtt, lost: r.lost, ago: hist.length - 1 - i }));
+        const line = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+        const bars = pts.map(p => ({ x: p.x, hgt: Math.min(H - 4, (p.lost / 10) * (H - 4)) })).filter(b => b.hgt > 0.5);
+        return { line, bars, maxRtt, step, pts };
     });
+    // The sample under the pointer, as the Blossom chart does it: nearest by x.
+    let hover = $state(null);
+    function pick(e) {
+        if (!graph) return;
+        const r = e.currentTarget.getBoundingClientRect();
+        const x = ((e.clientX - r.left) / r.width) * W;
+        let best = graph.pts[0];
+        for (const p of graph.pts) if (Math.abs(p.x - x) < Math.abs(best.x - x)) best = p;
+        hover = best;
+    }
+    function leave() { hover = null; }
+    const tipSide = $derived(!hover ? '' : hover.x < W * 0.2 ? 'call-graph-tip-left' : hover.x > W * 0.8 ? 'call-graph-tip-right' : '');
+    function lostWord(v) { return v < 0.05 ? 'nothing lost' : v < 1 ? 'under 1% lost' : `${v.toFixed(v < 10 ? 1 : 0)}% lost`; }
 </script>
 
 {#if c.id && c.phase === 'ringing' && !c.outgoing}
@@ -175,9 +196,10 @@
 {:else if c.id}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live}
-         style={placement} bind:this={pill}
-         onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>
-        <div class="call-pill-row">
+         style={placement} bind:this={pill}>
+        <!-- Only the header row drags or toggles; the panel below is for its controls. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="call-pill-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>
             <Avatar src={peer?.avatar} size={30} />
             <div class="call-pill-text">
                 <span class="call-pill-name cutoff">{peer?.name || ''}</span>
@@ -198,7 +220,7 @@
             {/if}
         </div>
         {#if expanded && c.phase !== 'ended'}
-            <div class="call-panel">
+            <div class="call-panel" transition:slide={{ duration: 180 }}>
                 <label class="call-panel-slider">
                     <span class="call-panel-label">Their volume</span>
                     <input type="range" min="0" max="200" step="5" value={Math.round(c.volume * 100)}
@@ -246,14 +268,23 @@
                     <span class="call-panel-label" title="Moments the speaker had to fill in because the audio was late or missing">Lost audio</span>
                     <span class="call-panel-value">{lostText}</span>
                 </div>
-                <div class="call-graph" title="Last minute: delay as a line, lost audio as bars">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="call-graph" onpointermove={pick} onpointerdown={pick} onpointerleave={leave}>
                     {#if graph}
-                        <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-hidden="true">
+                        <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-label="Last minute: delay as a line, lost audio as bars">
                             {#each graph.bars as b}
                                 <rect x={b.x - graph.step / 2} y={H - 2 - b.hgt} width={Math.max(1.5, graph.step - 0.5)} height={b.hgt} class="call-graph-lost" />
                             {/each}
                             <polyline points={graph.line} class="call-graph-delay" />
+                            {#if hover}
+                                <path d="M{hover.x.toFixed(1)},{hover.y.toFixed(1)}h0.01" class="call-graph-dot" stroke-linecap="round" vector-effect="non-scaling-stroke" />
+                            {/if}
                         </svg>
+                        {#if hover}
+                            <div class="call-graph-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(2)}%; top: {(hover.y / H * 100).toFixed(2)}%">
+                                <b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}
+                            </div>
+                        {/if}
                         <div class="call-graph-legend">
                             <span><i class="call-graph-key call-graph-key-delay"></i>delay, up to {graph.maxRtt} ms</span>
                             <span><i class="call-graph-key call-graph-key-lost"></i>lost audio</span>

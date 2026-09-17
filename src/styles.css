@@ -21300,28 +21300,39 @@ body.profile-switcher-editing .profile-switcher-add {
   width: max-content;
   max-width: min(320px, calc(100% - 24px));
   border-radius: 16px;
-  background: rgba(22, 22, 22, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  /* The relay dialog's surface, so it reads as one of the app's own panels. */
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid #262626;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   backdrop-filter: blur(10px);
   color: var(--text-color, #f6f6f6);
-  cursor: grab;
-  touch-action: none;
+  overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
   animation: qr-overlay-pop 0.16s ease-out;
 }
 
-.call-pill:active {
+.call-pill-row {
+  cursor: grab;
+  touch-action: none;
+}
+
+.call-pill-row:active {
   cursor: grabbing;
+}
+
+/* Open, the header row becomes the dialog's header band. */
+.call-pill-open .call-pill-row {
+  background: #262626;
+  border-bottom: 1px solid #333333;
 }
 
 .call-pill-open {
   width: 300px;
 }
 
-.call-pill-live {
-  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 35%, transparent);
+.call-pill-live:not(.call-pill-open) {
+  border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 35%, #262626);
 }
 
 .call-pill-ended {
@@ -21422,19 +21433,19 @@ body.profile-switcher-editing .profile-switcher-add {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 4px 12px 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 6px 14px 14px;
   cursor: default;
 }
 
 .call-panel-label {
-  font-size: 12px;
-  color: #b2b2b2;
+  font-size: 12.5px;
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .call-panel-value {
-  font-size: 12.5px;
-  color: var(--text-color, #f6f6f6);
+  font-size: 13px;
+  color: #fff;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   display: inline-flex;
   align-items: center;
@@ -21444,6 +21455,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .call-panel-hint {
   font-size: 11px;
   color: #8a8a8a;
+  font-weight: 400;
 }
 
 .call-panel-slider {
@@ -21531,13 +21543,16 @@ body.profile-switcher-editing .profile-switcher-add {
   margin-left: auto;
 }
 
+/* Each section starts with its own rule and title, the dialog's way of separating things. */
 .call-panel-section {
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #8a8a8a;
-  margin-top: 2px;
+  color: var(--accent-color, #59fcb3);
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid #262626;
 }
 
 .call-panel-grid {
@@ -21548,10 +21563,39 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-graph {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
+
+.call-graph-dot {
+  stroke: #fff;
+  stroke-width: 6px;
+}
+
+/* The Blossom chart's readout: one line, pinned above the sample. */
+.call-graph-tip {
+  position: absolute;
+  transform: translate(-50%, calc(-100% - 8px));
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(20, 20, 20, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 11px;
+  color: var(--text-color, #f6f6f6);
+  white-space: nowrap;
+  pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.call-graph-tip b {
+  color: var(--accent-color, #59fcb3);
+  font-weight: 600;
+}
+
+.call-graph-tip-left { transform: translate(-4px, calc(-100% - 8px)); }
+.call-graph-tip-right { transform: translate(calc(-100% + 4px), calc(-100% - 8px)); }
 
 .call-graph svg {
   display: block;
