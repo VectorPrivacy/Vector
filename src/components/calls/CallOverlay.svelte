@@ -104,7 +104,8 @@
         if (e.button !== 0 || e.target.closest('button, input, a')) return;
         const r = pill.getBoundingClientRect();
         drag = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
-        pill.setPointerCapture(e.pointerId);
+        // Capture on the row that listens, so its own pointerup ends the drag.
+        e.currentTarget.setPointerCapture(e.pointerId);
     }
     function onPointerMove(e) {
         if (!drag) return;
