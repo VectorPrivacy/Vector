@@ -21321,17 +21321,16 @@ body.profile-switcher-editing .profile-switcher-add {
   cursor: grabbing;
 }
 
-/* Open, the header row becomes the dialog's header band. */
+/* Open or closed, the pill is one surface; the panel starts under a plain rule. */
 .call-pill-open .call-pill-row {
-  background: #262626;
-  border-bottom: 1px solid #333333;
+  border-bottom: 1px solid #262626;
 }
 
 .call-pill-open {
   width: 300px;
 }
 
-.call-pill-live:not(.call-pill-open) {
+.call-pill-live {
   border-color: color-mix(in srgb, var(--accent-color, #59fcb3) 35%, #262626);
 }
 
