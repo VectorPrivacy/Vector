@@ -24,6 +24,14 @@ struct SpeexPreprocessState {
 
 const SPEEX_ECHO_SET_SAMPLING_RATE: i32 = 24;
 const SPEEX_PREPROCESS_SET_DENOISE: i32 = 0;
+const SPEEX_PREPROCESS_SET_AGC: i32 = 2;
+/// Float: the amplitude the gain control steers speech towards, out of 32768.
+const SPEEX_PREPROCESS_SET_AGC_LEVEL: i32 = 6;
+/// dB per second the gain may rise and fall.
+const SPEEX_PREPROCESS_SET_AGC_INCREMENT: i32 = 26;
+const SPEEX_PREPROCESS_SET_AGC_DECREMENT: i32 = 28;
+/// dB: the most a quiet microphone is lifted.
+const SPEEX_PREPROCESS_SET_AGC_MAX_GAIN: i32 = 30;
 const SPEEX_PREPROCESS_SET_NOISE_SUPPRESS: i32 = 18;
 const SPEEX_PREPROCESS_SET_ECHO_SUPPRESS: i32 = 20;
 const SPEEX_PREPROCESS_SET_ECHO_SUPPRESS_ACTIVE: i32 = 22;
@@ -69,6 +77,17 @@ impl SpeexAec {
             }
             let mut on: i32 = 1;
             speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_DENOISE, &mut on as *mut i32 as *mut c_void);
+            // Automatic gain: a laptop microphone at arm's length and a headset an inch
+            // away should reach the far end at the same level, without anyone shouting.
+            speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_AGC, &mut on as *mut i32 as *mut c_void);
+            let mut level: f32 = 20_000.0;
+            speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_AGC_LEVEL, &mut level as *mut f32 as *mut c_void);
+            let mut max_gain_db: i32 = 40;
+            speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_AGC_MAX_GAIN, &mut max_gain_db as *mut i32 as *mut c_void);
+            let mut up_db_s: i32 = 24;
+            speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_AGC_INCREMENT, &mut up_db_s as *mut i32 as *mut c_void);
+            let mut down_db_s: i32 = -60;
+            speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_AGC_DECREMENT, &mut down_db_s as *mut i32 as *mut c_void);
             let mut noise_db: i32 = -25;
             speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_NOISE_SUPPRESS, &mut noise_db as *mut i32 as *mut c_void);
             speex_preprocess_ctl(pre, SPEEX_PREPROCESS_SET_ECHO_STATE, echo as *mut c_void);
@@ -130,5 +149,38 @@ mod tests {
             residual += out.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
         }
         assert!(residual < input / 10.0, "residual {residual} vs input {input}");
+    }
+
+    #[test]
+    fn a_quiet_voice_is_lifted() {
+        let frame = 320;
+        let mut aec = SpeexAec::new(16_000, frame, 200).unwrap();
+        let far = vec![0i16; frame];
+        let mut phase = 0f32;
+        let rms = |s: &[i16]| (s.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / s.len() as f64).sqrt();
+        let mut first = 0f64;
+        let mut last = 0f64;
+        // Whispered "syllables": a harmonic-rich buzz in 300 ms bursts with 200 ms
+        // gaps, for ten seconds. A steady tone would read as noise, not speech.
+        for i in 0..500 {
+            let on = (i % 25) < 15;
+            let near: Vec<i16> = (0..frame)
+                .map(|_| {
+                    phase += 2.0 * std::f32::consts::PI * 140.0 / 16_000.0;
+                    let v: f32 = (1..=8).map(|h| (phase * h as f32).sin() / h as f32).sum();
+                    if on { (v * 500.0) as i16 } else { 0 }
+                })
+                .collect();
+            let mut out = vec![0i16; frame];
+            aec.process(&near, &far, &mut out);
+            if on {
+                if i < 15 {
+                    first = first.max(rms(&out));
+                }
+                last = rms(&out);
+            }
+        }
+        assert!(last > first * 3.0, "gain never came up: {first} -> {last}");
+        assert!(last > 2_000.0, "still quiet: {last}");
     }
 }

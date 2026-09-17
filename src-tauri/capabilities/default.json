@@ -373,6 +373,7 @@
     "allow-call-reject",
     "allow-call-hangup",
     "allow-call-set-muted",
+    "allow-call-set-volume",
     "allow-call-status",
     "allow-audio-pause",
     "allow-audio-seek",

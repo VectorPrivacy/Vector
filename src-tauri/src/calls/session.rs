@@ -45,6 +45,8 @@ pub struct CallState {
     pub reason: Option<String>,
     pub muted: bool,
     pub peer_muted: bool,
+    /// Listener-side volume, 1.0 is unity.
+    pub volume: f32,
     /// Milliseconds since the call went active; 0 before that.
     pub active_ms: u64,
 }
@@ -78,6 +80,7 @@ struct Call {
     active_since: Option<Instant>,
     muted: bool,
     peer_muted: bool,
+    volume: f32,
 }
 
 impl Call {
@@ -90,6 +93,7 @@ impl Call {
             reason,
             muted: self.muted,
             peer_muted: self.peer_muted,
+            volume: self.volume,
             active_ms: self.active_since.map_or(0, |t| t.elapsed().as_millis() as u64),
         }
     }
@@ -212,6 +216,7 @@ pub async fn start(peer: String) -> Result<CallState, String> {
             active_since: None,
             muted: false,
             peer_muted: false,
+            volume: 1.0,
         };
         let state = call.state(None);
         *guard = Some(call);
@@ -327,6 +332,59 @@ pub async fn set_muted(on: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Listener-side volume for the call in progress.
+pub async fn set_volume(volume: f32) -> Result<(), String> {
+    let volume = volume.clamp(0.0, 4.0);
+    with_call(|c| {
+        c.volume = volume;
+        if let Some(m) = c.media.as_ref() {
+            m.link.set_gain(volume);
+        }
+    })
+    .ok_or("No call")?;
+    if let Some(s) = snapshot() {
+        emit_state(&s);
+    }
+    Ok(())
+}
+
+/// Called once at startup: when the default microphone or speaker changes, an
+/// active call reopens its audio on the new devices.
+pub fn install_device_follow() {
+    if let Ok(mixer) = crate::audio_engine::AudioEngine::get() {
+        mixer.on_device_change(Box::new(|| {
+            let Some((id, conn)) = with_call(|c| (c.id.clone(), c.conn.clone())) else { return };
+            let Some(conn) = conn else { return };
+            vector_core::db::spawn_bound(async move {
+                restart_media(&id, conn).await;
+            });
+        }));
+    }
+}
+
+async fn restart_media(id: &str, conn: Connection) {
+    // Drop the old engine first: it holds the mixer slot and the old input stream.
+    let (old, muted, volume) = match with_call_id(id, |c| (c.media.take(), c.muted, c.volume)) {
+        Some(v) => v,
+        None => return,
+    };
+    drop(old);
+    let media = tokio::task::spawn_blocking(move || MediaEngine::start(conn, volume)).await;
+    match media {
+        Ok(Ok(m)) => {
+            m.muted.store(muted, Ordering::Relaxed);
+            let installed = with_call_id(id, |c| c.media = Some(m)).is_some();
+            if installed {
+                log_info!("[CALLS] Audio reopened on the new default devices");
+            }
+        }
+        _ => {
+            log_warn!("[CALLS] Could not reopen audio after a device change");
+            end(id, "audio_failed");
+        }
+    }
+}
+
 /// A signal from the peer, already validated as coming from `sender`.
 pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Option<&str>, created_at: u64) {
     log_info!("[CALLS] {signal} from {sender} for call {call_id}");
@@ -359,6 +417,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             active_since: None,
                             muted: false,
                             peer_muted: false,
+                            volume: 1.0,
                         };
                         let state = call.state(None);
                         *guard = Some(call);
@@ -476,7 +535,8 @@ pub async fn on_incoming(conn: Connection) {
 /// Media up, watchers on, Active.
 async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStream) {
     let media_conn = conn.clone();
-    let media = tokio::task::spawn_blocking(move || MediaEngine::start(media_conn)).await;
+    let volume = with_call_id(id, |c| c.volume).unwrap_or(1.0);
+    let media = tokio::task::spawn_blocking(move || MediaEngine::start(media_conn, volume)).await;
     let media = match media {
         Ok(Ok(m)) => m,
         Ok(Err(e)) => {

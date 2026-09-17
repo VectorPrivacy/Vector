@@ -48,6 +48,11 @@ pub async fn call_set_muted(muted: bool) -> Result<(), String> {
     session::set_muted(muted).await
 }
 
+#[tauri::command]
+pub async fn call_set_volume(volume: f32) -> Result<(), String> {
+    session::set_volume(volume).await
+}
+
 /// The call in progress, if any: what a reloaded webview asks first.
 #[tauri::command]
 pub async fn call_status() -> Option<CallState> {

@@ -62,17 +62,19 @@ pub struct MediaEngine {
     stop: Arc<AtomicBool>,
     pub muted: Arc<AtomicBool>,
     pub stats: Arc<MediaStats>,
+    pub link: Arc<LiveLink>,
     threads: Vec<std::thread::JoinHandle<()>>,
     rx_task: tokio::task::JoinHandle<()>,
 }
 
 impl MediaEngine {
-    pub fn start(conn: Connection) -> Result<Self, String> {
+    pub fn start(conn: Connection, volume: f32) -> Result<Self, String> {
         let mixer = AudioEngine::get()?;
         let out_rate = mixer.device_sample_rate();
         let link = Arc::new(LiveLink {
             play: SpscRing::new(out_rate as usize),
             tap: SpscRing::new(out_rate as usize),
+            gain: std::sync::atomic::AtomicU32::new(volume.to_bits()),
         });
         mixer.attach_live(Arc::clone(&link))?;
 
@@ -136,7 +138,7 @@ impl MediaEngine {
                 .map_err(|e| e.to_string())?
         };
 
-        Ok(Self { stop, muted, stats, threads: vec![capture, playout], rx_task })
+        Ok(Self { stop, muted, stats, link, threads: vec![capture, playout], rx_task })
     }
 }
 

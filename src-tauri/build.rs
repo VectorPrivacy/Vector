@@ -103,6 +103,7 @@ fn main() {
             "call_reject",
             "call_hangup",
             "call_set_muted",
+            "call_set_volume",
             "call_status",
             "stop_recording",
             "update_unread_counter",

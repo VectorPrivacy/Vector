@@ -512,6 +512,7 @@ pub fn run() {
 
             // Initialize the unified audio engine (persistent cpal output stream)
             audio_engine::AudioEngine::init();
+            calls::session::install_device_follow();
 
             // Start localhost media server on Android (provides Range request support for
             // <video> and <audio> elements that asset:// doesn't support)
@@ -673,6 +674,7 @@ pub fn run() {
             calls::commands::call_reject,
             calls::commands::call_hangup,
             calls::commands::call_set_muted,
+            calls::commands::call_set_volume,
             calls::commands::call_status,
             commands::relays::connect,
             // Account crypto commands (commands/account.rs)
