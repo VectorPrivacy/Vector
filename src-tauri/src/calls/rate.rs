@@ -43,6 +43,12 @@ impl RateControl {
         Self { rung, clean_secs: 0, hold: 0, last_sent: 0, last_lost: 0, loss_avg: 0.0 }
     }
 
+    /// Sets the baseline so the first observation covers only the next second.
+    pub fn prime(&mut self, sent_packets: u64, lost_packets: u64) {
+        self.last_sent = sent_packets;
+        self.last_lost = lost_packets;
+    }
+
     pub fn kbps(&self) -> u32 {
         LADDER[self.rung]
     }

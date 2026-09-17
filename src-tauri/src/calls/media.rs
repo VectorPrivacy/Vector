@@ -69,6 +69,11 @@ pub struct MediaStats {
     pub mic_level: AtomicU32,
     /// Loudness of what the peer sends, 0 to 1 (f32 bits).
     pub peer_level: AtomicU32,
+    /// The next outgoing sequence number (u16). Lives here, not in the capture
+    /// loop, so a restarted engine keeps counting: the peer drops everything
+    /// numbered below what it last played, and a reset silences us until the
+    /// count catches back up.
+    pub next_seq: AtomicU32,
 }
 
 impl MediaStats {
@@ -107,7 +112,14 @@ pub struct MediaEngine {
 impl MediaEngine {
     /// With a connection this is a call; without one it is a microphone test: the
     /// same capture chain, levels only, nothing sent and nothing played.
-    pub fn start(conn: Option<Connection>, volume: f32) -> Result<Self, String> {
+    /// `stats` carries the counters across a restart: the liveness check and the
+    /// stats UI hold one Arc for the call's life, and fresh ones would read as a
+    /// peer gone silent.
+    pub fn start(
+        conn: Option<Connection>,
+        volume: f32,
+        stats: Option<Arc<MediaStats>>,
+    ) -> Result<Self, String> {
         let mixer = AudioEngine::get()?;
         let out_rate = mixer.device_sample_rate();
         let link = Arc::new(LiveLink {
@@ -123,7 +135,7 @@ impl MediaEngine {
 
         let stop = Arc::new(AtomicBool::new(false));
         let muted = Arc::new(AtomicBool::new(false));
-        let stats = Arc::new(MediaStats::default());
+        let stats = stats.unwrap_or_else(|| Arc::new(MediaStats::default()));
         let jitter = Arc::new(Mutex::new(Jitter::default()));
 
         // Capture: the thread owns the cpal stream (it is not Send) and runs the encode loop.
@@ -348,9 +360,13 @@ fn capture_thread(
     let mut clean = [0i16; FRAME];
     let mut packet = [0u8; 1500];
     let started = Instant::now();
-    let mut seq: u16 = 0;
+    let mut seq: u16 = stats.next_seq.load(Ordering::Relaxed) as u16;
     let mut netsim = NetSim::from_env();
     let mut rate = RateControl::new();
+    if let Some(conn) = conn.as_ref() {
+        let net = conn.stats();
+        rate.prime(net.udp_tx.datagrams, net.lost_packets);
+    }
     stats.bitrate_kbps.store(rate.kbps(), Ordering::Relaxed);
     let mut rate_tick = Instant::now();
     // Far-end may run ahead of near-end by this much before the excess is dropped.
@@ -393,6 +409,7 @@ fn capture_thread(
 
             let Some(conn) = conn.as_ref() else {
                 seq = seq.wrapping_add(1);
+                stats.next_seq.store(seq as u32, Ordering::Relaxed);
                 continue;
             };
             let ts = started.elapsed().as_millis() as u32;
@@ -414,6 +431,7 @@ fn capture_thread(
                 }
             }
             seq = seq.wrapping_add(1);
+            stats.next_seq.store(seq as u32, Ordering::Relaxed);
         }
         if let (Some(sim), Some(conn)) = (netsim.as_mut(), conn.as_ref()) {
             sim.pump(conn, &stats);

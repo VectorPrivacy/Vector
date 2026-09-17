@@ -377,7 +377,7 @@ pub fn mic_test_running() -> bool {
 
 pub async fn mic_test_start() -> Result<(), String> {
     mic_test_stop();
-    let engine = tokio::task::spawn_blocking(|| MediaEngine::start(None, 1.0))
+    let engine = tokio::task::spawn_blocking(|| MediaEngine::start(None, 1.0, None))
         .await
         .map_err(|e| e.to_string())??;
     let stats = Arc::clone(&engine.stats);
@@ -428,8 +428,12 @@ async fn restart_media(id: &str, conn: Connection) {
         Some(v) => v,
         None => return,
     };
+    // The counters outlive the engine: the liveness check reads them for the
+    // call's life, and a reset reads as the peer having gone quiet.
+    let stats = old.as_ref().map(|m| Arc::clone(&m.stats));
     drop(old);
-    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(conn), volume)).await;
+    let media =
+        tokio::task::spawn_blocking(move || MediaEngine::start(Some(conn), volume, stats)).await;
     match media {
         Ok(Ok(m)) => {
             m.muted.store(muted, Ordering::Relaxed);
@@ -596,7 +600,7 @@ pub async fn on_incoming(conn: Connection) {
 async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStream) {
     let media_conn = conn.clone();
     let volume = with_call_id(id, |c| c.volume).unwrap_or(1.0);
-    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(media_conn), volume)).await;
+    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(media_conn), volume, None)).await;
     let media = match media {
         Ok(Ok(m)) => m,
         Ok(Err(e)) => {

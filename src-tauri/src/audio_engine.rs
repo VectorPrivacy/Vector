@@ -317,54 +317,63 @@ impl AudioEngine {
     /// nothing. It polls every second and wakes at once when a stream dies or a
     /// preference changes; on a change the output is reopened and the listeners told.
     fn start_device_watchdog(&'static self) {
+        // The listeners spawn tasks, and a plain thread carries no runtime.
+        let rt = tauri::async_runtime::handle();
         std::thread::Builder::new()
             .name("audio-devices".into())
-            .spawn(move || loop {
-                let kicked = {
-                    let (lock, cv) = &self.wake;
-                    let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let (mut guard, _) = cv
-                        .wait_timeout_while(guard, std::time::Duration::from_secs(1), |k| !*k)
-                        .unwrap_or_else(|e| e.into_inner());
-                    std::mem::replace(&mut *guard, false)
-                };
-                let output_now = crate::audio_devices::resolved_output_name();
-                let input_now = crate::audio_devices::resolved_input_name();
-                let output_changed = {
-                    let mut held = self.output_name.lock().unwrap_or_else(|e| e.into_inner());
-                    if *held != output_now && !output_now.is_empty() {
-                        *held = output_now.clone();
-                        true
-                    } else {
-                        false
+            .spawn(move || {
+                let _rt = rt.inner().enter();
+                loop {
+                    let kicked = {
+                        let (lock, cv) = &self.wake;
+                        let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        let (mut guard, _) = cv
+                            .wait_timeout_while(guard, std::time::Duration::from_secs(1), |k| !*k)
+                            .unwrap_or_else(|e| e.into_inner());
+                        std::mem::replace(&mut *guard, false)
+                    };
+                    let output_now = crate::audio_devices::resolved_output_name();
+                    let input_now = crate::audio_devices::resolved_input_name();
+                    let output_changed = {
+                        let mut held = self.output_name.lock().unwrap_or_else(|e| e.into_inner());
+                        if *held != output_now && !output_now.is_empty() {
+                            *held = output_now.clone();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    let input_changed = {
+                        let mut held = self.input_name.lock().unwrap_or_else(|e| e.into_inner());
+                        if *held != input_now && !input_now.is_empty() {
+                            *held = input_now.clone();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    // A kick with no visible change still means a stream died: reopen anyway.
+                    if output_changed || kicked {
+                        match self.rebuild_output() {
+                            Ok(()) => println!("[AudioEngine] Output on {output_now}"),
+                            Err(e) => eprintln!("[AudioEngine] Could not open the output device: {e}"),
+                        }
                     }
-                };
-                let input_changed = {
-                    let mut held = self.input_name.lock().unwrap_or_else(|e| e.into_inner());
-                    if *held != input_now && !input_now.is_empty() {
-                        *held = input_now.clone();
-                        true
-                    } else {
-                        false
+                    if input_changed || kicked {
+                        self.input_generation.fetch_add(1, Ordering::Relaxed);
+                        println!("[AudioEngine] Input on {input_now}");
                     }
-                };
-                // A kick with no visible change still means a stream died: reopen anyway.
-                if output_changed || kicked {
-                    match self.rebuild_output() {
-                        Ok(()) => println!("[AudioEngine] Output on {output_now}"),
-                        Err(e) => eprintln!("[AudioEngine] Could not open the output device: {e}"),
-                    }
-                }
-                if input_changed || kicked {
-                    self.input_generation.fetch_add(1, Ordering::Relaxed);
-                    println!("[AudioEngine] Input on {input_now}");
-                }
-                if output_changed || input_changed || kicked {
-                    for f in self.device_listeners.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-                        f();
-                    }
-                    if let Some(app) = TAURI_APP.get() {
-                        let _ = app.emit("audio_devices_changed", ());
+                    if output_changed || input_changed || kicked {
+                        for f in self.device_listeners.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                            // A panicking listener must not take the watchdog with it:
+                            // the thread dying ends device following for the process.
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())).is_err() {
+                                eprintln!("[AudioEngine] A device listener panicked");
+                            }
+                        }
+                        if let Some(app) = TAURI_APP.get() {
+                            let _ = app.emit("audio_devices_changed", ());
+                        }
                     }
                 }
             })
