@@ -5,7 +5,7 @@
 
 /// Bitrates the encoder may use, in kbit/s. Opus picks the audio bandwidth to
 /// match: narrowband at the bottom, fullband from the middle up.
-pub const LADDER: [u32; 7] = [12, 16, 20, 24, 32, 40, 48];
+pub const LADDER: [u32; 8] = [12, 16, 20, 24, 32, 40, 48, 64];
 pub const START_KBPS: u32 = 32;
 /// Loss in one second that costs a rung.
 const DOWN_AT_PCT: f32 = 4.0;
@@ -110,13 +110,13 @@ mod tests {
         // Clean seconds climb one rung every CLIMB_AFTER_SECS.
         let mut sent = 200;
         let mut changes = vec![];
-        for _ in 0..(CLIMB_AFTER_SECS * 3) {
+        for _ in 0..(CLIMB_AFTER_SECS * 4) {
             sent += 50;
             if let Some(s) = rc.observe(sent, 20) {
                 changes.push(s.kbps);
             }
         }
-        assert_eq!(changes, vec![24, 32, 40]);
+        assert_eq!(changes, vec![24, 32, 40, 48]);
     }
 
     #[test]

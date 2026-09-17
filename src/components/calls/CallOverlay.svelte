@@ -183,7 +183,7 @@
     const bitrateHint = $derived.by(() => {
         const loss = c.stats?.net_loss ?? 0;
         if (loss >= 4) return 'lowered, the network is dropping packets';
-        if (bitrate && bitrate >= 48) return 'full quality';
+        if (bitrate && bitrate >= 64) return 'full quality';
         return '';
     });
     // Graph: delay as a line, lost audio as bars, over the last minute. The top
