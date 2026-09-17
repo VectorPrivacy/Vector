@@ -173,8 +173,9 @@
         return recent.reduce((a, r) => a + r.lost, 0) / recent.length;
     });
     const lostText = $derived(lostPct < 0.05 ? 'none' : lostPct < 1 ? 'under 1%' : `${lostPct.toFixed(lostPct < 10 ? 1 : 0)}%`);
-    // Graph: delay as a line, lost audio as bars, over the last minute.
-    const W = 240, H = 44;
+    // Graph: delay as a line, lost audio as bars, over the last minute. The top
+    // HEAD pixels are headroom for the tip, so it can sit above the highest sample.
+    const W = 240, H = 72, HEAD = 34;
     const graph = $derived.by(() => {
         const hist = c.history;
         if (hist.length < 2) return null;
@@ -182,9 +183,9 @@
         const step = W / (n - 1);
         const off = n - hist.length;
         const maxRtt = Math.max(200, ...hist.map(r => r.rtt));
-        const pts = hist.map((r, i) => ({ x: (off + i) * step, y: H - 2 - (r.rtt / maxRtt) * (H - 6), rtt: r.rtt, lost: r.lost, ago: hist.length - 1 - i }));
+        const pts = hist.map((r, i) => ({ x: (off + i) * step, y: H - 2 - (r.rtt / maxRtt) * (H - HEAD - 6), rtt: r.rtt, lost: r.lost, ago: hist.length - 1 - i }));
         const line = pts.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-        const bars = pts.map(p => ({ x: p.x, hgt: Math.min(H - 4, (p.lost / 10) * (H - 4)) })).filter(b => b.hgt > 0.5);
+        const bars = pts.map(p => ({ x: p.x, hgt: Math.min(H - HEAD - 4, (p.lost / 10) * (H - HEAD - 4)) })).filter(b => b.hgt > 0.5);
         return { line, bars, maxRtt, step, pts };
     });
     // The sample under the pointer, as the Blossom chart does it: nearest by x.
@@ -198,7 +199,7 @@
         hover = best;
     }
     function leave() { hover = null; }
-    // The tip sits inside the chart's top edge; near either side it hangs from that side.
+    // The tip sits above its sample; near either side it hangs inward from that side.
     const tipSide = $derived(!hover ? '' : hover.x < W * 0.25 ? 'call-graph-tip-left' : hover.x > W * 0.75 ? 'call-graph-tip-right' : '');
     function lostWord(v) { return v < 0.05 ? 'nothing lost' : v < 1 ? 'under 1% lost' : `${v.toFixed(v < 10 ? 1 : 0)}% lost`; }
 </script>
@@ -299,8 +300,10 @@
                     <span class="call-panel-value">{lostText}</span>
                 </div>
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div class="call-graph" onpointermove={pick} onpointerdown={pick} onpointerleave={leave}>
+                <div class="call-graph">
                     {#if graph}
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <div class="call-graph-plot" onpointermove={pick} onpointerdown={pick} onpointerleave={leave}>
                         <svg viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-label="Last minute: delay as a line, lost audio as bars">
                             {#each graph.bars as b}
                                 <rect x={b.x - graph.step / 2} y={H - 2 - b.hgt} width={Math.max(1.5, graph.step - 0.5)} height={b.hgt} class="call-graph-lost" />
@@ -311,10 +314,11 @@
                             {/if}
                         </svg>
                         {#if hover}
-                            <div class="call-graph-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(2)}%">
+                            <div class="call-graph-tip {tipSide}" style="left: {(hover.x / W * 100).toFixed(2)}%; top: {(hover.y / H * 100).toFixed(2)}%">
                                 <b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}
                             </div>
                         {/if}
+                        </div>
                         <div class="call-graph-legend">
                             {#if hover}
                                 <span class="call-graph-readout"><b>{hover.rtt} ms</b> · {lostWord(hover.lost)} · {hover.ago === 0 ? 'now' : `${hover.ago}s ago`}</span>

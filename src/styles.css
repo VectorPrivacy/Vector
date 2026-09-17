@@ -21568,10 +21568,14 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-graph {
-  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* The tip is placed in the plot's own box, so its percentages match the samples. */
+.call-graph-plot {
+  position: relative;
 }
 
 .call-graph-dot {
@@ -21583,8 +21587,7 @@ body.profile-switcher-editing .profile-switcher-add {
    same words on the legend line beneath. */
 .call-graph-tip {
   position: absolute;
-  top: 4px;
-  transform: translateX(-50%);
+  transform: translate(-50%, calc(-100% - 6px));
   padding: 2px 7px;
   border-radius: 6px;
   background: rgba(20, 20, 20, 0.96);
@@ -21602,8 +21605,8 @@ body.profile-switcher-editing .profile-switcher-add {
   font-weight: 600;
 }
 
-.call-graph-tip-left { left: 4px !important; transform: none; }
-.call-graph-tip-right { left: auto !important; right: 4px; transform: none; }
+.call-graph-tip-left { transform: translate(0, calc(-100% - 6px)); }
+.call-graph-tip-right { transform: translate(-100%, calc(-100% - 6px)); }
 
 .call-graph-readout {
   font-size: 11.5px;
@@ -21619,7 +21622,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .call-graph svg {
   display: block;
   width: 100%;
-  height: 44px;
+  height: 72px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
 }
@@ -21658,7 +21661,7 @@ body.profile-switcher-editing .profile-switcher-add {
 .call-graph-key-lost { background: var(--status-fair); height: 7px; }
 
 .call-graph-empty {
-  height: 44px;
+  height: 72px;
   display: flex;
   align-items: center;
   justify-content: center;
