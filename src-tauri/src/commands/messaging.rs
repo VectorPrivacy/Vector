@@ -189,9 +189,16 @@ pub async fn evict_chat_messages(chat_id: String, keep_count: usize) -> Result<(
     if let Some(chat) = state.chats.iter_mut().find(|c| c.id == chat_id) {
         let total = chat.message_count();
         if total > keep_count {
-            // Keep only the last `keep_count` messages (most recent)
+            // Keep only the last `keep_count` messages (most recent). A pending send
+            // lives nowhere but here until it lands: evicting it would leave the
+            // finished send with nothing to finalize, so it is never sent or saved.
             let drain_count = total - keep_count;
-            chat.messages.drain(0..drain_count);
+            let mut unsent: Vec<_> = chat.messages.drain(0..drain_count).filter(|m| m.is_pending()).collect();
+            if !unsent.is_empty() {
+                let mut kept = std::mem::take(chat.messages.messages_mut());
+                unsent.append(&mut kept);
+                *chat.messages.messages_mut() = unsent;
+            }
             chat.messages.rebuild_index();
         }
     }

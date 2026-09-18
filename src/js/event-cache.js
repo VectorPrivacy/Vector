@@ -710,17 +710,20 @@ class EventCache {
      * @private
      */
     _evictIfNeeded() {
-        let spared = false;
+        const spared = new Set();
         while (this.cache.size > EVENT_CACHE_CONFIG.maxCachedConversations) {
             // Get the first entry (oldest/least recently used)
             const oldestKey = this.cache.keys().next().value;
             const oldestEntry = this.cache.get(oldestKey);
 
-            // The open chat is what the user is reading: never its entry. Move it to
-            // the recent end once and evict the next-oldest instead.
-            if (oldestKey === strOpenChat) {
-                if (spared) break;
-                spared = true;
+            // The open chat is what the user is reading: never its entry. A chat with
+            // a send still in flight is spared too: its pending row exists only here
+            // until the send lands, and the DB page cannot bring it back. Each spared
+            // entry moves to the recent end once; when nothing else is left, stop.
+            const inFlight = oldestKey !== strOpenChat && oldestEntry.events.some(e => e.pending);
+            if (oldestKey === strOpenChat || inFlight) {
+                if (spared.has(oldestKey)) break;
+                spared.add(oldestKey);
                 this.cache.delete(oldestKey);
                 this.cache.set(oldestKey, oldestEntry);
                 continue;
