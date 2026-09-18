@@ -15801,6 +15801,16 @@ hr {
   justify-content: center;
   pointer-events: none;
   z-index: 2;
+  container-type: size;
+}
+
+/* The ring stays round on any media: it shrinks on both axes to fit the
+   shorter side rather than letting flex squash its width. */
+.attachment-progress-overlay > .miniapp-downloading-spinner,
+.attachment-progress-overlay > .upload-cancel-btn {
+  flex: none;
+  max-width: 70cqmin;
+  max-height: 70cqmin;
 }
 
 /* Cancel button for file box uploads — positioned over the spinner inside .custom-audio-player */
