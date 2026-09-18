@@ -53,6 +53,10 @@ impl SendCallback for TauriSendCallback {
         }
     }
 
+    fn cancel_token(&self, pending_id: &str) -> Option<Arc<AtomicBool>> {
+        UPLOAD_CANCEL_FLAGS.lock().unwrap().get(pending_id).cloned()
+    }
+
     fn on_upload_progress(
         &self,
         pending_id: &str,

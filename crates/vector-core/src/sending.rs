@@ -45,6 +45,13 @@ pub trait SendCallback: Send + Sync {
     /// Message created and added to STATE as pending.
     fn on_pending(&self, _chat_id: &str, _msg: &Message) {}
 
+    /// The flag a cancel flips for this pending message, if the client keeps one.
+    /// The uploader polls it between progress ticks, so a cancel lands at once
+    /// even while nothing is moving.
+    fn cancel_token(&self, _pending_id: &str) -> Option<Arc<AtomicBool>> {
+        None
+    }
+
     /// File upload progress. Return Err("...") to cancel the upload.
     fn on_upload_progress(
         &self,
@@ -871,6 +878,7 @@ pub async fn send_file_dm(
         state.add_message_to_participant(receiver_npub, &msg);
     }
     callback.on_pending(receiver_npub, &msg);
+    let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 
     // Upload to Blossom — bridge SendCallback.on_upload_progress to Blossom ProgressCallback
     let servers = crate::state::get_blossom_servers();
@@ -912,7 +920,7 @@ pub async fn send_file_dm(
                 signer.clone(), servers, Arc::new(encrypted), Some(mime_type),
                 /* is_encrypted */ true,
                 progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
-                config.cancel_token.clone(),
+                cancel.clone(),
             ).await {
                 Ok(accepted) => accepted,
                 Err(e) => {
@@ -964,6 +972,12 @@ pub async fn send_file_dm(
             (upload_url, mirror_urls)
         }
     };
+
+    // A cancel during the mirror fan-out or the publish must not deliver: the
+    // bubble is already gone on the sender's side.
+    if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return Err("Upload cancelled".to_string());
+    }
 
     // Build Kind 15
     let mut file_rumor = EventBuilder::new(Kind::from_u16(15), &upload_url)
