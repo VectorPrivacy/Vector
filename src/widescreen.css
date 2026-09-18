@@ -1460,6 +1460,13 @@ body.ws .chatlist-community-head:hover {
   color: #fff;
 }
 
+.ws-rail-item-name .emoji {
+  width: 15px;
+  height: 15px;
+  vertical-align: -3px;
+  margin: 0;
+}
+
 .ws-rail-item:hover .ws-rail-item-name,
 .ws-rail-item.active .ws-rail-item-name {
   color: #fff;
