@@ -347,9 +347,12 @@ function _dmsgTextLeaf(msg, ctx) {
         ? new Set(msg.emoji_tags.map(t => t.shortcode))
         : null;
     let customEmojiCount = 0;
-    let strippedContent = safeContent;
+    // A heading mark is not content: `# :emoji:` is still an emoji on its own, and
+    // the jumbo size is bigger than any heading would make it.
+    const unheaded = safeContent.replace(/^[ \t]*(?:#{1,6}|-#)[ \t]+/gm, '');
+    let strippedContent = unheaded;
     if (emojiTagSet) {
-        strippedContent = safeContent.replace(/:([a-zA-Z0-9_~-]+):/g, (m, code) => {
+        strippedContent = unheaded.replace(/:([a-zA-Z0-9_~-]+):/g, (m, code) => {
             if (emojiTagSet.has(code)) {
                 customEmojiCount++;
                 return '';
@@ -369,7 +372,7 @@ function _dmsgTextLeaf(msg, ctx) {
     const remainderIsEmojiOnly = !strEmojiCleaned || isEmojiOnly(strEmojiCleaned);
     const fEmojiOnly = graphemeCount > 0 && graphemeCount <= 6 && remainderIsEmojiOnly;
 
-    const textSpan = _dmsgBuildText(msg, safeContent, fEmojiOnly, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked);
+    const textSpan = _dmsgBuildText(msg, fEmojiOnly ? unheaded : safeContent, fEmojiOnly, ctx.isGroupChat, ctx.currentChat, ctx.revealedBlocked);
     if (!(textSpan && (textSpan.textContent || textSpan.querySelector('img,video,hr')))) return null;
     twemojify(textSpan);
     return textSpan;
