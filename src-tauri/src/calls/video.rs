@@ -397,7 +397,7 @@ async fn outbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>, mut 
         while let Some(msg) = link.from_web.recv().await {
             match parse(&msg) {
                 Some(LinkMsg::Frame { header, .. }) => {
-                    ship(&conn, &shared, msg.slice(1..), header);
+                    ship(&conn, &shared, msg.slice(1..), header).await;
                 }
                 Some(LinkMsg::Pcm { rate, channels, samples }) => {
                     let pcm: Vec<f32> = samples.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
@@ -432,8 +432,11 @@ async fn outbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>, mut 
     }
 }
 
-/// One frame onto one stream, on its own task, so a slow frame never holds the next.
-fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: VideoHeader) {
+/// One frame onto one stream. The stream is opened here, in frame order, because
+/// the peer reads streams in the order their ids were issued and a delta that
+/// overtakes its predecessor reads as a gap; only the write and the wait for the
+/// acknowledgement run on a task of their own, so a slow frame never holds the next.
+async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: VideoHeader) {
     let kind = VideoKind::from_flags(header.flags);
     let i = kind.index();
     if shared.need_key_out[i].load(Ordering::Relaxed) {
@@ -460,10 +463,20 @@ fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: VideoHead
     let key = header.is_key();
     let rtt = Duration::from_millis(rtt_ms as u64);
     let stale = if key { STALE_KEY_MIN.max(rtt * 4) } else { STALE_MIN.max(rtt * 3) };
+    let opened = tokio::time::timeout(stale, conn.open_uni()).await;
+    let mut s = match opened {
+        Ok(Ok(s)) => s,
+        _ => {
+            shared.in_flight.fetch_sub(1, Ordering::Relaxed);
+            shared.stats.stale.fetch_add(1, Ordering::Relaxed);
+            shared.need_key_out[i].store(true, Ordering::Relaxed);
+            shared.tell_web(&ToLink::Keyframe { kind });
+            return;
+        }
+    };
+    let _ = s.set_priority(if key { 1 } else { 0 });
     vector_core::db::spawn_bound(async move {
         let result = async {
-            let mut s = tokio::time::timeout(stale, conn.open_uni()).await.map_err(|_| "open")?.map_err(|_| "open")?;
-            let _ = s.set_priority(if key { 1 } else { 0 });
             if tokio::time::timeout(stale, s.write_chunk(frame)).await.is_err() {
                 let _ = s.reset(VarInt::from_u32(1));
                 return Err("write");
