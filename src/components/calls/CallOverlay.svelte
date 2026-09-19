@@ -113,6 +113,29 @@
         h.selfPreview(kind, node);
         return { destroy() { h.selfPreview(kind, null); } };
     }
+    // A vertical curtain: the height alone, nothing inside rescaled. A block nested in
+    // the panel has no layout yet when a transition is created, so the stock slide
+    // reads it as empty; this one measures on its first frame instead.
+    function curtain(node, { duration = 180 } = {}) {
+        // The first tick comes before the block is in the document, where it measures
+        // as nothing; a zero is never kept, the next frame measures again.
+        let h = 0;
+        const ease = (t) => 1 - Math.pow(1 - t, 3);
+        return {
+            duration,
+            tick: (t) => {
+                if (!h) {
+                    node.style.height = '';
+                    h = node.getBoundingClientRect().height;
+                    if (!h) return;
+                }
+                const open = t >= 1;
+                node.style.overflow = open ? '' : 'hidden';
+                node.style.height = open ? '' : `${(ease(t) * h).toFixed(1)}px`;
+                node.style.minHeight = open ? '' : '0';
+            },
+        };
+    }
     // The panel's quality choices, by rung on each ladder.
     const QUALITY_CAMERA = [['Low', 1], ['Medium', 3], ['High', 5], ['Best', 6]];
     const QUALITY_SCREEN = [['Low', 1], ['Medium', 3], ['High', 4], ['Best', 5]];
@@ -387,7 +410,7 @@
             {/if}
         </div>
         {#if pictures && !max}
-            <div class="call-pictures" style="aspect-ratio: {aspectOf(lead)}">
+            <div class="call-pictures" style="aspect-ratio: {aspectOf(lead)}" transition:curtain>
                 {#if lead}
                     {#key lead}
                         <canvas class="call-picture-lead" use:peerCanvas={lead}></canvas>
@@ -434,12 +457,16 @@
                            oninput={(e) => h.setVolume(e.currentTarget.value / 100)} />
                     <span class="call-panel-value">{Math.round(c.volume * 100)}%</span>
                 </label>
-                <div class="call-panel-meters">
-                    <span class="call-panel-label">Your voice</span>
-                    <VoiceMeter level={c.muted ? 0 : c.levels.mic} active={live && !c.muted} />
-                </div>
+                {#if !c.muted}
+                    <div class="call-panel-meters" transition:curtain>
+                        <span class="call-panel-label">Your voice</span>
+                        <VoiceMeter level={c.levels.mic} active={live} />
+                    </div>
+                {/if}
                 {#each [['camera', 'Camera quality', QUALITY_CAMERA, FPS_CAMERA], ['screen', 'Screenshare quality', QUALITY_SCREEN, FPS_SCREEN]] as [kind, title, qualities, rates]}
                     {#if live && c.videoMine[kind]}
+                      <!-- A picture's section draws down like a curtain as it turns on, and up as it goes. -->
+                      <div class="call-panel-block" transition:curtain>
                         <div class="call-panel-section">
                             <span>{title}</span>
                             <span class="call-panel-section-note">{trackLine(kind)}</span>
@@ -460,6 +487,7 @@
                                 <button class="call-panel-button" onclick={() => h.changeScreen()}>Change…</button>
                             {/if}
                         </div>
+                      </div>
                     {/if}
                 {/each}
                 <div class="call-panel-section">Voice processing</div>

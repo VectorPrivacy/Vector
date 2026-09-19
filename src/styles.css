@@ -21447,7 +21447,8 @@ body.profile-switcher-editing .profile-switcher-add {
   background: rgba(0, 0, 0, 0.55);
 }
 
-/* The panel scrolls when the screen is short, with its scrollbar hidden. */
+/* The panel scrolls when the screen is short, with its scrollbar hidden. Its rows
+   never give height to make room: a row mid-curtain would be the one squeezed. */
 .call-panel {
   flex: 1 1 auto;
   min-height: 0;
@@ -21455,8 +21456,19 @@ body.profile-switcher-editing .profile-switcher-add {
   scrollbar-width: none;
 }
 
+.call-panel > * {
+  flex-shrink: 0;
+}
+
 .call-panel::-webkit-scrollbar {
   display: none;
+}
+
+/* A quality section as one block, so it can slide in and out as a whole. */
+.call-panel-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* What a picture is being sent at, on its section's own line. */
