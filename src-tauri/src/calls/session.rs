@@ -64,6 +64,8 @@ pub struct CallState {
     pub share_audio_peer: bool,
     /// Listener-side volume for their screen's sound, 1.0 is unity.
     pub share_volume: f32,
+    /// This platform can capture the screen's sound itself, without the webview.
+    pub share_audio_native: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -159,6 +161,7 @@ impl Call {
             share_audio_mine: self.share_audio_mine,
             share_audio_peer: self.share_audio_peer,
             share_volume: self.share_volume,
+            share_audio_native: super::share_native::available(),
         }
     }
 }
@@ -275,6 +278,7 @@ pub fn end(id: &str, reason: &str) {
     }
     // Media first: its threads hold the connection and the mixer slot. The video
     // track's drop closes the webview's socket, which stops the camera.
+    vector_core::db::spawn_bound(async { super::share_native::stop().await });
     drop(call.video.take());
     drop(call.media.take());
     if let Some(conn) = call.conn.take() {
@@ -482,6 +486,7 @@ pub async fn set_video(kind: VideoKind, on: bool) -> Result<(), String> {
         if !tracks.screen {
             c.share_audio_mine = false;
             c.share.active.store(false, Ordering::Relaxed);
+            vector_core::db::spawn_bound(async { super::share_native::stop().await });
         }
         c.refresh_awake();
         Ok((tracks, c.control.clone()))
@@ -504,17 +509,26 @@ async fn tell_tracks((tracks, control): (Tracks, Option<Arc<tokio::sync::Mutex<S
 }
 
 /// The shared screen's sound goes with it, or stops; it cannot outlive the screen.
-pub async fn set_share_audio(on: bool) -> Result<(), String> {
-    let tracks = with_call(|c| {
+/// `native` asks this platform to capture it itself, for a picker that gave none.
+pub async fn set_share_audio(on: bool, native: bool) -> Result<(), String> {
+    let (on, share) = with_call(|c| {
         if c.phase != Phase::Active {
             return Err("Not in a call".to_string());
         }
-        let on = on && c.video_mine.screen;
-        c.share_audio_mine = on;
-        c.share.active.store(on, Ordering::Relaxed);
-        Ok((c.video_mine, c.control.clone()))
+        Ok((on && c.video_mine.screen, Arc::clone(&c.share)))
     })
     .unwrap_or(Err("No call".into()))?;
+    if on && native {
+        super::share_native::start(share).await?;
+    } else {
+        super::share_native::stop().await;
+    }
+    let tracks = with_call(|c| {
+        c.share_audio_mine = on;
+        c.share.active.store(on, Ordering::Relaxed);
+        (c.video_mine, c.control.clone())
+    })
+    .ok_or("No call")?;
     tell_tracks(tracks).await;
     Ok(())
 }

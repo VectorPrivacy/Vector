@@ -181,12 +181,20 @@ async function stopShareAudio(tell = true) {
     if (tell && was) await invoke('call_share_audio', { on: false }).catch(() => {});
 }
 
-/** The switch in the panel: the sound goes with the screen, or stays home. */
+/** The switch in the panel: the sound goes with the screen, or stays home. With no
+ *  audio track from the picker, a platform that can capture the screen's sound
+ *  itself is asked to. */
 async function setShareAudio(on) {
     const stream = selfTracks.screen;
     const track = stream && stream.getAudioTracks()[0];
-    if (on && track && track.readyState === 'live') await startShareAudio(track);
-    else await stopShareAudio(true);
+    if (on && track && track.readyState === 'live') return startShareAudio(track);
+    if (track || !on) return stopShareAudio(true);
+    try {
+        await invoke('call_share_audio', { on: true, native: true });
+        VectorSvelte.setShareAudio(true, true);
+    } catch (e) {
+        VectorSvelte.showToast(String(e));
+    }
 }
 
 /** Pull frames off a playing element into the worker until the stream is replaced.
@@ -250,7 +258,7 @@ async function startVideo(kind, on = true) {
     ensureVideoWorker().postMessage({ t: 'capture', kind, fps: kind === 'screen' ? 15 : 30, kbps: kind === 'screen' ? 1000 : 800 });
     if (kind === 'screen') {
         const audio = stream.getAudioTracks()[0];
-        VectorSvelte.setShareAudio(false, !!audio);
+        VectorSvelte.setShareAudio(false, !!audio || VectorSvelte.shareAudioNative());
         if (audio) startShareAudio(audio);
     }
 }
@@ -283,8 +291,10 @@ async function changeScreenSource() {
     attachSource('screen', stream);
     old.getTracks().forEach((t) => t.stop());
     const audio = stream.getAudioTracks()[0];
-    VectorSvelte.setShareAudio(false, !!audio);
+    const wasOn = VectorSvelte.shareAudioOn();
+    VectorSvelte.setShareAudio(false, !!audio || VectorSvelte.shareAudioNative());
     if (audio) startShareAudio(audio);
+    else if (wasOn && !shareAudio) setShareAudio(true);
     else stopShareAudio(true);
 }
 

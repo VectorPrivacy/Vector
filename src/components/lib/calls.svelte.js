@@ -10,8 +10,9 @@ const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: n
     // offer was for a video call, and whether the peer has hidden our pictures.
     videoMine: { camera: false, screen: false }, videoPeer: { camera: false, screen: false },
     peerDecodes: [], videoOffered: false, pausedByPeer: false,
-    // The shared screen's sound, each way, and how loud theirs plays here.
-    shareAudioMine: false, shareAudioPeer: false, shareVolume: 1 });
+    // The shared screen's sound, each way, how loud theirs plays here, and whether
+    // this platform can capture ours itself when the picker gives no audio.
+    shareAudioMine: false, shareAudioPeer: false, shareVolume: 1, shareAudioNative: false });
 const NO_TRACK = () => ({ fps: 0, kbps: 0, width: 0, height: 0 });
 // The device's video ability (from the boot probe), the link to the worker, what the
 // worker reports per track (the peer's picture sizes, the encoders' numbers), and the
@@ -52,6 +53,8 @@ export function setVideoStats(tracks) {
 }
 export function setMaximized(kind) { video.maximized = kind || null; }
 export function setShareAudio(on, available) { video.shareAudio = { on: !!on, available: !!available }; }
+export function shareAudioNative() { return c.shareAudioNative; }
+export function shareAudioOn() { return c.shareAudioMine; }
 export function setVideoPrefs(kind, prefs) { if (video.prefs[kind]) video.prefs[kind] = { rung: prefs.rung ?? null, fps: prefs.fps ?? null }; }
 
 /** Ten times a second during a call: how loud each side is, 0 to 1. */
@@ -101,6 +104,7 @@ export function setCallState(s) {
     c.peerDecodes = s.peer_decodes || []; c.videoOffered = !!s.video_offered; c.pausedByPeer = !!s.paused_by_peer;
     c.shareAudioMine = !!s.share_audio_mine; c.shareAudioPeer = !!s.share_audio_peer;
     c.shareVolume = typeof s.share_volume === 'number' ? s.share_volume : 1;
+    c.shareAudioNative = !!s.share_audio_native;
     // A picture that stopped has no size and cannot stay maximized.
     for (const kind of ['camera', 'screen']) {
         if (!c.videoPeer[kind]) {

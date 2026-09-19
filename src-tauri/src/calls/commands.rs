@@ -42,10 +42,11 @@ pub async fn call_video_set(kind: VideoKind, on: bool) -> Result<(), String> {
     session::set_video(kind, on).await
 }
 
-/// The shared screen's sound goes with it, or stops.
+/// The shared screen's sound goes with it, or stops. `native` asks the platform to
+/// capture it itself, for a picker that gave none.
 #[tauri::command]
-pub async fn call_share_audio(on: bool) -> Result<(), String> {
-    session::set_share_audio(on).await
+pub async fn call_share_audio(on: bool, native: Option<bool>) -> Result<(), String> {
+    session::set_share_audio(on, native.unwrap_or(false)).await
 }
 
 /// Listener-side volume for their screen's sound.

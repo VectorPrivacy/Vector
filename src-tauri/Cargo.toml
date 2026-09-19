@@ -160,6 +160,14 @@ whisper-rs = { version = "0.15.1", features = ["metal"], optional = true }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSArray"] }
 objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+# ScreenCaptureKit: a shared screen's sound, minus our own process, where the
+# webview's picker cannot give any.
+objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShareableContent", "SCError", "block2", "dispatch2", "objc2-core-media", "objc2-core-graphics"] }
+objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMBlockBuffer", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3.2" }
+objc2-core-foundation = "0.3.2"
+block2 = "0.6"
+dispatch2 = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
