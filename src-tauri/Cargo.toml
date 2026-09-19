@@ -166,6 +166,8 @@ objc2-screen-capture-kit = { version = "0.3.2", features = ["SCStream", "SCShare
 objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMBlockBuffer", "objc2-core-audio-types"] }
 objc2-core-audio-types = { version = "0.3.2" }
 objc2-core-foundation = "0.3.2"
+# The screen recording consent's standing answer, for the panel's warning.
+objc2-core-graphics = { version = "0.3.2", features = ["CGWindow"] }
 block2 = "0.6"
 dispatch2 = "0.3"
 

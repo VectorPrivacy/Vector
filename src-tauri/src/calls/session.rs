@@ -66,6 +66,8 @@ pub struct CallState {
     pub share_volume: f32,
     /// This platform can capture the screen's sound itself, without the webview.
     pub share_audio_native: bool,
+    /// The system has refused screen recording and will not ask again.
+    pub share_audio_denied: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -125,6 +127,7 @@ struct Call {
     share_audio_mine: bool,
     share_audio_peer: bool,
     share_volume: f32,
+    share_audio_denied: bool,
 }
 
 impl Call {
@@ -162,6 +165,7 @@ impl Call {
             share_audio_peer: self.share_audio_peer,
             share_volume: self.share_volume,
             share_audio_native: super::share_native::available(),
+            share_audio_denied: self.share_audio_denied,
         }
     }
 }
@@ -332,6 +336,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             share_audio_mine: false,
             share_audio_peer: false,
             share_volume: 1.0,
+            share_audio_denied: false,
         };
         let state = call.state(None);
         *guard = Some(call);
@@ -519,7 +524,16 @@ pub async fn set_share_audio(on: bool, native: bool) -> Result<(), String> {
     })
     .unwrap_or(Err("No call".into()))?;
     if on && native {
-        super::share_native::start(share).await?;
+        if let Err(e) = super::share_native::start(share).await {
+            // A declined prompt is a plain no; a standing refusal is for the panel to show.
+            let denied = !super::share_native::permitted();
+            with_call(|c| c.share_audio_denied = denied);
+            if let Some(s) = snapshot() {
+                emit_state(&s);
+            }
+            return Err(if denied { "Screen recording is off for Vector in System Settings".to_string() } else { e });
+        }
+        with_call(|c| c.share_audio_denied = false);
     } else {
         super::share_native::stop().await;
     }
@@ -724,6 +738,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             share_audio_mine: false,
                             share_audio_peer: false,
                             share_volume: 1.0,
+                            share_audio_denied: false,
                         };
                         let state = call.state(None);
                         *guard = Some(call);

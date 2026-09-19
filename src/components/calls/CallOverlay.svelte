@@ -513,7 +513,13 @@
                                 <span class="call-panel-label">Sound</span>
                                 {#if v.shareAudio.available}
                                     <label class="toggle-container call-switch call-switch-inline">
-                                        <span>{c.shareAudioMine ? 'Sharing' : 'Not shared'}</span>
+                                        <span class="call-switch-text">
+                                            {c.shareAudioMine ? 'Sharing' : 'Not shared'}
+                                            {#if c.shareAudioDenied && !c.shareAudioMine}
+                                                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                                                <span class="call-warn" onmouseenter={(e) => showTooltip('Allow Vector under Screen & System Audio Recording in System Settings, then try again', e.currentTarget.getBoundingClientRect())} onmouseleave={hideTooltip}>System permission required</span>
+                                            {/if}
+                                        </span>
                                         <input type="checkbox" checked={c.shareAudioMine} onchange={(e) => h.setShareAudio(e.currentTarget.checked)}>
                                         <span class="neon-toggle"></span>
                                     </label>

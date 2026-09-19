@@ -21497,6 +21497,26 @@ body.profile-switcher-editing .profile-switcher-add {
   gap: 10px;
 }
 
+/* A standing refusal from the system, beside the switch it blocks. */
+.call-switch-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.call-warn {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 196, 0, 0.45);
+  background: rgba(255, 196, 0, 0.12);
+  color: #ffc400;
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+
 /* A switch sitting in the value column of the grid. */
 .call-panel .call-switch-inline {
   justify-self: stretch;

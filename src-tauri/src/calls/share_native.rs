@@ -144,6 +144,12 @@ mod imp {
         AnyClass::get(c"SCStreamConfiguration").is_some()
     }
 
+    /// The system's standing answer on screen recording: false after a decline, when
+    /// it will not ask again and only System Settings can change it.
+    pub fn permitted() -> bool {
+        objc2_core_graphics::CGPreflightScreenCaptureAccess()
+    }
+
     /// Everything Objective-C happens on one plain thread, so nothing that cannot
     /// cross threads is ever held across an await.
     pub async fn start(share: Arc<ShareInput>) -> Result<(), String> {
@@ -250,10 +256,13 @@ mod imp {
     pub fn available() -> bool {
         false
     }
+    pub fn permitted() -> bool {
+        true
+    }
     pub async fn start(_share: Arc<ShareInput>) -> Result<(), String> {
         Err("Native screen audio is not available on this platform".into())
     }
     pub async fn stop() {}
 }
 
-pub use imp::{available, start, stop};
+pub use imp::{available, permitted, start, stop};

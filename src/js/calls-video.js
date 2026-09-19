@@ -263,9 +263,10 @@ async function startVideo(kind, on = true) {
     attachSource(kind, stream);
     ensureVideoWorker().postMessage({ t: 'capture', kind, fps: kind === 'screen' ? 15 : 30, kbps: kind === 'screen' ? 1000 : 800 });
     if (kind === 'screen') {
+        // The sound goes with the screen unless the user or the system says no.
         const audio = stream.getAudioTracks()[0];
         VectorSvelte.setShareAudio(false, !!audio || VectorSvelte.shareAudioNative());
-        if (audio) startShareAudio(audio);
+        if (audio || VectorSvelte.shareAudioNative()) setShareAudio(true);
     }
 }
 
@@ -299,9 +300,7 @@ async function changeScreenSource() {
     const audio = stream.getAudioTracks()[0];
     const wasOn = VectorSvelte.shareAudioOn();
     VectorSvelte.setShareAudio(false, !!audio || VectorSvelte.shareAudioNative());
-    if (audio) startShareAudio(audio);
-    else if (wasOn && !shareAudio) setShareAudio(true);
-    else stopShareAudio(true);
+    if (wasOn) setShareAudio(true);
 }
 
 /** Stop one of our pictures. `tell` is false when the call is already gone. */
