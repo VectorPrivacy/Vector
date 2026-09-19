@@ -427,31 +427,6 @@
         {/if}
         {#if expanded && c.phase !== 'ended'}
             <div class="call-panel" transition:slide={{ duration: 180 }}>
-                {#each [['camera', 'Camera quality', QUALITY_CAMERA, FPS_CAMERA], ['screen', 'Screenshare quality', QUALITY_SCREEN, FPS_SCREEN]] as [kind, title, qualities, rates]}
-                    {#if live && c.videoMine[kind]}
-                        <div class="call-panel-section">
-                            <span>{title}</span>
-                            <span class="call-panel-section-note">{trackLine(kind)}</span>
-                        </div>
-                        <div class="call-panel-grid">
-                            <span class="call-panel-label">Quality</span>
-                            <select class="call-panel-select" value={v.prefs[kind].rung ?? ''} onchange={(e) => choosePref(kind, 'rung', e.currentTarget.value)}>
-                                <option value="">Auto</option>
-                                {#each qualities as [label, rung]}<option value={rung}>{label}</option>{/each}
-                            </select>
-                            <span class="call-panel-label">Frame rate</span>
-                            <select class="call-panel-select" value={v.prefs[kind].fps ?? ''} onchange={(e) => choosePref(kind, 'fps', e.currentTarget.value)}>
-                                <option value="">Auto</option>
-                                {#each rates as f}<option value={f}>{f} fps</option>{/each}
-                            </select>
-                            {#if kind === 'screen'}
-                                <span class="call-panel-label">Window</span>
-                                <button class="call-panel-button" onclick={() => h.changeScreen()}>Change…</button>
-                            {/if}
-                        </div>
-                        <span class="call-panel-hint">Auto follows the connection and uses spare headroom. A fixed choice holds, unless the voice needs the room.</span>
-                    {/if}
-                {/each}
                 <label class="call-panel-slider">
                     <span class="call-panel-label">Their volume</span>
                     <input type="range" min="0" max="200" step="5" value={Math.round(c.volume * 100)}
@@ -463,6 +438,30 @@
                     <span class="call-panel-label">Your voice</span>
                     <VoiceMeter level={c.muted ? 0 : c.levels.mic} active={live && !c.muted} />
                 </div>
+                {#each [['camera', 'Camera quality', QUALITY_CAMERA, FPS_CAMERA], ['screen', 'Screenshare quality', QUALITY_SCREEN, FPS_SCREEN]] as [kind, title, qualities, rates]}
+                    {#if live && c.videoMine[kind]}
+                        <div class="call-panel-section">
+                            <span>{title}</span>
+                            <span class="call-panel-section-note">{trackLine(kind)}</span>
+                        </div>
+                        <div class="call-panel-grid">
+                            <span class="call-panel-label">Quality</span>
+                            <select class="call-panel-select" value={v.prefs[kind].rung ?? ''} onchange={(e) => choosePref(kind, 'rung', e.currentTarget.value)}>
+                                <option value="">Adaptive</option>
+                                {#each qualities as [label, rung]}<option value={rung}>{label}</option>{/each}
+                            </select>
+                            <span class="call-panel-label">Frame rate</span>
+                            <select class="call-panel-select" value={v.prefs[kind].fps ?? ''} onchange={(e) => choosePref(kind, 'fps', e.currentTarget.value)}>
+                                <option value="">Adaptive</option>
+                                {#each rates as f}<option value={f}>{f} fps</option>{/each}
+                            </select>
+                            {#if kind === 'screen'}
+                                <span class="call-panel-label">Window</span>
+                                <button class="call-panel-button" onclick={() => h.changeScreen()}>Change…</button>
+                            {/if}
+                        </div>
+                    {/if}
+                {/each}
                 <div class="call-panel-section">Voice processing</div>
                 <div class="call-panel-switches">
                     <label class="toggle-container call-switch">
