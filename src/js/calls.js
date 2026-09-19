@@ -70,7 +70,6 @@ function registerCallScreen() {
             setVideo: (kind, on) => startVideo(kind, on),
             changeScreen: () => changeScreenSource(),
             setVideoPrefs: (kind, rung, fps) => setVideoPrefs(kind, rung, fps),
-            setVideoPause: (on) => invoke('call_video_pause', { on }).catch(() => {}),
             peerCanvas: (kind, el) => attachPeerCanvas(kind, el),
             selfPreview: (kind, el) => attachSelfPreview(kind, el),
             setAudio: (patch) => setCallAudioSettings(patch),

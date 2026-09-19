@@ -21440,19 +21440,11 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 /* Parent-qualified: the button base declares its own position further down. */
-.call-pictures .call-picture-max,
-.call-pictures .call-picture-hide {
+.call-pictures .call-picture-max {
   position: absolute;
   top: 8px;
-  background: rgba(0, 0, 0, 0.55);
-}
-
-.call-pictures .call-picture-max {
-  right: 40px;
-}
-
-.call-pictures .call-picture-hide {
   right: 8px;
+  background: rgba(0, 0, 0, 0.55);
 }
 
 /* The panel scrolls when the screen is short, with its scrollbar hidden. */
@@ -21551,19 +21543,20 @@ body.profile-switcher-editing .profile-switcher-add {
   color: #ddd;
 }
 
-/* The way out sits top-right, a bare glyph that shows itself with the mouse, like the strip below. */
+/* The way out sits top-right on a solid dark pad, so it reads over any picture, and
+   shows itself with the mouse, like the strip below. */
 .call-max .call-max-restore {
   position: absolute;
-  top: 14px;
-  right: 14px;
-  width: 28px;
-  height: 28px;
-  padding: 0;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
   border: 0;
-  background: none;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.85);
   color: #fff;
   cursor: pointer;
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
   opacity: 0;
   transition: opacity 0.35s ease;
 }

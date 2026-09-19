@@ -163,11 +163,11 @@ pub static CAMERA_LADDER: [Rung; 7] = [
 ];
 pub static SCREEN_LADDER: [Rung; 6] = [
     Rung { kbps: 300, width: 0, height: 720, fps: 5 },
-    Rung { kbps: 600, width: 0, height: 1080, fps: 5 },
-    Rung { kbps: 1000, width: 0, height: 1080, fps: 8 },
-    Rung { kbps: 1500, width: 0, height: 1440, fps: 10 },
-    Rung { kbps: 2500, width: 0, height: 0, fps: 15 },
-    Rung { kbps: 4000, width: 0, height: 0, fps: 15 },
+    Rung { kbps: 600, width: 0, height: 1080, fps: 8 },
+    Rung { kbps: 1000, width: 0, height: 1080, fps: 10 },
+    Rung { kbps: 1500, width: 0, height: 1440, fps: 15 },
+    Rung { kbps: 2500, width: 0, height: 0, fps: 30 },
+    Rung { kbps: 4000, width: 0, height: 0, fps: 30 },
 ];
 /// Where a fresh camera or screen starts, and the most a relayed path may carry:
 /// the relays are not ours yet, and a video call must not be what fills them.
@@ -181,6 +181,9 @@ pub const SCREEN_RELAY_CAP: usize = 3;
 const VIDEO_DOWN_AT_PCT: f32 = 2.0;
 /// Round-trip growth over the call's floor that reads as a filling buffer.
 const VIDEO_RTT_BLOAT_MS: u32 = 50;
+/// Clean seconds before video takes the next rung: sooner than the voice, since a
+/// rung of video is worth more and costs less to give back.
+const VIDEO_CLIMB_AFTER_SECS: u32 = 5;
 
 /// What the video controller sees once a second.
 #[derive(Debug, Clone, Copy, Default)]
@@ -323,7 +326,7 @@ impl VideoRate {
             }
         } else if loss < CLEAN_PCT {
             self.clean_secs += 1;
-            if self.clean_secs >= CLIMB_AFTER_SECS && self.rung < ceiling {
+            if self.clean_secs >= VIDEO_CLIMB_AFTER_SECS && self.rung < ceiling {
                 self.rung += 1;
                 self.clean_secs = 0;
             }
@@ -356,7 +359,7 @@ mod video_tests {
         }
         assert_eq!(changes, 0, "a relayed camera never passes the relay cap");
         assert_eq!(r.set_cap(6), None);
-        for _ in 0..8 {
+        for _ in 0..VIDEO_CLIMB_AFTER_SECS {
             sent += 100;
             r.observe(clean(sent));
         }
@@ -392,7 +395,7 @@ mod video_tests {
         let voice = VideoObservation { sent_packets: 300, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 1, backlog: true };
         assert_eq!(r.observe(voice), Some(CAMERA_LADDER[5]));
         let mut sent = 300;
-        for _ in 0..(HOLD_SECS + CLIMB_AFTER_SECS) {
+        for _ in 0..(HOLD_SECS + VIDEO_CLIMB_AFTER_SECS) {
             sent += 100;
             r.observe(VideoObservation { sent_packets: sent, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 1, backlog: true });
         }

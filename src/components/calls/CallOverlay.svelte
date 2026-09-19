@@ -6,7 +6,7 @@
     // with ours in a corner. Any of theirs can fill the window.
     import { untrack } from 'svelte';
     import { slide } from 'svelte/transition';
-    import { callState, callAudio, callVideo, setStageHidden, setMaximized } from '../lib/calls.svelte.js';
+    import { callState, callAudio, callVideo, setMaximized } from '../lib/calls.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import VoiceMeter from './VoiceMeter.svelte';
@@ -21,7 +21,6 @@
      * @property {(kind: 'camera'|'screen', on: boolean) => void} setVideo
      * @property {() => void} changeScreen
      * @property {(kind: 'camera'|'screen', rung: number|null, fps: number|null) => void} setVideoPrefs
-     * @property {(on: boolean) => void} setVideoPause
      * @property {(kind: 'camera'|'screen', el: HTMLCanvasElement|null) => void} peerCanvas
      * @property {(kind: 'camera'|'screen', el: HTMLVideoElement|null) => void} selfPreview
      * @property {(patch: {autoGain?: boolean, echoCancel?: boolean, noiseSuppress?: boolean}) => void} setAudio
@@ -83,7 +82,7 @@
     const mineOn = $derived(c.videoMine.camera || c.videoMine.screen);
     const peerOn = $derived(c.videoPeer.camera || c.videoPeer.screen);
     const videoOn = $derived(live && (mineOn || peerOn));
-    const pictures = $derived(videoOn && !v.stageHidden);
+    const pictures = $derived(videoOn);
     // Of their pictures, the screen leads and the camera sits inset; alone, either leads.
     const lead = $derived(c.videoPeer.screen ? 'screen' : c.videoPeer.camera ? 'camera' : null);
     const inset = $derived(c.videoPeer.screen && c.videoPeer.camera ? 'camera' : null);
@@ -98,11 +97,6 @@
         maxControls = true;
         clearTimeout(maxHide);
         maxHide = setTimeout(() => { maxControls = false; }, 2500);
-    }
-    function hidePictures(on) {
-        setStageHidden(on);
-        // Nobody is looking: the peer can stop spending upload on us.
-        h.setVideoPause(on);
     }
     $effect(() => {
         if (!max) return;
@@ -374,11 +368,7 @@
                 </span>
             </div>
             {#if c.phase !== 'ended'}
-                {#if videoOn && v.stageHidden}
-                    <button class="call-btn call-btn-on" title="Show the video" onclick={() => hidePictures(false)}>
-                        <span class="icon icon-video"></span>
-                    </button>
-                {:else if live && canSend}
+                {#if live && canSend}
                     <button class="call-btn" class:call-btn-on={c.videoMine.camera} title={c.videoMine.camera ? 'Turn the camera off' : 'Turn the camera on'} onclick={() => h.setVideo('camera', !c.videoMine.camera)}>
                         <span class="icon icon-video"></span>
                     </button>
@@ -432,10 +422,7 @@
                         <video class="call-picture-self" use:selfPreview={'camera'} muted playsinline autoplay></video>
                     {/if}
                 </div>
-                {#if c.pausedByPeer && mineOn}<span class="call-picture-tag call-picture-tag-low">They have hidden your video</span>{/if}
-                <button class="call-btn call-btn-small call-picture-hide" title="Hide the video" onclick={() => hidePictures(true)}>
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-                </button>
+                {#if c.pausedByPeer && mineOn}<span class="call-picture-tag call-picture-tag-low">They cannot see your video right now</span>{/if}
             </div>
         {/if}
         {#if expanded && c.phase !== 'ended'}

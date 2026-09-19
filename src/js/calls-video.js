@@ -91,7 +91,7 @@ async function callVideoOnState(s) {
 
 /** A request the platform never answers, rather than refuses, leaves the button dead:
  *  WebView2 opens no surface picker and settles getDisplayMedia neither way. */
-const VIDEO_SOURCE_WAIT_MS = 45000;
+const VIDEO_SOURCE_WAIT_MS = 120000;
 
 function waitForSource(request) {
     let settled = false;
@@ -246,9 +246,12 @@ function attachSelfPreview(kind, el) {
     if (el) el.srcObject = selfTracks[kind];
 }
 
-// A hidden page cannot capture; an honest "camera off" beats a frozen picture.
+// A hidden page cannot capture; an honest "camera off" beats a frozen picture. And
+// nobody here is watching theirs, so they may stop spending upload on it until we are back.
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && selfTracks.camera) stopVideo('camera', true);
+    const hidden = document.visibilityState === 'hidden';
+    if (hidden && selfTracks.camera) stopVideo('camera', true);
+    if (videoLinkCallId) invoke('call_video_pause', { on: hidden }).catch(() => {});
 });
 
 document.addEventListener('DOMContentLoaded', () => { videoProbe = probeVideoCaps(); }, { once: true });

@@ -13,11 +13,10 @@ const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: n
 const NO_TRACK = () => ({ fps: 0, kbps: 0, width: 0, height: 0 });
 // The device's video ability (from the boot probe), the link to the worker, what the
 // worker reports per track (the peer's picture sizes, the encoders' numbers), and the
-// stage's own state: pictures hidden, one of theirs maximized, the user's choices.
+// stage's own state: one of theirs maximized, the user's choices.
 const video = $state({ encode: [], decode: [], link: false,
     peer: { camera: { width: 0, height: 0 }, screen: { width: 0, height: 0 } },
     enc: { camera: NO_TRACK(), screen: NO_TRACK() }, decFps: { camera: 0, screen: 0 }, inKbps: 0,
-    stageHidden: false,
     // Which of their pictures fills the window, or null.
     maximized: null,
     // Held rung and frame rate per track; null lets the ladder decide.
@@ -47,7 +46,6 @@ export function setVideoStats(tracks) {
         video.decFps[kind] = t.decFps || 0;
     }
 }
-export function setStageHidden(on) { video.stageHidden = !!on; }
 export function setMaximized(kind) { video.maximized = kind || null; }
 export function setVideoPrefs(kind, prefs) { if (video.prefs[kind]) video.prefs[kind] = { rung: prefs.rung ?? null, fps: prefs.fps ?? null }; }
 
@@ -103,7 +101,7 @@ export function setCallState(s) {
             if (video.maximized === kind) video.maximized = null;
         }
     }
-    if (s.phase !== 'active') { video.stageHidden = false; video.maximized = null; }
+    if (s.phase !== 'active') video.maximized = null;
     // An ended call lingers long enough to read why.
     if (s.phase === 'ended') {
         endedTimer = setTimeout(() => {
