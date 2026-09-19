@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.5.0-1",
   "type": "module",
+  "engines": {
+    "npm": ">=11"
+  },
+  "packageManager": "npm@11.6.2",
   "scripts": {
     "tauri": "node scripts/tauri.mjs",
     "tauri:dev": "tauri dev",
