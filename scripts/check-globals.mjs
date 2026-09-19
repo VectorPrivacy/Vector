@@ -50,7 +50,7 @@ const PROVIDED = new Set([
     'Proxy', 'Reflect', 'Intl', 'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'Uint8Array', 'Uint8ClampedArray', 'Int8Array', 'Uint16Array',
     'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array', 'BigInt64Array', 'BigUint64Array', 'Atomics', 'Infinity', 'NaN',
     'undefined', 'arguments', 'eval', 'AudioContext', 'webkitAudioContext', 'MediaRecorder', 'MediaStream', 'MediaSource', 'AudioBuffer',
-    'OfflineAudioContext', 'AnalyserNode', 'GainNode', 'Worker', 'WebSocket', 'XMLHttpRequest', 'DOMParser', 'XMLSerializer', 'Range', 'Selection',
+    'OfflineAudioContext', 'AnalyserNode', 'GainNode', 'Worker', 'WebSocket', 'VideoEncoder', 'VideoDecoder', 'VideoFrame', 'EncodedVideoChunk', 'XMLHttpRequest', 'DOMParser', 'XMLSerializer', 'Range', 'Selection',
     'getSelection', 'createImageBitmap', 'ImageData', 'ImageBitmap', 'OffscreenCanvas', 'Path2D', 'CanvasRenderingContext2D', 'Notification',
     'speechSynthesis', 'SpeechSynthesisUtterance', 'visualViewport', 'ontouchstart', 'DocumentFragment', 'Text', 'Comment', 'ShadowRoot',
     'HTMLCollection', 'NamedNodeMap', 'CharacterData', 'StaticRange', 'IdleDeadline', 'PromiseRejectionEvent', 'ErrorEvent', 'ProgressEvent',

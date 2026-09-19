@@ -5,7 +5,16 @@ const HISTORY = 60;
 
 const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: null,
     muted: false, peerMuted: false, volume: 1, activeMs: 0, receivedAt: 0,
-    stats: null, history: [], quality: null, levels: { mic: 0, peer: 0 }, tick: 0 });
+    stats: null, history: [], quality: null, levels: { mic: 0, peer: 0 }, tick: 0,
+    // Video: what each side sends ('off' | 'camera' | 'screen'), what the peer can decode,
+    // whether the offer was for a video call, and whether the peer has hidden our picture.
+    videoMine: 'off', videoPeer: 'off', peerDecodes: [], videoOffered: false, pausedByPeer: false });
+// The device's video ability (from the boot probe), the link to the worker, and what
+// the worker reports: the peer's picture size and the encoder's numbers.
+const video = $state({ encode: [], decode: [], link: false, peerWidth: 0, peerHeight: 0,
+    enc: { fps: 0, kbps: 0, width: 0, height: 0 }, decFps: 0,
+    // The stage collapsed back to the pill while video is on.
+    stageHidden: false });
 // The voice processing switches and the microphone test, shared by the pill and Settings.
 const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, loaded: false,
     micTest: false, micLevel: 0,
@@ -15,6 +24,19 @@ let endedTimer = null;
 
 export function callState() { return c; }
 export function callAudio() { return audio; }
+export function callVideo() { return video; }
+
+export function setVideoCaps(caps) {
+    video.encode = caps?.encode || [];
+    video.decode = caps?.decode || [];
+}
+export function setVideoLink(open) { video.link = !!open; }
+export function setVideoPeerSize(w, h) { video.peerWidth = w; video.peerHeight = h; }
+export function setVideoStats(enc, decFps) {
+    if (enc) video.enc = enc;
+    video.decFps = decFps || 0;
+}
+export function setStageHidden(on) { video.stageHidden = !!on; }
 
 /** Ten times a second during a call: how loud each side is, 0 to 1. */
 export function setCallLevels(l) {
@@ -58,6 +80,9 @@ export function setCallState(s) {
     c.reason = s.reason || null; c.muted = s.muted; c.peerMuted = s.peer_muted;
     c.volume = typeof s.volume === 'number' ? s.volume : 1;
     c.activeMs = s.active_ms; c.receivedAt = Date.now();
+    c.videoMine = s.video_mine || 'off'; c.videoPeer = s.video_peer || 'off';
+    c.peerDecodes = s.peer_decodes || []; c.videoOffered = !!s.video_offered; c.pausedByPeer = !!s.paused_by_peer;
+    if (s.phase !== 'active') { video.stageHidden = false; video.peerWidth = 0; video.peerHeight = 0; }
     // An ended call lingers long enough to read why.
     if (s.phase === 'ended') {
         endedTimer = setTimeout(() => {

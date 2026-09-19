@@ -1,10 +1,11 @@
 <script>
     // The call on screen: a ring card while a call comes in, otherwise a pill that
     // floats above every pane, drags anywhere, remembers where it was left, and opens
-    // into volume, microphone and a plain-language view of the connection.
+    // into volume, microphone and a plain-language view of the connection. Once either
+    // side sends video the pill grows into a stage: their picture, ours in a corner.
     import { untrack } from 'svelte';
     import { slide } from 'svelte/transition';
-    import { callState, callAudio } from '../lib/calls.svelte.js';
+    import { callState, callAudio, callVideo, setStageHidden } from '../lib/calls.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import VoiceMeter from './VoiceMeter.svelte';
@@ -16,6 +17,10 @@
      * @property {() => void} hangup
      * @property {(on: boolean) => void} setMuted
      * @property {(volume: number) => void} setVolume
+     * @property {(kind: 'off'|'camera'|'screen') => void} setVideo
+     * @property {(on: boolean) => void} setVideoPause
+     * @property {(el: HTMLCanvasElement|null) => void} peerCanvas
+     * @property {(el: HTMLVideoElement|null) => void} selfPreview
      * @property {(patch: {autoGain?: boolean, echoCancel?: boolean, noiseSuppress?: boolean}) => void} setAudio
      * @property {(npub: string) => object|null} getProfile
      * @property {(profileOrId: object|string) => string} getName
@@ -26,6 +31,7 @@
     let { h } = $props();
     const c = callState();
     const a = callAudio();
+    const v = callVideo();
 
     const REASONS = {
         hangup: 'Call ended', rejected: 'Declined', busy: 'Busy', no_answer: 'No answer',
@@ -69,6 +75,26 @@
         }
     });
     const live = $derived(c.phase === 'active');
+    // This device can send video at all, and the peer can take it.
+    const canSend = $derived(v.encode.length > 0 && c.peerDecodes.length > 0);
+    const videoOn = $derived(live && (c.videoMine !== 'off' || c.videoPeer !== 'off'));
+    const stage = $derived(videoOn && !v.stageHidden);
+    // The peer's picture keeps its own shape; the stage is sized to the widest common case.
+    const peerAspect = $derived(v.peerWidth && v.peerHeight ? `${v.peerWidth} / ${v.peerHeight}` : '16 / 9');
+    function hideStage(on) {
+        setStageHidden(on);
+        // Nobody is looking: the peer can stop spending upload on us.
+        h.setVideoPause(on);
+    }
+    // The stage's media surfaces are the only elements this component hands out.
+    function peerCanvas(node) {
+        h.peerCanvas(node);
+        return { destroy() { h.peerCanvas(null); } };
+    }
+    function selfPreview(node) {
+        h.selfPreview(node);
+        return { destroy() { h.selfPreview(null); } };
+    }
 
     // ── the pill's place: dragged anywhere, remembered per device ──
     const POS_KEY = 'call_pill_pos';
@@ -222,7 +248,7 @@
         <div class="call-ring-card">
             <Avatar src={peer?.avatar} size={84} />
             <div class="call-ring-name">{peer?.name || ''}</div>
-            <div class="call-ring-sub">Incoming call</div>
+            <div class="call-ring-sub">{c.videoOffered ? 'Incoming video call' : 'Incoming call'}</div>
             <div class="call-ring-actions">
                 <button class="call-round call-round-decline" title="Decline" onclick={() => h.reject()}>
                     <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -235,6 +261,58 @@
                     </svg>
                 </button>
             </div>
+        </div>
+    </div>
+{:else if stage}
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="call-stage" style={pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : ''} bind:this={pill}>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="call-pill-row call-stage-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={(e) => { const moved = drag?.moved; onPointerUp(e); if (!moved && expanded) expanded = false; }} onpointercancel={onPointerUp}>
+            <span class="call-pill-avatar" style="--talk: {talk.toFixed(2)}">
+                <Avatar src={peer?.avatar} size={26} />
+            </span>
+            <div class="call-pill-text">
+                <span class="call-pill-name cutoff">{peer?.name || ''}</span>
+                <span class="call-pill-status cutoff">
+                    {#if c.quality}<span class="call-dot call-dot-{c.quality}" title={QUALITY[c.quality]}></span>{/if}
+                    {status}{#if c.peerMuted} · muted{/if}
+                </span>
+            </div>
+            <button class="call-btn call-btn-small" title="Hide the video" onclick={() => hideStage(true)}>
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+            </button>
+        </div>
+        <div class="call-stage-view" style="aspect-ratio: {peerAspect}">
+            <canvas class="call-stage-peer" class:call-stage-peer-off={c.videoPeer === 'off'} use:peerCanvas></canvas>
+            {#if c.videoPeer === 'off'}
+                <div class="call-stage-idle">
+                    <Avatar src={peer?.avatar} size={72} />
+                    <span>{c.pausedByPeer ? 'Their camera is off' : 'Their camera is off'}</span>
+                </div>
+            {:else if c.videoPeer === 'screen'}
+                <span class="call-stage-tag">{peer?.name || 'They'} is sharing a screen</span>
+            {/if}
+            {#if c.videoMine !== 'off'}
+                <!-- svelte-ignore a11y_media_has_caption -->
+                <video class="call-stage-self" class:call-stage-self-screen={c.videoMine === 'screen'} use:selfPreview muted playsinline autoplay></video>
+                {#if c.pausedByPeer}<span class="call-stage-tag call-stage-tag-mine">They have hidden your video</span>{/if}
+            {/if}
+        </div>
+        <div class="call-stage-controls">
+            <button class="call-btn" class:call-btn-on={c.videoMine === 'camera'} title={c.videoMine === 'camera' ? 'Turn the camera off' : 'Turn the camera on'} disabled={!canSend} onclick={() => h.setVideo(c.videoMine === 'camera' ? 'off' : 'camera')}>
+                <span class="icon icon-video"></span>
+            </button>
+            <button class="call-btn" class:call-btn-on={c.videoMine === 'screen'} title={c.videoMine === 'screen' ? 'Stop sharing the screen' : 'Share the screen'} disabled={!canSend} onclick={() => h.setVideo(c.videoMine === 'screen' ? 'off' : 'screen')}>
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>
+                <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
+            </button>
+            <button class="call-btn call-btn-hangup" title="Hang up" onclick={() => h.hangup()}>
+                <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                    <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            </button>
         </div>
     </div>
 {:else if c.id}
@@ -255,6 +333,15 @@
                 </span>
             </div>
             {#if c.phase !== 'ended'}
+                {#if videoOn && v.stageHidden}
+                    <button class="call-btn call-btn-on" title="Show the video" onclick={() => hideStage(false)}>
+                        <span class="icon icon-video"></span>
+                    </button>
+                {:else if live && canSend}
+                    <button class="call-btn" title="Turn the camera on" onclick={() => h.setVideo('camera')}>
+                        <span class="icon icon-video"></span>
+                    </button>
+                {/if}
                 <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>
                     <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
                 </button>

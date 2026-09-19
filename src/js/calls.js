@@ -67,6 +67,10 @@ function registerCallScreen() {
             hangup: () => invoke('call_hangup').catch(() => {}),
             setMuted: (on) => invoke('call_set_muted', { muted: on }).catch(() => {}),
             setVolume: (volume) => invoke('call_set_volume', { volume }).catch(() => {}),
+            setVideo: (kind) => startVideo(kind),
+            setVideoPause: (on) => invoke('call_video_pause', { on }).catch(() => {}),
+            peerCanvas: (el) => attachPeerCanvas(el),
+            selfPreview: (el) => attachSelfPreview(el),
             setAudio: (patch) => setCallAudioSettings(patch),
             getProfile: (npub) => getProfile(npub),
             getName: (x) => getName(x),
@@ -75,15 +79,15 @@ function registerCallScreen() {
         },
     });
     // A reloaded webview finds the call the backend still holds, and the switches it saved.
-    invoke('call_status').then((s) => { if (s) VectorSvelte.setCallState(s); }).catch(() => {});
+    invoke('call_status').then((s) => { if (s) { VectorSvelte.setCallState(s); callVideoOnState(s); } }).catch(() => {});
     invoke('call_audio_settings_get').then((s) => VectorSvelte.setCallAudio(s)).catch(() => {});
     loadAudioDevices();
 }
 
 /** Ring a DM contact. The Chat header's call button lands here. */
-async function startCall(npub) {
+async function startCall(npub, video = false) {
     try {
-        await invoke('call_start', { npub });
+        await invoke('call_start', { npub, video });
     } catch (e) {
         VectorSvelte.showToast(String(e));
     }
