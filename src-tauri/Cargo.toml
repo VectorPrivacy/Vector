@@ -163,6 +163,8 @@ objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
 
 [target.'cfg(windows)'.dependencies]
 whisper-rs = { version = "0.15.1", features = ["vulkan"], optional = true }
+# SetThreadExecutionState: keeps the machine and display awake during a call.
+windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
 # Native file clipboard (CF_HDROP read/write). Already in the lock via the
 # wry/tao stack — promoted to a direct dep.
 clipboard-win = "5"

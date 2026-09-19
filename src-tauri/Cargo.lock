@@ -11446,6 +11446,7 @@ dependencies = [
  "vector-core",
  "webp",
  "whisper-rs",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip 2.4.2",
 ]

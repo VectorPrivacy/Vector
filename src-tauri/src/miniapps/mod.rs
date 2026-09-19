@@ -11,7 +11,6 @@
 pub(crate) mod error;
 pub(crate) mod scheme;
 pub(crate) mod state;
-pub(crate) mod awake;
 pub(crate) mod commands;
 pub(crate) mod network_isolation;
 pub(crate) mod realtime;

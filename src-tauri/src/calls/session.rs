@@ -109,9 +109,25 @@ struct Call {
     peer_decodes: Vec<String>,
     video_offered: bool,
     paused_by_peer: bool,
+    /// The machine stays awake for the call, and the display too once there is video.
+    awake: Option<crate::awake::Hold>,
 }
 
 impl Call {
+    /// The hold the call needs right now; dropping the old one after taking the new
+    /// keeps the machine covered in between.
+    fn refresh_awake(&mut self) {
+        let level = if self.phase != Phase::Active {
+            None
+        } else if self.video_mine != VideoKind::Off || self.video_peer != VideoKind::Off {
+            Some(crate::awake::Level::Display)
+        } else {
+            Some(crate::awake::Level::System)
+        };
+        let next = level.map(crate::awake::hold);
+        self.awake = next;
+    }
+
     fn state(&self, reason: Option<String>) -> CallState {
         CallState {
             id: self.id.clone(),
@@ -292,6 +308,7 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             peer_decodes: Vec::new(),
             video_offered: video,
             paused_by_peer: false,
+            awake: None,
         };
         let state = call.state(None);
         *guard = Some(call);
@@ -441,6 +458,7 @@ pub async fn set_video(kind: VideoKind) -> Result<(), String> {
         }
         track.set_sending(kind);
         c.video_mine = kind;
+        c.refresh_awake();
         Ok(c.control.clone())
     })
     .unwrap_or(Err("No call".into()))?;
@@ -474,6 +492,7 @@ async fn on_link_closed(id: &str) {
         if let Some(v) = c.video.as_ref() {
             v.set_sending(VideoKind::Off);
         }
+        c.refresh_awake();
         c.control.clone()
     })
     .flatten();
@@ -614,6 +633,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             peer_decodes: parse_decodes(video),
                             video_offered: media == Some("video"),
                             paused_by_peer: false,
+                            awake: None,
                         };
                         let state = call.state(None);
                         *guard = Some(call);
@@ -779,6 +799,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
         c.video = Some(video);
         c.phase = Phase::Active;
         c.active_since = Some(Instant::now());
+        c.refresh_awake();
     })
     .is_some();
     if !installed {
@@ -810,6 +831,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                         if let Some(v) = c.video.as_ref() {
                             v.set_peer_kind(kind);
                         }
+                        c.refresh_awake();
                     });
                     if let Some(s) = snapshot() {
                         emit_state(&s);

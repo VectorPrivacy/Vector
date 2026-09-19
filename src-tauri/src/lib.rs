@@ -82,6 +82,8 @@ mod audio_engine;
 
 // Which microphone and speaker every audio path opens
 mod audio_devices;
+/// Sleep and App Nap holds for calls and Mini Apps.
+mod awake;
 
 // Native calls: Opus over Iroh datagrams, echo cancelled
 mod calls;

@@ -315,6 +315,8 @@ pub struct RealtimeChannelState {
 pub struct MiniAppsState {
     /// Map of window_label -> MiniAppInstance
     instances: RwLock<HashMap<String, MiniAppInstance>>,
+    /// Held while any Mini App window is open, so the process is not napped.
+    awake: std::sync::Mutex<Option<crate::awake::Hold>>,
     /// Cache of loaded packages (id -> package)
     packages: RwLock<HashMap<String, Arc<MiniAppPackage>>>,
     /// Realtime channel manager (Iroh P2P)
@@ -352,6 +354,7 @@ impl MiniAppsState {
     pub fn new() -> Self {
         Self {
             instances: RwLock::new(HashMap::new()),
+            awake: std::sync::Mutex::new(None),
             packages: RwLock::new(HashMap::new()),
             realtime: RealtimeManager::new(None),
             realtime_channels: RwLock::new(HashMap::new()),
@@ -482,7 +485,7 @@ impl MiniAppsState {
         let mut instances = self.instances.write().await;
         instances.insert(instance.window_label.clone(), instance);
         if instances.len() == 1 {
-            super::awake::hold();
+            *self.awake.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::awake::hold(crate::awake::Level::NoNap));
         }
     }
     
@@ -499,7 +502,7 @@ impl MiniAppsState {
             None
         };
         if instances.is_empty() {
-            super::awake::release();
+            self.awake.lock().unwrap_or_else(|e| e.into_inner()).take();
         }
         removed
     }
@@ -511,7 +514,7 @@ impl MiniAppsState {
         let mut instances = self.instances.write().await;
         let removed = instances.remove(window_label);
         if instances.is_empty() {
-            super::awake::release();
+            self.awake.lock().unwrap_or_else(|e| e.into_inner()).take();
         }
         removed
     }
