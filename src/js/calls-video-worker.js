@@ -65,9 +65,12 @@ function newTrack(kind) {
         decoder: null,
         decCodec: null,
         needKey: true,
-        // Decoded frames this second, frames handed to the decoder, and the longest
-        // wait from a hand-over to its output: what a hitch looks like from inside.
-        dec: { frames: 0, fed: 0, waitMax: 0, lastFed: 0 },
+        // The newest decoded frame not yet painted; older ones are let go unseen.
+        pending: null,
+        paintScheduled: false,
+        // Frames painted, frames handed to the decoder, frames it gave back, and the
+        // longest wait from a hand-over to its output: what a hitch looks like from inside.
+        dec: { frames: 0, fed: 0, out: 0, waitMax: 0, lastFed: 0 },
     };
 }
 const tracks = { camera: newTrack('camera'), screen: newTrack('screen') };
@@ -272,6 +275,7 @@ function resetDecoder(t) {
     t.decoder = null;
     t.decCodec = null;
     t.needKey = true;
+    if (t.pending) { t.pending.close(); t.pending = null; }
 }
 
 function onFrame(frame) {
@@ -314,14 +318,35 @@ function onFrame(frame) {
     }
 }
 
+// A decoded frame waits for the next paint slot; if another lands first, the older
+// one is closed unseen. Painting runs at display cadence, so a burst out of the
+// decoder after a stall becomes one draw of the newest frame rather than a
+// catch-up of every frame in between.
 function paint(t, vf) {
+    t.dec.out++;
+    if (t.dec.lastFed) t.dec.waitMax = Math.max(t.dec.waitMax, performance.now() - t.dec.lastFed);
+    if (vf.displayWidth * vf.displayHeight > MAX_DECODE_PX) {
+        vf.close();
+        resetDecoder(t);
+        control({ t: 'lost', kind: t.kind });
+        return;
+    }
+    if (t.pending) t.pending.close();
+    t.pending = vf;
+    if (t.paintScheduled) return;
+    t.paintScheduled = true;
+    const tick = () => paintPending(t);
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(tick);
+    else setTimeout(tick, 16);
+}
+
+function paintPending(t) {
+    t.paintScheduled = false;
+    const vf = t.pending;
+    t.pending = null;
+    if (!vf) return;
     try {
         if (!t.canvas) return;
-        if (vf.displayWidth * vf.displayHeight > MAX_DECODE_PX) {
-            resetDecoder(t);
-            control({ t: 'lost', kind: t.kind });
-            return;
-        }
         if (t.canvas.width !== vf.displayWidth || t.canvas.height !== vf.displayHeight) {
             t.canvas.width = vf.displayWidth;
             t.canvas.height = vf.displayHeight;
@@ -329,7 +354,6 @@ function paint(t, vf) {
         }
         t.ctx.drawImage(vf, 0, 0);
         t.dec.frames++;
-        if (t.dec.lastFed) t.dec.waitMax = Math.max(t.dec.waitMax, performance.now() - t.dec.lastFed);
     } finally {
         vf.close();
     }
@@ -340,8 +364,8 @@ function stats() {
     for (const t of Object.values(tracks)) {
         const s = { fps: t.enc.frames, kbps: Math.round(t.enc.bytes * 8 / 1000), width: t.capture ? t.capture.width : 0, height: t.capture ? t.capture.height : 0 };
         if (t.capture) control({ t: 'stats', kind: t.kind, ...s });
-        report[t.kind] = { enc: s, decFps: t.dec.frames, fed: t.dec.fed, queue: t.decoder ? t.decoder.decodeQueueSize : 0, waitMax: Math.round(t.dec.waitMax) };
-        t.enc.frames = 0; t.enc.bytes = 0; t.dec.frames = 0; t.dec.fed = 0; t.dec.waitMax = 0;
+        report[t.kind] = { enc: s, decFps: t.dec.frames, fed: t.dec.fed, out: t.dec.out, queue: t.decoder ? t.decoder.decodeQueueSize : 0, waitMax: Math.round(t.dec.waitMax) };
+        t.enc.frames = 0; t.enc.bytes = 0; t.dec.frames = 0; t.dec.fed = 0; t.dec.out = 0; t.dec.waitMax = 0;
     }
     postMessage({ t: 'stats', tracks: report });
 }
