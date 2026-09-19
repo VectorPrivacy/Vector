@@ -187,8 +187,14 @@ async function stopShareAudio(tell = true) {
 async function setShareAudio(on) {
     const stream = selfTracks.screen;
     const track = stream && stream.getAudioTracks()[0];
-    if (on && track && track.readyState === 'live') return startShareAudio(track);
-    if (track || !on) return stopShareAudio(true);
+    if (!on) {
+        // Off is off whichever way it was on: the tap here, or the platform's capture.
+        await stopShareAudio(false);
+        await invoke('call_share_audio', { on: false }).catch(() => {});
+        VectorSvelte.setShareAudio(false, !!track || VectorSvelte.shareAudioNative());
+        return;
+    }
+    if (track && track.readyState === 'live') return startShareAudio(track);
     try {
         await invoke('call_share_audio', { on: true, native: true });
         VectorSvelte.setShareAudio(true, true);
