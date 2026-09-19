@@ -87,18 +87,57 @@ async function callVideoOnState(s) {
     }).catch(() => { videoLinkCallId = null; });
 }
 
+/** A request the platform never answers, rather than refuses, leaves the button dead:
+ *  WebView2 opens no surface picker and settles getDisplayMedia neither way. */
+const VIDEO_SOURCE_WAIT_MS = 45000;
+let videoStarting = false;
+
+function waitForSource(request) {
+    let settled = false;
+    const mark = (fn) => (v) => { settled = true; return fn(v); };
+    const giveUp = new Promise((_, reject) => setTimeout(() => {
+        if (settled) return;
+        // A source that arrives after we gave up must not hold the device open.
+        request.then((s) => s.getTracks().forEach((t) => t.stop()), () => {});
+        const e = new Error('the system never answered');
+        e.name = 'SourceTimeout';
+        reject(e);
+    }, VIDEO_SOURCE_WAIT_MS));
+    return Promise.race([request.then(mark((s) => s), mark((e) => { throw e; })), giveUp]);
+}
+
+/** What to tell the user when a source request fails; null when their own refusal needs no toast. */
+function sourceFailureMessage(kind, e) {
+    const screen = kind === 'screen';
+    if (e && e.name === 'SourceTimeout') {
+        return screen ? 'Screen sharing is not available on this system' : 'The camera never answered';
+    }
+    // The OS privacy switch raises NotAllowedError without ever asking, unlike a refusal at the prompt.
+    if (e && e.name === 'NotAllowedError') {
+        return /\bsystem\b/i.test(e.message || '')
+            ? (screen ? 'Screen sharing is blocked in your system privacy settings' : 'Camera access is blocked in your system privacy settings')
+            : null;
+    }
+    return screen ? 'Could not share the screen' : 'Could not open the camera';
+}
+
 /** Turn the camera or the screen on ('camera' | 'screen') or everything off ('off'). */
 async function startVideo(kind) {
     if (kind === 'off' || kind === selfKind) return stopVideo(true);
+    if (videoStarting) return;
     if (selfKind !== 'off') await stopVideo(true);
     let stream;
+    videoStarting = true;
     try {
-        stream = kind === 'screen'
-            ? await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' })
-            : await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false });
+        stream = await waitForSource(kind === 'screen'
+            ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' })
+            : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
     } catch (e) {
-        if (e && e.name !== 'NotAllowedError') VectorSvelte.showToast(kind === 'screen' ? 'Could not share the screen' : 'Could not open the camera');
+        const message = sourceFailureMessage(kind, e);
+        if (message) VectorSvelte.showToast(message);
         return;
+    } finally {
+        videoStarting = false;
     }
     try {
         await invoke('call_video_set', { kind });
