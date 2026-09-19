@@ -21473,7 +21473,10 @@ body.profile-switcher-editing .profile-switcher-add {
 
 .call-panel-select {
   justify-self: start;
+  align-self: center;
+  margin: 0;
   min-width: 96px;
+  line-height: 1.2;
   background: #262626;
   color: #fff;
   border: 1px solid #333;
@@ -21484,6 +21487,8 @@ body.profile-switcher-editing .profile-switcher-add {
 
 .call-panel-button {
   justify-self: start;
+  align-self: center;
+  margin: 0;
   border: 1px solid #333;
   border-radius: 6px;
   background: #262626;
@@ -21732,26 +21737,33 @@ body.profile-switcher-editing .profile-switcher-add {
   border: 0;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  color: rgba(255, 255, 255, 0.88);
   cursor: pointer;
   padding: 0;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 .call-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
 }
 
 .call-btn .icon {
   width: 55%;
   height: 55%;
+  background-color: currentColor;
+  transition: background-color 0.15s ease;
 }
 
-.call-btn-on {
-  background: rgba(255, 255, 255, 0.85);
+/* On: a wash of the accent under an accent glyph, for masked icons and strokes alike. */
+.call-btn-on,
+.call-btn-on:hover {
+  background: color-mix(in srgb, var(--accent-color, #59fcb3) 22%, rgba(255, 255, 255, 0.04));
+  color: var(--accent-color, #59fcb3);
 }
 
-.call-btn-on .icon {
-  background-color: #111;
+.call-btn-on:hover {
+  background: color-mix(in srgb, var(--accent-color, #59fcb3) 30%, rgba(255, 255, 255, 0.04));
 }
 
 .call-btn-hangup {
@@ -21873,6 +21885,11 @@ body.profile-switcher-editing .profile-switcher-add {
   grid-template-columns: 84px 1fr;
   row-gap: 6px;
   align-items: center;
+}
+
+.call-panel-grid > .call-panel-label {
+  align-self: center;
+  line-height: 1.2;
 }
 
 .call-graph {
