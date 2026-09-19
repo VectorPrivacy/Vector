@@ -307,7 +307,7 @@ pub async fn hangup() -> Result<(), String> {
     let (id, peer, control) = with_call(|c| (c.id.clone(), c.peer.clone(), c.control.clone())).ok_or("No call")?;
     if let Some(control) = control {
         let mut send = control.lock().await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut send, &Control::Bye)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Bye)).await;
     }
     // Local teardown first: the peer's close must not be what ends our side.
     end(&id, "hangup");
@@ -338,7 +338,7 @@ pub async fn set_muted(on: bool) -> Result<(), String> {
     }
     if let Some(control) = control {
         let mut send = control.lock().await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut send, &Control::Mute { on })).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Mute { on })).await;
     }
     Ok(())
 }

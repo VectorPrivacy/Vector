@@ -7,86 +7,34 @@
 use super::aec::{EchoCanceller, SpeexAec};
 use super::codec::{Decoder, Encoder};
 use super::declick::Declicker;
+use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
 use super::rate::RateControl;
 use super::resample::Resampler;
 use super::ring::SpscRing;
 use super::settings;
 use super::transport::{pack, unpack};
 use super::{AEC_TAIL_MS, ENGINE_RATE, FRAME, FRAME_MS};
+pub use super::stats::MediaStats;
 use crate::audio_engine::{AudioEngine, LiveLink};
 use cpal::traits::{DeviceTrait, StreamTrait};
 use iroh::endpoint::Connection;
-use std::collections::{BTreeMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Milliseconds on a clock that starts with the process: what the jitter buffer times by.
+fn now_ms() -> u64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
 
 /// Datagram flag: the sender is muted, the payload is empty, play silence.
 const FLAG_MUTED: u16 = 1;
 
-/// Frames buffered before playout starts.
-const PREFILL: usize = 2;
-/// Deeper than this and playout jumps forward: latency costs more than the gap.
-const MAX_DEPTH: usize = 25;
-/// The deepest target the jitter estimate may ask for.
-const MAX_TARGET: usize = 20;
-/// How fast a remembered delay swing fades, in milliseconds per frame received:
-/// a 200 ms burst still shapes the target ten seconds later.
-const PEAK_DECAY_MS: f32 = 0.4;
-/// How long the buffer must sit above its target before it trims a frame. A burst
-/// leaves it deep; trimming at once would meet the next burst empty again.
-const SHED_AFTER: Duration = Duration::from_secs(3);
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
 const PLAY_AHEAD_MS: u32 = 30;
-/// Concealed frames in a row before playout stops guessing and waits. Each one
-/// stretches the last sound a little further; past three that reads as a slur,
-/// and a clean gap is easier on the ear.
-const MAX_PLC_RUN: u32 = 3;
-
-#[derive(Default)]
-pub struct MediaStats {
-    pub sent: AtomicU64,
-    pub send_dropped: AtomicU64,
-    pub received: AtomicU64,
-    /// Frames skipped over: a hole wider than FEC covers, or a jump past a backlog.
-    pub lost: AtomicU64,
-    /// Frames the buffer discarded on purpose to take latency back.
-    pub shed: AtomicU64,
-    /// Frames rebuilt from the FEC data in their successor.
-    pub rebuilt: AtomicU64,
-    pub concealed: AtomicU64,
-    pub late: AtomicU64,
-    pub depth_ms: AtomicU32,
-    pub jitter_ms: AtomicU32,
-    /// Cable clicks cut out of the microphone before encoding.
-    pub clicks_cut: AtomicU64,
-    /// What the encoder is sending at, in kbit/s.
-    pub bitrate_kbps: AtomicU32,
-    /// Packets the network dropped on the way out, percent of the last second (f32 bits).
-    pub net_loss: AtomicU32,
-    /// Loudness of what the microphone sends after processing, 0 to 1 (f32 bits).
-    pub mic_level: AtomicU32,
-    /// Loudness of what the peer sends, 0 to 1 (f32 bits).
-    pub peer_level: AtomicU32,
-    /// The next outgoing sequence number (u16). Lives here, not in the capture
-    /// loop, so a restarted engine keeps counting: the peer drops everything
-    /// numbered below what it last played, and a reset silences us until the
-    /// count catches back up.
-    pub next_seq: AtomicU32,
-}
-
-impl MediaStats {
-    pub fn mic_level(&self) -> f32 {
-        f32::from_bits(self.mic_level.load(Ordering::Relaxed))
-    }
-    pub fn peer_level(&self) -> f32 {
-        f32::from_bits(self.peer_level.load(Ordering::Relaxed))
-    }
-    pub fn net_loss(&self) -> f32 {
-        f32::from_bits(self.net_loss.load(Ordering::Relaxed))
-    }
-}
 
 /// A frame's loudness on a 0 to 1 scale: -60 dBFS is silence, 0 dBFS full.
 fn level_of(frame: &[i16]) -> f32 {
@@ -184,7 +132,7 @@ impl MediaEngine {
                     if let Some(frame) = unpack(&datagram) {
                         stats.received.fetch_add(1, Ordering::Relaxed);
                         let mut j = jitter.lock().unwrap_or_else(|e| e.into_inner());
-                        j.push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, &stats);
+                        j.push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
                     }
                 }
             })
@@ -481,8 +429,8 @@ fn playout_thread(
         }
         let next = {
             let mut j = jitter.lock().unwrap_or_else(|e| e.into_inner());
-            let next = j.pop(plc_run, &stats);
-            let depth = j.frames.len() as u32 * FRAME_MS + (link.play.len() as u32 * 1000 / out_rate);
+            let next = j.pop(plc_run, now_ms(), &stats);
+            let depth = j.buffered() as u32 * FRAME_MS + (link.play.len() as u32 * 1000 / out_rate);
             stats.depth_ms.store(depth, Ordering::Relaxed);
             next
         };
@@ -527,243 +475,5 @@ fn playout_thread(
         rs.process(&pcm_f32, &mut resampled);
         link.play.push(&resampled);
         resampled.clear();
-    }
-}
-
-enum Pop {
-    Frame(Vec<u8>),
-    /// The frame is missing; rebuild it from the FEC data in its successor.
-    Fec(Vec<u8>),
-    Muted,
-    Conceal,
-    Wait,
-}
-
-struct Buffered {
-    payload: Vec<u8>,
-    muted: bool,
-}
-
-#[derive(Default)]
-struct Jitter {
-    frames: BTreeMap<u64, Buffered>,
-    /// Next sequence to play; None until prefilled.
-    next: Option<u64>,
-    /// Unwrapped sequence of the newest arrival, for the 16-bit wrap.
-    newest: Option<u64>,
-    last_arrival: Option<(Instant, u64)>,
-    /// RFC 3550 style smoothed inter-arrival jitter, in milliseconds.
-    jitter_ms: f32,
-    /// The largest recent inter-arrival swing, decaying: bursts, not the average.
-    peak_ms: f32,
-    /// Since when the buffer has been deeper than its target.
-    over_since: Option<Instant>,
-    shed_after: Option<Duration>,
-}
-
-impl Jitter {
-    /// Frames to hold: enough for three times the smoothed jitter, or for the
-    /// biggest swing seen lately with a little to spare, whichever is more.
-    fn target_frames(&self) -> usize {
-        let need_ms = (self.jitter_ms * 3.0).max(self.peak_ms * 1.2);
-        let frames = (need_ms / FRAME_MS as f32).ceil() as usize;
-        (PREFILL + frames).clamp(PREFILL, MAX_TARGET)
-    }
-
-    fn unwrap_seq(&mut self, seq: u16) -> u64 {
-        let s = match self.newest {
-            None => seq as u64,
-            Some(newest) => {
-                let delta = seq.wrapping_sub(newest as u16) as i16 as i64;
-                (newest as i64 + delta).max(0) as u64
-            }
-        };
-        if self.newest.map_or(true, |n| s > n) {
-            self.newest = Some(s);
-        }
-        s
-    }
-
-    fn push(&mut self, seq: u16, muted: bool, payload: &[u8], stats: &MediaStats) {
-        let s = self.unwrap_seq(seq);
-        let now = Instant::now();
-        if let Some((at, prev_seq)) = self.last_arrival {
-            let expected = (s as i64 - prev_seq as i64) as f32 * FRAME_MS as f32;
-            let actual = now.duration_since(at).as_secs_f32() * 1000.0;
-            let d = (actual - expected).abs();
-            self.jitter_ms += (d - self.jitter_ms) / 16.0;
-            self.peak_ms = d.max(self.peak_ms - PEAK_DECAY_MS);
-            stats.jitter_ms.store(self.jitter_ms as u32, Ordering::Relaxed);
-        }
-        self.last_arrival = Some((now, s));
-
-        if let Some(next) = self.next {
-            if s < next {
-                stats.late.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        }
-        self.frames.insert(s, Buffered { payload: payload.to_vec(), muted });
-
-        if self.frames.len() > MAX_DEPTH {
-            // Jump to the newest PREFILL frames; what came before is late already.
-            let keep_from = *self.frames.keys().nth(self.frames.len() - PREFILL).unwrap();
-            let dropped = self.frames.range(..keep_from).count() as u64;
-            self.frames = self.frames.split_off(&keep_from);
-            stats.lost.fetch_add(dropped, Ordering::Relaxed);
-            self.next = Some(keep_from);
-        }
-    }
-
-    fn pop(&mut self, plc_run: u32, stats: &MediaStats) -> Pop {
-        let next = match self.next {
-            Some(n) => n,
-            None => {
-                if self.frames.len() < PREFILL {
-                    return Pop::Wait;
-                }
-                let first = *self.frames.keys().next().unwrap();
-                self.next = Some(first);
-                first
-            }
-        };
-        if self.frames.len() > self.target_frames() {
-            // Underruns stretched the buffer; once that has held for a while, take the
-            // latency back a frame at a time.
-            let now = Instant::now();
-            let since = *self.over_since.get_or_insert(now);
-            if now.duration_since(since) >= self.shed_after.unwrap_or(SHED_AFTER) {
-                if let Some(oldest) = self.frames.keys().next().copied() {
-                    self.frames.remove(&oldest);
-                    stats.shed.fetch_add(1, Ordering::Relaxed);
-                    self.next = Some(oldest + 1);
-                    self.over_since = Some(now);
-                    return self.pop(plc_run, stats);
-                }
-            }
-        } else {
-            self.over_since = None;
-        }
-        if let Some(f) = self.frames.remove(&next) {
-            self.next = Some(next + 1);
-            return if f.muted { Pop::Muted } else { Pop::Frame(f.payload) };
-        }
-        match self.frames.keys().next().copied() {
-            Some(min) if min == next + 1 => {
-                // One slot of grace: on a jittery path the frame is usually just behind
-                // its successor. Only when the buffer is already full enough is it lost.
-                if plc_run == 0 && self.frames.len() < self.target_frames() {
-                    return Pop::Conceal;
-                }
-                self.next = Some(min);
-                Pop::Fec(self.frames[&min].payload.clone())
-            }
-            Some(min) => {
-                // A hole wider than one frame: guess twice, then skip to what we have.
-                if plc_run < 2 {
-                    self.next = Some(next + 1);
-                    Pop::Conceal
-                } else {
-                    stats.lost.fetch_add(min - next, Ordering::Relaxed);
-                    self.next = Some(min);
-                    self.pop(0, stats)
-                }
-            }
-            None => {
-                // Nothing has arrived: fill the time without giving up on this frame, so
-                // its late arrival still plays and the buffer grows by the underrun.
-                if plc_run < MAX_PLC_RUN {
-                    Pop::Conceal
-                } else {
-                    Pop::Wait
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn frame(n: u8) -> Vec<u8> {
-        vec![n]
-    }
-
-    #[test]
-    fn frames_play_in_order_after_prefill_and_a_gap_uses_fec() {
-        let stats = MediaStats::default();
-        let mut j = Jitter::default();
-        assert!(matches!(j.pop(0, &stats), Pop::Wait));
-        j.push(0, false, &frame(0), &stats);
-        assert!(matches!(j.pop(0, &stats), Pop::Wait));
-        j.push(1, false, &frame(1), &stats);
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(0)));
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(1)));
-        // Frame 2 lost, 3 arrives: one frame of grace, then 2 is rebuilt from 3's FEC,
-        // then 3 plays.
-        j.push(3, false, &frame(3), &stats);
-        assert!(matches!(j.pop(0, &stats), Pop::Conceal));
-        assert!(matches!(j.pop(1, &stats), Pop::Fec(p) if p == frame(3)));
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(3)));
-        // Late arrival is dropped.
-        j.push(2, false, &frame(2), &stats);
-        assert_eq!(stats.late.load(Ordering::Relaxed), 1);
-        // An underrun conceals but keeps waiting for frame 4, which then plays.
-        assert!(matches!(j.pop(0, &stats), Pop::Conceal));
-        assert_eq!(j.next, Some(4));
-        j.push(4, false, &frame(4), &stats);
-        assert!(matches!(j.pop(1, &stats), Pop::Frame(p) if p == frame(4)));
-    }
-
-    #[test]
-    fn a_stretched_buffer_keeps_its_depth_at_first_then_sheds_to_target() {
-        let stats = MediaStats::default();
-        let mut j = Jitter::default();
-        for s in 0..8u16 {
-            j.push(s, false, &frame(s as u8), &stats);
-        }
-        // Instant pushes read as jitter to the estimator; pin it so the target is PREFILL.
-        j.jitter_ms = 0.0;
-        j.peak_ms = 0.0;
-        // A fresh overshoot is kept.
-        assert_eq!(j.target_frames(), PREFILL);
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(0)));
-        assert_eq!(stats.shed.load(Ordering::Relaxed), 0);
-        // Once the overshoot has lasted long enough, frames go one per pop until in range.
-        j.shed_after = Some(Duration::ZERO);
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(6)));
-        assert_eq!(stats.shed.load(Ordering::Relaxed), 5);
-        assert_eq!(stats.lost.load(Ordering::Relaxed), 0);
-        assert_eq!(j.frames.len(), 1);
-    }
-
-    #[test]
-    fn the_target_grows_with_jitter_and_remembers_bursts() {
-        let mut j = Jitter::default();
-        j.jitter_ms = 43.0;
-        assert_eq!(j.target_frames(), PREFILL + 7);
-        j.peak_ms = 300.0;
-        assert_eq!(j.target_frames(), PREFILL + 18);
-        j.jitter_ms = 1000.0;
-        assert_eq!(j.target_frames(), MAX_TARGET);
-    }
-
-    #[test]
-    fn sequence_wraps_and_deep_buffers_jump_forward() {
-        let stats = MediaStats::default();
-        let mut j = Jitter::default();
-        j.push(65534, false, &frame(1), &stats);
-        j.push(65535, false, &frame(2), &stats);
-        j.push(0, false, &frame(3), &stats);
-        assert!(matches!(j.pop(0, &stats), Pop::Frame(p) if p == frame(1)));
-        assert_eq!(j.next, Some(65535));
-        for s in 1..=(MAX_DEPTH as u16 + 2) {
-            j.push(s, false, &frame(9), &stats);
-        }
-        assert!(j.frames.len() <= MAX_DEPTH, "{}", j.frames.len());
-        assert!(stats.lost.load(Ordering::Relaxed) > 0);
-        // Playout resumed at the jump target, not at the frame it was on.
-        assert!(j.next.unwrap() > 65537);
     }
 }

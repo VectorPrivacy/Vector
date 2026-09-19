@@ -1053,7 +1053,7 @@ checksum = "ba91f619216e76a5eb2515783f7ec2e271938b51aadac592f4930517f4626863"
 dependencies = [
  "heck",
  "indexmap 2.14.0",
- "itertools 0.14.0",
+ "itertools",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -1850,6 +1850,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f558a64ac9af88b5ba400d99b579451af0d39c6d360980045b91aac966d705e2"
 
 [[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2251,15 +2257,6 @@ checksum = "25e659a4bb38e810ebc252e53b5814ff908a8c58c2a9ce2fae1bbec24cbf4e20"
 dependencies = [
  "memchr",
  "serde",
-]
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
 ]
 
 [[package]]
@@ -4621,7 +4618,7 @@ dependencies = [
  "extend",
  "getrandom 0.4.2",
  "hex",
- "itertools 0.15.0",
+ "itertools",
  "libc",
  "paste",
  "rand 0.10.2",
@@ -4666,7 +4663,7 @@ dependencies = [
  "derive-deftly",
  "derive_more",
  "educe",
- "itertools 0.15.0",
+ "itertools",
  "paste",
  "rand 0.10.2",
  "smallvec",
@@ -4752,7 +4749,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcdb5c50f28a24a4048a5ff8db5089eb1de204de80dc5ef40e04188ba66c8025"
 dependencies = [
  "humantime",
- "itertools 0.15.0",
+ "itertools",
  "signature",
  "thiserror 2.0.18",
  "tor-llcrypto",
@@ -4776,7 +4773,7 @@ dependencies = [
  "educe",
  "futures",
  "humantime-serde",
- "itertools 0.15.0",
+ "itertools",
  "once_cell",
  "oneshot-fused-workaround",
  "pin-project",
@@ -4826,7 +4823,7 @@ dependencies = [
  "fs-mistrust",
  "futures",
  "humantime-serde",
- "itertools 0.15.0",
+ "itertools",
  "notify",
  "paste",
  "postage",
@@ -4889,7 +4886,7 @@ dependencies = [
  "http",
  "httparse",
  "httpdate",
- "itertools 0.15.0",
+ "itertools",
  "memchr",
  "thiserror 2.0.18",
  "tor-circmgr",
@@ -4943,7 +4940,7 @@ dependencies = [
  "hex",
  "humantime",
  "humantime-serde",
- "itertools 0.15.0",
+ "itertools",
  "memmap2",
  "oneshot-fused-workaround",
  "paste",
@@ -5026,7 +5023,7 @@ dependencies = [
  "futures",
  "humantime",
  "humantime-serde",
- "itertools 0.15.0",
+ "itertools",
  "num_enum",
  "oneshot-fused-workaround",
  "pin-project",
@@ -5067,7 +5064,7 @@ dependencies = [
  "digest",
  "hex",
  "humantime",
- "itertools 0.15.0",
+ "itertools",
  "paste",
  "rand 0.10.2",
  "safelog",
@@ -5125,7 +5122,7 @@ dependencies = [
  "glob-match",
  "humantime",
  "inventory",
- "itertools 0.15.0",
+ "itertools",
  "rand 0.10.2",
  "safelog",
  "serde",
@@ -5161,7 +5158,7 @@ dependencies = [
  "derive_builder_fork_arti",
  "derive_more",
  "hex",
- "itertools 0.15.0",
+ "itertools",
  "safelog",
  "serde",
  "serde_with",
@@ -5247,7 +5244,7 @@ dependencies = [
  "educe",
  "extend",
  "futures",
- "itertools 0.15.0",
+ "itertools",
  "paste",
  "pin-project",
  "serde",
@@ -5273,7 +5270,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93d6db1779594e2934ea62b83baedb0b2de1f436177d3b07a497b252ca7b522d"
 dependencies = [
  "derive-deftly",
- "itertools 0.15.0",
+ "itertools",
  "paste",
  "void",
 ]
@@ -5289,7 +5286,7 @@ dependencies = [
  "derive_more",
  "futures",
  "humantime",
- "itertools 0.15.0",
+ "itertools",
  "num_enum",
  "rand 0.10.2",
  "serde",
@@ -5328,7 +5325,7 @@ dependencies = [
  "humantime",
  "ipnet",
  "iprange",
- "itertools 0.15.0",
+ "itertools",
  "memchr",
  "paste",
  "phf",
@@ -5370,7 +5367,7 @@ dependencies = [
  "fs-mistrust",
  "fslock-guard",
  "futures",
- "itertools 0.15.0",
+ "itertools",
  "oneshot-fused-workaround",
  "paste",
  "sanitize-filename",
@@ -5411,7 +5408,7 @@ dependencies = [
  "futures-util",
  "hkdf",
  "hmac",
- "itertools 0.15.0",
+ "itertools",
  "nonany",
  "oneshot-fused-workaround",
  "pin-project",
@@ -5478,7 +5475,7 @@ dependencies = [
  "derive_builder_fork_arti",
  "fs-mistrust",
  "futures",
- "itertools 0.15.0",
+ "itertools",
  "oneshot-fused-workaround",
  "serde",
  "thiserror 2.0.18",
@@ -5561,7 +5558,7 @@ dependencies = [
  "educe",
  "futures",
  "humantime",
- "itertools 0.15.0",
+ "itertools",
  "oneshot-fused-workaround",
  "pin-project",
  "priority-queue",
@@ -5890,6 +5887,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vector-calls"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hound",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "vector-cli"
 version = "0.1.0"
 dependencies = [
@@ -5939,6 +5947,7 @@ dependencies = [
  "tor-rtcompat",
  "unicode-normalization",
  "url",
+ "vector-calls",
  "zeroize",
 ]
 

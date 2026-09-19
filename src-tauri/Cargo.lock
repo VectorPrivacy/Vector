@@ -11451,6 +11451,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vector-calls"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "vector-core"
 version = "0.9.0"
 dependencies = [
@@ -11490,6 +11500,7 @@ dependencies = [
  "tor-rtcompat",
  "unicode-normalization",
  "url",
+ "vector-calls",
  "zeroize",
 ]
 

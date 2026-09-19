@@ -4,6 +4,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const CALL_ALPN: &[u8] = b"vector/call/1";
 
@@ -48,10 +49,7 @@ pub enum Control {
 
 pub const MAX_CONTROL_LEN: usize = 4096;
 
-pub async fn write_control(
-    send: &mut iroh::endpoint::SendStream,
-    msg: &Control,
-) -> Result<(), String> {
+pub async fn write_control<W: AsyncWrite + Unpin>(send: &mut W, msg: &Control) -> Result<(), String> {
     let body = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
     if body.len() > MAX_CONTROL_LEN {
         return Err("control message too large".into());
@@ -62,7 +60,7 @@ pub async fn write_control(
     send.write_all(&buf).await.map_err(|e| e.to_string())
 }
 
-pub async fn read_control(recv: &mut iroh::endpoint::RecvStream) -> Result<Control, String> {
+pub async fn read_control<R: AsyncRead + Unpin>(recv: &mut R) -> Result<Control, String> {
     let mut len = [0u8; 2];
     recv.read_exact(&mut len).await.map_err(|e| e.to_string())?;
     let len = u16::from_be_bytes(len) as usize;

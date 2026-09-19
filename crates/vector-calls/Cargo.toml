@@ -1,0 +1,20 @@
+[package]
+name = "vector-calls"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/VectorPrivacy/Vector"
+description = "The platform-free half of Vector's calls: session rules, wire format, jitter buffer, rate control."
+
+# Must build for wasm32-unknown-unknown: `cargo check -p vector-calls --target wasm32-unknown-unknown`.
+# Nothing here may touch a clock, a socket, a device or a thread; callers pass time in.
+
+[dependencies]
+bytes = "1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.49.0", default-features = false, features = ["io-util"] }
+
+[dev-dependencies]
+# The ignored real-recording declick test reads a WAV fixture.
+hound = "3.5.1"

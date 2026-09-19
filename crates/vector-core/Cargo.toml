@@ -12,6 +12,9 @@ keywords = ["nostr", "messaging", "encryption", "vector"]
 categories = ["network-programming", "cryptography", "asynchronous"]
 
 [dependencies]
+# Calls: the platform-free half, re-exported as `vector_core::calls` so every client
+# (the app, the CLI, bots) gets it the way it gets sending and profiles.
+vector-calls = { path = "../vector-calls", version = "0.1.0" }
 # Nostr Protocol. Declared as crates.io versions so the crate is publishable; the
 # workspace `[patch.crates-io]` redirects the shared `nostr` to the zeroize fork for
 # in-workspace builds (so the app keeps secret-key zeroization), while published
