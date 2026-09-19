@@ -5,7 +5,8 @@
 //! is about to play goes out on another so the echo canceller has its reference.
 
 use super::aec::{EchoCanceller, SpeexAec};
-use super::codec::{Decoder, Encoder};
+use super::codec::{Decoder, Encoder, ShareDecoder, ShareEncoder};
+use super::settings::AudioSettings;
 use super::declick::Declicker;
 use super::jitter::{Jitter, Pop, MAX_PLC_RUN};
 use super::rate::RateControl;
@@ -31,6 +32,36 @@ fn now_ms() -> u64 {
 
 /// Datagram flag: the sender is muted, the payload is empty, play silence.
 const FLAG_MUTED: u16 = 1;
+/// Datagram flag: a frame of the shared screen's sound, stereo, its own sequence.
+const FLAG_SHARE: u16 = 2;
+
+/// A shared screen's sound as the webview captures it: interleaved samples at the
+/// capture's own rate, waiting for the share thread. Lives on the call, not the
+/// engine, so a device change does not lose what was in flight.
+pub struct ShareInput {
+    ring: SpscRing,
+    rate: std::sync::atomic::AtomicU32,
+    channels: std::sync::atomic::AtomicU32,
+    pub active: AtomicBool,
+}
+
+impl ShareInput {
+    pub fn new() -> Self {
+        Self {
+            // Two seconds of stereo at 48 kHz.
+            ring: SpscRing::new(192_000),
+            rate: std::sync::atomic::AtomicU32::new(48_000),
+            channels: std::sync::atomic::AtomicU32::new(2),
+            active: AtomicBool::new(false),
+        }
+    }
+
+    pub fn push(&self, rate: u32, channels: u8, samples: &[f32]) {
+        self.rate.store(rate, Ordering::Relaxed);
+        self.channels.store(channels as u32, Ordering::Relaxed);
+        self.ring.push(samples);
+    }
+}
 
 /// How far ahead of the speaker the decoder keeps the play ring. Small on purpose:
 /// the jitter buffer holds the margin, the ring only covers the callback's stride.
@@ -67,6 +98,8 @@ impl MediaEngine {
         conn: Option<Connection>,
         volume: f32,
         stats: Option<Arc<MediaStats>>,
+        share: Option<Arc<ShareInput>>,
+        share_volume: f32,
     ) -> Result<Self, String> {
         let mixer = AudioEngine::get()?;
         let out_rate = mixer.device_sample_rate();
@@ -74,6 +107,9 @@ impl MediaEngine {
             play: SpscRing::new(out_rate as usize),
             tap: SpscRing::new(out_rate as usize),
             gain: std::sync::atomic::AtomicU32::new(volume.to_bits()),
+            share_play: SpscRing::new(out_rate as usize * 2),
+            share_tap: SpscRing::new(out_rate as usize),
+            share_gain: std::sync::atomic::AtomicU32::new(share_volume.to_bits()),
         });
         let on_mixer = conn.is_some();
         if on_mixer {
@@ -85,6 +121,7 @@ impl MediaEngine {
         let muted = Arc::new(AtomicBool::new(false));
         let stats = stats.unwrap_or_else(|| Arc::new(MediaStats::default()));
         let jitter = Arc::new(Mutex::new(Jitter::default()));
+        let share_jitter = Arc::new(Mutex::new(Jitter::default()));
 
         // Capture: the thread owns the cpal stream (it is not Send) and runs the encode loop.
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -122,17 +159,25 @@ impl MediaEngine {
             return Ok(Self { stop, muted, stats, link, on_mixer, threads: vec![capture], rx_task: None });
         };
 
-        // Receive: datagrams into the jitter buffer until the connection closes.
+        // Receive: datagrams into the jitter buffers until the connection closes; the
+        // voice and the shared screen's sound each keep their own.
         let rx_task = {
             let jitter = Arc::clone(&jitter);
+            let share_jitter = Arc::clone(&share_jitter);
             let stats = Arc::clone(&stats);
             let conn = conn.clone();
             vector_core::db::spawn_bound(async move {
                 while let Ok(datagram) = conn.read_datagram().await {
                     if let Some(frame) = unpack(&datagram) {
-                        stats.received.fetch_add(1, Ordering::Relaxed);
-                        let mut j = jitter.lock().unwrap_or_else(|e| e.into_inner());
-                        j.push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
+                        if frame.flags & FLAG_SHARE != 0 {
+                            stats.share_received.fetch_add(1, Ordering::Relaxed);
+                            let mut j = share_jitter.lock().unwrap_or_else(|e| e.into_inner());
+                            j.push(frame.seq, false, frame.payload, now_ms(), &stats);
+                        } else {
+                            stats.received.fetch_add(1, Ordering::Relaxed);
+                            let mut j = jitter.lock().unwrap_or_else(|e| e.into_inner());
+                            j.push(frame.seq, frame.flags & FLAG_MUTED != 0, frame.payload, now_ms(), &stats);
+                        }
                     }
                 }
             })
@@ -149,7 +194,30 @@ impl MediaEngine {
                 .map_err(|e| e.to_string())?
         };
 
-        Ok(Self { stop, muted, stats, link, on_mixer, threads: vec![capture, playout], rx_task: Some(rx_task) })
+        // The shared screen's sound, both ways.
+        let share_out = {
+            let stop = Arc::clone(&stop);
+            let stats = Arc::clone(&stats);
+            let link = Arc::clone(&link);
+            std::thread::Builder::new()
+                .name("calls-share-playout".into())
+                .spawn(move || share_playout_thread(link, out_rate, share_jitter, stop, stats))
+                .map_err(|e| e.to_string())?
+        };
+        let mut threads = vec![capture, playout, share_out];
+        if let Some(share) = share {
+            let stop = Arc::clone(&stop);
+            let stats = Arc::clone(&stats);
+            let link = Arc::clone(&link);
+            let conn = conn.clone();
+            let t = std::thread::Builder::new()
+                .name("calls-share".into())
+                .spawn(move || share_thread(conn, share, link, out_rate, stop, stats))
+                .map_err(|e| e.to_string())?;
+            threads.push(t);
+        }
+
+        Ok(Self { stop, muted, stats, link, on_mixer, threads, rx_task: Some(rx_task) })
     }
 }
 
@@ -398,6 +466,210 @@ fn capture_thread(
             }
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The shared screen's sound out: the webview's capture, minus everything this
+/// process played (the voices most of all), as stereo Opus on its own datagrams.
+/// A loopback capture is a digital mix, so the canceller has no room to contend
+/// with, only the delay between the mixer's output and the capture's return.
+fn share_thread(
+    conn: Connection,
+    share: Arc<ShareInput>,
+    link: Arc<LiveLink>,
+    out_rate: u32,
+    stop: Arc<AtomicBool>,
+    stats: Arc<MediaStats>,
+) {
+    let (mut aec_l, mut aec_r) = match (SpeexAec::new(ENGINE_RATE, FRAME, AEC_TAIL_MS), SpeexAec::new(ENGINE_RATE, FRAME, AEC_TAIL_MS)) {
+        (Ok(l), Ok(r)) => (l, r),
+        _ => {
+            eprintln!("[Calls] share canceller unavailable");
+            return;
+        }
+    };
+    // Cancel only: gain riding and noise suppression would chew on music.
+    let music = AudioSettings { auto_gain: false, echo_cancel: true, noise_suppress: false };
+    aec_l.configure(music);
+    aec_r.configure(music);
+    let mut enc = match ShareEncoder::new() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("[Calls] {e}");
+            return;
+        }
+    };
+    let mut src_rate = 0u32;
+    let mut rs_l = Resampler::new(48_000, ENGINE_RATE);
+    let mut rs_r = Resampler::new(48_000, ENGINE_RATE);
+    let mut far_rs = Resampler::new(out_rate, ENGINE_RATE);
+    let mut scratch = vec![0f32; 8192];
+    let (mut in_l, mut in_r) = (Vec::with_capacity(8192), Vec::with_capacity(8192));
+    let (mut left, mut right, mut far) = (Vec::with_capacity(ENGINE_RATE as usize), Vec::with_capacity(ENGINE_RATE as usize), Vec::with_capacity(ENGINE_RATE as usize));
+    let (mut near_l, mut near_r, mut far_i16) = ([0i16; FRAME], [0i16; FRAME], [0i16; FRAME]);
+    let (mut clean_l, mut clean_r) = ([0i16; FRAME], [0i16; FRAME]);
+    let mut stereo = [0i16; FRAME * 2];
+    let mut packet = [0u8; 4000];
+    let started = Instant::now();
+    let mut seq: u16 = stats.next_share_seq.load(Ordering::Relaxed) as u16;
+    let mut was_active = false;
+    let far_slack = FRAME * 5;
+
+    while !stop.load(Ordering::Relaxed) {
+        let active = share.active.load(Ordering::Relaxed);
+        if !active {
+            // Nothing to send: keep both rings from filling, and resync when it starts.
+            share.ring.skip(share.ring.len());
+            link.share_tap.skip(link.share_tap.len());
+            was_active = false;
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
+        if !was_active {
+            was_active = true;
+            left.clear();
+            right.clear();
+            far.clear();
+        }
+        let rate = share.rate.load(Ordering::Relaxed);
+        if rate != src_rate {
+            src_rate = rate;
+            rs_l = Resampler::new(rate, ENGINE_RATE);
+            rs_r = Resampler::new(rate, ENGINE_RATE);
+        }
+        let channels = share.channels.load(Ordering::Relaxed).clamp(1, 2) as usize;
+        let n = share.ring.pop(&mut scratch);
+        if n > 0 {
+            in_l.clear();
+            in_r.clear();
+            for frame in scratch[..n - n % channels].chunks(channels) {
+                in_l.push(frame[0]);
+                in_r.push(frame[channels - 1]);
+            }
+            rs_l.process(&in_l, &mut left);
+            rs_r.process(&in_r, &mut right);
+        }
+        let m = link.share_tap.pop(&mut scratch);
+        if m > 0 {
+            far_rs.process(&scratch[..m], &mut far);
+        }
+        if far.len() > left.len() + far_slack {
+            let excess = far.len() - left.len() - far_slack;
+            far.drain(..excess);
+        }
+        while left.len() >= FRAME && right.len() >= FRAME {
+            for (dst, src) in near_l.iter_mut().zip(left.drain(..FRAME)) {
+                *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
+            }
+            for (dst, src) in near_r.iter_mut().zip(right.drain(..FRAME)) {
+                *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
+            }
+            if far.len() >= FRAME {
+                for (dst, src) in far_i16.iter_mut().zip(far.drain(..FRAME)) {
+                    *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
+                }
+            } else {
+                far_i16.fill(0);
+            }
+            aec_l.process(&near_l, &far_i16, &mut clean_l);
+            aec_r.process(&near_r, &far_i16, &mut clean_r);
+            for i in 0..FRAME {
+                stereo[i * 2] = clean_l[i];
+                stereo[i * 2 + 1] = clean_r[i];
+            }
+            let ts = started.elapsed().as_millis() as u32;
+            if let Ok(len) = enc.encode(&stereo, &mut packet) {
+                match conn.send_datagram(pack(seq, ts, FLAG_SHARE, &packet[..len])) {
+                    Ok(()) => stats.share_sent.fetch_add(1, Ordering::Relaxed),
+                    Err(_) => stats.send_dropped.fetch_add(1, Ordering::Relaxed),
+                };
+            }
+            seq = seq.wrapping_add(1);
+            stats.next_share_seq.store(seq as u32, Ordering::Relaxed);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The peer's shared screen sound in: stereo Opus off its own jitter buffer, onto the
+/// mixer's second live source, so it plays through the same output as everything
+/// else and lands in the echo canceller's reference like everything else.
+fn share_playout_thread(
+    link: Arc<LiveLink>,
+    out_rate: u32,
+    jitter: Arc<Mutex<Jitter>>,
+    stop: Arc<AtomicBool>,
+    stats: Arc<MediaStats>,
+) {
+    let mut dec = match ShareDecoder::new() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[Calls] {e}");
+            return;
+        }
+    };
+    let mut rs_l = Resampler::new(ENGINE_RATE, out_rate);
+    let mut rs_r = Resampler::new(ENGINE_RATE, out_rate);
+    let ahead = (out_rate * PLAY_AHEAD_MS / 1000) as usize * 2;
+    let mut pcm = [0i16; FRAME * 2];
+    let (mut l, mut r) = ([0f32; FRAME], [0f32; FRAME]);
+    let (mut out_l, mut out_r) = (Vec::with_capacity(4096), Vec::with_capacity(4096));
+    let mut interleaved = Vec::with_capacity(8192);
+    let mut plc_run = 0u32;
+
+    while !stop.load(Ordering::Relaxed) {
+        if link.share_play.len() >= ahead {
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+        let next = jitter.lock().unwrap_or_else(|e| e.into_inner()).pop(plc_run, now_ms(), &stats);
+        let decoded = match next {
+            Pop::Frame(p) => {
+                plc_run = 0;
+                dec.decode(&p, &mut pcm).is_ok()
+            }
+            Pop::Fec(successor) => {
+                plc_run = 0;
+                dec.decode_fec(&successor, &mut pcm).is_ok()
+            }
+            Pop::Muted => {
+                plc_run = 0;
+                pcm.fill(0);
+                true
+            }
+            Pop::Conceal => {
+                plc_run += 1;
+                let ok = dec.conceal(&mut pcm).is_ok();
+                let gain = 1.0 - plc_run as f32 / (MAX_PLC_RUN as f32 + 1.0);
+                for s in pcm.iter_mut() {
+                    *s = (*s as f32 * gain) as i16;
+                }
+                ok
+            }
+            Pop::Wait => {
+                // Silence between shares must not be concealed into a held tone; the
+                // buffer simply waits, and the mixer plays nothing for this source.
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+        };
+        if !decoded {
+            pcm.fill(0);
+        }
+        for i in 0..FRAME {
+            l[i] = pcm[i * 2] as f32 / 32768.0;
+            r[i] = pcm[i * 2 + 1] as f32 / 32768.0;
+        }
+        rs_l.process(&l, &mut out_l);
+        rs_r.process(&r, &mut out_r);
+        interleaved.clear();
+        for i in 0..out_l.len().min(out_r.len()) {
+            interleaved.push(out_l[i]);
+            interleaved.push(out_r[i]);
+        }
+        link.share_play.push(&interleaved);
+        out_l.clear();
+        out_r.clear();
     }
 }
 

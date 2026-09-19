@@ -84,12 +84,19 @@ unsafe impl Send for AudioEngine {}
 unsafe impl Sync for AudioEngine {}
 
 /// A live call on the mixer: `play` is what the call wants heard, `tap` is what the
-/// speaker actually gets (everything mixed), the echo canceller's reference.
+/// speaker actually gets (everything mixed), the echo canceller's reference. A shared
+/// screen's sound is a second source, stereo and with its own volume, and `share_tap`
+/// is the same reference again for the canceller that keeps our own output out of
+/// the sound we capture from the screen.
 pub struct LiveLink {
     pub play: crate::calls::ring::SpscRing,
     pub tap: crate::calls::ring::SpscRing,
     /// Listener-side volume for the call, as f32 bits; 1.0 is unity.
     pub gain: AtomicU32,
+    /// Interleaved stereo at the device rate.
+    pub share_play: crate::calls::ring::SpscRing,
+    pub share_tap: crate::calls::ring::SpscRing,
+    pub share_gain: AtomicU32,
 }
 
 impl LiveLink {
@@ -98,6 +105,12 @@ impl LiveLink {
     }
     pub fn set_gain(&self, g: f32) {
         self.gain.store(g.clamp(0.0, 4.0).to_bits(), Ordering::Relaxed);
+    }
+    pub fn share_gain(&self) -> f32 {
+        f32::from_bits(self.share_gain.load(Ordering::Relaxed))
+    }
+    pub fn set_share_gain(&self, g: f32) {
+        self.share_gain.store(g.clamp(0.0, 4.0).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -891,18 +904,24 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
     if let Ok(slot) = shared.live.try_read() {
         if let Some(link) = slot.as_ref() {
             let mut mono = [0f32; 512];
+            let mut stereo = [0f32; 1024];
             for block in output.chunks_mut(channels * mono.len()) {
                 let frames = block.len() / channels;
                 let got = link.play.pop(&mut mono[..frames]);
                 mono[got..frames].fill(0.0);
                 let gain = link.gain();
+                let got2 = link.share_play.pop(&mut stereo[..frames * 2]);
+                stereo[got2..frames * 2].fill(0.0);
+                let share_gain = link.share_gain();
                 for (i, frame) in block.chunks_mut(channels).enumerate() {
-                    for out in frame.iter_mut() {
-                        *out = (*out + mono[i] * gain).clamp(-1.0, 1.0);
+                    for (c, out) in frame.iter_mut().enumerate() {
+                        let side = stereo[i * 2 + c.min(1)];
+                        *out = (*out + mono[i] * gain + side * share_gain).clamp(-1.0, 1.0);
                     }
                     mono[i] = frame.iter().sum::<f32>() / channels as f32;
                 }
                 link.tap.push(&mono[..frames]);
+                link.share_tap.push(&mono[..frames]);
             }
         }
     }

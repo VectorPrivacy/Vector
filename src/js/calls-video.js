@@ -15,6 +15,10 @@ const selfTracks = { camera: null, screen: null };
 const captureEls = { camera: null, screen: null };
 const previewEls = { camera: null, screen: null };
 const videoStarting = { camera: false, screen: false };
+// The shared screen's sound, when the platform offers it: an audio context tapping
+// the track, its chunks forwarded to the backend through the worker.
+const KIND_PCM = 3;
+let shareAudio = null; // { ctx, node, source, track }
 
 /** What this device can encode and decode; told to the backend for the next offer or answer. */
 async function probeVideoCaps() {
@@ -123,9 +127,66 @@ function sourceFailureMessage(kind, e) {
 }
 
 function requestSource(kind) {
+    // The screen's sound is asked for too; a platform that cannot give it (or gives
+    // it only for a whole screen) simply returns no audio track, and the picker
+    // offers the choice where it can. Our own playback is excluded where the
+    // platform knows how; the backend cancels it against the mixer's output anyway.
     return waitForSource(kind === 'screen'
-        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' })
+        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
         : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
+}
+
+/** Tap the screen's audio track and hand its samples to the backend. */
+async function startShareAudio(track) {
+    stopShareAudio(false);
+    const worker = ensureVideoWorker();
+    let ctx;
+    try {
+        ctx = new AudioContext();
+        await ctx.audioWorklet.addModule('js/calls-share-worklet.js');
+    } catch (e) {
+        VectorSvelte.showToast('Could not capture the screen audio here');
+        if (ctx) ctx.close();
+        return;
+    }
+    const source = ctx.createMediaStreamSource(new MediaStream([track]));
+    const node = new AudioWorkletNode(ctx, 'share-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 2, channelCountMode: 'explicit' });
+    node.port.onmessage = (e) => {
+        const { rate, channels, samples } = e.data;
+        const bytes = new Uint8Array(1 + 5 + samples.byteLength);
+        const view = new DataView(bytes.buffer);
+        view.setUint8(0, KIND_PCM);
+        view.setUint32(1, rate, true);
+        view.setUint8(5, channels);
+        bytes.set(new Uint8Array(samples.buffer), 6);
+        worker.postMessage({ t: 'raw', bytes }, [bytes.buffer]);
+    };
+    // A silent output keeps the graph running on engines that skip unconnected nodes.
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    source.connect(node).connect(mute).connect(ctx.destination);
+    shareAudio = { ctx, node, source, track };
+    VectorSvelte.setShareAudio(true, true);
+    await invoke('call_share_audio', { on: true }).catch((e) => VectorSvelte.showToast(String(e)));
+}
+
+async function stopShareAudio(tell = true) {
+    const was = shareAudio;
+    shareAudio = null;
+    if (was) {
+        try { was.node.disconnect(); was.source.disconnect(); } catch (_) {}
+        was.ctx.close().catch(() => {});
+    }
+    VectorSvelte.setShareAudio(false, !!was);
+    if (tell && was) await invoke('call_share_audio', { on: false }).catch(() => {});
+}
+
+/** The switch in the panel: the sound goes with the screen, or stays home. */
+async function setShareAudio(on) {
+    const stream = selfTracks.screen;
+    const track = stream && stream.getAudioTracks()[0];
+    if (on && track && track.readyState === 'live') await startShareAudio(track);
+    else await stopShareAudio(true);
 }
 
 /** Pull frames off a playing element into the worker until the stream is replaced.
@@ -187,6 +248,11 @@ async function startVideo(kind, on = true) {
     }
     attachSource(kind, stream);
     ensureVideoWorker().postMessage({ t: 'capture', kind, fps: kind === 'screen' ? 15 : 30, kbps: kind === 'screen' ? 1000 : 800 });
+    if (kind === 'screen') {
+        const audio = stream.getAudioTracks()[0];
+        VectorSvelte.setShareAudio(false, !!audio);
+        if (audio) startShareAudio(audio);
+    }
 }
 
 function attachSource(kind, stream) {
@@ -216,6 +282,10 @@ async function changeScreenSource() {
     const old = selfTracks.screen;
     attachSource('screen', stream);
     old.getTracks().forEach((t) => t.stop());
+    const audio = stream.getAudioTracks()[0];
+    VectorSvelte.setShareAudio(false, !!audio);
+    if (audio) startShareAudio(audio);
+    else stopShareAudio(true);
 }
 
 /** Stop one of our pictures. `tell` is false when the call is already gone. */
@@ -223,6 +293,7 @@ async function stopVideo(kind, tell = true) {
     const was = selfTracks[kind];
     selfTracks[kind] = null;
     if (captureEls[kind]) { captureEls[kind].srcObject = null; captureEls[kind] = null; }
+    if (kind === 'screen') stopShareAudio(false);
     if (was) was.getTracks().forEach((t) => t.stop());
     if (previewEls[kind]) previewEls[kind].srcObject = null;
     if (videoWorker) videoWorker.postMessage({ t: 'stop', kind });

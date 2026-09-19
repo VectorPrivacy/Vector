@@ -354,5 +354,7 @@ self.onmessage = (e) => {
         case 'capture': if (t) startCapture(t, m); break;
         case 'stop': if (t) { t.capture = null; lastRate[t.kind] = null; stopEncoder(t); } break;
         case 'frame': if (t) onCaptured(t, m.frame); else m.frame.close(); break;
+        // A ready-made link message from the page: the shared screen's sound.
+        case 'raw': send(m.bytes); break;
     }
 };

@@ -31,6 +31,52 @@ impl Encoder {
     }
 }
 
+/// Stereo Opus for a screen's sound: music, not a voice, at a fixed rate.
+pub const SHARE_KBPS: u32 = 96;
+
+pub struct ShareEncoder(opus::Encoder);
+
+impl ShareEncoder {
+    pub fn new() -> Result<Self, String> {
+        let mut enc = opus::Encoder::new(ENGINE_RATE, opus::Channels::Stereo, opus::Application::Audio)
+            .map_err(|e| format!("opus share encoder: {e}"))?;
+        enc.set_vbr(true).map_err(|e| e.to_string())?;
+        enc.set_inband_fec(true).map_err(|e| e.to_string())?;
+        enc.set_bitrate(opus::Bitrate::Bits((SHARE_KBPS * 1000) as i32)).map_err(|e| e.to_string())?;
+        enc.set_packet_loss_perc(10).map_err(|e| e.to_string())?;
+        Ok(Self(enc))
+    }
+
+    /// Encodes one interleaved stereo frame (FRAME * 2 samples) into `out`.
+    pub fn encode(&mut self, frame: &[i16], out: &mut [u8]) -> Result<usize, String> {
+        debug_assert_eq!(frame.len(), FRAME * 2);
+        self.0.encode(frame, out).map_err(|e| format!("opus share encode: {e}"))
+    }
+}
+
+pub struct ShareDecoder(opus::Decoder);
+
+impl ShareDecoder {
+    pub fn new() -> Result<Self, String> {
+        opus::Decoder::new(ENGINE_RATE, opus::Channels::Stereo)
+            .map(Self)
+            .map_err(|e| format!("opus share decoder: {e}"))
+    }
+
+    /// Decodes one packet into one interleaved stereo frame; returns frames per channel.
+    pub fn decode(&mut self, packet: &[u8], out: &mut [i16]) -> Result<usize, String> {
+        self.0.decode(packet, out, false).map_err(|e| format!("opus share decode: {e}"))
+    }
+
+    pub fn decode_fec(&mut self, next: &[u8], out: &mut [i16]) -> Result<usize, String> {
+        self.0.decode(next, out, true).map_err(|e| format!("opus share fec: {e}"))
+    }
+
+    pub fn conceal(&mut self, out: &mut [i16]) -> Result<usize, String> {
+        self.0.decode(&[], out, false).map_err(|e| format!("opus share plc: {e}"))
+    }
+}
+
 pub struct Decoder(opus::Decoder);
 
 impl Decoder {

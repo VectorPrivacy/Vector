@@ -4,7 +4,7 @@
 //! and its screen at once; every frame's flags say which one it belongs to.
 
 use super::link::{self, LinkConn};
-use super::media::MediaStats;
+use super::media::{MediaStats, ShareInput};
 use super::rate::{Rung, VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, SCREEN_LADDER, SCREEN_RELAY_CAP};
 use super::transport::{Control, Tracks, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
 use bytes::{Bytes, BytesMut};
@@ -109,6 +109,8 @@ pub struct Hooks {
     /// build whose control reader stops at the first message it does not know, so
     /// it is never sent one.
     pub peer_video: bool,
+    /// Where the shared screen's sound goes on its way to the engine.
+    pub share: Arc<ShareInput>,
 }
 
 /// The user's choices for one track: a held rung, a held frame rate, or neither.
@@ -396,6 +398,10 @@ async fn outbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>, mut 
             match parse(&msg) {
                 Some(LinkMsg::Frame { header, .. }) => {
                     ship(&conn, &shared, msg.slice(1..), header);
+                }
+                Some(LinkMsg::Pcm { rate, channels, samples }) => {
+                    let pcm: Vec<f32> = samples.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                    hooks.share.push(rate, channels, &pcm);
                 }
                 Some(LinkMsg::Control(c)) => match c {
                     FromLink::Caps { encode, decode } => (hooks.on_caps)(encode, decode),

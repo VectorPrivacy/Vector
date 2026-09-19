@@ -46,8 +46,14 @@ pub enum Control {
     Hello { call_id: String },
     Mute { on: bool },
     Bye,
-    /// What I am sending on the video streams from now on: either, both or neither.
-    Video { camera: bool, screen: bool },
+    /// What I am sending on the video streams from now on: either, both or neither,
+    /// and whether the screen comes with its sound.
+    Video {
+        camera: bool,
+        screen: bool,
+        #[serde(default)]
+        audio: bool,
+    },
     /// My decoder lost that chain: its next frame must be a keyframe.
     KeyframeRequest { kind: VideoKind },
     /// My view of your video is hidden; stop spending upload on it (or resume).
@@ -231,7 +237,7 @@ mod tests {
         let c: Control = serde_json::from_str(r#"{"t":"hologram","on":true}"#).unwrap();
         assert_eq!(c, Control::Unknown);
         let v: Control = serde_json::from_str(r#"{"t":"video","camera":false,"screen":true}"#).unwrap();
-        assert_eq!(v, Control::Video { camera: false, screen: true });
+        assert_eq!(v, Control::Video { camera: false, screen: true, audio: false });
         assert_eq!(serde_json::to_string(&Control::KeyframeRequest { kind: VideoKind::Camera }).unwrap(), r#"{"t":"keyframe_request","kind":"camera"}"#);
         assert_eq!(VideoKind::from_flags(VIDEO_KEY | VIDEO_SCREEN), VideoKind::Screen);
         assert!(Tracks::default().with(VideoKind::Screen, true).has(VideoKind::Screen));

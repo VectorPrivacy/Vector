@@ -22,6 +22,8 @@
      * @property {(kind: 'camera'|'screen', on: boolean) => void} setVideo
      * @property {() => void} changeScreen
      * @property {(kind: 'camera'|'screen', rung: number|null, fps: number|null) => void} setVideoPrefs
+     * @property {(on: boolean) => void} setShareAudio
+     * @property {(volume: number) => void} setShareVolume
      * @property {(kind: 'camera'|'screen', el: HTMLCanvasElement|null) => void} peerCanvas
      * @property {(kind: 'camera'|'screen', el: HTMLVideoElement|null) => void} selfPreview
      * @property {(patch: {autoGain?: boolean, echoCancel?: boolean, noiseSuppress?: boolean}) => void} setAudio
@@ -471,6 +473,15 @@
                            oninput={(e) => h.setVolume(e.currentTarget.value / 100)} />
                     <span class="call-panel-value">{Math.round(c.volume * 100)}%</span>
                 </label>
+                {#if c.shareAudioPeer}
+                    <label class="call-panel-slider" transition:curtain>
+                        <span class="call-panel-label">Their screen</span>
+                        <input type="range" min="0" max="200" step="5" value={Math.round(c.shareVolume * 100)}
+                               style="--slider-pct: {Math.round(c.shareVolume * 50)}%"
+                               oninput={(e) => h.setShareVolume(e.currentTarget.value / 100)} />
+                        <span class="call-panel-value">{Math.round(c.shareVolume * 100)}%</span>
+                    </label>
+                {/if}
                 {#if !c.muted}
                     <div class="call-panel-meters" transition:curtain>
                         <span class="call-panel-label">Your voice</span>
@@ -499,6 +510,16 @@
                             {#if kind === 'screen'}
                                 <span class="call-panel-label">Window</span>
                                 <button class="call-panel-button" onclick={() => h.changeScreen()}>Change…</button>
+                                <span class="call-panel-label">Sound</span>
+                                {#if v.shareAudio.available}
+                                    <label class="toggle-container call-switch call-switch-inline">
+                                        <span>{c.shareAudioMine ? 'Sharing' : 'Not shared'}</span>
+                                        <input type="checkbox" checked={c.shareAudioMine} onchange={(e) => h.setShareAudio(e.currentTarget.checked)}>
+                                        <span class="neon-toggle"></span>
+                                    </label>
+                                {:else}
+                                    <span class="call-panel-value call-panel-value-quiet">Not offered by this window</span>
+                                {/if}
                             {/if}
                         </div>
                       </div>

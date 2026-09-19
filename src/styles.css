@@ -21497,6 +21497,12 @@ body.profile-switcher-editing .profile-switcher-add {
   gap: 10px;
 }
 
+/* A switch sitting in the value column of the grid. */
+.call-panel .call-switch-inline {
+  justify-self: stretch;
+  margin: 0;
+}
+
 /* What a picture is being sent at, on its section's own line. */
 .call-panel-section-note {
   font-weight: 400;

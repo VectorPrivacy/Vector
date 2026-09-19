@@ -28,11 +28,15 @@ pub struct MediaStats {
     pub mic_level: AtomicU32,
     /// Loudness of what the peer sends, 0 to 1 (f32 bits).
     pub peer_level: AtomicU32,
+    /// A shared screen's sound: frames sent and received on its own track.
+    pub share_sent: AtomicU64,
+    pub share_received: AtomicU64,
     /// The next outgoing sequence number (u16). Lives here, not in the capture
     /// loop, so a restarted engine keeps counting: the peer drops everything
     /// numbered below what it last played, and a reset silences us until the
     /// count catches back up.
     pub next_seq: AtomicU32,
+    pub next_share_seq: AtomicU32,
 }
 
 impl MediaStats {

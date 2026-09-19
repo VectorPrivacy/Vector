@@ -11,6 +11,10 @@ use super::wire::{Tracks, VideoCodec, VideoHeader, VideoKind};
 pub const KIND_FRAME: u8 = 1;
 /// A JSON control message.
 pub const KIND_CONTROL: u8 = 2;
+/// Raw audio from a screen share: a 5-byte header (sample rate u32, channels u8) and
+/// interleaved little-endian f32 samples. Cancelled and encoded on the other side.
+pub const KIND_PCM: u8 = 3;
+pub const PCM_HEADER_LEN: usize = 5;
 
 /// Sent to the encoder side of the link.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -50,6 +54,7 @@ pub enum FromLink {
 pub enum LinkMsg<'a> {
     Frame { header: VideoHeader, frame: &'a [u8] },
     Control(FromLink),
+    Pcm { rate: u32, channels: u8, samples: &'a [u8] },
 }
 
 /// Parses a message from the encoder side. `frame` is the header plus payload, the
@@ -62,6 +67,18 @@ pub fn parse(msg: &[u8]) -> Option<LinkMsg<'_>> {
             Some(LinkMsg::Frame { header, frame })
         }
         &KIND_CONTROL => serde_json::from_slice(&msg[1..]).ok().map(LinkMsg::Control),
+        &KIND_PCM => {
+            let body = &msg[1..];
+            if body.len() < PCM_HEADER_LEN {
+                return None;
+            }
+            let rate = u32::from_le_bytes([body[0], body[1], body[2], body[3]]);
+            let channels = body[4];
+            if !(1..=2).contains(&channels) || !(8000..=192_000).contains(&rate) {
+                return None;
+            }
+            Some(LinkMsg::Pcm { rate, channels, samples: &body[PCM_HEADER_LEN..] })
+        }
         _ => None,
     }
 }
@@ -104,5 +121,15 @@ mod tests {
         assert!(matches!(parse(&odd), Some(LinkMsg::Control(FromLink::Unknown))));
         assert!(parse(&[9, 9]).is_none());
         assert!(parse(&[]).is_none());
+        let mut pcm = vec![KIND_PCM];
+        pcm.extend_from_slice(&48_000u32.to_le_bytes());
+        pcm.push(2);
+        pcm.extend_from_slice(&1.0f32.to_le_bytes());
+        match parse(&pcm) {
+            Some(LinkMsg::Pcm { rate, channels, samples }) => assert_eq!((rate, channels, samples.len()), (48_000, 2, 4)),
+            _ => panic!("pcm expected"),
+        }
+        pcm[5] = 7;
+        assert!(parse(&pcm).is_none(), "an impossible channel count is refused");
     }
 }

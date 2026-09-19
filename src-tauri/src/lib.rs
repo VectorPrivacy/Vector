@@ -684,6 +684,8 @@ pub fn run() {
             calls::commands::call_video_pause,
             calls::commands::call_video_caps,
             calls::commands::call_video_prefs,
+            calls::commands::call_share_audio,
+            calls::commands::call_set_share_volume,
             calls::commands::call_set_volume,
             calls::commands::call_audio_settings_get,
             calls::commands::call_audio_settings_set,

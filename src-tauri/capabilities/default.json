@@ -378,6 +378,8 @@
     "allow-call-video-pause",
     "allow-call-video-caps",
     "allow-call-video-prefs",
+    "allow-call-share-audio",
+    "allow-call-set-share-volume",
     "allow-call-set-volume",
     "allow-call-audio-settings-get",
     "allow-call-audio-settings-set",

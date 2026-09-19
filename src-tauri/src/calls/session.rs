@@ -4,7 +4,7 @@
 //! Every deferred step (a ring timeout, a connect, a closed watcher) carries the
 //! call id it was started for and does nothing if the call it finds is another.
 
-use super::media::MediaEngine;
+use super::media::{MediaEngine, ShareInput};
 use super::transport::{read_control, write_control, Control, Tracks, VideoCodec, VideoKind, CALL_ALPN};
 use super::video::{Hooks, Prefs, VideoSnapshot, VideoTrack};
 use crate::miniapps::realtime::{decode_node_addr, encode_node_addr, IrohState};
@@ -59,6 +59,11 @@ pub struct CallState {
     pub video_offered: bool,
     /// The peer has hidden our picture; the camera can rest.
     pub paused_by_peer: bool,
+    /// The shared screen's sound travels with it, each way.
+    pub share_audio_mine: bool,
+    pub share_audio_peer: bool,
+    /// Listener-side volume for their screen's sound, 1.0 is unity.
+    pub share_volume: f32,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -88,6 +93,8 @@ pub struct CallStats {
     /// Percent of our packets the network dropped in the last second.
     pub net_loss: f32,
     pub video: VideoSnapshot,
+    pub share_sent: u64,
+    pub share_received: u64,
 }
 
 struct Call {
@@ -111,6 +118,11 @@ struct Call {
     paused_by_peer: bool,
     /// The machine stays awake for the call, and the display too once there is video.
     awake: Option<crate::awake::Hold>,
+    /// The shared screen's sound from the webview, for the engine's share thread.
+    share: Arc<ShareInput>,
+    share_audio_mine: bool,
+    share_audio_peer: bool,
+    share_volume: f32,
 }
 
 impl Call {
@@ -144,6 +156,9 @@ impl Call {
             peer_decodes: self.peer_decodes.clone(),
             video_offered: self.video_offered,
             paused_by_peer: self.paused_by_peer,
+            share_audio_mine: self.share_audio_mine,
+            share_audio_peer: self.share_audio_peer,
+            share_volume: self.share_volume,
         }
     }
 }
@@ -309,6 +324,10 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             video_offered: video,
             paused_by_peer: false,
             awake: None,
+            share: Arc::new(ShareInput::new()),
+            share_audio_mine: false,
+            share_audio_peer: false,
+            share_volume: 1.0,
         };
         let state = call.state(None);
         *guard = Some(call);
@@ -460,6 +479,10 @@ pub async fn set_video(kind: VideoKind, on: bool) -> Result<(), String> {
         }
         track.set_sending(tracks);
         c.video_mine = tracks;
+        if !tracks.screen {
+            c.share_audio_mine = false;
+            c.share.active.store(false, Ordering::Relaxed);
+        }
         c.refresh_awake();
         Ok((tracks, c.control.clone()))
     })
@@ -470,13 +493,46 @@ pub async fn set_video(kind: VideoKind, on: bool) -> Result<(), String> {
 
 /// Every send of what we are sending goes through here: the UI and the peer both hear.
 async fn tell_tracks((tracks, control): (Tracks, Option<Arc<tokio::sync::Mutex<SendStream>>>)) {
+    let audio = with_call(|c| c.share_audio_mine).unwrap_or(false);
     if let Some(s) = snapshot() {
         emit_state(&s);
     }
     if let Some(control) = control {
         let mut send = control.lock().await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { camera: tracks.camera, screen: tracks.screen })).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { camera: tracks.camera, screen: tracks.screen, audio })).await;
     }
+}
+
+/// The shared screen's sound goes with it, or stops; it cannot outlive the screen.
+pub async fn set_share_audio(on: bool) -> Result<(), String> {
+    let tracks = with_call(|c| {
+        if c.phase != Phase::Active {
+            return Err("Not in a call".to_string());
+        }
+        let on = on && c.video_mine.screen;
+        c.share_audio_mine = on;
+        c.share.active.store(on, Ordering::Relaxed);
+        Ok((c.video_mine, c.control.clone()))
+    })
+    .unwrap_or(Err("No call".into()))?;
+    tell_tracks(tracks).await;
+    Ok(())
+}
+
+/// Listener-side volume for their screen's sound.
+pub async fn set_share_volume(volume: f32) -> Result<(), String> {
+    let volume = volume.clamp(0.0, 4.0);
+    with_call(|c| {
+        c.share_volume = volume;
+        if let Some(m) = c.media.as_ref() {
+            m.link.set_share_gain(volume);
+        }
+    })
+    .ok_or("No call")?;
+    if let Some(s) = snapshot() {
+        emit_state(&s);
+    }
+    Ok(())
 }
 
 /// The user's quality and frame rate for one of our pictures; None means the ladder decides.
@@ -506,6 +562,8 @@ async fn on_link_closed(id: &str) {
             return None;
         }
         c.video_mine = Tracks::default();
+        c.share_audio_mine = false;
+        c.share.active.store(false, Ordering::Relaxed);
         if let Some(v) = c.video.as_ref() {
             v.set_sending(Tracks::default());
         }
@@ -536,7 +594,7 @@ pub fn mic_test_running() -> bool {
 
 pub async fn mic_test_start() -> Result<(), String> {
     mic_test_stop();
-    let engine = tokio::task::spawn_blocking(|| MediaEngine::start(None, 1.0, None))
+    let engine = tokio::task::spawn_blocking(|| MediaEngine::start(None, 1.0, None, None, 1.0))
         .await
         .map_err(|e| e.to_string())??;
     let stats = Arc::clone(&engine.stats);
@@ -583,7 +641,7 @@ pub fn install_device_follow() {
 
 async fn restart_media(id: &str, conn: Connection) {
     // Drop the old engine first: it holds the mixer slot and the old input stream.
-    let (old, muted, volume) = match with_call_id(id, |c| (c.media.take(), c.muted, c.volume)) {
+    let (old, muted, volume, share, share_volume) = match with_call_id(id, |c| (c.media.take(), c.muted, c.volume, Arc::clone(&c.share), c.share_volume)) {
         Some(v) => v,
         None => return,
     };
@@ -592,7 +650,7 @@ async fn restart_media(id: &str, conn: Connection) {
     let stats = old.as_ref().map(|m| Arc::clone(&m.stats));
     drop(old);
     let media =
-        tokio::task::spawn_blocking(move || MediaEngine::start(Some(conn), volume, stats)).await;
+        tokio::task::spawn_blocking(move || MediaEngine::start(Some(conn), volume, stats, Some(share), share_volume)).await;
     match media {
         Ok(Ok(m)) => {
             m.muted.store(muted, Ordering::Relaxed);
@@ -648,6 +706,10 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             video_offered: media == Some("video"),
                             paused_by_peer: false,
                             awake: None,
+                            share: Arc::new(ShareInput::new()),
+                            share_audio_mine: false,
+                            share_audio_peer: false,
+                            share_volume: 1.0,
                         };
                         let state = call.state(None);
                         *guard = Some(call);
@@ -766,8 +828,9 @@ pub async fn on_incoming(conn: Connection) {
 /// Media up, watchers on, Active.
 async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStream) {
     let media_conn = conn.clone();
-    let volume = with_call_id(id, |c| c.volume).unwrap_or(1.0);
-    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(media_conn), volume, None)).await;
+    let (volume, share, share_volume) = with_call_id(id, |c| (c.volume, Arc::clone(&c.share), c.share_volume)).unwrap_or((1.0, Arc::new(ShareInput::new()), 1.0));
+    let media_share = Arc::clone(&share);
+    let media = tokio::task::spawn_blocking(move || MediaEngine::start(Some(media_conn), volume, None, Some(media_share), share_volume)).await;
     let media = match media {
         Ok(Ok(m)) => m,
         Ok(Err(e)) => {
@@ -803,6 +866,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
             on_caps: Arc::new(|encode, decode| set_video_caps(encode, decode)),
             audio: Arc::clone(&stats),
             peer_video,
+            share,
         },
     );
     let installed = with_call_id(id, |c| {
@@ -838,10 +902,11 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                     end(&ctl_id, "hangup");
                     break;
                 }
-                Ok(Control::Video { camera, screen }) => {
+                Ok(Control::Video { camera, screen, audio }) => {
                     let tracks = Tracks { camera, screen };
                     with_call_id(&ctl_id, |c| {
                         c.video_peer = tracks;
+                        c.share_audio_peer = audio && screen;
                         if let Some(v) = c.video.as_ref() {
                             v.set_peer(tracks);
                         }
@@ -962,6 +1027,8 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 bitrate_kbps: stats.bitrate_kbps.load(Ordering::Relaxed),
                 net_loss: stats.net_loss(),
                 video: with_call_id(&stats_id, |c| c.video.as_ref().map(|v| v.snapshot())).flatten().unwrap_or_default(),
+                share_sent: stats.share_sent.load(Ordering::Relaxed),
+                share_received: stats.share_received.load(Ordering::Relaxed),
             };
             vector_core::traits::emit_event("call_stats", &payload);
         }

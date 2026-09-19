@@ -42,6 +42,18 @@ pub async fn call_video_set(kind: VideoKind, on: bool) -> Result<(), String> {
     session::set_video(kind, on).await
 }
 
+/// The shared screen's sound goes with it, or stops.
+#[tauri::command]
+pub async fn call_share_audio(on: bool) -> Result<(), String> {
+    session::set_share_audio(on).await
+}
+
+/// Listener-side volume for their screen's sound.
+#[tauri::command]
+pub async fn call_set_share_volume(volume: f32) -> Result<(), String> {
+    session::set_share_volume(volume).await
+}
+
 /// A held quality rung and frame rate for one of our pictures; None lets the ladder decide.
 #[tauri::command]
 pub async fn call_video_prefs(kind: VideoKind, rung: Option<u32>, fps: Option<u32>) -> Result<(), String> {
