@@ -146,9 +146,9 @@
     }
     // The panel's quality choices, by rung on each ladder.
     const QUALITY_CAMERA = [['Low', 1], ['Medium', 3], ['High', 5], ['Best', 6]];
-    const QUALITY_SCREEN = [['Low', 1], ['Medium', 3], ['High', 4], ['Best', 5]];
+    const QUALITY_SCREEN = [['Low', 1], ['Medium', 3], ['High', 5], ['Best', 7], ['Ultra', 8]];
     const FPS_CAMERA = [15, 30];
-    const FPS_SCREEN = [5, 10, 15, 30];
+    const FPS_SCREEN = [5, 10, 15, 30, 60];
     function choosePref(kind, field, value) {
         const p = v.prefs[kind];
         const next = { rung: p.rung, fps: p.fps, [field]: value === '' ? null : Number(value) };

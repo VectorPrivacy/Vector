@@ -151,8 +151,9 @@ pub const VIDEO_SCREEN: u8 = 2;
 /// Header on every video frame, on the QUIC stream and on the link alike.
 pub const VIDEO_HEADER_LEN: usize = 16;
 /// A frame bigger than this is refused: the whole connection window is only 2 MB,
-/// and a bigger frame would sit in front of the control stream.
-pub const MAX_VIDEO_FRAME: usize = 512 * 1024;
+/// and a bigger frame would sit in front of the control stream. A crisp 1440p
+/// keyframe at the top of the screen ladder is a few hundred kilobytes.
+pub const MAX_VIDEO_FRAME: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoHeader {

@@ -132,7 +132,7 @@ function requestSource(kind) {
     // offers the choice where it can. Our own playback is excluded where the
     // platform knows how; the backend cancels it against the mixer's output anyway.
     return waitForSource(kind === 'screen'
-        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
+        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 60 } }, audio: { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include', selfBrowserSurface: 'exclude' })
         : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
 }
 

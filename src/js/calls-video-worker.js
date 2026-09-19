@@ -27,7 +27,7 @@ function codecString(name, width, height) {
 // Buffers the encoders write into; the socket copies on send, so they cycle at once.
 const POOL_SIZE = 8;
 const POOL_BYTES = 256 * 1024;
-const MAX_FRAME = 512 * 1024;
+const MAX_FRAME = 1024 * 1024;
 // The picture the peer sends is painted at its own size, up to what a decoder can
 // reasonably be asked for.
 const MAX_DECODE_PX = 4096 * 2304;

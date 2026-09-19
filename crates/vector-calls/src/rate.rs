@@ -161,13 +161,17 @@ pub static CAMERA_LADDER: [Rung; 7] = [
     Rung { kbps: 1800, width: 1280, height: 720, fps: 30 },
     Rung { kbps: 2500, width: 1280, height: 720, fps: 30 },
 ];
-pub static SCREEN_LADDER: [Rung; 6] = [
+/// The top three are for games: 60 frames a second, and enough bits to keep them crisp.
+pub static SCREEN_LADDER: [Rung; 9] = [
     Rung { kbps: 300, width: 0, height: 720, fps: 5 },
     Rung { kbps: 600, width: 0, height: 1080, fps: 8 },
     Rung { kbps: 1000, width: 0, height: 1080, fps: 10 },
     Rung { kbps: 1500, width: 0, height: 1440, fps: 15 },
     Rung { kbps: 2500, width: 0, height: 0, fps: 30 },
     Rung { kbps: 4000, width: 0, height: 0, fps: 30 },
+    Rung { kbps: 6000, width: 0, height: 1080, fps: 60 },
+    Rung { kbps: 10000, width: 0, height: 0, fps: 60 },
+    Rung { kbps: 16000, width: 0, height: 0, fps: 60 },
 ];
 /// Where a fresh camera or screen starts, and the most a relayed path may carry:
 /// the relays are not ours yet, and a video call must not be what fills them.
@@ -255,13 +259,16 @@ impl VideoRate {
         self.ladder.len()
     }
 
-    /// Hold a rung (within the cap) or let the ladder run again. Returns the rung
-    /// when it moved.
+    /// Hold a rung, or let the ladder run again. A held rung may sit above the
+    /// path's cap: the cap is a default for the ladder, the pin is the user's word.
+    /// Returns the rung when it moved.
     pub fn set_pin(&mut self, pin: Option<usize>) -> Option<Rung> {
         let before = self.rung;
         self.pin = pin.map(|p| p.min(self.ladder.len() - 1));
         if let Some(p) = self.pin {
-            self.rung = p.min(self.cap);
+            self.rung = p;
+        } else if self.rung > self.cap {
+            self.rung = self.cap;
         }
         self.clean_secs = 0;
         (self.rung != before || pin.is_some()).then(|| self.rung())
@@ -282,7 +289,7 @@ impl VideoRate {
     pub fn set_cap(&mut self, cap: usize) -> Option<Rung> {
         self.cap = cap.min(self.ladder.len() - 1);
         self.min_rtt = u32::MAX;
-        if self.rung > self.cap {
+        if self.pin.is_none() && self.rung > self.cap {
             self.rung = self.cap;
             return Some(self.rung());
         }
@@ -313,7 +320,7 @@ impl VideoRate {
         } else {
             loss >= VIDEO_DOWN_AT_PCT || audio_dropped > 0 || bloated || obs.backlog
         };
-        let ceiling = self.pin.map_or(self.cap, |p| p.min(self.cap));
+        let ceiling = self.pin.unwrap_or(self.cap);
         let before = self.rung;
         if self.hold > 0 {
             self.hold -= 1;
@@ -402,6 +409,12 @@ mod video_tests {
         assert_eq!(r.rung(), CAMERA_LADDER[6], "climbs back to the pin once the voice is fine");
         assert_eq!(r.set_fps(Some(15)).fps, 15);
         assert_eq!(r.set_pin(None), None, "unpinning where the ladder already stands changes nothing");
+        // A pin above the path's cap holds: the relay cap is a default, not a rule.
+        let mut relayed = VideoRate::screen(SCREEN_RELAY_CAP);
+        assert_eq!(relayed.set_pin(Some(8)), Some(SCREEN_LADDER[8]));
+        assert_eq!(relayed.set_cap(SCREEN_RELAY_CAP), None);
+        assert_eq!(relayed.rung(), SCREEN_LADDER[8]);
+        assert_eq!(relayed.set_pin(None), Some(SCREEN_LADDER[SCREEN_RELAY_CAP]), "letting go drops back under the cap");
     }
 
     #[test]
