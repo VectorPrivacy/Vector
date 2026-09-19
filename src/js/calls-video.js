@@ -46,6 +46,7 @@ function ensureVideoWorker() {
             case 'link': videoLinkOpen = m.open; VectorSvelte.setVideoLink(m.open); break;
             case 'painted': VectorSvelte.setVideoPeerSize(m.width, m.height); break;
             case 'stats': VectorSvelte.setVideoStats(m.enc, m.decFps); break;
+            case 'constrain': constrainCapture(m); break;
             case 'error': VectorSvelte.showToast(m.message); stopVideo(); break;
         }
     };
@@ -112,6 +113,16 @@ async function startVideo(kind) {
         el.requestVideoFrameCallback(pull);
     };
     el.requestVideoFrameCallback(pull);
+}
+
+/** The ladder moved: ask the device for that size and rate, so no frame is captured
+ *  bigger than it will be sent. Best effort; the worker scales whatever still arrives. */
+function constrainCapture(m) {
+    const track = selfStream && selfStream.getVideoTracks()[0];
+    if (!track || track.readyState !== 'live') return;
+    const c = { frameRate: m.fps };
+    if (m.kind !== 'screen' && m.width && m.height) { c.width = m.width; c.height = m.height; }
+    track.applyConstraints(c).catch(() => {});
 }
 
 /** Stop sending. `tell` is false when the call is already gone. */

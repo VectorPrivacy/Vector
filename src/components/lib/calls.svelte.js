@@ -12,7 +12,7 @@ const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: n
 // The device's video ability (from the boot probe), the link to the worker, and what
 // the worker reports: the peer's picture size and the encoder's numbers.
 const video = $state({ encode: [], decode: [], link: false, peerWidth: 0, peerHeight: 0,
-    enc: { fps: 0, kbps: 0, width: 0, height: 0 }, decFps: 0,
+    enc: { fps: 0, kbps: 0, width: 0, height: 0 }, decFps: 0, inKbps: 0,
     // The stage collapsed back to the pill while video is on.
     stageHidden: false });
 // The voice processing switches and the microphone test, shared by the pill and Settings.
@@ -101,6 +101,7 @@ export function setCallStats(st) {
     if (prev && st.received > prev.received) {
         lost = 100 * (st.concealed - prev.concealed) / (st.received - prev.received);
     }
+    if (prev && st.video && prev.video) video.inKbps = Math.max(0, Math.round((st.video.bytes_in - prev.video.bytes_in) * 8 / 1000));
     c.stats = st;
     c.history.push({ rtt: st.rtt_ms, lost: Math.max(0, lost) });
     if (c.history.length > HISTORY) c.history.shift();

@@ -33,7 +33,16 @@ let ctx = null;
 let encoder = null;
 let decoder = null;
 let codec = null;
-let capture = null; // { kind, width, height, fps, kbps }
+let capture = null; // { kind, width, height, fps, kbps, targetW, targetH, maxH }
+// Scales a frame down when the ladder asks for less than the camera gives; a GPU
+// draw, and a new frame from the canvas, only on the rungs that need it.
+let scaler = null;
+let scalerCtx = null;
+// Frame thinning: the capture runs at the device rate, the rung says how many to keep.
+let fpsDebt = 0;
+// The backend names the rung as soon as sending is agreed, which can be before the
+// page has posted its capture spec; the rung waits for it.
+let lastRate = null;
 let seq = 0;
 let skipNext = false;
 let forceKey = true;
@@ -108,9 +117,11 @@ function onSocket(msg) {
 // ── outgoing ──
 
 function startCapture(spec) {
-    capture = { kind: spec.kind, fps: spec.fps, kbps: spec.kbps, width: 0, height: 0 };
+    capture = { kind: spec.kind, fps: spec.fps, kbps: spec.kbps, width: 0, height: 0, targetW: 0, targetH: 0, maxH: 0 };
     forceKey = true;
     seq = 0;
+    fpsDebt = 0;
+    if (lastRate) setRate(lastRate);
 }
 
 function stopEncoder() {
@@ -136,30 +147,62 @@ function configureEncoder(width, height) {
 }
 
 function setRate(r) {
+    lastRate = r;
     if (!capture) return;
     capture.kbps = r.kbps;
     capture.fps = r.fps;
-    if (!encoder) return;
-    if (r.width && r.height && (r.width !== capture.width || r.height !== capture.height)) {
-        configureEncoder(r.width, r.height);
-        return;
+    if (capture.kind === 'screen') {
+        capture.maxH = r.height || 0;
+    } else {
+        capture.targetW = r.width || 0;
+        capture.targetH = r.height || 0;
     }
+    // The page asks the device for the new size and rate; whatever still arrives
+    // bigger is scaled here.
+    postMessage({ t: 'constrain', width: r.width, height: r.height, fps: r.fps, kind: capture.kind });
+    if (!encoder) return;
     try {
         encoder.configure({ codec: codecString(codec, capture.width, capture.height), width: capture.width, height: capture.height, bitrate: r.kbps * 1000, framerate: r.fps, latencyMode: 'realtime', hardwareAcceleration: 'prefer-hardware', ...(codec === 'h264' ? { avc: { format: 'annexb' } } : {}) });
     } catch (_) {}
+}
+
+// The size a captured frame is sent at: the rung's size for a camera, at most the
+// rung's height for a screen, always even, never upscaled.
+function targetSize(cw, ch) {
+    let w = cw, h = ch;
+    if (capture.kind === 'screen') {
+        if (capture.maxH && h > capture.maxH) { w = Math.round(cw * capture.maxH / ch); h = capture.maxH; }
+    } else if (capture.targetW && capture.targetH && (cw > capture.targetW || ch > capture.targetH)) {
+        const s = Math.min(capture.targetW / cw, capture.targetH / ch);
+        w = Math.round(cw * s); h = Math.round(ch * s);
+    }
+    return [w & ~1, h & ~1];
 }
 
 function onCaptured(captured) {
     let frame = captured;
     try {
         if (!capture || paused || !ws || skipNext) { skipNext = false; return; }
-        // H.264 takes even sizes only; a window can be any size. Trimming a pixel
-        // off the edge is a new view of the same buffer, not a copy.
-        const w = captured.displayWidth & ~1;
-        const h = captured.displayHeight & ~1;
+        // Keep the rung's share of the device's frames.
+        const srcFps = capture.kind === 'screen' ? 15 : 30;
+        fpsDebt += capture.fps / srcFps;
+        if (fpsDebt < 1) return;
+        fpsDebt -= 1;
+        const [w, h] = targetSize(captured.displayWidth, captured.displayHeight);
         if (!w || !h) return;
         if (w !== captured.displayWidth || h !== captured.displayHeight) {
-            frame = new VideoFrame(captured, { visibleRect: { x: 0, y: 0, width: w, height: h } });
+            if (w >= captured.displayWidth - 1 && h >= captured.displayHeight - 1) {
+                // H.264 takes even sizes only; a window can be any size. Trimming a pixel
+                // off the edge is a new view of the same buffer, not a copy.
+                frame = new VideoFrame(captured, { visibleRect: { x: 0, y: 0, width: w, height: h } });
+            } else {
+                if (!scaler || scaler.width !== w || scaler.height !== h) {
+                    scaler = new OffscreenCanvas(w, h);
+                    scalerCtx = scaler.getContext('2d', { alpha: false, desynchronized: true });
+                }
+                scalerCtx.drawImage(captured, 0, 0, w, h);
+                frame = new VideoFrame(scaler, { timestamp: captured.timestamp });
+            }
         }
         if (!encoder || w !== capture.width || h !== capture.height) {
             configureEncoder(w, h);
@@ -262,7 +305,7 @@ self.onmessage = (e) => {
             ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
             break;
         case 'capture': startCapture(m); break;
-        case 'stop': capture = null; stopEncoder(); break;
+        case 'stop': capture = null; lastRate = null; stopEncoder(); break;
         case 'frame': onCaptured(m.frame); break;
     }
 };

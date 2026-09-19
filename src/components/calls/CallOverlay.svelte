@@ -212,6 +212,13 @@
         if (bitrate && bitrate >= 64) return 'full quality';
         return '';
     });
+    // The video track in words: what we send and what arrives, from the stats line.
+    const videoLine = $derived.by(() => {
+        const vs = c.stats?.video;
+        if (!vs || c.videoMine === 'off') return '';
+        return `${vs.kbps} kbit/s · ${vs.width}×${vs.height} · ${vs.fps} fps`;
+    });
+    const peerVideoLine = $derived(c.videoPeer === 'off' || !v.peerWidth ? '' : `${v.inKbps} kbit/s · ${v.peerWidth}×${v.peerHeight} · ${v.decFps} fps`);
     // Graph: delay as a line, lost audio as bars, over the last minute. The top
     // HEAD pixels are headroom for the tip, so it can sit above the highest sample.
     const W = 240, H = 72, HEAD = 34;
@@ -395,6 +402,14 @@
                     <span class="call-panel-value">{lostText}</span>
                     <span class="call-panel-label" title="How much data your voice uses. It rises on a clean connection and drops when packets are being lost">Bitrate</span>
                     <span class="call-panel-value">{bitrate == null ? '…' : `${bitrate} kbit/s`}{#if bitrateHint} <span class="call-panel-hint">{bitrateHint}</span>{/if}</span>
+                    {#if videoLine}
+                        <span class="call-panel-label" title="What your camera or screen is sent at. It follows the connection, like the voice bitrate">Your video</span>
+                        <span class="call-panel-value">{videoLine}</span>
+                    {/if}
+                    {#if peerVideoLine}
+                        <span class="call-panel-label">Their video</span>
+                        <span class="call-panel-value">{peerVideoLine}</span>
+                    {/if}
                 </div>
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div class="call-graph">

@@ -3,6 +3,8 @@
 //! a lost or reset frame from ever painting a corrupt picture.
 
 use super::link::{self, LinkConn};
+use super::media::MediaStats;
+use super::rate::{VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, CAMERA_START, SCREEN_LADDER, SCREEN_RELAY_CAP, SCREEN_START};
 use super::transport::{Control, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
 use bytes::{Bytes, BytesMut};
 use iroh::endpoint::{Connection, SendStream, VarInt};
@@ -85,6 +87,8 @@ pub struct Hooks {
     pub on_link_closed: Arc<dyn Fn(&str) + Send + Sync>,
     /// The webview reported what it can encode and decode.
     pub on_caps: Arc<dyn Fn(Vec<String>, Vec<String>) + Send + Sync>,
+    /// The audio track's counters: its refused datagrams are video's first alarm.
+    pub audio: Arc<MediaStats>,
 }
 
 struct Shared {
@@ -98,6 +102,9 @@ struct Shared {
     last_key_request: Mutex<Option<Instant>>,
     codec: Mutex<Option<VideoCodec>>,
     peer_kind: Mutex<VideoKind>,
+    conn: Connection,
+    /// The ladder for what we are sending; None while we send nothing.
+    rate: Mutex<Option<VideoRate>>,
 }
 
 impl Shared {
@@ -106,6 +113,19 @@ impl Shared {
         if let Some(tx) = tx {
             let _ = tx.try_send(Bytes::from(control(msg)));
         }
+    }
+
+    /// Whether the selected path goes through a relay, and its round trip.
+    fn path(&self) -> (bool, u32) {
+        let paths = self.conn.paths();
+        match paths.iter().find(|p| p.is_selected()).or_else(|| paths.iter().next()) {
+            Some(p) => (p.is_relay(), p.rtt().as_millis() as u32),
+            None => (true, 0),
+        }
+    }
+
+    fn tell_rung(&self, r: super::rate::Rung) {
+        self.tell_web(&ToLink::Rate { kbps: r.kbps, width: r.width, height: r.height, fps: r.fps });
     }
 }
 
@@ -127,6 +147,8 @@ impl VideoTrack {
             last_key_request: Mutex::new(None),
             codec: Mutex::new(None),
             peer_kind: Mutex::new(VideoKind::Off),
+            conn: conn.clone(),
+            rate: Mutex::new(None),
         });
         let hooks = Arc::new(hooks);
         let (taker_tx, taker_rx) = mpsc::channel::<LinkConn>(1);
@@ -141,9 +163,31 @@ impl VideoTrack {
         let inn = {
             let shared = Arc::clone(&shared);
             let hooks = Arc::clone(&hooks);
+            let conn = conn.clone();
             vector_core::db::spawn_bound(async move { inbound(conn, shared, hooks).await })
         };
-        Self { shared, tasks: vec![out, inn], stats }
+        let rate = {
+            let shared = Arc::clone(&shared);
+            let hooks = Arc::clone(&hooks);
+            vector_core::db::spawn_bound(async move { rate_loop(conn, shared, hooks).await })
+        };
+        Self { shared, tasks: vec![out, inn, rate], stats }
+    }
+
+    /// What we send from now on. A fresh ladder starts for a camera or a screen, on a
+    /// rung the path allows, and the webview hears its size and rate before any frame.
+    pub fn set_sending(&self, kind: VideoKind) {
+        let (relay, _) = self.shared.path();
+        let controller = match kind {
+            VideoKind::Off => None,
+            VideoKind::Camera => Some(VideoRate::new(&CAMERA_LADDER, CAMERA_START, if relay { CAMERA_RELAY_CAP } else { CAMERA_LADDER.len() - 1 })),
+            VideoKind::Screen => Some(VideoRate::new(&SCREEN_LADDER, SCREEN_START, if relay { SCREEN_RELAY_CAP } else { SCREEN_LADDER.len() - 1 })),
+        };
+        let rung = controller.as_ref().map(|c| c.rung());
+        *self.shared.rate.lock().unwrap_or_else(|e| e.into_inner()) = controller;
+        if let Some(r) = rung {
+            self.shared.tell_rung(r);
+        }
     }
 
     /// The codec the peer decodes; told to the webview whenever it connects.
@@ -280,6 +324,54 @@ fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: VideoHead
             }
         }
     });
+}
+
+/// Once a second while we send: the connection's own loss and round trip, the audio
+/// track's refused datagrams and our own backlog decide the rung; the path's kind
+/// decides the ceiling.
+async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
+    let mut last_stale = 0u64;
+    let mut was_relay: Option<bool> = None;
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let (relay, rtt_ms) = shared.path();
+        let stale = shared.stats.stale.load(Ordering::Relaxed);
+        let backlog = stale > last_stale || shared.in_flight.load(Ordering::Relaxed) >= IN_FLIGHT;
+        last_stale = stale;
+        let net = conn.stats();
+        let obs = VideoObservation {
+            sent_packets: net.udp_tx.datagrams,
+            lost_packets: net.lost_packets,
+            rtt_ms,
+            audio_send_dropped: hooks.audio.send_dropped.load(Ordering::Relaxed),
+            backlog,
+        };
+        let change = {
+            let mut guard = shared.rate.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(rate) = guard.as_mut() else { continue };
+            let capped = if was_relay != Some(relay) {
+                was_relay = Some(relay);
+                let camera = std::ptr::eq(rate_ladder(rate), CAMERA_LADDER.as_slice());
+                let cap = match (relay, camera) {
+                    (true, true) => CAMERA_RELAY_CAP,
+                    (true, false) => SCREEN_RELAY_CAP,
+                    (false, true) => CAMERA_LADDER.len() - 1,
+                    (false, false) => SCREEN_LADDER.len() - 1,
+                };
+                rate.set_cap(cap)
+            } else {
+                None
+            };
+            rate.observe(obs).or(capped)
+        };
+        if let Some(r) = change {
+            shared.tell_rung(r);
+        }
+    }
+}
+
+fn rate_ladder(rate: &VideoRate) -> &'static [super::rate::Rung] {
+    rate.ladder()
 }
 
 async fn request_keyframe(shared: &Shared, hooks: &Hooks) {

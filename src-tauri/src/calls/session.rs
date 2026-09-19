@@ -439,6 +439,7 @@ pub async fn set_video(kind: VideoKind) -> Result<(), String> {
             let codec = pick_codec(&c.peer_decodes).ok_or("They cannot receive video")?;
             track.set_codec(codec);
         }
+        track.set_sending(kind);
         c.video_mine = kind;
         Ok(c.control.clone())
     })
@@ -470,6 +471,9 @@ async fn on_link_closed(id: &str) {
             return None;
         }
         c.video_mine = VideoKind::Off;
+        if let Some(v) = c.video.as_ref() {
+            v.set_sending(VideoKind::Off);
+        }
         c.control.clone()
     })
     .flatten();
@@ -762,6 +766,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 vector_core::db::spawn_bound(async move { on_link_closed(&id).await });
             }),
             on_caps: Arc::new(|encode, decode| set_video_caps(encode, decode)),
+            audio: Arc::clone(&stats),
         },
     );
     let video_stats = Arc::clone(&video.stats);
