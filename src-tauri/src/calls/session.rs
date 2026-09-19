@@ -756,6 +756,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
     let control = Arc::new(tokio::sync::Mutex::new(send));
     let stats = Arc::clone(&media.stats);
 
+    let peer_video = with_call_id(id, |c| !c.peer_decodes.is_empty()).unwrap_or(false);
     let video = VideoTrack::start(
         conn.clone(),
         Hooks {
@@ -767,6 +768,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
             }),
             on_caps: Arc::new(|encode, decode| set_video_caps(encode, decode)),
             audio: Arc::clone(&stats),
+            peer_video,
         },
     );
     let video_stats = Arc::clone(&video.stats);

@@ -38,8 +38,12 @@ let capture = null; // { kind, width, height, fps, kbps, targetW, targetH, maxH 
 // draw, and a new frame from the canvas, only on the rungs that need it.
 let scaler = null;
 let scalerCtx = null;
-// Frame thinning: the capture runs at the device rate, the rung says how many to keep.
-let fpsDebt = 0;
+// Frame thinning: the device delivers at its own rate, the rung says how many to keep;
+// the capture timestamps decide, so a camera already at the rung's rate loses none.
+let lastSentUs = -1;
+// The picture the peer sends is painted at its own size, up to what a decoder can
+// reasonably be asked for.
+const MAX_DECODE_PX = 4096 * 2304;
 // The backend names the rung as soon as sending is agreed, which can be before the
 // page has posted its capture spec; the rung waits for it.
 let lastRate = null;
@@ -69,21 +73,25 @@ function control(obj) {
 
 function open(url, caps) {
     close();
-    ws = new WebSocket(url);
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = () => {
+    const w = new WebSocket(url);
+    ws = w;
+    w.binaryType = 'arraybuffer';
+    w.onopen = () => {
+        if (ws !== w) return;
         control({ t: 'caps', encode: caps.encode, decode: caps.decode });
         postMessage({ t: 'link', open: true });
         statsTimer = setInterval(stats, 1000);
     };
-    ws.onmessage = (e) => onSocket(new Uint8Array(e.data));
-    ws.onclose = () => {
+    w.onmessage = (e) => { if (ws === w) onSocket(new Uint8Array(e.data)); };
+    // A replaced socket's close must not tear down the one that replaced it.
+    w.onclose = () => {
+        if (ws !== w) return;
         clearInterval(statsTimer);
         statsTimer = null;
         postMessage({ t: 'link', open: false });
         ws = null;
     };
-    ws.onerror = () => {};
+    w.onerror = () => {};
 }
 
 function close() {
@@ -120,7 +128,7 @@ function startCapture(spec) {
     capture = { kind: spec.kind, fps: spec.fps, kbps: spec.kbps, width: 0, height: 0, targetW: 0, targetH: 0, maxH: 0 };
     forceKey = true;
     seq = 0;
-    fpsDebt = 0;
+    lastSentUs = -1;
     if (lastRate) setRate(lastRate);
 }
 
@@ -183,11 +191,10 @@ function onCaptured(captured) {
     let frame = captured;
     try {
         if (!capture || paused || !ws || skipNext) { skipNext = false; return; }
-        // Keep the rung's share of the device's frames.
-        const srcFps = capture.kind === 'screen' ? 15 : 30;
-        fpsDebt += capture.fps / srcFps;
-        if (fpsDebt < 1) return;
-        fpsDebt -= 1;
+        // Keep the rung's share of the device's frames, by their timestamps.
+        const minGapUs = 1e6 / capture.fps * 0.9;
+        if (lastSentUs >= 0 && captured.timestamp - lastSentUs < minGapUs) return;
+        lastSentUs = captured.timestamp;
         const [w, h] = targetSize(captured.displayWidth, captured.displayHeight);
         if (!w || !h) return;
         if (w !== captured.displayWidth || h !== captured.displayHeight) {
@@ -253,7 +260,7 @@ function onFrame(frame) {
     const view = new DataView(frame.buffer, frame.byteOffset, frame.length);
     const flags = view.getUint8(12);
     const name = CODEC_NAME[view.getUint8(13)];
-    const ts = Number(view.getBigUint64(4));
+    const ts = Number(view.getBigUint64(4) & 0x1fffffffffffffn);
     const key = (flags & FLAG_KEY) !== 0;
     if (!name) return;
     if (!decoder || decCodec !== name) {
@@ -276,7 +283,12 @@ function onFrame(frame) {
 function paint(vf) {
     try {
         if (!canvas) return;
-        if (canvas.width !== vf.displayWidth || canvas.height !== vf.displayHeight) {
+        if (vf.displayWidth * vf.displayHeight > MAX_DECODE_PX) {
+            resetDecoder();
+            control({ t: 'lost' });
+            return;
+        }
+        if (canvas.width !== vf.displayWidth || vf.displayHeight !== canvas.height) {
             canvas.width = vf.displayWidth;
             canvas.height = vf.displayHeight;
             postMessage({ t: 'painted', width: vf.displayWidth, height: vf.displayHeight });
@@ -302,7 +314,7 @@ self.onmessage = (e) => {
         case 'close': close(); break;
         case 'canvas':
             canvas = m.canvas;
-            ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+            ctx = canvas ? canvas.getContext('2d', { alpha: false, desynchronized: true }) : null;
             break;
         case 'capture': startCapture(m); break;
         case 'stop': capture = null; lastRate = null; stopEncoder(); break;

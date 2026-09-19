@@ -4,7 +4,7 @@
 
 use super::link::{self, LinkConn};
 use super::media::MediaStats;
-use super::rate::{VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, CAMERA_START, SCREEN_LADDER, SCREEN_RELAY_CAP, SCREEN_START};
+use super::rate::{VideoObservation, VideoRate, CAMERA_LADDER, CAMERA_RELAY_CAP, SCREEN_LADDER, SCREEN_RELAY_CAP};
 use super::transport::{Control, VideoCodec, VideoHeader, VideoKind, MAX_VIDEO_FRAME, VIDEO_HEADER_LEN};
 use bytes::{Bytes, BytesMut};
 use iroh::endpoint::{Connection, SendStream, VarInt};
@@ -16,12 +16,19 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use vector_core::calls::link::{control, parse, FromLink, LinkMsg, ToLink, KIND_FRAME};
 
-/// Frames on the wire at once before captures are skipped.
-const IN_FLIGHT: usize = 3;
-/// A frame the peer has not read by then is reset: it is a picture of the past.
-const STALE: Duration = Duration::from_millis(400);
-/// Keyframes cost tens of kilobytes; requests coalesce to this many.
+/// Frames on the wire at once before captures are skipped, at a zero round trip. A
+/// frame counts as on the wire until the peer has acknowledged all of it, so the
+/// cap grows with the round trip: what a path holds in one RTT, and a little over.
+const IN_FLIGHT_MIN: usize = 3;
+/// A delta the peer has not acknowledged by then is reset: it is a picture of the
+/// past. Also scaled by the round trip, and a keyframe gets longer, since resetting
+/// one only buys another.
+const STALE_MIN: Duration = Duration::from_millis(400);
+const STALE_KEY_MIN: Duration = Duration::from_secs(2);
+/// Keyframes cost tens of kilobytes; requests coalesce to this many, in both directions.
 const KEYFRAME_MIN_GAP: Duration = Duration::from_secs(1);
+/// A frame the peer takes longer than this to deliver is abandoned; the next keyframe restarts.
+const INBOUND_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct VideoStats {
@@ -89,6 +96,10 @@ pub struct Hooks {
     pub on_caps: Arc<dyn Fn(Vec<String>, Vec<String>) + Send + Sync>,
     /// The audio track's counters: its refused datagrams are video's first alarm.
     pub audio: Arc<MediaStats>,
+    /// The peer declared decoders in its offer or answer. A peer that did not runs a
+    /// build whose control reader stops at the first message it does not know, so
+    /// it is never sent one.
+    pub peer_video: bool,
 }
 
 struct Shared {
@@ -100,8 +111,14 @@ struct Shared {
     /// Drop incoming deltas until a keyframe: the chain broke, or the webview just reconnected.
     need_key_in: AtomicBool,
     last_key_request: Mutex<Option<Instant>>,
+    /// The peer's keyframe requests are honoured this often at most.
+    last_key_forced: Mutex<Option<Instant>>,
     codec: Mutex<Option<VideoCodec>>,
     peer_kind: Mutex<VideoKind>,
+    /// The peer declared decoders, so it runs a build that knows the video messages.
+    peer_video: AtomicBool,
+    /// Sending rate in frames per second, for the in-flight cap.
+    fps: AtomicU32,
     conn: Connection,
     /// The ladder for what we are sending; None while we send nothing.
     rate: Mutex<Option<VideoRate>>,
@@ -125,7 +142,15 @@ impl Shared {
     }
 
     fn tell_rung(&self, r: super::rate::Rung) {
+        self.fps.store(r.fps, Ordering::Relaxed);
         self.tell_web(&ToLink::Rate { kbps: r.kbps, width: r.width, height: r.height, fps: r.fps });
+    }
+
+    /// How many frames may be unacknowledged before captures are skipped: one round
+    /// trip's worth at the sending rate, plus a little, never under the floor.
+    fn in_flight_cap(&self, rtt_ms: u32) -> usize {
+        let fps = self.fps.load(Ordering::Relaxed).max(1) as usize;
+        (rtt_ms as usize * fps / 1000 + 2).max(IN_FLIGHT_MIN)
     }
 }
 
@@ -138,6 +163,7 @@ pub struct VideoTrack {
 impl VideoTrack {
     pub fn start(conn: Connection, hooks: Hooks) -> Self {
         let stats = Arc::new(VideoStats::default());
+        let hooks = Arc::new(hooks);
         let shared = Arc::new(Shared {
             stats: Arc::clone(&stats),
             to_web: Mutex::new(None),
@@ -145,12 +171,14 @@ impl VideoTrack {
             need_key_out: AtomicBool::new(false),
             need_key_in: AtomicBool::new(true),
             last_key_request: Mutex::new(None),
+            last_key_forced: Mutex::new(None),
             codec: Mutex::new(None),
             peer_kind: Mutex::new(VideoKind::Off),
+            peer_video: AtomicBool::new(hooks.peer_video),
+            fps: AtomicU32::new(30),
             conn: conn.clone(),
             rate: Mutex::new(None),
         });
-        let hooks = Arc::new(hooks);
         let (taker_tx, taker_rx) = mpsc::channel::<LinkConn>(1);
         link::set_taker(Some(taker_tx));
 
@@ -180,8 +208,8 @@ impl VideoTrack {
         let (relay, _) = self.shared.path();
         let controller = match kind {
             VideoKind::Off => None,
-            VideoKind::Camera => Some(VideoRate::new(&CAMERA_LADDER, CAMERA_START, if relay { CAMERA_RELAY_CAP } else { CAMERA_LADDER.len() - 1 })),
-            VideoKind::Screen => Some(VideoRate::new(&SCREEN_LADDER, SCREEN_START, if relay { SCREEN_RELAY_CAP } else { SCREEN_LADDER.len() - 1 })),
+            VideoKind::Camera => Some(VideoRate::camera(if relay { CAMERA_RELAY_CAP } else { CAMERA_LADDER.len() - 1 })),
+            VideoKind::Screen => Some(VideoRate::screen(if relay { SCREEN_RELAY_CAP } else { SCREEN_LADDER.len() - 1 })),
         };
         let rung = controller.as_ref().map(|c| c.rung());
         *self.shared.rate.lock().unwrap_or_else(|e| e.into_inner()) = controller;
@@ -210,8 +238,16 @@ impl VideoTrack {
         self.shared.tell_web(&ToLink::Pause { on });
     }
 
-    /// The peer asked for a keyframe.
+    /// The peer asked for a keyframe. Honoured once a second: a peer asking at wire
+    /// rate would otherwise turn every frame into a keyframe.
     pub fn force_keyframe(&self) {
+        {
+            let mut last = self.shared.last_key_forced.lock().unwrap_or_else(|e| e.into_inner());
+            if last.is_some_and(|t| t.elapsed() < KEYFRAME_MIN_GAP) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
         self.shared.need_key_out.store(true, Ordering::Relaxed);
         self.shared.tell_web(&ToLink::Keyframe);
     }
@@ -279,32 +315,34 @@ fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: VideoHead
             return;
         }
     }
-    if shared.in_flight.load(Ordering::Relaxed) >= IN_FLIGHT {
+    let (_, rtt_ms) = shared.path();
+    let cap = shared.in_flight_cap(rtt_ms);
+    // An encoded frame is never dropped: a delta the peer never sees breaks the chain.
+    // Instead the webview is told to skip captures while the wire is this full, so
+    // what it drops was never encoded.
+    if shared.in_flight.load(Ordering::Relaxed) + 1 >= cap {
         shared.stats.skipped.fetch_add(1, Ordering::Relaxed);
-        // The delta chain is intact only if the encoder never encoded what we drop, so
-        // the next capture is skipped instead and this encoded frame forces a keyframe.
-        shared.need_key_out.store(true, Ordering::Relaxed);
         shared.tell_web(&ToLink::Skip);
-        shared.tell_web(&ToLink::Keyframe);
-        return;
     }
     shared.in_flight.fetch_add(1, Ordering::Relaxed);
     let conn = conn.clone();
     let shared = Arc::clone(shared);
     let len = frame.len() as u64;
+    let key = header.is_key();
+    let rtt = Duration::from_millis(rtt_ms as u64);
+    let stale = if key { STALE_KEY_MIN.max(rtt * 4) } else { STALE_MIN.max(rtt * 3) };
     vector_core::db::spawn_bound(async move {
-        let key = header.is_key();
         let result = async {
-            let mut s = tokio::time::timeout(STALE, conn.open_uni()).await.map_err(|_| "open")?.map_err(|_| "open")?;
+            let mut s = tokio::time::timeout(stale, conn.open_uni()).await.map_err(|_| "open")?.map_err(|_| "open")?;
             let _ = s.set_priority(if key { 1 } else { 0 });
-            if tokio::time::timeout(STALE, s.write_chunk(frame)).await.is_err() {
+            if tokio::time::timeout(stale, s.write_chunk(frame)).await.is_err() {
                 let _ = s.reset(VarInt::from_u32(1));
                 return Err("write");
             }
             if s.finish().is_err() {
                 return Err("finish");
             }
-            if tokio::time::timeout(STALE, s.stopped()).await.is_err() {
+            if tokio::time::timeout(stale, s.stopped()).await.is_err() {
                 let _ = s.reset(VarInt::from_u32(1));
                 return Err("stale");
             }
@@ -336,7 +374,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let (relay, rtt_ms) = shared.path();
         let stale = shared.stats.stale.load(Ordering::Relaxed);
-        let backlog = stale > last_stale || shared.in_flight.load(Ordering::Relaxed) >= IN_FLIGHT;
+        let backlog = stale > last_stale || shared.in_flight.load(Ordering::Relaxed) >= shared.in_flight_cap(rtt_ms);
         last_stale = stale;
         let net = conn.stats();
         let obs = VideoObservation {
@@ -351,7 +389,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
             let Some(rate) = guard.as_mut() else { continue };
             let capped = if was_relay != Some(relay) {
                 was_relay = Some(relay);
-                let camera = std::ptr::eq(rate_ladder(rate), CAMERA_LADDER.as_slice());
+                let camera = rate.is_camera();
                 let cap = match (relay, camera) {
                     (true, true) => CAMERA_RELAY_CAP,
                     (true, false) => SCREEN_RELAY_CAP,
@@ -370,11 +408,10 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
     }
 }
 
-fn rate_ladder(rate: &VideoRate) -> &'static [super::rate::Rung] {
-    rate.ladder()
-}
-
 async fn request_keyframe(shared: &Shared, hooks: &Hooks) {
+    if !shared.peer_video.load(Ordering::Relaxed) {
+        return;
+    }
     {
         let mut last = shared.last_key_request.lock().unwrap_or_else(|e| e.into_inner());
         if last.is_some_and(|t| t.elapsed() < KEYFRAME_MIN_GAP) {
@@ -395,8 +432,18 @@ async fn inbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         let mut buf = BytesMut::with_capacity(VIDEO_HEADER_LEN + 1 + 64 * 1024);
         buf.extend_from_slice(&[KIND_FRAME]);
         let mut whole = true;
+        let deadline = Instant::now() + INBOUND_FRAME_TIMEOUT;
         loop {
-            match stream.read_chunk(MAX_VIDEO_FRAME).await {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let read = match tokio::time::timeout(left, stream.read_chunk(MAX_VIDEO_FRAME)).await {
+                Ok(r) => r,
+                Err(_) => {
+                    let _ = stream.stop(VarInt::from_u32(3));
+                    whole = false;
+                    break;
+                }
+            };
+            match read {
                 Ok(Some(chunk)) => {
                     if buf.len() + chunk.len() > MAX_VIDEO_FRAME + 1 {
                         let _ = stream.stop(VarInt::from_u32(2));

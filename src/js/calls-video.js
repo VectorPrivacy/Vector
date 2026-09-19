@@ -11,6 +11,7 @@ let selfStream = null;
 let selfKind = 'off';
 let captureVideo = null;
 let selfPreviewEl = null;
+let videoProbe = null;
 
 /** What this device can encode and decode; told to the backend for the next offer or answer. */
 async function probeVideoCaps() {
@@ -43,7 +44,12 @@ function ensureVideoWorker() {
     videoWorker.onmessage = (e) => {
         const m = e.data;
         switch (m.t) {
-            case 'link': videoLinkOpen = m.open; VectorSvelte.setVideoLink(m.open); break;
+            case 'link':
+                videoLinkOpen = m.open;
+                VectorSvelte.setVideoLink(m.open);
+                // The backend dropped the socket: nothing we capture goes anywhere now.
+                if (!m.open && selfKind !== 'off') stopVideo(false);
+                break;
             case 'painted': VectorSvelte.setVideoPeerSize(m.width, m.height); break;
             case 'stats': VectorSvelte.setVideoStats(m.enc, m.decFps); break;
             case 'constrain': constrainCapture(m); break;
@@ -53,14 +59,19 @@ function ensureVideoWorker() {
     return videoWorker;
 }
 
-/** Every call_state: open the link when a call goes live, tear video down when it ends. */
-function callVideoOnState(s) {
+/** Every call_state: open the link when a call goes live, tear video down when it ends.
+ *  The link is worth opening only when both sides can take video: a peer that named
+ *  no decoders is on a build without any of this. */
+async function callVideoOnState(s) {
     if (!s || s.phase !== 'active') {
         if (selfKind !== 'off') stopVideo(false);
         if (videoWorker && (videoLinkOpen || videoLinkCallId)) videoWorker.postMessage({ t: 'close' });
         videoLinkCallId = null;
         return;
     }
+    if (videoLinkCallId === s.id || !(s.peer_decodes || []).length) return;
+    // A reloaded page hears about the call before its probe has finished.
+    if (videoProbe) await videoProbe;
     if (videoLinkCallId === s.id || !videoCaps.decode.length) return;
     videoLinkCallId = s.id;
     invoke('call_video_link').then((url) => {
@@ -138,7 +149,10 @@ async function stopVideo(tell = true) {
 
 /** The stage's canvas, handed to the worker to paint the peer on; null when it unmounts. */
 function attachPeerCanvas(el) {
-    if (!el) return;
+    if (!el) {
+        if (videoWorker) videoWorker.postMessage({ t: 'canvas', canvas: null });
+        return;
+    }
     const off = el.transferControlToOffscreen();
     ensureVideoWorker().postMessage({ t: 'canvas', canvas: off }, [off]);
 }
@@ -154,4 +168,4 @@ document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && selfKind === 'camera') stopVideo(true);
 });
 
-document.addEventListener('DOMContentLoaded', () => { probeVideoCaps(); }, { once: true });
+document.addEventListener('DOMContentLoaded', () => { videoProbe = probeVideoCaps(); }, { once: true });

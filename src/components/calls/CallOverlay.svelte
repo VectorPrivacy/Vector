@@ -294,7 +294,7 @@
             {#if c.videoPeer === 'off'}
                 <div class="call-stage-idle">
                     <Avatar src={peer?.avatar} size={72} />
-                    <span>{c.pausedByPeer ? 'Their camera is off' : 'Their camera is off'}</span>
+                    <span>Their camera is off</span>
                 </div>
             {:else if c.videoPeer === 'screen'}
                 <span class="call-stage-tag">{peer?.name || 'They'} is sharing a screen</span>

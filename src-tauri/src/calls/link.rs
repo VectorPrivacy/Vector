@@ -70,7 +70,11 @@ pub fn url() -> Result<String, String> {
             }
         };
         loop {
-            let Ok((stream, _)) = listener.accept().await else { continue };
+            let Ok((stream, _)) = listener.accept().await else {
+                // Out of descriptors, most likely; spinning would not help.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            };
             let token = token.clone();
             // spawn-detached: one socket's lifetime, no account state.
             tokio::spawn(async move {
@@ -83,9 +87,22 @@ pub fn url() -> Result<String, String> {
     Ok(url)
 }
 
+/// Equal length and equal bytes, taking the same time either way.
+fn token_matches(given: &str, token: &str) -> bool {
+    let (a, b) = (given.as_bytes(), token.as_bytes());
+    let mut diff = (a.len() ^ b.len()) as u8;
+    for i in 0..b.len() {
+        diff |= a.get(i).copied().unwrap_or(0) ^ b[i];
+    }
+    diff == 0
+}
+
+/// A local process that opens the port and never finishes the handshake holds a descriptor.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn handle(stream: tokio::net::TcpStream, token: &str) -> Result<(), String> {
-    let ws = tokio_tungstenite::accept_hdr_async(stream, |req: &http::Request<()>, resp: http::Response<()>| {
-        let path_ok = req.uri().path().trim_start_matches('/') == token;
+    let handshake = tokio_tungstenite::accept_hdr_async(stream, |req: &http::Request<()>, resp: http::Response<()>| {
+        let path_ok = token_matches(req.uri().path().trim_start_matches('/'), token);
         let origin_ok = req
             .headers()
             .get("origin")
@@ -96,9 +113,11 @@ async fn handle(stream: tokio::net::TcpStream, token: &str) -> Result<(), String
         } else {
             Err(http::Response::builder().status(http::StatusCode::FORBIDDEN).body(None).unwrap())
         }
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    });
+    let ws = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake)
+        .await
+        .map_err(|_| "handshake timed out".to_string())?
+        .map_err(|e| e.to_string())?;
 
     let (to_web_tx, mut to_web_rx) = mpsc::channel::<Bytes>(TO_WEB_DEPTH);
     let (from_web_tx, from_web_rx) = mpsc::channel::<Bytes>(FROM_WEB_DEPTH);
@@ -139,6 +158,15 @@ async fn handle(stream: tokio::net::TcpStream, token: &str) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_token_must_match_exactly() {
+        assert!(token_matches("abc123", "abc123"));
+        assert!(!token_matches("abc124", "abc123"));
+        assert!(!token_matches("abc12", "abc123"));
+        assert!(!token_matches("abc1234", "abc123"));
+        assert!(!token_matches("", "abc123"));
+    }
 
     #[test]
     fn only_the_apps_own_origins_pass() {

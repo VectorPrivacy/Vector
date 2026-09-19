@@ -152,7 +152,7 @@ pub struct Rung {
     pub fps: u32,
 }
 
-pub const CAMERA_LADDER: [Rung; 7] = [
+pub static CAMERA_LADDER: [Rung; 7] = [
     Rung { kbps: 150, width: 320, height: 180, fps: 15 },
     Rung { kbps: 300, width: 480, height: 270, fps: 15 },
     Rung { kbps: 500, width: 640, height: 360, fps: 24 },
@@ -161,7 +161,7 @@ pub const CAMERA_LADDER: [Rung; 7] = [
     Rung { kbps: 1800, width: 1280, height: 720, fps: 30 },
     Rung { kbps: 2500, width: 1280, height: 720, fps: 30 },
 ];
-pub const SCREEN_LADDER: [Rung; 6] = [
+pub static SCREEN_LADDER: [Rung; 6] = [
     Rung { kbps: 300, width: 0, height: 720, fps: 5 },
     Rung { kbps: 600, width: 0, height: 1080, fps: 5 },
     Rung { kbps: 1000, width: 0, height: 1080, fps: 8 },
@@ -196,6 +196,7 @@ pub struct VideoObservation {
 
 pub struct VideoRate {
     ladder: &'static [Rung],
+    camera: bool,
     rung: usize,
     cap: usize,
     clean_secs: u32,
@@ -208,10 +209,19 @@ pub struct VideoRate {
 }
 
 impl VideoRate {
-    pub fn new(ladder: &'static [Rung], start: usize, cap: usize) -> Self {
+    pub fn camera(cap: usize) -> Self {
+        Self::new(&CAMERA_LADDER, true, CAMERA_START, cap)
+    }
+
+    pub fn screen(cap: usize) -> Self {
+        Self::new(&SCREEN_LADDER, false, SCREEN_START, cap)
+    }
+
+    pub fn new(ladder: &'static [Rung], camera: bool, start: usize, cap: usize) -> Self {
         let cap = cap.min(ladder.len() - 1);
         Self {
             ladder,
+            camera,
             rung: start.min(cap),
             cap,
             clean_secs: 0,
@@ -228,14 +238,16 @@ impl VideoRate {
         self.ladder[self.rung]
     }
 
-    pub fn ladder(&self) -> &'static [Rung] {
-        self.ladder
+    pub fn is_camera(&self) -> bool {
+        self.camera
     }
 
     /// A new ceiling (the path changed, or the peer said how much it can take).
-    /// Returns the rung when the ceiling pushed it down.
+    /// Returns the rung when the ceiling pushed it down. The round-trip floor starts
+    /// over too: a new path has its own.
     pub fn set_cap(&mut self, cap: usize) -> Option<Rung> {
         self.cap = cap.min(self.ladder.len() - 1);
+        self.min_rtt = u32::MAX;
         if self.rung > self.cap {
             self.rung = self.cap;
             return Some(self.rung());
@@ -295,7 +307,7 @@ mod video_tests {
 
     #[test]
     fn a_clean_link_climbs_to_the_cap_and_no_further() {
-        let mut r = VideoRate::new(&CAMERA_LADDER, CAMERA_START, CAMERA_RELAY_CAP);
+        let mut r = VideoRate::camera(CAMERA_RELAY_CAP);
         assert_eq!(r.rung(), CAMERA_LADDER[4]);
         let mut sent = 0;
         let mut changes = 0;
@@ -316,7 +328,7 @@ mod video_tests {
 
     #[test]
     fn audio_drops_and_bufferbloat_step_down_at_once_and_a_cap_pulls_down() {
-        let mut r = VideoRate::new(&CAMERA_LADDER, CAMERA_START, 6);
+        let mut r = VideoRate::camera(6);
         r.observe(clean(100));
         r.observe(clean(200));
         let dropped = VideoObservation { sent_packets: 300, lost_packets: 0, rtt_ms: 40, audio_send_dropped: 3, backlog: false };
@@ -335,7 +347,7 @@ mod video_tests {
 
     #[test]
     fn two_percent_loss_is_enough_for_video() {
-        let mut r = VideoRate::new(&SCREEN_LADDER, SCREEN_START, 5);
+        let mut r = VideoRate::screen(5);
         r.observe(clean(100));
         let lossy = VideoObservation { sent_packets: 200, lost_packets: 3, rtt_ms: 40, audio_send_dropped: 0, backlog: false };
         assert_eq!(r.observe(lossy), Some(SCREEN_LADDER[2]));
