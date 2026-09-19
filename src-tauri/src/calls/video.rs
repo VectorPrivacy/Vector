@@ -528,6 +528,19 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         };
         let path_changed = was_relay != Some(relay);
         was_relay = Some(relay);
+        // A latch must not wait forever on a message that was lost or never answered:
+        // a track we send that still owes a keyframe is told again, and a track we
+        // receive that is still waiting for one asks again.
+        let peer = *shared.peer.lock().unwrap_or_else(|e| e.into_inner());
+        for kind in KINDS {
+            let i = kind.index();
+            if shared.need_key_out[i].load(Ordering::Relaxed) {
+                shared.tell_web(&ToLink::Keyframe { kind });
+            }
+            if peer.has(kind) && shared.need_key_in[i].load(Ordering::Relaxed) {
+                request_keyframe(&shared, &hooks, kind).await;
+            }
+        }
         let mut changes: Vec<(VideoKind, Rung)> = Vec::new();
         {
             let mut rates = shared.rate.lock().unwrap_or_else(|e| e.into_inner());

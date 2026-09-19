@@ -65,7 +65,9 @@ function newTrack(kind) {
         decoder: null,
         decCodec: null,
         needKey: true,
-        dec: { frames: 0 },
+        // Decoded frames this second, frames handed to the decoder, and the longest
+        // wait from a hand-over to its output: what a hitch looks like from inside.
+        dec: { frames: 0, fed: 0, waitMax: 0, lastFed: 0 },
     };
 }
 const tracks = { camera: newTrack('camera'), screen: newTrack('screen') };
@@ -303,6 +305,8 @@ function onFrame(frame) {
     if (t.needKey && !key) return;
     t.needKey = false;
     try {
+        t.dec.fed++;
+        t.dec.lastFed = performance.now();
         t.decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data: frame.subarray(HEADER_LEN) }));
     } catch (_) {
         resetDecoder(t);
@@ -325,6 +329,7 @@ function paint(t, vf) {
         }
         t.ctx.drawImage(vf, 0, 0);
         t.dec.frames++;
+        if (t.dec.lastFed) t.dec.waitMax = Math.max(t.dec.waitMax, performance.now() - t.dec.lastFed);
     } finally {
         vf.close();
     }
@@ -335,8 +340,8 @@ function stats() {
     for (const t of Object.values(tracks)) {
         const s = { fps: t.enc.frames, kbps: Math.round(t.enc.bytes * 8 / 1000), width: t.capture ? t.capture.width : 0, height: t.capture ? t.capture.height : 0 };
         if (t.capture) control({ t: 'stats', kind: t.kind, ...s });
-        report[t.kind] = { enc: s, decFps: t.dec.frames };
-        t.enc.frames = 0; t.enc.bytes = 0; t.dec.frames = 0;
+        report[t.kind] = { enc: s, decFps: t.dec.frames, fed: t.dec.fed, queue: t.decoder ? t.decoder.decodeQueueSize : 0, waitMax: Math.round(t.dec.waitMax) };
+        t.enc.frames = 0; t.enc.bytes = 0; t.dec.frames = 0; t.dec.fed = 0; t.dec.waitMax = 0;
     }
     postMessage({ t: 'stats', tracks: report });
 }
