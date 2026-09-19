@@ -7,6 +7,7 @@
     import { untrack } from 'svelte';
     import { slide } from 'svelte/transition';
     import { callState, callAudio, callVideo, setMaximized } from '../lib/calls.svelte.js';
+    import { showTooltip, hideTooltip } from '../lib/tooltip.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import VoiceMeter from './VoiceMeter.svelte';
@@ -135,6 +136,11 @@
                 node.style.minHeight = open ? '' : '0';
             },
         };
+    }
+    // Vector's own tooltip on a thumbnail, only while there is something to say.
+    function unseenTip(e, kind) {
+        if (!c.pausedByPeer) return;
+        showTooltip(`${peer?.name || 'They'} is busy and can't see your ${kind}`, e.currentTarget.getBoundingClientRect());
     }
     // The panel's quality choices, by rung on each ladder.
     const QUALITY_CAMERA = [['Low', 1], ['Medium', 3], ['High', 5], ['Best', 6]];
@@ -438,14 +444,16 @@
                 <!-- Our own pictures; dimmed with an eye-off badge while the peer is not looking. -->
                 <div class="call-pictures-mine" class:call-pictures-mine-unseen={c.pausedByPeer}>
                     {#if c.videoMine.screen}
-                        <span class="call-picture-self-wrap call-picture-self-screen" title={c.pausedByPeer ? `${peer?.name || 'They'} is busy and can't see your screen` : ''}>
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span class="call-picture-self-wrap call-picture-self-screen" onmouseenter={(e) => unseenTip(e, 'screen')} onmouseleave={hideTooltip}>
                             <!-- svelte-ignore a11y_media_has_caption -->
                             <video class="call-picture-self" use:selfPreview={'screen'} muted playsinline autoplay></video>
                             <span class="call-picture-unseen icon icon-eye-off"></span>
                         </span>
                     {/if}
                     {#if c.videoMine.camera}
-                        <span class="call-picture-self-wrap" title={c.pausedByPeer ? `${peer?.name || 'They'} is busy and can't see your camera` : ''}>
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
+                        <span class="call-picture-self-wrap" onmouseenter={(e) => unseenTip(e, 'camera')} onmouseleave={hideTooltip}>
                             <!-- svelte-ignore a11y_media_has_caption -->
                             <video class="call-picture-self" use:selfPreview={'camera'} muted playsinline autoplay></video>
                             <span class="call-picture-unseen icon icon-eye-off"></span>
