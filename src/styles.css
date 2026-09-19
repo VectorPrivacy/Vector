@@ -21401,23 +21401,56 @@ body.profile-switcher-editing .profile-switcher-add {
   flex-direction: row-reverse;
 }
 
-.call-picture-self {
-  width: 26%;
-  max-width: 130px;
+.call-picture-self-wrap {
+  position: relative;
+  display: block;
+  width: min(110px, 24vw);
   aspect-ratio: 4 / 3;
   border-radius: 8px;
   border: 1px solid #444;
   background: #111;
-  object-fit: cover;
+  overflow: hidden;
 }
 
-.call-pictures-mine .call-picture-self {
-  width: min(110px, 24vw);
+.call-picture-self {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: filter 0.2s ease, opacity 0.2s ease;
 }
 
 .call-picture-self-screen {
   aspect-ratio: 16 / 10;
+}
+
+.call-picture-self-screen .call-picture-self {
   object-fit: contain;
+}
+
+/* While the peer is not looking, our pictures fade and wear an eye-off. */
+.call-pictures-mine-unseen .call-picture-self {
+  filter: grayscale(1);
+  opacity: 0.45;
+}
+
+/* In the thumbnail's top-right corner; the icon base pins every edge, so all four are set. */
+.call-picture-self-wrap .call-picture-unseen {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  bottom: auto;
+  left: auto;
+  width: 18px;
+  height: 18px;
+  background-color: #fff;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  pointer-events: none;
+}
+
+.call-pictures-mine-unseen .call-picture-unseen {
+  opacity: 0.9;
 }
 
 .call-picture-tag {
@@ -21430,13 +21463,6 @@ body.profile-switcher-editing .profile-switcher-add {
   font-size: 11px;
   color: #ddd;
   pointer-events: none;
-}
-
-.call-picture-tag-low {
-  top: auto;
-  bottom: 8px;
-  left: 50%;
-  transform: translateX(-50%);
 }
 
 /* Parent-qualified: the button base declares its own position further down. */

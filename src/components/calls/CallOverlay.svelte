@@ -435,17 +435,23 @@
                         {/key}
                     </button>
                 {/if}
-                <div class="call-pictures-mine">
+                <!-- Our own pictures; dimmed with an eye-off badge while the peer is not looking. -->
+                <div class="call-pictures-mine" class:call-pictures-mine-unseen={c.pausedByPeer}>
                     {#if c.videoMine.screen}
-                        <!-- svelte-ignore a11y_media_has_caption -->
-                        <video class="call-picture-self call-picture-self-screen" use:selfPreview={'screen'} muted playsinline autoplay></video>
+                        <span class="call-picture-self-wrap call-picture-self-screen" title={c.pausedByPeer ? `${peer?.name || 'They'} is busy and can't see your screen` : ''}>
+                            <!-- svelte-ignore a11y_media_has_caption -->
+                            <video class="call-picture-self" use:selfPreview={'screen'} muted playsinline autoplay></video>
+                            <span class="call-picture-unseen icon icon-eye-off"></span>
+                        </span>
                     {/if}
                     {#if c.videoMine.camera}
-                        <!-- svelte-ignore a11y_media_has_caption -->
-                        <video class="call-picture-self" use:selfPreview={'camera'} muted playsinline autoplay></video>
+                        <span class="call-picture-self-wrap" title={c.pausedByPeer ? `${peer?.name || 'They'} is busy and can't see your camera` : ''}>
+                            <!-- svelte-ignore a11y_media_has_caption -->
+                            <video class="call-picture-self" use:selfPreview={'camera'} muted playsinline autoplay></video>
+                            <span class="call-picture-unseen icon icon-eye-off"></span>
+                        </span>
                     {/if}
                 </div>
-                {#if c.pausedByPeer && mineOn}<span class="call-picture-tag call-picture-tag-low">They cannot see your video right now</span>{/if}
             </div>
         {/if}
         {#if expanded && c.phase !== 'ended'}

@@ -128,7 +128,11 @@ function requestSource(kind) {
         : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
 }
 
-/** Pull frames off a playing element into the worker until the stream is replaced. */
+/** Pull frames off a playing element into the worker until the stream is replaced.
+ *  The frame callback stops while the document counts as hidden, which on macOS is
+ *  as soon as another window covers this one, so a timer takes over then and the
+ *  callback gets the job back when the page shows again. */
+const capturePumps = { camera: null, screen: null };
 function pumpFrames(kind, stream) {
     const worker = ensureVideoWorker();
     // A detached element plays the stream so frames can be pulled off it.
@@ -138,15 +142,25 @@ function pumpFrames(kind, stream) {
     el.srcObject = stream;
     captureEls[kind] = el;
     el.play().catch(() => {});
-    const pull = () => {
-        if (captureEls[kind] !== el) return;
+    let gen = 0;
+    const pull = (g) => () => {
+        if (g !== gen || captureEls[kind] !== el) return;
         if (el.videoWidth) {
             const frame = new VideoFrame(el, { timestamp: Math.round(performance.now() * 1000) });
             worker.postMessage({ t: 'frame', kind, frame }, [frame]);
         }
-        el.requestVideoFrameCallback(pull);
+        schedule();
     };
-    el.requestVideoFrameCallback(pull);
+    // Each schedule retires the loop before it, so a callback that only fires once
+    // the page shows again never runs beside the timer that replaced it.
+    const schedule = () => {
+        const g = ++gen;
+        if (captureEls[kind] !== el) return;
+        if (document.visibilityState === 'hidden') setTimeout(pull(g), 1000 / 30);
+        else el.requestVideoFrameCallback(pull(g));
+    };
+    capturePumps[kind] = schedule;
+    schedule();
 }
 
 /** Turn one of our pictures on or off. Camera and screen are independent. */
@@ -246,12 +260,15 @@ function attachSelfPreview(kind, el) {
     if (el) el.srcObject = selfTracks[kind];
 }
 
-// A hidden page cannot capture; an honest "camera off" beats a frozen picture. And
-// nobody here is watching theirs, so they may stop spending upload on it until we are back.
+// Hidden means backgrounded on a phone, where the camera must stop, but only covered
+// by another window on a desktop, where it must not. Either way nobody here is
+// watching theirs, so they may stop spending upload on it until we are back, and our
+// own capture switches between the frame callback and the timer.
 document.addEventListener('visibilitychange', () => {
     const hidden = document.visibilityState === 'hidden';
-    if (hidden && selfTracks.camera) stopVideo('camera', true);
+    if (hidden && selfTracks.camera && platformFeatures?.os === 'android') stopVideo('camera', true);
     if (videoLinkCallId) invoke('call_video_pause', { on: hidden }).catch(() => {});
+    for (const kind of ['camera', 'screen']) if (selfTracks[kind] && capturePumps[kind]) capturePumps[kind]();
 });
 
 document.addEventListener('DOMContentLoaded', () => { videoProbe = probeVideoCaps(); }, { once: true });
