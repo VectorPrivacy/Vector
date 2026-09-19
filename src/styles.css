@@ -21412,7 +21412,7 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-pictures-mine .call-picture-self {
-  width: 110px;
+  width: min(110px, 24vw);
 }
 
 .call-picture-self-screen {
@@ -21439,18 +21439,19 @@ body.profile-switcher-editing .profile-switcher-add {
   transform: translateX(-50%);
 }
 
-.call-picture-max,
-.call-picture-hide {
+/* Parent-qualified: the button base declares its own position further down. */
+.call-pictures .call-picture-max,
+.call-pictures .call-picture-hide {
   position: absolute;
   top: 8px;
   background: rgba(0, 0, 0, 0.55);
 }
 
-.call-picture-max {
+.call-pictures .call-picture-max {
   right: 40px;
 }
 
-.call-picture-hide {
+.call-pictures .call-picture-hide {
   right: 8px;
 }
 
@@ -21466,22 +21467,21 @@ body.profile-switcher-editing .profile-switcher-add {
   display: none;
 }
 
-.call-panel-choices {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 14px;
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.8);
+/* What a picture is being sent at, on its section's own line. */
+.call-panel-section-note {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #8a8a8a;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.call-panel-choices label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.call-panel-choices select {
+.call-panel-select {
+  justify-self: start;
+  min-width: 96px;
   background: #262626;
   color: #fff;
   border: 1px solid #333;
@@ -21491,6 +21491,7 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-panel-button {
+  justify-self: start;
   border: 1px solid #333;
   border-radius: 6px;
   background: #262626;
@@ -21504,16 +21505,24 @@ body.profile-switcher-editing .profile-switcher-add {
   background: #333;
 }
 
-.call-panel-readout {
+.call-panel-value-quiet {
   font-size: 12px;
+  font-weight: 400;
   color: #b2b2b2;
-  font-variant-numeric: tabular-nums;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
 }
 
-/* One of their pictures filling the window, above the pill. */
+/* One of their pictures filling the window below the chrome, above the pill. */
 .call-max {
   position: fixed;
-  inset: 0;
+  top: var(--chrome-h, 0px);
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 9500;
   background: #000;
   user-select: none;
@@ -21530,7 +21539,7 @@ body.profile-switcher-editing .profile-switcher-add {
 /* The word for the connection, only while it is worth a word. */
 .call-max-quality {
   position: absolute;
-  top: calc(var(--chrome-h, 0px) + 12px);
+  top: 12px;
   left: 12px;
   display: inline-flex;
   align-items: center;
@@ -21542,17 +21551,38 @@ body.profile-switcher-editing .profile-switcher-add {
   color: #ddd;
 }
 
-.call-max-restore {
+/* The way out sits top-right, a bare glyph that shows itself with the mouse, like the strip below. */
+.call-max .call-max-restore {
   position: absolute;
-  top: calc(var(--chrome-h, 0px) + 12px);
-  right: 12px;
-  background: rgba(0, 0, 0, 0.6);
+  top: 14px;
+  right: 14px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #fff;
+  cursor: pointer;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.7));
+  opacity: 0;
+  transition: opacity 0.35s ease;
 }
 
-/* Their other picture rides along the bottom; the strip of controls fades in on movement. */
-.call-max-other {
+.call-max .call-max-restore svg {
+  width: 100%;
+  height: 100%;
+}
+
+.call-max-controls .call-max-restore {
+  opacity: 1;
+}
+
+/* Their other picture rides along the bottom and glides down into the strip's place
+   as the strip fades; the strip of controls fades in on movement. */
+.call-max .call-max-other {
   position: absolute;
-  bottom: 72px;
+  bottom: 16px;
+  transition: bottom 0.35s ease;
   left: 50%;
   transform: translateX(-50%);
   width: min(28vw, 320px);
@@ -21584,11 +21614,15 @@ body.profile-switcher-editing .profile-switcher-add {
   background: rgba(20, 20, 20, 0.85);
   border: 1px solid #333;
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.35s ease;
 }
 
 .call-max-controls .call-max-strip {
   opacity: 1;
+}
+
+.call-max-controls .call-max-other {
+  bottom: 72px;
 }
 
 .call-max-strip svg,
@@ -21827,6 +21861,10 @@ body.profile-switcher-editing .profile-switcher-add {
 
 /* Each section starts with its own rule and title, the dialog's way of separating things. */
 .call-panel-section {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;

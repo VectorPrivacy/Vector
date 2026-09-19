@@ -131,7 +131,7 @@
     }
     const trackLine = (kind) => {
         const t = c.stats?.video?.[kind];
-        return t && c.videoMine[kind] ? `${t.kbps} kbit/s · ${t.width}×${t.height} · ${t.fps} fps${t.pinned ? '' : ' · auto'}` : '';
+        return t && c.videoMine[kind] && t.width ? `${t.width}×${t.height} · ${t.fps} fps · ${t.kbps} kbit/s` : '';
     };
     const peerTrackLine = (kind) => {
         const p = v.peer[kind];
@@ -328,8 +328,8 @@
             {#if maxQuality}
                 <span class="call-max-quality"><span class="call-dot call-dot-{maxQuality}"></span> {QUALITY[maxQuality]}</span>
             {/if}
-            <button class="call-btn call-btn-small call-max-restore" title="Back to the call window (Esc)" onclick={() => setMaximized(null)}>
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9 3H3v6M15 21h6v-6M3 3l7 7M21 21l-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <button class="call-max-restore" title="Back to the call window (Esc)" onclick={() => setMaximized(null)}>
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M2.99988 8H3.19988C4.88004 8 5.72011 8 6.36185 7.67302C6.92634 7.3854 7.38528 6.92646 7.6729 6.36197C7.99988 5.72024 7.99988 4.88016 7.99988 3.2V3M2.99988 16H3.19988C4.88004 16 5.72011 16 6.36185 16.327C6.92634 16.6146 7.38528 17.0735 7.6729 17.638C7.99988 18.2798 7.99988 19.1198 7.99988 20.8V21M15.9999 3V3.2C15.9999 4.88016 15.9999 5.72024 16.3269 6.36197C16.6145 6.92646 17.0734 7.3854 17.6379 7.67302C18.2796 8 19.1197 8 20.7999 8H20.9999M15.9999 21V20.8C15.9999 19.1198 15.9999 18.2798 16.3269 17.638C16.6145 17.0735 17.0734 16.6146 17.6379 16.327C18.2796 16 19.1197 16 20.7999 16H20.9999" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             {#if maxOther}
                 <!-- Their other picture rides along the bottom; a click swaps the two. -->
@@ -406,7 +406,7 @@
                         <div class="call-pictures-idle"><span>Waiting for their {lead}…</span></div>
                     {/if}
                     <button class="call-btn call-btn-small call-picture-max" title="Fill the window" onclick={() => setMaximized(lead)}>
-                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 9V3h6M21 15v6h-6M3 3l7 7M21 21l-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M8 3H7.8C6.11984 3 5.27976 3 4.63803 3.32698C4.07354 3.6146 3.6146 4.07354 3.32698 4.63803C3 5.27976 3 6.11984 3 7.8V8M8 21H7.8C6.11984 21 5.27976 21 4.63803 20.673C4.07354 20.3854 3.6146 19.9265 3.32698 19.362C3 18.7202 3 17.8802 3 16.2V16M21 8V7.8C21 6.11984 21 5.27976 20.673 4.63803C20.3854 4.07354 19.9265 3.6146 19.362 3.32698C18.7202 3 17.8802 3 16.2 3H16M21 16V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     </button>
                     {#if lead === 'screen'}<span class="call-picture-tag">{peer?.name || 'They'} is sharing a screen</span>{/if}
                 {:else}
@@ -440,59 +440,31 @@
         {/if}
         {#if expanded && c.phase !== 'ended'}
             <div class="call-panel" transition:slide={{ duration: 180 }}>
-                {#if live && (canSend || peerOn)}
-                    <div class="call-panel-section">Video</div>
-                    {#if canSend}
-                        <label class="toggle-container call-switch">
-                            <span>Camera</span>
-                            <input type="checkbox" checked={c.videoMine.camera} onchange={(e) => h.setVideo('camera', e.currentTarget.checked)}>
-                            <span class="neon-toggle"></span>
-                        </label>
-                        {#if c.videoMine.camera}
-                            <div class="call-panel-choices">
-                                <label>Quality
-                                    <select value={v.prefs.camera.rung ?? ''} onchange={(e) => choosePref('camera', 'rung', e.currentTarget.value)}>
-                                        <option value="">Auto</option>
-                                        {#each QUALITY_CAMERA as [name, rung]}<option value={rung}>{name}</option>{/each}
-                                    </select>
-                                </label>
-                                <label>Frame rate
-                                    <select value={v.prefs.camera.fps ?? ''} onchange={(e) => choosePref('camera', 'fps', e.currentTarget.value)}>
-                                        <option value="">Auto</option>
-                                        {#each FPS_CAMERA as f}<option value={f}>{f}</option>{/each}
-                                    </select>
-                                </label>
-                            </div>
-                            {#if trackLine('camera')}<span class="call-panel-readout">{trackLine('camera')}</span>{/if}
-                        {/if}
-                        <label class="toggle-container call-switch">
-                            <span>Screen</span>
-                            <input type="checkbox" checked={c.videoMine.screen} onchange={(e) => h.setVideo('screen', e.currentTarget.checked)}>
-                            <span class="neon-toggle"></span>
-                        </label>
-                        {#if c.videoMine.screen}
-                            <div class="call-panel-choices">
-                                <label>Quality
-                                    <select value={v.prefs.screen.rung ?? ''} onchange={(e) => choosePref('screen', 'rung', e.currentTarget.value)}>
-                                        <option value="">Auto</option>
-                                        {#each QUALITY_SCREEN as [name, rung]}<option value={rung}>{name}</option>{/each}
-                                    </select>
-                                </label>
-                                <label>Frame rate
-                                    <select value={v.prefs.screen.fps ?? ''} onchange={(e) => choosePref('screen', 'fps', e.currentTarget.value)}>
-                                        <option value="">Auto</option>
-                                        {#each FPS_SCREEN as f}<option value={f}>{f}</option>{/each}
-                                    </select>
-                                </label>
-                                <button class="call-panel-button" onclick={() => h.changeScreen()}>Change window…</button>
-                            </div>
-                            {#if trackLine('screen')}<span class="call-panel-readout">{trackLine('screen')}</span>{/if}
-                        {/if}
+                {#each [['camera', 'Camera quality', QUALITY_CAMERA, FPS_CAMERA], ['screen', 'Screenshare quality', QUALITY_SCREEN, FPS_SCREEN]] as [kind, title, qualities, rates]}
+                    {#if live && c.videoMine[kind]}
+                        <div class="call-panel-section">
+                            <span>{title}</span>
+                            <span class="call-panel-section-note">{trackLine(kind)}</span>
+                        </div>
+                        <div class="call-panel-grid">
+                            <span class="call-panel-label">Quality</span>
+                            <select class="call-panel-select" value={v.prefs[kind].rung ?? ''} onchange={(e) => choosePref(kind, 'rung', e.currentTarget.value)}>
+                                <option value="">Auto</option>
+                                {#each qualities as [label, rung]}<option value={rung}>{label}</option>{/each}
+                            </select>
+                            <span class="call-panel-label">Frame rate</span>
+                            <select class="call-panel-select" value={v.prefs[kind].fps ?? ''} onchange={(e) => choosePref(kind, 'fps', e.currentTarget.value)}>
+                                <option value="">Auto</option>
+                                {#each rates as f}<option value={f}>{f} fps</option>{/each}
+                            </select>
+                            {#if kind === 'screen'}
+                                <span class="call-panel-label">Window</span>
+                                <button class="call-panel-button" onclick={() => h.changeScreen()}>Change…</button>
+                            {/if}
+                        </div>
                         <span class="call-panel-hint">Auto follows the connection and uses spare headroom. A fixed choice holds, unless the voice needs the room.</span>
                     {/if}
-                    {#if peerTrackLine('camera')}<span class="call-panel-readout">Their camera: {peerTrackLine('camera')}</span>{/if}
-                    {#if peerTrackLine('screen')}<span class="call-panel-readout">Their screen: {peerTrackLine('screen')}</span>{/if}
-                {/if}
+                {/each}
                 <label class="call-panel-slider">
                     <span class="call-panel-label">Their volume</span>
                     <input type="range" min="0" max="200" step="5" value={Math.round(c.volume * 100)}
@@ -534,6 +506,14 @@
                     <span class="call-panel-value">{lostText}</span>
                     <span class="call-panel-label" title="How much data your voice uses. It rises on a clean connection and drops when packets are being lost">Bitrate</span>
                     <span class="call-panel-value">{bitrate == null ? '…' : `${bitrate} kbit/s`}{#if bitrateHint} <span class="call-panel-hint">{bitrateHint}</span>{/if}</span>
+                    {#if peerTrackLine('camera')}
+                        <span class="call-panel-label">Their camera</span>
+                        <span class="call-panel-value call-panel-value-quiet">{peerTrackLine('camera')}</span>
+                    {/if}
+                    {#if peerTrackLine('screen')}
+                        <span class="call-panel-label">Their screen</span>
+                        <span class="call-panel-value call-panel-value-quiet">{peerTrackLine('screen')}</span>
+                    {/if}
                 </div>
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div class="call-graph">
