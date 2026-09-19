@@ -60,6 +60,7 @@ function newTrack(kind) {
         enc: { frames: 0, bytes: 0 },
         // incoming
         canvas: null,
+        canvasId: 0,
         ctx: null,
         decoder: null,
         decCodec: null,
@@ -348,6 +349,9 @@ self.onmessage = (e) => {
         case 'close': close(); break;
         case 'canvas':
             if (!t) break;
+            // A take-back for a canvas already replaced is stale; the newer one stays.
+            if (!m.canvas && m.id !== t.canvasId) break;
+            t.canvasId = m.id;
             t.canvas = m.canvas;
             t.ctx = m.canvas ? m.canvas.getContext('2d', { alpha: false, desynchronized: true }) : null;
             break;

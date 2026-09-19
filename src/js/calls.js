@@ -72,7 +72,7 @@ function registerCallScreen() {
             setVideoPrefs: (kind, rung, fps) => setVideoPrefs(kind, rung, fps),
             setShareAudio: (on) => setShareAudio(on),
             setShareVolume: (volume) => invoke('call_set_share_volume', { volume }).catch(() => {}),
-            peerCanvas: (kind, el) => attachPeerCanvas(kind, el),
+            peerCanvas: (kind, el, gone) => attachPeerCanvas(kind, el, gone),
             selfPreview: (kind, el) => attachSelfPreview(kind, el),
             setAudio: (patch) => setCallAudioSettings(patch),
             getProfile: (npub) => getProfile(npub),

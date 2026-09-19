@@ -24,7 +24,7 @@
      * @property {(kind: 'camera'|'screen', rung: number|null, fps: number|null) => void} setVideoPrefs
      * @property {(on: boolean) => void} setShareAudio
      * @property {(volume: number) => void} setShareVolume
-     * @property {(kind: 'camera'|'screen', el: HTMLCanvasElement|null) => void} peerCanvas
+     * @property {(kind: 'camera'|'screen', el: HTMLCanvasElement, gone?: boolean) => void} peerCanvas
      * @property {(kind: 'camera'|'screen', el: HTMLVideoElement|null) => void} selfPreview
      * @property {(patch: {autoGain?: boolean, echoCancel?: boolean, noiseSuppress?: boolean}) => void} setAudio
      * @property {(npub: string) => object|null} getProfile
@@ -110,7 +110,7 @@
     // The media surfaces are the only elements this component hands out.
     function peerCanvas(node, kind) {
         h.peerCanvas(kind, node);
-        return { destroy() { h.peerCanvas(kind, null); } };
+        return { destroy() { h.peerCanvas(kind, node, true); } };
     }
     function selfPreview(node, kind) {
         h.selfPreview(kind, node);

@@ -330,14 +330,21 @@ function constrainCapture(m) {
     track.applyConstraints(c).catch(() => {});
 }
 
-/** A canvas for one of the peer's pictures, handed to the worker; null when it unmounts. */
-function attachPeerCanvas(kind, el) {
-    if (!el) {
-        if (videoWorker) videoWorker.postMessage({ t: 'canvas', kind, canvas: null });
+/** A canvas for one of the peer's pictures, handed to the worker, or taken back when
+ *  it unmounts. A mount and the previous canvas's unmount land in the same update in
+ *  no fixed order, so every hand-over carries an id and a take-back names the canvas
+ *  it means: the worker keeps a newer one it was given in between. */
+const canvasSeq = { camera: 0, screen: 0 };
+const canvasIds = new WeakMap();
+function attachPeerCanvas(kind, el, gone = false) {
+    if (gone) {
+        if (videoWorker && canvasIds.has(el)) videoWorker.postMessage({ t: 'canvas', kind, canvas: null, id: canvasIds.get(el) });
         return;
     }
+    const id = ++canvasSeq[kind];
+    canvasIds.set(el, id);
     const off = el.transferControlToOffscreen();
-    ensureVideoWorker().postMessage({ t: 'canvas', kind, canvas: off }, [off]);
+    ensureVideoWorker().postMessage({ t: 'canvas', kind, canvas: off, id }, [off]);
 }
 
 /** The preview element for one of our pictures; null when it unmounts. */
