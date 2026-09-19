@@ -206,6 +206,10 @@ pub struct VideoRate {
     last_audio_dropped: u64,
     min_rtt: u32,
     primed: bool,
+    /// A rung the user chose; the ladder only leaves it to protect the voice.
+    pin: Option<usize>,
+    /// A frame rate the user chose, over whatever the rung says.
+    fps: Option<u32>,
 }
 
 impl VideoRate {
@@ -231,11 +235,38 @@ impl VideoRate {
             last_audio_dropped: 0,
             min_rtt: u32::MAX,
             primed: false,
+            pin: None,
+            fps: None,
         }
     }
 
     pub fn rung(&self) -> Rung {
-        self.ladder[self.rung]
+        let mut r = self.ladder[self.rung];
+        if let Some(fps) = self.fps {
+            r.fps = fps;
+        }
+        r
+    }
+
+    pub fn rungs(&self) -> usize {
+        self.ladder.len()
+    }
+
+    /// Hold a rung (within the cap) or let the ladder run again. Returns the rung
+    /// when it moved.
+    pub fn set_pin(&mut self, pin: Option<usize>) -> Option<Rung> {
+        let before = self.rung;
+        self.pin = pin.map(|p| p.min(self.ladder.len() - 1));
+        if let Some(p) = self.pin {
+            self.rung = p.min(self.cap);
+        }
+        self.clean_secs = 0;
+        (self.rung != before || pin.is_some()).then(|| self.rung())
+    }
+
+    pub fn set_fps(&mut self, fps: Option<u32>) -> Rung {
+        self.fps = fps;
+        self.rung()
     }
 
     pub fn is_camera(&self) -> bool {
@@ -273,7 +304,13 @@ impl VideoRate {
         }
         let loss = if sent >= 10 { 100.0 * lost as f32 / sent as f32 } else { 0.0 };
         let bloated = self.min_rtt != u32::MAX && obs.rtt_ms > self.min_rtt + VIDEO_RTT_BLOAT_MS;
-        let trouble = loss >= VIDEO_DOWN_AT_PCT || audio_dropped > 0 || bloated || obs.backlog;
+        // A pinned rung answers only to the voice: the one thing video may never cost.
+        let trouble = if self.pin.is_some() {
+            audio_dropped > 0
+        } else {
+            loss >= VIDEO_DOWN_AT_PCT || audio_dropped > 0 || bloated || obs.backlog
+        };
+        let ceiling = self.pin.map_or(self.cap, |p| p.min(self.cap));
         let before = self.rung;
         if self.hold > 0 {
             self.hold -= 1;
@@ -286,7 +323,7 @@ impl VideoRate {
             }
         } else if loss < CLEAN_PCT {
             self.clean_secs += 1;
-            if self.clean_secs >= CLIMB_AFTER_SECS && self.rung < self.cap {
+            if self.clean_secs >= CLIMB_AFTER_SECS && self.rung < ceiling {
                 self.rung += 1;
                 self.clean_secs = 0;
             }
@@ -343,6 +380,25 @@ mod video_tests {
         }
         assert_eq!(r.rung(), CAMERA_LADDER[2]);
         assert_eq!(r.set_cap(0), Some(CAMERA_LADDER[0]));
+    }
+
+    #[test]
+    fn a_pinned_rung_ignores_loss_but_still_yields_to_the_voice() {
+        let mut r = VideoRate::camera(6);
+        assert_eq!(r.set_pin(Some(6)), Some(CAMERA_LADDER[6]));
+        r.observe(clean(100));
+        let lossy = VideoObservation { sent_packets: 200, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 0, backlog: true };
+        assert_eq!(r.observe(lossy), None);
+        let voice = VideoObservation { sent_packets: 300, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 1, backlog: true };
+        assert_eq!(r.observe(voice), Some(CAMERA_LADDER[5]));
+        let mut sent = 300;
+        for _ in 0..(HOLD_SECS + CLIMB_AFTER_SECS) {
+            sent += 100;
+            r.observe(VideoObservation { sent_packets: sent, lost_packets: 20, rtt_ms: 400, audio_send_dropped: 1, backlog: true });
+        }
+        assert_eq!(r.rung(), CAMERA_LADDER[6], "climbs back to the pin once the voice is fine");
+        assert_eq!(r.set_fps(Some(15)).fps, 15);
+        assert_eq!(r.set_pin(None), None, "unpinning where the ladder already stands changes nothing");
     }
 
     #[test]

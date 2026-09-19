@@ -1,18 +1,20 @@
-// Video on a call: the camera or the screen in, the peer's picture out. Capture
+// Video on a call: the camera and the screen out, the peer's pictures in. Capture
 // happens here, on the main thread, because only a document can open a camera;
-// everything after that (encode, socket, decode, paint) runs in the worker.
+// everything after that (encode, socket, decode, paint) runs in the worker. Each
+// track (camera, screen) has its own stream, capture element and preview.
 
 const VIDEO_PROBE_SIZE = { width: 1280, height: 720 };
 let videoWorker = null;
 let videoCaps = { encode: [], decode: [] };
 let videoLinkOpen = false;
 let videoLinkCallId = null;
-let selfStream = null;
-let selfKind = 'off';
-let captureVideo = null;
-let selfPreviewEl = null;
 let videoProbe = null;
 let decodeErrorShown = false;
+// Per track: the stream, the detached element frames are pulled from, the preview.
+const selfTracks = { camera: null, screen: null };
+const captureEls = { camera: null, screen: null };
+const previewEls = { camera: null, screen: null };
+const videoStarting = { camera: false, screen: false };
 
 /** What this device can encode and decode; told to the backend for the next offer or answer. */
 async function probeVideoCaps() {
@@ -49,14 +51,14 @@ function ensureVideoWorker() {
                 videoLinkOpen = m.open;
                 VectorSvelte.setVideoLink(m.open);
                 // The backend dropped the socket: nothing we capture goes anywhere now.
-                if (!m.open && selfKind !== 'off') stopVideo(false);
+                if (!m.open) stopAllVideo(false);
                 break;
-            case 'painted': VectorSvelte.setVideoPeerSize(m.width, m.height); break;
-            case 'stats': VectorSvelte.setVideoStats(m.enc, m.decFps); break;
+            case 'painted': VectorSvelte.setVideoPeerSize(m.kind, m.width, m.height); break;
+            case 'stats': VectorSvelte.setVideoStats(m.tracks); break;
             case 'constrain': constrainCapture(m); break;
-            case 'error': VectorSvelte.showToast(m.message); stopVideo(); break;
+            case 'error': VectorSvelte.showToast(m.message); stopVideo(m.kind, true); break;
             // Their picture cannot be decoded here; said once per call, then the peer
-            // is asked for keyframes in the hope a later one works.
+            // is asked for another codec.
             case 'decode_error':
                 if (!decodeErrorShown) { decodeErrorShown = true; VectorSvelte.showToast(`Could not decode their ${m.codec} video here (${m.message}); asking them for another codec`); }
                 break;
@@ -70,7 +72,7 @@ function ensureVideoWorker() {
  *  no decoders is on a build without any of this. */
 async function callVideoOnState(s) {
     if (!s || s.phase !== 'active') {
-        if (selfKind !== 'off') stopVideo(false);
+        stopAllVideo(false);
         if (videoWorker && (videoLinkOpen || videoLinkCallId)) videoWorker.postMessage({ t: 'close' });
         videoLinkCallId = null;
         return;
@@ -90,7 +92,6 @@ async function callVideoOnState(s) {
 /** A request the platform never answers, rather than refuses, leaves the button dead:
  *  WebView2 opens no surface picker and settles getDisplayMedia neither way. */
 const VIDEO_SOURCE_WAIT_MS = 45000;
-let videoStarting = false;
 
 function waitForSource(request) {
     let settled = false;
@@ -121,97 +122,133 @@ function sourceFailureMessage(kind, e) {
     return screen ? 'Could not share the screen' : 'Could not open the camera';
 }
 
-/** Turn the camera or the screen on ('camera' | 'screen') or everything off ('off'). */
-async function startVideo(kind) {
-    if (kind === 'off' || kind === selfKind) return stopVideo(true);
-    if (videoStarting) return;
-    if (selfKind !== 'off') await stopVideo(true);
-    let stream;
-    videoStarting = true;
-    try {
-        stream = await waitForSource(kind === 'screen'
-            ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' })
-            : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
-    } catch (e) {
-        const message = sourceFailureMessage(kind, e);
-        if (message) VectorSvelte.showToast(message);
-        return;
-    } finally {
-        videoStarting = false;
-    }
-    try {
-        await invoke('call_video_set', { kind });
-    } catch (e) {
-        VectorSvelte.showToast(String(e));
-        stream.getTracks().forEach((t) => t.stop());
-        return;
-    }
-    selfStream = stream;
-    selfKind = kind;
-    const track = stream.getVideoTracks()[0];
-    // The OS's own "stop sharing" control ends the track from outside.
-    track.onended = () => { if (selfStream === stream) stopVideo(true); };
-    if (selfPreviewEl) selfPreviewEl.srcObject = stream;
+function requestSource(kind) {
+    return waitForSource(kind === 'screen'
+        ? navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false, selfBrowserSurface: 'exclude' })
+        : navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, frameRate: 30 }, audio: false }));
+}
+
+/** Pull frames off a playing element into the worker until the stream is replaced. */
+function pumpFrames(kind, stream) {
     const worker = ensureVideoWorker();
-    worker.postMessage({ t: 'capture', kind, fps: kind === 'screen' ? 15 : 30, kbps: kind === 'screen' ? 1000 : 800 });
     // A detached element plays the stream so frames can be pulled off it.
-    captureVideo = document.createElement('video');
-    captureVideo.muted = true;
-    captureVideo.playsInline = true;
-    captureVideo.srcObject = stream;
-    const el = captureVideo;
-    try { await el.play(); } catch (_) {}
+    const el = document.createElement('video');
+    el.muted = true;
+    el.playsInline = true;
+    el.srcObject = stream;
+    captureEls[kind] = el;
+    el.play().catch(() => {});
     const pull = () => {
-        if (captureVideo !== el) return;
+        if (captureEls[kind] !== el) return;
         if (el.videoWidth) {
             const frame = new VideoFrame(el, { timestamp: Math.round(performance.now() * 1000) });
-            worker.postMessage({ t: 'frame', frame }, [frame]);
+            worker.postMessage({ t: 'frame', kind, frame }, [frame]);
         }
         el.requestVideoFrameCallback(pull);
     };
     el.requestVideoFrameCallback(pull);
 }
 
+/** Turn one of our pictures on or off. Camera and screen are independent. */
+async function startVideo(kind, on = true) {
+    if (!on) return stopVideo(kind, true);
+    if (selfTracks[kind] || videoStarting[kind]) return;
+    let stream;
+    videoStarting[kind] = true;
+    try {
+        stream = await requestSource(kind);
+    } catch (e) {
+        const message = sourceFailureMessage(kind, e);
+        if (message) VectorSvelte.showToast(message);
+        return;
+    } finally {
+        videoStarting[kind] = false;
+    }
+    try {
+        await invoke('call_video_set', { kind, on: true });
+    } catch (e) {
+        VectorSvelte.showToast(String(e));
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+    }
+    attachSource(kind, stream);
+    ensureVideoWorker().postMessage({ t: 'capture', kind, fps: kind === 'screen' ? 15 : 30, kbps: kind === 'screen' ? 1000 : 800 });
+}
+
+function attachSource(kind, stream) {
+    selfTracks[kind] = stream;
+    const track = stream.getVideoTracks()[0];
+    // The OS's own "stop sharing" control ends the track from outside.
+    track.onended = () => { if (selfTracks[kind] === stream) stopVideo(kind, true); };
+    if (previewEls[kind]) previewEls[kind].srcObject = stream;
+    pumpFrames(kind, stream);
+}
+
+/** Pick another window or screen while the share is on; the send never stops. */
+async function changeScreenSource() {
+    if (!selfTracks.screen || videoStarting.screen) return;
+    let stream;
+    videoStarting.screen = true;
+    try {
+        stream = await requestSource('screen');
+    } catch (e) {
+        const message = sourceFailureMessage('screen', e);
+        if (message) VectorSvelte.showToast(message);
+        return;
+    } finally {
+        videoStarting.screen = false;
+    }
+    if (!selfTracks.screen) { stream.getTracks().forEach((t) => t.stop()); return; }
+    const old = selfTracks.screen;
+    attachSource('screen', stream);
+    old.getTracks().forEach((t) => t.stop());
+}
+
+/** Stop one of our pictures. `tell` is false when the call is already gone. */
+async function stopVideo(kind, tell = true) {
+    const was = selfTracks[kind];
+    selfTracks[kind] = null;
+    if (captureEls[kind]) { captureEls[kind].srcObject = null; captureEls[kind] = null; }
+    if (was) was.getTracks().forEach((t) => t.stop());
+    if (previewEls[kind]) previewEls[kind].srcObject = null;
+    if (videoWorker) videoWorker.postMessage({ t: 'stop', kind });
+    if (tell && was) await invoke('call_video_set', { kind, on: false }).catch(() => {});
+}
+
+function stopAllVideo(tell) {
+    for (const kind of ['camera', 'screen']) if (selfTracks[kind]) stopVideo(kind, tell);
+}
+
 /** The ladder moved: ask the device for that size and rate, so no frame is captured
  *  bigger than it will be sent. Best effort; the worker scales whatever still arrives. */
 function constrainCapture(m) {
-    const track = selfStream && selfStream.getVideoTracks()[0];
+    const stream = selfTracks[m.kind];
+    const track = stream && stream.getVideoTracks()[0];
     if (!track || track.readyState !== 'live') return;
     const c = { frameRate: m.fps };
     if (m.kind !== 'screen' && m.width && m.height) { c.width = m.width; c.height = m.height; }
     track.applyConstraints(c).catch(() => {});
 }
 
-/** Stop sending. `tell` is false when the call is already gone. */
-async function stopVideo(tell = true) {
-    const was = selfKind;
-    selfKind = 'off';
-    if (captureVideo) { captureVideo.srcObject = null; captureVideo = null; }
-    if (selfStream) { selfStream.getTracks().forEach((t) => t.stop()); selfStream = null; }
-    if (selfPreviewEl) selfPreviewEl.srcObject = null;
-    if (videoWorker) videoWorker.postMessage({ t: 'stop' });
-    if (tell && was !== 'off') await invoke('call_video_set', { kind: 'off' }).catch(() => {});
-}
-
-/** The stage's canvas, handed to the worker to paint the peer on; null when it unmounts. */
-function attachPeerCanvas(el) {
+/** A canvas for one of the peer's pictures, handed to the worker; null when it unmounts. */
+function attachPeerCanvas(kind, el) {
     if (!el) {
-        if (videoWorker) videoWorker.postMessage({ t: 'canvas', canvas: null });
+        if (videoWorker) videoWorker.postMessage({ t: 'canvas', kind, canvas: null });
         return;
     }
     const off = el.transferControlToOffscreen();
-    ensureVideoWorker().postMessage({ t: 'canvas', canvas: off }, [off]);
+    ensureVideoWorker().postMessage({ t: 'canvas', kind, canvas: off }, [off]);
 }
 
-/** The stage's self preview element; null when it unmounts. */
-function attachSelfPreview(el) {
-    selfPreviewEl = el;
-    if (el) el.srcObject = selfStream;
+/** The preview element for one of our pictures; null when it unmounts. */
+function attachSelfPreview(kind, el) {
+    previewEls[kind] = el;
+    if (el) el.srcObject = selfTracks[kind];
 }
 
 // A hidden page cannot capture; an honest "camera off" beats a frozen picture.
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden' && selfKind === 'camera') stopVideo(true);
+    if (document.visibilityState === 'hidden' && selfTracks.camera) stopVideo('camera', true);
 });
 
 document.addEventListener('DOMContentLoaded', () => { videoProbe = probeVideoCaps(); }, { once: true });

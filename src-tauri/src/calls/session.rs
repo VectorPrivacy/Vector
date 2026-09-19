@@ -5,8 +5,8 @@
 //! call id it was started for and does nothing if the call it finds is another.
 
 use super::media::MediaEngine;
-use super::transport::{read_control, write_control, Control, VideoCodec, VideoKind, CALL_ALPN};
-use super::video::{Hooks, VideoSnapshot, VideoTrack};
+use super::transport::{read_control, write_control, Control, Tracks, VideoCodec, VideoKind, CALL_ALPN};
+use super::video::{Hooks, Prefs, VideoSnapshot, VideoTrack};
 use crate::miniapps::realtime::{decode_node_addr, encode_node_addr, IrohState};
 use crate::miniapps::state::MiniAppsState;
 use crate::{active_trusted_relays, my_public_key, nostr_client, TAURI_APP};
@@ -50,9 +50,9 @@ pub struct CallState {
     pub volume: f32,
     /// Milliseconds since the call went active; 0 before that.
     pub active_ms: u64,
-    /// What I am sending on video, and what the peer is.
-    pub video_mine: VideoKind,
-    pub video_peer: VideoKind,
+    /// What I am sending on video, and what the peer is: either, both or neither.
+    pub video_mine: Tracks,
+    pub video_peer: Tracks,
     /// Codecs the peer can decode, from their offer or answer; empty means no video.
     pub peer_decodes: Vec<String>,
     /// The offer asked for a video call.
@@ -104,8 +104,8 @@ struct Call {
     peer_muted: bool,
     volume: f32,
     video: Option<VideoTrack>,
-    video_mine: VideoKind,
-    video_peer: VideoKind,
+    video_mine: Tracks,
+    video_peer: Tracks,
     peer_decodes: Vec<String>,
     video_offered: bool,
     paused_by_peer: bool,
@@ -119,7 +119,7 @@ impl Call {
     fn refresh_awake(&mut self) {
         let level = if self.phase != Phase::Active {
             None
-        } else if self.video_mine != VideoKind::Off || self.video_peer != VideoKind::Off {
+        } else if self.video_mine.any() || self.video_peer.any() {
             Some(crate::awake::Level::Display)
         } else {
             Some(crate::awake::Level::System)
@@ -303,8 +303,8 @@ pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
             peer_muted: false,
             volume: 1.0,
             video: None,
-            video_mine: VideoKind::Off,
-            video_peer: VideoKind::Off,
+            video_mine: Tracks::default(),
+            video_peer: Tracks::default(),
             peer_decodes: Vec::new(),
             video_offered: video,
             paused_by_peer: false,
@@ -445,31 +445,48 @@ pub fn video_link_url() -> Result<String, String> {
     super::link::url()
 }
 
-/// Start or stop sending video. The codec is the first of ours the peer decodes.
-pub async fn set_video(kind: VideoKind) -> Result<(), String> {
-    let control = with_call(|c| {
+/// Start or stop sending one of our pictures. The codec is the first of ours the
+/// peer decodes.
+pub async fn set_video(kind: VideoKind, on: bool) -> Result<(), String> {
+    let tracks = with_call(|c| {
         if c.phase != Phase::Active {
             return Err("Not in a call".to_string());
         }
         let Some(track) = c.video.as_ref() else { return Err("No video track".to_string()) };
-        if kind != VideoKind::Off {
+        let tracks = c.video_mine.with(kind, on);
+        if tracks.any() {
             let codec = pick_codec(&c.peer_decodes).ok_or("They cannot receive video")?;
             track.set_codec(codec);
         }
-        track.set_sending(kind);
-        c.video_mine = kind;
+        track.set_sending(tracks);
+        c.video_mine = tracks;
         c.refresh_awake();
-        Ok(c.control.clone())
+        Ok((tracks, c.control.clone()))
     })
     .unwrap_or(Err("No call".into()))?;
+    tell_tracks(tracks).await;
+    Ok(())
+}
+
+/// Every send of what we are sending goes through here: the UI and the peer both hear.
+async fn tell_tracks((tracks, control): (Tracks, Option<Arc<tokio::sync::Mutex<SendStream>>>)) {
     if let Some(s) = snapshot() {
         emit_state(&s);
     }
     if let Some(control) = control {
         let mut send = control.lock().await;
-        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { kind })).await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { camera: tracks.camera, screen: tracks.screen })).await;
     }
-    Ok(())
+}
+
+/// The user's quality and frame rate for one of our pictures; None means the ladder decides.
+pub fn set_video_prefs(kind: VideoKind, rung: Option<usize>, fps: Option<u32>) -> Result<(), String> {
+    with_call(|c| {
+        let Some(track) = c.video.as_ref() else { return Err("No video track".to_string()) };
+        track.set_prefs(kind, Prefs { rung, fps });
+        Ok(())
+    })
+    .unwrap_or(Err("No call".into()))
 }
 
 /// Our view of their picture is hidden (or shown again): they may stop sending.
@@ -484,24 +501,21 @@ pub async fn set_video_pause(on: bool) -> Result<(), String> {
 
 /// The webview's socket closed under a call: whatever it was sending has stopped.
 async fn on_link_closed(id: &str) {
-    let control = with_call_id(id, |c| {
-        if c.video_mine == VideoKind::Off {
+    let tracks = with_call_id(id, |c| {
+        if !c.video_mine.any() {
             return None;
         }
-        c.video_mine = VideoKind::Off;
+        c.video_mine = Tracks::default();
         if let Some(v) = c.video.as_ref() {
-            v.set_sending(VideoKind::Off);
+            v.set_sending(Tracks::default());
         }
         c.refresh_awake();
-        c.control.clone()
+        Some((Tracks::default(), c.control.clone()))
     })
     .flatten();
-    let Some(control) = control else { return };
-    if let Some(s) = snapshot() {
-        emit_state(&s);
+    if let Some(t) = tracks {
+        tell_tracks(t).await;
     }
-    let mut send = control.lock().await;
-    let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { kind: VideoKind::Off })).await;
 }
 
 /// The microphone test outside a call: the capture chain alone, feeding the meter.
@@ -628,8 +642,8 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             peer_muted: false,
                             volume: 1.0,
                             video: None,
-                            video_mine: VideoKind::Off,
-                            video_peer: VideoKind::Off,
+                            video_mine: Tracks::default(),
+                            video_peer: Tracks::default(),
                             peer_decodes: parse_decodes(video),
                             video_offered: media == Some("video"),
                             paused_by_peer: false,
@@ -791,7 +805,6 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
             peer_video,
         },
     );
-    let video_stats = Arc::clone(&video.stats);
     let installed = with_call_id(id, |c| {
         c.conn = Some(conn.clone());
         c.media = Some(media);
@@ -825,11 +838,12 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                     end(&ctl_id, "hangup");
                     break;
                 }
-                Ok(Control::Video { kind }) => {
+                Ok(Control::Video { camera, screen }) => {
+                    let tracks = Tracks { camera, screen };
                     with_call_id(&ctl_id, |c| {
-                        c.video_peer = kind;
+                        c.video_peer = tracks;
                         if let Some(v) = c.video.as_ref() {
-                            v.set_peer_kind(kind);
+                            v.set_peer(tracks);
                         }
                         c.refresh_awake();
                     });
@@ -837,10 +851,10 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                         emit_state(&s);
                     }
                 }
-                Ok(Control::KeyframeRequest) => {
+                Ok(Control::KeyframeRequest { kind }) => {
                     with_call_id(&ctl_id, |c| {
                         if let Some(v) = c.video.as_ref() {
-                            v.force_keyframe();
+                            v.force_keyframe(kind);
                         }
                     });
                 }
@@ -856,19 +870,26 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                     }
                 }
                 Ok(Control::VideoUnsupported { codec }) => {
-                    let again = with_call_id(&ctl_id, |c| {
+                    // Send with what is left; with nothing left, video stops and the UI says so.
+                    let repick = with_call_id(&ctl_id, |c| {
                         c.peer_decodes.retain(|d| d != codec.name());
-                        c.video_mine != VideoKind::Off
-                    })
-                    .unwrap_or(false);
-                    if again {
-                        // Send with what is left; with nothing left, video stops and the UI says so.
-                        let kind = with_call_id(&ctl_id, |c| c.video_mine).unwrap_or(VideoKind::Off);
-                        if let Err(e) = set_video(kind).await {
-                            log_warn!("[CALLS] Peer cannot decode our video: {e}");
-                            let _ = set_video(VideoKind::Off).await;
-                            vector_core::traits::emit_event("call_video_refused", &serde_json::json!({ "id": ctl_id }));
+                        if !c.video_mine.any() {
+                            return None;
                         }
+                        match (pick_codec(&c.peer_decodes), c.video.as_ref()) {
+                            (Some(next), Some(track)) => {
+                                track.set_codec(next);
+                                Some(true)
+                            }
+                            _ => Some(false),
+                        }
+                    })
+                    .flatten();
+                    if repick == Some(false) {
+                        log_warn!("[CALLS] Peer cannot decode any codec we encode");
+                        let _ = set_video(VideoKind::Camera, false).await;
+                        let _ = set_video(VideoKind::Screen, false).await;
+                        vector_core::traits::emit_event("call_video_refused", &serde_json::json!({ "id": ctl_id }));
                     }
                 }
                 Ok(Control::Hello { .. }) | Ok(Control::Unknown) => {}
@@ -940,7 +961,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 jitter_ms: stats.jitter_ms.load(Ordering::Relaxed),
                 bitrate_kbps: stats.bitrate_kbps.load(Ordering::Relaxed),
                 net_loss: stats.net_loss(),
-                video: video_stats.snapshot(),
+                video: with_call_id(&stats_id, |c| c.video.as_ref().map(|v| v.snapshot())).flatten().unwrap_or_default(),
             };
             vector_core::traits::emit_event("call_stats", &payload);
         }

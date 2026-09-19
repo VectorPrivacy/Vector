@@ -1,11 +1,12 @@
 <script>
     // The call on screen: a ring card while a call comes in, otherwise a pill that
     // floats above every pane, drags anywhere, remembers where it was left, and opens
-    // into volume, microphone and a plain-language view of the connection. Once either
-    // side sends video the pill grows into a stage: their picture, ours in a corner.
+    // into volume, microphone and a plain-language view of the connection. Video is
+    // a section of the same pill, between its header and that panel: their pictures
+    // with ours in a corner. Any of theirs can fill the window.
     import { untrack } from 'svelte';
     import { slide } from 'svelte/transition';
-    import { callState, callAudio, callVideo, setStageHidden } from '../lib/calls.svelte.js';
+    import { callState, callAudio, callVideo, setStageHidden, setMaximized } from '../lib/calls.svelte.js';
     import { profileVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
     import VoiceMeter from './VoiceMeter.svelte';
@@ -17,10 +18,12 @@
      * @property {() => void} hangup
      * @property {(on: boolean) => void} setMuted
      * @property {(volume: number) => void} setVolume
-     * @property {(kind: 'off'|'camera'|'screen') => void} setVideo
+     * @property {(kind: 'camera'|'screen', on: boolean) => void} setVideo
+     * @property {() => void} changeScreen
+     * @property {(kind: 'camera'|'screen', rung: number|null, fps: number|null) => void} setVideoPrefs
      * @property {(on: boolean) => void} setVideoPause
-     * @property {(el: HTMLCanvasElement|null) => void} peerCanvas
-     * @property {(el: HTMLVideoElement|null) => void} selfPreview
+     * @property {(kind: 'camera'|'screen', el: HTMLCanvasElement|null) => void} peerCanvas
+     * @property {(kind: 'camera'|'screen', el: HTMLVideoElement|null) => void} selfPreview
      * @property {(patch: {autoGain?: boolean, echoCancel?: boolean, noiseSuppress?: boolean}) => void} setAudio
      * @property {(npub: string) => object|null} getProfile
      * @property {(profileOrId: object|string) => string} getName
@@ -77,24 +80,63 @@
     const live = $derived(c.phase === 'active');
     // This device can send video at all, and the peer can take it.
     const canSend = $derived(v.encode.length > 0 && c.peerDecodes.length > 0);
-    const videoOn = $derived(live && (c.videoMine !== 'off' || c.videoPeer !== 'off'));
-    const stage = $derived(videoOn && !v.stageHidden);
-    // The peer's picture keeps its own shape; the stage is sized to the widest common case.
-    const peerAspect = $derived(v.peerWidth && v.peerHeight ? `${v.peerWidth} / ${v.peerHeight}` : '16 / 9');
-    function hideStage(on) {
+    const mineOn = $derived(c.videoMine.camera || c.videoMine.screen);
+    const peerOn = $derived(c.videoPeer.camera || c.videoPeer.screen);
+    const videoOn = $derived(live && (mineOn || peerOn));
+    const pictures = $derived(videoOn && !v.stageHidden);
+    // Of their pictures, the screen leads and the camera sits inset; alone, either leads.
+    const lead = $derived(c.videoPeer.screen ? 'screen' : c.videoPeer.camera ? 'camera' : null);
+    const inset = $derived(c.videoPeer.screen && c.videoPeer.camera ? 'camera' : null);
+    const aspectOf = (kind) => { const p = kind && v.peer[kind]; return p && p.width ? `${p.width} / ${p.height}` : '16 / 9'; };
+    // The window-filling view of one of theirs; the other, if any, rides along the bottom.
+    const max = $derived(live && v.maximized && c.videoPeer[v.maximized] ? v.maximized : null);
+    const maxOther = $derived(max ? (max === 'screen' ? (c.videoPeer.camera ? 'camera' : null) : (c.videoPeer.screen ? 'screen' : null)) : null);
+    const maxQuality = $derived(max && c.quality && c.quality !== 'excellent' && c.quality !== 'good' ? c.quality : null);
+    let maxControls = $state(false);
+    let maxHide = null;
+    function wakeControls() {
+        maxControls = true;
+        clearTimeout(maxHide);
+        maxHide = setTimeout(() => { maxControls = false; }, 2500);
+    }
+    function hidePictures(on) {
         setStageHidden(on);
         // Nobody is looking: the peer can stop spending upload on us.
         h.setVideoPause(on);
     }
-    // The stage's media surfaces are the only elements this component hands out.
-    function peerCanvas(node) {
-        h.peerCanvas(node);
-        return { destroy() { h.peerCanvas(null); } };
+    $effect(() => {
+        if (!max) return;
+        const key = (e) => { if (e.key === 'Escape') setMaximized(null); };
+        window.addEventListener('keydown', key);
+        return () => window.removeEventListener('keydown', key);
+    });
+    // The media surfaces are the only elements this component hands out.
+    function peerCanvas(node, kind) {
+        h.peerCanvas(kind, node);
+        return { destroy() { h.peerCanvas(kind, null); } };
     }
-    function selfPreview(node) {
-        h.selfPreview(node);
-        return { destroy() { h.selfPreview(null); } };
+    function selfPreview(node, kind) {
+        h.selfPreview(kind, node);
+        return { destroy() { h.selfPreview(kind, null); } };
     }
+    // The panel's quality choices, by rung on each ladder.
+    const QUALITY_CAMERA = [['Low', 1], ['Medium', 3], ['High', 5], ['Best', 6]];
+    const QUALITY_SCREEN = [['Low', 1], ['Medium', 3], ['High', 4], ['Best', 5]];
+    const FPS_CAMERA = [15, 30];
+    const FPS_SCREEN = [5, 10, 15, 30];
+    function choosePref(kind, field, value) {
+        const p = v.prefs[kind];
+        const next = { rung: p.rung, fps: p.fps, [field]: value === '' ? null : Number(value) };
+        h.setVideoPrefs(kind, next.rung, next.fps);
+    }
+    const trackLine = (kind) => {
+        const t = c.stats?.video?.[kind];
+        return t && c.videoMine[kind] ? `${t.kbps} kbit/s · ${t.width}×${t.height} · ${t.fps} fps${t.pinned ? '' : ' · auto'}` : '';
+    };
+    const peerTrackLine = (kind) => {
+        const p = v.peer[kind];
+        return c.videoPeer[kind] && p.width ? `${p.width}×${p.height} · ${v.decFps[kind]} fps` : '';
+    };
 
     // ── the pill's place: dragged anywhere, remembered per device ──
     const POS_KEY = 'call_pill_pos';
@@ -152,8 +194,11 @@
 
     // Width is animated by hand: the closed pill hugs its content, which CSS cannot
     // tween from, so the width is pinned for the transition and released after.
-    const OPEN_W = 300;
     const WIDTH_MS = 180;
+    // The open width is pinned inline for the animation, so it must respect the
+    // window itself; the stylesheet's cap cannot reach an inline value.
+    let winW = $state(window.innerWidth);
+    const openW = $derived(Math.min(pictures ? 480 : 300, winW - 24));
     let width = $state(null);
     let collapsedW = 0;
     let release = null;
@@ -171,14 +216,18 @@
         const opening = expanded;
         requestAnimationFrame(() => requestAnimationFrame(() => {
             if (opening !== expanded) return;
-            width = opening ? OPEN_W : (collapsedW || from);
+            width = opening ? openW : (collapsedW || from);
             // Released on a clock, not the transition's end event: a close that lands
             // on its current width never transitions, and the meters' end events bubble.
             if (!opening) release = setTimeout(() => { if (!expanded) width = null; }, WIDTH_MS + 40);
         }));
     }
     $effect(() => {
-        const keep = () => { if (pos) pos = clamp(pos); };
+        const keep = () => {
+            winW = window.innerWidth;
+            if (width != null && expanded) width = Math.min(width, winW - 24);
+            if (pos) pos = clamp(pos);
+        };
         window.addEventListener('resize', keep);
         return () => window.removeEventListener('resize', keep);
     });
@@ -186,7 +235,12 @@
     // position is read untracked: writing it from an effect that depends on it loops.
     $effect(() => {
         expanded;
+        pictures;
         queueMicrotask(() => untrack(() => { if (pos) pos = clamp(pos); }));
+    });
+    $effect(() => {
+        pictures;
+        untrack(() => { if (width != null) width = expanded ? openW : null; });
     });
     const placement = $derived((pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : '') + (width != null ? ` width:${width}px;` : ''));
 
@@ -212,13 +266,6 @@
         if (bitrate && bitrate >= 64) return 'full quality';
         return '';
     });
-    // The video track in words: what we send and what arrives, from the stats line.
-    const videoLine = $derived.by(() => {
-        const vs = c.stats?.video;
-        if (!vs || c.videoMine === 'off') return '';
-        return `${vs.kbps} kbit/s · ${vs.width}×${vs.height} · ${vs.fps} fps`;
-    });
-    const peerVideoLine = $derived(c.videoPeer === 'off' || !v.peerWidth ? '' : `${v.inKbps} kbit/s · ${v.peerWidth}×${v.peerHeight} · ${v.decFps} fps`);
     // Graph: delay as a line, lost audio as bars, over the last minute. The top
     // HEAD pixels are headroom for the tip, so it can sit above the highest sample.
     const W = 240, H = 72, HEAD = 34;
@@ -270,65 +317,50 @@
             </div>
         </div>
     </div>
-{:else if stage}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="call-stage" style={pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : ''} bind:this={pill}>
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="call-pill-row call-stage-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={(e) => { const moved = drag?.moved; onPointerUp(e); if (!moved && expanded) expanded = false; }} onpointercancel={onPointerUp}>
-            <span class="call-pill-avatar" style="--talk: {talk.toFixed(2)}">
-                <Avatar src={peer?.avatar} size={26} />
-            </span>
-            <div class="call-pill-text">
-                <span class="call-pill-name cutoff">{peer?.name || ''}</span>
-                <span class="call-pill-status cutoff">
-                    {#if c.quality}<span class="call-dot call-dot-{c.quality}" title={QUALITY[c.quality]}></span>{/if}
-                    {status}{#if c.peerMuted} · muted{/if}
-                </span>
-            </div>
-            <button class="call-btn call-btn-small" title="Hide the video" onclick={() => hideStage(true)}>
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
-            </button>
-        </div>
-        <div class="call-stage-view" style="aspect-ratio: {peerAspect}">
-            <canvas class="call-stage-peer" class:call-stage-peer-off={c.videoPeer === 'off'} use:peerCanvas></canvas>
-            {#if c.videoPeer === 'off'}
-                <div class="call-stage-idle">
-                    <Avatar src={peer?.avatar} size={72} />
-                    <span>Their camera is off</span>
-                </div>
-            {:else if !v.peerWidth}
-                <div class="call-stage-idle"><span>Waiting for their {c.videoPeer === 'screen' ? 'screen' : 'camera'}…</span></div>
-            {:else if c.videoPeer === 'screen'}
-                <span class="call-stage-tag">{peer?.name || 'They'} is sharing a screen</span>
-            {/if}
-            {#if c.videoMine !== 'off'}
-                <!-- svelte-ignore a11y_media_has_caption -->
-                <video class="call-stage-self" class:call-stage-self-screen={c.videoMine === 'screen'} use:selfPreview muted playsinline autoplay></video>
-                {#if c.pausedByPeer}<span class="call-stage-tag call-stage-tag-mine">They have hidden your video</span>{/if}
-            {/if}
-        </div>
-        <div class="call-stage-controls">
-            <button class="call-btn" class:call-btn-on={c.videoMine === 'camera'} title={c.videoMine === 'camera' ? 'Turn the camera off' : 'Turn the camera on'} disabled={!canSend} onclick={() => h.setVideo(c.videoMine === 'camera' ? 'off' : 'camera')}>
-                <span class="icon icon-video"></span>
-            </button>
-            <button class="call-btn" class:call-btn-on={c.videoMine === 'screen'} title={c.videoMine === 'screen' ? 'Stop sharing the screen' : 'Share the screen'} disabled={!canSend} onclick={() => h.setVideo(c.videoMine === 'screen' ? 'off' : 'screen')}>
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-            </button>
-            <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>
-                <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
-            </button>
-            <button class="call-btn call-btn-hangup" title="Hang up" onclick={() => h.hangup()}>
-                <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                    <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-            </button>
-        </div>
-    </div>
 {:else if c.id}
+    {#if max}
+        <!-- One of their pictures over everything. The pill waits underneath. -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class="call-max" class:call-max-controls={maxControls} onpointermove={wakeControls} ondblclick={() => setMaximized(null)}>
+            {#key max}
+                <canvas class="call-max-canvas" use:peerCanvas={max}></canvas>
+            {/key}
+            {#if maxQuality}
+                <span class="call-max-quality"><span class="call-dot call-dot-{maxQuality}"></span> {QUALITY[maxQuality]}</span>
+            {/if}
+            <button class="call-btn call-btn-small call-max-restore" title="Back to the call window (Esc)" onclick={() => setMaximized(null)}>
+                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M9 3H3v6M15 21h6v-6M3 3l7 7M21 21l-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            </button>
+            {#if maxOther}
+                <!-- Their other picture rides along the bottom; a click swaps the two. -->
+                <button class="call-max-other" title="Swap" onclick={() => setMaximized(maxOther)}>
+                    {#key maxOther}
+                        <canvas use:peerCanvas={maxOther}></canvas>
+                    {/key}
+                </button>
+            {/if}
+            <div class="call-max-strip">
+                <button class="call-btn" class:call-btn-on={c.videoMine.camera} title={c.videoMine.camera ? 'Turn the camera off' : 'Turn the camera on'} disabled={!canSend} onclick={() => h.setVideo('camera', !c.videoMine.camera)}>
+                    <span class="icon icon-video"></span>
+                </button>
+                <button class="call-btn" class:call-btn-on={c.videoMine.screen} title={c.videoMine.screen ? 'Stop sharing the screen' : 'Share the screen'} disabled={!canSend} onclick={() => h.setVideo('screen', !c.videoMine.screen)}>
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                </button>
+                <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>
+                    <span class="icon" class:icon-mic-off={c.muted} class:icon-mic-on={!c.muted}></span>
+                </button>
+                <button class="call-btn call-btn-hangup" title="Hang up" onclick={() => h.hangup()}>
+                    <svg class="call-glyph-down" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                        <path d="M5 4h3l2 5-2.5 1.5a11 11 0 0 0 6 6L15 14l5 2v3a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    {/if}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live}
+    <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live} class:call-pill-video={pictures} class:call-pill-under={!!max}
          style={placement} bind:this={pill}>
-        <!-- Only the header row drags or toggles; the panel below is for its controls. -->
+        <!-- Only the header row drags or toggles; what is below is for its controls. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="call-pill-row" onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}>
             <span class="call-pill-avatar" style="--talk: {talk.toFixed(2)}">
@@ -343,14 +375,14 @@
             </div>
             {#if c.phase !== 'ended'}
                 {#if videoOn && v.stageHidden}
-                    <button class="call-btn call-btn-on" title="Show the video" onclick={() => hideStage(false)}>
+                    <button class="call-btn call-btn-on" title="Show the video" onclick={() => hidePictures(false)}>
                         <span class="icon icon-video"></span>
                     </button>
                 {:else if live && canSend}
-                    <button class="call-btn" title="Turn the camera on" onclick={() => h.setVideo('camera')}>
+                    <button class="call-btn" class:call-btn-on={c.videoMine.camera} title={c.videoMine.camera ? 'Turn the camera off' : 'Turn the camera on'} onclick={() => h.setVideo('camera', !c.videoMine.camera)}>
                         <span class="icon icon-video"></span>
                     </button>
-                    <button class="call-btn" title="Share the screen" onclick={() => h.setVideo('screen')}>
+                    <button class="call-btn" class:call-btn-on={c.videoMine.screen} title={c.videoMine.screen ? 'Stop sharing the screen' : 'Share the screen'} onclick={() => h.setVideo('screen', !c.videoMine.screen)}>
                         <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
                 {/if}
@@ -364,8 +396,103 @@
                 </button>
             {/if}
         </div>
+        {#if pictures && !max}
+            <div class="call-pictures" style="aspect-ratio: {aspectOf(lead)}">
+                {#if lead}
+                    {#key lead}
+                        <canvas class="call-picture-lead" use:peerCanvas={lead}></canvas>
+                    {/key}
+                    {#if !v.peer[lead].width}
+                        <div class="call-pictures-idle"><span>Waiting for their {lead}…</span></div>
+                    {/if}
+                    <button class="call-btn call-btn-small call-picture-max" title="Fill the window" onclick={() => setMaximized(lead)}>
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M3 9V3h6M21 15v6h-6M3 3l7 7M21 21l-7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    </button>
+                    {#if lead === 'screen'}<span class="call-picture-tag">{peer?.name || 'They'} is sharing a screen</span>{/if}
+                {:else}
+                    <div class="call-pictures-idle">
+                        <Avatar src={peer?.avatar} size={64} />
+                        <span>Their camera is off</span>
+                    </div>
+                {/if}
+                {#if inset}
+                    <button class="call-picture-inset" title="Fill the window with their camera" onclick={() => setMaximized(inset)}>
+                        {#key inset}
+                            <canvas use:peerCanvas={inset}></canvas>
+                        {/key}
+                    </button>
+                {/if}
+                <div class="call-pictures-mine">
+                    {#if c.videoMine.screen}
+                        <!-- svelte-ignore a11y_media_has_caption -->
+                        <video class="call-picture-self call-picture-self-screen" use:selfPreview={'screen'} muted playsinline autoplay></video>
+                    {/if}
+                    {#if c.videoMine.camera}
+                        <!-- svelte-ignore a11y_media_has_caption -->
+                        <video class="call-picture-self" use:selfPreview={'camera'} muted playsinline autoplay></video>
+                    {/if}
+                </div>
+                {#if c.pausedByPeer && mineOn}<span class="call-picture-tag call-picture-tag-low">They have hidden your video</span>{/if}
+                <button class="call-btn call-btn-small call-picture-hide" title="Hide the video" onclick={() => hidePictures(true)}>
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+                </button>
+            </div>
+        {/if}
         {#if expanded && c.phase !== 'ended'}
             <div class="call-panel" transition:slide={{ duration: 180 }}>
+                {#if live && (canSend || peerOn)}
+                    <div class="call-panel-section">Video</div>
+                    {#if canSend}
+                        <label class="toggle-container call-switch">
+                            <span>Camera</span>
+                            <input type="checkbox" checked={c.videoMine.camera} onchange={(e) => h.setVideo('camera', e.currentTarget.checked)}>
+                            <span class="neon-toggle"></span>
+                        </label>
+                        {#if c.videoMine.camera}
+                            <div class="call-panel-choices">
+                                <label>Quality
+                                    <select value={v.prefs.camera.rung ?? ''} onchange={(e) => choosePref('camera', 'rung', e.currentTarget.value)}>
+                                        <option value="">Auto</option>
+                                        {#each QUALITY_CAMERA as [name, rung]}<option value={rung}>{name}</option>{/each}
+                                    </select>
+                                </label>
+                                <label>Frame rate
+                                    <select value={v.prefs.camera.fps ?? ''} onchange={(e) => choosePref('camera', 'fps', e.currentTarget.value)}>
+                                        <option value="">Auto</option>
+                                        {#each FPS_CAMERA as f}<option value={f}>{f}</option>{/each}
+                                    </select>
+                                </label>
+                            </div>
+                            {#if trackLine('camera')}<span class="call-panel-readout">{trackLine('camera')}</span>{/if}
+                        {/if}
+                        <label class="toggle-container call-switch">
+                            <span>Screen</span>
+                            <input type="checkbox" checked={c.videoMine.screen} onchange={(e) => h.setVideo('screen', e.currentTarget.checked)}>
+                            <span class="neon-toggle"></span>
+                        </label>
+                        {#if c.videoMine.screen}
+                            <div class="call-panel-choices">
+                                <label>Quality
+                                    <select value={v.prefs.screen.rung ?? ''} onchange={(e) => choosePref('screen', 'rung', e.currentTarget.value)}>
+                                        <option value="">Auto</option>
+                                        {#each QUALITY_SCREEN as [name, rung]}<option value={rung}>{name}</option>{/each}
+                                    </select>
+                                </label>
+                                <label>Frame rate
+                                    <select value={v.prefs.screen.fps ?? ''} onchange={(e) => choosePref('screen', 'fps', e.currentTarget.value)}>
+                                        <option value="">Auto</option>
+                                        {#each FPS_SCREEN as f}<option value={f}>{f}</option>{/each}
+                                    </select>
+                                </label>
+                                <button class="call-panel-button" onclick={() => h.changeScreen()}>Change window…</button>
+                            </div>
+                            {#if trackLine('screen')}<span class="call-panel-readout">{trackLine('screen')}</span>{/if}
+                        {/if}
+                        <span class="call-panel-hint">Auto follows the connection and uses spare headroom. A fixed choice holds, unless the voice needs the room.</span>
+                    {/if}
+                    {#if peerTrackLine('camera')}<span class="call-panel-readout">Their camera: {peerTrackLine('camera')}</span>{/if}
+                    {#if peerTrackLine('screen')}<span class="call-panel-readout">Their screen: {peerTrackLine('screen')}</span>{/if}
+                {/if}
                 <label class="call-panel-slider">
                     <span class="call-panel-label">Their volume</span>
                     <input type="range" min="0" max="200" step="5" value={Math.round(c.volume * 100)}
@@ -407,14 +534,6 @@
                     <span class="call-panel-value">{lostText}</span>
                     <span class="call-panel-label" title="How much data your voice uses. It rises on a clean connection and drops when packets are being lost">Bitrate</span>
                     <span class="call-panel-value">{bitrate == null ? '…' : `${bitrate} kbit/s`}{#if bitrateHint} <span class="call-panel-hint">{bitrateHint}</span>{/if}</span>
-                    {#if videoLine}
-                        <span class="call-panel-label" title="What your camera or screen is sent at. It follows the connection, like the voice bitrate">Your video</span>
-                        <span class="call-panel-value">{videoLine}</span>
-                    {/if}
-                    {#if peerVideoLine}
-                        <span class="call-panel-label">Their video</span>
-                        <span class="call-panel-value">{peerVideoLine}</span>
-                    {/if}
                 </div>
                 <!-- svelte-ignore a11y_no_static_element_interactions -->
                 <div class="call-graph">

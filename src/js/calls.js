@@ -67,10 +67,12 @@ function registerCallScreen() {
             hangup: () => invoke('call_hangup').catch(() => {}),
             setMuted: (on) => invoke('call_set_muted', { muted: on }).catch(() => {}),
             setVolume: (volume) => invoke('call_set_volume', { volume }).catch(() => {}),
-            setVideo: (kind) => startVideo(kind),
+            setVideo: (kind, on) => startVideo(kind, on),
+            changeScreen: () => changeScreenSource(),
+            setVideoPrefs: (kind, rung, fps) => setVideoPrefs(kind, rung, fps),
             setVideoPause: (on) => invoke('call_video_pause', { on }).catch(() => {}),
-            peerCanvas: (el) => attachPeerCanvas(el),
-            selfPreview: (el) => attachSelfPreview(el),
+            peerCanvas: (kind, el) => attachPeerCanvas(kind, el),
+            selfPreview: (kind, el) => attachSelfPreview(kind, el),
             setAudio: (patch) => setCallAudioSettings(patch),
             getProfile: (npub) => getProfile(npub),
             getName: (x) => getName(x),
@@ -82,6 +84,12 @@ function registerCallScreen() {
     invoke('call_status').then((s) => { if (s) { VectorSvelte.setCallState(s); callVideoOnState(s); } }).catch(() => {});
     invoke('call_audio_settings_get').then((s) => VectorSvelte.setCallAudio(s)).catch(() => {});
     loadAudioDevices();
+}
+
+/** A held quality rung or frame rate for one of our pictures; null lets the ladder decide. */
+async function setVideoPrefs(kind, rung, fps) {
+    VectorSvelte.setVideoPrefs(kind, { rung, fps });
+    await invoke('call_video_prefs', { kind, rung, fps }).catch((e) => VectorSvelte.showToast(String(e)));
 }
 
 /** Ring a DM contact. The Chat header's call button lands here. */

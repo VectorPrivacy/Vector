@@ -46,10 +46,10 @@ pub enum Control {
     Hello { call_id: String },
     Mute { on: bool },
     Bye,
-    /// What I am sending on the video streams from now on.
-    Video { kind: VideoKind },
-    /// My decoder lost the chain: the next frame must be a keyframe.
-    KeyframeRequest,
+    /// What I am sending on the video streams from now on: either, both or neither.
+    Video { camera: bool, screen: bool },
+    /// My decoder lost that chain: its next frame must be a keyframe.
+    KeyframeRequest { kind: VideoKind },
     /// My view of your video is hidden; stop spending upload on it (or resume).
     VideoPause { on: bool },
     /// My decoder cannot take this codec after all; send with another.
@@ -59,13 +59,50 @@ pub enum Control {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// The two pictures a side can send at once; a frame's flags say which it is.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoKind {
-    #[default]
-    Off,
     Camera,
     Screen,
+}
+
+impl VideoKind {
+    pub fn index(self) -> usize {
+        match self {
+            Self::Camera => 0,
+            Self::Screen => 1,
+        }
+    }
+    pub fn from_flags(flags: u8) -> Self {
+        if flags & VIDEO_SCREEN != 0 { Self::Screen } else { Self::Camera }
+    }
+}
+
+/// Which of the two a side is sending.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Tracks {
+    pub camera: bool,
+    pub screen: bool,
+}
+
+impl Tracks {
+    pub fn any(self) -> bool {
+        self.camera || self.screen
+    }
+    pub fn has(self, kind: VideoKind) -> bool {
+        match kind {
+            VideoKind::Camera => self.camera,
+            VideoKind::Screen => self.screen,
+        }
+    }
+    pub fn with(mut self, kind: VideoKind, on: bool) -> Self {
+        match kind {
+            VideoKind::Camera => self.camera = on,
+            VideoKind::Screen => self.screen = on,
+        }
+        self
+    }
 }
 
 /// The codec byte in a video frame header. A fixed table, so nothing from the wire
@@ -193,9 +230,11 @@ mod tests {
     fn an_unknown_control_message_parses_as_unknown() {
         let c: Control = serde_json::from_str(r#"{"t":"hologram","on":true}"#).unwrap();
         assert_eq!(c, Control::Unknown);
-        let v: Control = serde_json::from_str(r#"{"t":"video","kind":"screen"}"#).unwrap();
-        assert_eq!(v, Control::Video { kind: VideoKind::Screen });
-        assert_eq!(serde_json::to_string(&Control::KeyframeRequest).unwrap(), r#"{"t":"keyframe_request"}"#);
+        let v: Control = serde_json::from_str(r#"{"t":"video","camera":false,"screen":true}"#).unwrap();
+        assert_eq!(v, Control::Video { camera: false, screen: true });
+        assert_eq!(serde_json::to_string(&Control::KeyframeRequest { kind: VideoKind::Camera }).unwrap(), r#"{"t":"keyframe_request","kind":"camera"}"#);
+        assert_eq!(VideoKind::from_flags(VIDEO_KEY | VIDEO_SCREEN), VideoKind::Screen);
+        assert!(Tracks::default().with(VideoKind::Screen, true).has(VideoKind::Screen));
     }
 
     #[test]

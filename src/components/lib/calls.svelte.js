@@ -6,15 +6,22 @@ const HISTORY = 60;
 const c = $state({ id: null, peer: null, outgoing: false, phase: null, reason: null,
     muted: false, peerMuted: false, volume: 1, activeMs: 0, receivedAt: 0,
     stats: null, history: [], quality: null, levels: { mic: 0, peer: 0 }, tick: 0,
-    // Video: what each side sends ('off' | 'camera' | 'screen'), what the peer can decode,
-    // whether the offer was for a video call, and whether the peer has hidden our picture.
-    videoMine: 'off', videoPeer: 'off', peerDecodes: [], videoOffered: false, pausedByPeer: false });
-// The device's video ability (from the boot probe), the link to the worker, and what
-// the worker reports: the peer's picture size and the encoder's numbers.
-const video = $state({ encode: [], decode: [], link: false, peerWidth: 0, peerHeight: 0,
-    enc: { fps: 0, kbps: 0, width: 0, height: 0 }, decFps: 0, inKbps: 0,
-    // The stage collapsed back to the pill while video is on.
-    stageHidden: false });
+    // Video: which pictures each side sends, what the peer can decode, whether the
+    // offer was for a video call, and whether the peer has hidden our pictures.
+    videoMine: { camera: false, screen: false }, videoPeer: { camera: false, screen: false },
+    peerDecodes: [], videoOffered: false, pausedByPeer: false });
+const NO_TRACK = () => ({ fps: 0, kbps: 0, width: 0, height: 0 });
+// The device's video ability (from the boot probe), the link to the worker, what the
+// worker reports per track (the peer's picture sizes, the encoders' numbers), and the
+// stage's own state: pictures hidden, one of theirs maximized, the user's choices.
+const video = $state({ encode: [], decode: [], link: false,
+    peer: { camera: { width: 0, height: 0 }, screen: { width: 0, height: 0 } },
+    enc: { camera: NO_TRACK(), screen: NO_TRACK() }, decFps: { camera: 0, screen: 0 }, inKbps: 0,
+    stageHidden: false,
+    // Which of their pictures fills the window, or null.
+    maximized: null,
+    // Held rung and frame rate per track; null lets the ladder decide.
+    prefs: { camera: { rung: null, fps: null }, screen: { rung: null, fps: null } } });
 // The voice processing switches and the microphone test, shared by the pill and Settings.
 const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, loaded: false,
     micTest: false, micLevel: 0,
@@ -31,12 +38,18 @@ export function setVideoCaps(caps) {
     video.decode = caps?.decode || [];
 }
 export function setVideoLink(open) { video.link = !!open; }
-export function setVideoPeerSize(w, h) { video.peerWidth = w; video.peerHeight = h; }
-export function setVideoStats(enc, decFps) {
-    if (enc) video.enc = enc;
-    video.decFps = decFps || 0;
+export function setVideoPeerSize(kind, w, h) { if (video.peer[kind]) video.peer[kind] = { width: w, height: h }; }
+export function setVideoStats(tracks) {
+    for (const kind of ['camera', 'screen']) {
+        const t = tracks && tracks[kind];
+        if (!t) continue;
+        video.enc[kind] = t.enc || NO_TRACK();
+        video.decFps[kind] = t.decFps || 0;
+    }
 }
 export function setStageHidden(on) { video.stageHidden = !!on; }
+export function setMaximized(kind) { video.maximized = kind || null; }
+export function setVideoPrefs(kind, prefs) { if (video.prefs[kind]) video.prefs[kind] = { rung: prefs.rung ?? null, fps: prefs.fps ?? null }; }
 
 /** Ten times a second during a call: how loud each side is, 0 to 1. */
 export function setCallLevels(l) {
@@ -80,9 +93,17 @@ export function setCallState(s) {
     c.reason = s.reason || null; c.muted = s.muted; c.peerMuted = s.peer_muted;
     c.volume = typeof s.volume === 'number' ? s.volume : 1;
     c.activeMs = s.active_ms; c.receivedAt = Date.now();
-    c.videoMine = s.video_mine || 'off'; c.videoPeer = s.video_peer || 'off';
+    c.videoMine = { camera: !!s.video_mine?.camera, screen: !!s.video_mine?.screen };
+    c.videoPeer = { camera: !!s.video_peer?.camera, screen: !!s.video_peer?.screen };
     c.peerDecodes = s.peer_decodes || []; c.videoOffered = !!s.video_offered; c.pausedByPeer = !!s.paused_by_peer;
-    if (s.phase !== 'active') { video.stageHidden = false; video.peerWidth = 0; video.peerHeight = 0; }
+    // A picture that stopped has no size and cannot stay maximized.
+    for (const kind of ['camera', 'screen']) {
+        if (!c.videoPeer[kind]) {
+            video.peer[kind] = { width: 0, height: 0 };
+            if (video.maximized === kind) video.maximized = null;
+        }
+    }
+    if (s.phase !== 'active') { video.stageHidden = false; video.maximized = null; }
     // An ended call lingers long enough to read why.
     if (s.phase === 'ended') {
         endedTimer = setTimeout(() => {

@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::wire::{VideoCodec, VideoHeader, VideoKind};
+use super::wire::{Tracks, VideoCodec, VideoHeader, VideoKind};
 
 /// A video frame: the 16-byte wire header, then the encoded bytes. The same bytes
 /// go on the QUIC stream, so nothing is re-framed in between.
@@ -16,14 +16,14 @@ pub const KIND_CONTROL: u8 = 2;
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ToLink {
-    /// Encode at this rate, size and frame rate from now on.
-    Rate { kbps: u32, width: u32, height: u32, fps: u32 },
-    /// Too many frames in flight: drop the next capture.
-    Skip,
-    /// Make the next frame a keyframe.
-    Keyframe,
-    /// What the peer is sending now, so the stage can show or hide their picture.
-    Peer { kind: VideoKind },
+    /// Encode that track at this rate, size and frame rate from now on.
+    Rate { kind: VideoKind, kbps: u32, width: u32, height: u32, fps: u32 },
+    /// Too many frames in flight: drop that track's next capture.
+    Skip { kind: VideoKind },
+    /// Make that track's next frame a keyframe.
+    Keyframe { kind: VideoKind },
+    /// What the peer is sending now, so the stage can show or hide their pictures.
+    Peer { tracks: Tracks },
     /// The peer cannot see us; stop capturing (or resume).
     Pause { on: bool },
     /// Send with this codec: the one the peer decodes.
@@ -36,10 +36,10 @@ pub enum ToLink {
 pub enum FromLink {
     /// What this device can encode and decode, from its boot probe.
     Caps { encode: Vec<String>, decode: Vec<String> },
-    /// The encoder's own numbers, for the stats line.
-    Stats { fps: u32, kbps: u32, width: u32, height: u32 },
-    /// My decoder lost the chain: ask the peer for a keyframe.
-    Lost,
+    /// One encoder's own numbers, for the stats line.
+    Stats { kind: VideoKind, fps: u32, kbps: u32, width: u32, height: u32 },
+    /// My decoder for that track lost the chain: ask the peer for a keyframe.
+    Lost { kind: VideoKind },
     /// My decoder refuses this codec outright: ask the peer to send another.
     Unsupported { codec: VideoCodec },
     #[serde(other)]
@@ -94,11 +94,11 @@ mod tests {
             }
             _ => panic!("frame expected"),
         }
-        let c = control(&ToLink::Rate { kbps: 800, width: 640, height: 360, fps: 30 });
+        let c = control(&ToLink::Rate { kind: VideoKind::Camera, kbps: 800, width: 640, height: 360, fps: 30 });
         assert_eq!(c[0], KIND_CONTROL);
         let mut lost = vec![KIND_CONTROL];
-        lost.extend_from_slice(br#"{"t":"lost"}"#);
-        assert!(matches!(parse(&lost), Some(LinkMsg::Control(FromLink::Lost))));
+        lost.extend_from_slice(br#"{"t":"lost","kind":"screen"}"#);
+        assert!(matches!(parse(&lost), Some(LinkMsg::Control(FromLink::Lost { kind: VideoKind::Screen }))));
         let mut odd = vec![KIND_CONTROL];
         odd.extend_from_slice(br#"{"t":"teleport"}"#);
         assert!(matches!(parse(&odd), Some(LinkMsg::Control(FromLink::Unknown))));

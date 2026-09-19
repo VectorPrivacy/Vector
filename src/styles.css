@@ -21322,52 +21322,40 @@ body.profile-switcher-editing .profile-switcher-add {
   animation: qr-overlay-pop 0.16s ease-out;
 }
 
-/* The stage: the pill grown into a window for the pictures, dragged by its header. */
-.call-stage {
-  position: fixed;
-  top: calc(var(--chrome-h, 0px) + 10px);
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9000;
-  display: flex;
-  flex-direction: column;
+/* With pictures showing, the pill is a window: wider, and never taller than the screen.
+   The panel below the pictures scrolls, without a scrollbar, so a short screen still
+   reaches every setting. */
+.call-pill-video {
   width: min(480px, calc(100vw - 24px));
-  border-radius: 16px;
-  background: rgba(20, 20, 20, 0.95);
-  border: 1px solid #333333;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-  color: var(--text-color, #f6f6f6);
-  overflow: hidden;
-  user-select: none;
-  -webkit-user-select: none;
-  animation: qr-overlay-pop 0.16s ease-out;
+  max-width: none;
 }
 
-.call-stage-row {
-  border-bottom: 1px solid #333333;
+.call-pill {
+  max-height: calc(100vh - var(--chrome-h, 0px) - 20px);
 }
 
-.call-stage-view {
+.call-pill-under {
+  visibility: hidden;
+}
+
+.call-pictures {
   position: relative;
+  flex: none;
   width: 100%;
-  max-height: min(60vh, 540px);
+  max-height: min(50vh, 420px);
   background: #000;
   overflow: hidden;
 }
 
-/* The peer's picture is painted by the worker at its own size; CSS fits it. */
-.call-stage-peer {
+/* Their leading picture is painted by the worker at its own size; CSS fits it. */
+.call-picture-lead {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
 
-.call-stage-peer-off {
-  visibility: hidden;
-}
-
-.call-stage-idle {
+.call-pictures-idle {
   position: absolute;
   inset: 0;
   display: flex;
@@ -21377,29 +21365,62 @@ body.profile-switcher-editing .profile-switcher-add {
   gap: 10px;
   font-size: 13px;
   color: #b2b2b2;
+  pointer-events: none;
 }
 
-/* Our own preview, tucked in a corner; a shared screen gets a smaller thumbnail. */
-.call-stage-self {
+/* Their camera beside their screen, and our own pictures, sit in the corners. */
+.call-picture-inset,
+.call-pictures-mine {
   position: absolute;
-  right: 8px;
   bottom: 8px;
-  width: 28%;
-  max-width: 160px;
+  display: flex;
+  gap: 6px;
+}
+
+.call-picture-inset {
+  left: 8px;
+  width: 26%;
+  max-width: 150px;
+  padding: 0;
+  border: 1px solid #444;
+  border-radius: 8px;
+  background: #111;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.call-picture-inset canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.call-pictures-mine {
+  right: 8px;
+  flex-direction: row-reverse;
+}
+
+.call-picture-self {
+  width: 26%;
+  max-width: 130px;
+  aspect-ratio: 4 / 3;
   border-radius: 8px;
   border: 1px solid #444;
   background: #111;
   object-fit: cover;
-  aspect-ratio: 4 / 3;
 }
 
-.call-stage-self-screen {
-  width: 22%;
+.call-pictures-mine .call-picture-self {
+  width: 110px;
+}
+
+.call-picture-self-screen {
   aspect-ratio: 16 / 10;
   object-fit: contain;
 }
 
-.call-stage-tag {
+.call-picture-tag {
   position: absolute;
   top: 8px;
   left: 8px;
@@ -21408,20 +21429,173 @@ body.profile-switcher-editing .profile-switcher-add {
   background: rgba(0, 0, 0, 0.55);
   font-size: 11px;
   color: #ddd;
+  pointer-events: none;
 }
 
-.call-stage-tag-mine {
+.call-picture-tag-low {
   top: auto;
   bottom: 8px;
-  left: 8px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
-.call-stage-controls {
+.call-picture-max,
+.call-picture-hide {
+  position: absolute;
+  top: 8px;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.call-picture-max {
+  right: 40px;
+}
+
+.call-picture-hide {
+  right: 8px;
+}
+
+/* The panel scrolls when the screen is short, with its scrollbar hidden. */
+.call-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.call-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.call-panel-choices {
   display: flex;
-  justify-content: center;
-  gap: 10px;
-  padding: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.call-panel-choices label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.call-panel-choices select {
   background: #262626;
+  color: #fff;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.call-panel-button {
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #262626;
+  color: #fff;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.call-panel-button:hover {
+  background: #333;
+}
+
+.call-panel-readout {
+  font-size: 12px;
+  color: #b2b2b2;
+  font-variant-numeric: tabular-nums;
+}
+
+/* One of their pictures filling the window, above the pill. */
+.call-max {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  background: #000;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.call-max-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* The word for the connection, only while it is worth a word. */
+.call-max-quality {
+  position: absolute;
+  top: calc(var(--chrome-h, 0px) + 12px);
+  left: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  font-size: 12px;
+  color: #ddd;
+}
+
+.call-max-restore {
+  position: absolute;
+  top: calc(var(--chrome-h, 0px) + 12px);
+  right: 12px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* Their other picture rides along the bottom; the strip of controls fades in on movement. */
+.call-max-other {
+  position: absolute;
+  bottom: 72px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(28vw, 320px);
+  padding: 0;
+  border: 1px solid #555;
+  border-radius: 10px;
+  background: #111;
+  overflow: hidden;
+  cursor: pointer;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.call-max-other canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  object-fit: contain;
+}
+
+.call-max-strip {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(20, 20, 20, 0.85);
+  border: 1px solid #333;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.call-max-controls .call-max-strip {
+  opacity: 1;
+}
+
+.call-max-strip svg,
+.call-btn-small svg,
+.call-pill-row .call-btn svg {
+  width: 20px;
+  height: 20px;
 }
 
 .call-btn:disabled {
@@ -21432,13 +21606,6 @@ body.profile-switcher-editing .profile-switcher-add {
 .call-btn-small {
   width: 26px;
   height: 26px;
-}
-
-.call-btn-small svg,
-.call-pill-row .call-btn svg,
-.call-stage-controls svg {
-  width: 20px;
-  height: 20px;
 }
 
 /* The header row is the dialog's grey band, open or closed. */

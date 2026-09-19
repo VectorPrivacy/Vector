@@ -1,6 +1,8 @@
 // The video pipeline of a call, off the main thread: encodes the frames the page
 // captures, ships them to the backend over the loopback socket, decodes what the
-// peer sends and paints it. The page only ever posts frames in and a canvas.
+// peer sends and paints it. The page only ever posts frames in and canvases.
+// A side can send its camera and its screen at once, so everything here is per
+// track: an encoder, a decoder and a canvas for each.
 //
 // Every frame's bytes are copied once, out of the encoder into a pooled buffer that
 // already holds the wire header; the socket sends that buffer as it is.
@@ -22,44 +24,50 @@ function codecString(name, width, height) {
     if (px <= 2097152) return 'avc1.42E028';
     return 'avc1.42E033';
 }
-// Buffers the encoder writes into; the socket copies on send, so they cycle at once.
+// Buffers the encoders write into; the socket copies on send, so they cycle at once.
 const POOL_SIZE = 8;
 const POOL_BYTES = 256 * 1024;
 const MAX_FRAME = 512 * 1024;
-
-let ws = null;
-let canvas = null;
-let ctx = null;
-let encoder = null;
-let decoder = null;
-let codec = null;
-let capture = null; // { kind, width, height, fps, kbps, targetW, targetH, maxH }
-// Scales a frame down when the ladder asks for less than the camera gives; a GPU
-// draw, and a new frame from the canvas, only on the rungs that need it.
-let scaler = null;
-let scalerCtx = null;
-// Frame thinning: the device delivers at its own rate, the rung says how many to keep;
-// the capture timestamps decide, so a camera already at the rung's rate loses none.
-let lastSentUs = -1;
 // The picture the peer sends is painted at its own size, up to what a decoder can
 // reasonably be asked for.
 const MAX_DECODE_PX = 4096 * 2304;
-// The backend names the rung as soon as sending is agreed, which can be before the
-// page has posted its capture spec; the rung waits for it.
-let lastRate = null;
-let seq = 0;
-let skipNext = false;
-let forceKey = true;
+
+let ws = null;
+let codec = null;
 let paused = false;
-let needKey = true;
-let decCodec = null;
-// Decoder errors per codec this link; a second one means the codec, not a frame.
-const decErrors = {};
 const pool = [];
 for (let i = 0; i < POOL_SIZE; i++) pool.push(new ArrayBuffer(POOL_BYTES));
-const enc = { frames: 0, bytes: 0 };
-const dec = { frames: 0 };
 let statsTimer = null;
+// The backend names each rung as soon as sending is agreed, which can be before the
+// page has posted that track's capture spec; the rung waits for it.
+const lastRate = { camera: null, screen: null };
+// Decoder errors per codec this link; a second one means the codec, not a frame.
+const decErrors = {};
+
+// One of these per track, both ways.
+function newTrack(kind) {
+    return {
+        kind,
+        // outgoing
+        capture: null, // { fps, kbps, width, height, targetW, targetH, maxH }
+        encoder: null,
+        seq: 0,
+        skipNext: false,
+        forceKey: true,
+        lastSentUs: -1,
+        scaler: null,
+        scalerCtx: null,
+        enc: { frames: 0, bytes: 0 },
+        // incoming
+        canvas: null,
+        ctx: null,
+        decoder: null,
+        decCodec: null,
+        needKey: true,
+        dec: { frames: 0 },
+    };
+}
+const tracks = { camera: newTrack('camera'), screen: newTrack('screen') };
 
 function send(bytes) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(bytes);
@@ -100,8 +108,7 @@ function close() {
     if (ws) { const w = ws; ws = null; try { w.close(); } catch (_) {} }
     clearInterval(statsTimer);
     statsTimer = null;
-    stopEncoder();
-    resetDecoder();
+    for (const t of Object.values(tracks)) { stopEncoder(t); resetDecoder(t); }
 }
 
 function onSocket(msg) {
@@ -109,97 +116,102 @@ function onSocket(msg) {
     if (msg[0] !== KIND_CONTROL) return;
     let c;
     try { c = JSON.parse(new TextDecoder().decode(msg.subarray(1))); } catch (_) { return; }
+    const t = tracks[c.kind];
     switch (c.t) {
-        case 'rate': setRate(c); break;
-        case 'skip': skipNext = true; break;
-        case 'keyframe': forceKey = true; break;
+        case 'rate': if (t) setRate(t, c); break;
+        case 'skip': if (t) t.skipNext = true; break;
+        case 'keyframe': if (t) t.forceKey = true; break;
         case 'peer':
-            if (c.kind === 'off') resetDecoder();
-            postMessage({ t: 'peer', kind: c.kind });
+            for (const kind of ['camera', 'screen']) if (!c.tracks[kind]) resetDecoder(tracks[kind]);
+            postMessage({ t: 'peer', tracks: c.tracks });
             break;
         case 'pause': paused = !!c.on; break;
         case 'codec':
-            if (codec !== c.codec) { codec = c.codec; stopEncoder(); }
+            if (codec !== c.codec) { codec = c.codec; for (const tr of Object.values(tracks)) stopEncoder(tr); }
             break;
     }
 }
 
 // ── outgoing ──
 
-function startCapture(spec) {
-    capture = { kind: spec.kind, fps: spec.fps, kbps: spec.kbps, width: 0, height: 0, targetW: 0, targetH: 0, maxH: 0 };
-    forceKey = true;
-    seq = 0;
-    lastSentUs = -1;
-    if (lastRate) setRate(lastRate);
+function startCapture(t, spec) {
+    t.capture = { fps: spec.fps, kbps: spec.kbps, width: 0, height: 0, targetW: 0, targetH: 0, maxH: 0 };
+    t.forceKey = true;
+    t.seq = 0;
+    t.lastSentUs = -1;
+    if (lastRate[t.kind]) setRate(t, lastRate[t.kind]);
 }
 
-function stopEncoder() {
-    if (encoder) { try { encoder.close(); } catch (_) {} }
-    encoder = null;
+function stopEncoder(t) {
+    if (t.encoder) { try { t.encoder.close(); } catch (_) {} }
+    t.encoder = null;
 }
 
-function configureEncoder(width, height) {
-    stopEncoder();
-    if (!codec || !capture) return;
-    capture.width = width;
-    capture.height = height;
-    encoder = new VideoEncoder({ output: onChunk, error: (e) => { postMessage({ t: 'error', message: 'encoder: ' + e.message }); stopEncoder(); } });
+function encoderConfig(t, width, height, kbps, fps) {
     // No hardware hint: Chromium reads prefer-hardware as "fail without hardware", and
     // a virtual machine has none. Left to itself it picks the hardware path when there is one.
-    const cfg = {
-        codec: codecString(codec, width, height), width, height,
-        bitrate: capture.kbps * 1000, framerate: capture.fps,
-        latencyMode: 'realtime',
-    };
+    const cfg = { codec: codecString(codec, width, height), width, height, bitrate: kbps * 1000, framerate: fps, latencyMode: 'realtime' };
     if (codec === 'h264') cfg.avc = { format: 'annexb' };
-    if (capture.kind === 'screen') cfg.contentHint = 'detail';
-    encoder.configure(cfg);
-    forceKey = true;
+    if (t.kind === 'screen') cfg.contentHint = 'detail';
+    return cfg;
 }
 
-function setRate(r) {
-    lastRate = r;
-    if (!capture) return;
-    capture.kbps = r.kbps;
-    capture.fps = r.fps;
-    if (capture.kind === 'screen') {
-        capture.maxH = r.height || 0;
+function configureEncoder(t, width, height) {
+    stopEncoder(t);
+    if (!codec || !t.capture) return;
+    t.capture.width = width;
+    t.capture.height = height;
+    t.encoder = new VideoEncoder({
+        output: (chunk) => onChunk(t, chunk),
+        error: (e) => { postMessage({ t: 'error', kind: t.kind, message: 'encoder: ' + e.message }); stopEncoder(t); },
+    });
+    t.encoder.configure(encoderConfig(t, width, height, t.capture.kbps, t.capture.fps));
+    t.forceKey = true;
+}
+
+function setRate(t, r) {
+    lastRate[t.kind] = r;
+    if (!t.capture) return;
+    t.capture.kbps = r.kbps;
+    t.capture.fps = r.fps;
+    if (t.kind === 'screen') {
+        t.capture.maxH = r.height || 0;
     } else {
-        capture.targetW = r.width || 0;
-        capture.targetH = r.height || 0;
+        t.capture.targetW = r.width || 0;
+        t.capture.targetH = r.height || 0;
     }
     // The page asks the device for the new size and rate; whatever still arrives
     // bigger is scaled here.
-    postMessage({ t: 'constrain', width: r.width, height: r.height, fps: r.fps, kind: capture.kind });
-    if (!encoder) return;
+    postMessage({ t: 'constrain', kind: t.kind, width: r.width, height: r.height, fps: r.fps });
+    if (!t.encoder) return;
     try {
-        encoder.configure({ codec: codecString(codec, capture.width, capture.height), width: capture.width, height: capture.height, bitrate: r.kbps * 1000, framerate: r.fps, latencyMode: 'realtime', ...(codec === 'h264' ? { avc: { format: 'annexb' } } : {}) });
+        t.encoder.configure(encoderConfig(t, t.capture.width, t.capture.height, r.kbps, r.fps));
     } catch (_) {}
 }
 
 // The size a captured frame is sent at: the rung's size for a camera, at most the
 // rung's height for a screen, always even, never upscaled.
-function targetSize(cw, ch) {
+function targetSize(t, cw, ch) {
     let w = cw, h = ch;
-    if (capture.kind === 'screen') {
-        if (capture.maxH && h > capture.maxH) { w = Math.round(cw * capture.maxH / ch); h = capture.maxH; }
-    } else if (capture.targetW && capture.targetH && (cw > capture.targetW || ch > capture.targetH)) {
-        const s = Math.min(capture.targetW / cw, capture.targetH / ch);
+    const c = t.capture;
+    if (t.kind === 'screen') {
+        if (c.maxH && h > c.maxH) { w = Math.round(cw * c.maxH / ch); h = c.maxH; }
+    } else if (c.targetW && c.targetH && (cw > c.targetW || ch > c.targetH)) {
+        const s = Math.min(c.targetW / cw, c.targetH / ch);
         w = Math.round(cw * s); h = Math.round(ch * s);
     }
     return [w & ~1, h & ~1];
 }
 
-function onCaptured(captured) {
+function onCaptured(t, captured) {
     let frame = captured;
     try {
-        if (!capture || paused || !ws || skipNext) { skipNext = false; return; }
+        if (!t.capture || paused || !ws || t.skipNext) { t.skipNext = false; return; }
         // Keep the rung's share of the device's frames, by their timestamps.
-        const minGapUs = 1e6 / capture.fps * 0.9;
-        if (lastSentUs >= 0 && captured.timestamp - lastSentUs < minGapUs) return;
-        lastSentUs = captured.timestamp;
-        const [w, h] = targetSize(captured.displayWidth, captured.displayHeight);
+        const minGapUs = 1e6 / t.capture.fps * 0.9;
+        if (t.lastSentUs >= 0 && captured.timestamp - t.lastSentUs < minGapUs) return;
+        t.lastSentUs = captured.timestamp;
+        const [w, h] = targetSize(t, captured.displayWidth, captured.displayHeight);
         if (!w || !h) return;
         if (w !== captured.displayWidth || h !== captured.displayHeight) {
             if (w >= captured.displayWidth - 1 && h >= captured.displayHeight - 1) {
@@ -207,56 +219,56 @@ function onCaptured(captured) {
                 // off the edge is a new view of the same buffer, not a copy.
                 frame = new VideoFrame(captured, { visibleRect: { x: 0, y: 0, width: w, height: h } });
             } else {
-                if (!scaler || scaler.width !== w || scaler.height !== h) {
-                    scaler = new OffscreenCanvas(w, h);
-                    scalerCtx = scaler.getContext('2d', { alpha: false, desynchronized: true });
+                if (!t.scaler || t.scaler.width !== w || t.scaler.height !== h) {
+                    t.scaler = new OffscreenCanvas(w, h);
+                    t.scalerCtx = t.scaler.getContext('2d', { alpha: false, desynchronized: true });
                 }
-                scalerCtx.drawImage(captured, 0, 0, w, h);
-                frame = new VideoFrame(scaler, { timestamp: captured.timestamp });
+                t.scalerCtx.drawImage(captured, 0, 0, w, h);
+                frame = new VideoFrame(t.scaler, { timestamp: captured.timestamp });
             }
         }
-        if (!encoder || w !== capture.width || h !== capture.height) {
-            configureEncoder(w, h);
-            if (!encoder) return;
+        if (!t.encoder || w !== t.capture.width || h !== t.capture.height) {
+            configureEncoder(t, w, h);
+            if (!t.encoder) return;
         }
         // Encoder backlog means the machine is behind: dropping a capture is safe,
         // encoding one that will never send is not.
-        if (encoder.encodeQueueSize > 2) return;
-        encoder.encode(frame, { keyFrame: forceKey });
-        forceKey = false;
+        if (t.encoder.encodeQueueSize > 2) return;
+        t.encoder.encode(frame, { keyFrame: t.forceKey });
+        t.forceKey = false;
     } finally {
         if (frame !== captured) frame.close();
         captured.close();
     }
 }
 
-function onChunk(chunk) {
+function onChunk(t, chunk) {
     const len = chunk.byteLength;
     if (1 + HEADER_LEN + len > MAX_FRAME) return;
     let buf = pool.pop();
     if (!buf || buf.byteLength < 1 + HEADER_LEN + len) buf = new ArrayBuffer(Math.max(POOL_BYTES, 1 + HEADER_LEN + len));
     const view = new DataView(buf);
     view.setUint8(0, KIND_FRAME);
-    view.setUint32(1, seq >>> 0);
-    seq = (seq + 1) >>> 0;
+    view.setUint32(1, t.seq >>> 0);
+    t.seq = (t.seq + 1) >>> 0;
     view.setBigUint64(5, BigInt(Math.max(0, Math.round(chunk.timestamp))));
-    view.setUint8(13, (chunk.type === 'key' ? FLAG_KEY : 0) | (capture && capture.kind === 'screen' ? FLAG_SCREEN : 0));
+    view.setUint8(13, (chunk.type === 'key' ? FLAG_KEY : 0) | (t.kind === 'screen' ? FLAG_SCREEN : 0));
     view.setUint8(14, CODEC_BYTE[codec] || 0);
     view.setUint16(15, 0);
     chunk.copyTo(new Uint8Array(buf, 1 + HEADER_LEN, len));
     send(new Uint8Array(buf, 0, 1 + HEADER_LEN + len));
-    enc.frames++;
-    enc.bytes += len;
+    t.enc.frames++;
+    t.enc.bytes += len;
     if (pool.length < POOL_SIZE) pool.push(buf);
 }
 
 // ── incoming ──
 
-function resetDecoder() {
-    if (decoder) { try { decoder.close(); } catch (_) {} }
-    decoder = null;
-    decCodec = null;
-    needKey = true;
+function resetDecoder(t) {
+    if (t.decoder) { try { t.decoder.close(); } catch (_) {} }
+    t.decoder = null;
+    t.decCodec = null;
+    t.needKey = true;
 }
 
 function onFrame(frame) {
@@ -266,74 +278,81 @@ function onFrame(frame) {
     const name = CODEC_NAME[view.getUint8(13)];
     const ts = Number(view.getBigUint64(4) & 0x1fffffffffffffn);
     const key = (flags & FLAG_KEY) !== 0;
+    const t = (flags & FLAG_SCREEN) ? tracks.screen : tracks.camera;
     if (!name) return;
-    if (!decoder || decCodec !== name) {
-        if (!key) { needKey = true; return; }
-        resetDecoder();
-        decoder = new VideoDecoder({
-            output: paint,
+    if (!t.decoder || t.decCodec !== name) {
+        if (!key) { t.needKey = true; return; }
+        resetDecoder(t);
+        t.decoder = new VideoDecoder({
+            output: (vf) => paint(t, vf),
             error: (e) => {
                 decErrors[name] = (decErrors[name] || 0) + 1;
-                resetDecoder();
+                resetDecoder(t);
                 if (decErrors[name] >= 2) {
                     postMessage({ t: 'decode_error', message: e.message, codec: name });
                     control({ t: 'unsupported', codec: name });
                 } else {
-                    control({ t: 'lost' });
+                    control({ t: 'lost', kind: t.kind });
                 }
             },
         });
-        decoder.configure({ codec: name === 'h264' ? H264_DECODE : 'vp8', optimizeForLatency: true });
-        decCodec = name;
+        t.decoder.configure({ codec: name === 'h264' ? H264_DECODE : 'vp8', optimizeForLatency: true });
+        t.decCodec = name;
     }
-    if (needKey && !key) return;
-    needKey = false;
+    if (t.needKey && !key) return;
+    t.needKey = false;
     try {
-        decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data: frame.subarray(HEADER_LEN) }));
+        t.decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data: frame.subarray(HEADER_LEN) }));
     } catch (_) {
-        resetDecoder();
-        control({ t: 'lost' });
+        resetDecoder(t);
+        control({ t: 'lost', kind: t.kind });
     }
 }
 
-function paint(vf) {
+function paint(t, vf) {
     try {
-        if (!canvas) return;
+        if (!t.canvas) return;
         if (vf.displayWidth * vf.displayHeight > MAX_DECODE_PX) {
-            resetDecoder();
-            control({ t: 'lost' });
+            resetDecoder(t);
+            control({ t: 'lost', kind: t.kind });
             return;
         }
-        if (canvas.width !== vf.displayWidth || vf.displayHeight !== canvas.height) {
-            canvas.width = vf.displayWidth;
-            canvas.height = vf.displayHeight;
-            postMessage({ t: 'painted', width: vf.displayWidth, height: vf.displayHeight });
+        if (t.canvas.width !== vf.displayWidth || t.canvas.height !== vf.displayHeight) {
+            t.canvas.width = vf.displayWidth;
+            t.canvas.height = vf.displayHeight;
+            postMessage({ t: 'painted', kind: t.kind, width: vf.displayWidth, height: vf.displayHeight });
         }
-        ctx.drawImage(vf, 0, 0);
-        dec.frames++;
+        t.ctx.drawImage(vf, 0, 0);
+        t.dec.frames++;
     } finally {
         vf.close();
     }
 }
 
 function stats() {
-    const s = { fps: enc.frames, kbps: Math.round(enc.bytes * 8 / 1000), width: capture ? capture.width : 0, height: capture ? capture.height : 0 };
-    if (capture) control({ t: 'stats', ...s });
-    postMessage({ t: 'stats', enc: s, decFps: dec.frames });
-    enc.frames = 0; enc.bytes = 0; dec.frames = 0;
+    const report = {};
+    for (const t of Object.values(tracks)) {
+        const s = { fps: t.enc.frames, kbps: Math.round(t.enc.bytes * 8 / 1000), width: t.capture ? t.capture.width : 0, height: t.capture ? t.capture.height : 0 };
+        if (t.capture) control({ t: 'stats', kind: t.kind, ...s });
+        report[t.kind] = { enc: s, decFps: t.dec.frames };
+        t.enc.frames = 0; t.enc.bytes = 0; t.dec.frames = 0;
+    }
+    postMessage({ t: 'stats', tracks: report });
 }
 
 self.onmessage = (e) => {
     const m = e.data;
+    const t = tracks[m.kind];
     switch (m.t) {
         case 'open': open(m.url, m.caps); break;
         case 'close': close(); break;
         case 'canvas':
-            canvas = m.canvas;
-            ctx = canvas ? canvas.getContext('2d', { alpha: false, desynchronized: true }) : null;
+            if (!t) break;
+            t.canvas = m.canvas;
+            t.ctx = m.canvas ? m.canvas.getContext('2d', { alpha: false, desynchronized: true }) : null;
             break;
-        case 'capture': startCapture(m); break;
-        case 'stop': capture = null; lastRate = null; stopEncoder(); break;
-        case 'frame': onCaptured(m.frame); break;
+        case 'capture': if (t) startCapture(t, m); break;
+        case 'stop': if (t) { t.capture = null; lastRate[t.kind] = null; stopEncoder(t); } break;
+        case 'frame': if (t) onCaptured(t, m.frame); else m.frame.close(); break;
     }
 };

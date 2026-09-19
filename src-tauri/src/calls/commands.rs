@@ -36,10 +36,16 @@ pub async fn call_video_link() -> Result<String, String> {
     session::video_link_url()
 }
 
-/// Start or stop sending the camera or the screen.
+/// Start or stop sending the camera or the screen; the other one is unaffected.
 #[tauri::command]
-pub async fn call_video_set(kind: VideoKind) -> Result<(), String> {
-    session::set_video(kind).await
+pub async fn call_video_set(kind: VideoKind, on: bool) -> Result<(), String> {
+    session::set_video(kind, on).await
+}
+
+/// A held quality rung and frame rate for one of our pictures; None lets the ladder decide.
+#[tauri::command]
+pub async fn call_video_prefs(kind: VideoKind, rung: Option<u32>, fps: Option<u32>) -> Result<(), String> {
+    session::set_video_prefs(kind, rung.map(|r| r as usize), fps)
 }
 
 /// Our view of the peer's picture is hidden or shown; they may stop sending.
