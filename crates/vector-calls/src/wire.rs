@@ -52,6 +52,8 @@ pub enum Control {
     KeyframeRequest,
     /// My view of your video is hidden; stop spending upload on it (or resume).
     VideoPause { on: bool },
+    /// My decoder cannot take this codec after all; send with another.
+    VideoUnsupported { codec: VideoCodec },
     /// A message from a newer peer: skipped, never fatal.
     #[serde(other)]
     Unknown,

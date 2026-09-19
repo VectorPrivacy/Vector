@@ -296,6 +296,8 @@
                     <Avatar src={peer?.avatar} size={72} />
                     <span>Their camera is off</span>
                 </div>
+            {:else if !v.peerWidth}
+                <div class="call-stage-idle"><span>Waiting for their {c.videoPeer === 'screen' ? 'screen' : 'camera'}…</span></div>
             {:else if c.videoPeer === 'screen'}
                 <span class="call-stage-tag">{peer?.name || 'They'} is sharing a screen</span>
             {/if}
@@ -347,6 +349,9 @@
                 {:else if live && canSend}
                     <button class="call-btn" title="Turn the camera on" onclick={() => h.setVideo('camera')}>
                         <span class="icon icon-video"></span>
+                    </button>
+                    <button class="call-btn" title="Share the screen" onclick={() => h.setVideo('screen')}>
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 20h8M12 16v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                     </button>
                 {/if}
                 <button class="call-btn" class:call-btn-on={c.muted} title={c.muted ? 'Unmute microphone' : 'Mute microphone'} onclick={() => h.setMuted(!c.muted)}>

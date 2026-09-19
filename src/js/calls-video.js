@@ -12,6 +12,7 @@ let selfKind = 'off';
 let captureVideo = null;
 let selfPreviewEl = null;
 let videoProbe = null;
+let decodeErrorShown = false;
 
 /** What this device can encode and decode; told to the backend for the next offer or answer. */
 async function probeVideoCaps() {
@@ -54,6 +55,11 @@ function ensureVideoWorker() {
             case 'stats': VectorSvelte.setVideoStats(m.enc, m.decFps); break;
             case 'constrain': constrainCapture(m); break;
             case 'error': VectorSvelte.showToast(m.message); stopVideo(); break;
+            // Their picture cannot be decoded here; said once per call, then the peer
+            // is asked for keyframes in the hope a later one works.
+            case 'decode_error':
+                if (!decodeErrorShown) { decodeErrorShown = true; VectorSvelte.showToast(`Could not decode their ${m.codec} video here (${m.message}); asking them for another codec`); }
+                break;
         }
     };
     return videoWorker;
@@ -74,6 +80,7 @@ async function callVideoOnState(s) {
     if (videoProbe) await videoProbe;
     if (videoLinkCallId === s.id || !videoCaps.decode.length) return;
     videoLinkCallId = s.id;
+    decodeErrorShown = false;
     invoke('call_video_link').then((url) => {
         if (videoLinkCallId !== s.id) return;
         ensureVideoWorker().postMessage({ t: 'open', url, caps: videoCaps });

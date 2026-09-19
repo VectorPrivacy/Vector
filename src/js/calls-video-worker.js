@@ -53,6 +53,8 @@ let forceKey = true;
 let paused = false;
 let needKey = true;
 let decCodec = null;
+// Decoder errors per codec this link; a second one means the codec, not a frame.
+const decErrors = {};
 const pool = [];
 for (let i = 0; i < POOL_SIZE; i++) pool.push(new ArrayBuffer(POOL_BYTES));
 const enc = { frames: 0, bytes: 0 };
@@ -143,10 +145,12 @@ function configureEncoder(width, height) {
     capture.width = width;
     capture.height = height;
     encoder = new VideoEncoder({ output: onChunk, error: (e) => { postMessage({ t: 'error', message: 'encoder: ' + e.message }); stopEncoder(); } });
+    // No hardware hint: Chromium reads prefer-hardware as "fail without hardware", and
+    // a virtual machine has none. Left to itself it picks the hardware path when there is one.
     const cfg = {
         codec: codecString(codec, width, height), width, height,
         bitrate: capture.kbps * 1000, framerate: capture.fps,
-        latencyMode: 'realtime', hardwareAcceleration: 'prefer-hardware',
+        latencyMode: 'realtime',
     };
     if (codec === 'h264') cfg.avc = { format: 'annexb' };
     if (capture.kind === 'screen') cfg.contentHint = 'detail';
@@ -170,7 +174,7 @@ function setRate(r) {
     postMessage({ t: 'constrain', width: r.width, height: r.height, fps: r.fps, kind: capture.kind });
     if (!encoder) return;
     try {
-        encoder.configure({ codec: codecString(codec, capture.width, capture.height), width: capture.width, height: capture.height, bitrate: r.kbps * 1000, framerate: r.fps, latencyMode: 'realtime', hardwareAcceleration: 'prefer-hardware', ...(codec === 'h264' ? { avc: { format: 'annexb' } } : {}) });
+        encoder.configure({ codec: codecString(codec, capture.width, capture.height), width: capture.width, height: capture.height, bitrate: r.kbps * 1000, framerate: r.fps, latencyMode: 'realtime', ...(codec === 'h264' ? { avc: { format: 'annexb' } } : {}) });
     } catch (_) {}
 }
 
@@ -266,8 +270,20 @@ function onFrame(frame) {
     if (!decoder || decCodec !== name) {
         if (!key) { needKey = true; return; }
         resetDecoder();
-        decoder = new VideoDecoder({ output: paint, error: () => { resetDecoder(); control({ t: 'lost' }); } });
-        decoder.configure({ codec: name === 'h264' ? H264_DECODE : 'vp8', optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+        decoder = new VideoDecoder({
+            output: paint,
+            error: (e) => {
+                decErrors[name] = (decErrors[name] || 0) + 1;
+                resetDecoder();
+                if (decErrors[name] >= 2) {
+                    postMessage({ t: 'decode_error', message: e.message, codec: name });
+                    control({ t: 'unsupported', codec: name });
+                } else {
+                    control({ t: 'lost' });
+                }
+            },
+        });
+        decoder.configure({ codec: name === 'h264' ? H264_DECODE : 'vp8', optimizeForLatency: true });
         decCodec = name;
     }
     if (needKey && !key) return;

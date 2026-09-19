@@ -295,6 +295,12 @@ async fn outbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>, mut 
                         shared.need_key_in.store(true, Ordering::Relaxed);
                         request_keyframe(&shared, &hooks).await;
                     }
+                    FromLink::Unsupported { codec } => {
+                        if shared.peer_video.load(Ordering::Relaxed) {
+                            let mut send = hooks.control.lock().await;
+                            let _ = tokio::time::timeout(Duration::from_secs(1), super::transport::write_control(&mut *send, &Control::VideoUnsupported { codec })).await;
+                        }
+                    }
                     FromLink::Unknown => {}
                 },
                 None => {}

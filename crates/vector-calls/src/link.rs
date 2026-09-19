@@ -40,6 +40,8 @@ pub enum FromLink {
     Stats { fps: u32, kbps: u32, width: u32, height: u32 },
     /// My decoder lost the chain: ask the peer for a keyframe.
     Lost,
+    /// My decoder refuses this codec outright: ask the peer to send another.
+    Unsupported { codec: VideoCodec },
     #[serde(other)]
     Unknown,
 }

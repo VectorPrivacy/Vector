@@ -833,6 +833,22 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                         emit_state(&s);
                     }
                 }
+                Ok(Control::VideoUnsupported { codec }) => {
+                    let again = with_call_id(&ctl_id, |c| {
+                        c.peer_decodes.retain(|d| d != codec.name());
+                        c.video_mine != VideoKind::Off
+                    })
+                    .unwrap_or(false);
+                    if again {
+                        // Send with what is left; with nothing left, video stops and the UI says so.
+                        let kind = with_call_id(&ctl_id, |c| c.video_mine).unwrap_or(VideoKind::Off);
+                        if let Err(e) = set_video(kind).await {
+                            log_warn!("[CALLS] Peer cannot decode our video: {e}");
+                            let _ = set_video(VideoKind::Off).await;
+                            vector_core::traits::emit_event("call_video_refused", &serde_json::json!({ "id": ctl_id }));
+                        }
+                    }
+                }
                 Ok(Control::Hello { .. }) | Ok(Control::Unknown) => {}
                 Err(_) => break,
             }

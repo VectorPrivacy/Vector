@@ -21435,6 +21435,7 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .call-btn-small svg,
+.call-pill-row .call-btn svg,
 .call-stage-controls svg {
   width: 20px;
   height: 20px;
