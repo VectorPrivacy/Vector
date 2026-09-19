@@ -2,6 +2,7 @@
 
 use super::session::{self, CallState};
 use super::settings::{self, AudioSettings};
+use super::transport::VideoKind;
 
 #[cfg(target_os = "android")]
 fn ensure_microphone() -> Result<(), String> {
@@ -22,10 +23,35 @@ fn ensure_microphone() -> Result<(), String> {
 }
 
 /// Ring `npub`. Returns the ringing state; the rest arrives as `call_state` events.
+/// `video` only tells the other side what kind of call this is; no camera starts here.
 #[tauri::command]
-pub async fn call_start(npub: String) -> Result<CallState, String> {
+pub async fn call_start(npub: String, video: Option<bool>) -> Result<CallState, String> {
     ensure_microphone()?;
-    session::start(npub).await
+    session::start(npub, video.unwrap_or(false)).await
+}
+
+/// The loopback socket the webview sends its encoded video through.
+#[tauri::command]
+pub async fn call_video_link() -> Result<String, String> {
+    session::video_link_url()
+}
+
+/// Start or stop sending the camera or the screen.
+#[tauri::command]
+pub async fn call_video_set(kind: VideoKind) -> Result<(), String> {
+    session::set_video(kind).await
+}
+
+/// Our view of the peer's picture is hidden or shown; they may stop sending.
+#[tauri::command]
+pub async fn call_video_pause(on: bool) -> Result<(), String> {
+    session::set_video_pause(on).await
+}
+
+/// What the webview found it can encode and decode, from its boot probe.
+#[tauri::command]
+pub async fn call_video_caps(encode: Vec<String>, decode: Vec<String>) {
+    session::set_video_caps(encode, decode);
 }
 
 #[tauri::command]

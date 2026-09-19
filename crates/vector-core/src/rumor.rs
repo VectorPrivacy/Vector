@@ -127,6 +127,10 @@ pub enum RumorProcessingResult {
         node_addr: Option<String>,
         sender_npub: String,
         created_at: u64,
+        /// Codecs the sender decodes, comma separated; absent from peers without video.
+        video: Option<String>,
+        /// "audio" or "video": what kind of call the offer is for.
+        media: Option<String>,
     },
     /// Unknown event type - stored for future compatibility
     /// The frontend will render this as "Unknown Event" placeholder
@@ -993,6 +997,8 @@ fn process_app_specific(
             node_addr: tag("call-node-addr"),
             sender_npub,
             created_at: rumor.created_at.as_secs(),
+            video: tag("call-video"),
+            media: tag("call-media"),
         });
     }
 

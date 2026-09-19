@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-video-set"
+description = "Enables the call_video_set command without any pre-configured scope."
+commands.allow = ["call_video_set"]
+
+[[permission]]
+identifier = "deny-call-video-set"
+description = "Denies the call_video_set command without any pre-configured scope."
+commands.deny = ["call_video_set"]

@@ -5,7 +5,8 @@
 //! call id it was started for and does nothing if the call it finds is another.
 
 use super::media::MediaEngine;
-use super::transport::{read_control, write_control, Control, CALL_ALPN};
+use super::transport::{read_control, write_control, Control, VideoCodec, VideoKind, CALL_ALPN};
+use super::video::{Hooks, VideoSnapshot, VideoTrack};
 use crate::miniapps::realtime::{decode_node_addr, encode_node_addr, IrohState};
 use crate::miniapps::state::MiniAppsState;
 use crate::{active_trusted_relays, my_public_key, nostr_client, TAURI_APP};
@@ -49,6 +50,15 @@ pub struct CallState {
     pub volume: f32,
     /// Milliseconds since the call went active; 0 before that.
     pub active_ms: u64,
+    /// What I am sending on video, and what the peer is.
+    pub video_mine: VideoKind,
+    pub video_peer: VideoKind,
+    /// Codecs the peer can decode, from their offer or answer; empty means no video.
+    pub peer_decodes: Vec<String>,
+    /// The offer asked for a video call.
+    pub video_offered: bool,
+    /// The peer has hidden our picture; the camera can rest.
+    pub paused_by_peer: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -77,6 +87,7 @@ pub struct CallStats {
     pub bitrate_kbps: u32,
     /// Percent of our packets the network dropped in the last second.
     pub net_loss: f32,
+    pub video: VideoSnapshot,
 }
 
 struct Call {
@@ -92,6 +103,12 @@ struct Call {
     muted: bool,
     peer_muted: bool,
     volume: f32,
+    video: Option<VideoTrack>,
+    video_mine: VideoKind,
+    video_peer: VideoKind,
+    peer_decodes: Vec<String>,
+    video_offered: bool,
+    paused_by_peer: bool,
 }
 
 impl Call {
@@ -106,8 +123,40 @@ impl Call {
             peer_muted: self.peer_muted,
             volume: self.volume,
             active_ms: self.active_since.map_or(0, |t| t.elapsed().as_millis() as u64),
+            video_mine: self.video_mine,
+            video_peer: self.video_peer,
+            peer_decodes: self.peer_decodes.clone(),
+            video_offered: self.video_offered,
+            paused_by_peer: self.paused_by_peer,
         }
     }
+}
+
+/// What this device's webview can encode and decode, from its boot probe. Sent on
+/// every offer and answer so the other side knows whether to offer video at all.
+static VIDEO_CAPS: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::new(), Vec::new()));
+
+pub fn set_video_caps(encode: Vec<String>, decode: Vec<String>) {
+    *VIDEO_CAPS.lock().unwrap_or_else(|e| e.into_inner()) = (encode, decode);
+}
+
+fn my_decodes() -> Vec<String> {
+    VIDEO_CAPS.lock().unwrap_or_else(|e| e.into_inner()).1.clone()
+}
+
+/// The codec to send with: the first of ours the peer decodes, H.264 first.
+fn pick_codec(peer_decodes: &[String]) -> Option<VideoCodec> {
+    let mine = VIDEO_CAPS.lock().unwrap_or_else(|e| e.into_inner()).0.clone();
+    [VideoCodec::H264, VideoCodec::Vp8]
+        .into_iter()
+        .find(|c| mine.iter().any(|m| m == c.name()) && peer_decodes.iter().any(|p| p == c.name()))
+}
+
+fn parse_decodes(tag: Option<&str>) -> Vec<String> {
+    tag.unwrap_or("")
+        .split(',')
+        .filter_map(|c| VideoCodec::from_name(c.trim()).map(|c| c.name().to_string()))
+        .collect()
 }
 
 static CALL: OnceLock<Mutex<Option<Call>>> = OnceLock::new();
@@ -145,7 +194,7 @@ async fn iroh() -> Result<Arc<IrohState>, String> {
 
 /// Gift-wraps one signal to the peer. The relay-only address rides along on offers and
 /// answers; an offer also carries an expiration so a stale one is dropped by relays too.
-async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>) -> bool {
+async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>, offer_video: bool) -> bool {
     let Some(client) = nostr_client() else { return false };
     let Some(me) = my_public_key() else { return false };
     let Ok(pubkey) = PublicKey::from_bech32(peer) else { return false };
@@ -160,6 +209,13 @@ async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>
     }
     if signal == "offer" {
         builder = builder.tag(Tag::expiration(Timestamp::now() + OFFER_TTL_SECS));
+        builder = builder.tag(Tag::custom("call-media", vec![if offer_video { "video" } else { "audio" }]));
+    }
+    if signal == "offer" || signal == "answer" {
+        let decodes = my_decodes();
+        if !decodes.is_empty() {
+            builder = builder.tag(Tag::custom("call-video", vec![decodes.join(",")]));
+        }
     }
     let rumor = builder.finalize_unsigned_with_id(me);
     let relays = active_trusted_relays().await;
@@ -186,7 +242,9 @@ pub fn end(id: &str, reason: &str) {
     for t in call.tasks.drain(..) {
         t.abort();
     }
-    // Media first: its threads hold the connection and the mixer slot.
+    // Media first: its threads hold the connection and the mixer slot. The video
+    // track's drop closes the webview's socket, which stops the camera.
+    drop(call.video.take());
     drop(call.media.take());
     if let Some(conn) = call.conn.take() {
         conn.close(VarInt::from_u32(0), b"bye");
@@ -202,7 +260,7 @@ pub fn end_all(reason: &str) {
     }
 }
 
-pub async fn start(peer: String) -> Result<CallState, String> {
+pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
     if PublicKey::from_bech32(&peer).is_err() {
         return Err("Not a valid npub".into());
     }
@@ -228,6 +286,12 @@ pub async fn start(peer: String) -> Result<CallState, String> {
             muted: false,
             peer_muted: false,
             volume: 1.0,
+            video: None,
+            video_mine: VideoKind::Off,
+            video_peer: VideoKind::Off,
+            peer_decodes: Vec::new(),
+            video_offered: video,
+            paused_by_peer: false,
         };
         let state = call.state(None);
         *guard = Some(call);
@@ -235,7 +299,7 @@ pub async fn start(peer: String) -> Result<CallState, String> {
     };
     emit_state(&state);
 
-    if !send_signal(&peer, &id, "offer", Some(&addr)).await {
+    if !send_signal(&peer, &id, "offer", Some(&addr), video).await {
         end(&id, "send_failed");
         return Err("Could not reach the relays".into());
     }
@@ -251,7 +315,7 @@ fn spawn_ring_timeout(id: String, peer: String, outgoing: bool) {
             return;
         }
         if outgoing {
-            send_signal(&peer, &id, "hangup", None).await;
+            send_signal(&peer, &id, "hangup", None, false).await;
             end(&id, "no_answer");
         } else {
             end(&id, "missed");
@@ -281,7 +345,7 @@ pub async fn accept() -> Result<(), String> {
 
     let iroh = iroh().await?;
     let addr = encode_node_addr(&iroh.get_node_addr()).map_err(|e| e.to_string())?;
-    if !send_signal(&peer, &id, "answer", Some(&addr)).await {
+    if !send_signal(&peer, &id, "answer", Some(&addr), false).await {
         end(&id, "send_failed");
         return Err("Could not reach the relays".into());
     }
@@ -298,7 +362,7 @@ pub async fn accept() -> Result<(), String> {
 
 pub async fn reject() -> Result<(), String> {
     let (id, peer) = with_call(|c| (c.id.clone(), c.peer.clone())).ok_or("No call")?;
-    send_signal(&peer, &id, "reject", None).await;
+    send_signal(&peer, &id, "reject", None, false).await;
     end(&id, "rejected");
     Ok(())
 }
@@ -312,7 +376,7 @@ pub async fn hangup() -> Result<(), String> {
     // Local teardown first: the peer's close must not be what ends our side.
     end(&id, "hangup");
     // The signal reaches a peer whose connection never came up, or one still ringing.
-    send_signal(&peer, &id, "hangup", None).await;
+    send_signal(&peer, &id, "hangup", None, false).await;
     Ok(())
 }
 
@@ -357,6 +421,64 @@ pub async fn set_volume(volume: f32) -> Result<(), String> {
         emit_state(&s);
     }
     Ok(())
+}
+
+/// The socket the webview pushes its video through.
+pub fn video_link_url() -> Result<String, String> {
+    super::link::url()
+}
+
+/// Start or stop sending video. The codec is the first of ours the peer decodes.
+pub async fn set_video(kind: VideoKind) -> Result<(), String> {
+    let control = with_call(|c| {
+        if c.phase != Phase::Active {
+            return Err("Not in a call".to_string());
+        }
+        let Some(track) = c.video.as_ref() else { return Err("No video track".to_string()) };
+        if kind != VideoKind::Off {
+            let codec = pick_codec(&c.peer_decodes).ok_or("They cannot receive video")?;
+            track.set_codec(codec);
+        }
+        c.video_mine = kind;
+        Ok(c.control.clone())
+    })
+    .unwrap_or(Err("No call".into()))?;
+    if let Some(s) = snapshot() {
+        emit_state(&s);
+    }
+    if let Some(control) = control {
+        let mut send = control.lock().await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { kind })).await;
+    }
+    Ok(())
+}
+
+/// Our view of their picture is hidden (or shown again): they may stop sending.
+pub async fn set_video_pause(on: bool) -> Result<(), String> {
+    let control = with_call(|c| c.control.clone()).ok_or("No call")?;
+    if let Some(control) = control {
+        let mut send = control.lock().await;
+        let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::VideoPause { on })).await;
+    }
+    Ok(())
+}
+
+/// The webview's socket closed under a call: whatever it was sending has stopped.
+async fn on_link_closed(id: &str) {
+    let control = with_call_id(id, |c| {
+        if c.video_mine == VideoKind::Off {
+            return None;
+        }
+        c.video_mine = VideoKind::Off;
+        c.control.clone()
+    })
+    .flatten();
+    let Some(control) = control else { return };
+    if let Some(s) = snapshot() {
+        emit_state(&s);
+    }
+    let mut send = control.lock().await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), write_control(&mut *send, &Control::Video { kind: VideoKind::Off })).await;
 }
 
 /// The microphone test outside a call: the capture chain alone, feeding the meter.
@@ -450,7 +572,7 @@ async fn restart_media(id: &str, conn: Connection) {
 }
 
 /// A signal from the peer, already validated as coming from `sender`.
-pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Option<&str>, created_at: u64) {
+pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Option<&str>, created_at: u64, video: Option<&str>, media: Option<&str>) {
     log_info!("[CALLS] {signal} from {sender} for call {call_id}");
     match signal {
         "offer" => {
@@ -482,6 +604,12 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                             muted: false,
                             peer_muted: false,
                             volume: 1.0,
+                            video: None,
+                            video_mine: VideoKind::Off,
+                            video_peer: VideoKind::Off,
+                            peer_decodes: parse_decodes(video),
+                            video_offered: media == Some("video"),
+                            paused_by_peer: false,
                         };
                         let state = call.state(None);
                         *guard = Some(call);
@@ -495,7 +623,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                     spawn_ring_timeout(call_id.to_string(), sender.to_string(), false);
                 }
                 None => {
-                    send_signal(sender, call_id, "busy", None).await;
+                    send_signal(sender, call_id, "busy", None, false).await;
                 }
             }
         }
@@ -507,6 +635,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
             let accepted = with_call_id(call_id, |c| {
                 if c.outgoing && c.peer == sender && c.phase == Phase::Ringing {
                     c.phase = Phase::Connecting;
+                    c.peer_decodes = parse_decodes(video);
                     true
                 } else {
                     false
@@ -520,7 +649,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                 emit_state(&s);
             }
             // The peer's other devices are still ringing; tell them which one answered.
-            send_signal(sender, call_id, "taken", node_addr).await;
+            send_signal(sender, call_id, "taken", node_addr, false).await;
             let id = call_id.to_string();
             let peer = sender.to_string();
             let task = vector_core::db::spawn_bound(async move {
@@ -528,7 +657,7 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                     Ok((conn, send, recv)) => attach(&id, conn, send, recv).await,
                     Err(e) => {
                         log_warn!("[CALLS] Connect failed: {e}");
-                        send_signal(&peer, &id, "hangup", None).await;
+                        send_signal(&peer, &id, "hangup", None, false).await;
                         end(&id, "connect_failed");
                     }
                 }
@@ -607,7 +736,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
             log_warn!("[CALLS] Media failed: {e}");
             let peer = with_call_id(id, |c| c.peer.clone());
             if let Some(peer) = peer {
-                send_signal(&peer, id, "hangup", None).await;
+                send_signal(&peer, id, "hangup", None, false).await;
             }
             conn.close(VarInt::from_u32(3), b"no audio");
             end(id, "audio_failed");
@@ -623,10 +752,24 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
     let control = Arc::new(tokio::sync::Mutex::new(send));
     let stats = Arc::clone(&media.stats);
 
+    let video = VideoTrack::start(
+        conn.clone(),
+        Hooks {
+            call_id: id.to_string(),
+            control: Arc::clone(&control),
+            on_link_closed: Arc::new(|id: &str| {
+                let id = id.to_string();
+                vector_core::db::spawn_bound(async move { on_link_closed(&id).await });
+            }),
+            on_caps: Arc::new(|encode, decode| set_video_caps(encode, decode)),
+        },
+    );
+    let video_stats = Arc::clone(&video.stats);
     let installed = with_call_id(id, |c| {
         c.conn = Some(conn.clone());
         c.media = Some(media);
         c.control = Some(Arc::clone(&control));
+        c.video = Some(video);
         c.phase = Phase::Active;
         c.active_since = Some(Instant::now());
     })
@@ -654,7 +797,36 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                     end(&ctl_id, "hangup");
                     break;
                 }
-                Ok(Control::Hello { .. }) => {}
+                Ok(Control::Video { kind }) => {
+                    with_call_id(&ctl_id, |c| {
+                        c.video_peer = kind;
+                        if let Some(v) = c.video.as_ref() {
+                            v.set_peer_kind(kind);
+                        }
+                    });
+                    if let Some(s) = snapshot() {
+                        emit_state(&s);
+                    }
+                }
+                Ok(Control::KeyframeRequest) => {
+                    with_call_id(&ctl_id, |c| {
+                        if let Some(v) = c.video.as_ref() {
+                            v.force_keyframe();
+                        }
+                    });
+                }
+                Ok(Control::VideoPause { on }) => {
+                    with_call_id(&ctl_id, |c| {
+                        c.paused_by_peer = on;
+                        if let Some(v) = c.video.as_ref() {
+                            v.set_paused(on);
+                        }
+                    });
+                    if let Some(s) = snapshot() {
+                        emit_state(&s);
+                    }
+                }
+                Ok(Control::Hello { .. }) | Ok(Control::Unknown) => {}
                 Err(_) => break,
             }
         }
@@ -723,6 +895,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 jitter_ms: stats.jitter_ms.load(Ordering::Relaxed),
                 bitrate_kbps: stats.bitrate_kbps.load(Ordering::Relaxed),
                 net_loss: stats.net_loss(),
+                video: video_stats.snapshot(),
             };
             vector_core::traits::emit_event("call_stats", &payload);
         }

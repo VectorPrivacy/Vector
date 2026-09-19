@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-video-caps"
+description = "Enables the call_video_caps command without any pre-configured scope."
+commands.allow = ["call_video_caps"]
+
+[[permission]]
+identifier = "deny-call-video-caps"
+description = "Denies the call_video_caps command without any pre-configured scope."
+commands.deny = ["call_video_caps"]

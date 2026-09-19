@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-video-link"
+description = "Enables the call_video_link command without any pre-configured scope."
+commands.allow = ["call_video_link"]
+
+[[permission]]
+identifier = "deny-call-video-link"
+description = "Denies the call_video_link command without any pre-configured scope."
+commands.deny = ["call_video_link"]

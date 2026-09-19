@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-video-pause"
+description = "Enables the call_video_pause command without any pre-configured scope."
+commands.allow = ["call_video_pause"]
+
+[[permission]]
+identifier = "deny-call-video-pause"
+description = "Denies the call_video_pause command without any pre-configured scope."
+commands.deny = ["call_video_pause"]

@@ -451,7 +451,7 @@ pub(crate) async fn tauri_commit_prepared_event_with(
                 let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at, vector_core::db::wrappers::TRANSPORT_NIP17);
                 return handle_webxdc_peer_advertisement(event_id, topic_id, node_addr, sender_npub, *created_at, contact).await;
             }
-            RumorProcessingResult::CallSignal { call_id, signal, node_addr, sender_npub, created_at, .. } => {
+            RumorProcessingResult::CallSignal { call_id, signal, node_addr, sender_npub, created_at, video, media, .. } => {
                 {
                     let mut cache = WRAPPER_ID_CACHE.lock().await;
                     cache.insert(*wrapper_event_id_bytes);
@@ -459,7 +459,7 @@ pub(crate) async fn tauri_commit_prepared_event_with(
                 let _ = db::save_processed_wrapper(wrapper_event_id_bytes, wrapper_created_at, vector_core::db::wrappers::TRANSPORT_NIP17);
                 // Only the DM's other party may signal; a group member cannot ring us through a channel.
                 if contact == sender_npub {
-                    crate::calls::session::on_signal(sender_npub, call_id, signal, node_addr.as_deref(), *created_at).await;
+                    crate::calls::session::on_signal(sender_npub, call_id, signal, node_addr.as_deref(), *created_at, video.as_deref(), media.as_deref()).await;
                 }
                 return true;
             }

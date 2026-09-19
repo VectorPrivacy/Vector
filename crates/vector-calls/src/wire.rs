@@ -1,6 +1,7 @@
 //! The call's wire format over one Iroh connection: a reliable control stream for
-//! the few messages that must arrive, and unreliable QUIC datagrams for audio,
-//! where a late frame is worth less than nothing.
+//! the few messages that must arrive, unreliable QUIC datagrams for audio, where a
+//! late frame is worth less than nothing, and one unidirectional QUIC stream per
+//! video frame, so a keyframe always lands whole and a stale delta can be reset.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,104 @@ pub enum Control {
     Hello { call_id: String },
     Mute { on: bool },
     Bye,
+    /// What I am sending on the video streams from now on.
+    Video { kind: VideoKind },
+    /// My decoder lost the chain: the next frame must be a keyframe.
+    KeyframeRequest,
+    /// My view of your video is hidden; stop spending upload on it (or resume).
+    VideoPause { on: bool },
+    /// A message from a newer peer: skipped, never fatal.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoKind {
+    #[default]
+    Off,
+    Camera,
+    Screen,
+}
+
+/// The codec byte in a video frame header. A fixed table, so nothing from the wire
+/// is ever handed to a decoder as a string.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum VideoCodec {
+    H264 = 1,
+    Vp8 = 2,
+}
+
+impl VideoCodec {
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            1 => Some(Self::H264),
+            2 => Some(Self::Vp8),
+            _ => None,
+        }
+    }
+    /// The name the signalling tag and the webview use.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Vp8 => "vp8",
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "h264" => Some(Self::H264),
+            "vp8" => Some(Self::Vp8),
+            _ => None,
+        }
+    }
+}
+
+/// Video frame flags.
+pub const VIDEO_KEY: u8 = 1;
+pub const VIDEO_SCREEN: u8 = 2;
+/// Header on every video frame, on the QUIC stream and on the link alike.
+pub const VIDEO_HEADER_LEN: usize = 16;
+/// A frame bigger than this is refused: the whole connection window is only 2 MB,
+/// and a bigger frame would sit in front of the control stream.
+pub const MAX_VIDEO_FRAME: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoHeader {
+    pub seq: u32,
+    /// Capture time in the sender's microseconds.
+    pub ts_us: u64,
+    pub flags: u8,
+    pub codec: VideoCodec,
+}
+
+impl VideoHeader {
+    pub fn is_key(&self) -> bool {
+        self.flags & VIDEO_KEY != 0
+    }
+
+    pub fn write(&self, out: &mut [u8]) {
+        debug_assert!(out.len() >= VIDEO_HEADER_LEN);
+        out[0..4].copy_from_slice(&self.seq.to_be_bytes());
+        out[4..12].copy_from_slice(&self.ts_us.to_be_bytes());
+        out[12] = self.flags;
+        out[13] = self.codec as u8;
+        out[14] = 0;
+        out[15] = 0;
+    }
+
+    pub fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < VIDEO_HEADER_LEN {
+            return None;
+        }
+        Some(Self {
+            seq: u32::from_be_bytes([data[0], data[1], data[2], data[3]]),
+            ts_us: u64::from_be_bytes([data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11]]),
+            flags: data[12],
+            codec: VideoCodec::from_byte(data[13])?,
+        })
+    }
 }
 
 pub const MAX_CONTROL_LEN: usize = 4096;
@@ -75,6 +174,27 @@ pub async fn read_control<R: AsyncRead + Unpin>(recv: &mut R) -> Result<Control,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_video_header_round_trips_and_refuses_an_unknown_codec() {
+        let h = VideoHeader { seq: 70_000, ts_us: 1 << 40, flags: VIDEO_KEY | VIDEO_SCREEN, codec: VideoCodec::Vp8 };
+        let mut buf = [0u8; VIDEO_HEADER_LEN + 3];
+        h.write(&mut buf);
+        assert_eq!(VideoHeader::parse(&buf), Some(h));
+        assert!(h.is_key());
+        buf[13] = 9;
+        assert!(VideoHeader::parse(&buf).is_none());
+        assert!(VideoHeader::parse(&buf[..10]).is_none());
+    }
+
+    #[test]
+    fn an_unknown_control_message_parses_as_unknown() {
+        let c: Control = serde_json::from_str(r#"{"t":"hologram","on":true}"#).unwrap();
+        assert_eq!(c, Control::Unknown);
+        let v: Control = serde_json::from_str(r#"{"t":"video","kind":"screen"}"#).unwrap();
+        assert_eq!(v, Control::Video { kind: VideoKind::Screen });
+        assert_eq!(serde_json::to_string(&Control::KeyframeRequest).unwrap(), r#"{"t":"keyframe_request"}"#);
+    }
 
     #[test]
     fn a_frame_round_trips() {

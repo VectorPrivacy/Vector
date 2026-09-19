@@ -8,6 +8,7 @@
 
 pub mod declick;
 pub mod jitter;
+pub mod link;
 pub mod rate;
 pub mod resample;
 pub mod ring;
