@@ -98,6 +98,27 @@ pub fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client
 ///
 /// Blossom PUT uses `follow_redirects = false`: a 3xx mid-upload would
 /// re-issue as GET and drop the body, so the 3xx surfaces as the real status.
+/// What every request calls itself. Set once by the app with its own
+/// version; until then, this crate's. Magnitude serves link previews to
+/// Vector only, and judges that by this header, so it has to be present on
+/// every request and has to start with `Vector/`. One string for every
+/// user is also the least identifying choice: over Tor, a client that looks
+/// like every other Vector looks like nothing in particular.
+static USER_AGENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Name the app's version in the user agent. Call once at startup; a second
+/// call is ignored.
+pub fn set_app_version(version: &str) {
+    let _ = USER_AGENT.set(format!("Vector/{version}"));
+}
+
+pub fn user_agent() -> String {
+    USER_AGENT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| format!("Vector/{}", env!("CARGO_PKG_VERSION")))
+}
+
 #[allow(clippy::disallowed_methods)]
 pub fn build_http_client_with_options(
     timeout: Option<std::time::Duration>,
@@ -105,6 +126,11 @@ pub fn build_http_client_with_options(
     follow_redirects: bool,
 ) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
+        // Every request names the client, on every platform, because this
+        // is the one place a client is built. reqwest sends no agent at all
+        // otherwise, and Magnitude's preview endpoint refuses a caller that
+        // does not say it is Vector.
+        .user_agent(user_agent())
         // Bounded connect: a black-holed host (SYN swallowed, never refused) must
         // fail in seconds instead of silently consuming the whole request budget.
         .connect_timeout(std::time::Duration::from_secs(15));
@@ -724,5 +750,21 @@ mod fd_limit_tests {
         let ceiling: libc::rlim_t = 1 << 20;
         assert!(after.rlim_cur >= before.rlim_cur);
         assert!(after.rlim_cur >= after.rlim_max.min(ceiling));
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::*;
+
+    /// Magnitude refuses a preview request whose agent does not start with
+    /// `Vector/`; this is the string every request will carry.
+    #[test]
+    fn the_client_names_itself_as_vector() {
+        assert!(user_agent().starts_with("Vector/"), "{}", user_agent());
+        set_app_version("9.9.9-test");
+        // Either the app's version or, if another test set it first, that
+        // one: in both cases still Vector's.
+        assert!(user_agent().starts_with("Vector/"), "{}", user_agent());
     }
 }

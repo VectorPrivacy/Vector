@@ -121,6 +121,10 @@ pub(crate) use services::{NotificationData, show_notification_generic};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before any HTTP client exists: the user agent every request carries is
+    // read when a client is built, and it should name the app's version, not
+    // the core crate's.
+    vector_core::net::set_app_version(env!("CARGO_PKG_VERSION"));
     // Before the first socket or pool exists: GUI apps start with a 256 ceiling.
     vector_core::net::raise_fd_limit();
 
