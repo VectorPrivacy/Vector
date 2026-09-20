@@ -651,6 +651,81 @@ mod tests {
 }
 
 // ============================================================================
+// Egress: where a request actually goes
+// ============================================================================
+
+/// Where a request for `url` really goes, and what it carries: the proxy's
+/// address with a signed authorization when the privacy setting routes it
+/// through Magnitude, or the URL itself.
+pub struct Egress {
+    pub url: String,
+    pub auth: Option<reqwest::header::HeaderValue>,
+}
+
+impl Egress {
+    /// Whether the request leaves through a proxy rather than to the host.
+    pub fn proxied(&self) -> bool {
+        self.auth.is_some() || crate::proxy::proxy_server_of(&self.url).is_some()
+    }
+}
+
+/// Resolve the destination for `url`. Every outbound fetch of somebody else's
+/// content asks here first, so the setting has exactly one place to act.
+pub async fn egress(url: &str) -> Egress {
+    match crate::proxy::proxied(url).await {
+        Some(via) => {
+            let auth = match crate::proxy::proxy_server_of(&via) {
+                Some(server) => crate::proxy::proxy_authorization(&server).await,
+                None => None,
+            };
+            Egress { url: via, auth }
+        }
+        None => Egress { url: url.to_string(), auth: None },
+    }
+}
+
+/// A request for `url` on `client`, already pointed at the right place and
+/// carrying the proxy authorization when there is one.
+pub async fn proxied_request(client: &reqwest::Client, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+    let e = egress(url).await;
+    let req = client.request(method, &e.url);
+    match e.auth {
+        Some(v) => req.header(reqwest::header::AUTHORIZATION, v),
+        None => req,
+    }
+}
+
+/// The HTTP status the SOURCE gives for `url`: 2xx means it serves, 404/410
+/// means it is gone. `None` means nothing definitive could be learned (the
+/// host, or the proxy, was unreachable). Through the proxy a HEAD carries no
+/// body, so one byte is asked for instead and the source's status read from
+/// the proxy's answer; direct, a HEAD is tried first and a one-byte GET when
+/// the host refuses HEAD.
+pub async fn remote_status(url: &str, timeout: std::time::Duration) -> Option<u16> {
+    let e = egress(url).await;
+    let client = build_http_client(timeout).ok()?;
+    let with = |req: reqwest::RequestBuilder| match &e.auth {
+        Some(v) => req.header(reqwest::header::AUTHORIZATION, v.clone()),
+        None => req,
+    };
+    if e.proxied() {
+        let resp = with(client.get(&e.url)).header(reqwest::header::RANGE, "bytes=0-0").send().await.ok()?;
+        if resp.status().is_success() {
+            return Some(200);
+        }
+        let body: serde_json::Value = resp.json().await.ok()?;
+        return body.get("source_status").and_then(|v| v.as_u64()).map(|v| v as u16);
+    }
+    let head = with(client.head(&e.url)).send().await.ok()?;
+    let status = head.status();
+    if status == reqwest::StatusCode::METHOD_NOT_ALLOWED || status == reqwest::StatusCode::NOT_IMPLEMENTED {
+        let r = with(client.get(&e.url)).header(reqwest::header::RANGE, "bytes=0-0").send().await.ok()?;
+        return Some(r.status().as_u16());
+    }
+    Some(status.as_u16())
+}
+
+// ============================================================================
 // Remote File Size
 // ============================================================================
 
@@ -661,7 +736,7 @@ pub async fn get_remote_file_size(url: &str) -> Option<u64> {
     let client = build_http_client(std::time::Duration::from_secs(8)).ok()?;
 
     // Method 1: HEAD request
-    if let Ok(head_res) = client.head(url).send().await {
+    if let Ok(head_res) = proxied_request(&client, reqwest::Method::HEAD, url).await.send().await {
         if let Some(length) = head_res.content_length() {
             if length > 0 {
                 return Some(length);
@@ -670,8 +745,8 @@ pub async fn get_remote_file_size(url: &str) -> Option<u64> {
     }
 
     // Method 2: Range request fallback
-    if let Ok(partial_res) = client
-        .get(url)
+    if let Ok(partial_res) = proxied_request(&client, reqwest::Method::GET, url)
+        .await
         .header("Range", "bytes=0-1")
         .send()
         .await

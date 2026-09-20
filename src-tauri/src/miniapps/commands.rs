@@ -2342,7 +2342,7 @@ async fn fetch_url_validator(url: &str) -> Option<String> {
         true,
     )
     .ok()?;
-    let res = client.head(url).send().await.ok()?;
+    let res = vector_core::net::proxied_request(&client, reqwest::Method::HEAD, url).await.send().await.ok()?;
     let headers = res.headers();
     headers
         .get("etag")

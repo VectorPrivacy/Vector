@@ -34,6 +34,23 @@ const GIF_API_BASE = 'https://gifverse.net';
 /** Preconnect link element for GIFGalaxy */
 let gifPreconnectLink = null;
 
+/**
+ * One GIF API query, as parsed JSON. With "Proxy Previews & Media" on, Rust
+ * asks the service through the user's Magnitude, so neither the listing nor
+ * the search term leaves from this device; off, the WebView asks directly.
+ * `signal` only guards the direct path; the proxied answer is checked for
+ * `signal.aborted` by every caller after the await.
+ * @param {string} query - e.g. `trending?limit=12&offset=0&sort=popular`
+ * @param {AbortSignal} [signal]
+ */
+async function gifApi(query, signal) {
+    if (fProxyMediaEnabled) {
+        return JSON.parse(await invoke('gif_api', { query }));
+    }
+    const response = await fetch(`${GIF_API_BASE}/api/v1/${query}`, { signal });
+    return await response.json();
+}
+
 /** Pagination state for GIFs */
 // Use smaller page size on macOS (WebKit) due to autoplay limitations
 const gifPageSize = navigator.userAgent.includes('Mac') && !navigator.userAgent.includes('Firefox') ? 6 : 12;
@@ -70,6 +87,7 @@ function showGifSkeletons(count) {
  */
 function preconnectGifServer() {
     if (gifPreconnectLink) return; // Already connected
+    if (fProxyMediaEnabled) return; // Nothing here talks to the service directly
     gifPreconnectLink = document.createElement('link');
     gifPreconnectLink.rel = 'preconnect';
     gifPreconnectLink.href = 'https://gifverse.net';
@@ -88,8 +106,7 @@ function prefetchTrendingGifs() {
     }
 
     // Prefetch trending in background (use dynamic page size)
-    fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`)
-        .then(res => res.json())
+    gifApi(`trending?limit=${gifPageSize}&offset=0&sort=popular`)
         .then(data => {
             if (data.results && data.results.length > 0) {
                 cachedTrendingGifs = data.results;
@@ -222,8 +239,7 @@ async function loadTrendingGifs() {
     showGifSkeletons(gifPageSize);
 
     try {
-        const response = await fetch(`${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=0&sort=popular`, { signal });
-        const data = await response.json();
+        const data = await gifApi(`trending?limit=${gifPageSize}&offset=0&sort=popular`, signal);
         if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
@@ -294,8 +310,7 @@ async function searchGifs(query) {
 
     try {
         const encodedQuery = encodeURIComponent(gifCurrentQuery);
-        const response = await fetch(`${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`, { signal });
-        const data = await response.json();
+        const data = await gifApi(`search?q=${encodedQuery}&limit=${gifPageSize}&offset=0&sort=relevant`, signal);
         if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
@@ -343,16 +358,15 @@ async function loadMoreGifs() {
     VectorSvelte.gifLoadingMore(true);
 
     try {
-        let url;
+        let query;
         if (gifCurrentMode === 'trending') {
-            url = `${GIF_API_BASE}/api/v1/trending?limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=popular`;
+            query = `trending?limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=popular`;
         } else {
             const encodedQuery = encodeURIComponent(gifCurrentQuery);
-            url = `${GIF_API_BASE}/api/v1/search?q=${encodedQuery}&limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=relevant`;
+            query = `search?q=${encodedQuery}&limit=${gifPageSize}&offset=${gifCurrentOffset}&sort=relevant`;
         }
 
-        const response = await fetch(url, { signal });
-        const data = await response.json();
+        const data = await gifApi(query, signal);
         if (signal.aborted) return;
 
         if (data.results && data.results.length > 0) {
@@ -391,6 +405,12 @@ function renderGifs(gifs, append = false) {
  * On error, tries the next format in the chain
  */
 function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex) {
+    // Proxied: the preview is the GIF itself, fetched and cached by Rust
+    // through Magnitude like any picture. The video formats would need the
+    // WebView to stream from the service directly, which is the leak.
+    if (fProxyMediaEnabled) {
+        formatIndex = gifFormatFallbackChain.length - 1;
+    }
     if (formatIndex >= gifFormatFallbackChain.length) {
         // All formats failed - show error icon
         if (placeholder) placeholder.innerHTML = '<span class="icon icon-image"></span>';
@@ -442,7 +462,14 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
         // Image format (GIF)
         const img = document.createElement('img');
         img.alt = gifTitle || 'GIF';
-        img.src = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
+        const remote = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
+        if (fProxyMediaEnabled) {
+            invoke('get_or_cache_image', { url: remote, imageType: 'inline_image' })
+                .then(path => { if (path) img.src = convertFileSrc(path); else img.onerror?.(); })
+                .catch(() => img.onerror?.());
+        } else {
+            img.src = remote;
+        }
 
         img.onload = () => {
             if (placeholder) placeholder.remove();

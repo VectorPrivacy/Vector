@@ -35,3 +35,4 @@ pub mod wallpaper;
 pub mod community;
 pub mod clipboard;
 pub mod updates;
+pub mod gifs;

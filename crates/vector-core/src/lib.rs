@@ -69,6 +69,7 @@ pub mod spawn_audit;
 
 // === Network ===
 pub mod net;
+pub mod proxy;
 pub mod negentropy;
 pub mod blossom;
 pub mod blossom_servers;
@@ -681,7 +682,7 @@ impl VectorCore {
                 last_err = e.to_string();
                 next_source!();
             }
-            let resp = match client.get(&url).send().await {
+            let resp = match crate::net::proxied_request(&client, reqwest::Method::GET, &url).await.send().await {
                 Ok(r) => r,
                 Err(e) => {
                     last_err = format!("download: {e}");

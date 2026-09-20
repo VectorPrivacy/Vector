@@ -618,8 +618,8 @@ pub async fn apply_received_wallpaper(
     crate::net::validate_url_not_private(url)?;
 
     let http = crate::net::build_http_client(Duration::from_secs(30))?;
-    let resp = http
-        .get(url)
+    let resp = crate::net::proxied_request(&http, reqwest::Method::GET, url)
+        .await
         .send()
         .await
         .map_err(|e| format!("Wallpaper download failed: {}", e))?;

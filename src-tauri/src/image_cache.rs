@@ -330,8 +330,9 @@ pub async fn cache_image<R: Runtime>(
     // Loaded through the user's Magnitude server when the privacy setting is
     // on and a server offers it: the host sees the server, not this device.
     // The cache stays keyed by the original URL either way.
-    let download_url = crate::magnitude::proxied(url).await.unwrap_or_else(|| url.to_string());
-    let mut response = match http_client().get(&download_url).send().await {
+    // Proxied and signed like every other fetch: unsigned, the proxy charged
+    // the address and never learned the account's tier.
+    let mut response = match vector_core::net::proxied_request(&http_client(), reqwest::Method::GET, url).await.send().await {
         Ok(resp) => resp,
         Err(e) => {
             // Dead link / expired blob / timeout — expected for remote media, not
@@ -703,6 +704,7 @@ pub async fn get_or_cache_image<R: Runtime>(
         "miniapp_icon" => ImageType::MiniAppIcon,
         "emoji" => ImageType::Emoji,
         "emoji_pack_icon" => ImageType::EmojiPackIcon,
+        "inline_image" => ImageType::InlineImage,
         _ => return Err("Invalid image type".to_string()),
     };
 
@@ -730,31 +732,12 @@ async fn probe_media_gone(url: &str) -> bool {
     if crate::net::validate_url_not_private(url).is_err() {
         return false;
     }
-    let client = http_client();
-    match client.head(url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
-                return true;
-            }
-            // Hosts that refuse HEAD get a 1-byte ranged GET instead.
-            if status == reqwest::StatusCode::METHOD_NOT_ALLOWED
-                || status == reqwest::StatusCode::NOT_IMPLEMENTED
-            {
-                if let Ok(r) = client
-                    .get(url)
-                    .header(reqwest::header::RANGE, "bytes=0-0")
-                    .send()
-                    .await
-                {
-                    let s = r.status();
-                    return s == reqwest::StatusCode::NOT_FOUND || s == reqwest::StatusCode::GONE;
-                }
-            }
-            false
-        }
-        Err(_) => false,
-    }
+    // Asked the way everything else is fetched: through the proxy when the
+    // setting is on, which relays the source's own status.
+    matches!(
+        vector_core::net::remote_status(url, std::time::Duration::from_secs(10)).await,
+        Some(404) | Some(410)
+    )
 }
 
 /// Tauri command: probe remote media liveness, bypassing the local cache.
@@ -999,8 +982,9 @@ pub async fn cache_url_image<R: Runtime>(
     // Download with progress reporting (10s timeout)
     log_trace!("[ImageCache] Downloading inline image with progress: {}", url);
     // Same routing as every other picture: through Magnitude when it can be.
-    let download_url = crate::magnitude::proxied(&url).await.unwrap_or_else(|| url.clone());
-    let bytes = match download_with_reporter(&download_url, &reporter, Some(Duration::from_secs(10))).await {
+    // download_with_reporter resolves the proxy itself; handing it an
+    // already-proxied URL left the request unsigned.
+    let bytes = match download_with_reporter(&url, &reporter, Some(Duration::from_secs(10))).await {
         Ok(b) => b,
         Err(e) => {
             cleanup().await;

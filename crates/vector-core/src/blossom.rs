@@ -654,34 +654,19 @@ where
 /// but proof the blob serves, we fall through to a fresh upload, which always
 /// works. Never assume here.
 pub async fn blob_is_served(url: &str, timeout: std::time::Duration) -> bool {
-    let Ok(client) = crate::net::build_http_client(timeout) else {
-        return false;
-    };
-    match client.head(url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
+    matches!(crate::net::remote_status(url, timeout).await, Some(200..=299))
 }
 
 /// anything else passes, so a flaky HEAD can't sink a good upload.
 async fn uploaded_blob_serves(url: &str) -> bool {
-    let client = match crate::net::build_http_client(std::time::Duration::from_secs(10)) {
-        Ok(c) => c,
-        Err(_) => return true,
-    };
     for attempt in 0..2 {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        match client.head(url).send().await {
-            Ok(resp) => {
-                let status = resp.status();
-                if status == StatusCode::NOT_FOUND || status == StatusCode::GONE {
-                    continue;
-                }
-                return true;
-            }
-            Err(_) => {
+        match crate::net::remote_status(url, std::time::Duration::from_secs(10)).await {
+            Some(404) | Some(410) => continue,
+            Some(_) => return true,
+            None => {
                 crate::log_net_info!("[Blossom] {} unreachable for post-upload verify — assuming stored", url);
                 return true;
             }

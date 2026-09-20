@@ -795,6 +795,7 @@ pub fn run() {
             miniapps::commands::miniapp_revoke_all_permissions,
             // Image cache commands
             image_cache::get_or_cache_image,
+            commands::gifs::gif_api,
             image_cache::verify_remote_media,
             image_cache::clear_image_cache,
             image_cache::get_image_cache_stats,

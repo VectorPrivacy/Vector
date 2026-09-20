@@ -775,17 +775,8 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
         // privacy setting is on, signed so the account is the one charged. A
         // custom emoji is somebody else's file on somebody else's host, and a
         // pack of hundreds is hundreds of chances to leak the reader's address.
-        let fetch_url = crate::magnitude::proxied(&url).await.unwrap_or_else(|| url.clone());
-        let auth = match crate::magnitude::proxy_server_of(&fetch_url) {
-            Some(server) => crate::magnitude::proxy_authorization(&server).await,
-            None => None,
-        };
         let client = vector_core::net::build_http_client(std::time::Duration::from_secs(10))?;
-        let mut req = client.get(&fetch_url);
-        if let Some(v) = auth {
-            req = req.header(reqwest::header::AUTHORIZATION, v);
-        }
-        let mut resp = req.send().await
+        let mut resp = vector_core::net::proxied_request(&client, reqwest::Method::GET, &url).await.send().await
             .map_err(|e| format!("fetch: {}", e))?;
         if !resp.status().is_success() {
             return Err(format!("HTTP {}", resp.status()));

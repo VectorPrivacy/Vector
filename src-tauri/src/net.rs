@@ -176,12 +176,7 @@ pub async fn download_with_reporter(
     // Through the user's Magnitude when the privacy setting is on and the
     // host is not ours: the host sees the edge, not this device. Every
     // attachment and picture comes through here, so this is the one place.
-    let proxied = crate::magnitude::proxied(content_url).await;
-    let fetch_url: String = proxied.clone().unwrap_or_else(|| content_url.to_string());
-    let authorization = match proxied.as_deref().and_then(crate::magnitude::proxy_server_of) {
-        Some(server) => crate::magnitude::proxy_authorization(&server).await,
-        None => None,
-    };
+    let vector_core::net::Egress { url: fetch_url, auth: authorization } = vector_core::net::egress(content_url).await;
 
     // Route through vector-core so the Tor failsafe applies — blackhole when
     // Tor is enabled-but-inactive, proxy when Tor is up. No deadline unless the

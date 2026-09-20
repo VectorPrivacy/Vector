@@ -4300,14 +4300,11 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
     let client = vector_core::net::build_http_client(std::time::Duration::from_secs(30))?;
     // An encrypted community logo is still a download from somebody's Blossom
     // server: proxied and signed like every other picture when the setting is on.
-    let fetch_url = crate::magnitude::proxied(&image.url).await.unwrap_or_else(|| image.url.clone());
-    let mut req = client.get(&fetch_url);
-    if let Some(server) = crate::magnitude::proxy_server_of(&fetch_url) {
-        if let Some(v) = crate::magnitude::proxy_authorization(&server).await {
-            req = req.header(reqwest::header::AUTHORIZATION, v);
-        }
-    }
-    let mut resp = req.send().await.map_err(|e| format!("download: {e}"))?;
+    let mut resp = vector_core::net::proxied_request(&client, reqwest::Method::GET, &image.url)
+        .await
+        .send()
+        .await
+        .map_err(|e| format!("download: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download failed: HTTP {}", resp.status()));
     }
