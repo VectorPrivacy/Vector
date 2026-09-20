@@ -310,6 +310,71 @@ pub async fn cache_image<R: Runtime>(
     if url.is_empty() {
         return CacheResult::Failed("Empty URL".to_string());
     }
+    // An emoji known to be unavailable is not asked for again for a while,
+    // whichever screen asks (a reaction, a message, a pack tab): without
+    // this every launch re-asked the proxy for every dead one in every pack.
+    let remembers_failures = matches!(image_type, ImageType::Emoji | ImageType::EmojiPackIcon);
+    if remembers_failures {
+        if let Some(reason) = unavailable_reason(handle, url, image_type) {
+            return CacheResult::Failed(reason);
+        }
+    }
+    let result = cache_image_uncached(handle, url, image_type).await;
+    if remembers_failures {
+        if let CacheResult::Failed(reason) = &result {
+            remember_unavailable(handle, url, image_type, reason);
+        }
+    }
+    result
+}
+
+/// How long a failure is believed, by what it says: a day for a file that
+/// is gone, too large or not an image; an hour for a server error; not at
+/// all for a fetch that got no answer.
+fn unavailable_for(reason: &str) -> Option<u64> {
+    if reason.contains("too large") || reason.contains("HTTP 404") || reason.contains("HTTP 410") || reason.starts_with("Invalid") {
+        Some(24 * 3600)
+    } else if reason.starts_with("HTTP ") {
+        Some(3600)
+    } else {
+        None
+    }
+}
+
+/// Markers live in a folder of their own beside the pictures, never among
+/// them: `get_cached_path` treats any file that starts with the key as the
+/// picture, and a marker there would be served as one.
+fn unavailable_marker<R: Runtime>(handle: &AppHandle<R>, url: &str, image_type: ImageType) -> Option<PathBuf> {
+    let dir = get_cache_dir(handle, image_type).ok()?.join("unavailable");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(url_to_cache_key(url)))
+}
+
+fn unavailable_reason<R: Runtime>(handle: &AppHandle<R>, url: &str, image_type: ImageType) -> Option<String> {
+    let path = unavailable_marker(handle, url, image_type)?;
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let at = v.get("at")?.as_u64()?;
+    let for_secs = v.get("for")?.as_u64()?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if now.saturating_sub(at) >= for_secs {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(v.get("reason")?.as_str()?.to_string())
+}
+
+fn remember_unavailable<R: Runtime>(handle: &AppHandle<R>, url: &str, image_type: ImageType, reason: &str) {
+    let Some(for_secs) = unavailable_for(reason) else { return };
+    let Some(path) = unavailable_marker(handle, url, image_type) else { return };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = std::fs::write(path, json!({ "reason": reason, "at": now, "for": for_secs }).to_string());
+}
+
+async fn cache_image_uncached<R: Runtime>(
+    handle: &AppHandle<R>,
+    url: &str,
+    image_type: ImageType,
+) -> CacheResult {
 
     // Check if already cached
     if let Some(path) = get_cached_path(handle, url, image_type) {
