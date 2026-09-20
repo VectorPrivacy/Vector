@@ -739,6 +739,62 @@ pub async fn decode_animated_emoji<R: tauri::Runtime>(
     if let Some(cached) = cached_sheet(&url) {
         return Ok(cached);
     }
+    // An emoji known to be unavailable is not asked for again for a while.
+    // Without this, every open of the picker and every launch fetched every
+    // dead or oversized emoji in every pack again: a 90 MB GIF streamed from
+    // the proxy up to the 1 MB cap, a dead host asked once more, each time.
+    let dir = sheet_cache_dir(&handle);
+    if let Some(dir) = &dir {
+        if let Some(reason) = unavailable_reason(dir, &url) {
+            return Err(reason);
+        }
+    }
+    let result = decode_animated_emoji_uncached(handle, url.clone()).await;
+    if let (Err(reason), Some(dir)) = (&result, &dir) {
+        if let Some(for_secs) = unavailable_for(reason) {
+            let _ = std::fs::write(
+                dir.join(format!("{}.unavailable", sheet_key(&url))),
+                serde_json::json!({ "reason": reason, "at": unix_now(), "for": for_secs }).to_string(),
+            );
+        }
+    }
+    result
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// How long a failure is believed, by what it says. A dead file and an
+/// oversized or undecodable one for a day; a server that answered with an
+/// error for an hour; a fetch that never got an answer not at all.
+fn unavailable_for(reason: &str) -> Option<u64> {
+    if reason.contains("too large") || reason.contains("HTTP 404") || reason.contains("HTTP 410") || reason.starts_with("decode") || reason.contains("unsupported") {
+        Some(24 * 3600)
+    } else if reason.starts_with("HTTP ") {
+        Some(3600)
+    } else {
+        None
+    }
+}
+
+/// The remembered failure for this URL, if it is still believed.
+fn unavailable_reason(dir: &std::path::Path, url: &str) -> Option<String> {
+    let path = dir.join(format!("{}.unavailable", sheet_key(url)));
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let at = v.get("at")?.as_u64()?;
+    let for_secs = v.get("for")?.as_u64()?;
+    if unix_now().saturating_sub(at) >= for_secs {
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(v.get("reason")?.as_str()?.to_string())
+}
+
+async fn decode_animated_emoji_uncached<R: tauri::Runtime>(
+    handle: tauri::AppHandle<R>,
+    url: String,
+) -> Result<EmojiSheet, String> {
     let sheet_dir = sheet_cache_dir(&handle);
     if let Some(dir) = &sheet_dir {
         if let Some(sheet) = read_sheet(dir, &url) {
