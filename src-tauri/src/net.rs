@@ -107,14 +107,27 @@ pub async fn download<R: tauri::Runtime>(
 /// Determine a remote file's size without downloading it.
 /// Tries HTTP HEAD first, falls back to a 2-byte Range request.
 /// Returns None if size cannot be determined.
+/// Attach a proxied request's signed authorization, when there is one.
+fn with_auth(req: reqwest::RequestBuilder, auth: Option<&reqwest::header::HeaderValue>) -> reqwest::RequestBuilder {
+    match auth {
+        Some(v) => req.header(reqwest::header::AUTHORIZATION, v.clone()),
+        None => req,
+    }
+}
+
+/// [`get_remote_file_size_with`] without an authorization: a plain probe.
 pub async fn get_remote_file_size(url: &str) -> Option<u64> {
+    get_remote_file_size_with(url, None).await
+}
+
+pub async fn get_remote_file_size_with(url: &str, auth: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
     validate_url_not_private(url).ok()?;
     // Route through vector-core so the Tor failsafe applies — blackhole when
     // Tor is enabled-but-inactive, proxy when Tor is up.
     let client = vector_core::net::build_http_client(std::time::Duration::from_secs(8)).ok()?;
 
     // Method 1: HEAD request
-    if let Ok(head_res) = client.head(url).send().await {
+    if let Ok(head_res) = with_auth(client.head(url), auth).send().await {
         if let Some(length) = head_res.content_length() {
             if length > 0 {
                 return Some(length);
@@ -123,8 +136,7 @@ pub async fn get_remote_file_size(url: &str) -> Option<u64> {
     }
 
     // Method 2: Range request fallback
-    if let Ok(partial_res) = client
-        .get(url)
+    if let Ok(partial_res) = with_auth(client.get(url), auth)
         .header("Range", "bytes=0-1")
         .send()
         .await
@@ -166,6 +178,15 @@ pub async fn download_with_reporter(
     timeout: Option<std::time::Duration>,
 ) -> Result<Vec<u8>, &'static str> {
     validate_url_not_private(content_url)?;
+    // Through the user's Magnitude when the privacy setting is on and the
+    // host is not ours: the host sees the edge, not this device. Every
+    // attachment and picture comes through here, so this is the one place.
+    let proxied = crate::magnitude::proxied(content_url).await;
+    let fetch_url: String = proxied.clone().unwrap_or_else(|| content_url.to_string());
+    let authorization = match proxied.as_deref().and_then(crate::magnitude::proxy_server_of) {
+        Some(server) => crate::magnitude::proxy_authorization(&server).await,
+        None => None,
+    };
 
     // Route through vector-core so the Tor failsafe applies — blackhole when
     // Tor is enabled-but-inactive, proxy when Tor is up. No deadline unless the
@@ -179,31 +200,31 @@ pub async fn download_with_reporter(
     .map_err(|_| "Failed to create HTTP client")?;
 
     // Determine file size using reusable probe
-    let total_size = get_remote_file_size(content_url).await;
+    let total_size = get_remote_file_size_with(&fetch_url, authorization.as_ref()).await;
     if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
         return Err("File exceeds the maximum download size");
     }
 
     // Based on findings, choose the appropriate download method
     match total_size {
-        Some(size) if supports_range(content_url, &client).await => {
+        Some(size) if supports_range(&fetch_url, &client, authorization.as_ref()).await => {
             // Use range-based download with progress
-            download_with_ranges(&client, content_url, size, reporter).await
+            download_with_ranges(&client, &fetch_url, size, reporter, authorization.as_ref()).await
         }
         Some(size) => {
             // Use streaming download with known size
-            download_with_streaming(&client, content_url, Some(size), reporter).await
+            download_with_streaming(&client, &fetch_url, Some(size), reporter, authorization.as_ref()).await
         }
         None => {
             // Use streaming download without known size
-            download_with_streaming(&client, content_url, None, reporter).await
+            download_with_streaming(&client, &fetch_url, None, reporter, authorization.as_ref()).await
         }
     }
 }
 
 /// Checks if the server supports range requests
-async fn supports_range(url: &str, client: &Client) -> bool {
-    if let Ok(res) = client.head(url).send().await {
+async fn supports_range(url: &str, client: &Client, auth: Option<&reqwest::header::HeaderValue>) -> bool {
+    if let Ok(res) = with_auth(client.head(url), auth).send().await {
         if let Some(accept_ranges) = res.headers().get("accept-ranges") {
             if let Ok(value) = accept_ranges.to_str() {
                 return value.contains("bytes");
@@ -212,7 +233,7 @@ async fn supports_range(url: &str, client: &Client) -> bool {
     }
 
     // Try a practical test with a range request
-    if let Ok(res) = client.get(url).header("Range", "bytes=0-10").send().await {
+    if let Ok(res) = with_auth(client.get(url), auth).header("Range", "bytes=0-10").send().await {
         return res.status().as_u16() == 206; // 206 Partial Content
     }
 
@@ -225,6 +246,7 @@ async fn download_with_ranges(
     url: &str,
     total_size: u64,
     reporter: &impl ProgressReporter,
+    auth: Option<&reqwest::header::HeaderValue>,
 ) -> Result<Vec<u8>, &'static str> {
     if total_size > MAX_DOWNLOAD_BYTES {
         return Err("File exceeds the maximum download size");
@@ -246,8 +268,7 @@ async fn download_with_ranges(
         let end = min(downloaded + chunk_size - 1, total_size - 1);
         let chunk_start = std::time::Instant::now();
 
-        let chunk_res = client
-            .get(url)
+        let chunk_res = with_auth(client.get(url), auth)
             .header("Range", format!("bytes={}-{}", downloaded, end))
             .send()
             .await
@@ -343,9 +364,9 @@ async fn download_with_streaming(
     url: &str,
     total_size: Option<u64>,
     reporter: &impl ProgressReporter,
+    auth: Option<&reqwest::header::HeaderValue>,
 ) -> Result<Vec<u8>, &'static str> {
-    let res = client
-        .get(url)
+    let res = with_auth(client.get(url), auth)
         .send()
         .await
         .map_err(|e| {

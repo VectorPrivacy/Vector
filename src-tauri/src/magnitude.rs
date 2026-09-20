@@ -109,7 +109,21 @@ fn proxy_url(server: &str, url: &str) -> String {
     format!("{server}/proxy?url={encoded}")
 }
 
-/// Somebody else's URL, over http(s), not already ours.
+/// Domains that are ours: a Magnitude answers these, so loading from them
+/// directly reveals nothing to anyone else, and routing them through a
+/// Magnitude would be Magnitude proxying Magnitude.
+const OWN_DOMAINS: &[&str] = &["vectorapp.io", "jskitty.com"];
+
+fn is_own_host(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    OWN_DOMAINS.iter().any(|d| h == *d || h.ends_with(&format!(".{d}")))
+}
+
+/// Everything over http(s) that is not ours goes through the proxy: a
+/// picture, an avatar, an emoji, and an attachment on somebody's Blossom
+/// server, which otherwise learns the recipient's address on every
+/// download. Only our own domains load directly, and a URL that is already
+/// a proxy or preview request is never wrapped again.
 fn wants_proxy(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else { return false };
     if !matches!(parsed.scheme(), "http" | "https") {
@@ -118,10 +132,29 @@ fn wants_proxy(url: &str) -> bool {
     if parsed.path() == "/proxy" || parsed.path() == "/unfurl" {
         return false;
     }
-    let origin = parsed.origin().ascii_serialization();
-    !crate::get_blossom_servers()
-        .iter()
-        .any(|s| s.trim_end_matches('/').eq_ignore_ascii_case(&origin))
+    !parsed.host_str().map(is_own_host).unwrap_or(true)
+}
+
+/// A signed `Authorization` for a proxied request, so the proxy charges the
+/// account rather than the address and a recognised account gets its own
+/// allowance. `None` when nobody is signed in; the proxy then treats the
+/// request as a stranger's, which still works.
+pub async fn proxy_authorization(server: &str) -> Option<reqwest::header::HeaderValue> {
+    let signer = vector_core::signer::active_signer().ok()?;
+    let server_url = url::Url::parse(server).ok()?;
+    vector_core::blossom_info::build_get_auth_header(&signer, &server_url, "Proxied fetch")
+        .await
+        .ok()
+}
+
+/// The proxy server a proxied URL points at, so its authorization can be
+/// scoped to it.
+pub fn proxy_server_of(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.path() != "/proxy" {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
 }
 
 /// A page's metadata, as the message stores it: via Magnitude when the
@@ -221,10 +254,18 @@ mod tests {
     }
 
     #[test]
-    fn only_other_peoples_http_urls_want_the_proxy() {
+    fn everything_but_our_own_domains_wants_the_proxy() {
         assert!(wants_proxy("https://cdn.example.net/a.jpg"));
+        assert!(wants_proxy("https://blossom.primal.net/abc.bin"), "somebody's Blossom server is somebody's");
+        assert!(wants_proxy("https://image.nostr.build/x.png"));
+        assert!(!wants_proxy("https://magnitude.jskitty.com/abc.png"), "ours");
+        assert!(!wants_proxy("https://us.magnitude.jskitty.com/abc.png"), "ours, an edge");
+        assert!(!wants_proxy("https://vectorapp.io/assets/x.png"), "ours");
+        assert!(wants_proxy("https://notjskitty.com/x.png"), "a suffix is not a subdomain");
         assert!(!wants_proxy("data:image/png;base64,AAAA"));
         assert!(!wants_proxy("asset://localhost/x.png"));
         assert!(!wants_proxy("https://magnitude.example/proxy?url=x"));
+        assert_eq!(proxy_server_of("https://us.magnitude.jskitty.com/proxy?url=x").as_deref(), Some("https://us.magnitude.jskitty.com"));
+        assert!(proxy_server_of("https://cdn.example.net/a.jpg").is_none());
     }
 }

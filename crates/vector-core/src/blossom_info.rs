@@ -285,9 +285,19 @@ async fn build_info_auth_header<T>(signer: &T, server: &Url) -> Result<reqwest::
 where
     T: VectorSigner,
 {
+    build_get_auth_header(signer, server, "Blossom server information").await
+}
+
+/// A signed `Authorization` for a `GET` scoped to `server`, good for two
+/// minutes: what the information document is fetched with, and what a
+/// proxied fetch carries so the proxy charges the account, not the address.
+pub async fn build_get_auth_header<T>(signer: &T, server: &Url, reason: &str) -> Result<reqwest::header::HeaderValue, String>
+where
+    T: VectorSigner,
+{
     let expiration = Timestamp::now() + Duration::from_secs(120);
     let auth = BlossomAuthorization::new(
-        "Blossom server information".to_string(),
+        reason.to_string(),
         expiration,
         BlossomAuthorizationVerb::Get,
         BlossomAuthorizationScope::ServerUrl(server.clone()),
