@@ -115,11 +115,6 @@ fn with_auth(req: reqwest::RequestBuilder, auth: Option<&reqwest::header::Header
     }
 }
 
-/// [`get_remote_file_size_with`] without an authorization: a plain probe.
-pub async fn get_remote_file_size(url: &str) -> Option<u64> {
-    get_remote_file_size_with(url, None).await
-}
-
 pub async fn get_remote_file_size_with(url: &str, auth: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
     validate_url_not_private(url).ok()?;
     // Route through vector-core so the Tor failsafe applies — blackhole when
