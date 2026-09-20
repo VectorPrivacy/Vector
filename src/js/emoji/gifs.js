@@ -463,13 +463,6 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
         const img = document.createElement('img');
         img.alt = gifTitle || 'GIF';
         const remote = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
-        if (fProxyMediaEnabled) {
-            invoke('get_or_cache_image', { url: remote, imageType: 'inline_image' })
-                .then(path => { if (path) img.src = convertFileSrc(path); else img.onerror?.(); })
-                .catch(() => img.onerror?.());
-        } else {
-            img.src = remote;
-        }
 
         img.onload = () => {
             if (placeholder) placeholder.remove();
@@ -481,7 +474,21 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
             loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
         };
 
-        gifItem.appendChild(img);
+        if (fProxyMediaEnabled) {
+            // The element joins the grid only once its bytes exist: an <img>
+            // without a src paints a broken frame and the alt text over the
+            // thumbhash, which is meant to stand alone until the picture lands.
+            invoke('get_or_cache_image', { url: remote, imageType: 'inline_image' })
+                .then(path => {
+                    if (!path) { img.onerror(); return; }
+                    img.src = convertFileSrc(path);
+                    gifItem.appendChild(img);
+                })
+                .catch(() => img.onerror());
+        } else {
+            img.src = remote;
+            gifItem.appendChild(img);
+        }
     }
 }
 

@@ -794,6 +794,18 @@ pub async fn clear_image_cache<R: Runtime>(
     // and remember what to fetch again: the frontend keeps every avatar it was
     // handed, so without this the pictures whose files just went stay broken
     // until each profile happens to sync.
+    forget_profile_images_and_refetch().await;
+    Ok(total)
+}
+
+/// The cached avatar and banner files are gone: forget their paths in state
+/// and the database, tell the screen at once so every profile drops to its
+/// placeholder instead of a broken picture, and fetch them again in the
+/// background, one after another so the download lane paces it (each one
+/// that lands announces itself the same way). Every cache clear must come
+/// through here: a clear that empties the files and says nothing leaves
+/// the screen pointing at nothing.
+pub(crate) async fn forget_profile_images_and_refetch() {
     let mut refetch: Vec<(String, String, String)> = Vec::new();
     {
         let mut state = crate::STATE.lock().await;
@@ -814,23 +826,19 @@ pub async fn clear_image_cache<R: Runtime>(
                 if !avatar.is_empty() || !banner.is_empty() {
                     refetch.push((slim.id.clone(), avatar, banner));
                 }
-                crate::db::set_profile(slim).await.ok();
+                crate::db::set_profile(slim.clone()).await.ok();
+                vector_core::emit_event("profile_update", &slim);
             }
         }
     }
-    // Fetch them again in the background, one after another so the download
-    // semaphore paces it. Each one that lands emits its own profile_update,
-    // which is what repaints the avatar.
     if !refetch.is_empty() {
         log_debug!("[ImageCache] re-fetching images for {} profiles after clearing", refetch.len());
-        tauri::async_runtime::spawn(async move {
+        vector_core::db::spawn_bound(async move {
             for (npub, avatar, banner) in refetch {
                 crate::profile::cache_profile_images(&npub, &avatar, &banner).await;
             }
         });
     }
-
-    Ok(total)
 }
 
 /// Tauri command: Get cache statistics

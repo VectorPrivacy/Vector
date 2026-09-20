@@ -324,23 +324,10 @@ async fn clear_media_caches<R: Runtime>(
         #[cfg(desktop)]
         audio::purge_sound_cache();
 
-        // Clear cached paths from all profiles in state and database
-        let mut state = STATE.lock().await;
-        let mut cleared_ids = Vec::new();
-        for profile in &mut state.profiles {
-            if !profile.avatar_cached.is_empty() || !profile.banner_cached.is_empty() {
-                profile.avatar_cached = Box::<str>::default();
-                profile.banner_cached = Box::<str>::default();
-                cleared_ids.push(profile.id);
-            }
-        }
-        for id in cleared_ids {
-            // Re-check each iteration: set_profile awaits, and a session swap
-            // mid-loop must not write the remaining profiles into the new account
-            if let Some(slim) = state.serialize_profile(id) {
-                db::set_profile(slim).await.ok();
-            }
-        }
+        // Forget the cached paths everywhere, tell the screen, fetch again:
+        // the same steps as the image-cache button, or on-screen profiles
+        // keep pointing at deleted files and show a broken picture.
+        crate::image_cache::forget_profile_images_and_refetch().await;
         Ok(())
     })
     .await
