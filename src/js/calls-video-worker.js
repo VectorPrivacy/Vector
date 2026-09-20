@@ -306,7 +306,12 @@ function onFrame(frame) {
         t.decoder.configure({ codec: name === 'h264' ? H264_DECODE : 'vp8', optimizeForLatency: true });
         t.decCodec = name;
     }
-    if (t.needKey && !key) return;
+    if (t.needKey && !key) {
+        // Waiting on a keyframe nobody asked for is waiting on luck; the backend
+        // rate-limits the request, so asking on every dropped delta is safe.
+        control({ t: 'lost', kind: t.kind });
+        return;
+    }
     t.needKey = false;
     try {
         t.dec.fed++;

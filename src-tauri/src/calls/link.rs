@@ -25,7 +25,7 @@ static SERVER: OnceLock<Server> = OnceLock::new();
 static TAKER: Mutex<Option<mpsc::Sender<LinkConn>>> = Mutex::new(None);
 
 /// Frames queued toward the webview before the oldest are dropped.
-const TO_WEB_DEPTH: usize = 4;
+const TO_WEB_DEPTH: usize = 8;
 /// Frames queued from the webview before its socket reads stall.
 const FROM_WEB_DEPTH: usize = 8;
 

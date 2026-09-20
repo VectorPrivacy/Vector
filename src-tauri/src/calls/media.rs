@@ -469,10 +469,92 @@ fn capture_thread(
     }
 }
 
+/// Reference lead past which the share canceller starts over: a capture stall this
+/// long has overflowed the tap ring, and the pairing the cancellation rests on is gone.
+const SHARE_MAX_LEAD: usize = FRAME * 30;
+/// How long the share waits for its reference before it sends a frame uncancelled.
+const SHARE_FAR_WAIT: u32 = 40;
+/// The lag probe: a half second of both signals at 8 kHz, searched over ±250 ms.
+const LAG_DECIMATE: usize = 6;
+const LAG_WINDOW: usize = ENGINE_RATE as usize / 2 / LAG_DECIMATE;
+const LAG_SEARCH: usize = ENGINE_RATE as usize / 4 / LAG_DECIMATE;
+/// A correlation peak weaker than this is noise, not the echo.
+const LAG_MIN_CORR: f32 = 0.25;
+/// Where the echo is kept relative to its reference: trailing by a margin, so
+/// arrival jitter never turns it into a lead, and well inside the tail.
+const LAG_TARGET_MS: i64 = 60;
+const LAG_LOW_MS: i64 = 20;
+const LAG_HIGH_MS: i64 = 150;
+
+/// Where the echo sits relative to the reference it is paired with, measured
+/// rather than assumed: the capture's return trip through the OS mixer and the
+/// webview is unknown per platform, and a canceller fed its reference after the
+/// echo cancels nothing at all.
+struct LagProbe {
+    near: Vec<f32>,
+    far: Vec<f32>,
+}
+
+impl LagProbe {
+    fn new() -> Self {
+        Self { near: Vec::with_capacity(LAG_WINDOW), far: Vec::with_capacity(LAG_WINDOW) }
+    }
+
+    fn reset(&mut self) {
+        self.near.clear();
+        self.far.clear();
+    }
+
+    /// One paired frame, decimated; the window slides.
+    fn push(&mut self, near_l: &[i16], near_r: &[i16], far: &[i16]) {
+        for i in (0..near_l.len()).step_by(LAG_DECIMATE) {
+            self.near.push((near_l[i] as f32 + near_r[i] as f32) / 65536.0);
+            self.far.push(far[i] as f32 / 32768.0);
+        }
+        if self.near.len() > LAG_WINDOW {
+            let excess = self.near.len() - LAG_WINDOW;
+            self.near.drain(..excess);
+            self.far.drain(..excess);
+        }
+    }
+
+    fn full(&self) -> bool {
+        self.near.len() >= LAG_WINDOW
+    }
+
+    /// The lag in engine samples and the normalised peak. Positive: the echo trails
+    /// its reference, which the canceller's tail absorbs; negative: it leads, which
+    /// nothing absorbs.
+    fn estimate(&self) -> Option<(i64, f32)> {
+        let n = self.near.len();
+        let en: f32 = self.near.iter().map(|x| x * x).sum();
+        let ef: f32 = self.far.iter().map(|x| x * x).sum();
+        if en < 1e-4 || ef < 1e-4 {
+            return None;
+        }
+        let norm = (en * ef).sqrt();
+        let mut best = (0i64, f32::MIN);
+        for lag in -(LAG_SEARCH as i64)..=(LAG_SEARCH as i64) {
+            let (lo, hi) = if lag >= 0 { (lag as usize, n) } else { (0, (n as i64 + lag) as usize) };
+            let mut acc = 0f32;
+            for i in lo..hi {
+                acc += self.near[i] * self.far[(i as i64 - lag) as usize];
+            }
+            let c = acc / norm;
+            if c > best.1 {
+                best = (lag, c);
+            }
+        }
+        Some((best.0 * LAG_DECIMATE as i64, best.1))
+    }
+}
+
 /// The shared screen's sound out: the webview's capture, minus everything this
 /// process played (the voices most of all), as stereo Opus on its own datagrams.
 /// A loopback capture is a digital mix, so the canceller has no room to contend
-/// with, only the delay between the mixer's output and the capture's return.
+/// with, only the offset between the reference and the capture's return. That
+/// offset is measured by the probe and corrected in whichever direction it lies,
+/// not trimmed to a guess: a reference fed after its echo cancels nothing.
 fn share_thread(
     conn: Connection,
     share: Arc<ShareInput>,
@@ -513,7 +595,9 @@ fn share_thread(
     let started = Instant::now();
     let mut seq: u16 = stats.next_share_seq.load(Ordering::Relaxed) as u16;
     let mut was_active = false;
-    let far_slack = FRAME * 5;
+    let mut probe = LagProbe::new();
+    let mut probe_next = Instant::now();
+    let mut far_wait = 0u32;
 
     while !stop.load(Ordering::Relaxed) {
         let active = share.active.load(Ordering::Relaxed);
@@ -527,9 +611,16 @@ fn share_thread(
         }
         if !was_active {
             was_active = true;
+            // Both rings start together: whatever lead the reference then takes is
+            // the capture's round trip, which the pairing carries from here on.
+            share.ring.skip(share.ring.len());
+            link.share_tap.skip(link.share_tap.len());
             left.clear();
             right.clear();
             far.clear();
+            probe.reset();
+            probe_next = Instant::now() + Duration::from_secs(2);
+            far_wait = 0;
         }
         let rate = share.rate.load(Ordering::Relaxed);
         if rate != src_rate {
@@ -553,26 +644,64 @@ fn share_thread(
         if m > 0 {
             far_rs.process(&scratch[..m], &mut far);
         }
-        if far.len() > left.len() + far_slack {
-            let excess = far.len() - left.len() - far_slack;
-            far.drain(..excess);
+        // A lead past the cap means a stall overflowed the tap ring and the pairing
+        // is gone: start over rather than cancel against the wrong reference.
+        if far.len() > left.len() + SHARE_MAX_LEAD {
+            eprintln!("[Calls] share canceller resync: reference {} ms ahead", (far.len() - left.len()) * 1000 / ENGINE_RATE as usize);
+            was_active = false;
+            continue;
         }
         while left.len() >= FRAME && right.len() >= FRAME {
+            // The reference is real time and only ever early: short means it is still
+            // on its way, and a frame paired with silence would mistrain the filter.
+            if far.len() < FRAME {
+                if far_wait < SHARE_FAR_WAIT {
+                    far_wait += 1;
+                    break;
+                }
+                far_i16.fill(0);
+            } else {
+                far_wait = 0;
+                for (dst, src) in far_i16.iter_mut().zip(far.drain(..FRAME)) {
+                    *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
+                }
+            }
             for (dst, src) in near_l.iter_mut().zip(left.drain(..FRAME)) {
                 *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
             }
             for (dst, src) in near_r.iter_mut().zip(right.drain(..FRAME)) {
                 *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
             }
-            if far.len() >= FRAME {
-                for (dst, src) in far_i16.iter_mut().zip(far.drain(..FRAME)) {
-                    *dst = (src.clamp(-1.0, 1.0) * 32767.0) as i16;
-                }
-            } else {
-                far_i16.fill(0);
-            }
             aec_l.process(&near_l, &far_i16, &mut clean_l);
             aec_r.process(&near_r, &far_i16, &mut clean_r);
+            probe.push(&near_l, &near_r, &far_i16);
+            if probe.full() && Instant::now() >= probe_next {
+                probe_next = Instant::now() + Duration::from_secs(5);
+                match probe.estimate() {
+                    Some((lag, corr)) if corr >= LAG_MIN_CORR => {
+                        let lag_ms = lag * 1000 / ENGINE_RATE as i64;
+                        let target = LAG_TARGET_MS * ENGINE_RATE as i64 / 1000;
+                        if lag_ms <= LAG_LOW_MS {
+                            // Too close to leading: advance the reference until the
+                            // echo trails it by the target.
+                            let n = ((target - lag) as usize).min(far.len());
+                            far.drain(..n);
+                            probe.reset();
+                            eprintln!("[Calls] share echo lag {lag_ms} ms (corr {corr:.2}): advanced the reference to +{LAG_TARGET_MS} ms");
+                        } else if lag_ms > LAG_HIGH_MS {
+                            // Trailing further than the tail should carry: hold the
+                            // reference back with silence, the capture stays intact.
+                            far.splice(0..0, std::iter::repeat(0.0).take((lag - target) as usize));
+                            probe.reset();
+                            eprintln!("[Calls] share echo lag {lag_ms} ms (corr {corr:.2}): held the reference back to +{LAG_TARGET_MS} ms");
+                        } else {
+                            eprintln!("[Calls] share echo lag {lag_ms} ms (corr {corr:.2})");
+                        }
+                    }
+                    Some((_, corr)) => eprintln!("[Calls] share echo lag: no echo found (corr {corr:.2})"),
+                    None => {}
+                }
+            }
             for i in 0..FRAME {
                 stereo[i * 2] = clean_l[i];
                 stereo[i * 2 + 1] = clean_r[i];
@@ -747,5 +876,59 @@ fn playout_thread(
         rs.process(&pcm_f32, &mut resampled);
         link.play.push(&resampled);
         resampled.clear();
+    }
+}
+
+#[cfg(test)]
+mod lag_probe_tests {
+    use super::*;
+
+    /// A reference and a capture that is the reference delayed: the probe reports the
+    /// delay as a positive lag, and a capture that runs ahead as a negative one.
+    fn probe_with_shift(shift: i64) -> Option<(i64, f32)> {
+        let mut probe = LagProbe::new();
+        let n = ENGINE_RATE as usize; // one second of pseudo-noise
+        let mut seed = 0x9e37_79b9u32;
+        let src: Vec<i16> = (0..n + 4 * FRAME)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed >> 17) as i16 / 2
+            })
+            .collect();
+        let base = 2 * FRAME;
+        for f in 0..(n / FRAME) {
+            let at = base + f * FRAME;
+            let far: Vec<i16> = src[at..at + FRAME].to_vec();
+            let from = (at as i64 - shift) as usize;
+            let near: Vec<i16> = src[from..from + FRAME].to_vec();
+            probe.push(&near, &near, &far);
+        }
+        probe.estimate()
+    }
+
+    #[test]
+    fn a_delayed_capture_reads_as_a_positive_lag() {
+        let (lag, corr) = probe_with_shift(480).expect("signal present");
+        assert!(corr > 0.8, "corr {corr}");
+        assert!((lag - 480).abs() <= LAG_DECIMATE as i64, "lag {lag}");
+    }
+
+    #[test]
+    fn a_capture_that_runs_ahead_reads_as_a_negative_lag() {
+        let (lag, corr) = probe_with_shift(-960).expect("signal present");
+        assert!(corr > 0.8, "corr {corr}");
+        assert!((lag + 960).abs() <= LAG_DECIMATE as i64, "lag {lag}");
+    }
+
+    #[test]
+    fn silence_is_not_an_echo() {
+        let mut probe = LagProbe::new();
+        let zero = [0i16; FRAME];
+        for _ in 0..(ENGINE_RATE as usize / FRAME) {
+            probe.push(&zero, &zero, &zero);
+        }
+        assert!(probe.estimate().is_none());
     }
 }

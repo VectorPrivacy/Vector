@@ -20,7 +20,13 @@ use vector_core::calls::link::{control, parse, FromLink, LinkMsg, ToLink, KIND_F
 /// Frames on the wire at once before captures are skipped, at a zero round trip. A
 /// frame counts as on the wire until the peer has acknowledged all of it, so the
 /// cap grows with the round trip: what a path holds in one RTT, and a little over.
-const IN_FLIGHT_MIN: usize = 3;
+const IN_FLIGHT_MIN: usize = 4;
+/// Time past the round trip before a frame's stream is acknowledged: the peer's ACK
+/// delay and the read on its side.
+const ACK_SLACK_MS: usize = 60;
+/// Captures skipped in a second, as a share of the rung's rate, that read as a wire
+/// too full for the rung. A skip now and then is the cap doing its job.
+const BACKLOG_SKIP_SHARE: u64 = 4;
 /// A delta the peer has not acknowledged by then is reset: it is a picture of the
 /// past. Also scaled by the round trip, and a keyframe gets longer, since resetting
 /// one only buys another.
@@ -30,6 +36,8 @@ const STALE_KEY_MIN: Duration = Duration::from_secs(2);
 const KEYFRAME_MIN_GAP: Duration = Duration::from_secs(1);
 /// A frame the peer takes longer than this to deliver is abandoned; the next keyframe restarts.
 const INBOUND_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a received frame waits for the webview before it is dropped.
+const TO_WEB_WAIT: Duration = Duration::from_millis(250);
 /// With the screen on as well, the camera is a thumbnail: it gets this rung at most.
 const CAMERA_BESIDE_SCREEN_CAP: usize = 2;
 
@@ -169,10 +177,12 @@ impl Shared {
         rates.iter().flatten().map(|r| r.rung().fps as usize).sum::<usize>().max(1)
     }
 
-    /// How many frames may be unacknowledged before captures are skipped: one round
-    /// trip's worth at the sending rate, plus a little, never under the floor.
+    /// How many frames may be unacknowledged before captures are skipped: one
+    /// acknowledgement's worth at the sending rate, plus a little, never under the
+    /// floor. An acknowledgement takes the round trip plus the peer's ACK delay and
+    /// its read, so a cap sized to the round trip alone sits full on a clean link.
     fn in_flight_cap(&self, rtt_ms: u32) -> usize {
-        (rtt_ms as usize * self.sending_fps() / 1000 + 2).max(IN_FLIGHT_MIN)
+        ((rtt_ms as usize + ACK_SLACK_MS) * self.sending_fps() / 1000 + 2).max(IN_FLIGHT_MIN)
     }
 
     /// The ceiling a track gets on this path, and beside its sibling.
@@ -463,10 +473,12 @@ async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: Vid
     let key = header.is_key();
     let rtt = Duration::from_millis(rtt_ms as u64);
     let stale = if key { STALE_KEY_MIN.max(rtt * 4) } else { STALE_MIN.max(rtt * 3) };
+    let t0 = Instant::now();
     let opened = tokio::time::timeout(stale, conn.open_uni()).await;
     let mut s = match opened {
         Ok(Ok(s)) => s,
-        _ => {
+        other => {
+            log_info!("[VIDEO] stale: open_uni {} after {} ms, key {key}, {len} bytes", if other.is_err() { "timed out" } else { "failed" }, t0.elapsed().as_millis());
             shared.in_flight.fetch_sub(1, Ordering::Relaxed);
             shared.stats.stale.fetch_add(1, Ordering::Relaxed);
             shared.need_key_out[i].store(true, Ordering::Relaxed);
@@ -497,7 +509,8 @@ async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: Vid
                 shared.stats.sent.fetch_add(1, Ordering::Relaxed);
                 shared.stats.bytes_out.fetch_add(len, Ordering::Relaxed);
             }
-            Err(_) => {
+            Err(reason) => {
+                log_info!("[VIDEO] stale: {reason} after {} ms, key {key}, {len} bytes", t0.elapsed().as_millis());
                 shared.stats.stale.fetch_add(1, Ordering::Relaxed);
                 shared.need_key_out[i].store(true, Ordering::Relaxed);
                 shared.tell_web(&ToLink::Keyframe { kind });
@@ -511,13 +524,63 @@ async fn ship(conn: &Connection, shared: &Arc<Shared>, frame: Bytes, header: Vid
 /// decides the ceilings.
 async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
     let mut last_stale = 0u64;
+    let mut last_skipped = 0u64;
+    let mut last_sent = 0u64;
+    let mut last_received = 0u64;
+    let mut tick = 0u32;
     let mut was_relay: Option<bool> = None;
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
         let (relay, rtt_ms) = shared.path();
         let stale = shared.stats.stale.load(Ordering::Relaxed);
-        let backlog = stale > last_stale || shared.in_flight.load(Ordering::Relaxed) >= shared.in_flight_cap(rtt_ms);
+        let skipped = shared.stats.skipped.load(Ordering::Relaxed);
+        let sent = shared.stats.sent.load(Ordering::Relaxed);
+        let in_flight = shared.in_flight.load(Ordering::Relaxed);
+        let cap = shared.in_flight_cap(rtt_ms);
+        // Backlog is a frame that timed out, or a second in which the cap turned away a
+        // real share of the captures; a sample of the in-flight count is the cap working.
+        let fps = shared.sending_fps() as u64;
+        let backlog = stale > last_stale || (skipped - last_skipped) * BACKLOG_SKIP_SHARE > fps;
+        tick += 1;
+        let received = shared.stats.received.load(Ordering::Relaxed);
+        if tick % 2 == 0 && (sent != last_sent || received != last_received) {
+            let net = conn.stats();
+            let (cwnd, cong) = {
+                let paths = conn.paths();
+                paths
+                    .iter()
+                    .find(|p| p.is_selected())
+                    .or_else(|| paths.iter().next())
+                    .map(|p| {
+                        let s = p.stats();
+                        (s.cwnd, s.congestion_events)
+                    })
+                    .unwrap_or((0, 0))
+            };
+            let rung = {
+                let rates = shared.rate.lock().unwrap_or_else(|e| e.into_inner());
+                rates.iter().flatten().map(|r| r.rung()).map(|r| format!("{}fps/{}kbps", r.fps, r.kbps)).collect::<Vec<_>>().join("+")
+            };
+            log_info!(
+                "[VIDEO] rtt {rtt_ms} ms {} cwnd {} lost {} cong {} | blocked: data {} stream_data {} streams_uni {} | out: sent {} skipped {} stale {} in_flight {in_flight}/{cap} rung {rung} | in: received {received} dropped {} key_req {}",
+                if relay { "relay" } else { "direct" },
+                cwnd,
+                net.lost_packets,
+                cong,
+                net.frame_tx.data_blocked,
+                net.frame_tx.stream_data_blocked,
+                net.frame_tx.streams_blocked_uni,
+                sent - last_sent,
+                skipped - last_skipped,
+                stale - last_stale,
+                shared.stats.dropped.load(Ordering::Relaxed),
+                shared.stats.key_requests.load(Ordering::Relaxed),
+            );
+            last_sent = sent;
+            last_received = received;
+        }
         last_stale = stale;
+        last_skipped = skipped;
         let net = conn.stats();
         let obs = VideoObservation {
             sent_packets: net.udp_tx.datagrams,
@@ -645,8 +708,11 @@ async fn inbound(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         }
         let len = buf.len() as u64;
         let tx = shared.to_web.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        // Wait for the webview rather than drop: a dropped delta costs a keyframe, and
+        // a keyframe a second is a slideshow. Waiting holds the stream unread, which
+        // holds the sender's acknowledgement, which is what makes it skip captures.
         let delivered = match tx {
-            Some(tx) => tx.try_send(buf.freeze()).is_ok(),
+            Some(tx) => tokio::time::timeout(TO_WEB_WAIT, tx.send(buf.freeze())).await.is_ok_and(|r| r.is_ok()),
             None => false,
         };
         if delivered {

@@ -140,9 +140,10 @@ impl IrohState {
             .max_concurrent_bidi_streams(VarInt::from_u32(256))
             .max_concurrent_uni_streams(VarInt::from_u32(256))
             .initial_rtt(std::time::Duration::from_millis(100))
-            // BBR congestion control — better throughput and latency than NewReno
-            // under relay conditions (bufferbloat, variable RTT)
-            .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
+            // Cubic, not BBR: BBR sizes its window to measured rate × RTT, and a
+            // rate-controlled video flow on a short path measures a window of a few
+            // packets — then every burst of its own waits on that window.
+            .congestion_controller_factory(Arc::new(noq_proto::congestion::CubicConfig::default()))
             // Rule 2: Disable observed address reports (prevents QUIC learning direct IPs
             // during handshake → routes data to unreachable path → one-way data loss)
             .send_observed_address_reports(false)
