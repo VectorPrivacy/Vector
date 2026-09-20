@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-gif-api"
+description = "Enables the gif_api command without any pre-configured scope."
+commands.allow = ["gif_api"]
+
+[[permission]]
+identifier = "deny-gif-api"
+description = "Denies the gif_api command without any pre-configured scope."
+commands.deny = ["gif_api"]

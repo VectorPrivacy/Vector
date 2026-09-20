@@ -59,6 +59,7 @@ fn main() {
             "send_cached_compressed_file",
             // Image cache commands
             "get_or_cache_image",
+            "gif_api",
             "clear_image_cache",
             "get_image_cache_stats",
             "cache_url_image",
