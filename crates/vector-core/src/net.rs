@@ -119,13 +119,64 @@ pub fn user_agent() -> String {
         .unwrap_or_else(|| format!("Vector/{}", env!("CARGO_PKG_VERSION")))
 }
 
-#[allow(clippy::disallowed_methods)]
+/// Clients by their options, so a fetch reuses the connections of every
+/// fetch before it with the same options instead of opening its own.
+///
+/// A `reqwest::Client` is a handle on a connection pool; one built per
+/// request has an empty pool and pays a TCP and a TLS handshake for every
+/// file, which through an edge 33 ms away cost more than the file itself
+/// (measured: ~260 ms per already-cached clip, against ~70 ms on a kept
+/// connection). Twenty call sites built their own; now they share by
+/// options. With HTTP/2 negotiated to the edges, hundreds of small fetches
+/// share one connection. Emptied by [`rebuild_shared_http_client`] when Tor
+/// flips, since a client carries the proxy it was built with.
+static CLIENTS_BY_OPTIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<(Option<std::time::Duration>, Option<std::time::Duration>, bool), reqwest::Client>>> =
+    OnceLock::new();
+
 pub fn build_http_client_with_options(
     timeout: Option<std::time::Duration>,
     read_timeout: Option<std::time::Duration>,
     follow_redirects: bool,
 ) -> Result<reqwest::Client, String> {
+    let key = (timeout, read_timeout, follow_redirects);
+    let cell = CLIENTS_BY_OPTIONS.get_or_init(Default::default);
+    if let Ok(map) = cell.lock() {
+        if let Some(c) = map.get(&key) {
+            return Ok(c.clone());
+        }
+    }
+    let client = build_http_client_uncached(timeout, read_timeout, follow_redirects)?;
+    if let Ok(mut map) = cell.lock() {
+        map.entry(key).or_insert_with(|| client.clone());
+    }
+    Ok(client)
+}
+
+/// Forget every pooled client: the next request builds one against the
+/// current Tor state.
+fn forget_pooled_clients() {
+    if let Some(cell) = CLIENTS_BY_OPTIONS.get() {
+        if let Ok(mut map) = cell.lock() {
+            map.clear();
+        }
+    }
+}
+
+#[allow(clippy::disallowed_methods)]
+fn build_http_client_uncached(
+    timeout: Option<std::time::Duration>,
+    read_timeout: Option<std::time::Duration>,
+    follow_redirects: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
+        // Kept connections: idle ones stay a while so a burst of small
+        // fetches to one host (an edge, a Blossom server) rides one or a
+        // few connections, and HTTP/2 multiplexes on them where offered.
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_while_idle(true)
         // Every request names the client, on every platform, because this
         // is the one place a client is built. reqwest sends no agent at all
         // otherwise, and Magnitude's preview endpoint refuses a caller that
@@ -226,6 +277,7 @@ pub fn shared_http_client() -> Arc<reqwest::Client> {
 /// request goes through the freshly-configured proxy. In-flight requests on
 /// the old client continue to completion on the previous Arc.
 pub fn rebuild_shared_http_client() -> Result<(), String> {
+    forget_pooled_clients();
     let new = Arc::new(build_http_client(DEFAULT_SHARED_TIMEOUT)?);
     *shared_cell().write().unwrap() = new;
     Ok(())

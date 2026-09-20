@@ -84,7 +84,7 @@ semver = "1"
 # all relay/Blossom traffic). `charset` is kept for text-response decoding (link
 # previews fetching HTML). `socks` is required for the Tor proxy — without it
 # reqwest accepts a `socks5://` Proxy URL but silently does nothing.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "socks"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "socks", "http2"] }
 aes = "0.8.4"
 aes-gcm = "0.10.3"
 sha2 = "0.10.9"
