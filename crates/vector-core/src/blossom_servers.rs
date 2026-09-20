@@ -178,6 +178,8 @@ pub fn list_all_servers() -> Vec<BlossomServerInfo> {
 /// Refresh this account's resolved server list. Call after edits + on login.
 pub fn refresh_cache() {
     crate::state::set_blossom_servers(compute_enabled_servers());
+    // The proxy picks were made against the old list.
+    crate::proxy::forget_picks();
 }
 
 // ============================================================================

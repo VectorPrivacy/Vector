@@ -48,6 +48,8 @@ struct Pick {
 
 static PICKS: Mutex<Vec<Pick>> = Mutex::new(Vec::new());
 const PICK_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long "no server offers it" is believed before asking again.
+const NEGATIVE_PICK_TTL: Duration = Duration::from_secs(60);
 
 /// The first configured Blossom server whose information document lists
 /// `extension`, as an origin without a trailing slash.
@@ -59,19 +61,39 @@ pub async fn server_offering(extension: &'static str) -> Option<String> {
             }
         }
     }
+    // The list is installed at login, and the first pictures are asked for
+    // in the same seconds; a pick made against an empty list is not "no
+    // server offers it", it is "not yet". Wait a little for it.
+    let mut servers = crate::state::get_blossom_servers();
+    for _ in 0..25 {
+        if !servers.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        servers = crate::state::get_blossom_servers();
+    }
     let mut found = None;
-    for server in crate::state::get_blossom_servers() {
+    // Whether every server was actually asked. A document that could not
+    // be fetched says nothing about what the server offers.
+    let mut every_answer_known = !servers.is_empty();
+    for server in servers {
         // A document no older than an hour, refetched otherwise. Never the
         // persisted copy at any age: this account's was written before the
         // server offered previews or the proxy, and trusting it meant every
         // picture loaded directly while the toggle said otherwise.
         let info = match crate::signer::active_signer() {
-            Ok(signer) => crate::blossom_info::refresh(&signer, &server, Duration::from_secs(60 * 60))
-                .await
-                .ok()
-                .flatten(),
+            Ok(signer) => match crate::blossom_info::refresh(&signer, &server, Duration::from_secs(60 * 60)).await {
+                Ok(i) => i,
+                Err(_) => {
+                    every_answer_known = false;
+                    None
+                }
+            },
             // No signer to ask with: the last copy is all there is.
-            Err(_) => crate::blossom_info::cached(&server),
+            Err(_) => {
+                every_answer_known = false;
+                crate::blossom_info::cached(&server)
+            }
         };
         if info.map(|i| i.extensions.iter().any(|e| e == extension)).unwrap_or(false) {
             found = Some(server.trim_end_matches('/').to_string());
@@ -80,11 +102,24 @@ pub async fn server_offering(extension: &'static str) -> Option<String> {
     }
     match &found {
         Some(s) => crate::log_debug!("[Proxy] {} offered by {}", extension, s),
-        None => crate::log_warn!("[Proxy] no configured Blossom server offers {}; falling back", extension),
+        None if every_answer_known => crate::log_warn!("[Proxy] no configured Blossom server offers {}; falling back", extension),
+        None => crate::log_warn!("[Proxy] could not learn which server offers {}; asking again next time", extension),
     }
+    // A found server is remembered; a settled "none" (every server asked,
+    // none offers it) only briefly, so a server that starts offering it is
+    // seen soon; a failure to learn is not remembered at all.
     if let Ok(mut picks) = PICKS.lock() {
         picks.retain(|p| p.extension != extension);
-        picks.push(Pick { extension, server: found.clone(), at: Instant::now() });
+        match (&found, every_answer_known) {
+            (Some(_), _) => picks.push(Pick { extension, server: found.clone(), at: Instant::now() }),
+            // Dated back so it ages out after the short window, not the long.
+            (None, true) => {
+                if let Some(at) = Instant::now().checked_sub(PICK_TTL - NEGATIVE_PICK_TTL) {
+                    picks.push(Pick { extension, server: None, at });
+                }
+            }
+            (None, false) => {}
+        }
     }
     found
 }
