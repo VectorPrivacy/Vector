@@ -60,6 +60,7 @@ fn main() {
             // Image cache commands
             "get_or_cache_image",
             "gif_api",
+            "cache_gif_preview",
             "clear_image_cache",
             "get_image_cache_stats",
             "cache_url_image",

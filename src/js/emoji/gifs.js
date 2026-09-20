@@ -404,13 +404,7 @@ function renderGifs(gifs, append = false) {
  * Attempts to load a GIF using the format at the given index in the fallback chain
  * On error, tries the next format in the chain
  */
-function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex) {
-    // Proxied: the preview is the GIF itself, fetched and cached by Rust
-    // through Magnitude like any picture. The video formats would need the
-    // WebView to stream from the service directly, which is the leak.
-    if (fProxyMediaEnabled) {
-        formatIndex = gifFormatFallbackChain.length - 1;
-    }
+function loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, formatIndex) {
     if (formatIndex >= gifFormatFallbackChain.length) {
         // All formats failed - show error icon
         if (placeholder) placeholder.innerHTML = '<span class="icon icon-image"></span>';
@@ -451,18 +445,34 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
         video.onerror = () => {
             // Try next format in the fallback chain
             video.remove();
-            loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
+            loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, formatIndex + 1);
         };
 
-        // Set src and explicitly call load() for WebKit
-        video.src = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
-        gifItem.appendChild(video);
-        video.load();
+        const remote = `${mediaBase}/${encodeURIComponent(gifId)}/${format.ext}`;
+        if (fProxyMediaEnabled) {
+            // Fetched by Rust through the privacy setting's egress into a
+            // small local cache, then played from the file; the WebView
+            // never talks to the service. The AV1 clip is ~14x smaller than
+            // the GIF, so this is also the fast path.
+            invoke('cache_gif_preview', { url: remote })
+                .then(path => {
+                    if (!path) { video.onerror(); return; }
+                    video.src = mediaUrl(path);
+                    gifItem.appendChild(video);
+                    video.load();
+                })
+                .catch(() => video.onerror());
+        } else {
+            // Set src and explicitly call load() for WebKit
+            video.src = remote;
+            gifItem.appendChild(video);
+            video.load();
+        }
     } else {
         // Image format (GIF)
         const img = document.createElement('img');
         img.alt = gifTitle || 'GIF';
-        const remote = `${mediaUrl}/${encodeURIComponent(gifId)}/${format.ext}`;
+        const remote = `${mediaBase}/${encodeURIComponent(gifId)}/${format.ext}`;
 
         img.onload = () => {
             if (placeholder) placeholder.remove();
@@ -471,17 +481,17 @@ function loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, fo
         img.onerror = () => {
             // Try next format in the fallback chain (if any)
             img.remove();
-            loadGifWithFallback(gifItem, mediaUrl, gifId, gifTitle, placeholder, formatIndex + 1);
+            loadGifWithFallback(gifItem, mediaBase, gifId, gifTitle, placeholder, formatIndex + 1);
         };
 
         if (fProxyMediaEnabled) {
             // The element joins the grid only once its bytes exist: an <img>
             // without a src paints a broken frame and the alt text over the
             // thumbhash, which is meant to stand alone until the picture lands.
-            invoke('get_or_cache_image', { url: remote, imageType: 'inline_image' })
+            invoke('cache_gif_preview', { url: remote })
                 .then(path => {
                     if (!path) { img.onerror(); return; }
-                    img.src = convertFileSrc(path);
+                    img.src = mediaUrl(path);
                     gifItem.appendChild(img);
                 })
                 .catch(() => img.onerror());

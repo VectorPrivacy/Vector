@@ -796,6 +796,7 @@ pub fn run() {
             // Image cache commands
             image_cache::get_or_cache_image,
             commands::gifs::gif_api,
+            commands::gifs::cache_gif_preview,
             image_cache::verify_remote_media,
             image_cache::clear_image_cache,
             image_cache::get_image_cache_stats,

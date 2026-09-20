@@ -64,6 +64,7 @@
     "allow-send-cached-compressed-file",
     "allow-get-or-cache-image",
     "allow-gif-api",
+    "allow-cache-gif-preview",
     "allow-verify-remote-media",
     "allow-clear-image-cache",
     "allow-get-image-cache-stats",

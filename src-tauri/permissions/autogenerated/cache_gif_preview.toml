@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-gif-preview"
+description = "Enables the cache_gif_preview command without any pre-configured scope."
+commands.allow = ["cache_gif_preview"]
+
+[[permission]]
+identifier = "deny-cache-gif-preview"
+description = "Denies the cache_gif_preview command without any pre-configured scope."
+commands.deny = ["cache_gif_preview"]
