@@ -105,6 +105,11 @@ pub async fn get_seed() -> Result<Option<String>, String> {
 /// Set a setting value in SQL database
 #[command]
 pub fn set_sql_setting(key: String, value: String) -> Result<(), String> {
+    // The media-proxy pick is remembered for a few minutes; a change to the
+    // setting must take effect on the next picture, not after that.
+    if key == crate::magnitude::SETTING_KEY {
+        crate::magnitude::forget_picks();
+    }
     if let Ok(_npub) = crate::account_manager::get_current_account() {
         let conn = crate::account_manager::get_write_connection_guard_static()?;
         conn.execute(

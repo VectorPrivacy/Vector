@@ -771,6 +771,8 @@ async function exportAccount() {
 
 // Privacy Settings - Simple global variables
 let fWebPreviewsEnabled = true;
+/** Previews and pictures via the user's Magnitude server, not this device. */
+let fProxyMediaEnabled = true;
 let fStripTrackingEnabled = true;
 let fSendTypingIndicators = true;
 
@@ -1079,6 +1081,7 @@ async function setPrivacySetting(key, on) {
         case 'webPreviews': fWebPreviewsEnabled = on; await saveWebPreviews(on); break;
         case 'stripTracking': fStripTrackingEnabled = on; await saveStripTracking(on); break;
         case 'sendTyping': fSendTypingIndicators = on; await saveSendTypingIndicators(on); break;
+        case 'proxyMedia': fProxyMediaEnabled = on; await saveProxyMedia(on); break;
     }
 }
 
@@ -1102,7 +1105,8 @@ async function initSettings() {
     fWebPreviewsEnabled = await loadWebPreviews();
     fStripTrackingEnabled = await loadStripTracking();
     fSendTypingIndicators = await loadSendTypingIndicators();
-    VectorSvelte.setSettingsScreen({ privacy: { webPreviews: fWebPreviewsEnabled, stripTracking: fStripTrackingEnabled, sendTyping: fSendTypingIndicators } });
+    fProxyMediaEnabled = await loadProxyMedia();
+    VectorSvelte.setSettingsScreen({ privacy: { webPreviews: fWebPreviewsEnabled, stripTracking: fStripTrackingEnabled, sendTyping: fSendTypingIndicators, proxyMedia: fProxyMediaEnabled } });
 
     // Auto-download toggle + limit (migrates pre-split accounts). At boot so the
     // gate in message-row.js is correct before Settings is opened.
@@ -1719,6 +1723,7 @@ function updateMigrationProgress(total, completed, phase) {
 const SETTINGS_HELP = {
     stripTracking: ['Strip Tracking Markers', 'When enabled, Vector will <b>automatically remove tracking markers</b> from URLs before displaying or sending them.<br><br>This helps reduce your footprint and enhances your privacy with no loss in functionality, only disable if you know what you\'re doing.'],
     sendTyping: ['Send Typing Indicators', 'When enabled, Vector will <b>notify your contacts when you are typing</b> a message to them.<br><br>Disable this if you prefer to type without others knowing you are composing a message.'],
+    proxyMedia: ['Proxy Previews & Media', 'Fetches link previews and every picture (avatars, banners, emoji, pictures posted as links) through your Magnitude server instead of from this device.<br><br>A picture loaded directly is a request from <b>your</b> address to whoever hosts it; through Magnitude, they see the server instead. Needs a Magnitude server in your Blossom list that offers it.<br><br>Off: everything loads directly from its source.'],
     // Trademark notice + non-endorsement disclaimer included per the
     // Tor Project's trademark policy (https://www.torproject.org/about/trademark/).
     tor: ['Route traffic through Tor',

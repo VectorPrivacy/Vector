@@ -327,7 +327,11 @@ pub async fn cache_image<R: Runtime>(
     // Download the image
     log_debug!("[ImageCache] Downloading {} for {:?}", url, image_type);
 
-    let mut response = match http_client().get(url).send().await {
+    // Loaded through the user's Magnitude server when the privacy setting is
+    // on and a server offers it: the host sees the server, not this device.
+    // The cache stays keyed by the original URL either way.
+    let download_url = crate::magnitude::proxied(url).await.unwrap_or_else(|| url.to_string());
+    let mut response = match http_client().get(&download_url).send().await {
         Ok(resp) => resp,
         Err(e) => {
             // Dead link / expired blob / timeout — expected for remote media, not
@@ -972,7 +976,9 @@ pub async fn cache_url_image<R: Runtime>(
 
     // Download with progress reporting (10s timeout)
     log_trace!("[ImageCache] Downloading inline image with progress: {}", url);
-    let bytes = match download_with_reporter(&url, &reporter, Some(Duration::from_secs(10))).await {
+    // Same routing as every other picture: through Magnitude when it can be.
+    let download_url = crate::magnitude::proxied(&url).await.unwrap_or_else(|| url.clone());
+    let bytes = match download_with_reporter(&download_url, &reporter, Some(Duration::from_secs(10))).await {
         Ok(b) => b,
         Err(e) => {
             cleanup().await;

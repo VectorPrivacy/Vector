@@ -91,6 +91,13 @@
             <span class="neon-toggle"></span>
         </label>
     </div>
+    <div class="form-group">
+        <label class="toggle-container">
+            <span><InfoIcon onclick={() => h.help('proxyMedia')} />Proxy Previews &amp; Media</span>
+            <input type="checkbox" bind:checked={sc.privacy.proxyMedia} onchange={() => h.setPrivacy('proxyMedia', sc.privacy.proxyMedia)}>
+            <span class="neon-toggle"></span>
+        </label>
+    </div>
 
     {#if sc.platform.tor}
         <!-- Adjacent siblings: the card's CSS fuses it with an expanded disclosure. -->

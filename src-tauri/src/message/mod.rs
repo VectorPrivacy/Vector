@@ -4,7 +4,6 @@
 
 use tauri::Emitter;
 
-use crate::net;
 use crate::STATE;
 use crate::util;
 use crate::TAURI_APP;
@@ -118,7 +117,9 @@ pub async fn fetch_msg_metadata(chat_id: String, msg_id: String) -> bool {
         {
             continue;
         }
-        match net::fetch_site_metadata(&url).await {
+        // Via the user's Magnitude server when the privacy setting is on, so the
+        // page learns the server's address and not this device's.
+        match crate::magnitude::site_metadata(&url).await {
             Ok(metadata) => {
                 let has_content = metadata.og_title.is_some()
                     || metadata.og_description.is_some()

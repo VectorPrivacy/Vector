@@ -108,6 +108,21 @@ async function saveWebPreviews(bool) {
 }
 
 /**
+ * Whether link previews and pictures are fetched through the user's Magnitude
+ * server rather than by this device. On by default: a picture loaded here is a
+ * request from this address to whoever hosts it.
+ */
+async function loadProxyMedia() {
+    const value = await invoke('get_sql_setting', { key: 'privacy_proxy_media' });
+    if (value === null || value === undefined) return true;
+    return value === 'true' || value === '1';
+}
+
+async function saveProxyMedia(bool) {
+    return await invoke('set_sql_setting', { key: 'privacy_proxy_media', value: bool ? 'true' : 'false' });
+}
+
+/**
  * Load the user's Strip Tracking setting
  * @returns {Promise<boolean>}
  */

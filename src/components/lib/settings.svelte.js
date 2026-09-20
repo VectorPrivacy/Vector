@@ -133,7 +133,7 @@ export function setVoiceDownloadProgress(text) {
 // `{ storage: { clearing: true } }` without restating the rest.
 const screen = $state({
     theme: 'vector',
-    privacy: { webPreviews: true, stripTracking: true, sendTyping: true },
+    privacy: { webPreviews: true, stripTracking: true, sendTyping: true, proxyMedia: true },
     battery: { shown: false, enabled: false, warning: false },
     storage: { galleryShown: false, galleryHidden: false, autoDownload: true, limit: 10485760, clearing: false },
     platform: { tor: true, voice: false, updates: true },

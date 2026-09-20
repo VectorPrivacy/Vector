@@ -5,6 +5,7 @@ extern crate vector_core;
 
 #[macro_use]
 mod macros;
+mod magnitude;
 
 mod crypto;
 
