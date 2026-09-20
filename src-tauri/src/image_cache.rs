@@ -30,6 +30,11 @@ use tokio::sync::Mutex;
 
 /// Maximum concurrent image downloads
 static DOWNLOAD_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
+/// Emoji and pack icons have a lane of their own. They are tiny and they sit
+/// in reaction chips and the picker, and after a cache clear or a fresh boot
+/// the shared lane is full of avatars, banners and inline pictures for a
+/// long while; a reaction that waits behind all of them looks stuck.
+static EMOJI_DOWNLOAD_SEMAPHORE: LazyLock<Semaphore> = LazyLock::new(|| Semaphore::new(4));
 
 /// Track URLs currently being downloaded to prevent duplicate downloads
 /// (e.g., when messages re-render from Pending to Sent)
@@ -312,7 +317,11 @@ pub async fn cache_image<R: Runtime>(
     }
 
     // Acquire semaphore permit to limit concurrent downloads
-    let _permit = DOWNLOAD_SEMAPHORE.acquire().await
+    let lane = match image_type {
+        ImageType::Emoji | ImageType::EmojiPackIcon => &*EMOJI_DOWNLOAD_SEMAPHORE,
+        _ => &*DOWNLOAD_SEMAPHORE,
+    };
+    let _permit = lane.acquire().await
         .map_err(|e| format!("Semaphore error: {}", e));
 
     if _permit.is_err() {
