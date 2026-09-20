@@ -4298,7 +4298,16 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
     // Download the ciphertext (Tor failsafe applies via build_http_client), bounded.
     const MAX_IMG: usize = 10 * 1024 * 1024;
     let client = vector_core::net::build_http_client(std::time::Duration::from_secs(30))?;
-    let mut resp = client.get(&image.url).send().await.map_err(|e| format!("download: {e}"))?;
+    // An encrypted community logo is still a download from somebody's Blossom
+    // server: proxied and signed like every other picture when the setting is on.
+    let fetch_url = crate::magnitude::proxied(&image.url).await.unwrap_or_else(|| image.url.clone());
+    let mut req = client.get(&fetch_url);
+    if let Some(server) = crate::magnitude::proxy_server_of(&fetch_url) {
+        if let Some(v) = crate::magnitude::proxy_authorization(&server).await {
+            req = req.header(reqwest::header::AUTHORIZATION, v);
+        }
+    }
+    let mut resp = req.send().await.map_err(|e| format!("download: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download failed: HTTP {}", resp.status()));
     }
