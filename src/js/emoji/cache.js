@@ -57,6 +57,8 @@ function _isCacheableEmojiUrl(url) {
 function reloadCachedEmojiImgs() {
     _emojiCacheMemo.clear();
     _emojiFailReason.clear();
+    // The pack canvases hold decoded sheets of their own (pack-canvas.js).
+    if (typeof resetPackEmojiSheets === 'function') resetPackEmojiSheets();
     document.querySelectorAll('img[data-cache-token]').forEach(img => {
         bindCachedEmojiImg(img, img.dataset.cacheToken, img.dataset.cacheKind || 'emoji');
     });

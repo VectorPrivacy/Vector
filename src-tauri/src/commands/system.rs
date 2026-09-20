@@ -318,6 +318,7 @@ async fn clear_media_caches<R: Runtime>(
         if cache_dir.exists() {
             let _ = std::fs::remove_dir_all(&cache_dir);
         }
+        crate::commands::emoji_packs::forget_sheets();
 
         // Clear in-memory notification sound cache (desktop only)
         #[cfg(desktop)]

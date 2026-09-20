@@ -568,6 +568,13 @@ impl SpritesheetCache {
     }
 }
 
+/// Drop every remembered sheet descriptor: the files are being deleted
+/// underneath them. Each one re-checks its file anyway, but a cache that is
+/// known to be wrong should not wait to be caught.
+pub fn forget_sheets() {
+    spritesheet_cache().lock().unwrap().entries.clear();
+}
+
 fn spritesheet_cache() -> &'static Mutex<SpritesheetCache> {
     static CACHE: OnceLock<Mutex<SpritesheetCache>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(SpritesheetCache::new()))

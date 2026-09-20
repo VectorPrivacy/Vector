@@ -290,6 +290,21 @@ async function decodePackEmojiFrames(url) {
     return promise;
 }
 
+/** Forget every decoded sheet and atlas and make each pack grid ask again.
+ *  After "Delete Cache" the files these point at are gone; without this the
+ *  panel keeps drawing from memory and looks cached when nothing is. */
+function resetPackEmojiSheets() {
+    _packEmojiSheetCache.clear();
+    _sheetImageCache.clear();
+    for (const grid of _packCanvasGrids.values()) {
+        grid.frames = new Array(grid.emojis.length).fill(undefined);
+        grid.dirty.clear();
+        for (let i = 0; i < grid.emojis.length; i++) grid.dirty.add(i);
+        grid._framesRequested = false;
+        grid._requestFrames();
+    }
+}
+
 const _activeCanvasSections = new Set();
 let _packCanvasRafHandle = null;
 let _packCanvasLastTick = 0;
