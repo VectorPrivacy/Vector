@@ -57,20 +57,26 @@ pub async fn server_offering(extension: &'static str) -> Option<String> {
     }
     let mut found = None;
     for server in crate::get_blossom_servers() {
-        let info = match vector_core::blossom_info::cached(&server) {
-            Some(i) => Some(i),
-            None => match vector_core::signer::active_signer() {
-                Ok(signer) => vector_core::blossom_info::refresh(&signer, &server, Duration::from_secs(6 * 60 * 60))
-                    .await
-                    .ok()
-                    .flatten(),
-                Err(_) => None,
-            },
+        // A document no older than an hour, refetched otherwise. Never the
+        // persisted copy at any age: this account's was written before the
+        // server offered previews or the proxy, and trusting it meant every
+        // picture loaded directly while the toggle said otherwise.
+        let info = match vector_core::signer::active_signer() {
+            Ok(signer) => vector_core::blossom_info::refresh(&signer, &server, Duration::from_secs(60 * 60))
+                .await
+                .ok()
+                .flatten(),
+            // No signer to ask with: the last copy is all there is.
+            Err(_) => vector_core::blossom_info::cached(&server),
         };
         if info.map(|i| i.extensions.iter().any(|e| e == extension)).unwrap_or(false) {
             found = Some(server.trim_end_matches('/').to_string());
             break;
         }
+    }
+    match &found {
+        Some(s) => log_debug!("[Proxy] {} offered by {}", extension, s),
+        None => log_warn!("[Proxy] no configured Blossom server offers {}; falling back", extension),
     }
     if let Ok(mut picks) = PICKS.lock() {
         picks.retain(|p| p.extension != extension);
