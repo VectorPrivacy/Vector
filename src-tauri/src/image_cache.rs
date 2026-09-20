@@ -798,7 +798,11 @@ pub async fn clear_image_cache<R: Runtime>(
     total += clear_cache(&handle, ImageType::Emoji)?;
     total += clear_cache(&handle, ImageType::EmojiPackIcon)?;
 
-    // Clear stale cached path references in profiles (DB + in-memory state)
+    // Clear stale cached path references in profiles (DB + in-memory state),
+    // and remember what to fetch again: the frontend keeps every avatar it was
+    // handed, so without this the pictures whose files just went stay broken
+    // until each profile happens to sync.
+    let mut refetch: Vec<(String, String, String)> = Vec::new();
     {
         let mut state = crate::STATE.lock().await;
         let mut cleared_ids = Vec::new();
@@ -811,9 +815,27 @@ pub async fn clear_image_cache<R: Runtime>(
         }
         for id in cleared_ids {
             if let Some(slim) = state.serialize_profile(id) {
+                let (avatar, banner) = state
+                    .get_profile_by_id(id)
+                    .map(|p| (p.avatar.to_string(), p.banner.to_string()))
+                    .unwrap_or_default();
+                if !avatar.is_empty() || !banner.is_empty() {
+                    refetch.push((slim.id.clone(), avatar, banner));
+                }
                 crate::db::set_profile(slim).await.ok();
             }
         }
+    }
+    // Fetch them again in the background, one after another so the download
+    // semaphore paces it. Each one that lands emits its own profile_update,
+    // which is what repaints the avatar.
+    if !refetch.is_empty() {
+        log_debug!("[ImageCache] re-fetching images for {} profiles after clearing", refetch.len());
+        tauri::async_runtime::spawn(async move {
+            for (npub, avatar, banner) in refetch {
+                crate::profile::cache_profile_images(&npub, &avatar, &banner).await;
+            }
+        });
     }
 
     Ok(total)
