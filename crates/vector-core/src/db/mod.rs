@@ -24,6 +24,7 @@ pub mod wrappers;
 pub mod nip17_keys;
 pub mod community;
 pub mod bots;
+pub mod notify;
 
 pub use settings::{
     get_sql_setting, set_sql_setting, advance_u64_setting, get_pkey, set_pkey, get_seed, set_seed, remove_setting,
@@ -1330,6 +1331,11 @@ pub fn init_database(npub: &str) -> Result<(), String> {
             .unwrap_or(false);
         crate::tor::set_tor_enabled_pref(enabled);
     }
+
+    // Read the notification preferences now: every badge recount resolves every
+    // chat against them, so a lazy first read would land a SQLite round trip on
+    // that path with the chat state lock held.
+    crate::notify::warm();
 
     Ok(())
 }

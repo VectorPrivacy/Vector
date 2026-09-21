@@ -802,12 +802,16 @@ static CHANNEL_COMMUNITY_CACHE: std::sync::LazyLock<
 /// Drop every cached channel→community mapping (account swap).
 pub fn clear_channel_community_cache() {
     CHANNEL_COMMUNITY_CACHE.write().unwrap().clear();
+    crate::notify::invalidate_live_channels();
 }
 
 /// Forget a community's channel mappings — its rows were dropped or rewritten, so any
 /// pruned entry must stop resolving. Retained channels refill lazily on next lookup.
 fn forget_community_channels(community_id: &str) {
     CHANNEL_COMMUNITY_CACHE.write().unwrap().retain(|_, cid| cid != community_id);
+    // A prune here is how a channel stops being openable, which is what decides
+    // whether its unread may still badge.
+    crate::notify::invalidate_live_channels();
 }
 
 pub fn community_id_for_channel(channel_id: &str) -> Result<Option<String>, String> {

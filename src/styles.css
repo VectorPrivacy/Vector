@@ -260,6 +260,18 @@
   mask-image: url("./icons/volume-mute.svg");
 }
 
+.icon-bell {
+  mask-image: url("./icons/bell.svg");
+}
+
+.icon-chevron-right {
+  mask-image: url("./icons/chevron-right.svg");
+}
+
+.icon-chevron-left {
+  mask-image: url("./icons/chevron-left.svg");
+}
+
 .icon-volume-max {
   mask-image: url("./icons/volume-max.svg");
 }
@@ -2367,6 +2379,39 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 .context-menu-item:active { background: #2a2a2a; color: #fff; }
 .context-menu-item.is-danger:active { background: var(--danger-color-hover); color: var(--danger-color); }
+
+/* A section label inside the menu, e.g. NOTIFICATIONS above a set of levels. */
+.context-menu-header {
+  padding: 9px 14px 4px;
+  color: #6f6f6f;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* The row back out of a submenu: its chevron leads, so it reads as a return
+   rather than another command. */
+.context-menu-item.is-back {
+  justify-content: flex-start;
+  gap: 8px;
+  color: #8b8b8b;
+}
+.context-menu-lead { flex-shrink: 0; }
+
+/* A setting the app-wide switch has already decided. Visible, so the reason a
+   choice here would do nothing is readable, but not selectable. */
+.context-menu-item.is-disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.context-menu-item.is-disabled:hover,
+.context-menu-item.is-disabled:active {
+  background: transparent;
+  color: #b2b2b2;
+}
 
 /* Dimmed qualifier after an item label, e.g. Copy (plain). */
 .context-menu-item-hint {

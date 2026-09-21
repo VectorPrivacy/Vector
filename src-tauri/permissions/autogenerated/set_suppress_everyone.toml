@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-suppress-everyone"
+description = "Enables the set_suppress_everyone command without any pre-configured scope."
+commands.allow = ["set_suppress_everyone"]
+
+[[permission]]
+identifier = "deny-set-suppress-everyone"
+description = "Denies the set_suppress_everyone command without any pre-configured scope."
+commands.deny = ["set_suppress_everyone"]

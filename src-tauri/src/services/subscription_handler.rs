@@ -198,48 +198,52 @@ impl vector_core::community::transport::CommunityIngestSink for CommunityStraggl
     }
 }
 
-/// OS notification for a realtime Community message, mirroring the DM/group rules: a normal message
-/// notifies only when neither the channel nor the sender is muted; a direct @mention, a reply to one of our own messages,
-/// or an authorized @everyone (owner or admin) breaks through a muted channel — unless the SENDER's DM
-/// is muted, they're blocked, or @everyone pings are globally disabled. `chat_id` is the channel id.
+/// OS notification for a realtime Community message. The channel's resolved level decides which
+/// classes ring: everything at `All`, only a ping at `Mentions`, nothing at `Nothing` — where a
+/// mute has already clamped that level to at most `Mentions`. A ping is a direct @mention, a reply
+/// to one of our own messages, or an authorized @everyone the community still allows. Above all of
+/// it, a blocked or DM-muted sender is silent whatever the room says. `chat_id` is the channel id.
 pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core::Message) {
     if msg.mine { return; }
     let sender_npub = msg.npub.as_deref().unwrap_or_default();
     if sender_npub.is_empty() { return; }
 
+    let community_id = vector_core::db::community::community_id_for_channel(chat_id).ok().flatten();
+
     // Resolve @everyone authority only when the text actually contains it (zero-cost on normal sends).
-    let everyone_ping = if msg.mentions_everyone() {
-        let muted_everyone = vector_core::db::settings::get_sql_setting("notif_mute_everyone".to_string())
-            .ok().flatten().map_or(false, |v| v == "true");
-        !muted_everyone && community_sender_is_admin(chat_id, sender_npub)
-    } else {
-        false
-    };
+    let everyone_ping = msg.mentions_everyone()
+        && vector_core::notify::everyone_allowed(community_id.as_deref())
+        && community_sender_is_admin(chat_id, sender_npub);
 
     // A reply to our own message is an implicit ping (same as a direct @mention). The inbound parse
     // doesn't resolve the reply's author, so check the target event's `mine` flag directly.
     let reply_ping = !msg.replied_to.is_empty()
         && vector_core::db::events::is_own_event(&msg.replied_to);
 
+    let class = if everyone_ping {
+        vector_core::notify::MessageClass::Everyone
+    } else if msg.mentions_me() || reply_ping {
+        vector_core::notify::MessageClass::Mention
+    } else {
+        vector_core::notify::MessageClass::Normal
+    };
+
     let should_notify = {
         let state = crate::STATE.lock().await;
-        // Only a community's surfaced (primary) row notifies. Every channel is registered
-        // and synced, but there is no row to open for a sibling channel, so ringing for
-        // one would be a notification the user can't act on or clear.
-        let registered = state
-            .get_chat(chat_id)
-            .is_some_and(|c| c.is_surfaced_community_channel());
-        let mentions_me = msg.mentions_me();
-        let sender_blocked = state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked());
-        let sender_dm_muted = state.get_chat(sender_npub).map_or(false, |c| c.muted);
-        if !registered || sender_blocked {
+        let Some(chat) = state.get_chat(chat_id) else { return };
+        // Every LISTED channel has a row to open in widescreen, so a sibling's ping rings
+        // like any other. A channel its community no longer lists keeps its chat row and
+        // history but has nowhere to open, and `community_id_for_channel` is exactly that
+        // question: the row is pruned when the channel stops being listed.
+        if community_id.is_none() {
             false
-        } else if mentions_me || reply_ping || everyone_ping {
-            // Pings bypass a muted CHANNEL, but never a muted/blocked sender.
-            !sender_dm_muted
+        } else if state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked())
+            || state.get_chat(sender_npub).map_or(false, |c| vector_core::notify::muted_for_chat(c))
+        {
+            // A blocked or muted SENDER is silent in every channel, at every level.
+            false
         } else {
-            // A muted SENDER is silent in every channel, muted or not.
-            state.get_chat(chat_id).map_or(false, |c| !c.muted) && !sender_dm_muted
+            vector_core::notify::passes(vector_core::notify::ring_for_chat(chat), class)
         }
     };
     if !should_notify { return; }

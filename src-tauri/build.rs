@@ -37,6 +37,10 @@ fn main() {
             // Chat commands
             "mark_as_read",
             "toggle_chat_mute",
+            "get_notify_prefs",
+            "set_notify_level",
+            "set_notify_mute",
+            "set_suppress_everyone",
             // Message commands
             "message",
             "file_message",

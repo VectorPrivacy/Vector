@@ -581,6 +581,26 @@ async function setupRustListeners() {
         scheduleUnreadRefresh();
     });
 
+    _on('notify_prefs_changed', (evt) => {
+        // Carries every chat's resolved pair, because a community-scope change or a
+        // lapsed timer moves rows nobody touched.
+        let any = false;
+        for (const row of evt.payload?.chats || []) {
+            const cChat = arrChats.find(c => c.id === row.id);
+            if (!cChat) continue;
+            if (cChat.muted === row.muted && cChat.notify === row.notify
+                && cChat.everyone_pings === row.everyone) continue;
+            cChat.muted = row.muted;
+            cChat.notify = row.notify;
+            cChat.everyone_pings = row.everyone;
+            chatChanged(cChat);
+            any = true;
+        }
+        if (!any) return;
+        communitiesChanged();
+        scheduleUnreadRefresh();
+    });
+
     _on('profile_nick_changed', (evt) => {
         // Update the profile's nickname
         const cProfile = getProfile(evt.payload.profile_id);

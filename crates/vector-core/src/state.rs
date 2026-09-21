@@ -720,6 +720,20 @@ pub struct ChatState {
     pub cache_stats: crate::stats::CacheStats,
 }
 
+/// Whether a Community chat is one the user can actually reach.
+///
+/// Widescreen gives every LISTED channel a row, so a sibling's unread counts
+/// like any other. Two kinds of row still have nowhere to go: a bare
+/// persistence anchor with no community stamp, and a channel its community
+/// stopped listing — a tombstoned or no-longer-readable one keeps its chat row
+/// and history on disk, so its unread could never be seen or cleared.
+fn chat_has_a_row(chat: &crate::chat::Chat) -> bool {
+    if !chat.metadata.custom_fields.contains_key("community_id") {
+        return false;
+    }
+    chat.is_surfaced_community_channel() || crate::notify::channel_is_listed(&chat.id)
+}
+
 impl ChatState {
     pub fn new() -> Self {
         Self {
@@ -1120,7 +1134,9 @@ impl ChatState {
     pub fn sum_unread_from(&self, counts: &std::collections::HashMap<String, u32>) -> u32 {
         let mut total = 0u32;
         for chat in &self.chats {
-            if chat.muted {
+            // Only a room that rings for everything pushes the OS badge. At Mentions or
+            // Nothing its traffic is the row's own business, and the row shows pings.
+            if crate::notify::ring_for_chat(chat) != crate::notify::NotifyLevel::All {
                 continue;
             }
             if !chat.is_community() {
@@ -1129,10 +1145,7 @@ impl ChatState {
                         continue;
                     }
                 }
-            } else if !chat.is_surfaced_community_channel() {
-                // Only a community's PRIMARY channel gets a row; a bare persistence anchor
-                // or a sibling channel is invisible, so its unreads can't be seen or
-                // cleared and must not badge.
+            } else if !chat_has_a_row(chat) {
                 continue;
             }
             total += counts.get(&chat.id).copied().unwrap_or(0);
@@ -1183,19 +1196,18 @@ impl ChatState {
         let muted_senders: std::collections::HashSet<u16> = self
             .chats
             .iter()
-            .filter(|c| c.muted && !c.is_community())
+            .filter(|c| !c.is_community() && crate::notify::muted_for_chat(c))
             .filter_map(|c| self.interner.lookup(&c.id))
             .collect();
         let mut total_unread = 0;
         for chat in &self.chats {
-            if chat.muted { continue; }
+            if crate::notify::ring_for_chat(chat) != crate::notify::NotifyLevel::All { continue; }
             let is_group = chat.is_community();
             if !is_group {
                 if let Some(id) = self.interner.lookup(&chat.id) {
                     if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) { continue; }
                 }
-            } else if !chat.is_surfaced_community_channel() {
-                // Unsurfaced channel row — see `sum_unread_from`.
+            } else if !chat_has_a_row(chat) {
                 continue;
             }
             let mut unread_count = 0u32;

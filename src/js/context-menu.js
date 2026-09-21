@@ -10,13 +10,27 @@
  *   items: [
  *     { label: 'Share', icon: 'share', onClick: () => {...} },
  *     { divider: true },
+ *     { header: 'NOTIFICATIONS' },
+ *     { label: 'Mentions', checked: true, onClick: () => {...} },
+ *     { label: 'Mute', icon: 'volume-mute', submenu: [ ...items ] },
+ *     { label: 'Allow', disabled: true, hint: 'App Settings' },
  *     { label: 'Remove', icon: 'x', danger: true, onClick: () => {...} },
  *   ],
  * });
+ *
+ * A `submenu` drills DOWN in place behind a back row rather than flying out
+ * beside the panel. One model for right-click and long-press, and a panel that
+ * can always fit because it never grows sideways.
  */
 
 let _ctxMenuVisible = false;
 let _ctxMenuDismissedAt = 0; // timestamp of the last outside-tap dismissal
+/** Frames we have drilled past, outermost first, so a back row can restore one. */
+let _ctxMenuTrail = [];
+/** Where the open asked to be: every re-measure clamps against the same anchor. */
+let _ctxMenuAnchor = { x: 0, y: 0 };
+/** The frame on screen, so drilling in can put it on the trail. */
+let _ctxMenuFrame = [];
 
 /** True if an outside tap just dismissed a visible menu. Lets an underlying
  *  click handler (e.g. the chatlist open) swallow that same tap, so dismissing
@@ -28,28 +42,60 @@ function wasContextMenuJustDismissed() {
 // The menu is a component; an item's activation closes it before its handler runs.
 VectorSvelte.setContextMenuHandlers({
     activate: (item) => {
+        if (item.disabled) return;
+        if (item.back) { _showContextMenuFrame(_ctxMenuTrail.pop() || []); return; }
+        if (Array.isArray(item.submenu)) {
+            _ctxMenuTrail.push(_ctxMenuFrame);
+            _showContextMenuFrame([{ back: true, label: item.label }, ...item.submenu]);
+            return;
+        }
         hideContextMenu();
         try { item.onClick && item.onClick(); }
         catch (err) { console.warn('[context-menu] item handler failed:', err); }
     },
 });
 
+/** Android back: up one frame if we have drilled in, otherwise dismiss. */
+function contextMenuBack() {
+    if (_ctxMenuTrail.length) {
+        _showContextMenuFrame(_ctxMenuTrail.pop());
+        pushBack('context-menu', contextMenuBack);
+        return;
+    }
+    hideContextMenu();
+}
+
 function hideContextMenu() {
     if (!_ctxMenuVisible) return;
     _ctxMenuVisible = false;
+    _ctxMenuTrail = [];
     VectorSvelte.setContextMenu({ open: false });
     popBack('context-menu');
 }
 
 function showContextMenu({ x, y, items }) {
     if (!Array.isArray(items) || items.length === 0) return;
-    // Render at the origin to measure, then clamp to the viewport so the menu can never
-    // bleed off-screen on long lists or near edges.
+    _ctxMenuTrail = [];
+    _ctxMenuAnchor = { x, y };
+    _showContextMenuFrame(items);
+}
+
+/**
+ * Put one frame on screen: render at the origin to measure, then clamp to the
+ * viewport so the menu can never bleed off-screen on long lists or near edges.
+ * A drill-down re-measures because the frames are different heights.
+ */
+function _showContextMenuFrame(items) {
+    if (!Array.isArray(items) || items.length === 0) { hideContextMenu(); return; }
+    const { x, y } = _ctxMenuAnchor;
+    _ctxMenuFrame = items;
     VectorSvelte.setContextMenu({ items, x: 0, y: 0, open: true });
     VectorSvelte.flushSync();
+    const wasVisible = _ctxMenuVisible;
     _ctxMenuVisible = true;
-    // Android back closes an open menu instead of leaving the screen.
-    pushBack('context-menu', hideContextMenu);
+    // Android back steps out of a submenu first, and only then closes the menu,
+    // which is the same path the back row walks.
+    if (!wasVisible) pushBack('context-menu', contextMenuBack);
     const rect = VectorSvelte.contextMenuEls().root.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;

@@ -206,10 +206,14 @@ async function refreshCommunityRaidAlert(communityId) {
  * Reuses the context-menu component, so it inherits its viewport clamping,
  * outside-click dismissal and styling rather than growing a second one.
  */
-async function openCommunityMenu(chat, ev) {
+async function openCommunityMenu(chat, ev, at) {
     if (!chat) return;
     const cf = chat.metadata?.custom_fields || {};
-    const rect = ev.currentTarget.getBoundingClientRect();
+    // Hung off a header button, or opened where a right-click landed on a rail shortcut.
+    const anchor = at || (() => {
+        const rect = ev.currentTarget.getBoundingClientRect();
+        return { x: rect.left, y: rect.bottom + 4 };
+    })();
     // No description row: a menu item that does nothing still hovers like one, and a
     // sentence-long label stretched the menu to twice its useful width. It reads in
     // the details pane, which has the room for it.
@@ -220,19 +224,12 @@ async function openCommunityMenu(chat, ev) {
         icon: 'add-user',
         onClick: () => openCommunityInvitePanel(chat),
     });
-    items.push({
-        label: chat.muted ? 'Unmute Community' : 'Mute Community',
-        icon: chat.muted ? 'volume-max' : 'volume-mute',
-        onClick: async () => {
-            chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
-            chatChanged(chat);
-        },
-    });
-    items.push({
-        label: 'Members',
-        icon: 'users-multi',
-        onClick: () => openCommunityDetails(chat),
-    });
+    // Scoped to the COMMUNITY, so it reaches every channel rather than whichever
+    // one happens to anchor its row.
+    if (cf.community_id) {
+        items.push({ divider: true });
+        items.push(...await notifyMenuItems(cf.community_id, cf.community_id));
+    }
     // Batch containment (raid triage, invite revocation, key rotation). Needs BAN
     // rather than KICK, and only v2 can rotate. Awaited before the menu is built —
     // a late push lands in an array the component has already read.
@@ -246,7 +243,14 @@ async function openCommunityMenu(chat, ev) {
                 hint: raid?.detected ? `${raid.suspects} flagged` : undefined,
                 icon: 'warning',
                 danger: !!raid?.detected,
-                onClick: () => openModerationPanel(cf.community_id),
+                // The console acts on a community, so land in it first: the menu
+                // is reachable from the rail, where you may be somewhere else
+                // entirely, and closing the console should leave you there.
+                onClick: () => {
+                    const target = wsChannelForCommunity(cf.community_id) || chat.id;
+                    if (target && !chatOnScreen(target)) openChat(target);
+                    openModerationPanel(cf.community_id);
+                },
             });
         }
     }
@@ -260,7 +264,38 @@ async function openCommunityMenu(chat, ev) {
         onClick: () => communityLeaveOrDelete(chat),
     });
 
-    showContextMenu({ x: rect.left, y: rect.bottom + 4, items });
+    showContextMenu({ x: anchor.x, y: anchor.y, items });
+}
+
+/**
+ * A channel's own menu. Reachable by right-click or long-press from either
+ * shape of the channel list; there is no affordance in the row itself, which
+ * stays navigation.
+ */
+async function openChannelMenu(communityId, channel, x, y) {
+    const chat = arrChats.find(c => c.id === channel.id);
+    const items = [];
+    if (chat && computeRowBadgeCount(chat) > 0) {
+        items.push({
+            label: 'Mark as Read',
+            icon: 'check',
+            onClick: () => { markChatCaughtUp(chat, /* explicit */ true); chatChanged(chat); },
+        });
+        items.push({ divider: true });
+    }
+    items.push(...await notifyMenuItems(channel.id, communityId));
+    // The primary channel anchors the community's row and history; the backend refuses to tombstone it.
+    const fPrimary = arrChats.some(c => c.id === channel.id && c.metadata?.custom_fields?.primary_channel === channel.id);
+    if (communityCanAddChannels(communityId) && !fPrimary) {
+        items.push({ divider: true });
+        items.push({
+            label: 'Delete Channel',
+            icon: 'x',
+            danger: true,
+            onClick: () => promptDeleteChannel(communityId, channel),
+        });
+    }
+    showContextMenu({ x, y, items });
 }
 
 async function promptCreateChannel(communityId, isPrivate = false) {

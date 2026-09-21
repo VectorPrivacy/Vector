@@ -64,6 +64,9 @@ function renderRailShortcuts() {
      * @property {(chatId: string) => void} openChat
      * @property {() => void} openDmHome
      * @property {(communityId: string) => string|null} wsChannelForCommunity
+     * @property {(el: Element, onMenu: (x: number, y: number) => void) => void} attachLongPressContextMenu
+     * @property {(chat: object, x: number, y: number) => void} openCommunityMenu
+     * @property {(chat: object, isGroup: boolean, unread: number, x: number, y: number) => void} showChatRowContextMenu
      * @property {() => void} syncRailFade
      * @property {(unreadDms: number) => void} onUnreadDms
      */
@@ -83,6 +86,11 @@ function renderRailShortcuts() {
             openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
             openDmHome: wsOpenDmHome,
             wsChannelForCommunity,
+            attachLongPressContextMenu,
+            // A shortcut stands for the whole community, so it opens the community's menu
+            // rather than its anchoring channel's row menu.
+            openCommunityMenu: (chat, x, y) => openCommunityMenu(chat, null, { x, y }),
+            showChatRowContextMenu: _showChatRowContextMenu,
             syncRailFade,
             onUnreadDms: syncChatTabBadge,
         },

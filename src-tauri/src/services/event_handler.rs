@@ -102,12 +102,16 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             // DB persistence, but this avoids the racey badge bump in between.
             let marked = auto_mark_if_active(&chat_id, &msg_id).await;
             refresh_chat_unread(&chat_id, marked).await;
-            // Check muted
-            let is_muted = {
+            // A DM has no mention tier to fall back to, so anything short of "ring for
+            // everything" is silence.
+            let rings = {
                 let state = STATE.lock().await;
-                state.get_chat(&chat_id).map_or(false, |c| c.muted)
+                // No row yet means nobody has asked for quiet, so it rings.
+                state.get_chat(&chat_id).map_or(true, |c| {
+                    vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All
+                })
             };
-            if !is_muted {
+            if rings {
                 let display_info = {
                     let state = STATE.lock().await;
                     get_dm_notification_info(&state, &chat_id, &content)
@@ -145,12 +149,16 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
         vector_core::db::spawn_bound(async move {
             let marked = auto_mark_if_active(&chat_id, &msg_id).await;
             refresh_chat_unread(&chat_id, marked).await;
-            // Check muted
-            let is_muted = {
+            // A DM has no mention tier to fall back to, so anything short of "ring for
+            // everything" is silence.
+            let rings = {
                 let state = STATE.lock().await;
-                state.get_chat(&chat_id).map_or(false, |c| c.muted)
+                // No row yet means nobody has asked for quiet, so it rings.
+                state.get_chat(&chat_id).map_or(true, |c| {
+                    vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All
+                })
             };
-            if !is_muted {
+            if rings {
                 let display_info = {
                     let state = STATE.lock().await;
                     get_file_notification_info(&state, &chat_id, &extension)

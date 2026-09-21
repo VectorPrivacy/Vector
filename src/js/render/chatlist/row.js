@@ -11,7 +11,7 @@
  * Block. Actions reuse the same backend commands as the profile/group panels
  * and repaint the list.
  */
-function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
+async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
     if (chat._joining) return; // nothing actionable until the join finalises
     // A mobile long-press synthesises a trailing tap; stamp the time so the
     // chatlist open handler can swallow it instead of opening the chat.
@@ -32,17 +32,14 @@ function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
             onClick: () => markChatUnread(chat),
         });
     }
-    items.push({
-        label: chat.muted ? 'Unmute' : 'Mute',
-        icon: 'volume-mute',
-        onClick: async () => {
-            if (blockedBySync()) return;
-            chat.muted = await invoke('toggle_chat_mute', { chatId: chat.id });
-            chatChanged(chat);
-            // A muted sender is silent in every community too.
-            if (!isGroup) communitiesChanged();
-        },
-    });
+    // A community row stands for the whole community, so its settings are the
+    // community's, not its anchoring channel's.
+    const strNotifyScope = isGroup
+        ? (chat.metadata?.custom_fields?.community_id || chat.id)
+        : chat.id;
+    if (!blockedBySync()) {
+        items.push(...await notifyMenuItems(strNotifyScope, isGroup ? strNotifyScope : null));
+    }
     // Pin/Unpin. Keyed by chatPinKey, so a Community pins as the COMMUNITY —
     // its general row is what the pin then hoists.
     const strPinKey = chatPinKey(chat);

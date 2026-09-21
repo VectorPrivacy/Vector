@@ -175,6 +175,7 @@ impl Chat {
     }
 
     pub fn to_serializable(&self, interner: &NpubInterner) -> SerializableChat {
+        let resolved = crate::notify::resolve_chat(self);
         SerializableChat {
             id: self.id.clone(),
             chat_type: self.chat_type.clone(),
@@ -183,7 +184,9 @@ impl Chat {
             last_read: if self.last_read == [0u8; 32] { String::new() } else { decode_message_id(&self.last_read) },
             created_at: self.created_at,
             metadata: self.metadata.clone(),
-            muted: self.muted,
+            muted: resolved.muted,
+            notify: resolved.ring.as_u8(),
+            everyone_pings: crate::notify::everyone_pings_for_chat(self),
             wallpaper_path: self.wallpaper_path.clone(),
             wallpaper_ts: self.wallpaper_ts,
             wallpaper_blur: self.wallpaper_blur,
@@ -194,6 +197,7 @@ impl Chat {
     }
 
     pub fn to_serializable_with_last_n(&self, n: usize, interner: &NpubInterner) -> SerializableChat {
+        let resolved = crate::notify::resolve_chat(self);
         SerializableChat {
             id: self.id.clone(),
             chat_type: self.chat_type.clone(),
@@ -202,7 +206,9 @@ impl Chat {
             last_read: if self.last_read == [0u8; 32] { String::new() } else { decode_message_id(&self.last_read) },
             created_at: self.created_at,
             metadata: self.metadata.clone(),
-            muted: self.muted,
+            muted: resolved.muted,
+            notify: resolved.ring.as_u8(),
+            everyone_pings: crate::notify::everyone_pings_for_chat(self),
             wallpaper_path: self.wallpaper_path.clone(),
             wallpaper_ts: self.wallpaper_ts,
             wallpaper_blur: self.wallpaper_blur,
@@ -302,7 +308,17 @@ pub struct SerializableChat {
     pub last_read: String,
     pub created_at: u64,
     pub metadata: ChatMetadata,
+    /// Effective mute, after the community's own mute and any timer. The row
+    /// greys on this; `notify` is what it badges with.
     pub muted: bool,
+    /// The resolved level AFTER the mute clamp, as `NotifyLevel::as_u8`. The
+    /// frontend badges from this alone rather than re-walking the chain.
+    #[serde(default)]
+    pub notify: u8,
+    /// Whether an authorized @everyone still counts as a ping here, i.e. the
+    /// community has not suppressed it.
+    #[serde(default = "default_everyone_pings")]
+    pub everyone_pings: bool,
     #[serde(default)]
     pub wallpaper_path: String,
     #[serde(default)]
@@ -318,6 +334,7 @@ pub struct SerializableChat {
 }
 
 fn default_wallpaper_dim() -> u8 { 50 }
+fn default_everyone_pings() -> bool { true }
 
 impl SerializableChat {
     pub fn to_chat(self, interner: &mut NpubInterner) -> Chat {

@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 92;
+pub const HIGHEST_MIGRATION_ID: u32 = 93;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1365,6 +1365,31 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
 
     run_atomic_migration(conn, 92, "Create blossom_server_stats table", |tx| {
         crate::blossom_stats::migrate(tx)
+    })?;
+
+    // Keyed by scope id rather than hung off a chat row: a community has no chat
+    // row of its own, only its primary channel's, and storing it there is what
+    // made "Mute Community" silence one channel.
+    run_atomic_migration(conn, 93, "Per-scope notification preferences", |tx| {
+        tx.execute(
+            "CREATE TABLE IF NOT EXISTS notify_prefs (
+                scope_id          TEXT PRIMARY KEY,
+                level             INTEGER,
+                mute_until        INTEGER NOT NULL DEFAULT 0,
+                suppress_everyone INTEGER
+            )",
+            [],
+        )
+        .map_err(|e| format!("create notify_prefs: {e}"))?;
+        // Existing mutes carry over as indefinite ones, so nobody's rooms get
+        // loud on upgrade.
+        tx.execute(
+            "INSERT OR REPLACE INTO notify_prefs (scope_id, level, mute_until, suppress_everyone)
+             SELECT chat_identifier, NULL, -1, NULL FROM chats WHERE muted = 1 AND chat_identifier != ''",
+            [],
+        )
+        .map_err(|e| format!("seed notify_prefs from mutes: {e}"))?;
+        Ok(())
     })?;
 
     Ok(())

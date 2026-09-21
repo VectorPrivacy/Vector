@@ -215,6 +215,9 @@ async fn ensure_unread_seeded() {
     if STATE.lock().await.unread_seeded {
         return;
     }
+    // A mute that ran out while the app was closed must not suppress the first badge, and
+    // nothing else has looked at the clock yet this login.
+    crate::commands::notify::sweep_before_seed().await;
     // The DB read straddles an await; a swap could land, so guard the seed against writing account
     // A's counts into account B's freshly-swapped state.
     let counts = crate::db::unread_counts().await.unwrap_or_default();
@@ -247,6 +250,13 @@ pub async fn update_unread_counter<R: Runtime>(handle: AppHandle<R>) -> u32 {
         let state = STATE.lock().await;
         state.sum_unread()
     };
+
+    // There is one badge and one UI, both showing whoever is live. A task that
+    // outlived its account — a detached mute timer, a late list apply — still
+    // counts its own account correctly, and must not paint that count here.
+    if !vector_core::db::session_is_live() {
+        return unread_count;
+    }
 
     // Get the main window (only used on desktop for badge handling)
     #[allow(unused_variables)]

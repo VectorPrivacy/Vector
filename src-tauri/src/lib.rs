@@ -436,6 +436,13 @@ pub fn run() {
                             });
                         }
                     }
+                    // A suspended device fires no timers, so coming back to the window is
+                    // where a mute that ended meanwhile actually gets noticed.
+                    tauri::WindowEvent::Focused(true) => {
+                        tauri::async_runtime::spawn(vector_core::db::scoped(async {
+                            crate::commands::notify::sweep_now().await;
+                        }));
+                    }
                     _ => {}
                 }
             });
@@ -623,6 +630,10 @@ pub fn run() {
             chat::mark_as_read,
             chat::mark_as_unread,
             chat::toggle_chat_mute,
+            commands::notify::get_notify_prefs,
+            commands::notify::set_notify_level,
+            commands::notify::set_notify_mute,
+            commands::notify::set_suppress_everyone,
             profile::set_nickname,
             profile::block_user,
             profile::unblock_user,

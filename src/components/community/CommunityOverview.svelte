@@ -10,7 +10,7 @@
     // roster island mounts into #group-overview-members from the app.
     import { overviewState } from '../lib/overview.svelte.js';
 
-    let { h } = $props();   // h: memberSubtext, toggleMute, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete, migrate
+    let { h } = $props();   // h: memberSubtext, openNotifyMenu, pickIcon, rename, setDescription, invite, moderate, leaveOrDelete, migrate
 
     const ov = overviewState();
     const manage = $derived(!!ov.caps.manage_metadata);
@@ -60,9 +60,10 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div id="group-mute-btn" class="profile-option" onclick={h.toggleMute}>
-    <span class="icon icon-volume-{ov.muted ? 'mute' : 'max'} navbar-icon"></span>
-    <p class="navbar-text" style="font-size: 10px;">{ov.muted ? 'Unmute' : 'Mute'}</p>
+<div id="group-mute-btn" class="profile-option"
+     onclick={(e) => { const r = e.currentTarget.getBoundingClientRect(); h.openNotifyMenu(r.left, r.bottom + 4); }}>
+    <span class="icon icon-{ov.muted ? 'volume-mute' : 'bell'} navbar-icon"></span>
+    <p class="navbar-text" style="font-size: 10px;">{ov.muted ? 'Muted' : 'Notify'}</p>
 </div>
 <!-- The whole icon is the pick target for managers; the pencil is the cue. -->
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

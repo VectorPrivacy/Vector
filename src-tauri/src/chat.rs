@@ -152,9 +152,7 @@ pub async fn toggle_chat_mute(chat_id: String) -> bool {
     // land them in whichever account a mid-flight swap installs — then the Mutes
     // projection would sync the stray row fleet-wide.
     vector_core::db::scoped(async move {
-        let handle = crate::TAURI_APP.get().unwrap();
-
-        let (muted, slim) = {
+        {
             let mut state = crate::STATE.lock().await;
             // Muting someone known only from a community: create the DM row on demand
             // so the mute has somewhere to live. Empty DMs never render in the chat list.
@@ -164,30 +162,19 @@ pub async fn toggle_chat_mute(chat_id: String) -> bool {
                 }
                 state.create_dm_chat(&chat_id);
             }
-            let idx = match state.chats.iter().position(|c| c.id == chat_id) {
-                Some(i) => i,
-                None => return false,
-            };
-            state.chats[idx].muted = !state.chats[idx].muted;
-            let m = state.chats[idx].muted;
-            (m, crate::db::chats::SlimChatDB::from_chat(&state.chats[idx], &state.interner))
-        };
+        }
 
-        let _ = crate::db::chats::save_slim_chat(slim).await;
-
-        // A sender-level mute changes OTHER chats' counts (their community messages
-        // stop counting), so reseed the cache rather than patch one entry.
-        let counts = crate::db::unread_counts().await.unwrap_or_default();
-        crate::STATE.lock().await.unread_seed(counts);
-
-        // Gated emit: paints nothing if this session is no longer the live one.
-        vector_core::traits::emit_event_json("chat_muted", serde_json::json!({
-            "chat_id": &chat_id,
-            "value": muted
-        }));
-
-        let _ = crate::commands::messaging::update_unread_counter(handle.clone()).await;
-        crate::commands::prefs::publish_projection(vector_core::synced_prefs::Pref::Mutes);
+        // The quick toggle is the indefinite end of the duration menu, not a
+        // separate mechanism, so it writes the same scope row.
+        let now = vector_core::notify::now_ms();
+        let muted = !vector_core::notify::prefs(&chat_id).muted_at(now);
+        let until = if muted { vector_core::notify::MUTE_FOREVER } else { vector_core::notify::MUTE_OFF };
+        if vector_core::notify::set_mute(&chat_id, until).is_err() {
+            return false;
+        }
+        // Reconciles the mirror, reseeds the counts a sender-level mute moves in
+        // OTHER chats, re-badges and republishes both projections.
+        crate::commands::notify::reconcile().await;
         muted
     })
     .await

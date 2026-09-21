@@ -57,6 +57,7 @@
         class="chatlist-community-head btn"
         id="chatlist-community-head"
         onclick={(e) => h.openCommunityMenu(vm.primary, e)}
+        oncontextmenu={(e) => { e.preventDefault(); e.stopPropagation(); h.openCommunityMenu(vm.primary, e); }}
     >
         <Avatar src={vm.avatarSrc} size={36} group class="chatlist-community-head-avatar" />
         <div class="chatlist-community-head-meta">

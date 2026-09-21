@@ -678,10 +678,13 @@ function registerCommunityOverview() {
     VectorSvelte.setScreen('overview', {
         h: {
             memberSubtext: communityMemberSubtext,
-            toggleMute: async () => {
-                const chat = cur();
-                if (!chat) return;
-                VectorSvelte.setOverview({ muted: await invoke('toggle_chat_mute', { chatId: chat.id }) });
+            // Mute is one rung of a ladder now, so the button opens the same menu the
+            // community's shortcut and row do rather than flipping a flag.
+            openNotifyMenu: async (x, y) => {
+                const { communityId } = VectorSvelte.overviewState();
+                if (!communityId) return;
+                const items = await notifyMenuItems(communityId, communityId);
+                if (items.length) showContextMenu({ x, y, items });
             },
             pickIcon: () => pickCommunityIcon(cur()),
             rename: async (newName) => {

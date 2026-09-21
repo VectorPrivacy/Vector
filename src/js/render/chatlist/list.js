@@ -115,6 +115,7 @@ function chatlistSnapshot() {
  * @property {(chat: object) => number} countPingMessages
  * @property {(id: string) => boolean} isPrimaryChannelId
  * @property {(chatId: string) => void} openChannel
+ * @property {(communityId: string, channel: object, x: number, y: number) => void} openChannelMenu
  * @property {(vm: object) => void} rowClick
  * @property {(communityId: string, isPrivate: boolean) => void} createChannel
  * @property {(chatId: string) => void} deleteChannel
@@ -162,6 +163,7 @@ function chatlistHelpers() {
         countPingMessages,
         isPrimaryChannelId: (id) => arrChats.some(c => c.id === id && c.metadata?.custom_fields?.primary_channel === id),
         openChannel: openCommunityChannel,
+        openChannelMenu,
         // A tap that dismissed an open context menu must only close it, not also open the
         // chat behind it; the trailing tap a long-press synthesises is swallowed the same way.
         // An invite row and a community still joining (locked until it is readable) stay put.
@@ -523,15 +525,19 @@ function countUnreadMessages(chat) {
  * see" rather than the full unread count.
  */
 /**
- * Resolve the badge count for a chat row:
- *  - Muted DM/single-user chat: 0 (silenced entirely).
- *  - Muted group: count only pings (mentions of us / admin @everyone).
- *  - Anything else: full unread count.
+ * Resolve the badge count for a chat row from its resolved notification level
+ * (`notify`: 0 rings for everything, 1 for your name, 2 for nothing — a mute
+ * has already clamped that to at most 1):
+ *  - 2: nothing to say.
+ *  - 1: pings only in a group, and a DM has no ping tier, so nothing.
+ *  - 0: the full unread count.
  */
 function computeRowBadgeCount(chat) {
-    if (chat.muted) {
-        return chatIsGroup(chat) ? countPingMessages(chat) : 0;
-    }
+    let nRing = chat.notify | 0;
+    // A row this device created itself has no resolved level yet; its mute still counts.
+    if (chat.muted && nRing < 1) nRing = 1;
+    if (nRing >= 2) return 0;
+    if (nRing === 1) return chatIsGroup(chat) ? countPingMessages(chat) : 0;
     // DB-sourced count (set by refreshUnreadCounts) is authoritative across restarts, when only
     // the last message per chat is in RAM. Fall back to the in-memory walk before the first
     // refresh lands (or if it ever failed).
@@ -594,9 +600,11 @@ function countPingMessages(chat) {
         }
         if (!msg.content) continue;
         const mentionedMe = strPubkey && msg.content.includes('@' + strPubkey);
-        // Authorized @everyone = owner or admin (owner isn't in the admins list — it's its own tier).
+        // Authorized @everyone = owner or admin (owner isn't in the admins list — it's its own tier),
+        // and only where the community still lets one through.
         const everyoneAuthor = msg.npub || '';
         const mentionedEveryone = isGroup
+            && chat.everyone_pings !== false
             && /@everyone\b/.test(msg.content)
             && (admins?.includes(everyoneAuthor) || chat.metadata?.custom_fields?.owner_npub === everyoneAuthor);
         if (mentionedMe || mentionedEveryone) pings++;

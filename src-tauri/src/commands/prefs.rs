@@ -7,7 +7,8 @@
 //! the local flags, not merged into a parallel structure.
 
 use nostr_sdk::prelude::Event;
-use vector_core::synced_prefs::{self, IdList, NicknameMap, Pref};
+use vector_core::notify;
+use vector_core::synced_prefs::{self, IdList, NicknameMap, NotifyMap, Pref};
 
 /// Publish a projection of the current local state for `pref`. Runs behind the
 /// caller's return: these are triggered by user actions whose UI has already
@@ -30,14 +31,17 @@ pub fn publish_projection(pref: Pref) {
                 l.to_json()
             }
             Pref::Mutes => {
+                // Written with the SAME predicate `apply_mutes` reads it with, or an
+                // inherited mute round-trips into a permanent per-channel one.
                 let mut l = IdList::default();
                 let state = vector_core::state::STATE.lock().await;
-                for c in state.chats.iter().filter(|c| c.muted) {
+                for c in state.chats.iter().filter(|c| notify::legacy_muted_for_chat(c)) {
                     let _ = l.add(&c.id);
                 }
                 drop(state);
                 l.to_json()
             }
+            Pref::Notify => notify::to_wire().to_json(),
             Pref::Nicknames => {
                 let mut m = NicknameMap::default();
                 let state = vector_core::state::STATE.lock().await;
@@ -66,6 +70,7 @@ pub async fn hydrate_prefs() {
             Pref::Blocks => apply_blocks(IdList::from_json(&json)).await,
             Pref::Mutes => apply_mutes(IdList::from_json(&json)).await,
             Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
+            Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
         }
     }
 }
@@ -78,6 +83,17 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Blocks => apply_blocks(IdList::from_json(&json)).await,
         Pref::Mutes => apply_mutes(IdList::from_json(&json)).await,
         Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
+        Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
+    }
+}
+
+/// Adopt a sibling's per-scope settings, then let the reconcile bring the
+/// `chats.muted` mirror, the badge and the row repaints along with it.
+async fn apply_notify(map: NotifyMap) {
+    match notify::apply_wire(&map) {
+        Ok(moved) if moved.is_empty() => {}
+        Ok(_) => crate::commands::notify::reconcile_local().await,
+        Err(e) => eprintln!("[SyncedPrefs] applying {} failed: {e}", Pref::Notify.d_tag()),
     }
 }
 
@@ -109,7 +125,7 @@ async fn apply_blocks(list: IdList) {
 /// Mirror the mute list onto chat rows, persisting and surfacing only the ones
 /// that actually flipped.
 async fn apply_mutes(list: IdList) {
-    let (changed, slims) = {
+    let chat_ids: Vec<(String, bool, bool)> = {
         let mut state = vector_core::state::STATE.lock().await;
         // A sibling device can mute someone this device has never DM'd: create
         // the DM row so the mute has somewhere to live (and so this device's own
@@ -119,39 +135,44 @@ async fn apply_mutes(list: IdList) {
                 state.create_dm_chat(id);
             }
         }
-        let mut out = Vec::new();
-        for chat in state.chats.iter_mut() {
-            let want = list.contains(&chat.id);
-            if chat.muted != want {
-                chat.muted = want;
-                out.push((chat.id.clone(), want));
-            }
-        }
-        let slims: Vec<_> = state
+        state
             .chats
             .iter()
-            .filter(|c| out.iter().any(|(id, _)| id == &c.id))
-            .map(|c| crate::db::chats::SlimChatDB::from_chat(c, &state.interner))
-            .collect();
-        (out, slims)
+            .map(|c| {
+                (
+                    c.id.clone(),
+                    notify::legacy_muted_for_chat(c),
+                    notify::prefs(&c.id).mute_until != notify::MUTE_OFF,
+                )
+            })
+            .collect()
     };
-    let any_changed = !changed.is_empty();
-    for slim in slims {
-        let _ = crate::db::chats::save_slim_chat(slim).await;
-    }
-    for (chat_id, muted) in changed {
-        vector_core::traits::emit_event_json(
-            "chat_muted",
-            serde_json::json!({ "chat_id": chat_id, "value": muted }),
-        );
-    }
-    // Sender-level mutes change other chats' counts — reseed, then re-badge.
-    if any_changed {
-        let counts = crate::db::unread_counts().await.unwrap_or_default();
-        vector_core::state::STATE.lock().await.unread_seed(counts);
-        if let Some(handle) = crate::TAURI_APP.get() {
-            crate::commands::messaging::update_unread_counter(handle.clone()).await;
+
+    // This list only ever names chats, so it speaks for chat scopes alone. A
+    // community-scope mute has no id here and must survive a sibling that is
+    // too old to know about one.
+    let mut changed = false;
+    for (chat_id, already, owns_its_mute) in chat_ids {
+        let want = list.contains(&chat_id);
+        if want == already {
+            continue;
         }
+        if want {
+            // The list carries no deadline, so anything it adds is indefinite.
+            if notify::set_mute(&chat_id, notify::MUTE_FOREVER).is_ok() {
+                changed = true;
+            }
+        } else if owns_its_mute {
+            // Inherited from its community, which this list cannot address: leave it
+            // alone rather than writing a clear that changes nothing.
+            if notify::set_mute(&chat_id, notify::MUTE_OFF).is_ok() {
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        // Adopting a sibling's list must not publish back at it.
+        crate::commands::notify::reconcile_local().await;
     }
 }
 

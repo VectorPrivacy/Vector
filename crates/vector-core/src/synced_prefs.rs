@@ -26,10 +26,12 @@ use crate::stored_event::event_kind;
 pub const BLOCKS_D_TAG: &str = "vector/blocks";
 pub const MUTES_D_TAG: &str = "vector/mutes";
 pub const NICKNAMES_D_TAG: &str = "vector/nicknames";
+pub const NOTIFY_D_TAG: &str = "vector/notify";
 
 const BLOCKS_LOCAL_KEY: &str = "synced_blocks_local";
 const MUTES_LOCAL_KEY: &str = "synced_mutes_local";
 const NICKNAMES_LOCAL_KEY: &str = "synced_nicknames_local";
+const NOTIFY_LOCAL_KEY: &str = "synced_notify_local";
 
 /// One NIP-44 event holds the whole list, so it inherits the same ~65KB
 /// plaintext ceiling as the Community List. Blocks and nicknames scale with
@@ -56,6 +58,57 @@ pub struct NicknameMap {
     pub v: u32,
     #[serde(default)]
     pub names: BTreeMap<String, String>,
+}
+
+/// One scope's notification settings on the wire. Level is spelled out rather
+/// than numbered so a future rung does not silently become an old one, and an
+/// absent field means inherit, exactly as it does on disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<String>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub mute_until: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suppress_everyone: Option<bool>,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
+}
+
+/// scope id → settings, for communities, channels and DMs alike.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyMap {
+    #[serde(default = "one")]
+    pub v: u32,
+    #[serde(default)]
+    pub scopes: BTreeMap<String, NotifyEntry>,
+}
+
+impl NotifyMap {
+    pub fn from_json(s: &str) -> Self {
+        serde_json::from_str(s).unwrap_or_default()
+    }
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{\"v\":1,\"scopes\":{}}".to_string())
+    }
+    /// Refuses to grow past the ceiling rather than publishing a list no
+    /// reader can open, the same rule the id lists follow.
+    pub fn set(&mut self, scope_id: &str, entry: NotifyEntry) -> Result<(), String> {
+        if scope_id.trim().is_empty() {
+            return Err("empty scope id".to_string());
+        }
+        if entry == NotifyEntry::default() {
+            self.scopes.remove(scope_id);
+            return Ok(());
+        }
+        if !self.scopes.contains_key(scope_id) && self.scopes.len() >= MAX_ENTRIES {
+            return Err(format!("this list is full ({MAX_ENTRIES} entries)"));
+        }
+        self.scopes.insert(scope_id.to_string(), entry);
+        Ok(())
+    }
 }
 
 fn one() -> u32 {
@@ -124,7 +177,12 @@ pub enum Pref {
     Blocks,
     Mutes,
     Nicknames,
+    Notify,
 }
+
+/// Every list, in the order hydration walks them. `Notify` comes after `Mutes`
+/// so a device holding both applies the richer one last and wins the overlap.
+pub const ALL_PREFS: [Pref; 4] = [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify];
 
 impl Pref {
     pub fn d_tag(self) -> &'static str {
@@ -132,6 +190,7 @@ impl Pref {
             Pref::Blocks => BLOCKS_D_TAG,
             Pref::Mutes => MUTES_D_TAG,
             Pref::Nicknames => NICKNAMES_D_TAG,
+            Pref::Notify => NOTIFY_D_TAG,
         }
     }
     fn local_key(self) -> &'static str {
@@ -139,6 +198,7 @@ impl Pref {
             Pref::Blocks => BLOCKS_LOCAL_KEY,
             Pref::Mutes => MUTES_LOCAL_KEY,
             Pref::Nicknames => NICKNAMES_LOCAL_KEY,
+            Pref::Notify => NOTIFY_LOCAL_KEY,
         }
     }
     /// The d-tag → list routing used by the self-sync handler.
@@ -147,6 +207,7 @@ impl Pref {
             BLOCKS_D_TAG => Some(Pref::Blocks),
             MUTES_D_TAG => Some(Pref::Mutes),
             NICKNAMES_D_TAG => Some(Pref::Nicknames),
+            NOTIFY_D_TAG => Some(Pref::Notify),
             _ => None,
         }
     }
@@ -191,7 +252,7 @@ pub fn mark_hydrated(pref: Pref) {
 pub async fn hydrate_all(client: &Client) -> Vec<(Pref, String)> {
     let Some(my_pk) = crate::state::my_public_key() else { return Vec::new() };
     let mut applied = Vec::new();
-    for pref in [Pref::Blocks, Pref::Mutes, Pref::Nicknames] {
+    for pref in ALL_PREFS {
         match fetch_raw(client, my_pk, pref).await {
             Some(json) => {
                 if save_local_raw(pref, &json).is_ok() {
@@ -226,6 +287,9 @@ pub fn load_mutes() -> IdList {
 }
 pub fn load_nicknames() -> NicknameMap {
     load_local_raw(Pref::Nicknames).map(|s| NicknameMap::from_json(&s)).unwrap_or_default()
+}
+pub fn load_notify() -> NotifyMap {
+    load_local_raw(Pref::Notify).map(|s| NotifyMap::from_json(&s)).unwrap_or_default()
 }
 
 async fn decrypt_event(my_pk: &PublicKey, event: &Event) -> Option<String> {
@@ -297,7 +361,7 @@ mod tests {
 
     #[test]
     fn d_tags_round_trip_and_are_distinct() {
-        for p in [Pref::Blocks, Pref::Mutes, Pref::Nicknames] {
+        for p in ALL_PREFS {
             assert_eq!(Pref::from_d_tag(p.d_tag()), Some(p));
         }
         // A tag belonging to another 30078 list must not resolve here, or the

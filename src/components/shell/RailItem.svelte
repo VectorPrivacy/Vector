@@ -52,6 +52,14 @@
     function open() {
         h.openChat(isCommunity ? (h.wsChannelForCommunity(vm.communityId) || chat.id) : chat.id);
     }
+
+    // Right-click or long-press: the community's own menu, or the DM's row menu.
+    function menu(node) {
+        h.attachLongPressContextMenu(node, (x, y) => {
+            if (isCommunity) h.openCommunityMenu(chat, x, y);
+            else h.showChatRowContextMenu(chat, false, vm.unread, x, y);
+        });
+    }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -62,6 +70,7 @@
     class:active
     id="ws-rail-item-{chat.id}"
     title={vm.name}
+    use:menu
     onclick={open}
 >
     <Avatar src={vm.src} size={26} group={isCommunity} class="ws-rail-item-avatar" />

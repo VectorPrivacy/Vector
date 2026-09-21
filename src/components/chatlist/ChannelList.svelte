@@ -6,7 +6,8 @@
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
-    //    computeRowBadgeCount, countPingMessages, isPrimaryChannelId, openChannel, createChannel, deleteChannel
+    //    computeRowBadgeCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelMenu,
+    //    attachLongPressContextMenu, createChannel, deleteChannel
 
     const state = $derived.by(() => {
         communityVersion(communityId);
@@ -50,7 +51,10 @@
 
 {#snippet row(channel, canManage)}
     {@const chat = (chatVersion(channel.id), h.chatById(channel.id))}
-    {@const pings = chat ? h.countPingMessages(chat) : 0}
+    <!-- A room set to Nothing is silent everywhere, including its own row. -->
+    {@const pings = chat && (chat.notify | 0) < 2 ? h.countPingMessages(chat) : 0}
+    <!-- The menu is the only way in: the row itself stays navigation. -->
+    {@const menu = (node) => h.attachLongPressContextMenu(node, (x, y) => h.openChannelMenu(communityId, channel, x, y))}
     <!-- Three tiers, loudest first: something to read, nothing to read, and a room you asked
          to be quiet. Muted wins outright: a standing instruction, not a state unread overrides. -->
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -59,6 +63,7 @@
          class:is-muted={!!chat?.muted}
          class:has-unread={!chat?.muted && !!chat && h.computeRowBadgeCount(chat) > 0}
          class:is-read={!chat?.muted && !(chat && h.computeRowBadgeCount(chat) > 0)}
+         use:menu
          onclick={() => h.openChannel(communityId, channel)}>
         <span class="chatlist-channel-hash"><span class="icon icon-channel-hash"></span></span>
         <span class="chatlist-channel-name cutoff">{channel.name}</span>
