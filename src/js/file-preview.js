@@ -345,7 +345,14 @@ async function openFilePreview(filepath, receiver, replyRef = '') {
         }
     } else if (isVideo) {
         // Video preview is unreliable on Android; show a generic film icon.
-        content = isAndroid ? { kind: 'icon', icon: 'icon-film' } : { kind: 'video', src: mediaUrl(filepath) };
+        if (isAndroid) {
+            content = { kind: 'icon', icon: 'icon-film' };
+        } else {
+            // A picked video can live outside the asset scope; admit this one file first.
+            const allowed = await invoke('allow_video_preview', { path: filepath }).then(() => true, () => false);
+            if (filePreviewGeneration !== myGeneration) return;
+            content = allowed ? { kind: 'video', src: mediaUrl(filepath) } : { kind: 'icon', icon: 'icon-film' };
+        }
     } else {
         content = { kind: 'icon', icon: getFileIcon(filepath) };
     }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-allow-video-preview"
+description = "Enables the allow_video_preview command without any pre-configured scope."
+commands.allow = ["allow_video_preview"]
+
+[[permission]]
+identifier = "deny-allow-video-preview"
+description = "Denies the allow_video_preview command without any pre-configured scope."
+commands.deny = ["allow_video_preview"]

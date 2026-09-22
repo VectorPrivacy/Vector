@@ -370,6 +370,7 @@
     "allow-verify-credential",
     "allow-is-directory",
     "allow-read-image-preview",
+    "allow-allow-video-preview",
     "allow-zip-directory",
     "allow-cleanup-zip",
     "allow-audio-probe",

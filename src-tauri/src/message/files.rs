@@ -727,6 +727,30 @@ pub async fn read_image_preview(app: tauri::AppHandle, path: String) -> Result<S
     .map_err(|e| e.to_string())?
 }
 
+/// Let the webview play one video the user picked from outside the asset scope.
+///
+/// The static scope is deliberately narrow, and a picked video can live anywhere.
+/// Images are copied into the preview dir instead, but copying a video that may run
+/// to gigabytes just to show its first frame is the wrong trade: this admits that
+/// single file, and only when its bytes say it is a video.
+#[tauri::command]
+pub fn allow_video_preview(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use std::io::Read;
+    use tauri::Manager;
+    let meta = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a file".to_string());
+    }
+    let mut head = [0u8; 64];
+    let n = std::fs::File::open(&path)
+        .and_then(|mut f| f.read(&mut head))
+        .map_err(|e| e.to_string())?;
+    if !vector_core::crypto::mime_from_magic_bytes(&head[..n]).starts_with("video/") {
+        return Err("not a video".to_string());
+    }
+    app.asset_protocol_scope().allow_file(&path).map_err(|e| e.to_string())
+}
+
 /// Zip a directory and return metadata about the result
 #[tauri::command]
 pub async fn zip_directory(dir_path: String) -> Result<ZipDirectoryResult, String> {
