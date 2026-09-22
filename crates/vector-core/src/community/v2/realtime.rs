@@ -248,6 +248,27 @@ pub fn load_held_v2() -> Vec<CommunityV2> {
         .collect()
 }
 
+/// Communities a dissolution has sealed. Excluded from [`load_held_v2`] because
+/// nothing about them is live any more, but their chat rows still need the seal.
+pub fn load_dissolved_v2() -> Vec<CommunityV2> {
+    let ids = crate::db::community::list_community_ids().unwrap_or_default();
+    ids.iter()
+        .filter(|id| matches!(crate::db::community::community_protocol(id).ok().flatten(), Some(ConcordProtocol::V2)))
+        .filter(|id| crate::db::community::get_community_dissolved(&crate::simd::hex::bytes_to_hex_32(&id.0)).unwrap_or(false))
+        .filter_map(|id| crate::db::community::load_community_v2(id).ok().flatten())
+        .collect()
+}
+
+/// Carry a dissolution onto the community's chat rows. The fold flags the
+/// community row, but the chats the app boots from are rows of their own, and the
+/// boot re-stamp walks only held communities: without this a dissolved community
+/// reloads unsealed, its composer open and its end marker gone.
+async fn stamp_dissolved_chats(id: &CommunityId) {
+    if let Ok(Some(c)) = crate::db::community::load_community_v2(id) {
+        crate::register_v2_chats_inner(&c).await;
+    }
+}
+
 /// Session-scoped short-TTL cache over [`load_held_v2`] for the dispatch hot
 /// path: dispatch runs per arriving wrap (typing indicators included), and a
 /// fresh load vault-decrypts EVERY community row each time — measured at a
@@ -552,6 +573,7 @@ pub async fn dispatch_event(event: Event, handler: Arc<dyn InboundEventHandler>)
                     // handler). The next load_held_v2 excludes it, so its planes also
                     // stop being subscribed + routed.
                     if crate::db::community::set_community_dissolved(&community_id).unwrap_or(false) {
+                        stamp_dissolved_chats(c.id()).await;
                         handler.on_community_dissolved(&community_id);
                         if let Some(client) = crate::state::nostr_client() {
                             refresh_subscription(&client).await;
@@ -835,6 +857,7 @@ async fn follow_community(session: &std::sync::Arc<crate::db::Session>, id: &Com
             // death) — the flag is set; seal + surface, and stop following.
             Ok(follow) if follow.dissolved => {
                 crate::log_warn!("[v2:teardown {}] DISSOLVED tombstone", &community_id[..8.min(community_id.len())]);
+                stamp_dissolved_chats(id).await;
                 handler.on_community_dissolved(&community_id);
                 return;
             }

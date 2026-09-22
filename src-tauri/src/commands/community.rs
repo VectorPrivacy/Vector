@@ -3113,6 +3113,20 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         for c in vector_core::community::v2::realtime::load_held_v2() {
             vector_core::VectorCore.register_v2_chats(&c, &session).await;
         }
+        // Dissolved ones too: they are no longer followed, but their rows must stay
+        // sealed, and this also repairs rows a dissolution never reached.
+        for c in vector_core::community::v2::realtime::load_dissolved_v2() {
+            let cid = vector_core::simd::hex::bytes_to_hex_32(&c.id().0);
+            let unsealed = crate::STATE.lock().await.chats.iter().any(|ch| {
+                ch.metadata.custom_fields.get("community_id") == Some(&cid)
+                    && ch.metadata.custom_fields.get("dissolved").map(String::as_str) != Some("true")
+            });
+            vector_core::VectorCore.register_v2_chats(&c, &session).await;
+            // The UI already holds the rows it booted with; tell it only about a repair.
+            if unsealed {
+                vector_core::emit_event("community_refreshed", &serde_json::json!({ "community_id": cid }));
+            }
+        }
 
         // v1 hot-lane result (successes only), filled on the probe branch of the
         // paint join below.

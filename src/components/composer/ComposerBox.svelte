@@ -99,7 +99,6 @@
         const input = h()?.input();
         if (!input) return;
         input.disabled = locked;
-        input.style.paddingLeft = locked ? '15px' : '';
         input.placeholder = locked ? lock.placeholder : status.text ? status.text : (isEdit ? 'Editing message...' : h().placeholder);
     });
 

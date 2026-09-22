@@ -791,6 +791,13 @@ function createRichComposer(host, opts = {}) {
         dispatchEvent: (...a) => el.dispatchEvent(...a),
         get placeholder() { return el.dataset.placeholder || ''; },
         set placeholder(v) { el.dataset.placeholder = v; },
+        // A div has no `disabled`; only switching off editing stops keystrokes landing.
+        get disabled() { return el.contentEditable === 'false'; },
+        set disabled(v) {
+            el.contentEditable = v ? 'false' : 'true';
+            el.toggleAttribute('data-locked', !!v);
+            if (v) el.blur();
+        },
         /** Re-run tokenisation when the emoji/mention resolvers learn something new. */
         refresh() { rerender(caretOffset()); },
     };

@@ -4576,6 +4576,17 @@ textarea#chat-input::placeholder {
   user-select: none;
 }
 
+/* Locked (a dissolved community, a blocked contact): the attach button is gone,
+   so the reason needs an inset of its own. Set on the placeholder too, which is
+   absolute and would otherwise ignore the padding and sit against the border. */
+#chat-input.rich-composer[data-locked] {
+  padding-left: 15px;
+  cursor: default;
+}
+#chat-input.rich-composer[data-locked][data-empty="1"]::before {
+  left: 15px;
+}
+
 /* Decorated source: markers stay visible but recede, so what you type is what
    gets sent and the caret has somewhere to go inside them. */
 #chat-input.rich-composer .cmp-mark { opacity: 0.4; }
