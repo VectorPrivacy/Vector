@@ -107,6 +107,14 @@
   mask-image: url("./icons/palette.svg");
 }
 
+.icon-globe {
+  mask-image: url("./icons/globe.svg");
+}
+
+.icon-align-left {
+  mask-image: url("./icons/align-left.svg");
+}
+
 .icon-gamepad {
   mask-image: url("./icons/gamepad.svg");
 }
@@ -20777,6 +20785,528 @@ body.profile-switcher-editing .profile-switcher-add {
   .mod-actions { width: 100%; }
   .mod-btn { flex: 1; justify-content: center; }
   .mod-tally { justify-content: center; width: 100%; }
+}
+
+/* ── Community Settings ──────────────────────────────────────────────────────
+   The settings layout the app is moving to, trialled in a modal: sections on the
+   left, each with a timeline of anchors into its content, and the content as
+   headed blocks in one centred column. Rides the moderation overlay's backdrop
+   and open/close animation. */
+
+.cs-overlay.closing .cs-card {
+  animation: modal-card-pop-out 0.15s ease-out forwards;
+}
+
+.cs-card {
+  display: flex;
+  width: 100%;
+  max-width: 1180px;
+  height: 100%;
+  max-height: 860px;
+  background-color: #050505;
+  border: 1px solid #2c2e2f;
+  border-radius: 18px;
+  overflow: hidden;
+}
+
+.cs-card.pop-in { animation: qr-overlay-pop 0.16s ease-out; }
+
+/* Nav column */
+.cs-nav {
+  display: flex;
+  flex-direction: column;
+  width: 248px;
+  flex-shrink: 0;
+  background-color: #0b0b0b;
+  border-right: 1px solid #262626;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.cs-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 64px;
+  padding: 0 14px;
+  border-bottom: 1px solid #262626;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+.cs-search .icon {
+  position: absolute;
+  inset: auto;
+  left: 25px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  transform: translateY(-50%);
+  background-color: #8a8a8a;
+}
+.cs-search input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px 0 36px;
+  border: none;
+  border-radius: 8px;
+  background-color: #1f1f1f;
+  color: #fff;
+  font-size: 14px;
+  outline: none;
+  box-sizing: border-box;
+}
+.cs-search input::placeholder { color: #8a8a8a; }
+.cs-search input:focus { box-shadow: inset 0 0 0 1px #3a3a3a; }
+
+.cs-nav-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 12px 24px;
+}
+
+.cs-nav-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 16px;
+}
+.cs-nav-head .cs-nav-avatar {
+  border-radius: 8px !important;
+  flex-shrink: 0;
+}
+.cs-nav-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.cs-section {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  margin: 2px 0;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: #cfcfcf;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+.cs-section:hover { background-color: #151515; color: #fff; }
+.cs-section.active { background-color: #1b1b1b; color: #fff; }
+
+/* A section's anchors open beneath it the way a rail folder does: the row
+   grows while its contents fade and settle into place. */
+.cs-anchors-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.cs-anchors-wrap.open {
+  grid-template-rows: 1fr;
+}
+.cs-anchors-wrap > .cs-anchors {
+  min-height: 0;
+  overflow: hidden;
+  /* Padding counts even at 0fr, so it collapses along with the row. */
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    padding 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.cs-anchors-wrap.open > .cs-anchors {
+  padding-top: 4px;
+  padding-bottom: 8px;
+  opacity: 1;
+  transform: none;
+}
+
+/* The anchors hang off a line, dots on it, the one being read lit. */
+.cs-anchors {
+  position: relative;
+  padding: 4px 0 8px 10px;
+}
+.cs-anchors::before {
+  content: '';
+  position: absolute;
+  left: 13.5px;
+  top: 17px;
+  bottom: 21px;
+  width: 1px;
+  background-color: #333;
+}
+.cs-anchor {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px 0 0;
+  border: none;
+  background: none;
+  color: #9a9a9a;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.cs-anchor:hover { color: #e6e6e6; }
+.cs-anchor.active { color: #fff; }
+.cs-anchor-dot {
+  position: relative;
+  z-index: 1;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: #444;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+.cs-anchor.active .cs-anchor-dot {
+  background-color: #e6e6e6;
+  transform: scale(1.12);
+}
+.cs-anchor-icon {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  opacity: 0.85;
+}
+.cs-anchor-icon .icon {
+  width: 11px;
+  height: 11px;
+  background-color: currentColor;
+}
+.cs-anchor-label { min-width: 0; }
+
+.cs-nav-empty {
+  margin: 12px 10px;
+  color: #6f6f6f;
+  font-size: 13px;
+}
+
+/* Content */
+.cs-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.cs-top {
+  display: flex;
+  align-items: center;
+  height: 64px;
+  padding: 0 18px 0 28px;
+  border-bottom: 1px solid #262626;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+.cs-top-title {
+  flex: 1;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.cs-close {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #9a9a9a;
+  cursor: pointer;
+}
+.cs-close-x {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1.5px solid #4a4a4a;
+  border-radius: 50%;
+  font-size: 12px;
+  transition: border-color 0.12s ease, color 0.12s ease;
+}
+.cs-close-key {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.cs-close:hover { color: #fff; }
+.cs-close:hover .cs-close-x { border-color: #9a9a9a; }
+
+.cs-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cs-content {
+  max-width: 600px;
+  margin: 0 auto;
+  /* The save bar floats over the bottom; the last block must scroll clear of it. */
+  padding: 12px 36px 140px;
+  transition: opacity 0.2s ease;
+}
+.cs-content.loading { opacity: 0.4; pointer-events: none; }
+
+/* A section arrives with a short rise, the same soft settle the anchors use. */
+.cs-content-enter {
+  animation: cs-content-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes cs-content-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+.cs-block {
+  padding: 30px 0 34px;
+}
+.cs-block + .cs-block {
+  border-top: 1px solid #262626;
+}
+
+.cs-heading {
+  margin: 0 0 20px;
+  font-size: 24px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.cs-lede {
+  margin: -8px 0 18px;
+  color: #9a9a9a;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.cs-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 22px;
+}
+
+.cs-icon {
+  position: relative;
+  width: 88px;
+  height: 88px;
+  flex-shrink: 0;
+  border-radius: 24px;
+  overflow: hidden;
+  background-color: #161616;
+}
+.cs-icon .cs-icon-img {
+  width: 100% !important;
+  height: 100% !important;
+  border-radius: 0 !important;
+}
+.cs-icon.editable { cursor: pointer; }
+.cs-icon-edit {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.cs-icon-edit .icon {
+  position: relative;
+  inset: auto;
+  width: 22px;
+  height: 22px;
+  background-color: #fff;
+}
+.cs-icon.editable:hover .cs-icon-edit { opacity: 1; }
+.cs-icon-new {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  background-color: var(--icon-color-primary);
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+}
+
+.cs-field { display: flex; flex-direction: column; }
+.cs-field-grow { flex: 1; min-width: 0; }
+.cs-field-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.cs-label {
+  color: #cfcfcf;
+  font-size: 13px;
+  font-weight: 500;
+}
+.cs-count {
+  color: #6f6f6f;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cs-count.warn { color: var(--danger-color); }
+
+.cs-input {
+  width: 100%;
+  padding: 11px 13px;
+  border: 1px solid #2c2c2c;
+  border-radius: 10px;
+  background-color: #111;
+  color: #fff;
+  font-family: inherit;
+  font-size: 15px;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.cs-input:focus { border-color: var(--icon-color-primary); }
+.cs-input:disabled { opacity: 0.6; }
+.cs-textarea {
+  resize: vertical;
+  min-height: 110px;
+  line-height: 1.5;
+}
+
+.cs-hint {
+  margin: 10px 0 0;
+  color: #7a7a7a;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.cs-relays {
+  border: 1px solid #262626;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.cs-relays .cs-hint { margin: 14px 16px; }
+.cs-relay {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 46px;
+  padding: 0 16px;
+  background-color: #0c0c0c;
+}
+.cs-relay + .cs-relay { border-top: 1px solid #1e1e1e; }
+.cs-relay-icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.cs-relay-icon .icon { width: 100%; height: 100%; background-color: #7a7a7a; }
+.cs-relay-url {
+  min-width: 0;
+  color: #e8e8e8;
+  font-size: 14px;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.cs-relay-scheme { color: #6a6a6a; }
+
+/* The save bar rises when the draft differs from what the community holds. */
+.cs-savebar {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: min(600px, calc(100% - 44px));
+  padding: 10px 10px 10px 18px;
+  border: 1px solid #2c2c2c;
+  border-radius: 12px;
+  background-color: #151515;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  box-sizing: border-box;
+  opacity: 0;
+  transform: translate(-50%, 140%);
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.32s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.2s ease;
+}
+.cs-savebar.visible {
+  opacity: 1;
+  transform: translate(-50%, 0);
+  pointer-events: auto;
+}
+.cs-savebar-text {
+  flex: 1;
+  min-width: 0;
+  color: #e6e6e6;
+  font-size: 14px;
+  transition: color 0.2s ease;
+}
+.cs-savebar.warn { border-color: var(--danger-color); animation: cs-shake 0.42s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+.cs-savebar.warn .cs-savebar-text { color: var(--danger-color); }
+@keyframes cs-shake {
+  10%, 90% { transform: translate(calc(-50% - 1px), 0); }
+  20%, 80% { transform: translate(calc(-50% + 3px), 0); }
+  30%, 50%, 70% { transform: translate(calc(-50% - 5px), 0); }
+  40%, 60% { transform: translate(calc(-50% + 5px), 0); }
+}
+.cs-savebar-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.cs-btn-text,
+.cs-btn-save {
+  height: 34px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.cs-btn-text { background: none; color: #cfcfcf; }
+.cs-btn-text:hover { color: #fff; text-decoration: underline; }
+.cs-btn-save {
+  background-color: var(--icon-color-primary);
+  color: #000;
+  font-weight: 600;
+  transition: filter 0.12s ease, opacity 0.12s ease;
+}
+.cs-btn-save:hover { filter: brightness(1.08); }
+.cs-btn-text:disabled,
+.cs-btn-save:disabled { opacity: 0.45; cursor: default; filter: none; text-decoration: none; }
+
+/* Narrow: the nav becomes a strip of section tabs above the content. */
+@media (max-width: 760px) {
+  .cs-overlay { padding: 0; }
+  .cs-card { flex-direction: column; border-radius: 0; border: none; max-width: none; max-height: none; }
+  .cs-nav { width: auto; border-right: none; border-bottom: 1px solid #262626; }
+  .cs-search, .cs-nav-head, .cs-anchors, .cs-nav-empty { display: none; }
+  .cs-nav-scroll { display: flex; gap: 6px; padding: 10px 12px; overflow-x: auto; overflow-y: hidden; }
+  .cs-section { width: auto; white-space: nowrap; }
+  .cs-content { padding: 4px 18px 140px; }
+  .cs-identity { flex-direction: column; }
 }
 
 /* ── Policy Designer ─────────────────────────────────────────────────────── */

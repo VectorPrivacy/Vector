@@ -91,6 +91,8 @@ pub struct CommunitySummary {
     /// custom_fields at join/surface time, so v2-only affordances (e.g. the
     /// Self-Destruct Timer) work immediately instead of after the next reload.
     pub proto_version: i64,
+    /// The relays hosting the community, for the settings view.
+    pub relays: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -131,6 +133,7 @@ fn summarize(community: &vector_core::community::Community) -> CommunitySummary 
         dissolved: community.dissolved,
         preloaded: false,
         proto_version: vector_core::community::ConcordProtocol::V1.as_i64(),
+        relays: community.relays.clone(),
     }
 }
 
@@ -162,6 +165,7 @@ fn summarize_v2(c: &vector_core::community::v2::community::CommunityV2) -> Commu
         dissolved: c.dissolved,
         preloaded: false,
         proto_version: vector_core::community::ConcordProtocol::V2.as_i64(),
+        relays: c.relays.clone(),
     }
 }
 

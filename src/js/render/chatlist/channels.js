@@ -219,11 +219,29 @@ async function openCommunityMenu(chat, ev, at) {
     // the details pane, which has the room for it.
     const items = [];
 
+    // Awaited before the menu is built: a late push lands in an array the component
+    // has already read.
+    const caps = cf.community_id
+        ? await invoke('get_community_capabilities', { communityId: cf.community_id }).catch(() => null)
+        : null;
     items.push({
         label: 'Invite People',
         icon: 'add-user',
         onClick: () => openCommunityInvitePanel(chat),
     });
+    if (communitySettingsWritable(caps)) {
+        items.push({
+            label: 'Community Settings',
+            icon: 'settings',
+            // Land in the community first, as Moderation does: from the rail you may
+            // be somewhere else entirely, and closing should leave you there.
+            onClick: () => {
+                const target = wsChannelForCommunity(cf.community_id) || chat.id;
+                if (target && !chatOnScreen(target)) openChat(target);
+                openCommunitySettings(cf.community_id);
+            },
+        });
+    }
     // Scoped to the COMMUNITY, so it reaches every channel rather than whichever
     // one happens to anchor its row.
     if (cf.community_id) {
@@ -231,10 +249,8 @@ async function openCommunityMenu(chat, ev, at) {
         items.push(...await notifyMenuItems(cf.community_id, cf.community_id));
     }
     // Batch containment (raid triage, invite revocation, key rotation). Needs BAN
-    // rather than KICK, and only v2 can rotate. Awaited before the menu is built —
-    // a late push lands in an array the component has already read.
+    // rather than KICK, and only v2 can rotate.
     if (cf.proto_version === '2' && cf.community_id) {
-        const caps = await invoke('get_community_capabilities', { communityId: cf.community_id }).catch(() => null);
         if (caps?.ban) {
             const raid = communityRaidAlerts.get(cf.community_id);
             items.push({

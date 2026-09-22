@@ -38,6 +38,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
     import StatusDialog from '../ui/StatusDialog.svelte';
     import DowngradeBlock from '../ui/DowngradeBlock.svelte';
     import ModConsole from '../moderation/ModConsole.svelte';
+    import CommunitySettings from '../community/CommunitySettings.svelte';
     import AddRelayDialog from '../settings/network/AddRelayDialog.svelte';
     import RelayInfoDialog from '../settings/network/RelayInfoDialog.svelte';
     import BlossomInfoDialog from '../settings/network/BlossomInfoDialog.svelte';
@@ -146,6 +147,7 @@ import CallOverlay from '../calls/CallOverlay.svelte';
 {#if screens.call}<CallOverlay h={screens.call.h} />{/if}
 {#if screens.downgradeBlock}<DowngradeBlock h={screens.downgradeBlock.h} />{/if}
 {#if screens.modConsole}<ModConsole h={screens.modConsole.h} />{/if}
+{#if screens.communitySettings}<CommunitySettings h={screens.communitySettings.h} />{/if}
 {#if screens.network}
     <AddRelayDialog h={screens.network.h.addRelay} />
     <RelayInfoDialog h={screens.network.h.relayInfo} />
