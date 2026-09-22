@@ -8,7 +8,10 @@
  * reports identifiers that none declares and the browser does not provide. It also checks
  * that every `VectorSvelte.<name>` the scripts use is exported by src/components/index.js,
  * that nothing on that surface is dead, and that no export shares a name with a global (a
- * bare call would then reach the vanilla one and the prefixed call the bundle's).
+ * bare call would then reach the vanilla one and the prefixed call the bundle's). Last, it
+ * checks the string-keyed shell registries: a `setScreen('x')` naming a screen the shell never
+ * declared throws at load and the component simply never mounts, with nothing on screen to
+ * say why.
  *
  * Usage: node scripts/check-globals.mjs   (exit 1 on findings)
  */
@@ -72,6 +75,22 @@ const computedUses = [];             // VectorSvelte[expr]: a use the name-based
 const eagerCalls = [];               // { file, line, names }: top-level VectorSvelte.* calls and the identifiers their arguments pass by value
 const svelteUses = new Map();        // VectorSvelte.<name> → [files]
 const svelteUsesIn = new Map();      // file → Set of VectorSvelte.<name> it calls
+const registryCalls = [];            // { file, line, fn, name }: a literal key handed to a shell registry
+
+// The shell's registries, each a `$state({ ... })` whose keys are the only names its setters
+// accept, and the calls that take one of those keys first.
+const REGISTRY_OF = { setScreen: 'screens', showPane: 'panes', paneShown: 'panes', setShellFlag: 'shell', revealPane: 'reveals' };
+const registryKeys = new Map();      // registry → Set of declared keys
+{
+    const shellAst = acorn.parse(readFileSync(join(SRC, 'components/lib/shell.svelte.js'), 'utf8'), { ecmaVersion: 'latest', sourceType: 'module' });
+    const wanted = new Set(Object.values(REGISTRY_OF));
+    walk(shellAst, (n) => {
+        if (n.type !== 'VariableDeclarator' || n.id.type !== 'Identifier' || !wanted.has(n.id.name)) return;
+        const obj = n.init?.type === 'CallExpression' && n.init.callee.name === '$state' ? n.init.arguments[0] : null;
+        if (obj?.type !== 'ObjectExpression') return;
+        registryKeys.set(n.id.name, new Set(obj.properties.map(p => p.key?.name ?? p.key?.value).filter(Boolean)));
+    });
+}
 
 function collectPattern(node, out) {
     if (!node) return;
@@ -111,6 +130,15 @@ for (const rel of scripts) {
             case 'ClassDeclaration': case 'ClassExpression': if (n.id) fileDeclared.add(n.id.name); break;
             case 'CatchClause': collectPattern(n.param, fileDeclared); break;
             case 'ImportDeclaration': for (const s of n.specifiers) fileDeclared.add(s.local.name); break;
+            case 'CallExpression': {
+                const c = n.callee;
+                const arg = n.arguments[0];
+                if (c.type === 'MemberExpression' && c.object.type === 'Identifier' && c.object.name === 'VectorSvelte'
+                    && !c.computed && REGISTRY_OF[c.property.name] && arg?.type === 'Literal' && typeof arg.value === 'string') {
+                    registryCalls.push({ file: rel, line: n.loc?.start.line, fn: c.property.name, name: arg.value });
+                }
+                break;
+            }
             case 'MemberExpression':
                 if (n.object.type === 'Identifier' && n.object.name === 'VectorSvelte' && n.computed) computedUses.push(`${rel}:${n.loc?.start.line}`);
                 if (n.object.type === 'Identifier' && n.object.name === 'VectorSvelte' && !n.computed && n.property.type === 'Identifier') {
@@ -206,5 +234,12 @@ for (const name of [...exported].sort()) {
     findings++;
     console.log(`${owners.join(', ')}: declares '${name}', which is also a different VectorSvelte export`);
 }
+for (const registry of new Set(Object.values(REGISTRY_OF))) {
+    if (!registryKeys.has(registry)) { findings++; console.log(`components/lib/shell.svelte.js: could not read the '${registry}' registry's keys`); }
+}
+for (const { file, line, fn, name } of registryCalls) {
+    const keys = registryKeys.get(REGISTRY_OF[fn]);
+    if (keys && !keys.has(name)) { findings++; console.log(`${file}:${line}: ${fn}('${name}'), but shell.svelte.js declares no such key in '${REGISTRY_OF[fn]}'`); }
+}
 if (findings) { console.log(`\n${findings} finding(s)`); process.exit(1); }
-console.log(`[check-globals] ${scripts.length} scripts, ${declared.size} declared names, ${exported.size} exports, ${svelteUses.size} used: clean`);
+console.log(`[check-globals] ${scripts.length} scripts, ${declared.size} declared names, ${exported.size} exports, ${svelteUses.size} used, ${registryCalls.length} registry keys: clean`);
