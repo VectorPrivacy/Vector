@@ -1766,10 +1766,36 @@ function insertUnreadDivider(anchorEl, anchorAfter = false) {
     const p = domChatMessages.querySelector(':scope > .unread-divider');
     if (p) { p._targetId = anchorEl.id; p._anchorAfter = anchorAfter; unreadDividerEl = p; }
 }
+/**
+ * Drop the "New" divider without moving what the reader sees.
+ *
+ * It is cleared from places that know nothing about scroll: refocusing the
+ * window, sending, the last unread below being deleted. Removing it shrinks the
+ * list by its height, so a pinned view is re-pinned explicitly (WKWebView can
+ * leave its scroll layer past the new bottom when the clamp lands during a focus
+ * change, showing blank space until the next gesture), and a view scrolled past
+ * it is shifted up by the same amount.
+ */
 function clearUnreadDivider() {
+    const div = unreadDividerEl?.isConnected ? unreadDividerEl : null;
+    const el = domChatMessages;
+    // Measured, not summed from the divider's box: the row after it has its top
+    // margin zeroed while the divider stands, and gets it back when it goes.
+    const above = !!(div && el && !chatPinnedToBottom && div.offsetTop + div.offsetHeight <= el.scrollTop);
+    const heightBefore = el ? el.scrollHeight : 0;
     VectorSvelte.clearDivider();
     VectorSvelte.flushSync();
     unreadDividerEl = null;
+    if (!div || !el) return;
+    if (above) {
+        const removed = heightBefore - el.scrollHeight;
+        if (removed > 0) {
+            beginProgrammaticScroll();
+            el.scrollTop -= removed;
+        }
+    } else {
+        softChatScroll();
+    }
 }
 function setUnreadBelow(n) {
     unreadBelowCount = Math.max(0, n);
