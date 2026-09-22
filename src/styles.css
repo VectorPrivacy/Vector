@@ -3753,14 +3753,19 @@ body.chat-bg-disabled .chat-messages::before {
 
 /* The `highlightMessage` animation is defined in `/themes/*` */
 
-/* Used for "New" elements, like new incoming messages, or other new elements added to a list */
+/* Used for "New" elements, like new incoming messages, or other new elements added to a list.
+   Grown from the bottom-left corner rather than slid up from below: a transformed box
+   counts toward its scroller's scroll height, and one that starts below its own slot
+   stretches the chat past its last message for the length of the animation, which the
+   bottom hold chases and then gives back a pixel a frame. */
 .new-anim {
+  transform-origin: bottom left;
   animation: SlideIn 0.75s cubic-bezier(.46,.03,.52,.96) forwards;
 }
 
 @keyframes SlideIn {
-  0% { opacity: 0; transform: translateY(100px) translateX(-100px) scale(0); }
-  100% { opacity: inherit; transform: translateY(0px) translateX(0px) scale(1); }
+  0% { opacity: 0; transform: translateX(-100px) scale(0); }
+  100% { opacity: inherit; transform: translateX(0px) scale(1); }
 }
 
 /* Used for "Expiring" elements, like finished statuses, etc */
