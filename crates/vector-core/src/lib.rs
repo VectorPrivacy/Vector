@@ -4344,11 +4344,18 @@ impl VectorCore {
             .roles
             .iter()
             .map(|r| {
+                // A channel-scoped role is that channel's access list (CORD-04 §2), which
+                // is what a Private Channel's member list is drawn from.
+                let channel_id = match &r.scope {
+                    crate::community::roles::RoleScope::Channel(c) => Some(c.to_ascii_lowercase()),
+                    crate::community::roles::RoleScope::Server => None,
+                };
                 serde_json::json!({
                     "role_id": r.role_id,
                     "name": r.name,
                     "position": r.position,
                     "color": r.color,
+                    "channel_id": channel_id,
                 })
             })
             .collect();

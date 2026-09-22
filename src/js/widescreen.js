@@ -100,7 +100,9 @@ function wsRememberOpenChat() {
  *  primary — which is also the fallback when that channel has since gone. */
 function wsChannelForCommunity(communityId) {
     const last = wsLastChannel.get(communityId);
-    if (last && arrChats.some(c => c.id === last)) return last;
+    // Only a channel still visible: the one left in may since have been revoked.
+    const visible = communityChannelsCache.get(communityId);
+    if (last && arrChats.some(c => c.id === last) && (!visible || visible.some(c => c.id === last))) return last;
     return arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c))?.id || null;
 }
 
@@ -262,8 +264,12 @@ function wsSyncMembersPane() {
     // member list for good — which then looked like a per-community memory.
     const shown = VectorSvelte.paneShown('groupOverview');
     if (inCommunity && wsMembersOpen) {
-        // Up already: only another community's channel re-renders it, in place.
-        if (!shown || VectorSvelte.overviewState().groupId !== communityIdOfChat(chat)) openGroupOverview(chat);
+        // Up already: only another community's channel re-renders it, in place. A channel
+        // of the same community keeps the roster and re-scopes it: a Private Channel lists
+        // only who may read it.
+        const communityId = communityIdOfChat(chat);
+        if (!shown || VectorSvelte.overviewState().groupId !== communityId) openGroupOverview(chat);
+        else VectorSvelte.overviewRoster()?.setChannel(rosterChannelFor(communityId, chat.id));
     } else if (shown) {
         wsCloseDetails();
     }

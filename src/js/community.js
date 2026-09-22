@@ -786,6 +786,15 @@ async function pickCommunityIcon(chat) {
     communityChanged(communityId);
 }
 
+/**
+ * The Private Channel a community's roster should be scoped to for `chatId`, or null
+ * when that chat is a public channel (everyone in the community reads it).
+ */
+function rosterChannelFor(communityId, chatId) {
+    const channel = (communityChannelsCache.get(communityId) || []).find(c => c.id === chatId);
+    return channel?.private ? channel.id : null;
+}
+
 /** The mounted member-roster island and the community it shows (one per overview open). */
 let groupRoster = null;
 let groupRosterCommunityId = null;
@@ -860,11 +869,17 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         const remount = !groupRoster || groupRosterCommunityId !== communityId || !preserveSearch;
         if (remount) {
             groupRosterCommunityId = communityId;
+            // The channel the roster lists for: the one on screen when it belongs to this
+            // community (widescreen), else the one the overview was opened from (narrow).
+            const onScreen = arrChats.find(c => c.id === strOpenChat);
+            const rosterChannel = rosterChannelFor(communityId,
+                communityIdOfChat(onScreen) === communityId ? strOpenChat : chat.id);
             // A new key remounts: the roster's props are mount-time constants.
             VectorSvelte.setScreen('roster', { key: `${communityId}:${++groupRosterSeq}`, props: {
                 communityId, myNpub, ownerNpub, caps,
                 profiles: [...arrProfiles],
                 members: memberList, admins: adminNpubs, banned: bannedList, roleGraph,
+                channel: rosterChannel,
                 loading: !hadCache,
                 h: {
                     invoke, popupConfirm, escapeHtml, showToast, showContextMenu,

@@ -11,6 +11,33 @@
  * still where unread counts and messages come from, looked up by channel id.
  */
 
+/**
+ * The channels a summary lists that this member may see. A Private Channel shows only
+ * while we hold its CURRENT key: a rekey that leaves us out drops the key backend-side
+ * (the channel is then recorded keyless, as the cursor for a future re-grant), so
+ * `readable` false is exactly "not, or no longer, entitled".
+ */
+function visibleChannels(channels) {
+    return (channels || [])
+        .filter(c => !(c.private && c.readable === false))
+        .map(c => ({ id: c.channel_id, name: c.name, private: !!c.private, readable: true }));
+}
+
+/**
+ * Leave a channel that is no longer visible, for the community's primary: a revoke
+ * landing while it is on screen must not leave the user reading a room they are out of.
+ */
+function leaveHiddenChannel(communityId) {
+    if (!strOpenChat) return;
+    const open = arrChats.find(c => c.id === strOpenChat);
+    if (!open || communityIdOfChat(open) !== communityId) return;
+    const channels = communityChannelsCache.get(communityId);
+    if (!channels || channels.some(c => c.id === strOpenChat)) return;
+    const primary = arrChats.find(c => communityIdOfChat(c) === communityId && isPrimaryChannelChat(c));
+    const target = primary && channels.some(c => c.id === primary.id) ? primary.id : channels[0]?.id;
+    if (target) openChat(target);
+}
+
 /** communityId → [{ id, name }], as last read from the community documents. */
 const communityChannelsCache = new Map();
 /** communityIds whose channel list is expanded in the chat list. */
@@ -29,12 +56,12 @@ function loadCommunityChannels() {
     invoke('list_communities')
         .then(list => {
             for (const community of list || []) {
-                communityChannelsCache.set(community.community_id,
-                    (community.channels || []).map(c => ({
-                        id: c.channel_id, name: c.name, private: !!c.private, readable: c.readable !== false,
-                    })));
+                communityChannelsCache.set(community.community_id, visibleChannels(community.channels));
             }
-            for (const community of list || []) communityChanged(community.community_id);
+            for (const community of list || []) {
+                communityChanged(community.community_id);
+                leaveHiddenChannel(community.community_id);
+            }
         })
         .catch(() => {})
         .finally(() => { communityChannelsLoading = false; });
@@ -43,9 +70,8 @@ function loadCommunityChannels() {
 /** Adopt a channel set straight off a `get_community` summary the caller already fetched. */
 function setCommunityChannels(communityId, channels) {
     if (!communityId || !Array.isArray(channels)) return;
-    communityChannelsCache.set(communityId, channels.map(c => ({
-        id: c.channel_id, name: c.name, private: !!c.private, readable: c.readable !== false,
-    })));
+    communityChannelsCache.set(communityId, visibleChannels(channels));
+    leaveHiddenChannel(communityId);
 }
 
 /** Channels for a community, or null before the first load lands. */

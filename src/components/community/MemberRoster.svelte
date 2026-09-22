@@ -20,7 +20,8 @@
         members = [],              // [{ npub }]
         admins = [],
         banned = [],
-        roleGraph = null,          // { roles: [{ role_id, name, position }], grants: [{ npub, role_ids }] }
+        roleGraph = null,          // { roles: [{ role_id, name, position, channel_id }], grants: [{ npub, role_ids }] }
+        channel = null,            // a Private Channel's id: list only who may read it
         loading = false,           // no cached roster yet: show the loading line until setRoster
         h,                         // the app's bag, registered with the roster screen (js/community.js)
         onChange = () => {},       // ({ members, admins, banned }) after a member-driven change
@@ -38,6 +39,8 @@
     let profilesList = $state.raw(profiles);
     // svelte-ignore state_referenced_locally
     let isLoading = $state(loading);
+    // svelte-ignore state_referenced_locally
+    let scopeChannel = $state(channel);
     let filter = $state('');
     let acting = $state.raw(new Set());   // npubs with an action in flight
 
@@ -55,6 +58,11 @@
     const hoverBg = `linear-gradient(to right, ${accent}40, transparent)`;
 
     // ── instance exports: the vanilla<->island bridge ──
+
+    /** The open channel changed: a Private Channel's id, or null for a public one. */
+    export function setChannel(id) {
+        scopeChannel = id || null;
+    }
 
     /** Authoritative lists landed (or a cached paint is being replaced). */
     export function setRoster(next) {
@@ -134,11 +142,24 @@
 
     const f = $derived(filter.trim().toLowerCase());
 
+    // Who may read the scoped Private Channel: the owner, and holders of a role scoped
+    // to it (CORD-04 §2, the roles scoped to a channel ARE its access list). Unscoped
+    // until the graph lands, so a slow read shows everyone rather than a false empty.
+    const scope = $derived.by(() => {
+        if (!scopeChannel || !graph) return null;
+        const access = new Set((graph.roles || []).filter((r) => r.channel_id === scopeChannel).map((r) => r.role_id));
+        const out = new Set();
+        if (ownerNpub) out.add(ownerNpub);
+        for (const g of graph.grants || []) if (g.role_ids?.some((id) => access.has(id))) out.add(g.npub);
+        return out;
+    });
+
     // Row view-models bucketed by section: owner → admins → members, A→Z within a tier.
     const sections = $derived.by(() => {
         const tierOf = (npub) => (npub === ownerNpub ? 0 : adminSet.has(npub) ? 1 : 2);
         const vms = [];
         for (const m of memberList) {
+            if (scope && !scope.has(m.npub)) continue;
             const profile = profileFor(m.npub);
             const display = displayOf(m.npub, profile);
             if (f && !(display + ' ' + m.npub).toLowerCase().includes(f)) continue;
