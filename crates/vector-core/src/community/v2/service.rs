@@ -4936,6 +4936,263 @@ pub async fn revoke_admin<T: Transport + ?Sized>(transport: &T, community: &Comm
     .await
 }
 
+// ── Role authoring (CORD-04 §2/§3) ──────────────────────────────────────────
+//
+// Every check below is the rule a READER applies, run before publishing so this
+// device never signs an edition the fold drops. That matters beyond wasted work:
+// editions are version-chained, and a dropped head still advances the author's own
+// floor onto a state nobody honours.
+
+/// Who is authoring a role change, and from what standing.
+struct RoleAuthor {
+    me_hex: String,
+    owner_hex: String,
+    is_owner: bool,
+    /// The owner is 0; otherwise the highest (lowest-numbered) role position held.
+    rank: u32,
+    /// Bits this author may put on a role: everything for the owner, else their own.
+    grantable: u64,
+}
+
+impl RoleAuthor {
+    /// Strictly above `position`: equal never acts on equal (CORD-04 §3).
+    fn outranks(&self, position: u32) -> bool {
+        self.is_owner || self.rank < position
+    }
+    /// A role may gain only bits its author holds. Bits it already has may stay:
+    /// someone lacking BAN can still rename a role that bans.
+    fn may_add(&self, from: u64, to: u64) -> bool {
+        self.is_owner || (to & !from) & !self.grantable == 0
+    }
+}
+
+fn role_author(community: &CommunityV2, view: &AuthorityView) -> Result<RoleAuthor, String> {
+    use crate::community::roles::Permissions;
+    let me = me_pk()?;
+    let owner = community.owner()?;
+    let (me_hex, owner_hex) = (me.to_hex(), owner.to_hex());
+    let is_owner = me == owner;
+    if !is_owner {
+        if view.banned.contains(&me_hex) {
+            return Err("you are banned from this community".to_string());
+        }
+        if !view.roles.is_authorized(&me_hex, Some(&owner_hex), Permissions::MANAGE_ROLES) {
+            return Err("managing roles needs the Manage Roles permission".to_string());
+        }
+    }
+    let rank = if is_owner { 0 } else { view.roles.highest_position(&me_hex).unwrap_or(u32::MAX) };
+    let grantable = if is_owner { u64::MAX } else { view.roles.effective_permissions(&me_hex).0 };
+    Ok(RoleAuthor { me_hex, owner_hex, is_owner, rank, grantable })
+}
+
+/// A role's current head must be in hand before replacing it, or this edition could
+/// chain from a stale version and lose to (or fork from) the one the relays hold.
+fn require_role_head(view: &AuthorityView, role_id: &str) -> Result<(), String> {
+    let eid = role_id.to_ascii_lowercase();
+    if view.floored.contains(&eid) && !view.head_entities.contains(&eid) {
+        return Err("this role's current state could not be fetched; try again once relays serve the control plane".to_string());
+    }
+    Ok(())
+}
+
+/// Mint a Role beneath everything that exists, including its author: a new role
+/// starts at the bottom, as in Discord, and no role may sit at or above its minter.
+/// Returns the new `role_id`.
+pub async fn create_role<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    name: &str,
+    color: u32,
+    permissions: u64,
+    scope: crate::community::roles::RoleScope,
+) -> Result<String, String> {
+    crate::db::scoped(async move {
+        use crate::community::roles::{Permissions, Role};
+        let view = fetch_authority(transport, community).await;
+        let author = role_author(community, &view)?;
+        if view.roles.roles.len() >= super::roles::MAX_ROLES_PER_COMMUNITY {
+            return Err(format!("a community holds at most {} roles", super::roles::MAX_ROLES_PER_COMMUNITY));
+        }
+        if !author.may_add(0, permissions) {
+            return Err("you can't give a role permissions you don't hold".to_string());
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a role needs a name".to_string());
+        }
+        let floor = view.roles.roles.iter().map(|r| r.position).max().unwrap_or(0).max(author.rank);
+        let role = Role {
+            role_id: crate::simd::hex::bytes_to_hex_32(&super::super::random_32()),
+            name: name.to_string(),
+            position: floor.saturating_add(1),
+            permissions: Permissions(permissions),
+            scope,
+            color,
+            extra: Default::default(),
+        };
+        set_role(transport, community, &role).await?;
+        Ok(role.role_id)
+    })
+    .await
+}
+
+/// Edit a Role's name, colour, permissions and scope, keeping its position and every
+/// field another client wrote. Both CORD-04 §3 gates hold: the author outranks the
+/// role as it stands, and the edition claims nothing at or above them.
+pub async fn edit_role<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    role_id: &str,
+    name: &str,
+    color: u32,
+    permissions: u64,
+    scope: crate::community::roles::RoleScope,
+) -> Result<(), String> {
+    crate::db::scoped(async move {
+        use crate::community::roles::Permissions;
+        let view = fetch_authority(transport, community).await;
+        let author = role_author(community, &view)?;
+        let current = view.roles.role(role_id).cloned().ok_or("no such role")?;
+        require_role_head(&view, role_id)?;
+        if !author.outranks(current.position) {
+            return Err("you can only edit roles beneath your own".to_string());
+        }
+        if !author.may_add(current.permissions.0, permissions) {
+            return Err("you can't give a role permissions you don't hold".to_string());
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a role needs a name".to_string());
+        }
+        let mut next = current.clone();
+        next.name = name.to_string();
+        next.color = color;
+        next.permissions = Permissions(permissions);
+        next.scope = scope;
+        if next == current {
+            return Ok(());
+        }
+        set_role(transport, community, &next).await
+    })
+    .await
+}
+
+/// Reorder the roles beneath the author, top to bottom as `ordered` lists them.
+///
+/// Positions are the whole of CORD-04's ordering (no RoleOrder entity), so a reorder
+/// republishes each role whose position moves, and nothing else. The author's own
+/// rank and everything above it stay put: the moved set is renumbered from just
+/// beneath them, which also resolves any ties into one definite order. Returns how
+/// many roles were republished.
+pub async fn reorder_roles<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    ordered: &[String],
+) -> Result<usize, String> {
+    crate::db::scoped(async move {
+        let view = fetch_authority(transport, community).await;
+        let author = role_author(community, &view)?;
+        let mut movable: Vec<crate::community::roles::Role> = view
+            .roles
+            .roles
+            .iter()
+            .filter(|r| author.outranks(r.position))
+            .cloned()
+            .collect();
+        // The requested order first; anything it omits keeps its current relative place.
+        movable.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
+        let rank_of = |id: &str| ordered.iter().position(|o| o.eq_ignore_ascii_case(id));
+        let mut keyed: Vec<(usize, usize, crate::community::roles::Role)> = movable
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| (rank_of(&r.role_id).unwrap_or(usize::MAX), i, r))
+            .collect();
+        keyed.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut changed = Vec::new();
+        for (i, (_, _, role)) in keyed.into_iter().enumerate() {
+            let position = author.rank.saturating_add(1).saturating_add(i as u32);
+            if role.position != position {
+                require_role_head(&view, &role.role_id)?;
+                let mut next = role;
+                next.position = position;
+                changed.push(next);
+            }
+        }
+        for role in &changed {
+            set_role(transport, community, role).await?;
+        }
+        Ok(changed.len())
+    })
+    .await
+}
+
+/// Set exactly which Roles `member` holds. A Grant replaces the member's whole set
+/// (CORD-04 §2), so this is the one place a set is written: every change is judged
+/// against the author's rank, and ids this device can't resolve ride through
+/// untouched rather than being stripped by the device that knows least.
+pub async fn set_member_roles<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    member: &PublicKey,
+    role_ids: Vec<String>,
+) -> Result<(), String> {
+    crate::db::scoped(async move {
+        use crate::community::roles::Permissions;
+        let view = fetch_authority(transport, community).await;
+        let author = role_author(community, &view)?;
+        let member_hex = member.to_hex();
+        if member_hex == author.owner_hex {
+            return Err("the owner's standing isn't granted by roles".to_string());
+        }
+        require_grant_head(community, &view, &member_hex)?;
+        if !author.is_owner && !view.roles.can_act_on_member(&author.me_hex, Some(&author.owner_hex), &member_hex, Permissions::MANAGE_ROLES) {
+            return Err("you can only change the roles of members beneath you".to_string());
+        }
+        let current: Vec<String> = view
+            .roles
+            .grants
+            .iter()
+            .find(|g| g.member == member_hex)
+            .map(|g| g.role_ids.clone())
+            .unwrap_or_default();
+        let mut next: Vec<String> = Vec::new();
+        for id in role_ids.iter().map(|r| r.to_ascii_lowercase()) {
+            if !next.contains(&id) {
+                next.push(id);
+            }
+        }
+        for id in next.iter().filter(|id| !current.contains(id)) {
+            let role = view.roles.role(id).ok_or("no such role")?;
+            if !author.outranks(role.position) {
+                return Err(format!("you can't grant \"{}\": it isn't beneath your own role", role.name));
+            }
+        }
+        let dropped: Vec<String> = current.iter().filter(|id| !next.contains(id)).cloned().collect();
+        for id in dropped {
+            // An unresolvable id can't be judged, so it can't be removed either.
+            match view.roles.role(&id) {
+                Some(role) if !author.outranks(role.position) => {
+                    return Err(format!("you can't remove \"{}\": it isn't beneath your own role", role.name));
+                }
+                Some(_) => {}
+                None => next.push(id),
+            }
+        }
+        if next.len() > super::roles::MAX_ROLES_PER_MEMBER {
+            return Err(format!("a member holds at most {} roles", super::roles::MAX_ROLES_PER_MEMBER));
+        }
+        let mut a = current.clone();
+        let mut b = next.clone();
+        a.sort();
+        b.sort();
+        if a == b {
+            return Ok(());
+        }
+        grant_roles_with_roster(transport, community, member, next, &view.roles).await
+    })
+    .await
+}
+
 /// A grant replaces whole — refuse the merge when this member's grant is FLOORED
 /// locally but no head folded (withheld / evicted): a blind push at that point
 /// would erase their other roles at a higher version.
@@ -11984,6 +12241,84 @@ mod tests {
         grants.sort_by(|x, y| x.member.cmp(&y.member));
         let banned: Vec<&String> = a.banned.iter().collect();
         serde_json::json!({ "roles": roles, "grants": grants, "banned": banned }).to_string()
+    }
+
+    fn folded_role<'a>(view: &'a AuthorityView, id: &str) -> &'a crate::community::roles::Role {
+        view.roles.role(id).unwrap_or_else(|| panic!("role {id} folded"))
+    }
+
+    #[tokio::test]
+    async fn roles_are_created_at_the_bottom_edited_in_place_and_reordered() {
+        use crate::community::roles::{Permissions, RoleScope};
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Roles", bed.relays.clone(), None).await.unwrap();
+
+        let a = create_role(&bed.relay, &community, "Alpha", 0, Permissions::KICK, RoleScope::Server).await.unwrap();
+        let b = create_role(&bed.relay, &community, "Beta", 0, 0, RoleScope::Server).await.unwrap();
+        let c = create_role(&bed.relay, &community, "Gamma", 0, 0, RoleScope::Server).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        let pos = |v: &AuthorityView, id: &str| folded_role(v, id).position;
+        assert!(pos(&view, &a) < pos(&view, &b) && pos(&view, &b) < pos(&view, &c), "each new role lands beneath the last");
+        assert!(pos(&view, &a) >= 1, "no role claims the owner's position");
+
+        edit_role(&bed.relay, &community, &b, "Beta Prime", 0x59fcb3, Permissions::BAN, RoleScope::Server).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        let edited = folded_role(&view, &b);
+        assert_eq!((edited.name.as_str(), edited.color, edited.permissions.0), ("Beta Prime", 0x59fcb3, Permissions::BAN));
+        assert_eq!(edited.position, pos(&view, &b), "an edit keeps the role where it was");
+
+        let moved = reorder_roles(&bed.relay, &community, &[c.clone(), a.clone(), b.clone()]).await.unwrap();
+        assert_eq!(moved, 3, "every role whose position changed is republished");
+        let view = fetch_authority(&bed.relay, &community).await;
+        assert!(pos(&view, &c) < pos(&view, &a) && pos(&view, &a) < pos(&view, &b), "the fold holds the requested order");
+        assert_eq!(pos(&view, &c), 1, "renumbered from just beneath the owner");
+
+        let again = reorder_roles(&bed.relay, &community, &[c, a, b]).await.unwrap();
+        assert_eq!(again, 0, "the same order again publishes nothing");
+    }
+
+    #[tokio::test]
+    async fn a_members_role_set_is_written_whole_and_the_owner_is_never_a_target() {
+        use crate::community::roles::{Permissions, RoleScope};
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Grants", bed.relays.clone(), None).await.unwrap();
+        let a = create_role(&bed.relay, &community, "A", 0, Permissions::KICK, RoleScope::Server).await.unwrap();
+        let b = create_role(&bed.relay, &community, "B", 0, 0, RoleScope::Server).await.unwrap();
+        let member = Keys::generate().public_key();
+
+        set_member_roles(&bed.relay, &community, &member, vec![a.clone(), b.clone()]).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        let held: Vec<String> = view.roles.roles_of(&member.to_hex()).map(|r| r.role_id.clone()).collect();
+        assert!(held.contains(&a) && held.contains(&b), "both roles granted");
+
+        set_member_roles(&bed.relay, &community, &member, vec![b.clone()]).await.unwrap();
+        let view = fetch_authority(&bed.relay, &community).await;
+        let held: Vec<String> = view.roles.roles_of(&member.to_hex()).map(|r| r.role_id.clone()).collect();
+        assert_eq!(held, vec![b.clone()], "the set replaces, it does not append");
+
+        let err = set_member_roles(&bed.relay, &community, &owner.keys.public_key(), vec![a]).await.unwrap_err();
+        assert!(err.contains("owner"), "the owner is never a role target: {err}");
+    }
+
+    #[test]
+    fn a_role_author_adds_only_bits_they_hold_and_acts_only_beneath_themselves() {
+        use crate::community::roles::Permissions;
+        let moderator = RoleAuthor {
+            me_hex: "m".into(),
+            owner_hex: "o".into(),
+            is_owner: false,
+            rank: 3,
+            grantable: Permissions::MANAGE_ROLES | Permissions::KICK,
+        };
+        assert!(moderator.may_add(0, Permissions::KICK), "a bit they hold");
+        assert!(!moderator.may_add(0, Permissions::BAN), "a bit they lack");
+        assert!(moderator.may_add(Permissions::BAN, Permissions::BAN | Permissions::KICK), "an existing bit may stay");
+        assert!(moderator.may_add(Permissions::BAN, 0), "and may always be taken away");
+        assert!(moderator.outranks(4) && !moderator.outranks(3) && !moderator.outranks(1), "strictly beneath only");
+        let owner = RoleAuthor { is_owner: true, rank: 0, grantable: u64::MAX, ..moderator };
+        assert!(owner.may_add(0, u64::MAX) && owner.outranks(1));
     }
 
     #[tokio::test]

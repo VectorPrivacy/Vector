@@ -4972,6 +4972,70 @@ pub async fn ban_community_members(community_id: String, npubs: Vec<String>) -> 
     .await
 }
 
+/// Everything the role editor needs, read locally.
+#[tauri::command]
+pub fn get_community_roles_view(community_id: String) -> Result<serde_json::Value, String> {
+    vector_core::VectorCore.community_roles_view(&community_id).map_err(|e| e.to_string())
+}
+
+/// Create a Role at the bottom of the list; returns its id. `permissions` is a decimal string.
+#[tauri::command]
+pub async fn create_community_role(
+    community_id: String,
+    name: String,
+    color: u32,
+    permissions: String,
+    channel_id: Option<String>,
+) -> Result<String, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .create_role(&community_id, &name, color, &permissions, channel_id.as_deref())
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Edit a Role's name, colour, permissions and channel scope.
+#[tauri::command]
+pub async fn edit_community_role(
+    community_id: String,
+    role_id: String,
+    name: String,
+    color: u32,
+    permissions: String,
+    channel_id: Option<String>,
+) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .edit_role(&community_id, &role_id, &name, color, &permissions, channel_id.as_deref())
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Reorder the roles beneath the caller, top to bottom; returns how many moved.
+#[tauri::command]
+pub async fn reorder_community_roles(community_id: String, ordered: Vec<String>) -> Result<usize, String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore.reorder_roles(&community_id, &ordered).await.map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Set exactly which Roles a member holds.
+#[tauri::command]
+pub async fn set_community_member_roles(community_id: String, npub: String, role_ids: Vec<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        vector_core::VectorCore
+            .set_member_roles(&community_id, &npub, role_ids)
+            .await
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
 /// Lift several bans as one banlist edition. An unban never rotates (only a fresh
 /// ban severs), so this is one publish however many are selected, where lifting them
 /// one by one would publish, and race, an edition each.

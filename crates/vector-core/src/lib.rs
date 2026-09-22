@@ -4371,6 +4371,137 @@ impl VectorCore {
         Ok(serde_json::json!({ "roles": roles, "grants": grants }))
     }
 
+    /// Everything a role editor needs, in one local read: every role in display order
+    /// (CORD-04 §3: position, then the lower role_id), who holds each, what the caller
+    /// may touch, and the channels a role can be scoped to. Permissions ride as decimal
+    /// strings, the wire's own rule, since a JS number corrupts past 2^53.
+    pub fn community_roles_view(&self, community_id: &str) -> Result<serde_json::Value> {
+        use crate::community::roles::{Permissions, RoleScope};
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
+        let me = state::my_public_key().ok_or_else(|| VectorError::Other("Not logged in".into()))?.to_hex();
+        let owner_hex = v2.owner().map_err(VectorError::Other)?.to_hex();
+        let roster = crate::db::community::get_community_roles(community_id).map_err(VectorError::Other)?;
+        let banned = crate::db::community::get_community_banlist(community_id).unwrap_or_default();
+        let is_owner = me == owner_hex;
+        let can_manage = is_owner
+            || (!banned.contains(&me) && roster.is_authorized(&me, Some(&owner_hex), Permissions::MANAGE_ROLES));
+        let rank = if is_owner { Some(0) } else { roster.highest_position(&me) };
+        let grantable = if is_owner { u64::MAX } else { roster.effective_permissions(&me).0 };
+        let mut roles: Vec<&crate::community::roles::Role> = roster.roles.iter().collect();
+        roles.sort_by(|a, b| a.position.cmp(&b.position).then_with(|| a.role_id.cmp(&b.role_id)));
+        let roles: Vec<serde_json::Value> = roles
+            .into_iter()
+            .map(|r| {
+                let holders = roster
+                    .grants
+                    .iter()
+                    .filter(|g| !banned.contains(&g.member) && g.role_ids.iter().any(|id| id == &r.role_id))
+                    .count();
+                serde_json::json!({
+                    "role_id": r.role_id,
+                    "name": r.name,
+                    "position": r.position,
+                    "color": r.color,
+                    "permissions": r.permissions.0.to_string(),
+                    "channel_id": match &r.scope { RoleScope::Channel(c) => Some(c.to_ascii_lowercase()), RoleScope::Server => None },
+                    "holders": holders,
+                    "manageable": can_manage && (is_owner || rank.is_some_and(|p| p < r.position)),
+                })
+            })
+            .collect();
+        let channels: Vec<serde_json::Value> = v2
+            .channels
+            .iter()
+            .map(|c| serde_json::json!({
+                "channel_id": crate::simd::hex::bytes_to_hex_32(&c.id.0),
+                "name": c.name,
+                "private": c.private,
+            }))
+            .collect();
+        Ok(serde_json::json!({
+            "is_owner": is_owner,
+            "can_manage": can_manage,
+            "rank": rank,
+            "grantable": grantable.to_string(),
+            "roles": roles,
+            "channels": channels,
+            "max_roles": crate::community::v2::roles::MAX_ROLES_PER_COMMUNITY,
+            "max_per_member": crate::community::v2::roles::MAX_ROLES_PER_MEMBER,
+        }))
+    }
+
+    fn parse_permissions(s: &str) -> Result<u64> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(VectorError::Other(format!("permissions must be a decimal string, got {s:?}")));
+        }
+        s.parse::<u64>().map_err(|_| VectorError::Other("permissions out of range".into()))
+    }
+
+    fn role_scope(channel_id: Option<&str>) -> Result<crate::community::roles::RoleScope> {
+        use crate::community::roles::RoleScope;
+        match channel_id {
+            None => Ok(RoleScope::Server),
+            Some(c) if c.len() == 64 && c.bytes().all(|b| b.is_ascii_hexdigit()) => Ok(RoleScope::Channel(c.to_ascii_lowercase())),
+            Some(_) => Err(VectorError::Other("channel_id must be 32-byte hex".into())),
+        }
+    }
+
+    /// Create a Role at the bottom of the list. Returns its id.
+    pub async fn create_role(&self, community_id: &str, name: &str, color: u32, permissions: &str, channel_id: Option<&str>) -> Result<String> {
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
+        let perms = Self::parse_permissions(permissions)?;
+        let scope = Self::role_scope(channel_id)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let id = crate::community::v2::service::create_role(&transport, &v2, name, color, perms, scope)
+            .await
+            .map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(id)
+    }
+
+    /// Edit a Role's name, colour, permissions and scope.
+    pub async fn edit_role(&self, community_id: &str, role_id: &str, name: &str, color: u32, permissions: &str, channel_id: Option<&str>) -> Result<()> {
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
+        let perms = Self::parse_permissions(permissions)?;
+        let scope = Self::role_scope(channel_id)?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::edit_role(&transport, &v2, role_id, name, color, perms, scope)
+            .await
+            .map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(())
+    }
+
+    /// Reorder the roles beneath the caller, top to bottom. Returns how many moved.
+    pub async fn reorder_roles(&self, community_id: &str, ordered: &[String]) -> Result<usize> {
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        let moved = crate::community::v2::service::reorder_roles(&transport, &v2, ordered)
+            .await
+            .map_err(VectorError::Other)?;
+        if moved > 0 {
+            Self::converge_v2_authority(&transport, community_id).await;
+        }
+        Ok(moved)
+    }
+
+    /// Set exactly which Roles a member holds.
+    pub async fn set_member_roles(&self, community_id: &str, npub: &str, role_ids: Vec<String>) -> Result<()> {
+        let v2 = Self::load_v2_if_v2(community_id)?
+            .ok_or_else(|| VectorError::Other("roles need a Concord v2 community".into()))?;
+        let member = nostr_sdk::prelude::PublicKey::parse(npub).map_err(|_| VectorError::Other("invalid npub".into()))?;
+        let transport = crate::community::transport::LiveTransport::with_timeout(std::time::Duration::from_secs(12));
+        crate::community::v2::service::set_member_roles(&transport, &v2, &member, role_ids)
+            .await
+            .map_err(VectorError::Other)?;
+        Self::converge_v2_authority(&transport, community_id).await;
+        Ok(())
+    }
+
     /// Whether `npub` holds `permission` in this community, per the folded roster.
     ///
     /// The roster IS the ACL (CORD-04), so this is the same question every
