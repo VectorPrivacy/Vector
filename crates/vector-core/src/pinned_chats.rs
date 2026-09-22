@@ -106,11 +106,24 @@ impl PinnedChats {
         Ok(())
     }
 
+    /// Drop the Community pins older builds wrote. Communities are arranged on
+    /// the rail now, so a pin there means nothing; it is shed on the next write
+    /// rather than by a write of its own. Keyed on FORM (a community id is 64
+    /// hex, a DM is an npub), so a pin for a chat this device has never synced
+    /// still survives.
+    pub fn retire_community_pins(&mut self) {
+        self.chats.retain(|c| !is_community_id(c));
+    }
+
     /// Drop `id`. Absent is success: unpinning something already gone is the
     /// state the caller asked for.
     pub fn unpin(&mut self, id: &str) {
         self.chats.retain(|c| c != id);
     }
+}
+
+fn is_community_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// The local mirror. Every read path goes through here so the UI never waits on
@@ -237,6 +250,7 @@ async fn publish_only(client: &Client, list: &PinnedChats) -> Result<(), String>
 /// republishes if it failed.
 pub async fn pin_chat(client: &Client, id: &str) -> Result<PinnedChats, String> {
     let mut list = load_local();
+    list.retire_community_pins();
     list.pin(id, effective_max_pinned())?;
     save_local(&list)?;
     publish_in_background(client, &list);
@@ -246,6 +260,7 @@ pub async fn pin_chat(client: &Client, id: &str) -> Result<PinnedChats, String> 
 /// Unpin a chat. Same commit-then-sync shape as [`pin_chat`].
 pub async fn unpin_chat(client: &Client, id: &str) -> Result<PinnedChats, String> {
     let mut list = load_local();
+    list.retire_community_pins();
     list.unpin(id);
     save_local(&list)?;
     publish_in_background(client, &list);
@@ -284,6 +299,18 @@ pub async fn ingest_remote_event(my_pk: &PublicKey, event: &Event) -> Result<Pin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn community_pins_are_shed_and_dm_pins_kept() {
+        let mut l = PinnedChats::default();
+        l.chats = vec![
+            "npub1alice".to_string(),
+            "c".repeat(64),
+            "some-future-id".to_string(),
+        ];
+        l.retire_community_pins();
+        assert_eq!(l.chats, vec!["npub1alice".to_string(), "some-future-id".to_string()]);
+    }
 
     #[test]
     fn pinning_is_capped_but_reading_over_the_cap_is_not() {

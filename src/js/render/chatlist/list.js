@@ -90,7 +90,6 @@ function chatlistSnapshot() {
  * @property {(chat: object) => boolean} chatIsGroup
  * @property {(npub: string) => object|null} getProfile
  * @property {(profileOrNpub: object|string) => string} getName
- * @property {(chat: object) => string} chatPinKey
  * @property {(chat: object) => number} computeListRowBadgeCount
  * @property {(chat: object) => number} computeListRowUnreadCount
  * @property {(chat: object) => number} computeRowBadgeCount
@@ -137,7 +136,6 @@ function chatlistHelpers() {
         chatIsGroup,
         getProfile,
         getName,
-        chatPinKey,
         computeListRowBadgeCount,
         computeListRowUnreadCount,
         computeRowBadgeCount,

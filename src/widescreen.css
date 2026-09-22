@@ -1585,6 +1585,167 @@ body.ws.ws-rail-collapsed .ws-rail-item-badge.muted {
   background-color: rgba(255, 255, 255, 0.45);
 }
 
+/* ── Rail arrangement: drag to reorder, drop onto a community to make a folder.
+   The gesture and its look are the emoji pack rail's (lib/reorder.js): pan-y until
+   a hold arms, a lift once armed, a glowing line where the drop lands. */
+.ws-rail-item {
+  position: relative;
+}
+#ws-rail-spaces .ws-rail-item {
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#ws-rail-spaces .ws-rail-item,
+#ws-rail-spaces .ws-rail-item img {
+  -webkit-user-drag: none;
+}
+#ws-rail-spaces .ws-rail-item.is-dragging { opacity: 0.3; }
+#ws-rail-spaces .ws-rail-item.is-drag-armed {
+  transform: scale(1.04);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out;
+  z-index: 3;
+}
+.ws-rail-ghost {
+  opacity: 0.92;
+  transition: none !important;
+  background-color: #161616;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
+}
+/* ::after, so the badge and the row's own states keep their pseudo-elements. */
+#ws-rail-spaces .ws-rail-item.drop-above::after,
+#ws-rail-spaces .ws-rail-item.drop-below::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background-color: var(--icon-color-primary);
+  box-shadow: 0 0 8px var(--icon-color-primary);
+  pointer-events: none;
+}
+#ws-rail-spaces .ws-rail-item.drop-above::after { top: -2px; }
+#ws-rail-spaces .ws-rail-item.drop-below::after { bottom: -2px; }
+/* Held over the middle of a row: the two become (or join) a folder. */
+#ws-rail-spaces .ws-rail-item.drop-combine {
+  background-color: color-mix(in srgb, var(--icon-color-primary) 16%, transparent);
+  box-shadow: inset 0 0 0 2px var(--icon-color-primary);
+}
+
+/* A folder. Uncoloured, it is neutral grey: the accent is reserved for what
+   needs your attention, and a folder is only furniture. */
+.ws-rail-folder {
+  --folder-tint: var(--folder-color, #9a9a9a);
+  margin: 0 4px;
+  border-radius: 12px;
+  transition: background-color 0.24s ease;
+}
+.ws-rail-folder .ws-rail-item {
+  margin: 0 4px;
+}
+/* Open, the folder is a band of its colour holding its communities. */
+.ws-rail-folder.is-open {
+  background-color: color-mix(in srgb, var(--folder-tint) 9%, transparent);
+}
+.ws-rail-folder-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ws-rail-folder.is-open > .ws-rail-folder-body {
+  grid-template-rows: 1fr;
+}
+.ws-rail-folder-inner {
+  min-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ws-rail-folder.is-open .ws-rail-folder-inner {
+  opacity: 1;
+  transform: none;
+  padding-bottom: 4px;
+}
+
+/* Shut: up to four of its communities in a tile of the folder's colour. Open: the
+   tile becomes the folder glyph, so the head reads as a lid over what it holds. */
+.ws-rail-folder-tile {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background-color: color-mix(in srgb, var(--folder-tint) 26%, transparent);
+  transition: background-color 0.24s ease;
+}
+.ws-rail-folder-grid {
+  position: absolute;
+  inset: 3px;
+  display: grid;
+  /* minmax(0, …): a plain 1fr floors at the image's own size, which let two
+     members stretch down both rows. Four fixed slots, filled in reading order,
+     the empty ones left empty, as an iOS folder does. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  transition: opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+/* ui/Avatar.svelte writes its size and radius inline, hence !important. */
+.ws-rail-folder-grid .ws-rail-folder-mini {
+  /* Height from the width, not a percentage: WebKit resolves a grid item's
+     percentage height against the whole grid rather than its row. */
+  width: 100% !important;
+  height: auto !important;
+  aspect-ratio: 1;
+  min-width: 0;
+  margin: 0;
+  border-radius: 30% !important;
+  object-fit: cover;
+}
+.ws-rail-folder-glyph {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform: scale(0.7);
+  transition: opacity 0.2s ease, transform 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.ws-rail-folder-glyph .icon {
+  width: 60%;
+  height: 60%;
+  background-color: var(--folder-tint);
+}
+.ws-rail-folder-tile.is-open {
+  background-color: transparent;
+}
+.ws-rail-folder-tile.is-open .ws-rail-folder-grid {
+  opacity: 0;
+  transform: scale(0.7);
+}
+.ws-rail-folder-tile.is-open .ws-rail-folder-glyph {
+  opacity: 1;
+  transform: none;
+}
+
+body.ws.ws-rail-collapsed .ws-rail-folder {
+  margin: 0 auto;
+  width: 48px;
+}
+body.ws.ws-rail-collapsed .ws-rail-folder .ws-rail-item {
+  margin: 0 auto;
+}
+body.ws.ws-rail-collapsed .ws-rail-folder-tile {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+}
+body.ws.ws-rail-collapsed .ws-rail-folder-grid {
+  inset: 4px;
+  gap: 2px;
+}
+
 /* Nav rows: icon-left + label, with a neutral pill on the active tab. The row
    is the collapsed tile's height, and its 14px left inset puts the glyph on the
    pixel a 40px tile centres it on, so collapsing moves nothing but the label. */

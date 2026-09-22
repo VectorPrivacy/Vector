@@ -214,6 +214,7 @@ async function login(skipAnimations = false) {
             // sibling-device edit in afterwards.
             _pinnedLoaded = false; // a fresh account's pins are not the last one's
             await ensurePinnedLoaded();
+            loadRailLayout();
 
             // Seed unread badges from the DB — boot loads only the last message per chat into RAM,
             // so the in-memory walk can't see a backlog received in a prior session. Fire-and-render

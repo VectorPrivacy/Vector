@@ -27,11 +27,18 @@ pub const BLOCKS_D_TAG: &str = "vector/blocks";
 pub const MUTES_D_TAG: &str = "vector/mutes";
 pub const NICKNAMES_D_TAG: &str = "vector/nicknames";
 pub const NOTIFY_D_TAG: &str = "vector/notify";
+pub const RAIL_D_TAG: &str = "vector/rail";
 
 const BLOCKS_LOCAL_KEY: &str = "synced_blocks_local";
 const MUTES_LOCAL_KEY: &str = "synced_mutes_local";
 const NICKNAMES_LOCAL_KEY: &str = "synced_nicknames_local";
 const NOTIFY_LOCAL_KEY: &str = "synced_notify_local";
+const RAIL_LOCAL_KEY: &str = "synced_rail_local";
+
+/// Set when a list has local edits the relays have not seen, cleared once they
+/// have. Persisted, so a quit during the rail's publish debounce is recoverable
+/// at the next boot instead of being silently lost.
+const RAIL_DIRTY_KEY: &str = "synced_rail_dirty";
 
 /// One NIP-44 event holds the whole list, so it inherits the same ~65KB
 /// plaintext ceiling as the Community List. Blocks and nicknames scale with
@@ -178,11 +185,13 @@ pub enum Pref {
     Mutes,
     Nicknames,
     Notify,
+    Rail,
 }
 
 /// Every list, in the order hydration walks them. `Notify` comes after `Mutes`
 /// so a device holding both applies the richer one last and wins the overlap.
-pub const ALL_PREFS: [Pref; 4] = [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify];
+pub const ALL_PREFS: [Pref; 5] =
+    [Pref::Blocks, Pref::Mutes, Pref::Nicknames, Pref::Notify, Pref::Rail];
 
 impl Pref {
     pub fn d_tag(self) -> &'static str {
@@ -191,6 +200,7 @@ impl Pref {
             Pref::Mutes => MUTES_D_TAG,
             Pref::Nicknames => NICKNAMES_D_TAG,
             Pref::Notify => NOTIFY_D_TAG,
+            Pref::Rail => RAIL_D_TAG,
         }
     }
     fn local_key(self) -> &'static str {
@@ -199,6 +209,7 @@ impl Pref {
             Pref::Mutes => MUTES_LOCAL_KEY,
             Pref::Nicknames => NICKNAMES_LOCAL_KEY,
             Pref::Notify => NOTIFY_LOCAL_KEY,
+            Pref::Rail => RAIL_LOCAL_KEY,
         }
     }
     /// The d-tag → list routing used by the self-sync handler.
@@ -208,6 +219,7 @@ impl Pref {
             MUTES_D_TAG => Some(Pref::Mutes),
             NICKNAMES_D_TAG => Some(Pref::Nicknames),
             NOTIFY_D_TAG => Some(Pref::Notify),
+            RAIL_D_TAG => Some(Pref::Rail),
             _ => None,
         }
     }
@@ -253,6 +265,14 @@ pub async fn hydrate_all(client: &Client) -> Vec<(Pref, String)> {
     let Some(my_pk) = crate::state::my_public_key() else { return Vec::new() };
     let mut applied = Vec::new();
     for pref in ALL_PREFS {
+        // The rail is the one list that can hold edits the relays have never
+        // seen: its publish is debounced, so a quit mid-drag leaves the newer
+        // copy here. Applying the relay's older one would undo it.
+        if pref == Pref::Rail && rail_is_dirty() {
+            mark_hydrated(pref);
+            schedule_rail_publish();
+            continue;
+        }
         match fetch_raw(client, my_pk, pref).await {
             Some(json) => {
                 if save_local_raw(pref, &json).is_ok() {
@@ -290,6 +310,11 @@ pub fn load_nicknames() -> NicknameMap {
 }
 pub fn load_notify() -> NotifyMap {
     load_local_raw(Pref::Notify).map(|s| NotifyMap::from_json(&s)).unwrap_or_default()
+}
+pub fn load_rail() -> crate::rail_layout::RailLayout {
+    load_local_raw(Pref::Rail)
+        .map(|s| crate::rail_layout::RailLayout::from_json(&s))
+        .unwrap_or_default()
 }
 
 async fn decrypt_event(my_pk: &PublicKey, event: &Event) -> Option<String> {
@@ -352,7 +377,87 @@ pub async fn ingest_remote(my_pk: &PublicKey, event: &Event) -> Option<(Pref, St
         return None;
     }
     mark_hydrated(pref);
+    if pref == Pref::Rail {
+        set_rail_dirty(false);
+    }
     Some((pref, json))
+}
+
+// ============================================================================
+// The rail's debounced publish
+// ============================================================================
+
+/// How long the rail must sit still before its arrangement goes out.
+///
+/// Rearranging is burst activity: a minute of dragging communities in and out
+/// of folders is ONE document at the end of it, not forty along the way. The
+/// local mirror already holds every intermediate state, so nothing is at risk
+/// while the timer runs.
+const RAIL_PUBLISH_IDLE: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// Bumped by every rail edit. A sleeping publish that wakes to find a newer
+/// generation was superseded mid-drag and simply stops, which is what collapses
+/// a burst into one write.
+struct RailPublishGen;
+
+fn rail_gen() -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+    crate::db::current_session().scoped::<RailPublishGen, _>()
+}
+
+/// Whether the rail holds edits the relays have not seen.
+pub fn rail_is_dirty() -> bool {
+    crate::db::settings::get_sql_setting(RAIL_DIRTY_KEY.to_string())
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+}
+
+fn set_rail_dirty(dirty: bool) {
+    let _ = crate::db::settings::set_sql_setting(
+        RAIL_DIRTY_KEY.to_string(),
+        if dirty { "1" } else { "0" }.to_string(),
+    );
+}
+
+/// Commit an arrangement: on disk now, on the relays once the dragging stops.
+///
+/// The local mirror is the truth the rail paints from, so the UI never waits on
+/// a relay to show a drag landing.
+pub fn save_rail_debounced(layout: &crate::rail_layout::RailLayout) -> Result<(), String> {
+    save_local_raw(Pref::Rail, &layout.to_json())?;
+    set_rail_dirty(true);
+    schedule_rail_publish();
+    Ok(())
+}
+
+fn schedule_rail_publish() {
+    let generation = rail_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    crate::db::spawn_bound(async move {
+        tokio::time::sleep(RAIL_PUBLISH_IDLE).await;
+        if rail_gen().load(std::sync::atomic::Ordering::Relaxed) != generation {
+            return;
+        }
+        flush_rail().await;
+    });
+}
+
+/// Publish the arrangement if it has unsent edits.
+///
+/// A failure leaves the dirty flag set rather than retrying in a loop: the next
+/// edit reschedules, and failing that the next boot does, because the flag is
+/// persisted. That is also what covers a quit inside the debounce window — the
+/// publish never ran, and the arrangement is not lost.
+pub async fn flush_rail() {
+    if !rail_is_dirty() || !is_hydrated(Pref::Rail) {
+        return;
+    }
+    let Some(client) = crate::state::nostr_client() else { return };
+    let Some(json) = load_local_raw(Pref::Rail) else { return };
+    match publish_raw(&client, Pref::Rail, &json).await {
+        Ok(()) => set_rail_dirty(false),
+        Err(e) => crate::log_warn!("[SyncedPrefs] rail publish deferred: {e}"),
+    }
 }
 
 #[cfg(test)]

@@ -801,24 +801,12 @@ function finalizePendingMessage(chatId, pendingId, eventId) {
 }
 
 /**
- * Pinned chat ids, in pin order — the account's favourites, synced across its
- * own devices. Ids are opaque: a DM's npub, or a Community's id.
+ * Pinned DM npubs, in pin order, synced across the account's own devices.
+ * Communities are arranged on the rail instead, so a community id an older
+ * build pinned is simply never matched here.
  * @type {string[]}
  */
 let arrPinnedChats = [];
-
-/**
- * The id a chat is pinned BY. A Community is pinned as the community, not as
- * the channel row that represents it, so its `general` row is what gets hoisted.
- * @param {Chat} chat
- * @returns {string}
- */
-function chatPinKey(chat) {
-    if (chat.chat_type === 'Community') {
-        return chat.metadata?.custom_fields?.community_id || chat.id;
-    }
-    return chat.id;
-}
 
 /**
  * Pin rank, or -1 when unpinned. Looked up per render rather than stamped onto
@@ -828,7 +816,8 @@ function chatPinKey(chat) {
  * @returns {number}
  */
 function chatPinRank(chat) {
-    return arrPinnedChats.indexOf(chatPinKey(chat));
+    if (chatIsGroup(chat)) return -1;
+    return arrPinnedChats.indexOf(chat.id);
 }
 
 let fSyncing = false;

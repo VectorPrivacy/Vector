@@ -66,6 +66,8 @@ pub(crate) async fn subscribe_self_sync() {
             vector_core::synced_prefs::BLOCKS_D_TAG.to_string(),
             vector_core::synced_prefs::MUTES_D_TAG.to_string(),
             vector_core::synced_prefs::NICKNAMES_D_TAG.to_string(),
+            vector_core::synced_prefs::NOTIFY_D_TAG.to_string(),
+            vector_core::synced_prefs::RAIL_D_TAG.to_string(),
         ]);
     match client.subscribe(self_lists_filter).await {
         Ok(out) => new_ids.push(out.value),

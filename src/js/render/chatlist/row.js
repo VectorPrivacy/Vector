@@ -40,23 +40,22 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
     if (!blockedBySync()) {
         items.push(...await notifyMenuItems(strNotifyScope, isGroup ? strNotifyScope : null));
     }
-    // Pin/Unpin. Keyed by chatPinKey, so a Community pins as the COMMUNITY —
-    // its general row is what the pin then hoists.
-    const strPinKey = chatPinKey(chat);
-    const fPinned = arrPinnedChats.includes(strPinKey);
-    items.push({
-        label: fPinned ? 'Unpin' : 'Pin',
-        icon: 'pin',
-        onClick: async () => {
-            if (blockedBySync()) return;
-            try {
-                arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: strPinKey });
-                listChanged();
-            } catch (e) {
-                showToast(e);
-            }
-        },
-    });
+    if (!isGroup) {
+        const fPinned = arrPinnedChats.includes(chat.id);
+        items.push({
+            label: fPinned ? 'Unpin' : 'Pin',
+            icon: 'pin',
+            onClick: async () => {
+                if (blockedBySync()) return;
+                try {
+                    arrPinnedChats = await invoke(fPinned ? 'unpin_chat' : 'pin_chat', { chatId: chat.id });
+                    listChanged();
+                } catch (e) {
+                    showToast(e);
+                }
+            },
+        });
+    }
     if (!isGroup) {
         items.push({ divider: true });
         items.push({

@@ -277,6 +277,7 @@ pub async fn delete_community(community_id: String) -> Result<(), String> {
         // Full local teardown + cross-device list tombstone — a sealed husk lingering in the
         // owner's own DB just re-registers its chat row at every boot ("dissolved group came back").
         teardown_community_local(&community_id, &channel_ids, true).await;
+        crate::commands::rail::forget_community(&community_id).await;
         Ok(())
     })
     .await
@@ -679,6 +680,7 @@ pub async fn leave_community(community_id: String) -> Result<(), String> {
                 vector_core::log_net_fail!("[Leave] {} announced nothing ({}) — it will come back", &community_id[..8], e);
             }
             teardown_community_local(&community_id, &channel_ids, true).await;
+            crate::commands::rail::forget_community(&community_id).await;
             return Ok(());
         }
         // Capture the full community first (channel ids for chat-row teardown + a leave announce).

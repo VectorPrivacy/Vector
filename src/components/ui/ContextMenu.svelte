@@ -25,6 +25,7 @@
                  class:is-disabled={item.disabled} role="menuitem" tabindex="-1"
                  onclick={(e) => { e.stopPropagation(); h().activate?.(item); }}>
                 {#if item.back}<span class="icon icon-chevron-left context-menu-lead"></span>{/if}
+                {#if item.swatch}<span class="context-menu-swatch" style:background={item.swatch}></span>{/if}
                 <span>{item.label}{#if item.hint}<span class="context-menu-item-hint">{item.hint}</span>{/if}</span>
                 {#if item.submenu}
                     <span class="icon icon-chevron-right"></span>

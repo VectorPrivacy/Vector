@@ -990,6 +990,11 @@ pub fn run() {
             commands::pinned::get_pinned_chats,
             commands::pinned::pin_chat,
             commands::pinned::unpin_chat,
+            commands::rail::get_rail_layout,
+            commands::rail::rail_apply_drop,
+            commands::rail::rail_rename_folder,
+            commands::rail::rail_set_folder_hue,
+            commands::rail::rail_dissolve_folder,
             commands::community::sync_communities_boot,
             #[cfg(debug_assertions)]
             commands::community::debug_v2_community_state,

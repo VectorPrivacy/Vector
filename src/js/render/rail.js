@@ -71,6 +71,9 @@ function renderRailShortcuts() {
      * @property {(chat: object, isGroup: boolean, unread: number, x: number, y: number) => void} showChatRowContextMenu
      * @property {() => void} syncRailFade
      * @property {(unreadDms: number) => void} onUnreadDms
+     * @property {(source: object, target: object, live: string[]) => void} railDrop
+     * @property {(folder: object, x: number, y: number) => void} openFolderMenu
+     * @property {(node: HTMLElement) => void} closeMenu
      */
     VectorSvelte.setScreen('rail', {
         h: {
@@ -97,10 +100,91 @@ function renderRailShortcuts() {
             showChatRowContextMenu: _showChatRowContextMenu,
             syncRailFade,
             onUnreadDms: syncChatTabBadge,
+            railDrop,
+            openFolderMenu,
+            closeMenu: hideContextMenu,
         },
         snapshot: () => ({ chats: arrChats, myNpub: strPubkey }),
     });
     VectorSvelte.setOpenChat(strOpenChat);
+    loadRailLayout();
+}
+
+/**
+ * The account's rail arrangement, from the local mirror so the first paint is
+ * already in its order. Cleared first, so a swap never shows the last
+ * account's folders while the next one's load.
+ */
+async function loadRailLayout() {
+    VectorSvelte.setRailLayout(null);
+    try {
+        VectorSvelte.setRailLayout(await invoke('get_rail_layout'));
+    } catch (e) {
+        console.warn('[Rail] layout load failed:', e);
+    }
+}
+
+/**
+ * A drag on the rail let go. The backend answers with the new arrangement, which
+ * also arrives as `rail_layout_updated`; setting it here saves the event's hop.
+ */
+async function railDrop(source, target, live) {
+    try {
+        VectorSvelte.setRailLayout(await invoke('rail_apply_drop', { source, target, live }));
+    } catch (e) {
+        showToast(String(e));
+    }
+}
+
+/** Folder colours: neutral grey by default, then a spread around the wheel. */
+const RAIL_FOLDER_HUES = [
+    ['Red', 0], ['Orange', 28], ['Yellow', 50], ['Green', 140],
+    ['Teal', 175], ['Blue', 212], ['Purple', 265], ['Pink', 320],
+];
+
+function openFolderMenu(folder, x, y) {
+    const edit = async (cmd, args) => {
+        try { VectorSvelte.setRailLayout(await invoke(cmd, { folderId: folder.id, ...args })); }
+        catch (e) { showToast(String(e)); }
+    };
+    showContextMenu({
+        x, y,
+        items: [
+            {
+                label: 'Rename Folder',
+                icon: 'edit',
+                onClick: async () => {
+                    const name = await popupConfirm('Rename Folder', '', false, folder.name || 'Folder Name');
+                    if (name === false || name == null) return;
+                    edit('rail_rename_folder', { name: String(name) });
+                },
+            },
+            {
+                label: 'Colour',
+                icon: 'palette',
+                submenu: [
+                    {
+                        label: 'Grey',
+                        swatch: '#9a9a9a',
+                        checked: folder.hue == null,
+                        onClick: () => edit('rail_set_folder_hue', { hue: null }),
+                    },
+                    ...RAIL_FOLDER_HUES.map(([label, hue]) => ({
+                        label,
+                        swatch: `hsl(${hue} 65% 62%)`,
+                        checked: folder.hue === hue,
+                        onClick: () => edit('rail_set_folder_hue', { hue }),
+                    })),
+                ],
+            },
+            { divider: true },
+            {
+                label: 'Ungroup',
+                icon: 'folder',
+                onClick: () => edit('rail_dissolve_folder', {}),
+            },
+        ],
+    });
 }
 
 /**

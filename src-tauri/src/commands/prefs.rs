@@ -42,6 +42,11 @@ pub fn publish_projection(pref: Pref) {
                 l.to_json()
             }
             Pref::Notify => notify::to_wire().to_json(),
+            // Its own state, not a projection of another: it publishes itself.
+            Pref::Rail => {
+                synced_prefs::flush_rail().await;
+                return;
+            }
             Pref::Nicknames => {
                 let mut m = NicknameMap::default();
                 let state = vector_core::state::STATE.lock().await;
@@ -71,6 +76,7 @@ pub async fn hydrate_prefs() {
             Pref::Mutes => apply_mutes(IdList::from_json(&json)).await,
             Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
             Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
+            Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
         }
     }
 }
@@ -84,6 +90,7 @@ pub async fn ingest_prefs_update(event: Event) {
         Pref::Mutes => apply_mutes(IdList::from_json(&json)).await,
         Pref::Nicknames => apply_nicknames(NicknameMap::from_json(&json)).await,
         Pref::Notify => apply_notify(NotifyMap::from_json(&json)).await,
+        Pref::Rail => crate::commands::rail::emit(&vector_core::rail_layout::RailLayout::from_json(&json)),
     }
 }
 

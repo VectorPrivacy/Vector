@@ -79,7 +79,7 @@
         <ChatlistRow
             {h}
             {chat}
-            pinned={snap.pinned.includes(h.chatPinKey(chat))}
+            pinned={!h.chatIsGroup(chat) && snap.pinned.includes(chat.id)}
             {tick}
         />
     {/each}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rail-rename-folder"
+description = "Enables the rail_rename_folder command without any pre-configured scope."
+commands.allow = ["rail_rename_folder"]
+
+[[permission]]
+identifier = "deny-rail-rename-folder"
+description = "Denies the rail_rename_folder command without any pre-configured scope."
+commands.deny = ["rail_rename_folder"]

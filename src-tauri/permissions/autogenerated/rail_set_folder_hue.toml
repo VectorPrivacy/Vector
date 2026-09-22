@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rail-set-folder-hue"
+description = "Enables the rail_set_folder_hue command without any pre-configured scope."
+commands.allow = ["rail_set_folder_hue"]
+
+[[permission]]
+identifier = "deny-rail-set-folder-hue"
+description = "Denies the rail_set_folder_hue command without any pre-configured scope."
+commands.deny = ["rail_set_folder_hue"]

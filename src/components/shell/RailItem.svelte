@@ -3,8 +3,11 @@
     // any other chat leaves this node untouched.
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
+    import { reorderable } from '../lib/reorder.js';
 
-    let { h, chat, isCommunity, active = false } = $props();   // h: RailHelpers (js/render/rail.js)
+    // press: the rail's drag handlers when this row can be rearranged (it then owns the
+    // context menu too, so one arbiter decides every press); mark: where a drop would land.
+    let { h, chat, isCommunity, active = false, press = null, mark = null, armed = false, dragging = false, el = null } = $props();   // h: RailHelpers (js/render/rail.js)
 
     const vm = $derived.by(() => {
         chatVersion(chat.id);
@@ -49,8 +52,17 @@
     }
 
     // A community's shortcut returns you to the channel you left it in, not its primary.
-    function open() {
+    function open(e) {
+        if (e.currentTarget.dataset.suppressClick === '1') { delete e.currentTarget.dataset.suppressClick; return; }
         h.openChat(isCommunity ? (h.wsChannelForCommunity(vm.communityId) || chat.id) : chat.id);
+    }
+
+    // A rearrangeable row hands every press to the drag arbiter; the rest keep the plain
+    // long-press menu. Decided once: a row does not change kind under itself.
+    function gesture(node, g) {
+        el?.(node);
+        if (g) return reorderable(node, g);
+        menu(node);
     }
 
     // Right-click or long-press: the community's own menu, or the DM's row menu.
@@ -69,9 +81,14 @@
     class:is-quiet={isCommunity && !vm.unread}
     class:is-muted={vm.muted}
     class:active
+    class:is-drag-armed={armed}
+    class:is-dragging={dragging}
+    class:drop-above={mark === 'above'}
+    class:drop-below={mark === 'below'}
+    class:drop-combine={mark === 'combine'}
     id="ws-rail-item-{chat.id}"
     title={vm.name}
-    use:menu
+    use:gesture={press}
     onclick={open}
 >
     <Avatar src={vm.src} size={26} group={isCommunity} class="ws-rail-item-avatar" />

@@ -50,6 +50,9 @@ async function setupRustListeners() {
     // Another device pinned or unpinned a chat. Re-sort and repaint — the pin
     // may name a chat this device has not synced yet, which is fine: the rank
     // lookup simply finds it when it arrives.
+    // The rail's arrangement changed: an edit here, or one from another device.
+    _on('rail_layout_updated', (evt) => VectorSvelte.setRailLayout(evt.payload));
+
     _on('pinned_chats_updated', (evt) => {
         arrPinnedChats = Array.isArray(evt.payload) ? evt.payload : [];
         listChanged();

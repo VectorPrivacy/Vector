@@ -30,6 +30,7 @@ pub mod audio;
 pub mod tor;
 pub mod emoji_packs;
 pub mod pinned;
+pub mod rail;
 pub mod prefs;
 pub mod notify;
 pub mod wallpaper;

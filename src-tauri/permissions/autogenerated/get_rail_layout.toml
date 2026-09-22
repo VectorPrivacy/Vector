@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-rail-layout"
+description = "Enables the get_rail_layout command without any pre-configured scope."
+commands.allow = ["get_rail_layout"]
+
+[[permission]]
+identifier = "deny-get-rail-layout"
+description = "Denies the get_rail_layout command without any pre-configured scope."
+commands.deny = ["get_rail_layout"]

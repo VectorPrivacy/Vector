@@ -103,6 +103,10 @@
   mask-image: url("./icons/folder.svg");
 }
 
+.icon-palette {
+  mask-image: url("./icons/palette.svg");
+}
+
 .icon-gamepad {
   mask-image: url("./icons/gamepad.svg");
 }
@@ -2404,6 +2408,20 @@ body.mobile #chat-new-scan-btn { display: block; }
   color: #8b8b8b;
 }
 .context-menu-lead { flex-shrink: 0; }
+
+/* A colour choice: the swatch leads and any tick sits at the far edge. */
+.context-menu-swatch {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+.context-menu-item:has(> .context-menu-swatch) {
+  justify-content: flex-start;
+  gap: 10px;
+}
+.context-menu-item:has(> .context-menu-swatch) > .icon { margin-left: auto; }
 
 /* A setting the app-wide switch has already decided. Visible, so the reason a
    choice here would do nothing is readable, but not selectable. */

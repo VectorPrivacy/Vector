@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-rail-apply-drop"
+description = "Enables the rail_apply_drop command without any pre-configured scope."
+commands.allow = ["rail_apply_drop"]
+
+[[permission]]
+identifier = "deny-rail-apply-drop"
+description = "Denies the rail_apply_drop command without any pre-configured scope."
+commands.deny = ["rail_apply_drop"]
