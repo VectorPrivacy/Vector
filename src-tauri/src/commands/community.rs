@@ -924,7 +924,13 @@ pub async fn create_community(
     }
 
     let owner_npub = community.owner().ok().and_then(|pk| pk.to_bech32().ok());
-    Ok(CreatedCommunity { community_id, channel_id, owner_npub })
+    Ok(CreatedCommunity {
+        community_id,
+        channel_id,
+        owner_npub,
+        channel_name,
+        proto_version: vector_core::community::ConcordProtocol::V2.as_i64(),
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -932,6 +938,10 @@ pub struct CreatedCommunity {
     pub community_id: String,
     pub channel_id: String,
     pub owner_npub: Option<String>,
+    /// The first channel's name and the protocol stack, so the chat the UI grafts
+    /// before any reload carries the same stamps `upsert_community_chat` persists.
+    pub channel_name: String,
+    pub proto_version: i64,
 }
 
 /// Publish an ephemeral typing indicator into a Community channel. Best-effort fire-and-forget — a
