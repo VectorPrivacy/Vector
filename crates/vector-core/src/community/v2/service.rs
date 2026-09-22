@@ -5036,8 +5036,8 @@ pub async fn create_role<T: Transport + ?Sized>(
     .await
 }
 
-/// Edit a Role's name, colour, permissions and scope, keeping its position and every
-/// field another client wrote. Both CORD-04 §3 gates hold: the author outranks the
+/// Edit a Role's name, colour and permissions, keeping its position, its scope and
+/// every field another client wrote. Both CORD-04 §3 gates hold: the author outranks the
 /// role as it stands, and the edition claims nothing at or above them.
 pub async fn edit_role<T: Transport + ?Sized>(
     transport: &T,
@@ -5064,11 +5064,15 @@ pub async fn edit_role<T: Transport + ?Sized>(
         if name.is_empty() {
             return Err("a role needs a name".to_string());
         }
+        // A scope is a channel's access list: moving it would re-entitle every holder at
+        // once, and keys follow grants, not role edits. It is fixed at creation.
+        if scope != current.scope {
+            return Err("a role's channel can't be changed once it's created".to_string());
+        }
         let mut next = current.clone();
         next.name = name.to_string();
         next.color = color;
         next.permissions = Permissions(permissions);
-        next.scope = scope;
         if next == current {
             return Ok(());
         }
@@ -5188,9 +5192,64 @@ pub async fn set_member_roles<T: Transport + ?Sized>(
         if a == b {
             return Ok(());
         }
-        grant_roles_with_roster(transport, community, member, next, &view.roles).await
+        grant_roles_with_roster(transport, community, member, next.clone(), &view.roles).await?;
+        let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
+        merge_local_roster(&cid_hex, None, Some(&crate::community::roles::MemberGrant { member: member_hex.clone(), role_ids: next.clone() }));
+        settle_channel_keys(transport, community, &view, member, &current, &next).await
     })
     .await
+}
+
+/// Move Private Channel keys to match a role change (CORD-03: a key is "delivered on
+/// grant and rekeyed on removal"). A role scoped to a channel IS its access list, so
+/// gaining one owes the member that channel's key, and losing the last one that
+/// entitled them rotates the channel without them. Without this a Grant would move
+/// entitlement while the keys stayed where they were.
+async fn settle_channel_keys<T: Transport + ?Sized>(
+    transport: &T,
+    community: &CommunityV2,
+    view: &AuthorityView,
+    member: &PublicKey,
+    before: &[String],
+    after: &[String],
+) -> Result<(), String> {
+    use crate::community::roles::RoleScope;
+    let added: Vec<String> = after.iter().filter(|id| !before.contains(id)).cloned().collect();
+    let removed: Vec<String> = before.iter().filter(|id| !after.contains(id)).cloned().collect();
+    let owner_hex = community.owner()?.to_hex();
+    let member_hex = member.to_hex();
+    let channel_of = |id: &String| match view.roles.role(id).map(|r| &r.scope) {
+        Some(RoleScope::Channel(c)) => Some(c.to_ascii_lowercase()),
+        _ => None,
+    };
+    let held = |hex: &str| {
+        crate::simd::hex::hex_to_bytes_32_checked(hex)
+            .and_then(|b| community.channel(&ChannelId(b)).map(|c| (c.private, c.key.is_some(), ChannelId(b))))
+    };
+
+    // One Direct Invite carries every channel the new set entitles them to.
+    if added.iter().filter_map(channel_of).any(|c| matches!(held(&c), Some((true, true, _)))) {
+        let my_pk = me_pk()?;
+        let bundle = bundle_of_with_overlay(community, BundleAudience::Member(*member), Some(my_pk), None, None, &added, &removed);
+        let signer = crate::signer::active_signer()?;
+        let wrap = invite::build_direct_invite_signed(&signer, my_pk, member, &bundle).await.map_err(|e| e.to_string())?;
+        transport.publish(&wrap, &community.relays).await?;
+    }
+
+    let mut severed: Vec<String> = Vec::new();
+    for chan in removed.iter().filter_map(channel_of) {
+        if severed.contains(&chan) {
+            continue;
+        }
+        severed.push(chan.clone());
+        let Some((true, true, channel_id)) = held(&chan) else { continue };
+        if view.roles.is_entitled(Some(&owner_hex), &member_hex, &chan, &added, &removed) {
+            continue; // another role they keep still opens it
+        }
+        let access_ids = view.roles.channel_role_ids(&chan);
+        rekey_channel_excluding(transport, community, &channel_id, &view.roles, &access_ids, std::slice::from_ref(member)).await?;
+    }
+    Ok(())
 }
 
 /// A grant replaces whole — refuse the merge when this member's grant is FLOORED
@@ -12300,6 +12359,35 @@ mod tests {
 
         let err = set_member_roles(&bed.relay, &community, &owner.keys.public_key(), vec![a]).await.unwrap_err();
         assert!(err.contains("owner"), "the owner is never a role target: {err}");
+    }
+
+    #[tokio::test]
+    async fn losing_the_last_role_that_opens_a_channel_rotates_it_and_keeping_one_does_not() {
+        use crate::community::roles::{Permissions, RoleScope};
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Keys", bed.relays.clone(), None).await.unwrap();
+        let chan = create_private_channel(&bed.relay, &community, "secret").await.unwrap();
+        let chan_hex = crate::simd::hex::bytes_to_hex_32(&chan.0);
+        let reload = || crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let epoch = |c: &CommunityV2| c.channel(&chan).unwrap().epoch.0;
+
+        let held = reload();
+        let access = fetch_authority(&bed.relay, &held).await.roles.channel_role_ids(&chan_hex);
+        assert!(!access.is_empty(), "the private channel came with its access role");
+        let second = create_role(&bed.relay, &held, "Also Secret", 0, Permissions::empty().0, RoleScope::Channel(chan_hex.clone())).await.unwrap();
+        let member = Keys::generate().public_key();
+
+        set_member_roles(&bed.relay, &reload(), &member, vec![access[0].clone(), second.clone()]).await.unwrap();
+        let start = epoch(&reload());
+
+        // Drop one of the two: still entitled, so nobody is cut and nothing rotates.
+        set_member_roles(&bed.relay, &reload(), &member, vec![second.clone()]).await.unwrap();
+        assert_eq!(epoch(&reload()), start, "a kept role still opens the channel");
+
+        // Drop the last: the channel rotates without them.
+        set_member_roles(&bed.relay, &reload(), &member, vec![]).await.unwrap();
+        assert_eq!(epoch(&reload()), start + 1, "losing the last access role severs them");
     }
 
     #[test]

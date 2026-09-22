@@ -4393,11 +4393,13 @@ impl VectorCore {
         let roles: Vec<serde_json::Value> = roles
             .into_iter()
             .map(|r| {
-                let holders = roster
+                let holders: Vec<String> = roster
                     .grants
                     .iter()
                     .filter(|g| !banned.contains(&g.member) && g.role_ids.iter().any(|id| id == &r.role_id))
-                    .count();
+                    .filter_map(|g| nostr_sdk::prelude::PublicKey::from_hex(&g.member).ok())
+                    .filter_map(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
+                    .collect();
                 serde_json::json!({
                     "role_id": r.role_id,
                     "name": r.name,
