@@ -961,6 +961,7 @@ pub fn run() {
             commands::community::get_chat_commands,
             commands::community::ban_community_member,
             commands::community::ban_community_members,
+            commands::community::unban_community_members,
             commands::community::check_community_raid,
             commands::community::debug_v2_memberlist_diff,
             commands::community::kick_community_members,

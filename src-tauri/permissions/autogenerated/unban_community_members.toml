@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-unban-community-members"
+description = "Enables the unban_community_members command without any pre-configured scope."
+commands.allow = ["unban_community_members"]
+
+[[permission]]
+identifier = "deny-unban-community-members"
+description = "Denies the unban_community_members command without any pre-configured scope."
+commands.deny = ["unban_community_members"]

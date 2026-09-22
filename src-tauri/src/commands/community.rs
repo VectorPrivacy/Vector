@@ -4972,6 +4972,28 @@ pub async fn ban_community_members(community_id: String, npubs: Vec<String>) -> 
     .await
 }
 
+/// Lift several bans as one banlist edition. An unban never rotates (only a fresh
+/// ban severs), so this is one publish however many are selected, where lifting them
+/// one by one would publish, and race, an edition each.
+#[tauri::command]
+pub async fn unban_community_members(community_id: String, npubs: Vec<String>) -> Result<(), String> {
+    vector_core::db::scoped(async move {
+        let refs: Vec<&str> = npubs.iter().map(|s| s.as_str()).collect();
+        vector_core::VectorCore
+            .set_members_banned(&community_id, &refs, false)
+            .await
+            .map_err(|e| e.to_string())?;
+        // Their messages render again, and the unread cache cannot know that.
+        reconcile_community_unread(&community_id).await;
+        // The live routes carry the banned set they were built with.
+        if vector_core::db::session_is_live() {
+            crate::services::subscription_handler::refresh_community_subscription().await;
+        }
+        Ok(())
+    })
+    .await
+}
+
 /// Recompute the unread badge for every channel of a Community.
 ///
 /// Used after a membership change that retroactively hides messages (a ban), where an

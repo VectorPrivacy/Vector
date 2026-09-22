@@ -4,11 +4,14 @@
     // the content itself as headed blocks in one scroll. Edits collect in a draft behind a
     // save bar; closing with unsaved changes is refused, and the bar says why.
     import { tick } from 'svelte';
-    import { csOverlay, csState, csDirty, csSetDraft, csSetSection, csSetQuery } from '../lib/community-settings.svelte.js';
+    import { csOverlay, csState, csDirty, csSetDraft, csSetSection, csSetQuery, csSelectBans, csClearBanSel } from '../lib/community-settings.svelte.js';
     import { popIn } from '../lib/popin.js';
     import Avatar from '../ui/Avatar.svelte';
+    import MemberRow from '../people/MemberRow.svelte';
+    import { profileVersion } from '../lib/signals.svelte.js';
 
-    // h: close(), pickIcon(), save(), reset()
+    // h: close(), pickIcon(), save(), reset(), unban() (the selection), name(npub), profile(npub),
+    //    avatarSrc(npub), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
     let { h } = $props();
 
     const ov = csOverlay.state();
@@ -34,15 +37,25 @@
                 { id: 'relay-list', label: 'Hosting Relays', icon: 'globe', keys: 'relays servers hosting network nostr' },
             ],
         },
+        {
+            id: 'bans',
+            label: 'Bans',
+            needs: 'canBan',
+            anchors: [
+                { id: 'ban-list', label: 'Banned Members', icon: 'x-user', keys: 'bans banned unban blocked removed' },
+            ],
+        },
     ];
 
-    const section = $derived(SECTIONS.find((x) => x.id === st.section) || SECTIONS[0]);
+    // A section only for those who can act in it: bans are a moderation surface.
+    const sections = $derived(SECTIONS.filter((x) => !x.needs || st[x.needs]));
+    const section = $derived(sections.find((x) => x.id === st.section) || sections[0]);
 
     // A search lists every matching anchor, whichever section holds it.
     const nav = $derived.by(() => {
         const q = st.query.trim().toLowerCase();
-        if (!q) return SECTIONS.map((sec) => ({ ...sec, open: sec.id === section.id }));
-        return SECTIONS.map((sec) => ({
+        if (!q) return sections.map((sec) => ({ ...sec, open: sec.id === section.id }));
+        return sections.map((sec) => ({
             ...sec,
             open: true,
             anchors: sec.anchors.filter((a) => `${sec.label} ${a.label} ${a.keys}`.toLowerCase().includes(q)),
@@ -72,7 +85,7 @@
         csSetSection(id);
         await tick();
         if (scroller) scroller.scrollTop = 0;
-        activeAnchor = SECTIONS.find((x) => x.id === id)?.anchors[0]?.id;
+        activeAnchor = sections.find((x) => x.id === id)?.anchors[0]?.id;
     }
 
     async function goAnchor(sectionId, anchorId) {
@@ -107,6 +120,34 @@
         clearTimeout(warnTimer);
         warnTimer = setTimeout(() => { warn = false; }, 1600);
     });
+
+    // ── bans ──
+    let banQuery = $state('');
+    const banRows = $derived.by(() => {
+        const q = banQuery.trim().toLowerCase();
+        const rows = [];
+        for (const npub of st.bans) {
+            profileVersion(npub);
+            const name = h.name(npub);
+            if (q && !`${name} ${npub}`.toLowerCase().includes(q)) continue;
+            rows.push({ npub, name, profile: h.profile(npub), src: h.avatarSrc(npub) });
+        }
+        return rows;
+    });
+    // Head and tail: the ends are what an impersonator's key can't also match.
+    const shortNpub = (npub) => `${npub.slice(0, 12)}…${npub.slice(-6)}`;
+
+    // Select-all acts on what the search shows, so "all" never reaches rows out of view.
+    const shownSelected = $derived(banRows.filter((r) => st.banSel.has(r.npub)).length);
+    const allShown = $derived(banRows.length > 0 && shownSelected === banRows.length);
+    function toggleAll() {
+        csSelectBans(banRows.map((r) => r.npub), !allShown);
+    }
+
+
+    // One bar at the bottom, two jobs: an unban selection while in Bans, else unsaved
+    // edits. A refused close always takes it: the bar is the only place that says why.
+    const bar = $derived(warn && dirty ? 'save' : section.id === 'bans' && st.banSel.size ? 'unban' : dirty ? 'save' : null);
 
     const iconSrc = $derived(st.draft.iconPreview || st.saved.iconSrc);
     const nameEmpty = $derived(!st.draft.name.trim());
@@ -209,6 +250,51 @@
                                           value={st.draft.description} oninput={(e) => csSetDraft({ description: e.currentTarget.value })}></textarea>
                             </div>
                         </section>
+                    {:else if section.id === 'bans'}
+                        <section class="cs-block" data-anchor="ban-list">
+                            <h3 class="cs-heading">Banned Members</h3>
+                            <p class="cs-lede">A banned member is silenced everywhere in this community and can't rejoin until they're unbanned.</p>
+                            <div class="cs-bans-bar">
+                                <!-- The invite picker's own search field, so the two read as one control. -->
+                                <div class="emoji-search-container cs-bans-search">
+                                    <span class="emoji-search-icon icon icon-search"></span>
+                                    <input type="text" placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+                                           value={banQuery} oninput={(e) => { banQuery = e.currentTarget.value; }}>
+                                </div>
+                                <span class="cs-count" class:warn={st.bans.length >= st.bansMax}>{st.bans.length} of {st.bansMax}</span>
+                            </div>
+                            <!-- The contact picker's rows and indicators: one selection model app-wide. -->
+                            <div class="cs-bans" class:busy={st.unbanning}>
+                                {#if banRows.length}
+                                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                                    <div class="member-pick-row cs-bans-all" onclick={toggleAll}>
+                                        <div class="member-pick-hover"></div>
+                                        <span class="cs-bans-all-label">
+                                            {allShown ? 'Deselect' : 'Select'} {banQuery.trim() ? 'matches' : 'all'} ({banRows.length})
+                                        </span>
+                                        <div class="member-pick-indicator" class:selected={allShown}></div>
+                                    </div>
+                                {/if}
+                                {#each banRows as row (row.npub)}
+                                    <MemberRow
+                                        npub={row.npub}
+                                        profile={row.profile}
+                                        src={row.src}
+                                        display={row.name || shortNpub(row.npub)}
+                                        hasName={!!row.name}
+                                        keyHint={row.name ? shortNpub(row.npub) : ''}
+                                        onactivate={() => csSelectBans([row.npub])}
+                                        ui={h.ui}
+                                    >
+                                        {#snippet trailing()}
+                                            <div class="member-pick-indicator" class:selected={st.banSel.has(row.npub)}></div>
+                                        {/snippet}
+                                    </MemberRow>
+                                {:else}
+                                    <p class="cmt-empty" style="text-align:center;">{banQuery.trim() ? 'No matches.' : 'Nobody is banned from this community.'}</p>
+                                {/each}
+                            </div>
+                        </section>
                     {:else}
                         <section class="cs-block" data-anchor="relay-list">
                             <h3 class="cs-heading">Hosting Relays</h3>
@@ -229,20 +315,36 @@
                 {/key}
             </div>
 
-            <div class="cs-savebar" class:visible={dirty} class:warn>
-                <span class="cs-savebar-text">
-                    {#if st.saving}
-                        Saving{st.progress ? ` ${Math.round(st.progress)}%` : '...'}
-                    {:else if warn}
-                        Save or reset your changes before closing
-                    {:else}
-                        You have unsaved changes
-                    {/if}
-                </span>
-                <div class="cs-savebar-actions">
-                    <button class="cs-btn-text" disabled={st.saving} onclick={() => h.reset()}>Reset</button>
-                    <button class="cs-btn-save" disabled={st.saving || nameEmpty} onclick={() => h.save()}>Save Changes</button>
-                </div>
+            <div class="cs-savebar" class:visible={!!bar} class:warn={warn && bar === 'save'} class:is-unban={bar === 'unban'}>
+                {#if bar === 'unban'}
+                    <span class="cs-savebar-text">
+                        {#if st.unbanning}
+                            Unbanning {st.banSel.size}...
+                        {:else}
+                            {st.banSel.size} {st.banSel.size === 1 ? 'member' : 'members'} selected
+                        {/if}
+                    </span>
+                    <div class="cs-savebar-actions">
+                        <button class="cs-btn-text" disabled={st.unbanning} onclick={() => csClearBanSel()}>Clear</button>
+                        <button class="cs-btn-save" disabled={st.unbanning} onclick={() => h.unban()}>
+                            Unban {st.banSel.size === st.bans.length && st.bans.length > 1 ? 'All' : st.banSel.size}
+                        </button>
+                    </div>
+                {:else}
+                    <span class="cs-savebar-text">
+                        {#if st.saving}
+                            Saving{st.progress ? ` ${Math.round(st.progress)}%` : '...'}
+                        {:else if warn}
+                            Save or reset your changes before closing
+                        {:else}
+                            You have unsaved changes
+                        {/if}
+                    </span>
+                    <div class="cs-savebar-actions">
+                        <button class="cs-btn-text" disabled={st.saving} onclick={() => h.reset()}>Reset</button>
+                        <button class="cs-btn-save" disabled={st.saving || nameEmpty} onclick={() => h.save()}>Save Changes</button>
+                    </div>
+                {/if}
             </div>
         </main>
     </div>

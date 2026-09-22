@@ -34,7 +34,7 @@ export { addRelayDialog, relayInfoDialog, blossomInfoDialog } from './lib/networ
 export { qrOverlay, setQrScanner } from './lib/qr.svelte.js';
 export { statusDialog } from './lib/statusdialog.svelte.js';
 export { modOverlay } from './lib/moderation.svelte.js';
-export { csOverlay, csState, csDirty, csOpen, csLoaded, csSetDraft, csReset, csCommitted, csSetSaving, csNudge } from './lib/community-settings.svelte.js';
+export { csOverlay, csState, csDirty, csOpen, csLoaded, csSetDraft, csReset, csCommitted, csSetSaving, csNudge, csSetBans, csSetUnbanning, csRemoveBans } from './lib/community-settings.svelte.js';
 export { showDowngradeBlock } from './lib/overlays.svelte.js';
 export { setInvites } from './lib/invitescreen.svelte.js';
 import App from './shell/App.svelte';

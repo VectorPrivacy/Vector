@@ -8,6 +8,7 @@
         rankLabel = null,         // the role's own name when the shield stands for a positioned role
         bot = false,
         status = null,            // { title, emojiTags } — the person's NIP-38 status line
+        keyHint = '',             // a shortened npub beside the name, so a copied name can't pass as its owner
         style = '',
         ui,                       // { twemojify, renderCustomEmojiShortcodes, showTooltip, hideTooltip }
     } = $props();
@@ -49,6 +50,7 @@
 <div class="member-pick-identity" {style}>
     <div class="member-pick-nameline">
         <div class="compact-member-name" use:name={display}></div>
+        {#if keyHint}<span class="member-pick-keyhint">{keyHint}</span>{/if}
         {#if rank === 'owner' || rank === 'admin'}
             <span
                 class="icon member-rank-mark {rank === 'owner' ? 'icon-crown member-rank-owner' : 'icon-shield-filled member-rank-admin'}"

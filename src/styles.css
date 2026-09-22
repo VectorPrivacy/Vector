@@ -12735,6 +12735,10 @@ select:disabled:hover {
     isolation: isolate;
     cursor: pointer;
     position: relative;
+    /* A row is a control, not text: a drag or a double-click selects a person, not
+       their name. Every people list shares this row. */
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 /* Right-aligned moderation handle on a member row: a "\22EF" that opens the same menu as
@@ -12861,6 +12865,16 @@ select:disabled:hover {
 /* Bot marker, same glyph + accent the chat list and profile use. Sized to the name's
    cap height; `position: relative` and `margin: 0` undo the base `.icon` absolute
    inset + auto margins (which would centre it and push its siblings apart). */
+/* The key beside a name: quiet, but there to check against. */
+.member-pick-keyhint {
+    flex-shrink: 0;
+    margin-left: 8px;
+    color: #6a6a6a;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
 .member-pick-bot {
     position: relative;
     width: 14px;
@@ -13331,17 +13345,20 @@ select:disabled:hover {
 
 /* Solid subtle hover — not the gradient sweep the other pickers use */
 #create-group-list .member-pick-hover,
-#cmt-contacts .member-pick-hover {
+#cmt-contacts .member-pick-hover,
+.cs-bans .member-pick-hover {
   background: rgba(255, 255, 255, 0.085);
 }
 
 /* Quiet until chosen: unselected boxes are gray, only a selection earns the green */
 #create-group-list .member-pick-indicator,
-#cmt-contacts .member-pick-indicator {
+#cmt-contacts .member-pick-indicator,
+.cs-bans .member-pick-indicator {
   border-color: rgba(255, 255, 255, 0.28);
 }
 #create-group-list .member-pick-indicator.selected,
-#cmt-contacts .member-pick-indicator.selected {
+#cmt-contacts .member-pick-indicator.selected,
+.cs-bans .member-pick-indicator.selected {
   border-color: var(--icon-color-primary);
   background-color: var(--icon-color-primary);
 }
@@ -21248,6 +21265,45 @@ body.profile-switcher-editing .profile-switcher-add {
   user-select: text;
 }
 .cs-relay-scheme { color: #6a6a6a; }
+
+/* Bans: the contact picker's rows and search, laid out beside the count. */
+.cs-bans-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.cs-bans-bar .cs-bans-search {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  isolation: isolate;
+}
+/* The invite picker's field, which sets these inline. */
+.cs-bans-search input {
+  flex: 1;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 10px 12px 10px 44px;
+  background-color: transparent;
+  border: 1px solid rgba(57, 57, 57, 0.5);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 16px;
+}
+.cs-bans { margin: 6px 0 12px; }
+.cs-bans.busy { opacity: 0.55; pointer-events: none; }
+.cs-bans-all { cursor: pointer; }
+.cs-bans-all-label {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  color: #9a9a9a;
+  font-size: 13px;
+}
+
 
 /* The save bar rises when the draft differs from what the community holds. */
 .cs-savebar {

@@ -139,6 +139,7 @@
     "allow-get-chat-commands",
     "allow-ban-community-member",
     "allow-ban-community-members",
+    "allow-unban-community-members",
     "allow-check-community-raid",
     "allow-debug-v2-memberlist-diff",
     "allow-kick-community-members",

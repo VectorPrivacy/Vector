@@ -1,6 +1,6 @@
 <script>
     // The community overview's member roster: rank sections, search, the admin crown,
-    // kick/ban through the row menu, and the owner-facing banlist with unban.
+    // and kick/ban through the row menu. The banlist itself lives in Community Settings.
     //
     // The roster owns its live lists (members, admins, banned, role graph, filter) as
     // $state; the vanilla side feeds it through setRoster / setProfiles / setFilter and
@@ -267,16 +267,6 @@
         return { destroy() { sc.removeEventListener('scroll', read); ro.disconnect(); } };
     }
 
-    // Owner-only banlist: banned members are excluded above, so this is the only place
-    // they surface, with the unban affordance.
-    const bannedRows = $derived.by(() => {
-        if (!caps.ban || f) return [];
-        return bannedList.map((npub) => {
-            const profile = profileFor(npub);
-            return { npub, profile, display: displayOf(npub, profile), hasName: !!nameOf(profile), src: profile ? h.getProfileAvatarSrc(profile) || null : null };
-        });
-    });
-
     // ── actions ──
 
     function setActing(npub, busy) {
@@ -343,22 +333,6 @@
             else h.showToast(String(err));
         } finally {
             setActing(vm.npub, false);
-        }
-    }
-
-    async function unban(row, e) {
-        e.stopPropagation();
-        if (acting.has(row.npub)) return;
-        setActing(row.npub, true);
-        try {
-            await h.invoke('unban_community_member', { communityId, npub: row.npub });
-            bannedList = bannedList.filter((x) => x !== row.npub);
-            h.dmsgClearDeleteMetaCache();
-            onChange(getRoster());
-        } catch (err) {
-            h.showToast(String(err));
-        } finally {
-            setActing(row.npub, false);
         }
     }
 
@@ -464,39 +438,5 @@
     </div>
 {/if}
 
-{#if bannedRows.length}
-    <div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;opacity:0.5;margin:16px 0 6px;padding-left:2px;">
-        Banned ({bannedRows.length})
-    </div>
-    {#each bannedRows as row (row.npub)}
-        <MemberRow
-            npub={row.npub}
-            profile={row.profile}
-            src={row.src}
-            display={row.display}
-            hasName={row.hasName}
-            withStatus
-            dim
-            onactivate={(e) => openProfile(row.npub, e)}
-            {ui}
-        >
-            {#snippet trailing()}
-                <button
-                    class="cmt-btn cmt-btn-sm cmt-btn-secondary"
-                    title="Unban"
-                    style="margin-left:auto;"
-                    disabled={acting.has(row.npub)}
-                    onclick={(e) => unban(row, e)}
-                >
-                    {#if acting.has(row.npub)}
-                        <span class="icon icon-loading spin"></span>Unbanning
-                    {:else}
-                        <span class="icon icon-add-user"></span>Unban
-                    {/if}
-                </button>
-            {/snippet}
-        </MemberRow>
-    {/each}
-{/if}
 
 <!-- No <style>: the global .member-* rules cascade in; the DOM matches the vanilla roster. -->

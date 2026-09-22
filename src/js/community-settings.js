@@ -1,5 +1,6 @@
 // Community Settings: the modal's loading and publishing. The draft lives in
-// lib/community-settings.svelte.js; nothing here writes until Save.
+// lib/community-settings.svelte.js and nothing in it publishes until Save; bans are
+// the exception, acting at once as every moderation verb does.
 
 VectorSvelte.setScreen('communitySettings', {
     h: {
@@ -7,6 +8,12 @@ VectorSvelte.setScreen('communitySettings', {
         pickIcon: () => csPickIcon(),
         save: () => csSave(),
         reset: () => VectorSvelte.csReset(),
+        unban: () => csUnbanSelected(),
+        // Empty when they have no name of their own, so the row shows the key once.
+        name: (npub) => { const p = getProfile(npub); return p && (p.nickname || p.name || p.display_name) ? getName(p) : ''; },
+        avatarSrc: (npub) => { const p = getProfile(npub); return p ? getProfileAvatarSrc(p) || null : null; },
+        profile: (npub) => getProfile(npub) || null,
+        ui: { twemojify, showTooltip: showGlobalTooltip, hideTooltip: hideGlobalTooltip },
     },
 });
 
@@ -17,7 +24,7 @@ VectorSvelte.setScreen('communitySettings', {
  * @param {object|null} caps get_community_capabilities
  */
 function communitySettingsWritable(caps) {
-    return !!caps?.manage_metadata;
+    return !!(caps?.manage_metadata || caps?.ban);
 }
 
 /** The chat row that stands for a community: its primary channel, or any of its channels. */
@@ -43,8 +50,10 @@ async function openCommunitySettings(communityId) {
             description: summary.description || '',
             iconSrc: cached ? convertFileSrc(cached) : null,
             relays: summary.relays || [],
-            canEdit: communitySettingsWritable(caps),
+            canEdit: !!caps.manage_metadata,
+            canBan: !!caps.ban,
         });
+        if (caps.ban) csLoadBans(communityId);
     } catch (e) {
         if (VectorSvelte.csState().communityId !== communityId) return;
         console.error('Failed to load community settings:', e);
@@ -142,6 +151,43 @@ async function csSave() {
     } finally {
         if (unlisten) unlisten();
         VectorSvelte.csSetSaving(false);
+    }
+}
+
+/** The banlist, and the profiles behind it so rows read as people rather than keys. */
+async function csLoadBans(communityId) {
+    let bans = [];
+    try { bans = await invoke('get_community_banlist', { communityId }) || []; } catch (_) { return; }
+    if (VectorSvelte.csState().communityId !== communityId) return;
+    VectorSvelte.csSetBans(bans);
+    const unknown = bans.filter(np => !getProfile(np) && !strangerProfileRequested.has(np));
+    for (const np of unknown) {
+        strangerProfileRequested.add(np);
+        invoke('load_profile', { npub: np }).catch(() => {});
+    }
+}
+
+/**
+ * Lift every selected ban as ONE banlist edition. Immediate once asked, like every
+ * moderation verb: the list is the published state, not a draft, and batching is
+ * the point, since each separate unban would publish, and race, its own edition.
+ */
+async function csUnbanSelected() {
+    const st = VectorSvelte.csState();
+    const communityId = st.communityId;
+    const npubs = [...st.banSel];
+    if (!communityId || !st.canBan || st.unbanning || !npubs.length) return;
+    VectorSvelte.csSetUnbanning(true);
+    try {
+        await invoke('unban_community_members', { communityId, npubs });
+        if (VectorSvelte.csState().communityId === communityId) VectorSvelte.csRemoveBans(npubs);
+        dmsgClearDeleteMetaCache();
+        refreshCommunityMemberCount(communityId, true);
+        showToast(npubs.length === 1 ? 'Member unbanned' : `${npubs.length} members unbanned`);
+    } catch (e) {
+        showToast(String(e));
+    } finally {
+        VectorSvelte.csSetUnbanning(false);
     }
 }
 

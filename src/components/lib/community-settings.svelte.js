@@ -15,6 +15,12 @@ const s = $state({
     draft: { name: '', description: '', iconPath: null, iconPreview: null },
     relays: [],
     canEdit: false,
+    // Bans act at once, not through the save bar: the list IS the published state.
+    canBan: false,
+    bans: [],               // npubs
+    bansMax: 500,
+    banSel: new Set(),      // npubs picked for the next unban
+    unbanning: false,       // a batch unban is publishing
     saving: false,
     progress: 0,
     // Bumped when a close is refused over unsaved changes, so the bar can say so.
@@ -39,18 +45,47 @@ export function csOpen(communityId) {
     s.draft = { name: '', description: '', iconPath: null, iconPreview: null };
     s.relays = [];
     s.canEdit = false;
+    s.canBan = false;
+    s.bans = [];
+    s.banSel = new Set();
+    s.unbanning = false;
     s.saving = false;
     s.progress = 0;
     s.section = 'overview';
     s.query = '';
 }
 
-export function csLoaded({ name, description, iconSrc, relays, canEdit }) {
+export function csLoaded({ name, description, iconSrc, relays, canEdit, canBan }) {
     s.saved = { name, description, iconSrc };
     s.draft = { name, description, iconPath: null, iconPreview: null };
     s.relays = relays || [];
     s.canEdit = !!canEdit;
+    s.canBan = !!canBan;
     s.loading = false;
+}
+
+export function csSetBans(npubs, max) {
+    s.bans = npubs || [];
+    if (max) s.bansMax = max;
+}
+export function csSetUnbanning(on) { s.unbanning = !!on; }
+
+/** Pick or drop `npubs` for the next unban; `on` null toggles each. */
+export function csSelectBans(npubs, on = null) {
+    const next = new Set(s.banSel);
+    for (const n of npubs) {
+        const want = on === null ? !next.has(n) : on;
+        if (want) next.add(n); else next.delete(n);
+    }
+    s.banSel = next;
+}
+export function csClearBanSel() { s.banSel = new Set(); }
+
+/** Unbanned: out of the list and out of the selection. */
+export function csRemoveBans(npubs) {
+    const gone = new Set(npubs);
+    s.bans = s.bans.filter((n) => !gone.has(n));
+    s.banSel = new Set([...s.banSel].filter((n) => !gone.has(n)));
 }
 
 export function csSetDraft(patch) { Object.assign(s.draft, patch); }
