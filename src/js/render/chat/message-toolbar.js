@@ -192,7 +192,25 @@ function showMessageToolbar(rowEl) {
     VectorSvelte.setMessageToolbar(view);
     VectorSvelte.setToolbarHost({ open: true, target: rowEl.id });
     VectorSvelte.flushSync();
+    _dmsgPlaced = null;
     _dmsgPositionToolbar(rowEl);
+    if (_dmsgToolbarFollowRaf === null) _dmsgToolbarFollowRaf = requestAnimationFrame(_dmsgFollowToolbar);
+}
+
+/**
+ * Keep the open toolbar on its row. It is placed in content coordinates, so it does
+ * not move with the row: a trim above, a cleared divider, a streak merging or media
+ * settling all shift rows out from under it. Stranded past the last row it stretches
+ * the scroll height, and the bottom hold rides the view down into blank space until a
+ * scroll hides it. Cheap while nothing moves: the read hits clean layout.
+ */
+let _dmsgToolbarFollowRaf = null;
+function _dmsgFollowToolbar() {
+    _dmsgToolbarFollowRaf = null;
+    if (!_dmsgToolbarTarget || !VectorSvelte.toolbarHost().open) return;
+    if (!_dmsgToolbarTarget.isConnected) { hideMessageToolbar(); return; }
+    _dmsgPositionToolbar(_dmsgToolbarTarget);
+    _dmsgToolbarFollowRaf = requestAnimationFrame(_dmsgFollowToolbar);
 }
 
 /** Which actions the toolbar offers for `rowEl`, or null to offer none. */
@@ -303,8 +321,13 @@ function _dmsgPositionToolbar(rowEl) {
     // Don't bleed off the left edge of the chat content area.
     if (left < 0) left = 0;
 
+    // Unchanged is the common case while following; the store write is skipped.
+    const placed = `${top},${left}`;
+    if (placed === _dmsgPlaced) return;
+    _dmsgPlaced = placed;
     VectorSvelte.setToolbarHost({ top: `${top}px`, left: `${left}px` });
 }
+let _dmsgPlaced = null;
 
 function _dmsgHandleToolbarClick(e) {
     const btn = e.target.closest('.dmsg-toolbar-btn');
