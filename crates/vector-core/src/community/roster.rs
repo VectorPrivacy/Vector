@@ -1069,7 +1069,7 @@ mod tests {
             position,
             permissions: Permissions::admin(),
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let eid = crate::simd::hex::hex_to_bytes_32(role_id);
         edition::build_edition_inner(owner.public_key(), VSK_ROLE, &eid, version, prev, &serde_json::to_string(&role).unwrap(), created_at, None)
@@ -1366,7 +1366,7 @@ mod tests {
             1, None, "not json at all", 100, None,
         ).finalize(&owner).unwrap();
         // Junk B: a role whose content claims a DIFFERENT role_id than its entity coordinate → skipped (binding).
-        let role_b = Role { role_id: "cc".repeat(64), name: "X".into(), position: 1, permissions: Permissions::admin(), scope: RoleScope::Server, color: 0 };
+        let role_b = Role { role_id: "cc".repeat(64), name: "X".into(), position: 1, permissions: Permissions::admin(), scope: RoleScope::Server, color: 0, extra: Default::default() };
         let mismatched = edition::build_edition_inner(
             owner.public_key(), VSK_ROLE, &crate::simd::hex::hex_to_bytes_32(&"dd".repeat(64)),
             1, None, &serde_json::to_string(&role_b).unwrap(), 100, None,
@@ -1390,6 +1390,7 @@ mod tests {
             permissions: Permissions::admin(),
             scope: RoleScope::Server,
             color: 0,
+            extra: Default::default(),
         };
         let wrong_eid = [0x12u8; 32]; // but the edition lives at a different coordinate
         let ev = edition::build_edition_inner(owner.public_key(), VSK_ROLE, &wrong_eid, 1, None, &serde_json::to_string(&role).unwrap(), 100, None)
@@ -1441,7 +1442,7 @@ mod tests {
             position: 1,
             permissions: Permissions::admin(),
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let member = "bb".repeat(32);
         let grant = roles::MemberGrant { member: member.clone(), role_ids: vec![role.role_id.clone()] };
@@ -1462,7 +1463,7 @@ mod tests {
         let owner = Keys::generate();
         let role = Role {
             role_id: "a".repeat(64), name: "Admin".into(), position: 1,
-            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0,
+            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0, extra: Default::default(),
         };
         // v1 with a prev_hash, and v>1 without one, are both rejected at build time.
         assert!(build_role_edition(&owner, &role, 1, Some(&[0u8; 32]), 100, None).is_err());
@@ -1478,7 +1479,7 @@ mod tests {
         let owner = Keys::generate();
         let bad_role = Role {
             role_id: "not-hex".into(), name: "X".into(), position: 1,
-            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0,
+            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0, extra: Default::default(),
         };
         assert!(build_role_edition(&owner, &bad_role, 1, None, 100, None).is_err());
         let bad_grant = roles::MemberGrant { member: "zz".repeat(32), role_ids: vec!["a".repeat(64)] };
@@ -1520,7 +1521,7 @@ mod tests {
         let epoch = Epoch(0);
         let role = Role {
             role_id: "a".repeat(64), name: "Admin".into(), position: 1,
-            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0,
+            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0, extra: Default::default(),
         };
 
         let inner = build_role_edition(&owner, &role, 1, None, 100, None).unwrap();
@@ -1549,7 +1550,7 @@ mod tests {
         let community_id = CommunityId([0x09; 32]);
         let role = Role {
             role_id: "a".repeat(64), name: "Admin".into(), position: 1,
-            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0,
+            permissions: Permissions::admin(), scope: RoleScope::Server, color: 0, extra: Default::default(),
         };
         let inner = build_role_edition(&owner, &role, 1, None, 100, None).unwrap();
         let outer = seal_control_edition(&Keys::generate(), &inner, &sr(), &community_id, Epoch(4)).unwrap();

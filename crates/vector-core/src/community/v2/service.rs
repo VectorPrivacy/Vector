@@ -5728,7 +5728,7 @@ pub fn channel_access_role(channel_id: &ChannelId, name: &str) -> crate::communi
         position: u32::MAX - 1,
         permissions: Permissions::empty(),
         scope: RoleScope::Channel(crate::simd::hex::bytes_to_hex_32(&channel_id.0)),
-        color: 0,
+        color: 0, extra: Default::default(),
     }
 }
 
@@ -11018,7 +11018,7 @@ mod tests {
     }
 
     fn admin_role(role_id: &str, perms: u64) -> Role {
-        Role { role_id: role_id.into(), name: "Admin".into(), position: 1, permissions: Permissions(perms), scope: RoleScope::Server, color: 0 }
+        Role { role_id: role_id.into(), name: "Admin".into(), position: 1, permissions: Permissions(perms), scope: RoleScope::Server, color: 0, extra: Default::default() }
     }
 
     /// Hand-roll a LEGACY (pre-split) community exactly as a pre-0.4.2 build
@@ -11920,7 +11920,7 @@ mod tests {
             &bed.relay,
             &community,
             &attacker.keys,
-            &Role { role_id: admin_rid.clone(), name: "pwned".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0 },
+            &Role { role_id: admin_rid.clone(), name: "pwned".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0, extra: Default::default() },
             2,
         )
         .await;
@@ -12631,8 +12631,8 @@ mod tests {
         let moder = Keys::generate();
         let stranger = Keys::generate();
         let (admin_rid, mod_rid) = ("a1".repeat(32), "b2".repeat(32));
-        publish_role(&relay, &community, &owner, &Role { role_id: admin_rid.clone(), name: "Admin".into(), position: 1, permissions: Permissions(Permissions::ADMIN_ALL), scope: RoleScope::Server, color: 0 }, 1).await;
-        publish_role(&relay, &community, &owner, &Role { role_id: mod_rid.clone(), name: "Mod".into(), position: 2, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0 }, 1).await;
+        publish_role(&relay, &community, &owner, &Role { role_id: admin_rid.clone(), name: "Admin".into(), position: 1, permissions: Permissions(Permissions::ADMIN_ALL), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
+        publish_role(&relay, &community, &owner, &Role { role_id: mod_rid.clone(), name: "Mod".into(), position: 2, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
         publish_grant(&relay, &community, &owner, &admin.public_key(), vec![admin_rid], 1).await;
         publish_grant(&relay, &community, &owner, &moder.public_key(), vec![mod_rid], 1).await;
         publish_banlist(&relay, &community, &moder, &[admin.public_key().to_hex(), owner.public_key().to_hex(), stranger.public_key().to_hex()], 1).await;
@@ -14401,14 +14401,14 @@ mod tests {
         let senior = "a1".repeat(32);
         let mid = "a5".repeat(32);
         publish_role(&bed.relay, &community, &owner.keys,
-            &Role { role_id: senior.clone(), name: "Senior".into(), position: 1, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0 }, 1).await;
+            &Role { role_id: senior.clone(), name: "Senior".into(), position: 1, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
         publish_role(&bed.relay, &community, &owner.keys,
-            &Role { role_id: mid.clone(), name: "Mid".into(), position: 5, permissions: Permissions(Permissions::MANAGE_ROLES), scope: RoleScope::Server, color: 0 }, 1).await;
+            &Role { role_id: mid.clone(), name: "Mid".into(), position: 5, permissions: Permissions(Permissions::MANAGE_ROLES), scope: RoleScope::Server, color: 0, extra: Default::default() }, 1).await;
         publish_grant(&bed.relay, &community, &owner.keys, &attacker.keys.public_key(), vec![mid.clone()], 1).await;
 
         // The attacker republishes the SENIOR role, dropping it beneath themselves.
         publish_role(&bed.relay, &community, &attacker.keys,
-            &Role { role_id: senior.clone(), name: "Senior".into(), position: 9, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0 }, 2).await;
+            &Role { role_id: senior.clone(), name: "Senior".into(), position: 9, permissions: Permissions(Permissions::BAN), scope: RoleScope::Server, color: 0, extra: Default::default() }, 2).await;
 
         let authority = fetch_authority(&bed.relay, &community).await;
         let folded_senior = authority.roles.role(&senior).expect("the senior role survives the fold");
@@ -14781,7 +14781,7 @@ mod tests {
         assert!(fetch_authority(&bed.relay, &community).await.roles.is_admin(&member.keys.public_key().to_hex()), "member is admin pre-attack");
 
         // The attacker (a non-owner) forges v2 of the admin role, chaining onto v1.
-        publish_role(&bed.relay, &community, &attacker, &Role { role_id: rid.clone(), name: "pwn".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0 }, 2).await;
+        publish_role(&bed.relay, &community, &attacker, &Role { role_id: rid.clone(), name: "pwn".into(), position: 1, permissions: Permissions(0), scope: RoleScope::Server, color: 0, extra: Default::default() }, 2).await;
 
         // Owner refounds (keeping everyone).
         let refounded = refound_community(&bed.relay, &community, &[]).await.unwrap();
@@ -16104,7 +16104,7 @@ mod tests {
             position,
             permissions,
             scope: crate::community::roles::RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         set_role(relay, community, &role).await.unwrap();
         let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
@@ -16518,7 +16518,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let folded = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant { member: me.clone(), role_ids: vec![access.role_id.clone()] }],
@@ -16571,7 +16571,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -16649,7 +16649,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -16709,7 +16709,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -16857,7 +16857,7 @@ mod tests {
             position: u32::MAX - 1,
             permissions: crate::community::roles::Permissions::empty(),
             scope: crate::community::roles::RoleScope::Channel(chan_hex.clone()),
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let roster = crate::community::roles::CommunityRoles {
             grants: vec![crate::community::roles::MemberGrant {
@@ -19362,7 +19362,7 @@ mod tests {
             position: 1,
             permissions: Permissions(Permissions::ADMIN_FOUNDING_MASK),
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         publish_role(&relay, &community, &owner, &legacy, 1).await;
         follow_control(&relay, &community).await.unwrap().updated;

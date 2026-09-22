@@ -135,6 +135,11 @@ pub struct Role {
     /// UI badge color (e.g. the Admin crown); 0 = theme default. Cosmetic.
     #[serde(default)]
     pub color: u32,
+    /// Fields another client wrote that this one doesn't model. An edition replaces the
+    /// whole entity, so they ride every republish untouched (CORD-02 §6): dropping them
+    /// would erase another client's data for every member.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Role {
@@ -147,7 +152,7 @@ impl Role {
             position: 1,
             permissions: Permissions::admin(),
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         }
     }
 }
@@ -438,7 +443,7 @@ mod tests {
             position: 5,
             permissions: social,
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let alice = "aa".repeat(32);
         let r = CommunityRoles {
@@ -463,7 +468,7 @@ mod tests {
             position: 2,
             permissions: Permissions(Permissions::MANAGE_ROLES | Permissions::KICK),
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let admin_pos = admin_role.position; // 1
         let mod_pos = mod_role.position; // 2
@@ -510,7 +515,7 @@ mod tests {
             position: 2,
             permissions: Permissions(Permissions::KICK), // KICK only — NO ban, NO manage-messages
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let r = CommunityRoles {
             grants: vec![
@@ -565,7 +570,7 @@ mod tests {
             position: 2,
             permissions: Permissions(Permissions::MANAGE_MESSAGES | Permissions::KICK),
             scope: RoleScope::Server,
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let admin = Role::admin("a".repeat(64));
         let r = CommunityRoles {
@@ -628,7 +633,7 @@ mod tests {
             position: 5,
             permissions: Permissions(Permissions::MANAGE_MESSAGES),
             scope: RoleScope::Channel(chan.to_string()),
-            color: 0,
+            color: 0, extra: Default::default(),
         };
         let server = Role::admin("22".repeat(32));
         CommunityRoles {

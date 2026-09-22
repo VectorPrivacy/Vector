@@ -48,7 +48,7 @@ impl RoleContent {
             permissions: r.permissions.0,
             scope: r.scope.clone(),
             color: r.color,
-            extra: serde_json::Map::new(),
+            extra: r.extra.clone(),
         }
     }
     pub fn into_role(self) -> Role {
@@ -59,6 +59,7 @@ impl RoleContent {
             permissions: Permissions(self.permissions),
             scope: self.scope,
             color: self.color,
+            extra: self.extra,
         }
     }
 }
@@ -199,6 +200,30 @@ mod perm_decimal_string {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_role_republished_here_keeps_what_another_client_wrote() {
+        // Armada's hoist flag and a field nobody has invented yet: neither is modelled
+        // here, and an edit must not erase either for every member (CORD-02 §6).
+        let wire = r#"{"role_id":"ab","name":"Mods","position":3,"permissions":"24","scope":{"kind":"server"},"color":0,"display":true,"future":{"x":1}}"#;
+        let mut role = parse_role_content(wire).expect("parses");
+        role.name = "Moderators".into();
+        role.color = 0x59fcb3;
+        let back: serde_json::Value = serde_json::from_str(&role_content_json(&role).unwrap()).unwrap();
+        assert_eq!(back["display"], serde_json::json!(true), "the hoist flag survives the edit");
+        assert_eq!(back["future"], serde_json::json!({"x": 1}), "so does anything else unknown");
+        assert_eq!(back["name"], "Moderators");
+        assert_eq!(back["permissions"], "24", "still a decimal string");
+    }
+
+    #[test]
+    fn a_role_with_nothing_extra_serializes_as_before() {
+        let role = parse_role_content(r#"{"role_id":"ab","name":"A","position":1,"permissions":"1","scope":{"kind":"server"},"color":0}"#).unwrap();
+        assert!(role.extra.is_empty());
+        let stored = serde_json::to_string(&role).unwrap();
+        assert!(!stored.contains("extra"), "stored rosters stay byte-identical when nothing is carried");
+    }
+
     use super::*;
 
     fn role(perms: u64, pos: u32) -> Role {
@@ -208,7 +233,7 @@ mod tests {
             position: pos,
             permissions: Permissions(perms),
             scope: RoleScope::Server,
-            color: 15158332,
+            color: 15158332, extra: Default::default(),
         }
     }
 
