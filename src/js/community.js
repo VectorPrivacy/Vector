@@ -854,7 +854,11 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // DOM; this side seeds it, feeds it the authoritative lists, and mirrors the
         // member-driven changes it reports back into the session caches. A live refresh
         // feeds the mounted island; a fresh open or another community remounts.
-        if (!groupRoster || groupRosterCommunityId !== communityId || !preserveSearch) {
+        // Whether the island was just seeded from the cache. A live refresh keeps the
+        // mounted one, which holds whatever it was last given, and the cache may already
+        // be ahead of it: a member-count refresh writes the new list there first.
+        const remount = !groupRoster || groupRosterCommunityId !== communityId || !preserveSearch;
+        if (remount) {
             groupRosterCommunityId = communityId;
             // A new key remounts: the roster's props are mount-time constants.
             VectorSvelte.setScreen('roster', { key: `${communityId}:${++groupRosterSeq}`, props: {
@@ -909,7 +913,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         // id (re-tagged right after open for the realtime listener), never chat.id here.
         if (!live() || groupRoster !== roster) return;
         VectorSvelte.touchCommunity(communityId);
-        if (!hadCache || rosterPrint() !== cachedPrint) {
+        if (!remount || !hadCache || rosterPrint() !== cachedPrint) {
             roster.setRoster({ members: memberList, admins: adminNpubs, banned: bannedList, roleGraph });
         }
 
