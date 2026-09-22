@@ -101,6 +101,9 @@ async function setupRustListeners() {
         // A control change may have promoted/demoted admins — refresh the cached roster so in-chat
         // admin tags + @everyone reflect it (the open overview re-fetches separately below).
         loadCommunityRoles(communityId);
+        // Who may see a raid alarm is a role question too: a BAN granted or revoked must
+        // raise or drop the pip now, not on the next visit. Only verdicts already on show.
+        if (communityRaidAlerts.has(communityId)) refreshCommunityRaidAlert(communityId);
         // An open moderation console is a live view of who is in the room. A ban, kick
         // or rotation changes exactly that, so it must not keep offering rows the
         // network has already removed — an operator would tick one and act on a roster

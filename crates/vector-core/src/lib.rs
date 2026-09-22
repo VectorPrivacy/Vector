@@ -3137,6 +3137,13 @@ impl VectorCore {
         let Some(community) = Self::load_v2_if_v2(community_id)? else {
             return Ok(serde_json::json!({ "detected": false }));
         };
+        // A raid alarm is a call to act, and only BAN can answer it (the console's
+        // containment verbs all need it). Anyone else would be alarmed with nothing
+        // to do, and would pay for a four-thousand-message scan to get there.
+        let caps = self.community_capabilities(community_id)?;
+        if caps["ban"].as_bool() != Some(true) {
+            return Ok(serde_json::json!({ "detected": false }));
+        }
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
         let report = Self::policy_console_report(&cid_hex, &community)?;
         let biggest = report["cohorts"].get(0);
