@@ -92,7 +92,9 @@ function chatlistSnapshot() {
  * @property {(profileOrNpub: object|string) => string} getName
  * @property {(chat: object) => string} chatPinKey
  * @property {(chat: object) => number} computeListRowBadgeCount
+ * @property {(chat: object) => number} computeListRowUnreadCount
  * @property {(chat: object) => number} computeRowBadgeCount
+ * @property {(chat: object) => number} computeRowUnreadCount
  * @property {(chat: object) => { text: string, isHtml: boolean, isTyping: boolean, needsTwemoji: boolean, emojiTags: object[]|null }} generateChatPreviewText   isHtml picks innerHTML over textContent: text is then contentToPreviewHtml's output
  * @property {(path: string) => string} convertFileSrc
  * @property {(profile: object|null) => string|null} getProfileAvatarSrc
@@ -137,7 +139,9 @@ function chatlistHelpers() {
         getName,
         chatPinKey,
         computeListRowBadgeCount,
+        computeListRowUnreadCount,
         computeRowBadgeCount,
+        computeRowUnreadCount,
         generateChatPreviewText,
         // avatars + text finishing
         convertFileSrc,
@@ -532,6 +536,15 @@ function countUnreadMessages(chat) {
  *  - 1: pings only in a group, and a DM has no ping tier, so nothing.
  *  - 0: the full unread count.
  */
+/**
+ * What a row's unread MARKER reads. A level decides how loudly a room may speak, not
+ * whether the list admits there is something in it — withholding that is the mute's job.
+ */
+function computeRowUnreadCount(chat) {
+    if (chat.muted) return 0;
+    return (typeof chat.unread === 'number') ? chat.unread : countUnreadMessages(chat);
+}
+
 function computeRowBadgeCount(chat) {
     let nRing = chat.notify | 0;
     // A row this device created itself has no resolved level yet; its mute still counts.
@@ -545,42 +558,26 @@ function computeRowBadgeCount(chat) {
 }
 
 /**
- * The badge for a chat-list ROW. Identical to `computeRowBadgeCount` except on a
- * community's row, which represents every channel: its badge is the community total, so
- * unread in a collapsed secondary channel still flags the community.
+ * A community's row answers for its whole space, so traffic in a collapsed channel still
+ * reaches it. Anything else answers only for itself.
  */
-function computeListRowBadgeCount(chat) {
+function foldCommunity(chat, per) {
     const communityId = chatIsGroup(chat) && isPrimaryChannelChat(chat)
         ? chat.metadata?.custom_fields?.community_id
         : null;
-    if (!communityId) return computeRowBadgeCount(chat);
+    if (!communityId) return per(chat);
     let total = 0;
     for (const c of arrChats) {
         if (c.chat_type !== 'Community') continue;
         if (c.metadata?.custom_fields?.community_id !== communityId) continue;
-        total += computeRowBadgeCount(c);
+        total += per(c);
     }
     return total;
 }
 
-/**
- * A community's pings across every channel it owns — the same fan-out
- * `computeListRowBadgeCount` does for unread, because a ping in a collapsed
- * channel is still someone calling your name.
- */
-function computeCommunityPingCount(chat) {
-    const communityId = chatIsGroup(chat) && isPrimaryChannelChat(chat)
-        ? chat.metadata?.custom_fields?.community_id
-        : null;
-    if (!communityId) return countPingMessages(chat);
-    let total = 0;
-    for (const c of arrChats) {
-        if (c.chat_type !== 'Community') continue;
-        if (c.metadata?.custom_fields?.community_id !== communityId) continue;
-        total += countPingMessages(c);
-    }
-    return total;
-}
+function computeListRowBadgeCount(chat) { return foldCommunity(chat, computeRowBadgeCount); }
+function computeListRowUnreadCount(chat) { return foldCommunity(chat, computeRowUnreadCount); }
+function computeCommunityPingCount(chat) { return foldCommunity(chat, countPingMessages); }
 
 function countPingMessages(chat) {
     if (!chat.messages || !chat.messages.length) return 0;

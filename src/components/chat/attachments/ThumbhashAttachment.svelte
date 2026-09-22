@@ -1,8 +1,12 @@
 <script>
     // A picture not on disk yet: its thumbhash blur sized to the box the real image will
-    // take, under a download ring (downloading or auto-download) or a Download button.
+    // take, under a download ring (downloading or auto-download) or a Download box.
     // A missing blur falls back to the file box leaf.
-    import { downloadProgress } from '../../lib/attachments.svelte.js';
+    //
+    // Both overlays size themselves off the rendered blur, because a thumbnail can be
+    // anything from a wide banner to a sliver: the box drops its text when there is no
+    // room for it, and the ring shows a rate only when one will fit under it.
+    import { downloadProgress, transfer } from '../../lib/attachments.svelte.js';
     import FileBox from './FileBox.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, auto, h } = $props();
@@ -24,14 +28,30 @@
         const scale = Math.min(450 / m.width, 350 / m.height, 1);
         return { w: Math.round(m.width * scale), h: Math.round(m.height * scale), ratio: `${m.width} / ${m.height}` };
     });
+
+    // Measured, not derived from the metadata: the blur is capped by the column it lands
+    // in, and a thumbnail with no metadata at all still has to place its overlay.
+    let boxW = $state(0);
+    let boxH = $state(0);
+    // The full box measures 191x68 at its widest wording and sits at 94% of the media,
+    // so below this it is the icon alone with no panel around it.
+    const compact = $derived(boxW > 0 && (boxW < 205 || boxH < 76));
+    // The ring plus a line under it, with air around both.
+    const showRate = $derived(boxH >= 118 && boxW >= 120);
+
     const pct = $derived(downloadProgress(att.id));
+    const rate = $derived.by(() => {
+        const t = transfer(att.id);
+        if (!t || !(t.bps > 0)) return '';
+        return `${h.formatBytes(t.bps, t.bps >= 1048576 ? 2 : 0, true)}/s`;
+    });
+
+    const failed = $derived(!!att.download_failed);
+    const title = $derived(failed ? 'Download Failed' : `Download ${(att.extension || '').toUpperCase()}`.trim());
     // A failed download carries the backend's reason, so a red box is diagnosable at a glance.
-    const label = $derived.by(() => {
-        if (att.download_failed) {
-            const reason = (att.download_error || '').slice(0, 64);
-            return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
-        }
-        return `Download ${(att.extension || '').toUpperCase()} (${att.size > 0 ? h.formatBytes(att.size) : 'Unknown Size'})`;
+    const sub = $derived.by(() => {
+        if (failed) return (att.download_error || '').slice(0, 64) || 'Tap to Retry';
+        return att.size > 0 ? h.formatBytes(att.size) : 'Unknown Size';
     });
 
     function download(e) {
@@ -42,23 +62,46 @@
     }
 </script>
 
+{#snippet ring()}
+    <div class="miniapp-downloading-spinner" data-attachment-id={att.id} style="width: 48px; height: 48px;" style:--progress={pct != null ? `${pct}%` : null}></div>
+{/snippet}
+
 {#if blurFailed}
     <FileBox {att} {msg} {sender} phase={downloading ? 'downloading' : 'download'} {h} />
 {:else if blur}
     <div style="position: relative; display: inline-block;" style:line-height={downloading ? '0' : null}>
         <img src={blur} alt="" width={fit?.w} height={fit?.h}
+             bind:clientWidth={boxW} bind:clientHeight={boxH}
              style="max-width: min(100%, 450px); max-height: 350px; height: auto; border-radius: 8px;"
              style:aspect-ratio={fit?.ratio ?? null}
              style:opacity={downloading ? (att.downloading ? '0.7' : '0.8') : '0.6'}
              onload={() => h.onThumbLoad()}>
         {#if downloading}
             <div class="attachment-progress-overlay">
-                <div class="miniapp-downloading-spinner" data-attachment-id={att.id} style="width: 48px; height: 48px;" style:--progress={pct != null ? `${pct}%` : null}></div>
+                <!-- No rate to show means the original DOM, so the overlay's own rule still
+                     keeps the ring round on media too small to hold it. -->
+                {#if showRate}
+                    <div class="media-progress">
+                        {@render ring()}
+                        <span class="media-progress-note" class:is-visible={!!rate}>{rate}</span>
+                    </div>
+                {:else}
+                    {@render ring()}
+                {/if}
             </div>
         {:else}
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <i class="btn" data-attachment-id={att.id} onclick={download}
-               style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background-color:rgba(0,0,0,0.8);padding:8px 15px;border-radius:6px;color:white;cursor:pointer;font-size:12px;white-space:nowrap;text-align:center;max-width:90%;overflow:hidden;text-overflow:ellipsis;">{label}</i>
+            <div class="thumb-download" class:is-compact={compact} class:is-failed={failed}
+                 data-attachment-id={att.id} role="button" tabindex="-1" title={compact ? `${title} · ${sub}` : null}
+                 onclick={download}>
+                <span class="thumb-download-icon"><span class="icon icon-{failed ? 'refresh' : 'download'}"></span></span>
+                {#if !compact}
+                    <span class="thumb-download-text">
+                        <span class="thumb-download-title cutoff">{title}</span>
+                        <span class="thumb-download-sub cutoff">{sub}</span>
+                    </span>
+                {/if}
+            </div>
         {/if}
     </div>
 {/if}

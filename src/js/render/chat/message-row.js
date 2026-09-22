@@ -223,6 +223,7 @@ const _dmsgContentHelpers = {
  *   willAutoDownload: (att: object, ctx: object) => boolean,
  *   autoDownload: (att: object, msg: object, sender: object|null) => void,
  *   startDownload: (att: object, msg: object, sender: object|null) => void,
+ *   cancelDownload: (att: object, msg: object) => void,
  *   audio: object,
  *   fileTypeInfo: (ext: string) => object,
  *   loadMiniAppInfo: (path: string) => Promise<object|null>,
@@ -244,10 +245,11 @@ const _dmsgMediaHelpers = {
     isVideo: (ext) => platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(ext),
     isDownloading: (att) => !!att.downloading || downloadingAttachmentIds.has(att.id),
     willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && att.size > 0
-        && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed,
+        && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed && !att.download_cancelled,
     // Once per attachment id across renders, or every repaint would re-fire the download.
     autoDownload: (att, msg) => _dmsgStartDownload(att, msg),
     startDownload: (att, msg) => _dmsgStartDownload(att, msg),
+    cancelDownload: (att, msg) => _dmsgCancelDownload(att, msg),
     get audio() { return AUDIO_PLAYER_HELPERS; },
     fileTypeInfo: (ext) => getFileTypeInfo(ext),
     loadMiniAppInfo: (path) => loadMiniAppInfo(path),
@@ -542,6 +544,8 @@ function _dmsgBuildText(msg, displayContent, fEmojiOnly, isGroupChat, currentCha
 function _dmsgStartDownload(att, msg) {
     if (downloadingAttachmentIds.has(att.id)) return;
     downloadingAttachmentIds.add(att.id);
+    // Asking for it again withdraws the stop that kept auto-download off it.
+    att.download_cancelled = false;
     // The box derives its phase under the message's version, so the start has to
     // move it, or the box shows nothing until the finished result lands.
     att.downloading = true;
@@ -554,6 +558,21 @@ function _dmsgStartDownload(att, msg) {
             att.downloading = false;
             VectorSvelte.touchMessage(msg.id);
         });
+}
+
+/** Stop a download in flight. The walk owns the outcome event whenever one was running. */
+function _dmsgCancelDownload(att, msg) {
+    invoke('cancel_download', { attachmentId: att.id })
+        .then((stopped) => {
+            if (stopped) return;
+            // Nothing was running, so nothing will emit: the spinner was stale.
+            downloadingAttachmentIds.delete(att.id);
+            VectorSvelte.transferDone(att.id);
+            att.downloading = false;
+            att.download_cancelled = true;
+            VectorSvelte.touchMessage(msg.id);
+        })
+        .catch(() => {});
 }
 
 /** Open a downloaded file: a Mini App launches (and reports its session), a file reveals or opens. */

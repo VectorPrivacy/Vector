@@ -40,6 +40,7 @@
     "allow-set-notify-mute",
     "allow-set-suppress-everyone",
     "allow-message",
+    "allow-cancel-download",
     "allow-cancel-upload",
     "allow-delete-failed-message",
     "allow-retry-failed-dm",

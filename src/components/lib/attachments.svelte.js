@@ -6,6 +6,7 @@ import { SvelteMap } from 'svelte/reactivity';
 
 const map = new SvelteMap();   // id → { kind: 'upload' | 'download', phase: 'active' | 'failed', pct, bps, error }
 const lerps = new Map();       // id → { display, target, factor, lastBytes, lastTime, raf }
+const slowTimers = new Map();  // id → timeout, one per publish that outstays its welcome
 
 export function transfer(id) { return map.get(id) ?? null; }
 
@@ -15,6 +16,10 @@ function patch(id, fields) {
 
 /** An upload chunk landed: `bytesSent` is cumulative, so the rate is its delta over time. */
 export function uploadProgressed(pendingId, pct, bytesSent) {
+    // 100% is the last byte leaving, not the send finishing: the server still has to
+    // answer and the blob still has to be verified. It is already unstoppable by then,
+    // so the phase flips here rather than waiting for the completion notice.
+    if (pct >= 100) { markPublishing(pendingId); return; }
     patch(pendingId, { kind: 'upload', phase: 'active', pct });
     if (bytesSent == null) return;
     const now = performance.now();
@@ -68,8 +73,39 @@ function stop(id) {
     lerps.delete(id);
 }
 
+/** The bytes are on the server; only the Nostr publish is left. There is nothing to
+ *  cancel from here, so every surface drops its button rather than offering one that
+ *  would abandon the blob. */
+function markPublishing(id) {
+    const already = map.get(id)?.phase === 'publishing';
+    stop(id);
+    patch(id, { kind: 'upload', phase: 'publishing', pct: 100, bps: 0 });
+    // A publish that lands promptly says nothing; only one that leaves a full ring on
+    // screen earns a label, so the common case stays quiet.
+    if (already || slowTimers.has(id)) return;
+    slowTimers.set(id, setTimeout(() => {
+        slowTimers.delete(id);
+        if (map.get(id)?.phase === 'publishing') patch(id, { slow: true });
+    }, 1000));
+}
+
+/** No guard on an existing record: an upload quick enough to finish without a progress
+ *  frame has none, and that is exactly when the button must still go. */
+export function uploadPublishing(pendingId) { markPublishing(pendingId); }
+
+/** Whether a transfer is past the point of cancelling. */
+export function transferPublishing(id) { return map.get(id)?.phase === 'publishing'; }
+
+/** Whether it has sat in the publish long enough to be worth saying so. */
+export function transferSlow(id) { return map.get(id)?.slow === true; }
+
 /** The transfer ended well (or was cancelled): nothing is left to show. */
-export function transferDone(id) { stop(id); map.delete(id); }
+export function transferDone(id) {
+    stop(id);
+    clearTimeout(slowTimers.get(id));
+    slowTimers.delete(id);
+    map.delete(id);
+}
 
 export function uploadProgress(pendingId) { return map.get(pendingId)?.pct ?? null; }
 export function downloadProgress(attachmentId) { return map.get(attachmentId)?.pct ?? null; }

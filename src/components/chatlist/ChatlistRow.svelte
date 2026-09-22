@@ -34,6 +34,9 @@
             isGroup,
             profile,
             communityId: chat.metadata?.custom_fields?.community_id,
+            // Two different questions: nMark is whether the row has anything in it at all,
+            // nUnread is how much of that the level lets the badge say out loud.
+            nMark: h.computeListRowUnreadCount(chat),
             nUnread: h.computeListRowBadgeCount(chat),
             last: chat.messages[chat.messages.length - 1] || null,
             name: isGroup
@@ -101,7 +104,7 @@
     // Context menu: attach listeners once, always fire with the fresh view-model.
     function rowMenu(node, v) {
         let cur = v;
-        h.attachLongPressContextMenu(node, (x, y) => h.showChatRowContextMenu(cur.chat, cur.isGroup, cur.nUnread, x, y));
+        h.attachLongPressContextMenu(node, (x, y) => h.showChatRowContextMenu(cur.chat, cur.isGroup, cur.nMark, x, y));
         return { update: (v) => { cur = v; } };
     }
 
@@ -110,7 +113,7 @@
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
 <div
     class="chatlist-contact"
-    class:has-unread={vm.nUnread}
+    class:has-unread={vm.nMark}
     class:chatlist-joining={vm.joining}
     class:ws-active={shellState().ws && openChatId() === vm.chat.id}
     id="chatlist-{vm.chat.id}"

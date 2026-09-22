@@ -29,6 +29,9 @@ impl ActiveDownloadGuard {
     async fn try_new(id: String) -> Option<Self> {
         let mut active = ACTIVE_DOWNLOADS.lock().await;
         if active.insert(id.clone()) {
+            // A stop only ever reaches an id this set already holds, so clearing an
+            // earlier attempt's stop here cannot swallow one meant for this attempt.
+            net::clear_transfer_cancel(&id);
             Some(Self { id })
         } else {
             None
@@ -38,6 +41,9 @@ impl ActiveDownloadGuard {
 
 impl Drop for ActiveDownloadGuard {
     fn drop(&mut self) {
+        // Retire the stop with the download that owned it, so a cancelled file is
+        // not still cancelled the next time someone asks for it.
+        net::clear_transfer_cancel(&self.id);
         // Use try_lock to avoid blocking in drop (tokio Mutex).
         // In the rare case the lock is held, spawn a task to clean up.
         match ACTIVE_DOWNLOADS.try_lock() {
@@ -264,6 +270,20 @@ fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
     } else {
         Err("path is outside the download directory".to_string())
     }
+}
+
+/// Stop an in-progress attachment download.
+///
+/// Returns whether a live download was flagged. The download owns its outcome event,
+/// so a `false` means nothing was running and the caller should not wait for one.
+#[tauri::command]
+pub async fn cancel_download(attachment_id: String) -> bool {
+    let active = ACTIVE_DOWNLOADS.lock().await;
+    if !active.contains(&attachment_id) {
+        return false;
+    }
+    net::cancel_transfer(&attachment_id);
+    true
 }
 
 /// Download and decrypt an attachment
@@ -497,6 +517,11 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         let mut hash_swap_tried = false;
         let mut i = 0;
         while i < candidates.len() {
+            // A stop outranks the walk: a dead source must not buy the next one a
+            // fresh round of timeouts after the user already said no.
+            if net::transfer_cancelled(&attachment_hex_id) {
+                break;
+            }
             let url = candidates[i].clone();
 
             // Fetch this source's bytes, retrying transient failures with backoff.
@@ -505,6 +530,9 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 match net::download(&url, handle, &attachment_hex_id, None).await {
                     Ok(d) => break Some(d),
                     Err(error) => {
+                        if error == net::TRANSFER_CANCELLED {
+                            break None;
+                        }
                         attempt += 1;
                         last_error = error.to_string();
                         let permanent = matches!(
@@ -647,6 +675,28 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     i, candidates.len(), last_error, candidates[i]
                 );
             }
+        }
+
+        if saved.is_none() && net::transfer_cancelled(&attachment_hex_id) {
+            vector_core::log_info!(
+                "[AttachmentDownload] stopped by the user (msg {}, attachment {})",
+                msg_id, attachment_id
+            );
+            let mut state = STATE.lock().await;
+            state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
+                att.set_downloading(false);
+                att.set_downloaded(false);
+            });
+            drop(state);
+            handle.emit("attachment_download_result", serde_json::json!({
+                "profile_id": npub,
+                "msg_id": msg_id,
+                "id": attachment_id,
+                "success": false,
+                "cancelled": true,
+                "result": net::TRANSFER_CANCELLED
+            })).ok();
+            return false;
         }
 
         let Some((hash_file_path, file_hash)) = saved else {

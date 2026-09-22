@@ -59,7 +59,9 @@ function renderRailShortcuts() {
      * @property {(path: string) => string} convertFileSrc
      * @property {(el: Element) => void} twemojify
      * @property {(chat: object) => number} computeRowBadgeCount
+     * @property {(chat: object) => number} computeRowUnreadCount
      * @property {(chat: object) => number} computeListRowBadgeCount
+     * @property {(chat: object) => number} computeListRowUnreadCount
      * @property {(chat: object) => number} computeCommunityPingCount
      * @property {(chatId: string) => void} openChat
      * @property {() => void} openDmHome
@@ -81,7 +83,9 @@ function renderRailShortcuts() {
             convertFileSrc,
             twemojify,
             computeRowBadgeCount,
+            computeRowUnreadCount,
             computeListRowBadgeCount,
+            computeListRowUnreadCount,
             computeCommunityPingCount,
             openChat: (id) => { if (!chatOnScreen(id)) openChat(id); },
             openDmHome: wsOpenDmHome,

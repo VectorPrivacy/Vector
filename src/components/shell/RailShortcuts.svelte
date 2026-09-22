@@ -32,7 +32,7 @@
             // Unread only, so a muted chat (scores 0) never takes one of the slots.
             // Reading the chat's signal is what re-runs this when its unread moves.
             chatVersion(chat.id);
-            if (!h.computeRowBadgeCount(chat)) continue;
+            if (!h.computeRowUnreadCount(chat)) continue;
             unreadDms++;
             if (dms.length < DM_COUNT) dms.push(chat);
         }

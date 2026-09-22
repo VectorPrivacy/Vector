@@ -302,8 +302,10 @@
         {#if uploading}
             <div style="position: relative; width: 40px; height: 40px; min-width: 40px; flex-shrink: 0;">
                 <div class="miniapp-downloading-spinner" style="width: 40px; height: 40px;" style:--progress={up?.pct != null ? `${up.pct}%` : null}></div>
-                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <div class="upload-cancel-btn audio-upload-cancel" onclick={(e) => { e.stopPropagation(); h.cancelUpload(msg.id); }}></div>
+                {#if up?.phase !== 'publishing'}
+                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                    <div class="upload-cancel-btn audio-upload-cancel" onclick={(e) => { e.stopPropagation(); h.cancelUpload(msg.id); }}></div>
+                {/if}
             </div>
         {:else}
             <button class="audio-play-btn" class:loading disabled={download.active} aria-label={playing ? 'Pause' : 'Play'} onclick={() => { if (playing) pause(); else play(); }}>

@@ -382,20 +382,18 @@ body.ws .chat-messages {
   padding-top: 12px;
 }
 
-/* File boxes, voice notes and audio players size themselves off the VIEWPORT
+/* Voice notes and audio players size themselves off the VIEWPORT
    (`min(500px, 100vw - 100px)`), which was the conversation's own width when the
    conversation was the whole screen. Here it's the middle column: the 500px arm
-   wins on any normal window and the box runs out past the column, under the member
-   list. Bound it by the row it sits in and keep 500px as the cap it always was.
-
-   Mini App boxes stay content-sized — their border IS the tap target — so their
-   own rule is re-stated at a specificity that survives this one. */
+   wins on any normal window and the player runs out past the column, under the
+   member list. Bound it by the row it sits in and keep 500px as the cap it always
+   was. File boxes hug their content, so they only need the cap moved. */
 body.ws .custom-audio-player {
   width: min(100%, 500px);
 }
 
-body.ws .miniapp-attachment .custom-audio-player {
-  width: fit-content;
+body.ws .file-attachment,
+body.ws .file-box {
   max-width: min(100%, 500px);
 }
 
@@ -1508,6 +1506,16 @@ body.ws .chatlist-community-head:hover {
    said the same thing twice while making the room look switched off. */
 .ws-rail-item.is-quiet:hover .ws-rail-item-name,
 .ws-rail-item.is-quiet.active .ws-rail-item-name {
+  color: #fff;
+}
+
+/* Muted sits below quiet: quiet is "nothing new", muted is "and do not tell me". */
+.ws-rail-item.is-muted .ws-rail-item-name {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.ws-rail-item.is-muted:hover .ws-rail-item-name,
+.ws-rail-item.is-muted.active .ws-rail-item-name {
   color: #fff;
 }
 

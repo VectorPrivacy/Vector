@@ -275,7 +275,7 @@ async function openCommunityMenu(chat, ev, at) {
 async function openChannelMenu(communityId, channel, x, y) {
     const chat = arrChats.find(c => c.id === channel.id);
     const items = [];
-    if (chat && computeRowBadgeCount(chat) > 0) {
+    if (chat && computeRowUnreadCount(chat) > 0) {
         items.push({
             label: 'Mark as Read',
             icon: 'check',

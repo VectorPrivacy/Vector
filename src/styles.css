@@ -127,6 +127,10 @@
   mask-image: url("./icons/refresh.svg");
 }
 
+.icon-download {
+  mask-image: url("./icons/download.svg");
+}
+
 .icon-locked {
   mask-image: url("./icons/locked.svg");
 }
@@ -10934,6 +10938,358 @@ select:disabled:hover {
   background: var(--danger-color-hover);
 }
 
+/* File attachment boxes.
+   Neutral chrome on purpose: the box is furniture, and the only colour in it is the
+   one carrying meaning. A file that is on this device takes the theme colour, one
+   that failed takes the danger colour, and everything else stays grey. */
+.file-box,
+.thumb-download {
+    --file-box-bg: #161616;
+    --file-box-bg-hover: #1d1d1d;
+    --file-box-line: #262626;
+    --file-box-line-hover: #363636;
+    --file-box-title: rgba(255, 255, 255, 0.92);
+    --file-box-body: rgba(255, 255, 255, 0.55);
+    --file-box-dim: rgba(255, 255, 255, 0.34);
+    --file-box-glyph: rgba(255, 255, 255, 0.7);
+}
+
+.file-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    margin-bottom: 6px;
+    width: fit-content;
+    min-width: 240px;
+    max-width: min(500px, calc(100vw - 100px));
+    box-sizing: border-box;
+    border: 1px solid var(--file-box-line);
+    border-radius: 12px;
+    background: var(--file-box-bg);
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.file-box:hover {
+    background: var(--file-box-bg-hover);
+    border-color: var(--file-box-line-hover);
+}
+
+/* A transfer in flight and a live Mini App session are both "already doing it". */
+.file-box.is-static {
+    cursor: default;
+}
+
+.file-box-icon {
+    position: relative;
+    flex: none;
+    width: 40px;
+    height: 40px;
+}
+
+.file-box-icon > .icon {
+    width: 32px;
+    height: 32px;
+    background-color: var(--file-box-glyph);
+}
+
+.file-box-icon > img {
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    object-fit: cover;
+    background-color: transparent;
+}
+
+.file-box[data-state="failed"] .file-box-icon > .icon {
+    background-color: var(--danger-color);
+}
+
+.file-box-text {
+    flex: 1;
+    min-width: 0;
+    line-height: 1.25;
+}
+
+.file-box-title {
+    display: block;
+    color: var(--file-box-title);
+    font-weight: 400;
+}
+
+.file-box[data-state="local"] .file-box-title {
+    color: var(--icon-color-primary);
+}
+
+/* Size and speed ride the title line while the bar owns the line below it. */
+.file-box-meta {
+    color: var(--file-box-dim);
+    font-size: 0.85em;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The rate is the one thing in the box that rewrites itself several times a second,
+   and a Mini App's box is sized to its own text. Give the rate a slot wide enough for
+   the fastest it can read, so the box stops resizing and the cancel button stops moving. */
+.file-box-rate {
+    display: inline-block;
+    width: 6.7em;
+    margin-left: 0.35em;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 0.28s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.file-box-rate.is-visible {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.file-box-sub {
+    display: block;
+    margin-top: 3px;
+    color: var(--file-box-body);
+    font-size: 0.8em;
+    font-weight: 400;
+}
+
+.file-box-bar {
+    --progress: 0%;
+    display: block;
+    margin-top: 7px;
+    height: 4px;
+    border-radius: 999px;
+    background: linear-gradient(
+        to right,
+        var(--icon-color-primary) 0% var(--progress),
+        rgba(255, 255, 255, 0.12) var(--progress) 100%
+    );
+    transition: --progress 0.3s ease;
+}
+
+.file-box-action {
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: 1px solid var(--file-box-line-hover);
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.file-box-action > .icon {
+    width: 17px;
+    height: 17px;
+    background-color: var(--icon-color-primary);
+}
+
+.file-box-action:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.file-box-action.is-failed {
+    border-color: color-mix(in srgb, var(--danger-color) 45%, transparent);
+}
+
+.file-box-action.is-failed > .icon {
+    background-color: var(--danger-color);
+}
+
+.file-box-action.is-failed:hover {
+    background: var(--danger-color-hover);
+    border-color: var(--danger-color);
+}
+
+/* Cancel is grey until you reach for it, then it says what it will do. */
+.file-box-action.is-cancel > .icon {
+    background-color: var(--file-box-glyph);
+}
+
+.file-box-action.is-cancel:hover {
+    background: var(--danger-color-hover);
+    border-color: var(--danger-color);
+}
+
+.file-box-action.is-cancel:hover > .icon {
+    background-color: var(--danger-color);
+}
+
+/* The Mini App session line keeps its own colour: it reports a live thing, not a file state. */
+.file-box-session {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 3px;
+    font-size: 0.8em;
+}
+
+.file-box-peers {
+    padding: 2px 8px;
+    border-radius: 10px;
+    background-color: color-mix(in srgb, var(--icon-color-primary) 15%, transparent);
+    border: 0.5px solid color-mix(in srgb, var(--icon-color-primary) 30%, transparent);
+    color: var(--icon-color-primary);
+    font-size: 0.85em;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+}
+
+@media (max-width: 480px) {
+    .file-box {
+        gap: 10px;
+        padding: 10px;
+    }
+}
+
+/* The pending-download affordance over a thumbhash blur. Same language as the file
+   box, sized off the picture underneath: a banner gets the icon and both lines, a
+   sliver gets the icon alone rather than text it cannot show. */
+.thumb-download {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 94%;
+    max-height: 94%;
+    box-sizing: border-box;
+    padding: 10px;
+    border: 1px solid var(--file-box-line-hover);
+    border-radius: 12px;
+    background: rgba(12, 12, 12, 0.82);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    cursor: pointer;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.thumb-download:not(.is-compact):hover {
+    background: rgba(24, 24, 24, 0.88);
+    border-color: #4a4a4a;
+}
+
+/* Too small for the wording, so the panel goes with it: the icon tile IS the button,
+   and takes over the backdrop the panel was carrying. */
+.thumb-download.is-compact {
+    gap: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+}
+
+.thumb-download.is-compact .thumb-download-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: rgba(12, 12, 12, 0.82);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.thumb-download.is-compact:hover .thumb-download-icon {
+    background: rgba(24, 24, 24, 0.88);
+    border-color: #4a4a4a;
+}
+
+.thumb-download-icon {
+    position: relative;
+    flex: none;
+    width: 44px;
+    height: 44px;
+    /* Media smaller than the tile still has to fit it. */
+    max-width: 100%;
+    max-height: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--file-box-line-hover);
+    border-radius: 10px;
+}
+
+/* Proportional, so the glyph keeps its weight when the tile shrinks to fit small media. */
+.thumb-download-icon > .icon {
+    width: 64%;
+    height: 64%;
+    background-color: var(--icon-color-primary);
+}
+
+.thumb-download.is-failed .thumb-download-icon {
+    border-color: color-mix(in srgb, var(--danger-color) 45%, transparent);
+}
+
+.thumb-download.is-failed .thumb-download-icon > .icon {
+    background-color: var(--danger-color);
+}
+
+.thumb-download-text {
+    min-width: 0;
+    padding-right: 4px;
+    text-align: left;
+    line-height: 1.25;
+}
+
+.thumb-download-title {
+    display: block;
+    color: var(--file-box-title);
+    font-size: 14px;
+    font-weight: 400;
+}
+
+.thumb-download-sub {
+    display: block;
+    margin-top: 2px;
+    color: var(--file-box-dim);
+    font-size: 12px;
+}
+
+/* The ring is unchanged; a line hangs under it carrying a transfer rate or a publish
+   notice, and only where one fits. The overlay sizes its child against the media, so
+   the pair takes the cap the bare ring would have taken. */
+.attachment-progress-overlay > .media-progress {
+    flex: none;
+    max-width: 70cqmin;
+    max-height: 70cqmin;
+}
+
+.media-progress {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+/* Hung off the ring rather than stacked with it, so the ring is placed once and
+   nothing beside it (the cancel button centres on the same axis) is displaced. */
+.media-progress-note {
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 50%;
+    color: rgba(255, 255, 255, 0.82);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+    white-space: nowrap;
+    /* Rises the last few pixels into place as it fades, so it reads as settling out of
+       the ring above rather than being switched on. */
+    opacity: 0;
+    transform: translateX(-50%) translateY(4px);
+    transition: opacity 0.28s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.media-progress-note.is-visible {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}
+
 /* Custom Audio Player Styles */
 .custom-audio-player {
     gap: 12px;
@@ -10949,19 +11305,18 @@ select:disabled:hover {
     margin-bottom: 6px;
 }
 
-/* Mini App boxes are tap-to-launch buttons — size to content so the visible
-   border matches the click target (the audio width would leave a wide blank
-   strip that still opens the app when tapped). The wrapper carries the click
-   handler, so it must hug the box too — a block-width wrapper would keep the
-   dead strip tappable even with the inner box shrunk. */
-.miniapp-attachment {
+/* Every file box is a tap target — open, download, retry — so the visible border
+   has to be the whole of it. The wrapper carries the click handler, so it hugs the
+   box too: a block-width wrapper leaves a dead strip beside the box that still
+   opens the file when tapped. The transfer line is kept from resizing the box by
+   the fixed slot on `.file-box-rate`. */
+.file-attachment {
     width: fit-content;
-}
-.miniapp-attachment .custom-audio-player {
-    width: fit-content;
-    min-width: 240px;
+    /* The same cap the box takes: without it a long filename stretches the wrapper
+       past the box it is meant to hug, and the overhang is still tappable. */
     max-width: min(500px, calc(100vw - 100px));
 }
+
 
 .custom-audio-player-inner {
     display: flex;
@@ -15858,25 +16213,6 @@ hr {
   max-height: 70cqmin;
 }
 
-/* Cancel button for file box uploads — positioned over the spinner inside .custom-audio-player */
-.custom-audio-player > .upload-cancel-btn {
-  position: absolute;
-  left: 15px;
-  top: 0;
-  bottom: 0;
-  margin: auto;
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-  cursor: pointer;
-  background: rgba(0, 0, 0, 0.6);
-  border-radius: 50%;
-  z-index: 3;
-}
 /* Cancel button for image/video uploads — sized to fill the spinner's donut
  * hole exactly. Spinner is 48x48 with a ~4px ring (mask leaves an inner 40px
  * hole), so a 40x40 inner button kisses the ring without covering it. */
@@ -15924,7 +16260,6 @@ hr {
   color: white;
   font-size: 16px;
 }
-.custom-audio-player:hover > .upload-cancel-btn,
 .attachment-progress-overlay:hover > .upload-cancel-btn {
   opacity: 1;
 }
@@ -18036,7 +18371,10 @@ textarea.command-part-input {
 .dmsg:hover                            { background: var(--dmsg-hover-bg); }
 .dmsg[data-pinged="true"]              { background: var(--dmsg-pinged-bg); border-left-color: var(--dmsg-pinged-border); }
 .dmsg[data-replying-to="true"]         { background: var(--dmsg-replying-bg); border-left-color: var(--dmsg-replying-border); }
-.dmsg[data-status="pending"] .dmsg-content { opacity: var(--dmsg-pending-opacity); }
+/* A file box in flight carries its own progress bar and cancel button, which say
+   "not sent yet" better than a wash does. Opacity composites the whole subtree, so the
+   box cannot opt out from inside — the row has to stop dimming instead. */
+.dmsg[data-status="pending"] .dmsg-content:not(:has(.file-attachment)) { opacity: var(--dmsg-pending-opacity); }
 /* Failed sends need a row-level signal — the inline "Failed" text alone
    gets lost on rich attachments. Red left border + soft red wash matches
    the ping/reply pattern, and the attachment gets dimmed so a failed image

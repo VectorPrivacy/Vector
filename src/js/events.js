@@ -345,6 +345,8 @@ async function setupRustListeners() {
     // Upload progress lands in the transfer store; the attachment components read it.
     _on('attachment_upload_progress', async (evt) => {
         VectorSvelte.uploadProgressed(evt.payload.id, evt.payload.progress, evt.payload.bytesSent);
+        // The last byte retires the cancel, and the toolbar may already be open over it.
+        if (evt.payload.progress >= 100) refreshMessageToolbar();
     });
 
     // Listen for backend error toasts
@@ -423,6 +425,29 @@ async function setupRustListeners() {
                     if (memMsg) updateMessageRow(memMsg, msgId);
                 }
                 softChatScroll();
+            }
+        } else if (evt.payload.cancelled) {
+            // Stopped on purpose: the file is pending again, not broken. The flag is
+            // what keeps auto-download from starting the same file over on the next
+            // repaint; asking for it again clears it.
+            const stoppedMsgIds = [];
+            for (const msg of cChat.messages) {
+                let touched = false;
+                for (const att of msg.attachments) {
+                    if (att.id === matchId) {
+                        att.downloading = false;
+                        att.download_failed = false;
+                        att.download_cancelled = true;
+                        touched = true;
+                    }
+                }
+                if (touched) stoppedMsgIds.push(msg.id);
+            }
+            if (strOpenChat === evt.payload.profile_id) {
+                for (const msgId of stoppedMsgIds) {
+                    const memMsg = cChat.messages.find(m => m.id === msgId);
+                    if (memMsg) updateMessageRow(memMsg, msgId);
+                }
             }
         } else {
             // Download failed — mark EVERY loaded copy failed first. The auto-download
@@ -589,10 +614,12 @@ async function setupRustListeners() {
             const cChat = arrChats.find(c => c.id === row.id);
             if (!cChat) continue;
             if (cChat.muted === row.muted && cChat.notify === row.notify
-                && cChat.everyone_pings === row.everyone) continue;
+                && cChat.everyone_pings === row.everyone
+                && cChat.community_muted === row.community_muted) continue;
             cChat.muted = row.muted;
             cChat.notify = row.notify;
             cChat.everyone_pings = row.everyone;
+            cChat.community_muted = row.community_muted;
             chatChanged(cChat);
             any = true;
         }
@@ -1084,6 +1111,9 @@ async function setupRustListeners() {
 
     _on('attachment_update', (evt) => {
         const { chat_id, message_id, attachment_id, url } = evt.payload;
+        // The upload landed; what remains is the publish, which cannot be called off.
+        VectorSvelte.uploadPublishing(message_id);
+        refreshMessageToolbar();
         const cChat = getChat(chat_id);
         if (!cChat) return;
 

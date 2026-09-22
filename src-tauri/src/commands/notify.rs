@@ -154,6 +154,7 @@ pub async fn reconcile_mirror() {
                 "muted": want.muted,
                 "notify": want.ring.as_u8(),
                 "everyone": notify::everyone_pings_for_chat(&state.chats[i]),
+                "community_muted": notify::community_muted_for_chat(&state.chats[i]),
             }));
         }
         let slims: Vec<_> = state

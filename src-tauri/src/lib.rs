@@ -946,6 +946,7 @@ pub fn run() {
             // Attachment commands (commands/attachments.rs)
             commands::attachments::generate_thumbhash_preview,
             commands::attachments::decode_thumbhash,
+            commands::attachments::cancel_download,
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,
             commands::attachments::can_install_apks,

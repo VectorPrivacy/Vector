@@ -170,6 +170,11 @@ function initMessageToolbar() {
     _dmsgToolbarListenersAttached = true;
 }
 
+/** The cancel lapses mid-hover when the last byte lands, so the open toolbar re-reads it. */
+function refreshMessageToolbar() {
+    if (_dmsgToolbarTarget && _dmsgToolbarTarget.isConnected) showMessageToolbar(_dmsgToolbarTarget);
+}
+
 function showMessageToolbar(rowEl) {
     // Mobile has no hover: taps would otherwise pop this corner toolbar. Touch
     // surfaces use press-and-hold (context menu) + swipe (reply) instead.
@@ -197,9 +202,11 @@ function _dmsgToolbarView(rowEl) {
     const msg = _dmsgLookupMessage(rowEl);
 
     // Pending messages aren't on the wire yet. An attachment upload gets a single cancel;
-    // a plain text send has no cancel path, so its toolbar stays suppressed.
+    // a plain text send has no cancel path, so its toolbar stays suppressed. Past the last
+    // byte there is nothing to stop either, only a blob to strand on the media server.
     if (status === 'pending') {
         if (!(msg && msg.attachments && msg.attachments.length)) return null;
+        if (VectorSvelte.transferPublishing(rowEl.id)) return null;
         return { show: { cancel: true }, path: null, del: null };
     }
 
@@ -706,9 +713,11 @@ async function _dmsgOpenMessageMenu(rowEl, x, y) {
         return;
     }
     // Pending: only attachment uploads are cancellable (a plain text send has no cancel path). The
-    // cancel flag is registered for messages with attachments (see sending.rs on_pending).
+    // cancel flag is registered for messages with attachments (see sending.rs on_pending). Once the
+    // bytes are out there is nothing left to stop, only a blob to strand, so the menu goes with the
+    // button rather than offering the one thing the backend now refuses.
     if (status === 'pending') {
-        if (msg && msg.attachments && msg.attachments.length) {
+        if (msg && msg.attachments && msg.attachments.length && !VectorSvelte.transferPublishing(targetId)) {
             items.push({ label: 'Cancel upload', icon: 'x', danger: true, onClick: () => invoke('cancel_upload', { pendingId: targetId }) });
             showContextMenu({ x, y, items });
         }

@@ -1,4 +1,6 @@
 use std::cmp::min;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 
 use futures_util::StreamExt;
 use reqwest::{self, Client};
@@ -10,6 +12,30 @@ pub use vector_core::SiteMetadata;
 
 use crate::simd::html_meta;
 
+/// Transfers the user asked to stop, keyed by the id their progress events carry.
+/// The reporter consults it once per chunk, so a stop lands inside the body read
+/// instead of after a mirror walk that can run for minutes.
+static CANCELLED_TRANSFERS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// The error a cancelled transfer returns. Callers must not retry on it.
+pub const TRANSFER_CANCELLED: &str = "Download cancelled";
+
+/// Ask the transfer reporting under `id` to stop at its next chunk.
+pub fn cancel_transfer(id: &str) {
+    CANCELLED_TRANSFERS.lock().unwrap().insert(id.to_ascii_lowercase());
+}
+
+/// Whether a stop is outstanding for `id`.
+pub fn transfer_cancelled(id: &str) -> bool {
+    CANCELLED_TRANSFERS.lock().unwrap().contains(&id.to_ascii_lowercase())
+}
+
+/// Drop `id`'s stop. The download owning the id clears it on entry and on exit,
+/// so a cancelled transfer never poisons the next attempt at the same file.
+pub fn clear_transfer_cancel(id: &str) {
+    CANCELLED_TRANSFERS.lock().unwrap().remove(&id.to_ascii_lowercase());
+}
+
 /// Trait for reporting download progress
 pub trait ProgressReporter {
     /// Report progress of a download
@@ -17,6 +43,13 @@ pub trait ProgressReporter {
 
     /// Report completion of a download
     fn report_complete(&self) -> Result<(), &'static str>;
+
+    /// Whether the user has asked this transfer to stop. Checked at the points a
+    /// download spends real time without reporting progress, so a stop during the
+    /// size probe lands as fast as one mid-body.
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 /// A no-op progress reporter that does nothing when progress is reported
@@ -57,6 +90,10 @@ impl<'a, R: tauri::Runtime> TauriProgressReporter<'a, R> {
 
 impl<'a, R: tauri::Runtime> ProgressReporter for TauriProgressReporter<'a, R> {
     fn report_progress(&self, percentage: Option<u8>, bytes_downloaded: Option<u64>, bytes_per_sec: Option<f64>) -> Result<(), &'static str> {
+        // Every download loop propagates this error, so it is also the stop signal.
+        if transfer_cancelled(self.attachment_id) {
+            return Err(TRANSFER_CANCELLED);
+        }
         let mut payload = json!({
             "id": self.attachment_id
         });
@@ -80,7 +117,14 @@ impl<'a, R: tauri::Runtime> ProgressReporter for TauriProgressReporter<'a, R> {
             .map_err(|_| "Failed to emit event")
     }
     
+    fn cancelled(&self) -> bool {
+        transfer_cancelled(self.attachment_id)
+    }
+
     fn report_complete(&self) -> Result<(), &'static str> {
+        if transfer_cancelled(self.attachment_id) {
+            return Err(TRANSFER_CANCELLED);
+        }
         self.handle
             .emit(
                 "attachment_download_progress",
@@ -194,6 +238,11 @@ pub async fn download_with_reporter(
     if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
         return Err("File exceeds the maximum download size");
     }
+    // The probe and the range sniff can burn seconds against a dead host without a
+    // byte to report, which is exactly when a user reaches for cancel.
+    if reporter.cancelled() {
+        return Err(TRANSFER_CANCELLED);
+    }
 
     // Based on findings, choose the appropriate download method
     match total_size {
@@ -255,6 +304,9 @@ async fn download_with_ranges(
     let mut speed_samples: Vec<f64> = Vec::with_capacity(10);
 
     while downloaded < total_size {
+        if reporter.cancelled() {
+            return Err(TRANSFER_CANCELLED);
+        }
         let end = min(downloaded + chunk_size - 1, total_size - 1);
         let chunk_start = std::time::Instant::now();
 
@@ -285,6 +337,9 @@ async fn download_with_ranges(
             // the exact unbounded read the byte cap exists to stop.
             let mut stream = chunk_res.bytes_stream();
             while let Some(item) = stream.next().await {
+                if reporter.cancelled() {
+                    return Err(TRANSFER_CANCELLED);
+                }
                 let chunk = item.map_err(|e| {
                     vector_core::log_warn!("[AttachmentDownload] full-body read failed for {}: {}", url, e);
                     "Failed to read chunk bytes"
@@ -385,6 +440,9 @@ async fn download_with_streaming(
     let mut stream = res.bytes_stream();
 
     while let Some(item) = stream.next().await {
+        if reporter.cancelled() {
+            return Err(TRANSFER_CANCELLED);
+        }
         let chunk = item.map_err(|e| {
             vector_core::log_warn!("[AttachmentDownload] stream interrupted for {}: {}", url, e);
             "Error downloading chunk"

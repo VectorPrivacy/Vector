@@ -78,7 +78,7 @@ async function startXdcUrlDownload(target, msg, url) {
         xdcUrlResolved.delete(xdcUrlCacheKey(msg, url));
         VectorSvelte.transferDone(url);
         VectorSvelte.mountFileBox(target, {
-            att: synth, msg, phase: 'download', h: _dmsgMediaHelpers,
+            att: synth, msg, phase: 'download', h: _dmsgMediaHelpers, failed: true,
             label: `Failed: ${String(e).slice(0, 48)} · Tap to Retry`, onActivate: () => startXdcUrlDownload(target, msg, url),
         });
     }

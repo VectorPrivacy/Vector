@@ -321,6 +321,12 @@ pub fn muted_for_chat(chat: &crate::chat::Chat) -> bool {
     resolve_chat(chat).muted
 }
 
+/// Whether a chat's COMMUNITY is itself silenced, rather than this one room inside it.
+/// A surface that stands for the whole space must not grey because one channel is quiet.
+pub fn community_muted_for_chat(chat: &crate::chat::Chat) -> bool {
+    community_of(chat).map_or(false, |id| prefs(id).muted_at(now_ms()))
+}
+
 /// The predicate the older `vector/mutes` projection is both WRITTEN and READ
 /// with. Publishing one shape and applying another is how an inherited mute
 /// ratchets into a permanent per-channel one.

@@ -807,7 +807,7 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
         name: cf.name || `Community ${chat.id.substring(0, 10)}...`,
         description: cf.description || '',
         avatarSrc: chat.metadata?.avatar_cached ? convertFileSrc(chat.metadata.avatar_cached) : null,
-        muted: !!chat.muted,
+        muted: !!chat.community_muted,
         isOwner: cf.is_owner === 'true',
         isV2: cf.proto_version === '2',
         caps: _communityCapsCache.get(communityId) || {},

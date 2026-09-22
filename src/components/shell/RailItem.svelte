@@ -16,10 +16,10 @@
             ? (chat.metadata?.custom_fields?.name || 'Community')
             : h.getName(profile || chat.id);
         // Community shortcuts total their channels, so unread in a collapsed channel still shows.
-        const unread = isCommunity ? h.computeListRowBadgeCount(chat) : h.computeRowBadgeCount(chat);
-        // A community earns a NUMBER only when someone called your name; ordinary unread
-        // is a dot: the room is awake without asking you to act.
-        const pings = isCommunity ? h.computeCommunityPingCount(chat) : unread;
+        const unread = isCommunity ? h.computeListRowUnreadCount(chat) : h.computeRowUnreadCount(chat);
+        // A NUMBER is for someone calling your name, or a room still set to tell you everything;
+        // ordinary unread is a dot: the room is awake without asking you to act.
+        const pings = isCommunity ? h.computeCommunityPingCount(chat) : h.computeRowBadgeCount(chat);
         return {
             name,
             twemoji: isCommunity || !!(profile?.nickname || profile?.name),
@@ -28,12 +28,12 @@
                 : h.getProfileAvatarSrc(profile) || null,
             unread,
             pings,
-            muted: !!chat.muted,
+            muted: isCommunity ? !!chat.community_muted : !!chat.muted,
             communityId,
         };
     });
 
-    const isDot = $derived(isCommunity && !vm.pings);
+    const isDot = $derived(!vm.pings);
 
     // Keyed on the string so a re-derive that yields the same name never restarts twemoji.
     function name(node, v) {
@@ -67,6 +67,7 @@
     class="ws-rail-item btn"
     class:is-community={isCommunity}
     class:is-quiet={isCommunity && !vm.unread}
+    class:is-muted={vm.muted}
     class:active
     id="ws-rail-item-{chat.id}"
     title={vm.name}

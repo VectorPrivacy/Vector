@@ -6,13 +6,19 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use tauri::Emitter;
 
 /// Cancel flags for in-progress uploads, keyed by pending message ID.
 pub(crate) static UPLOAD_CANCEL_FLAGS: LazyLock<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Pending ids whose bytes already reached a media server and are waiting only on
+/// the Nostr publish. There is nothing left to cancel by then: dropping the message
+/// here abandons the blob on the server with no event that ever references it.
+pub(crate) static UPLOADS_PUBLISHING: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
 
 use crate::{STATE, nostr_client};
 use crate::TAURI_APP;
@@ -43,6 +49,8 @@ impl SendCallback for TauriSendCallback {
         if !msg.attachments.is_empty() {
             let mut flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();
             flags.insert(msg.id.clone(), Arc::new(AtomicBool::new(false)));
+            // A resend reuses the id, so it must not inherit the last attempt's phase.
+            UPLOADS_PUBLISHING.lock().unwrap().remove(&msg.id);
         }
 
         if let Some(handle) = TAURI_APP.get() {
@@ -73,6 +81,12 @@ impl SendCallback for TauriSendCallback {
             }
         }
 
+        // Every byte is out: the server's answer and the serve-check are still to come,
+        // but there is no upload left to stop, only a blob to strand.
+        if percentage >= 100 {
+            UPLOADS_PUBLISHING.lock().unwrap().insert(pending_id.to_string());
+        }
+
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("attachment_upload_progress", serde_json::json!({
                 "id": pending_id,
@@ -84,6 +98,7 @@ impl SendCallback for TauriSendCallback {
     }
 
     fn on_upload_complete(&self, chat_id: &str, pending_id: &str, attachment_id: &str, url: &str) {
+        UPLOADS_PUBLISHING.lock().unwrap().insert(pending_id.to_string());
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("attachment_update", serde_json::json!({
                 "chat_id": chat_id,
@@ -96,6 +111,7 @@ impl SendCallback for TauriSendCallback {
 
     fn on_sent(&self, chat_id: &str, old_id: &str, msg: &Message) {
         UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(old_id);
+        UPLOADS_PUBLISHING.lock().unwrap().remove(old_id);
         // Mid-flight persists (upload progress, previews) can land a DB row
         // under the optimistic pending id; the finalized message saves under
         // its real id, orphaning that row as a ghost duplicate on reload.
@@ -118,6 +134,7 @@ impl SendCallback for TauriSendCallback {
 
     fn on_failed(&self, chat_id: &str, old_id: &str, msg: &Message) {
         UPLOAD_CANCEL_FLAGS.lock().unwrap().remove(old_id);
+        UPLOADS_PUBLISHING.lock().unwrap().remove(old_id);
         if let Some(handle) = TAURI_APP.get() {
             handle.emit("message_update", serde_json::json!({
                 "old_id": old_id,
@@ -546,6 +563,11 @@ pub async fn retry_failed_dm(receiver: String, message_id: String) -> Result<boo
 /// Removes the pending message from state and emits `message_removed`.
 #[tauri::command]
 pub async fn cancel_upload(pending_id: String) -> Result<(), String> {
+    // The bytes are already on the server: the only thing left to stop is the publish,
+    // and stopping that leaves a blob nothing will ever reference.
+    if UPLOADS_PUBLISHING.lock().unwrap().contains(&pending_id) {
+        return Ok(());
+    }
     // Set the cancel flag if upload is still in progress
     let was_in_progress = {
         let flags = UPLOAD_CANCEL_FLAGS.lock().unwrap();

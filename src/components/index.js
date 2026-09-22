@@ -22,7 +22,7 @@ import MessageList from './chat/MessageList.svelte';
 import CommandComposer from './composer/CommandComposer.svelte';
 import { openReactionTip, closeReactionTip, openReactionDetails, closeReactionDetails } from './lib/reactionpopups.svelte.js';
 import { setMessageToolbar } from './lib/toolbar.svelte.js';
-import { uploadProgressed, downloadProgressed, transferDone } from './lib/attachments.svelte.js';
+import { uploadProgressed, uploadPublishing, transferPublishing, downloadProgressed, transferDone } from './lib/attachments.svelte.js';
 import { setMiniappStatus } from './lib/miniapps.svelte.js';
 import FileBox from './chat/attachments/FileBox.svelte';
 import PackPreviewCard from './picker/PackPreviewCard.svelte';
@@ -90,7 +90,7 @@ export { setProfileSwitcherOpen, profileEls } from './lib/profilescreen.svelte.j
 export { overviewRoster, overviewState, setOverview };
 export { miniProfile, openMiniProfile, closeMiniProfile };
 export { setMessageToolbar };
-export { uploadProgressed, downloadProgressed, transferDone, setMiniappStatus };
+export { uploadProgressed, uploadPublishing, transferPublishing, downloadProgressed, transferDone, setMiniappStatus };
 export { pickerState, setPickerPacks, setPickerActive, setPickerQuery, bumpPickerRecents, bumpPickerChrome, setPanelMode, setPickerReady, setCreatorOpen, setPickerError, setPickerProgress, setPickerProgressDetail, setPickerConfirm, setPickerNaming, setPickerNamingError, setPickerCropperOpen };
 export { setCreator, setCreatorBusy, clearCreatorBusy, markCreatorBroken, setCreatorSaving, focusCreatorName };
 export { openPackDetails, resolvePackDetails, closePackDetails };

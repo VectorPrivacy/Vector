@@ -187,6 +187,7 @@ impl Chat {
             muted: resolved.muted,
             notify: resolved.ring.as_u8(),
             everyone_pings: crate::notify::everyone_pings_for_chat(self),
+            community_muted: crate::notify::community_muted_for_chat(self),
             wallpaper_path: self.wallpaper_path.clone(),
             wallpaper_ts: self.wallpaper_ts,
             wallpaper_blur: self.wallpaper_blur,
@@ -209,6 +210,7 @@ impl Chat {
             muted: resolved.muted,
             notify: resolved.ring.as_u8(),
             everyone_pings: crate::notify::everyone_pings_for_chat(self),
+            community_muted: crate::notify::community_muted_for_chat(self),
             wallpaper_path: self.wallpaper_path.clone(),
             wallpaper_ts: self.wallpaper_ts,
             wallpaper_blur: self.wallpaper_blur,
@@ -319,6 +321,10 @@ pub struct SerializableChat {
     /// community has not suppressed it.
     #[serde(default = "default_everyone_pings")]
     pub everyone_pings: bool,
+    /// Whether the COMMUNITY this chat belongs to is silenced, as opposed to the
+    /// chat itself. A surface standing for the whole space reads this one.
+    #[serde(default)]
+    pub community_muted: bool,
     #[serde(default)]
     pub wallpaper_path: String,
     #[serde(default)]

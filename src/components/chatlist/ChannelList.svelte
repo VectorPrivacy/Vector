@@ -6,7 +6,7 @@
 
     let { communityId, pane = false, h, onShown = () => {} } = $props();
     // h: getChannels, canAddChannels, channelsShown, sectionClosed, toggleSection, chatById,
-    //    computeRowBadgeCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelMenu,
+    //    computeRowUnreadCount, countPingMessages, isPrimaryChannelId, openChannel, openChannelMenu,
     //    attachLongPressContextMenu, createChannel, deleteChannel
 
     const state = $derived.by(() => {
@@ -61,8 +61,8 @@
     <div class="chatlist-channel" id="chatlist-channel-{channel.id}"
          class:active={openChatId() === channel.id}
          class:is-muted={!!chat?.muted}
-         class:has-unread={!chat?.muted && !!chat && h.computeRowBadgeCount(chat) > 0}
-         class:is-read={!chat?.muted && !(chat && h.computeRowBadgeCount(chat) > 0)}
+         class:has-unread={!!chat && h.computeRowUnreadCount(chat) > 0}
+         class:is-read={!(chat && h.computeRowUnreadCount(chat) > 0)}
          use:menu
          onclick={() => h.openChannel(communityId, channel)}>
         <span class="chatlist-channel-hash"><span class="icon icon-channel-hash"></span></span>
