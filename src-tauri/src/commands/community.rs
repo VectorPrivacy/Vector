@@ -1296,11 +1296,19 @@ async fn process_outbound_community_attachment(
             &name,
             use_compression,
             keep_metadata,
+            None,
         )
         .await;
     }
 
-    let bytes = std::fs::read(file_path).map_err(|e| format!("read attachment: {e}"))?;
+    // The preview already compressed this file (or is still at it): a compressed send
+    // uses that result, a full-resolution one only its thumbhash.
+    let precompressed = crate::message::files::take_precompressed(file_path, use_compression && !keep_metadata).await;
+    let path = file_path.to_string();
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("read attachment: {e}"))?;
     let name = if !name_override.is_empty() {
         name_override.to_string()
     } else {
@@ -1310,7 +1318,7 @@ async fn process_outbound_community_attachment(
             .unwrap_or("")
             .to_string()
     };
-    process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata).await
+    process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata, precompressed).await
 }
 
 /// Encrypt a single outbound file (raw bytes + filename) for a Community message.
@@ -1324,6 +1332,7 @@ async fn process_outbound_community_attachment_bytes(
     file_name: &str,
     use_compression: bool,
     keep_metadata: bool,
+    precompressed: Option<crate::message::types::CachedCompressedImage>,
 ) -> Result<PreparedCommunityAttachment, String> {
     use vector_core::types::Attachment;
 
@@ -1343,28 +1352,32 @@ async fn process_outbound_community_attachment_bytes(
     );
 
     // Process image bytes per the compress + keep-metadata choice: strips EXIF
-    // by default, bakes orientation into pixels, and re-attaches metadata when
-    // kept. GIFs and non-images pass through untouched. Parity with DM sends.
-    let (bytes, img_meta) = if is_image {
-        let processed = crate::message::compression::prepare_outbound_image(
-            std::sync::Arc::new(bytes), &extension, use_compression, keep_metadata,
-        )?;
-        extension = processed.extension;
-        (processed.bytes.as_ref().clone(), processed.img_meta)
-    } else {
-        (bytes, None)
-    };
-
-    let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
-
-    // Save the plaintext locally (keyed by hash, matching the inbound path convention) so
-    // the sender's optimistic bubble renders immediately as a downloaded file.
+    // by default, keeps orientation, and re-attaches metadata when kept. GIFs and
+    // non-images pass through untouched. Parity with DM sends. Hashing and the
+    // local save ride the same blocking task: each is a full pass over the bytes.
     let dir = vector_core::db::get_download_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let local_path = dir.join(format!("{}.{}", plaintext_hash, extension));
-    if !local_path.exists() {
-        let _ = std::fs::write(&local_path, &bytes);
-    }
+    let (bytes, img_meta, extension, plaintext_hash, local_path) = tokio::task::spawn_blocking(move || {
+        let (bytes, img_meta) = if is_image {
+            let processed = crate::message::compression::process_image_for_send(
+                std::sync::Arc::new(bytes), &extension, use_compression, keep_metadata, precompressed,
+            )?;
+            extension = processed.extension;
+            (std::sync::Arc::try_unwrap(processed.bytes).unwrap_or_else(|a| (*a).clone()), processed.img_meta)
+        } else {
+            (bytes, None)
+        };
+        let plaintext_hash = vector_core::crypto::sha256_hex(&bytes);
+        // Save the plaintext locally (keyed by hash, matching the inbound path convention)
+        // so the sender's optimistic bubble renders immediately as a downloaded file.
+        let _ = std::fs::create_dir_all(&dir);
+        let local_path = dir.join(format!("{}.{}", plaintext_hash, extension));
+        if !local_path.exists() {
+            let _ = std::fs::write(&local_path, &bytes);
+        }
+        Ok::<_, String>((bytes, img_meta, extension, plaintext_hash, local_path))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
 
     // Smart-forward: a prior verified send/download of these exact bytes left a
     // decryptable blob behind — reference it instead of re-encrypting and
@@ -1387,7 +1400,10 @@ async fn process_outbound_community_attachment_bytes(
         }
         None => {
             let params = vector_core::crypto::generate_encryption_params();
-            let encrypted = vector_core::crypto::encrypt_data(&bytes, &params)?;
+            let (plain, p) = (bytes, vector_core::crypto::EncryptionParams { key: params.key.clone(), nonce: params.nonce.clone() });
+            let encrypted = tokio::task::spawn_blocking(move || vector_core::crypto::encrypt_data(&plain, &p))
+                .await
+                .map_err(|e| e.to_string())??;
             let size = encrypted.len() as u64;
             (params.key, params.nonce, String::new(), encrypted, size, false)
         }
@@ -1459,7 +1475,7 @@ pub(crate) async fn send_community_voice_bytes(
     bytes: Vec<u8>,
     replied_to: Option<String>,
 ) -> Result<(), String> {
-    let mut prepared = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false, false).await?;
+    let mut prepared = process_outbound_community_attachment_bytes(bytes, "voice-message.wav", false, false, None).await?;
     prepared.attachment.name = String::new();
     dispatch_community_attachment_message(channel_id, String::new(), replied_to, vec![prepared]).await.map(|_| ())
 }
@@ -1476,6 +1492,8 @@ pub async fn send_community_cached_file(
     keep_metadata: bool,
     replied_to: Option<String>,
 ) -> Result<(), String> {
+    // The paste's background compression, if it finished.
+    let precompressed = crate::message::files::JS_COMPRESSION_CACHE.lock().await.take();
     // Take ownership of the cached bytes + name + extension, clearing in one lock.
     let (bytes, cache_name, cache_ext) = {
         let mut cache = crate::message::files::JS_FILE_CACHE.lock().unwrap();
@@ -1492,7 +1510,7 @@ pub async fn send_community_cached_file(
     if std::path::Path::new(&name).extension().is_none() && !cache_ext.is_empty() {
         name = format!("{}.{}", name, cache_ext);
     }
-    let prepared = vec![process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata).await?];
+    let prepared = vec![process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata, precompressed).await?];
     dispatch_community_attachment_message(channel_id, content, replied_to, prepared).await.map(|_| ())
 }
 

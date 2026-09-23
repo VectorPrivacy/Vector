@@ -723,9 +723,9 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
 
         return if let Some(ref attached_file) = file {
             // File DM: vector-core handles encrypt + upload + send
-            let result = vector_core::sending::send_file_dm(
+            let result = vector_core::sending::send_file_dm_with_meta(
                 &receiver, Arc::clone(&attached_file.bytes),
-                &attached_file.name, &attached_file.extension,
+                &attached_file.name, &attached_file.extension, attached_file.img_meta.clone(),
                 if content.is_empty() { None } else { Some(&content) },
                 if replied_to.is_empty() { None } else { Some(&replied_to) },
                 &config, callback.clone(),

@@ -39,7 +39,7 @@ strip = false
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
-# The at-rest AEADs + hashes the unlock path runs alongside the KDF.
+# The AEADs + hashes the unlock path and every attachment's encrypt and hash run.
 [profile.dev.package.aes-gcm]
 opt-level = 3
 [profile.dev.package.aes]
@@ -49,6 +49,48 @@ opt-level = 3
 [profile.dev.package.chacha20]
 opt-level = 3
 [profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3
+[profile.dev.package.polyval]
+opt-level = 3
+[profile.dev.package.ctr]
+opt-level = 3
+[profile.dev.package.universal-hash]
+opt-level = 3
+[profile.dev.package.bitcoin_hashes]
+opt-level = 3
+# The image stack: every attachment preview and send decodes, resizes or re-encodes,
+# and unoptimized a phone photo costs seconds per pass rather than tens of ms.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.simd-adler32]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.weezl]
+opt-level = 3
+[profile.dev.package.tiff]
+opt-level = 3
+[profile.dev.package.fast-thumbhash]
+opt-level = 3
+[profile.dev.package.little_exif]
 opt-level = 3
 
 [lib]

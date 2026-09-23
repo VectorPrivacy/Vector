@@ -1043,8 +1043,11 @@ pub fn generate_image_metadata(file_bytes: &[u8]) -> Option<crate::types::ImageM
     let width = img.width();
     let height = img.height();
 
-    let rgba = img.to_rgba8();
-    let thumbhash = generate_thumbhash_from_rgba(rgba.as_raw(), width, height)?;
+    // Shrink before converting: a full-resolution RGBA copy of a phone photo is
+    // ~50 MB, for a hash that reads 100 pixels a side.
+    let small = if width > 100 || height > 100 { img.thumbnail(100, 100) } else { img };
+    let rgba = small.to_rgba8();
+    let thumbhash = generate_thumbhash_from_rgba(rgba.as_raw(), rgba.width(), rgba.height())?;
 
     Some(crate::types::ImageMetadata {
         thumbhash,

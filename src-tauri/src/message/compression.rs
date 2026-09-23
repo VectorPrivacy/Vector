@@ -25,11 +25,16 @@ use crate::android::filesystem;
 /// - full-res + keep   -> ship the original bytes untouched (all metadata + orientation intact)
 ///
 /// GIFs are always shipped as-is to preserve animation.
+///
+/// `thumbhash_hint` is a thumbhash already made from these pixels (the preview's
+/// pre-compression): a branch that keeps the pixels as they are pairs it with the
+/// header's dimensions instead of decoding the whole image for them.
 pub(crate) fn prepare_outbound_image(
     bytes: Arc<Vec<u8>>,
     extension: &str,
     compress: bool,
     keep_metadata: bool,
+    thumbhash_hint: Option<&str>,
 ) -> Result<CachedCompressedImage, String> {
     use crate::shared::image::{
         calculate_resize_dimensions, encode_rgba_auto, reattach_exif_jpeg,
@@ -47,8 +52,15 @@ pub(crate) fn prepare_outbound_image(
     // These passthrough/lossless branches only decode to build preview metadata,
     // so a decode failure (e.g. an image past the bounded-decoder's size limit)
     // must NOT fail the send — ship the bytes with img_meta = None.
-    let meta_opt = |b: &[u8]| vector_core::crypto::decode_image_bounded(b).ok()
-        .and_then(|img| meta_from(&img));
+    let meta_opt = |b: &[u8]| {
+        thumbhash_hint
+            .filter(|t| !t.is_empty())
+            .and_then(|t| {
+                let (width, height) = crate::shared::image::header_dimensions_oriented(b)?;
+                Some(ImageMetadata { thumbhash: t.to_string(), width, height })
+            })
+            .or_else(|| vector_core::crypto::decode_image_bounded(b).ok().and_then(|img| meta_from(&img)))
+    };
 
     // GIF: never re-encode (would drop animation). Metadata is read off the
     // first frame; GIFs don't carry EXIF anyway.
@@ -74,7 +86,7 @@ pub(crate) fn prepare_outbound_image(
     // Strip metadata at full resolution: drop the privacy tags losslessly while
     // keeping orientation, so the pixels are never re-encoded (no quality loss,
     // no file growth). Falls through to the re-encode below when a container
-    // can't be stripped in place (non-JPEG, or a JPEG carrying XMP/IPTC).
+    // can't be stripped in place (not JPEG or PNG, malformed, or a rotated PNG).
     if !keep_metadata && !compress {
         if let Some(stripped) = crate::shared::image::strip_metadata_keep_orientation(&bytes, extension) {
             let img_meta = meta_opt(&bytes);
@@ -242,7 +254,7 @@ pub(super) fn compress_bytes_internal(
 /// stripped + resized version). It's reused only when the user wants exactly
 /// that; every other combination re-derives from `original_bytes` so metadata
 /// and full-resolution choices are honoured.
-pub(super) fn process_image_for_send(
+pub(crate) fn process_image_for_send(
     original_bytes: Arc<Vec<u8>>,
     extension: &str,
     use_compression: bool,
@@ -254,7 +266,8 @@ pub(super) fn process_image_for_send(
             return Ok(pc);
         }
     }
-    prepare_outbound_image(original_bytes, extension, use_compression, keep_metadata)
+    let hint = precompressed.as_ref().and_then(|pc| pc.img_meta.as_ref()).map(|m| m.thumbhash.as_str());
+    prepare_outbound_image(original_bytes, extension, use_compression, keep_metadata, hint)
 }
 
 /// Internal function to compress an image and return cached data

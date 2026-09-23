@@ -766,12 +766,29 @@ pub async fn resend_failed_dm(
 
 /// Send a NIP-17 gift-wrapped file attachment DM.
 ///
-/// Flow: hash → save locally → encrypt → upload → build Kind 15 rumor → gift-wrap + send.
+/// Flow: hash → save locally → pending → encrypt → upload → build Kind 15 rumor → gift-wrap + send.
 pub async fn send_file_dm(
     receiver_npub: &str,
     file_bytes: Arc<Vec<u8>>,
     filename: &str,
     extension: &str,
+    content: Option<&str>,
+    reply_to: Option<&str>,
+    config: &SendConfig,
+    callback: Arc<dyn SendCallback>,
+) -> Result<SendResult, String> {
+    send_file_dm_with_meta(receiver_npub, file_bytes, filename, extension, None, content, reply_to, config, callback).await
+}
+
+/// [`send_file_dm`] for a caller that already holds the image's preview metadata,
+/// sparing a second full decode before the bubble can appear. `None` derives it.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_file_dm_with_meta(
+    receiver_npub: &str,
+    file_bytes: Arc<Vec<u8>>,
+    filename: &str,
+    extension: &str,
+    img_meta: Option<crate::types::ImageMetadata>,
     content: Option<&str>,
     reply_to: Option<&str>,
     config: &SendConfig,
@@ -794,8 +811,41 @@ pub async fn send_file_dm(
     let receiver = PublicKey::from_bech32(receiver_npub)
         .map_err(|e| format!("Invalid npub: {}", e))?;
 
-    let file_hash = crypto::sha256_hex(&file_bytes);
     let mime_type = crypto::mime_from_extension(extension);
+    let download_dir = crate::db::get_download_dir();
+
+    // Hash, save and (if not given) read the preview metadata off the runtime: each
+    // is a full pass over the bytes, and a runtime worker parked on one stalls every
+    // task queued behind it.
+    let (file_hash, local_path_str, img_meta) = {
+        let bytes = Arc::clone(&file_bytes);
+        let (filename, extension) = (filename.to_string(), extension.to_string());
+        tokio::task::spawn_blocking(move || {
+            let file_hash = crypto::sha256_hex(&bytes);
+            let _ = std::fs::create_dir_all(&download_dir);
+            // Save with an extension matching the actual content. The caller's
+            // `extension` is post-compression (e.g. JPEG when an original PNG was
+            // compressed), but `filename` may still carry the pre-compression one;
+            // JPEG bytes saved as `.png` would poison a later re-upload with a
+            // MIP-04 mismatch.
+            let local_name = if filename.is_empty() {
+                format!("{}.{}", &file_hash, extension)
+            } else {
+                let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(&filename);
+                format!("{}.{}", stem, extension)
+            };
+            // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
+            let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);
+            // Atomic write: temp file then rename
+            let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
+            let _ = std::fs::write(&tmp, &*bytes);
+            let _ = std::fs::rename(&tmp, &local_path);
+            let img_meta = img_meta.or_else(|| crypto::generate_image_metadata(&bytes));
+            (file_hash, local_path.to_string_lossy().to_string(), img_meta)
+        })
+        .await
+        .map_err(|e| format!("Attachment prep failed: {}", e))?
+    };
 
     // WebXDC Mini Apps: mint the realtime-channel topic at send time and carry
     // it on the rumor — locally-derived topics are asymmetric in DMs (each
@@ -804,31 +854,32 @@ pub async fn send_file_dm(
     let webxdc_topic = (extension.eq_ignore_ascii_case("xdc"))
         .then(|| crate::webxdc::mint_topic_id(&file_hash, &my_pk.to_hex()));
 
-    // Save file locally so the attachment is immediately viewable
-    let download_dir = crate::db::get_download_dir();
-    let _ = std::fs::create_dir_all(&download_dir);
-    // Save with an extension matching the actual content. The caller's
-    // `extension` argument is post-compression (e.g. JPEG when an
-    // original PNG was compressed), but `filename` is the user-facing
-    // name which may still carry the pre-compression extension. If we
-    // honored `filename` verbatim we'd save JPEG bytes as `.png` and
-    // poison any future re-upload with a MIP-04 mismatch.
-    let local_name = if filename.is_empty() {
-        format!("{}.{}", &file_hash, extension)
-    } else {
-        let stem = filename.rsplit_once('.').map(|(s, _)| s).unwrap_or(filename);
-        format!("{}.{}", stem, extension)
+    // The bubble goes up now, on fresh encryption parameters; a reused blob swaps in
+    // its own below. AES-GCM appends a 16-byte tag, so the size is known unencrypted.
+    let params = crypto::generate_encryption_params();
+    let attachment = Attachment {
+        id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
+        extension: extension.to_string(), name: filename.to_string(),
+        url: String::new(), path: local_path_str.clone(), size: file_bytes.len() as u64 + 16,
+        img_meta: img_meta.clone(), downloading: false, downloaded: true,
+        webxdc_topic: webxdc_topic.clone(),
+        ..Default::default()
     };
-    // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
-    let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);
-    // Atomic write: temp file then rename
-    let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
-    let _ = std::fs::write(&tmp, &*file_bytes);
-    let _ = std::fs::rename(&tmp, &local_path);
-    let local_path_str = local_path.to_string_lossy().to_string();
-
-    // === Generate image metadata (thumbhash + dimensions) for image files ===
-    let img_meta = crypto::generate_image_metadata(&file_bytes);
+    let msg = Message {
+        id: pending_id.clone(), content: content.unwrap_or("").to_string(),
+        replied_to: reply_to.unwrap_or("").to_string(),
+        at: now.as_millis() as u64, pending: true, mine: true,
+        npub: my_pk.to_bech32().ok(), attachments: vec![attachment.clone()],
+        // A lifespan is stamped after the upload; the bubble shows no clock until then.
+        expiration: if config.self_destruct_secs.is_some() { None } else { config.expiration },
+        ..Default::default()
+    };
+    {
+        let mut state = STATE.lock().await;
+        state.add_message_to_participant(receiver_npub, &msg);
+    }
+    callback.on_pending(receiver_npub, &msg);
+    let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 
     // === Smart-forward: reuse a prior upload of this exact plaintext ===
     //
@@ -847,38 +898,32 @@ pub async fn send_file_dm(
 
     // === Encrypt → upload → build rumor → send (skipped wholesale on reuse) ===
     let (att_key, att_nonce, att_url, encrypted_size, encrypted) = match &reused {
-        Some(r) => (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size, None),
+        Some(r) => {
+            let adopted = crate::compact::CompactAttachment::from_attachment(&Attachment {
+                key: r.key.clone(), nonce: r.nonce.clone(), url: r.url.clone(), size: r.size,
+                ..attachment.clone()
+            });
+            let mut state = STATE.lock().await;
+            state.update_message(&pending_id, |msg| {
+                if let Some(att) = msg.attachments.last_mut() {
+                    *att = adopted.clone();
+                }
+            });
+            (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size, None)
+        }
         None => {
-            let params = crypto::generate_encryption_params();
-            let encrypted = crypto::encrypt_data(&file_bytes, &params)?;
+            let bytes = Arc::clone(&file_bytes);
+            let key = params.key.clone();
+            let nonce = params.nonce.clone();
+            let encrypted = tokio::task::spawn_blocking(move || {
+                crypto::encrypt_data(&bytes, &crypto::EncryptionParams { key, nonce })
+            })
+            .await
+            .map_err(|e| format!("Encryption failed: {}", e))??;
             let size = encrypted.len() as u64;
             (params.key, params.nonce, String::new(), size, Some(encrypted))
         }
     };
-
-    let attachment = Attachment {
-        id: file_hash.clone(), key: att_key.clone(), nonce: att_nonce.clone(),
-        extension: extension.to_string(), name: filename.to_string(),
-        url: att_url.clone(), path: local_path_str.clone(), size: encrypted_size,
-        img_meta: img_meta.clone(), downloading: false, downloaded: true,
-        webxdc_topic: webxdc_topic.clone(),
-        ..Default::default()
-    };
-    let msg = Message {
-        id: pending_id.clone(), content: content.unwrap_or("").to_string(),
-        replied_to: reply_to.unwrap_or("").to_string(),
-        at: now.as_millis() as u64, pending: true, mine: true,
-        npub: my_pk.to_bech32().ok(), attachments: vec![attachment],
-        // A lifespan is stamped after the upload; the bubble shows no clock until then.
-        expiration: if config.self_destruct_secs.is_some() { None } else { config.expiration },
-        ..Default::default()
-    };
-    {
-        let mut state = STATE.lock().await;
-        state.add_message_to_participant(receiver_npub, &msg);
-    }
-    callback.on_pending(receiver_npub, &msg);
-    let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 
     // Upload to Blossom — bridge SendCallback.on_upload_progress to Blossom ProgressCallback
     let servers = crate::state::get_blossom_servers();

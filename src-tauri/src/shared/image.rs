@@ -701,50 +701,137 @@ fn little_exif_filetype(extension: &str) -> Option<little_exif::filetype::FileEx
     }
 }
 
-/// Scan a JPEG's marker segments for non-EXIF metadata, returning
-/// `(has_metadata, has_unclearable)`:
-/// - `has_metadata`: any XMP (APP1 without the `Exif\0\0` header), IPTC/Photoshop
-///   (APP13), Ducky (APP12), comment (COM), or other non-standard APPn is present.
-/// - `has_unclearable`: at least one of those can't be removed losslessly by
-///   little_exif (XMP, COM, and misc APP3-11/15) — so a strip must re-encode.
-///   APP12/APP13 are clearable in place, so they count as metadata but not as
-///   unclearable. JFIF (APP0), ICC (APP2), and Adobe (APP14) are benign structure
-///   and ignored entirely.
-fn jpeg_metadata_scan(bytes: &[u8]) -> (bool, bool) {
-    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
-        return (false, false); // not a JPEG
+
+/// Whether a JPEG segment is structure a decoder needs rather than metadata: every
+/// non-APPn segment, JFIF without a thumbnail, the ICC profile and the Adobe
+/// transform. `head` need only be the payload's first 14 bytes.
+fn jpeg_segment_is_structure(marker: u8, head: &[u8]) -> bool {
+    match marker {
+        // JFIF header only: the thumbnail dims (bytes 12, 13) must be zero.
+        0xE0 => head.starts_with(b"JFIF\0") && head.len() >= 14 && head[12] == 0 && head[13] == 0,
+        0xE2 => head.starts_with(b"ICC_PROFILE\0"),
+        0xEE => head.starts_with(b"Adobe"),
+        0xE1..=0xEF | 0xFE => false,
+        _ => true,
     }
-    let (mut has_metadata, mut has_unclearable) = (false, false);
-    let mut i = 2;
-    while i + 4 <= bytes.len() {
-        if bytes[i] != 0xFF {
-            break; // left the marker section
+}
+
+/// The PNG chunks rendering needs (image data, palette, transparency, colour space,
+/// density, APNG frames); every other chunk is metadata.
+const PNG_RENDER_CHUNKS: &[&[u8; 4]] = &[
+    b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP",
+    b"sBIT", b"cICP", b"mDCV", b"mDCv", b"cLLI", b"cLLi", b"bKGD", b"pHYs",
+    b"acTL", b"fcTL", b"fdAT",
+];
+
+/// [`image_bytes_have_metadata`] for JPEG and PNG, walking segment headers and
+/// seeking past everything else: a few KB are read however large the file. `None`
+/// for any other format, or a file too broken to walk.
+pub fn header_has_metadata<R: std::io::Read + std::io::Seek>(reader: &mut R, extension: &str) -> Option<bool> {
+    match extension.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => jpeg_has_metadata(reader),
+        "png" => png_has_metadata(reader),
+        _ => None,
+    }
+}
+
+fn read_n<R: std::io::Read>(reader: &mut R, n: usize) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; n];
+    reader.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Whether an EXIF block says anything beyond Orientation: another IFD0 tag (the
+/// camera, GPS and Exif sub-IFDs hang off it), or a second IFD (a thumbnail).
+/// A block that can't be read counts as saying something.
+fn exif_beyond_orientation(tiff: &[u8]) -> bool {
+    let read = || -> Option<bool> {
+        let le = match tiff.get(0..2)? {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let u16_at = |i: usize| tiff.get(i..i + 2).map(|b| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) });
+        let u32_at = |i: usize| tiff.get(i..i + 4).map(|b| if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) });
+        let ifd = u32_at(4)? as usize;
+        let entries = u16_at(ifd)? as usize;
+        for k in 0..entries {
+            if u16_at(ifd + 2 + k * 12)? != 0x0112 {
+                return Some(true);
+            }
         }
-        let marker = bytes[i + 1];
-        // Standalone markers (RSTn/SOI/EOI/TEM) carry no length field.
-        if marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
-            i += 2;
+        Some(u32_at(ifd + 2 + entries * 12)? != 0)
+    };
+    read().unwrap_or(true)
+}
+
+/// Whether the strip would drop a segment: anything but structure, where an EXIF
+/// block holding only the orientation counts as structure too.
+fn jpeg_has_metadata<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<bool> {
+    use std::io::SeekFrom;
+    if read_n(r, 2)? != [0xFF, 0xD8] {
+        return None;
+    }
+    loop {
+        let mut m = [0u8; 2];
+        r.read_exact(&mut m).ok()?;
+        if m[0] != 0xFF {
+            return None;
+        }
+        match m[1] {
+            0xFF => { r.seek(SeekFrom::Current(-1)).ok()?; continue; }
+            0xDA | 0xD9 => return Some(false),
+            0x01 | 0xD0..=0xD7 => continue,
+            _ => {}
+        }
+        let len = u16::from_be_bytes(read_n(r, 2)?.try_into().ok()?) as usize;
+        let body = len.checked_sub(2)?;
+        if !(0xE0..=0xEF).contains(&m[1]) && m[1] != 0xFE {
+            r.seek(SeekFrom::Current(body as i64)).ok()?;
             continue;
         }
-        if marker == 0xDA {
-            break; // Start of Scan — compressed pixel data follows.
+        let head = read_n(r, body.min(14))?;
+        if m[1] == 0xE1 && head.starts_with(b"Exif\0\0") {
+            let mut tiff = head[6..].to_vec();
+            tiff.extend(read_n(r, body - head.len())?);
+            if exif_beyond_orientation(&tiff) {
+                return Some(true);
+            }
+            continue;
         }
-        let len = ((bytes[i + 2] as usize) << 8) | (bytes[i + 3] as usize);
-        if len < 2 || i + 2 + len > bytes.len() {
-            break; // malformed
+        if !jpeg_segment_is_structure(m[1], &head) {
+            return Some(true);
         }
-        let payload = &bytes[i + 4..i + 2 + len];
-        match marker {
-            0xE1 => if !payload.starts_with(b"Exif\0\0") { has_metadata = true; has_unclearable = true; }, // XMP
-            0xEC | 0xED => has_metadata = true, // APP12 / APP13 (IPTC): clearable in place
-            0xFE => { has_metadata = true; has_unclearable = true; } // COM
-            0xE0 | 0xE2 | 0xEE => {} // JFIF / ICC / Adobe: benign structure
-            0xE3..=0xEF => { has_metadata = true; has_unclearable = true; } // other APPn
-            _ => {} // DQT/DHT/SOF/... structural
-        }
-        i += 2 + len;
+        r.seek(SeekFrom::Current((body - head.len()) as i64)).ok()?;
     }
-    (has_metadata, has_unclearable)
+}
+
+/// Whether the strip would drop a chunk ahead of the pixels, where an `eXIf` holding
+/// only the orientation counts as none.
+fn png_has_metadata<R: std::io::Read + std::io::Seek>(r: &mut R) -> Option<bool> {
+    use std::io::SeekFrom;
+    // An EXIF block is a few KB; one claiming more is not something to read whole.
+    const EXIF_READ_CAP: usize = 1 << 20;
+    if read_n(r, 8)? != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    loop {
+        let head = read_n(r, 8)?;
+        let len = u32::from_be_bytes(head[0..4].try_into().ok()?) as usize;
+        let ty = &head[4..8];
+        match ty {
+            b"IDAT" | b"IEND" => return Some(false),
+            b"eXIf" if len > EXIF_READ_CAP => return Some(true),
+            b"eXIf" => {
+                if exif_beyond_orientation(&read_n(r, len)?) {
+                    return Some(true);
+                }
+                r.seek(SeekFrom::Current(4)).ok()?;
+            }
+            _ if !PNG_RENDER_CHUNKS.iter().any(|k| k.as_slice() == ty) => return Some(true),
+            _ => { r.seek(SeekFrom::Current(len as i64 + 4)).ok()?; }
+        }
+    }
 }
 
 /// Whether an image carries strip-worthy metadata — EXIF tags beyond Orientation
@@ -755,13 +842,9 @@ pub fn image_bytes_have_metadata(bytes: &[u8], extension: &str) -> bool {
     use little_exif::metadata::Metadata;
     use little_exif::exif_tag::ExifTag;
 
-    // little_exif only reads EXIF; JPEG can also carry GPS in XMP/IPTC/APPn.
-    if matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg")
-        && jpeg_metadata_scan(bytes).0
-    {
-        return true;
+    if matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png") {
+        return header_has_metadata(&mut std::io::Cursor::new(bytes), extension).unwrap_or(false);
     }
-
     let Some(filetype) = little_exif_filetype(extension) else { return false; };
     match Metadata::new_from_vec(&bytes.to_vec(), filetype) {
         Ok(md) => (&md).into_iter().any(|tag| !matches!(tag, ExifTag::Orientation(_))),
@@ -769,51 +852,274 @@ pub fn image_bytes_have_metadata(bytes: &[u8], extension: &str) -> bool {
     }
 }
 
-/// Losslessly strip a JPEG's EXIF while keeping its Orientation tag.
+/// Losslessly strip an image's metadata while keeping its Orientation.
 ///
 /// The orientation tag reveals nothing (just which way is up), so keeping it lets
-/// us drop the privacy-relevant tags (GPS, camera, timestamps) without re-encoding
-/// the pixels — no quality loss and no file growth. The receiver's `<img>` still
-/// renders upright from the surviving tag.
+/// us drop the privacy-relevant tags (GPS, camera, timestamps, XMP, comments,
+/// embedded thumbnails) without re-encoding the pixels: no quality loss, no file
+/// growth, and none of the full decode + encode a re-encode costs.
 ///
-/// Restricted to JPEG: clears the EXIF (APP1), IPTC (APP13), and Ducky (APP12)
-/// segments in place — which covers iPhone/Android camera output and their
-/// Photoshop-IRB screenshots — then re-attaches only the orientation. Returns
-/// `None` (caller falls back to a re-encode that rebuilds from pixels, dropping
-/// every metadata segment) for non-JPEG containers or JPEGs carrying metadata
-/// little_exif can't remove in place (XMP, comments, misc APPn), keeping the
-/// privacy guarantee intact.
+/// JPEG and PNG are filtered segment by segment against an allowlist of what
+/// rendering needs, so anything unrecognised goes. Returns `None` (the caller
+/// re-encodes from pixels, which drops every metadata segment) for other
+/// containers, malformed files, and a PNG whose orientation isn't upright.
 pub fn strip_metadata_keep_orientation(bytes: &[u8], extension: &str) -> Option<Vec<u8>> {
-    use little_exif::metadata::Metadata;
-    use little_exif::exif_tag::ExifTag;
-    use little_exif::filetype::FileExtension;
+    match extension.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => strip_jpeg_metadata(bytes),
+        "png" => strip_png_metadata(bytes),
+        _ => None,
+    }
+}
 
-    if !matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg") {
+/// The EXIF orientation (1-8) a decoder would apply, read from the header alone.
+/// JPEG and PNG are read directly; anything else asks the decoder.
+fn header_orientation(bytes: &[u8]) -> Option<u8> {
+    if let Some(h) = jpeg_header(bytes) {
+        return h.orientation;
+    }
+    if let Some(h) = png_header(bytes) {
+        return h.orientation;
+    }
+    use image::ImageDecoder;
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    reader.limits(vector_core::crypto::bounded_image_limits());
+    let mut decoder = reader.into_decoder().ok()?;
+    decoder.orientation().ok().map(|o| o.to_exif())
+}
+
+/// An image's upright dimensions from its header alone: no pixels are decoded.
+pub fn header_dimensions_oriented(bytes: &[u8]) -> Option<(u32, u32)> {
+    let (w, h, orientation) = match (jpeg_header(bytes), png_header(bytes)) {
+        (Some(j), _) => (j.width?, j.height?, j.orientation?),
+        (_, Some(p)) => (p.width, p.height, p.orientation?),
+        _ => {
+            use image::ImageDecoder;
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+            reader.limits(vector_core::crypto::bounded_image_limits());
+            let mut decoder = reader.into_decoder().ok()?;
+            let (w, h) = decoder.dimensions();
+            (w, h, decoder.orientation().ok()?.to_exif())
+        }
+    };
+    // EXIF 5-8 turn the image a quarter, swapping its sides.
+    Some(if orientation >= 5 { (h, w) } else { (w, h) })
+}
+
+/// The Orientation tag of a TIFF-structured EXIF block: 1 when absent, `None` when
+/// the block can't be read (a caller then treats the orientation as unknown).
+fn exif_orientation(tiff: &[u8]) -> Option<u8> {
+    let le = match tiff.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16_at = |i: usize| tiff.get(i..i + 2).map(|b| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) });
+    let u32_at = |i: usize| tiff.get(i..i + 4).map(|b| if le { u32::from_le_bytes([b[0], b[1], b[2], b[3]]) } else { u32::from_be_bytes([b[0], b[1], b[2], b[3]]) });
+    let ifd = u32_at(4)? as usize;
+    let entries = u16_at(ifd)? as usize;
+    for k in 0..entries {
+        let entry = ifd + 2 + k * 12;
+        if u16_at(entry)? == 0x0112 {
+            let v = u16_at(entry + 8)?;
+            return Some(if (1..=8).contains(&v) { v as u8 } else { 1 });
+        }
+    }
+    Some(1)
+}
+
+/// What a JPEG's marker segments say before the scan: its size (from the frame
+/// header) and orientation (from the first EXIF block).
+struct JpegHeader {
+    width: Option<u32>,
+    height: Option<u32>,
+    orientation: Option<u8>,
+}
+
+/// Each marker segment ahead of the first scan: `(offset, marker, total length)`,
+/// or `None` for a file that isn't a JPEG or breaks off before its scan.
+fn jpeg_segments(bytes: &[u8]) -> Option<(Vec<(usize, u8, usize)>, usize)> {
+    if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return None;
     }
-    if jpeg_metadata_scan(bytes).1 {
-        return None; // unclearable metadata present — re-encode drops everything
+    let mut segments = Vec::new();
+    let mut i = 2;
+    loop {
+        if i + 4 > bytes.len() || bytes[i] != 0xFF {
+            return None;
+        }
+        let marker = bytes[i + 1];
+        match marker {
+            0xFF => { i += 1; continue; }
+            0xDA => return Some((segments, i)),
+            0xD9 => return None,
+            0x01 | 0xD0..=0xD7 => { segments.push((i, marker, 2)); i += 2; continue; }
+            _ => {}
+        }
+        let len = ((bytes[i + 2] as usize) << 8) | bytes[i + 3] as usize;
+        if len < 2 || i + 2 + len > bytes.len() {
+            return None;
+        }
+        segments.push((i, marker, 2 + len));
+        i += 2 + len;
     }
+}
 
-    let orientation: Option<u16> = Metadata::new_from_vec(&bytes.to_vec(), FileExtension::JPEG)
-        .ok()
-        .and_then(|md| (&md).into_iter().find_map(|t| match t {
-            ExifTag::Orientation(v) => v.first().copied(),
-            _ => None,
-        }));
+fn jpeg_header(bytes: &[u8]) -> Option<JpegHeader> {
+    let (segments, _) = jpeg_segments(bytes)?;
+    let mut header = JpegHeader { width: None, height: None, orientation: Some(1) };
+    let mut exif_seen = false;
+    for (at, marker, len) in segments {
+        let payload = &bytes[(at + 4).min(at + len)..at + len];
+        match marker {
+            // SOFn (not DHT, JPG or DAC): precision, height, width.
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) && payload.len() >= 5 => {
+                header.height = Some(u16::from_be_bytes([payload[1], payload[2]]) as u32);
+                header.width = Some(u16::from_be_bytes([payload[3], payload[4]]) as u32);
+            }
+            0xE1 if !exif_seen && payload.starts_with(b"Exif\0\0") => {
+                exif_seen = true;
+                header.orientation = exif_orientation(&payload[6..]);
+            }
+            _ => {}
+        }
+    }
+    Some(header)
+}
 
-    let mut out = bytes.to_vec();
-    // Any failure here means we can't guarantee a clean strip — bail to re-encode.
-    Metadata::clear_metadata(&mut out, FileExtension::JPEG).ok()?;       // EXIF (APP1)
-    Metadata::clear_app13_segment(&mut out, FileExtension::JPEG).ok()?;  // IPTC / Photoshop IRB
-    Metadata::clear_app12_segment(&mut out, FileExtension::JPEG).ok()?;  // Ducky
+/// What a PNG's chunks say ahead of its pixels: its size (IHDR) and orientation (eXIf).
+struct PngHeader {
+    width: u32,
+    height: u32,
+    orientation: Option<u8>,
+}
 
-    if matches!(orientation, Some(o) if o != 1) {
-        let mut md = Metadata::new();
-        md.set_tag(ExifTag::Orientation(vec![orientation.unwrap()]));
-        md.write_to_vec(&mut out, FileExtension::JPEG).ok()?;
+fn png_header(bytes: &[u8]) -> Option<PngHeader> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !bytes.starts_with(SIGNATURE) || bytes.get(12..16)? != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+    let height = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
+    let mut orientation = Some(1);
+    let mut off = SIGNATURE.len();
+    while off + 8 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[off..off + 4].try_into().ok()?) as usize;
+        let ty = &bytes[off + 4..off + 8];
+        if ty == b"IDAT" || ty == b"IEND" {
+            break;
+        }
+        if ty == b"eXIf" {
+            orientation = exif_orientation(bytes.get(off + 8..off + 8 + len)?);
+            break;
+        }
+        off = off.checked_add(12)?.checked_add(len)?;
+    }
+    Some(PngHeader { width, height, orientation })
+}
+
+/// A minimal EXIF APP1 segment carrying only the Orientation tag.
+fn orientation_app1(orientation: u8) -> Vec<u8> {
+    let mut v = vec![0xFF, 0xE1, 0x00, 0x22];
+    v.extend_from_slice(b"Exif\0\0");
+    v.extend_from_slice(b"MM\0\x2A\0\0\0\x08");
+    // One IFD entry: tag 0x0112, SHORT, count 1, value; then no next IFD.
+    v.extend_from_slice(&[0x00, 0x01, 0x01, 0x12, 0x00, 0x03, 0, 0, 0, 1, 0x00, orientation, 0, 0, 0, 0, 0, 0]);
+    v
+}
+
+/// Where a JPEG's compressed data ends: just past EOI, walking marker segments by
+/// their lengths and the entropy-coded runs between them, so bytes inside a table
+/// can't pass for an EOI. `None` for a file that never reaches one.
+fn jpeg_scan_end(bytes: &[u8], mut i: usize) -> Option<usize> {
+    while i + 1 < bytes.len() {
+        if bytes[i] != 0xFF {
+            return None;
+        }
+        let m = bytes[i + 1];
+        match m {
+            0xD9 => return Some(i + 2),
+            0xFF => { i += 1; continue; }
+            0x01 | 0xD0..=0xD7 => i += 2,
+            _ => {
+                if i + 4 > bytes.len() {
+                    return None;
+                }
+                let len = ((bytes[i + 2] as usize) << 8) | bytes[i + 3] as usize;
+                if len < 2 {
+                    return None;
+                }
+                i += 2 + len;
+            }
+        }
+        // Entropy-coded data runs until a real marker; FF00 is a stuffed byte and
+        // RSTn sits inside the scan. Only an FF can start either, so jump between them.
+        loop {
+            i += memchr::memchr(0xFF, bytes.get(i..)?)?;
+            match bytes.get(i + 1)? {
+                0x00 | 0xD0..=0xD7 => i += 2,
+                _ => break,
+            }
+        }
+    }
+    None
+}
+
+/// Keep what a JPEG decoder needs (tables, frame, scans, JFIF without a thumbnail,
+/// the ICC profile and the Adobe transform) and drop every other APPn and comment,
+/// then everything after EOI (MPF secondary images, trailers).
+fn strip_jpeg_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
+    let orientation = jpeg_header(bytes)?.orientation?;
+    let (segments, scan) = jpeg_segments(bytes)?;
+    let end = jpeg_scan_end(bytes, scan)?;
+    let mut out = Vec::with_capacity(end);
+    out.extend_from_slice(&[0xFF, 0xD8]);
+    // The orientation segment follows a leading JFIF, which must stay first.
+    let mut exif_at = 2;
+    for (at, marker, len) in segments {
+        let payload = &bytes[(at + 4).min(at + len)..at + len];
+        if jpeg_segment_is_structure(marker, payload) {
+            out.extend_from_slice(&bytes[at..at + len]);
+            if marker == 0xE0 && out.len() == 2 + len {
+                exif_at = out.len();
+            }
+        }
+    }
+    out.extend_from_slice(&bytes[scan..end]);
+    if orientation != 1 {
+        out.splice(exif_at..exif_at, orientation_app1(orientation));
     }
     Some(out)
+}
+
+/// Keep a PNG's rendering chunks (image data, palette, transparency, colour space,
+/// density, APNG frames) and drop the rest: text, eXIf, timestamps and anything
+/// private. Only an upright PNG: its orientation lives in the eXIf that goes.
+fn strip_png_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !bytes.starts_with(SIGNATURE) || header_orientation(bytes)? != 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(SIGNATURE);
+    let mut off = SIGNATURE.len();
+    loop {
+        if off + 12 > bytes.len() {
+            return None;
+        }
+        let len = u32::from_be_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]) as usize;
+        let end = off.checked_add(12)?.checked_add(len)?;
+        if end > bytes.len() {
+            return None;
+        }
+        let ty = &bytes[off + 4..off + 8];
+        if PNG_RENDER_CHUNKS.iter().any(|k| k.as_slice() == ty) {
+            out.extend_from_slice(&bytes[off..end]);
+        }
+        off = end;
+        if ty == b"IEND" {
+            return Some(out);
+        }
+    }
 }
 
 /// Re-attach the original photo's EXIF metadata (GPS, camera, timestamps) onto
@@ -899,7 +1205,7 @@ pub fn read_file_checked(path: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod metadata_scan_tests {
-    use super::jpeg_metadata_scan;
+    use super::{header_has_metadata, orientation_app1};
 
     // A JPEG marker segment: FF <marker> <len:u16 including these 2 bytes> <payload>.
     fn seg(marker: u8, payload: &[u8]) -> Vec<u8> {
@@ -914,32 +1220,35 @@ mod metadata_scan_tests {
         v.extend_from_slice(&[0xFF, 0xDA]); // SOS (stop)
         v
     }
-
-    #[test]
-    fn exif_and_iptc_are_clearable_not_unclearable() {
-        // EXIF (APP1 "Exif") + IPTC (APP13) — like an iOS screenshot.
-        let j = jpeg(&[seg(0xE1, b"Exif\0\0MM"), seg(0xED, b"Photoshop")]);
-        assert_eq!(jpeg_metadata_scan(&j), (true, false));
+    fn scan(bytes: &[u8], ext: &str) -> Option<bool> {
+        header_has_metadata(&mut std::io::Cursor::new(bytes), ext)
     }
 
     #[test]
-    fn xmp_and_comment_are_unclearable() {
-        let xmp = jpeg(&[seg(0xE1, b"http://ns.adobe.com/xap/1.0/\0")]);
-        assert_eq!(jpeg_metadata_scan(&xmp), (true, true));
-        let com = jpeg(&[seg(0xFE, b"a private note")]);
-        assert_eq!(jpeg_metadata_scan(&com), (true, true));
+    fn exif_iptc_xmp_and_comments_are_metadata() {
+        let gps_ifd = b"Exif\0\0MM\0\x2A\0\0\0\x08\0\x01\x88\x25\0\x04\0\0\0\x01\0\0\0\0\0\0\0\0";
+        assert_eq!(scan(&jpeg(&[seg(0xE1, gps_ifd)]), "jpg"), Some(true));
+        assert_eq!(scan(&jpeg(&[seg(0xED, b"Photoshop")]), "jpg"), Some(true));
+        assert_eq!(scan(&jpeg(&[seg(0xE1, b"http://ns.adobe.com/xap/1.0/\0")]), "jpg"), Some(true));
+        assert_eq!(scan(&jpeg(&[seg(0xFE, b"a private note")]), "jpg"), Some(true));
+        assert_eq!(scan(&jpeg(&[seg(0xE2, b"MPF\0offsets")]), "jpg"), Some(true), "the strip drops it");
+    }
+
+    #[test]
+    fn an_orientation_alone_is_not_metadata() {
+        assert_eq!(scan(&jpeg(&[orientation_app1(6)]), "jpeg"), Some(false));
     }
 
     #[test]
     fn benign_structure_is_ignored() {
-        // JFIF (APP0) + ICC (APP2) + Adobe (APP14) carry no privacy data.
-        let j = jpeg(&[seg(0xE0, b"JFIF\0"), seg(0xE2, b"ICC_PROFILE\0"), seg(0xEE, b"Adobe")]);
-        assert_eq!(jpeg_metadata_scan(&j), (false, false));
+        let j = jpeg(&[seg(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0"), seg(0xE2, b"ICC_PROFILE\0"), seg(0xEE, b"Adobe")]);
+        assert_eq!(scan(&j, "jpg"), Some(false));
     }
 
     #[test]
-    fn non_jpeg_scans_clean() {
-        assert_eq!(jpeg_metadata_scan(b"\x89PNG\r\n\x1a\n...."), (false, false));
+    fn other_formats_are_not_answered_here() {
+        assert_eq!(scan(b"\x89PNG\r\n\x1a\n....", "jpg"), None);
+        assert_eq!(scan(b"RIFF....WEBP", "webp"), None);
     }
 }
 
@@ -1227,3 +1536,149 @@ mod animated_visual_probe {
         }
     }
 }
+
+#[cfg(test)]
+mod lossless_strip_tests {
+    use super::*;
+
+    fn seg(marker: u8, payload: &[u8]) -> Vec<u8> {
+        let len = (payload.len() + 2) as u16;
+        let mut v = vec![0xFF, marker, (len >> 8) as u8, (len & 0xFF) as u8];
+        v.extend_from_slice(payload);
+        v
+    }
+
+    fn photo() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(64, 32, |x, y| image::Rgb([(x * 4) as u8, (y * 8) as u8, 120]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90).encode_image(&img).unwrap();
+        out.into_inner()
+    }
+
+    /// A camera-style JPEG: sideways EXIF, XMP, a comment, IPTC, and an MPF trailer.
+    fn tagged_photo() -> Vec<u8> {
+        let clean = photo();
+        let mut v = vec![0xFF, 0xD8];
+        v.extend(orientation_app1(6));
+        v.extend(seg(0xE1, b"http://ns.adobe.com/xap/1.0/\0<gps>51.5,-0.12</gps>"));
+        v.extend(seg(0xFE, b"a private note"));
+        v.extend(seg(0xED, b"Photoshop 3.0\0secret-caption"));
+        v.extend(seg(0xE2, b"MPF\0secondary-image-offsets"));
+        v.extend_from_slice(&clean[2..]);
+        v.extend_from_slice(b"\xFF\xD8trailing-depth-map-bytes\xFF\xD9");
+        v
+    }
+
+    fn pixels(bytes: &[u8]) -> Vec<u8> {
+        vector_core::crypto::decode_image_bounded(bytes).unwrap().to_rgb8().into_raw()
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn a_jpeg_loses_every_tag_but_its_orientation_and_keeps_its_pixels() {
+        let tagged = tagged_photo();
+        let out = strip_metadata_keep_orientation(&tagged, "jpg").expect("strips in place");
+        assert_eq!(pixels(&out), pixels(&tagged), "not a pixel re-encoded");
+        assert_eq!(header_orientation(&out), Some(6), "still upright on arrival");
+        assert_eq!(header_dimensions_oriented(&out), Some((32, 64)), "a quarter turn swaps the sides");
+        for secret in [&b"<gps>"[..], b"private note", b"secret-caption", b"MPF\0", b"depth-map"] {
+            assert!(!contains(&out, secret), "{} survived", String::from_utf8_lossy(secret));
+        }
+        assert_eq!(&out[out.len() - 2..], b"\xFF\xD9", "nothing after EOI");
+    }
+
+    #[test]
+    fn an_upright_jpeg_carries_no_exif_at_all() {
+        let mut v = vec![0xFF, 0xD8];
+        v.extend(seg(0xE1, b"Exif\0\0MM\0\x2A\0\0\0\x08\0\0\0\0\0\0"));
+        v.extend_from_slice(&photo()[2..]);
+        let out = strip_metadata_keep_orientation(&v, "jpeg").unwrap();
+        assert!(!contains(&out, b"Exif"));
+        assert_eq!(pixels(&out), pixels(&v));
+    }
+
+    #[test]
+    fn a_jfif_thumbnail_goes_but_a_bare_header_stays() {
+        let bare = [&b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0"[..]].concat();
+        let thumbed = [&b"JFIF\0\x01\x01\0\0\x01\0\x01\x01\x01"[..], &[9u8, 9, 9]].concat();
+        for (payload, kept) in [(bare, true), (thumbed, false)] {
+            let mut v = vec![0xFF, 0xD8];
+            v.extend(seg(0xE0, &payload));
+            v.extend_from_slice(&photo()[2..]);
+            let out = strip_metadata_keep_orientation(&v, "jpg").unwrap();
+            assert_eq!(contains(&out, &payload), kept);
+        }
+    }
+
+    #[test]
+    fn a_truncated_jpeg_falls_back_to_a_re_encode() {
+        let t = tagged_photo();
+        let cut = &t[..t.len() / 2];
+        assert!(strip_metadata_keep_orientation(cut, "jpg").is_none());
+    }
+
+    fn png_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut v = (data.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(ty);
+        v.extend_from_slice(data);
+        let mut crc = !0u32;
+        for &b in ty.iter().chain(data) {
+            crc ^= b as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        v.extend_from_slice(&(!crc).to_be_bytes());
+        v
+    }
+
+    /// A screenshot-style PNG: text, XMP, a private chunk and `eXIf` ahead of the pixels.
+    fn tagged_png(orientation: u8) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(40, 20, |x, y| image::Rgba([x as u8 * 6, y as u8 * 12, 7, 255]));
+        let mut clean = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img).write_to(&mut clean, image::ImageFormat::Png).unwrap();
+        let clean = clean.into_inner();
+        let ihdr_end = 8 + 12 + 13;
+        let exif = &orientation_app1(orientation)[10..];
+        let mut v = clean[..ihdr_end].to_vec();
+        v.extend(png_chunk(b"tEXt", b"Comment\0taken at home"));
+        v.extend(png_chunk(b"iTXt", b"XML:com.adobe.xmp\0\0\0\0\0<gps/>"));
+        v.extend(png_chunk(b"caBX", b"provenance-manifest"));
+        v.extend(png_chunk(b"eXIf", exif));
+        v.extend(png_chunk(b"pHYs", &[0, 0, 0x16, 0x25, 0, 0, 0x16, 0x25, 1]));
+        v.extend_from_slice(&clean[ihdr_end..]);
+        v
+    }
+
+    #[test]
+    fn a_png_keeps_its_pixels_and_density_and_drops_the_rest() {
+        let tagged = tagged_png(1);
+        let out = strip_metadata_keep_orientation(&tagged, "png").expect("strips in place");
+        assert_eq!(pixels(&out), pixels(&tagged));
+        assert!(contains(&out, b"pHYs"));
+        for secret in [&b"taken at home"[..], b"<gps/>", b"provenance", b"eXIf"] {
+            assert!(!contains(&out, secret), "{} survived", String::from_utf8_lossy(secret));
+        }
+    }
+
+    #[test]
+    fn what_the_strip_leaves_reads_as_clean() {
+        let has = |b: &[u8], ext| header_has_metadata(&mut std::io::Cursor::new(b), ext);
+        let jpeg = tagged_photo();
+        assert_eq!(has(&jpeg, "jpg"), Some(true));
+        assert_eq!(has(&strip_metadata_keep_orientation(&jpeg, "jpg").unwrap(), "jpg"), Some(false), "the kept orientation is not metadata");
+        let png = tagged_png(1);
+        assert_eq!(has(&png, "png"), Some(true));
+        assert_eq!(has(&strip_metadata_keep_orientation(&png, "png").unwrap(), "png"), Some(false));
+    }
+
+    #[test]
+    fn a_rotated_png_is_left_to_the_re_encode() {
+        assert!(strip_metadata_keep_orientation(&tagged_png(6), "png").is_none());
+    }
+}
+
+

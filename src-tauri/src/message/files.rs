@@ -208,14 +208,21 @@ pub fn get_cached_file_info() -> Result<Option<FileInfo>, String> {
 /// JS byte cache (Android / clipboard paste) when the path is empty. The path wins
 /// when given: the cache may still hold an earlier paste.
 #[tauri::command]
-pub fn generate_thumbhash_for_preview(file_path: String) -> Result<String, String> {
+pub async fn generate_thumbhash_for_preview(file_path: String) -> Result<String, String> {
+    // A synchronous command runs on the main thread, where a full decode freezes the UI.
+    tokio::task::spawn_blocking(move || thumbhash_for_preview(&file_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn thumbhash_for_preview(file_path: &str) -> Result<String, String> {
     let img = if file_path.is_empty() {
         let cache = JS_FILE_CACHE.lock().unwrap();
         let (bytes, _, _) = cache.as_ref().ok_or("No cached file and no file path provided")?;
         vector_core::crypto::decode_image_bounded(bytes)
             .map_err(|e| format!("Failed to decode cached image: {}", e))?
     } else {
-        ::image::open(&file_path)
+        ::image::open(file_path)
             .map_err(|e| format!("Failed to open image: {}", e))?
     };
 
@@ -228,7 +235,13 @@ pub fn generate_thumbhash_for_preview(file_path: String) -> Result<String, Strin
 /// hide the "Keep Metadata" toggle for screenshots/memes that have none. An empty
 /// `file_path` checks the JS-cached bytes (clipboard / File-object sends).
 #[tauri::command]
-pub fn file_has_metadata(file_path: String) -> Result<bool, String> {
+pub async fn file_has_metadata(file_path: String) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || has_metadata(file_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn has_metadata(file_path: String) -> Result<bool, String> {
     if file_path.is_empty() {
         let cache = JS_FILE_CACHE.lock().unwrap();
         Ok(match cache.as_ref() {
@@ -237,6 +250,13 @@ pub fn file_has_metadata(file_path: String) -> Result<bool, String> {
         })
     } else {
         let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+        // A JPEG or PNG is answered from its segment headers, never read whole.
+        if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
+            return Ok(std::fs::File::open(&file_path)
+                .ok()
+                .and_then(|mut f| crate::shared::image::header_has_metadata(&mut f, &ext))
+                .unwrap_or(false));
+        }
         match read_file_checked(&file_path) {
             Ok(bytes) => Ok(crate::shared::image::image_bytes_have_metadata(&bytes, &ext)),
             Err(_) => Ok(false),
@@ -262,7 +282,9 @@ pub async fn start_cached_bytes_compression() -> Result<(), String> {
     // Spawn compression task (no min_savings - checked later by caller)
     // spawn-detached: image compression — CPU work on bytes already in hand.
     tokio::spawn(async move {
-        let result = compress_bytes_internal(bytes, &extension, None);
+        let result = tokio::task::spawn_blocking(move || compress_bytes_internal(bytes, &extension, None))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
         let mut comp_cache = JS_COMPRESSION_CACHE.lock().await;
         *comp_cache = result.ok();
     });
@@ -309,9 +331,12 @@ pub async fn send_cached_file(receiver: String, replied_to: String, use_compress
     let is_image = matches!(original_extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
 
     let mut attachment_file = if is_image {
-        let processed = process_image_for_send(
-            original_bytes, &original_extension, use_compression, keep_metadata, precompressed,
-        )?;
+        let ext = original_extension.clone();
+        let processed = tokio::task::spawn_blocking(move || process_image_for_send(
+            original_bytes, &ext, use_compression, keep_metadata, precompressed,
+        ))
+        .await
+        .map_err(|e| e.to_string())??;
         AttachmentFile {
             bytes: processed.bytes,
             extension: processed.extension,
@@ -373,7 +398,10 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     let mut attachment_file = {
         #[cfg(not(target_os = "android"))]
         {
-            let file_bytes = read_file_checked(&file_path)?;
+            let path = file_path.clone();
+            let file_bytes = tokio::task::spawn_blocking(move || read_file_checked(&path))
+                .await
+                .map_err(|e| e.to_string())??;
 
             let extension = file_path
                 .rsplit('.')
@@ -428,14 +456,20 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         }
     };
 
+    // The preview's pre-compression is no use to a full-resolution send beyond its
+    // thumbhash. Taking the entry also drops a result still being made.
+    let precompressed = take_precompressed(&file_path, false).await;
+
     // Images (no compression here): strip metadata (default) or keep the
-    // original bytes untouched. Either way orientation is baked and preview
+    // original bytes untouched. Either way orientation is kept and preview
     // metadata is generated.
     if matches!(attachment_file.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
-        let processed = super::compression::process_image_for_send(
-            attachment_file.bytes.clone(), &attachment_file.extension,
-            /* use_compression */ false, keep_metadata, None,
-        )?;
+        let (bytes, extension) = (attachment_file.bytes.clone(), attachment_file.extension.clone());
+        let processed = tokio::task::spawn_blocking(move || super::compression::process_image_for_send(
+            bytes, &extension, /* use_compression */ false, keep_metadata, precompressed,
+        ))
+        .await
+        .map_err(|e| e.to_string())??;
         attachment_file.bytes = processed.bytes;
         attachment_file.extension = processed.extension;
         attachment_file.img_meta = processed.img_meta;
@@ -596,7 +630,10 @@ pub async fn start_image_precompression(file_path: String) -> Result<(), String>
     let path_clone = file_path.clone();
     // spawn-detached: same, for a path already resolved.
     tokio::spawn(async move {
-        let result = compress_image_internal(&path_clone);
+        let path_for_work = path_clone.clone();
+        let result = tokio::task::spawn_blocking(move || compress_image_internal(&path_for_work))
+            .await
+            .unwrap_or_else(|e| Err(e.to_string()));
         let mut cache = COMPRESSION_CACHE.lock().await;
 
         // Only store if still in cache (not cancelled)
@@ -1008,6 +1045,26 @@ pub fn cleanup_zip() -> Result<(), String> {
     Ok(())
 }
 
+/// Take the preview's pre-compression of `file_path` out of the cache. `wait` awaits a
+/// run still in progress, for a send that will use the compressed bytes; otherwise a
+/// run in progress is dropped on arrival.
+///
+/// The wait is time-bounded: the notifier fires via notify_waiters() (which stores no
+/// permit), so a completion landing between the status read and the await would
+/// otherwise hang forever; on timeout the cache is simply re-read.
+pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<CachedCompressedImage> {
+    if wait {
+        let status = { COMPRESSION_CACHE.lock().await.get(file_path).cloned() };
+        if let Some(None) = status {
+            let notify = { super::types::COMPRESSION_NOTIFY.lock().await.get(file_path).cloned() };
+            if let Some(n) = notify {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), n.notified()).await;
+            }
+        }
+    }
+    COMPRESSION_CACHE.lock().await.remove(file_path).flatten()
+}
+
 /// Send a file using the cached compressed version if available
 #[tauri::command]
 pub async fn send_cached_compressed_file(receiver: String, replied_to: String, file_path: String, keep_metadata: bool, name_override: String) -> Result<MessageSendResult, String> {
@@ -1019,38 +1076,24 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
         .unwrap_or("")
         .to_string();
 
-    // Await the background pre-compression if still running, then take the
-    // (stripped + resized) result out of the cache. The wait is time-bounded:
-    // the notifier fires via notify_waiters() (which stores no permit), so a
-    // completion landing in the gap between the status read and the await would
-    // otherwise hang forever — on timeout we just re-read the cache below and
-    // fall back to a fresh compress if it's genuinely not ready.
-    let precompressed = {
-        let status = { COMPRESSION_CACHE.lock().await.get(&file_path).cloned() };
-        if let Some(None) = status {
-            let notify = { super::types::COMPRESSION_NOTIFY.lock().await.get(&file_path).cloned() };
-            if let Some(n) = notify {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), n.notified()).await;
-            }
-        }
-        COMPRESSION_CACHE.lock().await.remove(&file_path).flatten()
-    };
+    // Keep-metadata re-derives from the original, so only the default path waits.
+    let precompressed = take_precompressed(&file_path, !keep_metadata).await;
 
     let extension = file_path.rsplit('.').next().unwrap_or("bin").to_lowercase();
 
     // Default strip+compress reuses the pre-compressed result. Keep-metadata
     // (needs EXIF re-attach) and cache misses re-derive from the original file.
-    let processed = if !keep_metadata {
-        match precompressed {
-            Some(pc) => pc,
-            None => {
-                let bytes = read_file_checked(&file_path)?;
-                process_image_for_send(Arc::new(bytes), &extension, true, false, None)?
-            }
+    let processed = match precompressed {
+        Some(pc) if !keep_metadata => pc,
+        _ => {
+            let path = file_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let bytes = read_file_checked(&path)?;
+                process_image_for_send(Arc::new(bytes), &extension, true, keep_metadata, None)
+            })
+            .await
+            .map_err(|e| e.to_string())??
         }
-    } else {
-        let bytes = read_file_checked(&file_path)?;
-        process_image_for_send(Arc::new(bytes), &extension, true, true, None)?
     };
 
     let mut attachment_file = AttachmentFile {

@@ -1035,8 +1035,7 @@ async function sendPreviewedFile() {
                 nameOverride
             });
         } else {
-            // Desktop: send without compression, but clear the cache first
-            await invoke("clear_compression_cache", { filePath: filePath });
+            // Desktop, full resolution: the send takes the pre-compression entry itself.
             result = await invoke("file_message", {
                 receiver: chatId,
                 repliedTo: replyRef,
