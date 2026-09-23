@@ -371,8 +371,8 @@ pub async fn clear_cached_file() -> Result<(), String> {
 /// This should be called when the user cancels file selection or after sending
 #[tauri::command]
 pub fn clear_android_file_cache(file_path: String) -> Result<(), String> {
-    let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-    cache.remove(&file_path);
+    ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
+    super::types::discard_picked_file(&file_path);
     Ok(())
 }
 
@@ -380,8 +380,12 @@ pub fn clear_android_file_cache(file_path: String) -> Result<(), String> {
 /// This is a cleanup function to ensure no stale data remains
 #[tauri::command]
 pub fn clear_all_android_file_cache() -> Result<(), String> {
-    let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
-    cache.clear();
+    ANDROID_FILE_CACHE.lock().unwrap().clear();
+    if let Ok(mut picked) = super::types::ANDROID_PICKED_FILES.lock() {
+        for (_, (path, ..)) in picked.drain() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     Ok(())
 }
 
@@ -393,6 +397,26 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         .and_then(|n| n.to_str())
         .unwrap_or("")
         .to_string();
+
+    // Anything that isn't processed first streams from disk, whatever its size.
+    #[cfg(not(target_os = "android"))]
+    {
+        let extension = file_path.rsplit('.').next().unwrap_or("bin").to_lowercase();
+        if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
+            match std::fs::metadata(&file_path) {
+                Ok(m) if m.len() > 0 => {}
+                Ok(_) => return Err(format!("File is empty (0 bytes): {}", file_path)),
+                Err(e) => return Err(format!("Failed to read file metadata: {}", e)),
+            }
+            take_precompressed(&file_path, false).await;
+            let mut name = file_name.clone();
+            if !name_override.is_empty() {
+                let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+                if !sanitized.is_empty() { name = sanitized; }
+            }
+            return super::sending::send_file_from_path(receiver, replied_to, std::path::PathBuf::from(&file_path), name, extension).await;
+        }
+    }
 
     // Load the file as AttachmentFile
     let mut attachment_file = {
@@ -418,6 +442,18 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
         }
         #[cfg(target_os = "android")]
         {
+            // A pick copied to disk at selection streams from that copy, which goes once sent.
+            let picked = super::types::ANDROID_PICKED_FILES.lock().unwrap().get(&file_path).cloned();
+            if let Some((copy, extension, cached_name, _)) = picked {
+                let mut name = cached_name;
+                if !name_override.is_empty() {
+                    let sanitized = crate::commands::attachments::sanitize_filename(&name_override);
+                    if !sanitized.is_empty() { name = sanitized; }
+                }
+                let sent = super::sending::send_file_from_path(receiver, replied_to, copy, name, extension).await;
+                super::types::discard_picked_file(&file_path);
+                return sent;
+            }
             // First check if we have cached bytes for this URI
             // Take ownership from cache to avoid clone - bytes already Arc
             let mut cache = ANDROID_FILE_CACHE.lock().unwrap();
@@ -434,7 +470,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 // Check if this is a content:// URI or a regular file path
                 if file_path.starts_with("content://") {
                     // Content URI - use Android ContentResolver
-                    filesystem::read_android_uri(file_path)?
+                    filesystem::read_android_uri(file_path.clone())?
                 } else {
                     // Regular file path (e.g., marketplace apps) - use standard file I/O
                     let file_bytes = read_file_checked(&file_path)?;
@@ -502,11 +538,38 @@ pub struct AndroidFileCacheResult {
     pub extension: String,
 }
 
+/// Where Android picks wait to be sent. Copies older than a day are leftovers of a
+/// preview that was never sent or closed, and are swept on the way in.
+#[cfg(target_os = "android")]
+fn picked_files_dir() -> Result<std::path::PathBuf, String> {
+    let dir = vector_core::db::get_app_data_dir()?.join("picked");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to prepare the file: {e}"))?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let now = std::time::SystemTime::now();
+        for entry in entries.flatten() {
+            let old = entry.metadata().and_then(|m| m.modified())
+                .map(|t| now.duration_since(t).unwrap_or_default() > std::time::Duration::from_secs(24 * 3600))
+                .unwrap_or(false);
+            if old {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(dir)
+}
+
 /// Cache an Android content URI's bytes immediately after file selection.
 /// This must be called immediately after the file picker returns, before the permission expires.
 /// On non-Android platforms, this just returns file info without caching.
 #[tauri::command]
-pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, String> {
+pub async fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, String> {
+    // A synchronous command runs on the main thread, where reading a large pick stalls the UI.
+    tokio::task::spawn_blocking(move || cache_picked_file(file_path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn cache_picked_file(file_path: String) -> Result<AndroidFileCacheResult, String> {
     #[cfg(not(target_os = "android"))]
     {
         // On non-Android platforms, just return file info without caching
@@ -533,6 +596,25 @@ pub fn cache_android_file(file_path: String) -> Result<AndroidFileCacheResult, S
     }
     #[cfg(target_os = "android")]
     {
+        // Anything that isn't processed before sending is copied to disk rather than
+        // held in memory, so its size is bounded by storage alone.
+        if let Ok(info) = filesystem::get_android_uri_info(file_path.clone()) {
+            let processed = matches!(info.extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico");
+            if !processed && !info.extension.is_empty() {
+                let dir = picked_files_dir()?;
+                let copy = dir.join(format!("{}.{}", vector_core::crypto::sha256_hex(file_path.as_bytes()), info.extension));
+                let size = filesystem::copy_android_uri_to_file(&file_path, &copy)?;
+                let name = if info.name.is_empty() || info.name == "unknown" {
+                    format!("file.{}", info.extension)
+                } else {
+                    info.name.clone()
+                };
+                super::types::ANDROID_PICKED_FILES.lock().unwrap()
+                    .insert(file_path, (copy, info.extension.clone(), name.clone(), size));
+                return Ok(AndroidFileCacheResult { size, name, extension: info.extension });
+            }
+        }
+
         // Read the file using the same method as avatar upload (read_android_uri)
         // This uses getType() instead of query() which may have different permission behavior
         // read_android_uri now carries the real display name + name-derived extension
@@ -588,6 +670,9 @@ pub fn get_file_info(file_path: String) -> Result<FileInfo, String> {
     }
     #[cfg(target_os = "android")]
     {
+        if let Some((_, extension, name, size)) = super::types::ANDROID_PICKED_FILES.lock().unwrap().get(&file_path) {
+            return Ok(FileInfo { size: *size, name: name.clone(), extension: extension.clone() });
+        }
         // First check if we have cached bytes for this URI
         let cache = ANDROID_FILE_CACHE.lock().unwrap();
         if let Some((bytes, extension, name, _)) = cache.get(&file_path) {
@@ -693,8 +778,8 @@ pub async fn clear_compression_cache(file_path: String) -> Result<(), String> {
     drop(cache);
     
     // Also clear Android file cache
-    let mut android_cache = ANDROID_FILE_CACHE.lock().unwrap();
-    android_cache.remove(&file_path);
+    ANDROID_FILE_CACHE.lock().unwrap().remove(&file_path);
+    super::types::discard_picked_file(&file_path);
     
     Ok(())
 }
@@ -817,7 +902,6 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
         .to_string();
 
     // Walk phase: collect all entries, sum total size
-    const MAX_UNCOMPRESSED: u64 = 1_073_741_824; // 1GB
     // Entries: (path, is_dir, file_size)
     let mut entries: Vec<(std::path::PathBuf, bool, u64)> = Vec::new();
     let mut total_size: u64 = 0;
@@ -828,7 +912,6 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
         current: &std::path::Path,
         entries: &mut Vec<(std::path::PathBuf, bool, u64)>,
         total_size: &mut u64,
-        max: u64,
         depth: u32,
     ) -> Result<(), String> {
         if depth > MAX_DEPTH {
@@ -853,20 +936,17 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
 
             if meta.is_dir() {
                 entries.push((path.clone(), true, 0));
-                walk_dir(base, &path, entries, total_size, max, depth + 1)?;
+                walk_dir(base, &path, entries, total_size, depth + 1)?;
             } else if meta.is_file() {
                 let size = meta.len();
                 *total_size += size;
-                if *total_size >= max {
-                    return Err("Directory exceeds 1GB limit".to_string());
-                }
                 entries.push((path, false, size));
             }
         }
         Ok(())
     }
 
-    walk_dir(dir, dir, &mut entries, &mut total_size, MAX_UNCOMPRESSED, 0)?;
+    walk_dir(dir, dir, &mut entries, &mut total_size, 0)?;
 
     if entries.is_empty() {
         return Err("Directory is empty".to_string());
@@ -936,7 +1016,8 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
                 _ => {}
             }
 
-            zip_writer.start_file(&rel_str, options)
+            // Past 4 GB an entry needs ZIP64 sizes.
+            zip_writer.start_file(&rel_str, options.large_file(file_size >= u32::MAX as u64))
                 .map_err(|e| format!("Failed to start file in zip: {}", e))?;
 
             // Handle empty files (nothing to write)

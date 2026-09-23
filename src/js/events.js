@@ -355,6 +355,14 @@ async function setupRustListeners() {
         if (evt.payload.progress >= 100) refreshMessageToolbar();
     });
 
+    // What a transfer is doing while no bytes move: sealing before an upload, opening after a download.
+    _on('attachment_upload_stage', (evt) => {
+        VectorSvelte.transferStaged(evt.payload.id, 'upload', evt.payload.stage, evt.payload.progress ?? null);
+    });
+    _on('attachment_download_stage', (evt) => {
+        VectorSvelte.transferStaged(evt.payload.id, 'download', evt.payload.stage, evt.payload.progress ?? null);
+    });
+
     // Listen for backend error toasts
     _on('show_toast', (evt) => {
         showToast(evt.payload || 'An Error Occurred');

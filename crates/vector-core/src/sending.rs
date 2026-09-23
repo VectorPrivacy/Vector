@@ -64,6 +64,9 @@ pub trait SendCallback: Send + Sync {
 
     /// Upload complete, attachment URL now available.
     fn on_upload_complete(&self, _chat_id: &str, _pending_id: &str, _attachment_id: &str, _url: &str) {}
+    /// What an upload is doing before its bytes move: sealing (`"encrypting"`, with its
+    /// percentage when it is streamed) or getting underway (`"starting"`).
+    fn on_upload_stage(&self, _pending_id: &str, _stage: &str, _pct: Option<u8>) {}
 
     /// Message successfully delivered to at least one relay.
     /// `old_id` is the pending ID, `msg` has the real event ID.
@@ -794,6 +797,40 @@ pub async fn send_file_dm_with_meta(
     config: &SendConfig,
     callback: Arc<dyn SendCallback>,
 ) -> Result<SendResult, String> {
+    send_file_dm_from(receiver_npub, FileSource::Bytes(file_bytes), filename, extension, img_meta, content, reply_to, config, callback).await
+}
+
+/// Where an outgoing file's bytes come from.
+pub enum FileSource {
+    /// In memory: images the caller has already processed, pasted bytes.
+    Bytes(Arc<Vec<u8>>),
+    /// On disk, read a chunk at a time: a file of any size costs one chunk of memory.
+    /// Its preview metadata is the caller's to give; nothing here decodes it.
+    Path(std::path::PathBuf),
+}
+
+/// Removes a file when dropped: the ciphertext of an upload that ended either way.
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// [`send_file_dm_with_meta`] from either source.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_file_dm_from(
+    receiver_npub: &str,
+    source: FileSource,
+    filename: &str,
+    extension: &str,
+    img_meta: Option<crate::types::ImageMetadata>,
+    content: Option<&str>,
+    reply_to: Option<&str>,
+    config: &SendConfig,
+    callback: Arc<dyn SendCallback>,
+) -> Result<SendResult, String> {
     let client = nostr_client().ok_or("Not logged in")?;
     let my_pk = my_public_key().ok_or("Public key not set")?;
     let reply_to = reply_to.filter(|r| !r.is_empty());
@@ -817,11 +854,17 @@ pub async fn send_file_dm_with_meta(
     // Hash, save and (if not given) read the preview metadata off the runtime: each
     // is a full pass over the bytes, and a runtime worker parked on one stalls every
     // task queued behind it.
-    let (file_hash, local_path_str, img_meta) = {
-        let bytes = Arc::clone(&file_bytes);
+    let (file_hash, local_path_str, img_meta, plain_len) = {
+        let source = match &source {
+            FileSource::Bytes(bytes) => FileSource::Bytes(Arc::clone(bytes)),
+            FileSource::Path(path) => FileSource::Path(path.clone()),
+        };
         let (filename, extension) = (filename.to_string(), extension.to_string());
-        tokio::task::spawn_blocking(move || {
-            let file_hash = crypto::sha256_hex(&bytes);
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let (file_hash, plain_len) = match &source {
+                FileSource::Bytes(bytes) => (crypto::sha256_hex(bytes), bytes.len() as u64),
+                FileSource::Path(path) => crypto::stream::hash_file(path)?,
+            };
             let _ = std::fs::create_dir_all(&download_dir);
             // Save with an extension matching the actual content. The caller's
             // `extension` is post-compression (e.g. JPEG when an original PNG was
@@ -836,15 +879,24 @@ pub async fn send_file_dm_with_meta(
             };
             // Resolve unique path (pasted_image.png → pasted_image-1.png on collision)
             let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);
-            // Atomic write: temp file then rename
+            // Atomic write: temp file then rename. A file source copies file to file
+            // (a clone where the filesystem has them), never through memory.
             let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
-            let _ = std::fs::write(&tmp, &*bytes);
+            let img_meta = match &source {
+                FileSource::Bytes(bytes) => {
+                    let _ = std::fs::write(&tmp, &**bytes);
+                    img_meta.or_else(|| crypto::generate_image_metadata(bytes))
+                }
+                FileSource::Path(path) => {
+                    std::fs::copy(path, &tmp).map_err(|e| format!("Failed to save the file: {e}"))?;
+                    img_meta
+                }
+            };
             let _ = std::fs::rename(&tmp, &local_path);
-            let img_meta = img_meta.or_else(|| crypto::generate_image_metadata(&bytes));
-            (file_hash, local_path.to_string_lossy().to_string(), img_meta)
+            Ok((file_hash, local_path.to_string_lossy().to_string(), img_meta, plain_len))
         })
         .await
-        .map_err(|e| format!("Attachment prep failed: {}", e))?
+        .map_err(|e| format!("Attachment prep failed: {}", e))??
     };
 
     // WebXDC Mini Apps: mint the realtime-channel topic at send time and carry
@@ -860,7 +912,7 @@ pub async fn send_file_dm_with_meta(
     let attachment = Attachment {
         id: file_hash.clone(), key: params.key.clone(), nonce: params.nonce.clone(),
         extension: extension.to_string(), name: filename.to_string(),
-        url: String::new(), path: local_path_str.clone(), size: file_bytes.len() as u64 + 16,
+        url: String::new(), path: local_path_str.clone(), size: plain_len + 16,
         img_meta: img_meta.clone(), downloading: false, downloaded: true,
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
@@ -897,6 +949,8 @@ pub async fn send_file_dm_with_meta(
         };
 
     // === Encrypt → upload → build rumor → send (skipped wholesale on reuse) ===
+    // Held to the end of the send, so the ciphertext goes however it ends.
+    let mut _ciphertext_file: Option<TempFile> = None;
     let (att_key, att_nonce, att_url, encrypted_size, encrypted) = match &reused {
         Some(r) => {
             let adopted = crate::compact::CompactAttachment::from_attachment(&Attachment {
@@ -912,16 +966,48 @@ pub async fn send_file_dm_with_meta(
             (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size, None)
         }
         None => {
-            let bytes = Arc::clone(&file_bytes);
             let key = params.key.clone();
             let nonce = params.nonce.clone();
-            let encrypted = tokio::task::spawn_blocking(move || {
-                crypto::encrypt_data(&bytes, &crypto::EncryptionParams { key, nonce })
-            })
-            .await
-            .map_err(|e| format!("Encryption failed: {}", e))??;
-            let size = encrypted.len() as u64;
-            (params.key, params.nonce, String::new(), size, Some(encrypted))
+            // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
+            let streamed = matches!(source, FileSource::Path(_));
+            callback.on_upload_stage(&pending_id, "encrypting", streamed.then_some(0));
+            // Resolved here, on the task that carries the account, not on a blocking thread.
+            let outgoing = crate::db::current_account_dir()
+                .map(|d| d.join("outgoing"))
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let body = match &source {
+                FileSource::Bytes(bytes) => {
+                    let bytes = Arc::clone(bytes);
+                    let sealed = tokio::task::spawn_blocking(move || {
+                        crypto::encrypt_data(&bytes, &crypto::EncryptionParams { key, nonce })
+                    })
+                    .await
+                    .map_err(|e| format!("Encryption failed: {}", e))??;
+                    crate::blossom::UploadBody::Memory(Arc::new(sealed))
+                }
+                FileSource::Path(_) => {
+                    // Sealed from the local copy, which nothing else will move or edit.
+                    let _ = std::fs::create_dir_all(&outgoing);
+                    let sealed_path = outgoing.join(format!("{}.enc", pending_id));
+                    _ciphertext_file = Some(TempFile(sealed_path.clone()));
+                    let plain = std::path::PathBuf::from(&local_path_str);
+                    let out = sealed_path.clone();
+                    let (stage_cb, pid, stop) = (callback.clone(), pending_id.clone(), cancel.clone());
+                    let (hash, len) = tokio::task::spawn_blocking(move || {
+                        crypto::stream::encrypt_file_with_progress(&plain, &out, &key, &nonce, &mut |pct| {
+                            stage_cb.on_upload_stage(&pid, "encrypting", Some(pct));
+                            // A cancel lands here, not after the whole file is sealed.
+                            !stop.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+                        })
+                    })
+                    .await
+                    .map_err(|e| format!("Encryption failed: {}", e))??;
+                    crate::blossom::UploadBody::file(sealed_path, len, &hash)?
+                }
+            };
+            callback.on_upload_stage(&pending_id, "starting", None);
+            let size = body.len();
+            (params.key, params.nonce, String::new(), size, Some(body))
         }
     };
 
@@ -961,8 +1047,8 @@ pub async fn send_file_dm_with_meta(
             (att_url.clone(), Vec::new())
         }
         Some(encrypted) => {
-            let accepted = match crate::blossom::upload_blob_with_progress_and_failover(
-                signer.clone(), servers, Arc::new(encrypted), Some(mime_type),
+            let accepted = match crate::blossom::upload_body_with_progress_and_failover(
+                signer.clone(), servers, encrypted, Some(mime_type),
                 /* is_encrypted */ true,
                 progress_cb, Some(config.upload_retries), Some(config.upload_retry_delay),
                 cancel.clone(),

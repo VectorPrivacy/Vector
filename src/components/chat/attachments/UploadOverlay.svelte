@@ -1,12 +1,14 @@
 <script>
     // The progress ring and cancel over a picture or video still uploading. Past 100%
-    // there is nothing left to stop, so the button goes; if the publish then drags on,
-    // a line under the ring says so rather than leaving a full ring with no explanation.
-    import { uploadProgress, transferPublishing, transferSlow } from '../../lib/attachments.svelte.js';
+    // there is nothing left to stop, so the button goes. A line under the ring says what
+    // is happening whenever the ring can't: sealing before the bytes move, or a publish
+    // that drags on after.
+    import { uploadProgress, transferPublishing, transferSlow, transferStageText } from '../../lib/attachments.svelte.js';
     let { pendingId, size = 48, h } = $props();   // h: cancelUpload(pendingId)
     const pct = $derived(uploadProgress(pendingId));
     const publishing = $derived(transferPublishing(pendingId));
     const sending = $derived(transferSlow(pendingId));
+    const note = $derived(sending ? 'Sending' : transferStageText(pendingId));
 
     // Measured off the media: a thumbnail too small for a line under the ring gets none.
     let boxW = $state(0);
@@ -23,7 +25,7 @@
     {#if room}
         <div class="media-progress">
             {@render ring()}
-            <span class="media-progress-note" class:is-visible={sending}>Sending</span>
+            <span class="media-progress-note" class:is-visible={!!note}>{note}</span>
         </div>
     {:else}
         <!-- No room for a note means the original DOM, so the overlay's own rule still

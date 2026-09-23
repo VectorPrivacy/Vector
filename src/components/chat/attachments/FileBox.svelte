@@ -6,7 +6,7 @@
     //
     // The chrome is deliberately grey. The only colour in the box is the one carrying meaning:
     // a file that is on this device takes the theme colour, a failed one takes the danger colour.
-    import { transfer, transferSlow } from '../../lib/attachments.svelte.js';
+    import { transfer, transferSlow, transferStageText } from '../../lib/attachments.svelte.js';
     import { miniappStatus } from '../../lib/miniapps.svelte.js';
     import { profileVersion } from '../../lib/signals.svelte.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
@@ -87,9 +87,16 @@
         if (!t || !(t.bps > 0)) return '';
         return `· ${h.formatBytes(t.bps, t.bps >= 1048576 ? 2 : 0, true)}/s`;
     });
-    // A publish that drags on takes over the rate's slot, so a finished bar is never
-    // left with nothing to say for itself.
-    const note = $derived(uploading && transferSlow(msg.id) ? 'Sending' : '');
+    // The rate's slot says what the transfer is doing whenever no bytes move: sealing
+    // before an upload, opening after a download, or a publish that drags on.
+    const note = $derived.by(() => {
+        const text = uploading && transferSlow(msg.id) ? 'Sending'
+            : uploading ? transferStageText(msg.id)
+            : phase === 'downloading' ? transferStageText(att.id)
+            : '';
+        // The same separator the rate carries, so the line reads the same either way.
+        return text ? `· ${text}` : '';
+    });
     // What the file IS, for the line below the name: its own extension, or the closest word we have.
     const kind = $derived(ext ? `.${ext}` : info.description);
     const sizeText = $derived(att.size > 0 ? h.formatBytes(att.size) : '');

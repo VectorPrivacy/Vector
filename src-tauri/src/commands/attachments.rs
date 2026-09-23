@@ -277,6 +277,8 @@ fn sweep_stale_partials(dir: &std::path::Path) {
 
 /// Why a finished download can't be used.
 enum Verdict {
+    /// The user stopped it while it was being opened.
+    Cancelled,
     /// These bytes aren't this blob: another source may still serve it.
     BadSource(String),
     /// Nothing another source could fix.
@@ -291,8 +293,9 @@ fn verify_download(
     staging: &std::path::Path,
     url: &str,
     attachment: &Attachment,
+    progress: &mut dyn FnMut(u8) -> bool,
 ) -> Result<(std::path::PathBuf, String, u64), Verdict> {
-    use vector_core::crypto::stream::{decrypt_file, hash_file};
+    use vector_core::crypto::stream::{decrypt_file_with_progress, hash_file};
     let address = vector_core::blossom::blob_hash(url);
     let len = std::fs::metadata(part).map(|m| m.len()).map_err(|e| Verdict::Fatal(e.to_string()))?;
     if len < 16 {
@@ -310,7 +313,7 @@ fn verify_download(
         return Ok((part.to_path_buf(), hash, len));
     }
 
-    match decrypt_file(part, staging, &attachment.key, &attachment.nonce) {
+    match decrypt_file_with_progress(part, staging, &attachment.key, &attachment.nonce, progress) {
         Ok(done) => {
             if address.as_deref().is_some_and(|a| a != done.source_sha256) {
                 let _ = std::fs::remove_file(staging);
@@ -318,6 +321,7 @@ fn verify_download(
             }
             Ok((staging.to_path_buf(), done.output_sha256, done.output_len))
         }
+        Err(e) if e == vector_core::crypto::stream::CANCELLED => Err(Verdict::Cancelled),
         Err(e) if e.contains("aead") => {
             // Bytes that match their address but won't decrypt are the right blob
             // with the wrong key; anything else is a bad copy.
@@ -627,7 +631,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             let mut attempt: u32 = 0;
             let fetched = loop {
                 let reporter = net::TauriProgressReporter::new(handle, &attachment_hex_id);
-                match net::download_to_file(&url, &part, &reporter).await {
+                match net::download_to_file(&url, &part, Some(attachment.size), &reporter).await {
                     Ok(_) => break true,
                     Err(error) => {
                         if error == net::TRANSFER_CANCELLED {
@@ -656,11 +660,29 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             if fetched {
                 let (src, url_for_check, att) = (part.clone(), url.clone(), attachment_for_decrypt.clone());
                 let staging = vector_core::db::get_download_dir().join(format!(".{}.download", attachment_hex_id));
-                let outcome = tokio::task::spawn_blocking(move || verify_download(&src, &staging, &url_for_check, &att))
-                    .await
-                    .unwrap_or_else(|e| Err(Verdict::Fatal(e.to_string())));
+                // The last byte is in, but the file isn't ready until it's opened: the
+                // bubble says so rather than sitting on a full bar.
+                let stage = |stage: &str, pct: Option<u8>| {
+                    let _ = handle.emit("attachment_download_stage", serde_json::json!({
+                        "id": &attachment_hex_id, "stage": stage, "progress": pct,
+                    }));
+                };
+                let encrypted = !attachment_for_decrypt.key.is_empty();
+                stage(if encrypted { "decrypting" } else { "verifying" }, encrypted.then_some(0));
+                let (stage_handle, stage_id) = (handle.clone(), attachment_hex_id.clone());
+                let outcome = tokio::task::spawn_blocking(move || {
+                    verify_download(&src, &staging, &url_for_check, &att, &mut |pct| {
+                        let _ = stage_handle.emit("attachment_download_stage", serde_json::json!({
+                            "id": &stage_id, "stage": "decrypting", "progress": pct,
+                        }));
+                        !net::transfer_cancelled(&stage_id)
+                    })
+                })
+                .await
+                .unwrap_or_else(|e| Err(Verdict::Fatal(e.to_string())));
                 match outcome {
                     Ok((ready, file_hash, len)) => {
+                        stage("saving", None);
                         let (name, extension) = (attachment_for_decrypt.name.clone(), attachment_for_decrypt.extension.clone());
                         let hash = file_hash.clone();
                         let placed = tokio::task::spawn_blocking(move || {
@@ -674,6 +696,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             Err(e) => last_error = e,
                         }
                     }
+                    // The stop is handled with every other stop, after the walk.
+                    Err(Verdict::Cancelled) => break,
                     Err(Verdict::BadSource(reason)) => {
                         // These bytes are wrong for this blob; the next source starts clean.
                         vector_core::log_net_fail!("[AttachmentDownload] {} — bad source: {}", reason, url);
@@ -967,4 +991,5 @@ pub(crate) async fn reconcile_missing_attachments_in_state(affected: &[String]) 
 // - generate_thumbhash_preview
 // - decode_thumbhash
 // - download_attachment
+
 

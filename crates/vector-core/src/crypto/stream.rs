@@ -31,6 +31,20 @@ pub struct StreamedFile {
     pub output_len: u64,
 }
 
+/// What a pass stopped by its caller returns.
+pub const CANCELLED: &str = "Upload cancelled";
+
+/// Tell `progress` when `done` of `total` reaches a new whole percentage; false when
+/// it asks the pass to stop.
+fn report(done: u64, total: u64, reported: &mut u8, progress: &mut dyn FnMut(u8) -> bool) -> bool {
+    let pct = if total == 0 { 100 } else { (done.saturating_mul(100) / total).min(100) as u8 };
+    if pct > *reported {
+        *reported = pct;
+        return progress(pct);
+    }
+    true
+}
+
 fn hex32(bytes: &[u8]) -> String {
     hex::encode(bytes)
 }
@@ -39,14 +53,22 @@ fn hex32(bytes: &[u8]) -> String {
 /// `dst` holds unauthenticated plaintext until this returns: on any error it is
 /// removed, and a tag mismatch is reported as a decryption failure.
 pub fn decrypt_file(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) -> Result<StreamedFile, String> {
-    let result = decrypt_file_inner(src, dst, key_hex, nonce_hex);
+    decrypt_file_with_progress(src, dst, key_hex, nonce_hex, &mut |_| true)
+}
+
+/// [`decrypt_file`], telling `progress` each new whole percentage of the file opened.
+/// `progress` answering false stops the pass, as for [`encrypt_file_with_progress`].
+pub fn decrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
+    let result = decrypt_file_inner(src, dst, key_hex, nonce_hex, progress);
     if result.is_err() {
         let _ = std::fs::remove_file(dst);
     }
     result
 }
 
-fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) -> Result<StreamedFile, String> {
+/// The GCM state for one message: the keystream (positioned past the tag's block),
+/// the tag's mask, and a GHASH ready for the ciphertext.
+fn gcm_start(key_hex: &str, nonce_hex: &str) -> Result<(ctr::Ctr32BE<Aes256>, [u8; 16], GHash), String> {
     let key: [u8; 32] = hex::decode(key_hex)
         .map_err(|e| format!("Invalid key: {}", e))?
         .try_into()
@@ -55,14 +77,6 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) ->
     if nonce.len() != 16 {
         return Err("Invalid nonce length".to_string());
     }
-
-    let mut input = std::fs::File::open(src).map_err(|e| format!("open download: {e}"))?;
-    let total = input.metadata().map_err(|e| format!("stat download: {e}"))?.len();
-    if total < 16 {
-        return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", total));
-    }
-    let ciphertext_len = total - 16;
-
     // H = E_K(0^128); a 16-byte nonce derives J0 through GHASH (SP 800-38D 7.1).
     let cipher = Aes256::new(&key.into());
     let mut h = ghash::Block::default();
@@ -78,8 +92,94 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) ->
     let mut ctr = ctr::Ctr32BE::<Aes256>::new(&key.into(), &j0);
     let mut tag_mask = [0u8; 16];
     ctr.apply_keystream(&mut tag_mask);
+    Ok((ctr, tag_mask, GHash::new(&h)))
+}
 
-    let mut tag_hash = GHash::new(&h);
+/// The tag over `ciphertext_len` bytes already fed to `ghash`.
+fn gcm_tag(mut ghash: GHash, tag_mask: [u8; 16], ciphertext_len: u64) -> [u8; 16] {
+    let mut lengths = ghash::Block::default();
+    lengths[8..].copy_from_slice(&(ciphertext_len * 8).to_be_bytes());
+    ghash.update(&[lengths]);
+    let mut tag = [0u8; 16];
+    for (t, (s, m)) in tag.iter_mut().zip(ghash.finalize().iter().zip(tag_mask)) {
+        *t = s ^ m;
+    }
+    tag
+}
+
+/// Encrypt `src` into `dst` (ciphertext || tag), the counterpart of [`decrypt_file`].
+/// Returns the SHA-256 and length of what was written: the blob a server will hold.
+pub fn encrypt_file(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) -> Result<(String, u64), String> {
+    encrypt_file_with_progress(src, dst, key_hex, nonce_hex, &mut |_| true)
+}
+
+/// [`encrypt_file`], telling `progress` each new whole percentage of the file sealed.
+/// `progress` answering false stops the pass: nothing is written and the error says
+/// it was cancelled.
+pub fn encrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64), String> {
+    let result = encrypt_file_inner(src, dst, key_hex, nonce_hex, progress);
+    if result.is_err() {
+        let _ = std::fs::remove_file(dst);
+    }
+    result
+}
+
+fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64), String> {
+    let (mut ctr, tag_mask, mut ghash) = gcm_start(key_hex, nonce_hex)?;
+    let mut input = std::fs::File::open(src).map_err(|e| format!("open file: {e}"))?;
+    let total = input.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut reported = 0u8;
+    let mut output = std::io::BufWriter::with_capacity(
+        CHUNK,
+        std::fs::File::create(dst).map_err(|e| format!("create ciphertext: {e}"))?,
+    );
+    let mut blob_hash = Sha256::new();
+    let mut buf = vec![0u8; CHUNK];
+    let mut len = 0u64;
+    loop {
+        // Fill the buffer before encrypting: GHASH may only pad the final block.
+        let mut n = 0;
+        while n < CHUNK {
+            let got = input.read(&mut buf[n..]).map_err(|e| format!("read file: {e}"))?;
+            if got == 0 {
+                break;
+            }
+            n += got;
+        }
+        if n == 0 {
+            break;
+        }
+        let chunk = &mut buf[..n];
+        ctr.apply_keystream(chunk);
+        ghash.update_padded(chunk);
+        blob_hash.update(&*chunk);
+        output.write_all(chunk).map_err(|e| format!("write ciphertext: {e}"))?;
+        len += n as u64;
+        if !report(len, total, &mut reported, progress) {
+            return Err(CANCELLED.to_string());
+        }
+        if n < CHUNK {
+            break;
+        }
+    }
+    let tag = gcm_tag(ghash, tag_mask, len);
+    blob_hash.update(tag);
+    output.write_all(&tag).map_err(|e| format!("write ciphertext: {e}"))?;
+    let file = output.into_inner().map_err(|e| format!("write ciphertext: {e}"))?;
+    file.sync_all().map_err(|e| format!("sync ciphertext: {e}"))?;
+    Ok((hex32(&blob_hash.finalize()), len + 16))
+}
+
+fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
+    let (mut ctr, tag_mask, mut tag_hash) = gcm_start(key_hex, nonce_hex)?;
+    let mut input = std::fs::File::open(src).map_err(|e| format!("open download: {e}"))?;
+    let total = input.metadata().map_err(|e| format!("stat download: {e}"))?.len();
+    if total < 16 {
+        return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", total));
+    }
+    let ciphertext_len = total - 16;
+    let mut reported = 0u8;
+
     let mut source_hash = Sha256::new();
     let mut output_hash = Sha256::new();
     let mut output = std::io::BufWriter::with_capacity(
@@ -99,18 +199,18 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) ->
         output_hash.update(&*chunk);
         output.write_all(chunk).map_err(|e| format!("write output: {e}"))?;
         remaining -= n as u64;
+        if !report(ciphertext_len - remaining, ciphertext_len, &mut reported, progress) {
+            return Err(CANCELLED.to_string());
+        }
     }
 
     let mut tag = [0u8; 16];
     input.read_exact(&mut tag).map_err(|e| format!("read download: {e}"))?;
     source_hash.update(tag);
 
-    let mut lengths = ghash::Block::default();
-    lengths[8..].copy_from_slice(&(ciphertext_len * 8).to_be_bytes());
-    tag_hash.update(&[lengths]);
-    let expected = tag_hash.finalize();
+    let expected = gcm_tag(tag_hash, tag_mask, ciphertext_len);
     // Every byte compared, whatever the first difference.
-    let mismatch = expected.iter().zip(tag_mask).zip(tag).fold(0u8, |acc, ((e, m), t)| acc | (e ^ m ^ t));
+    let mismatch = expected.iter().zip(tag).fold(0u8, |acc, (e, t)| acc | (e ^ t));
     if mismatch != 0 {
         return Err("Decryption failed: aead::Error (authentication tag mismatch)".to_string());
     }
@@ -200,6 +300,38 @@ mod tests {
         for len in [0, 1, 15, 16, 17, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK + 7] {
             roundtrip(len);
         }
+    }
+
+    #[test]
+    fn a_streamed_seal_opens_with_the_one_shot_cipher() {
+        for len in [0usize, 1, 16, 17, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK + 7] {
+            let dir = scratch(&format!("enc{len}"));
+            let plain: Vec<u8> = (0..len).map(|i| (i * 7 % 253) as u8).collect();
+            let (src, sealed) = (dir.join("plain"), dir.join("sealed"));
+            std::fs::write(&src, &plain).unwrap();
+            let params = crate::crypto::generate_encryption_params();
+            let (hash, sealed_len) = encrypt_file(&src, &sealed, &params.key, &params.nonce).unwrap();
+            let blob = std::fs::read(&sealed).unwrap();
+            assert_eq!(blob, crate::crypto::encrypt_data(&plain, &params).unwrap(), "byte for byte at {len} bytes");
+            assert_eq!((hash, sealed_len), (crate::crypto::sha256_hex(&blob), blob.len() as u64));
+        }
+    }
+
+    #[test]
+    fn a_stopped_pass_ends_early_and_leaves_nothing() {
+        let dir = scratch("stop");
+        let (src, sealed, opened) = (dir.join("plain"), dir.join("sealed"), dir.join("opened"));
+        std::fs::write(&src, vec![3u8; 4 * CHUNK]).unwrap();
+        let params = crate::crypto::generate_encryption_params();
+        let mut seen = 0;
+        let err = encrypt_file_with_progress(&src, &sealed, &params.key, &params.nonce, &mut |pct| { seen = pct; pct < 25 }).unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert!(seen < 100 && !sealed.exists(), "stopped at {seen}%, nothing left behind");
+
+        encrypt_file(&src, &sealed, &params.key, &params.nonce).unwrap();
+        let err = decrypt_file_with_progress(&sealed, &opened, &params.key, &params.nonce, &mut |pct| pct < 50).unwrap_err();
+        assert_eq!(err, CANCELLED);
+        assert!(!opened.exists(), "no half-opened plaintext");
     }
 
     #[test]

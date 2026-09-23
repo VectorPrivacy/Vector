@@ -194,8 +194,12 @@ pub fn discard_partial(part: &std::path::Path) {
 pub async fn download_to_file(
     content_url: &str,
     part: &std::path::Path,
+    declared: Option<u64>,
     reporter: &impl ProgressReporter,
 ) -> Result<u64, &'static str> {
+    // The message said how big the blob is, so a body running past that is not it.
+    // The slack covers senders that state the plaintext's size, 16 bytes short.
+    let limit = declared.filter(|&d| d > 0).map(|d| d + 64 * 1024).unwrap_or(UNDECLARED_MAX_BYTES);
     use tokio::io::AsyncWriteExt;
 
     validate_url_not_private(content_url)?;
@@ -260,7 +264,7 @@ pub async fn download_to_file(
             }
         };
         let total = total.or_else(|| res.content_length().map(|n| n + start));
-        if total.is_some_and(|t| t > MAX_DOWNLOAD_BYTES) {
+        if total.is_some_and(|t| t > limit) {
             return Err("File exceeds the maximum download size");
         }
 
@@ -320,7 +324,7 @@ pub async fn download_to_file(
                     return Err("Error downloading chunk");
                 }
             };
-            if written + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
+            if written + chunk.len() as u64 > limit {
                 return Err("File exceeds the maximum download size");
             }
             file.write_all(&chunk).await.map_err(|_| "Failed to save the download")?;
@@ -344,8 +348,12 @@ pub async fn download_to_file(
     Err("Server did not honor range request")
 }
 
-/// Hard ceiling for any single download on this pipeline (attachments,
-/// inline images, mini-apps). The advertised size is attacker/server
+/// A streamed download's ceiling when its message declared no size: only disk is at
+/// stake, so it guards against an endless body rather than bounding the file.
+const UNDECLARED_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+
+/// Hard ceiling for any download held in memory (inline images, mini-apps;
+/// attachments stream to disk instead). The advertised size is attacker/server
 /// controlled — without a cap, a lying Content-Length means a giant
 /// `Vec::with_capacity` (alloc abort = process kill) and an endless body
 /// streams until OOM.

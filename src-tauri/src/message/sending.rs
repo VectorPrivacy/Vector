@@ -97,6 +97,16 @@ impl SendCallback for TauriSendCallback {
         Ok(())
     }
 
+    fn on_upload_stage(&self, pending_id: &str, stage: &str, pct: Option<u8>) {
+        if let Some(handle) = TAURI_APP.get() {
+            handle.emit("attachment_upload_stage", serde_json::json!({
+                "id": pending_id,
+                "stage": stage,
+                "progress": pct,
+            })).ok();
+        }
+    }
+
     fn on_upload_complete(&self, chat_id: &str, pending_id: &str, attachment_id: &str, url: &str) {
         UPLOADS_PUBLISHING.lock().unwrap().insert(pending_id.to_string());
         if let Some(handle) = TAURI_APP.get() {
@@ -692,6 +702,33 @@ pub async fn send_text_reply_headless(chat_id: &str, content: &str) -> Result<St
     Ok(event_id)
 }
 
+/// A file DM's send settings: the chat's self-destruct lifespan rides along and is
+/// stamped once the upload is done, so the clock starts at publish.
+fn file_send_config(receiver: &str) -> SendConfig {
+    SendConfig {
+        self_destruct_secs: vector_core::self_destruct::chat_duration_secs(receiver),
+        ..SendConfig::gui()
+    }
+}
+
+/// Send a file DM straight from disk: hashed, sealed and uploaded a chunk at a time,
+/// so its size costs no memory. For files that need no processing first.
+pub async fn send_file_from_path(
+    receiver: String,
+    replied_to: String,
+    path: std::path::PathBuf,
+    name: String,
+    extension: String,
+) -> Result<MessageSendResult, String> {
+    let callback: Arc<dyn SendCallback> = Arc::new(TauriSendCallback);
+    let result = vector_core::sending::send_file_dm_from(
+        &receiver, vector_core::sending::FileSource::Path(path), &name, &extension, None, None,
+        if replied_to.is_empty() { None } else { Some(&replied_to) },
+        &file_send_config(&receiver), callback,
+    ).await?;
+    Ok(MessageSendResult { pending_id: result.pending_id, event_id: result.event_id })
+}
+
 #[tauri::command]
 pub async fn message(receiver: String, content: String, replied_to: String, file: Option<AttachmentFile>) -> Result<MessageSendResult, String> {
     // Detect chat type early (needed for short-circuit)
@@ -709,10 +746,7 @@ pub async fn message(receiver: String, content: String, replied_to: String, file
         // Self-Destruct Timer: a text DM is stamped now; a file DM carries the lifespan
         // and is stamped once its upload is done, so the clock starts at publish.
         let config = if file.is_some() {
-            SendConfig {
-                self_destruct_secs: vector_core::self_destruct::chat_duration_secs(&receiver),
-                ..SendConfig::gui()
-            }
+            file_send_config(&receiver)
         } else {
             SendConfig {
                 expiration: vector_core::self_destruct::resolve_send_expiry(&receiver),

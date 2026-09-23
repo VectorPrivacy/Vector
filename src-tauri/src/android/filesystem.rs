@@ -308,6 +308,74 @@ fn read_android_uri_bytes_internal(
     Ok((bytes, extension))
 }
 
+/// Stream a content URI into `dest` a buffer at a time, returning its length. A
+/// picked URI's read grant can lapse soon after the pick, so this runs while it holds,
+/// and a file of any size costs one buffer.
+pub fn copy_android_uri_to_file(uri: &str, dest: &std::path::Path) -> Result<u64, String> {
+    with_android_context(|env, activity| {
+        let content_resolver = get_content_resolver(env, activity)?;
+        copy_android_uri_internal(env, &content_resolver, uri, dest)
+            .map_err(|e| format!("Failed to copy URI: {:?}", e))
+    })
+}
+
+fn copy_android_uri_internal(
+    env: &mut jni::JNIEnv,
+    content_resolver: &JObject,
+    uri: &str,
+    dest: &std::path::Path,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let uri_string = env.new_string(uri)?;
+    let uri_class = env.find_class("android/net/Uri")?;
+    let uri_object = env.call_static_method(
+        &uri_class,
+        "parse",
+        "(Ljava/lang/String;)Landroid/net/Uri;",
+        &[JValue::Object(&uri_string)],
+    )?.l()?;
+    try_take_persistable_permission(env, content_resolver, &uri_object);
+
+    let input_stream = env.call_method(
+        content_resolver,
+        "openInputStream",
+        "(Landroid/net/Uri;)Ljava/io/InputStream;",
+        &[JValue::Object(&uri_object)],
+    )?.l()?;
+    if input_stream.is_null() {
+        return Err("Failed to open input stream".into());
+    }
+
+    let mut out = std::io::BufWriter::with_capacity(256 * 1024, std::fs::File::create(dest)?);
+    let buffer = env.new_byte_array(STREAM_BUFFER_SIZE)?;
+    let mut signed = vec![0i8; STREAM_BUFFER_SIZE as usize];
+    let mut total = 0u64;
+    let copied: Result<(), Box<dyn std::error::Error>> = loop {
+        let read = match env.call_method(&input_stream, "read", "([B)I", &[JValue::Object(&buffer)]).and_then(|v| v.i()) {
+            Ok(n) => n,
+            Err(e) => break Err(e.into()),
+        };
+        if read == -1 {
+            break Ok(());
+        }
+        if read > 0 {
+            let n = read as usize;
+            if let Err(e) = env.get_byte_array_region(&buffer, 0, &mut signed[..n]) {
+                break Err(e.into());
+            }
+            let bytes: Vec<u8> = signed[..n].iter().map(|&b| b as u8).collect();
+            if let Err(e) = out.write_all(&bytes) {
+                break Err(e.into());
+            }
+            total += n as u64;
+        }
+    };
+    let _ = env.call_method(&input_stream, "close", "()V", &[]);
+    copied?;
+    out.flush()?;
+    Ok(total)
+}
+
 pub fn read_android_uri(uri: String) -> Result<AttachmentFile, String> {
     let mut attachment = with_android_context(|env, activity| {
         let content_resolver = get_content_resolver(env, activity)?;

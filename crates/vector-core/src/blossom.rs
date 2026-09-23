@@ -57,6 +57,79 @@ impl Stream for ProgressTrackingStream {
     }
 }
 
+/// What an upload sends: bytes in hand, or a file read from disk as the socket
+/// takes it, so a blob of any size costs one slice of memory.
+#[derive(Clone)]
+pub enum UploadBody {
+    Memory(Arc<Vec<u8>>),
+    /// A file whose length and SHA-256 are already known: the auth event and the
+    /// preflight need the hash before the first byte goes.
+    File { path: std::path::PathBuf, len: u64, sha256: Sha256Hash },
+}
+
+impl UploadBody {
+    /// A file body from its path, length and hex SHA-256.
+    pub fn file(path: std::path::PathBuf, len: u64, sha256_hex: &str) -> Result<Self, String> {
+        let sha256 = Sha256Hash::from_str(sha256_hex).map_err(|e| format!("bad blob hash: {e}"))?;
+        Ok(Self::File { path, len, sha256 })
+    }
+
+    pub fn len(&self) -> u64 {
+        match self {
+            Self::Memory(data) => data.len() as u64,
+            Self::File { len, .. } => *len,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn sha256(&self) -> Sha256Hash {
+        match self {
+            Self::Memory(data) => Sha256Hash::hash(data),
+            Self::File { sha256, .. } => *sha256,
+        }
+    }
+
+    /// The body as a stream, counting into `bytes_sent` as slices are pulled.
+    fn stream(&self, bytes_sent: Arc<Mutex<u64>>) -> Pin<Box<dyn Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>> {
+        match self {
+            Self::Memory(data) => Box::pin(ProgressTrackingStream::new(Arc::clone(data), bytes_sent)),
+            Self::File { path, len, .. } => {
+                // Larger than a memory slice: every read is a trip to the blocking pool.
+                const FILE_SLICE: u64 = 64 * 1024;
+                let start = (None::<tokio::fs::File>, path.clone(), *len);
+                Box::pin(futures_util::stream::unfold(start, move |(file, path, remaining)| {
+                    let bytes_sent = Arc::clone(&bytes_sent);
+                    async move {
+                        use tokio::io::AsyncReadExt;
+                        if remaining == 0 {
+                            return None;
+                        }
+                        let mut file = match file {
+                            Some(f) => f,
+                            None => match tokio::fs::File::open(&path).await {
+                                Ok(f) => f,
+                                Err(e) => return Some((Err(e), (None, path, 0))),
+                            },
+                        };
+                        let mut slice = vec![0u8; remaining.min(FILE_SLICE) as usize];
+                        match file.read_exact(&mut slice).await {
+                            Ok(_) => {
+                                *bytes_sent.lock().unwrap() += slice.len() as u64;
+                                let left = remaining - slice.len() as u64;
+                                Some((Ok(bytes::Bytes::from(slice)), (Some(file), path, left)))
+                            }
+                            Err(e) => Some((Err(e), (None, path, 0))),
+                        }
+                    }
+                }))
+            }
+        }
+    }
+}
+
 /// After the last byte is handed to the socket there is nothing left to watch:
 /// what remains is buffered bytes draining, an ingress relay forwarding the
 /// blob to its origin, and the origin storing it — none of which is visible
@@ -126,7 +199,7 @@ fn callback_failure(e: String) -> UploadFailure {
     }
 }
 
-/// Send `file_data` as the body of `request`, watching progress rather than
+/// Send `body` as the body of `request`, watching progress rather than
 /// the clock.
 ///
 /// There is no total time limit. A transfer moving at any rate runs to
@@ -135,15 +208,14 @@ fn callback_failure(e: String) -> UploadFailure {
 async fn send_upload(
     request: reqwest::RequestBuilder,
     server_url: &Url,
-    file_data: Arc<Vec<u8>>,
+    body: &UploadBody,
     stall_limit: std::time::Duration,
     cancel_flag: Option<&Arc<AtomicBool>>,
     progress_callback: Option<&ProgressCallback>,
 ) -> Result<reqwest::Response, UploadFailure> {
-    let total_size = file_data.len() as u64;
+    let total_size = body.len();
     let bytes_sent = Arc::new(Mutex::new(0u64));
-    let tracking_stream = ProgressTrackingStream::new(file_data, Arc::clone(&bytes_sent));
-    let mut request_future = Box::pin(request.body(Body::wrap_stream(tracking_stream)).send());
+    let mut request_future = Box::pin(request.body(Body::wrap_stream(body.stream(Arc::clone(&bytes_sent)))).send());
 
     let mut watch = StallWatch::new(total_size, stall_limit, RESPONSE_WAIT);
     let mut last_percentage = 0;
@@ -248,7 +320,7 @@ pub async fn upload_blob_with_progress<T>(
 where
     T: VectorSigner + Clone,
 {
-    upload_with_retries(signer, server_url, file_data, mime_type, progress_callback, retry_count, retry_spacing, cancel_flag, true).await
+    upload_with_retries(signer, server_url, UploadBody::Memory(file_data), mime_type, progress_callback, retry_count, retry_spacing, cancel_flag, true).await
 }
 
 /// [`upload_blob_with_progress`], with the BUD-06 preflight optional: a caller that
@@ -257,7 +329,7 @@ where
 async fn upload_with_retries<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<Vec<u8>>,
+    body: UploadBody,
     mime_type: Option<&str>,
     progress_callback: ProgressCallback,
     retry_count: Option<u32>,
@@ -289,7 +361,7 @@ where
         match upload_attempt(
             signer.clone(),
             server_url,
-            file_data.clone(),
+            body.clone(),
             mime_type,
             &progress_callback,
             cancel_flag.clone(),
@@ -311,7 +383,7 @@ where
                     // size policy; don't burn retries. Below 8MB, treat as a
                     // genuine transient blip and retry.
                     UploadFailure::Transport(_) => {
-                        !(e.is_mid_stream_drop() && file_data.len() > 8 * 1024 * 1024)
+                        !(e.is_mid_stream_drop() && body.len() > 8 * 1024 * 1024)
                     }
                     UploadFailure::Integrity(_) | UploadFailure::Other(_) | UploadFailure::Cancelled => false,
                 };
@@ -320,13 +392,13 @@ where
                         if crate::blossom_error::is_gateway_status(r.status) && r.code().is_none() {
                             crate::log_warn!(
                                 "[Blossom] {} origin unreachable (status {}) on {} bytes; routing to the next server",
-                                server_url, r.status, file_data.len(),
+                                server_url, r.status, body.len(),
                             );
                         }
                     } else if e.is_mid_stream_drop() {
                         crate::log_warn!(
                             "[Blossom] {} dropped the connection mid-upload of {} bytes, treating as permanent",
-                            server_url, file_data.len(),
+                            server_url, body.len(),
                         );
                     }
                     return Err(e);
@@ -485,7 +557,7 @@ async fn refusal_from(response: reqwest::Response) -> Refusal {
 async fn upload_attempt<T>(
     signer: T,
     server_url: &Url,
-    file_data: Arc<Vec<u8>>,
+    body: UploadBody,
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
     cancel_flag: Option<Arc<AtomicBool>>,
@@ -497,8 +569,8 @@ where
     let upload_url = server_url.join("upload")
         .map_err(|e| UploadFailure::Other(format!("Invalid server URL: {}", e)))?;
 
-    let total_size = file_data.len() as u64;
-    let hash = Sha256Hash::hash(&*file_data);
+    let total_size = body.len();
+    let hash = body.sha256();
 
     progress_callback(Some(0), Some(0)).map_err(callback_failure)?;
 
@@ -537,7 +609,7 @@ where
     let response = send_upload(
         client.put(upload_url.clone()).headers(headers),
         server_url,
-        file_data,
+        &body,
         crate::net::TRANSFER_STALL,
         cancel_flag.as_ref(),
         Some(progress_callback),
@@ -621,7 +693,7 @@ where
     let response = send_upload(
         client.put(upload_url).headers(headers),
         server_url,
-        file_data,
+        &UploadBody::Memory(file_data),
         stall_timeout.unwrap_or(crate::net::TRANSFER_STALL),
         None,
         None,
@@ -800,6 +872,7 @@ pub async fn warm_upload_connection(server_urls: Vec<String>, mime_type: &str, i
 }
 
 /// Upload with progress + failover, cache-aware routing, and capability learning.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
     server_urls: Vec<String>,
@@ -814,11 +887,34 @@ pub async fn upload_blob_with_progress_and_failover<T>(
 where
     T: VectorSigner + Clone,
 {
+    upload_body_with_progress_and_failover(
+        signer, server_urls, UploadBody::Memory(file_data), mime_type, is_encrypted,
+        progress_callback, retry_count, retry_spacing, cancel_flag,
+    ).await
+}
+
+/// [`upload_blob_with_progress_and_failover`] for any [`UploadBody`], a file on
+/// disk included.
+#[allow(clippy::too_many_arguments)]
+pub async fn upload_body_with_progress_and_failover<T>(
+    signer: T,
+    server_urls: Vec<String>,
+    body: UploadBody,
+    mime_type: Option<&str>,
+    is_encrypted: bool,
+    progress_callback: ProgressCallback,
+    retry_count: Option<u32>,
+    retry_spacing: Option<std::time::Duration>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<AcceptedUpload, String>
+where
+    T: VectorSigner + Clone,
+{
     let mut failures: Vec<(String, UploadFailure)> = Vec::new();
 
     // Known-good first, unknown second, MIME-rejected last. Stable within
     // tier so the user's BUD-03 trust order wins ties.
-    let size_bytes = file_data.len() as u64;
+    let size_bytes = body.len();
     let mime_for_routing = mime_type.unwrap_or("application/octet-stream");
     let ranked = crate::blossom_capabilities::rank_servers(server_urls, mime_for_routing, is_encrypted, size_bytes);
     // Pin capability writes to the account that started the upload.
@@ -851,7 +947,7 @@ where
         match upload_with_retries(
             signer.clone(),
             &server_url,
-            file_data.clone(),
+            body.clone(),
             mime_type,
             progress_callback.clone(),
             retry_count,

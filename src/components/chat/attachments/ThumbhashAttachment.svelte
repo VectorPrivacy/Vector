@@ -6,7 +6,7 @@
     // Both overlays size themselves off the rendered blur, because a thumbnail can be
     // anything from a wide banner to a sliver: the box drops its text when there is no
     // room for it, and the ring shows a rate only when one will fit under it.
-    import { downloadProgress, transfer } from '../../lib/attachments.svelte.js';
+    import { downloadProgress, transfer, transferStageText } from '../../lib/attachments.svelte.js';
     import FileBox from './FileBox.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     let { att, msg, ctx, sender, auto, h } = $props();
@@ -41,6 +41,8 @@
 
     const pct = $derived(downloadProgress(att.id));
     const rate = $derived.by(() => {
+        const stage = transferStageText(att.id);
+        if (stage) return stage;
         const t = transfer(att.id);
         if (!t || !(t.bps > 0)) return '';
         return `${h.formatBytes(t.bps, t.bps >= 1048576 ? 2 : 0, true)}/s`;

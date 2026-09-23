@@ -7,6 +7,7 @@ import { SvelteMap } from 'svelte/reactivity';
 const map = new SvelteMap();   // id → { kind: 'upload' | 'download', phase: 'active' | 'failed', pct, bps, error }
 const lerps = new Map();       // id → { display, target, factor, lastBytes, lastTime, raf }
 const slowTimers = new Map();  // id → timeout, one per publish that outstays its welcome
+const stageTimers = new Map(); // id → timeout, one per stage that outlasts a glance
 
 export function transfer(id) { return map.get(id) ?? null; }
 
@@ -20,6 +21,8 @@ export function uploadProgressed(pendingId, pct, bytesSent) {
     // answer and the blob still has to be verified. It is already unstoppable by then,
     // so the phase flips here rather than waiting for the completion notice.
     if (pct >= 100) { markPublishing(pendingId); return; }
+    // The first byte out ends whatever the upload was doing before; the rate takes over.
+    if (bytesSent > 0) clearStage(pendingId);
     patch(pendingId, { kind: 'upload', phase: 'active', pct });
     if (bytesSent == null) return;
     const now = performance.now();
@@ -102,9 +105,42 @@ export function transferSlow(id) { return map.get(id)?.slow === true; }
 /** The transfer ended well (or was cancelled): nothing is left to show. */
 export function transferDone(id) {
     stop(id);
+    clearTimeout(stageTimers.get(id));
+    stageTimers.delete(id);
     clearTimeout(slowTimers.get(id));
     slowTimers.delete(id);
     map.delete(id);
+}
+
+/**
+ * What a transfer is doing while no bytes move: sealing or starting before an upload,
+ * opening and saving after a download. `pct` is the stage's own progress, when it has one.
+ */
+export function transferStaged(id, kind, stage, pct = null) {
+    patch(id, { kind, stage, stagePct: pct });
+    // Like a slow publish, a stage only earns words once it has held the screen a moment:
+    // the common, quick transfer goes by without a flash of text.
+    if (map.get(id)?.stageShown || stageTimers.has(id)) return;
+    stageTimers.set(id, setTimeout(() => {
+        stageTimers.delete(id);
+        if (map.get(id)?.stage) patch(id, { stageShown: true });
+    }, 1000));
+}
+
+function clearStage(id) {
+    clearTimeout(stageTimers.get(id));
+    stageTimers.delete(id);
+    if (map.get(id)?.stage) patch(id, { stage: null, stageShown: false });
+}
+
+const STAGE_WORDS = { encrypting: 'Encrypting', starting: 'Starting upload', decrypting: 'Decrypting', verifying: 'Verifying', saving: 'Saving' };
+
+/** The stage in words for the rate's slot, or '' when the rate has it. */
+export function transferStageText(id) {
+    const t = map.get(id);
+    const word = t?.stage && t.stageShown ? STAGE_WORDS[t.stage] : '';
+    if (!word) return '';
+    return t.stagePct != null && t.stagePct < 100 ? `${word} ${t.stagePct}%` : word;
 }
 
 export function uploadProgress(pendingId) { return map.get(pendingId)?.pct ?? null; }

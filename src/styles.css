@@ -11181,10 +11181,12 @@ select:disabled:hover {
 
 /* The rate is the one thing in the box that rewrites itself several times a second,
    and a Mini App's box is sized to its own text. Give the rate a slot wide enough for
-   the fastest it can read, so the box stops resizing and the cancel button stops moving. */
+   the longest it can read (a stage such as "Starting upload"), so the box stops
+   resizing and the cancel button stops moving. */
 .file-box-rate {
     display: inline-block;
-    width: 6.7em;
+    width: 8.8em;
+    white-space: nowrap;
     margin-left: 0.35em;
     opacity: 0;
     transform: translateY(4px);

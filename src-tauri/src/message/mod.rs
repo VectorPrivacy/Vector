@@ -22,6 +22,11 @@ pub(crate) async fn clear_all_message_caches() {
     { *files::JS_COMPRESSION_CACHE.lock().await = None; }
     if let Ok(mut p) = files::PENDING_ZIP_PATH.lock() { *p = None; }
     if let Ok(mut a) = types::ANDROID_FILE_CACHE.lock() { a.clear(); }
+    if let Ok(mut picked) = types::ANDROID_PICKED_FILES.lock() {
+        for (_, (path, ..)) in picked.drain() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     { types::COMPRESSION_CACHE.lock().await.clear(); }
     // Drop any pending COMPRESSION_NOTIFY entries. These are
     // content-hash-keyed so they aren't correctness-critical, but they
