@@ -44,6 +44,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # Async
 tokio = { version = "1.49.0", features = ["sync", "time", "net", "io-util", "rt-multi-thread", "macros"] }
 futures-util = "0.3.31"
+bytes = "1.9"
 # Boxed, Send futures for the Community Transport trait so impls work in spawned tasks.
 async-trait = "0.1"
 

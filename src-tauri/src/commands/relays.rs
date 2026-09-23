@@ -637,6 +637,12 @@ pub async fn blossom_upload_verdict(
 ) -> vector_core::blossom_capabilities::UploadVerdict {
     let mime = vector_core::crypto::mime_from_extension(&extension);
     let servers = vector_core::state::get_blossom_servers();
+    // Asked as a file is picked, before the user has chosen to send it: the moment to
+    // have the connection ready.
+    let warm = servers.clone();
+    vector_core::db::spawn_bound(async move {
+        vector_core::blossom::warm_upload_connection(warm, mime, is_encrypted, size_bytes).await;
+    });
     vector_core::blossom_capabilities::upload_verdict(&servers, mime, is_encrypted, size_bytes)
 }
 

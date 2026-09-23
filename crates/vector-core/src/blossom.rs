@@ -8,7 +8,6 @@ use reqwest::{Body, StatusCode};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
 use futures_util::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -16,65 +15,45 @@ use std::task::{Context, Poll};
 /// Progress callback function type
 pub type ProgressCallback = std::sync::Arc<dyn Fn(Option<u8>, Option<u64>) -> Result<(), String> + Send + Sync>;
 
-/// Custom upload stream that tracks progress
+/// The upload body: slices of the one ciphertext buffer, counted as the socket pulls
+/// them. A slice shares the buffer, so nothing is copied on the way out.
 struct ProgressTrackingStream {
+    data: bytes::Bytes,
+    position: usize,
     bytes_sent: Arc<Mutex<u64>>,
-    inner: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+}
+
+/// Lends an `Arc`'d buffer to `Bytes` without copying it.
+struct SharedBuffer(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for SharedBuffer {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl ProgressTrackingStream {
+    /// Progress is observed per slice pulled, so the slice is the slowest rate that
+    /// still reads as progress: 16 KB in a 60 s stall window is about 2 kbit/s.
+    const SLICE: usize = 16 * 1024;
+
     fn new(data: Arc<Vec<u8>>, bytes_sent: Arc<Mutex<u64>>) -> Self {
-        let (tx, rx) = mpsc::channel(8); // Buffer size of 8 chunks
-
-        // Spawn a background task to feed the stream. NOT bound: this pumps
-        // bytes already in hand into a channel and never touches account state.
-        // spawn-detached: byte-pump into a channel; the bytes are already in hand.
-        tokio::spawn(async move {
-            // Progress is observed per chunk pulled, so the chunk is the slowest
-            // rate that still reads as progress: 16 KB in a 60 s stall window is
-            // about 2 kbit/s. Only unavoidable copy.
-            let chunk_size = 16 * 1024;
-            let mut position = 0;
-
-            while position < data.len() {
-                let end = std::cmp::min(position + chunk_size, data.len());
-                let chunk = data[position..end].to_vec();
-
-                // Send chunk through channel
-                if tx.send(Ok(chunk)).await.is_err() {
-                    break; // Receiver was dropped
-                }
-
-                position = end;
-            }
-        });
-
-        Self {
-            bytes_sent,
-            inner: rx,
-        }
+        Self { data: bytes::Bytes::from_owner(SharedBuffer(data)), position: 0, bytes_sent }
     }
 }
 
 impl Stream for ProgressTrackingStream {
-    type Item = Result<Vec<u8>, std::io::Error>;
+    type Item = Result<bytes::Bytes, std::io::Error>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        match self.inner.poll_recv(cx) {
-            Poll::Ready(Some(result)) => {
-                // Update the bytes sent counter
-                if let Ok(chunk) = &result {
-                    let mut bytes_sent = self.bytes_sent.lock().unwrap();
-                    *bytes_sent += chunk.len() as u64;
-                }
-                Poll::Ready(Some(result))
-            }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.position >= self.data.len() {
+            return Poll::Ready(None);
         }
+        let end = (self.position + Self::SLICE).min(self.data.len());
+        let slice = self.data.slice(self.position..end);
+        self.position = end;
+        *self.bytes_sent.lock().unwrap() += slice.len() as u64;
+        Poll::Ready(Some(Ok(slice)))
     }
 }
 
@@ -269,6 +248,26 @@ pub async fn upload_blob_with_progress<T>(
 where
     T: VectorSigner + Clone,
 {
+    upload_with_retries(signer, server_url, file_data, mime_type, progress_callback, retry_count, retry_spacing, cancel_flag, true).await
+}
+
+/// [`upload_blob_with_progress`], with the BUD-06 preflight optional: a caller that
+/// already knows the server takes this blob spares the round trip.
+#[allow(clippy::too_many_arguments)]
+async fn upload_with_retries<T>(
+    signer: T,
+    server_url: &Url,
+    file_data: Arc<Vec<u8>>,
+    mime_type: Option<&str>,
+    progress_callback: ProgressCallback,
+    retry_count: Option<u32>,
+    retry_spacing: Option<std::time::Duration>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+    preflight_first: bool,
+) -> Result<String, UploadFailure>
+where
+    T: VectorSigner + Clone,
+{
     let retry_count = retry_count.unwrap_or(0);
     let retry_spacing = retry_spacing.unwrap_or(std::time::Duration::from_secs(1));
 
@@ -294,6 +293,7 @@ where
             mime_type,
             &progress_callback,
             cancel_flag.clone(),
+            preflight_first,
         ).await {
             Ok(url) => return Ok(url),
             Err(UploadFailure::Cancelled) => return Err(UploadFailure::Cancelled),
@@ -489,6 +489,7 @@ async fn upload_attempt<T>(
     mime_type: Option<&str>,
     progress_callback: &ProgressCallback,
     cancel_flag: Option<Arc<AtomicBool>>,
+    preflight_first: bool,
 ) -> Result<String, UploadFailure>
 where
     T: VectorSigner,
@@ -509,11 +510,13 @@ where
     let client = crate::net::build_http_client_with_options(None, None, false)
         .map_err(UploadFailure::Other)?;
 
-    match preflight(&client, &upload_url, server_url, &auth_header, hash, total_size, mime_type).await? {
-        Preflight::Proceed => {}
-        Preflight::AlreadyStored(url) => {
-            progress_callback(Some(100), Some(total_size)).map_err(callback_failure)?;
-            return Ok(url);
+    if preflight_first {
+        match preflight(&client, &upload_url, server_url, &auth_header, hash, total_size, mime_type).await? {
+            Preflight::Proceed => {}
+            Preflight::AlreadyStored(url) => {
+                progress_callback(Some(100), Some(total_size)).map_err(callback_failure)?;
+                return Ok(url);
+            }
         }
     }
 
@@ -663,7 +666,7 @@ async fn uploaded_blob_serves(url: &str) -> bool {
         if attempt > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        match crate::net::remote_status(url, std::time::Duration::from_secs(10)).await {
+        match uploaded_blob_status(url).await {
             Some(404) | Some(410) => continue,
             Some(_) => return true,
             None => {
@@ -674,6 +677,21 @@ async fn uploaded_blob_serves(url: &str) -> bool {
     }
     crate::log_net_fail!("[Blossom] {} ACKed the upload but serves 404/410 — treating as dropped", url);
     false
+}
+
+/// The status a just-uploaded blob answers with. Asked directly, it rides the
+/// upload's pooled connection instead of opening a fresh one to the same host.
+async fn uploaded_blob_status(url: &str) -> Option<u16> {
+    let timeout = std::time::Duration::from_secs(10);
+    if crate::net::egress(url).await.proxied() {
+        return crate::net::remote_status(url, timeout).await;
+    }
+    let client = crate::net::build_http_client_with_options(None, None, false).ok()?;
+    let status = tokio::time::timeout(timeout, client.head(url).send()).await.ok()?.ok()?.status();
+    if status == StatusCode::METHOD_NOT_ALLOWED || status == StatusCode::NOT_IMPLEMENTED {
+        return crate::net::remote_status(url, timeout).await;
+    }
+    Some(status.as_u16())
 }
 
 /// What a failure says about the server's state for the status pill: gone
@@ -770,6 +788,17 @@ pub struct AcceptedUpload {
     pub server: String,
 }
 
+/// Open a pooled connection to the server an upload of this kind would try first,
+/// so a send that follows starts on a live TLS session rather than a handshake.
+/// Best-effort and bodiless: the answer is irrelevant, the connection is the point.
+pub async fn warm_upload_connection(server_urls: Vec<String>, mime_type: &str, is_encrypted: bool, size_bytes: u64) {
+    let ranked = crate::blossom_capabilities::rank_servers(server_urls, mime_type, is_encrypted, size_bytes);
+    let Some(url) = ranked.first().and_then(|u| Url::parse(u).ok()) else { return };
+    // The same options as `upload_attempt`, so the upload draws from this pool.
+    let Ok(client) = crate::net::build_http_client_with_options(None, None, false) else { return };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), client.head(url).send()).await;
+}
+
 /// Upload with progress + failover, cache-aware routing, and capability learning.
 pub async fn upload_blob_with_progress_and_failover<T>(
     signer: T,
@@ -814,7 +843,12 @@ where
         crate::log_info!("[Blossom] Attempting upload to server {} of {}: {}",
             index + 1, ranked.len(), server_url_str);
 
-        match upload_blob_with_progress(
+        // A fresh random key makes every ciphertext new, so a preflight can only
+        // refuse; it is skipped where this server has already taken its like.
+        let preflight_first = !crate::blossom_capabilities::preflight_redundant(
+            server_url_str, mime_for_routing, is_encrypted, size_bytes,
+        );
+        match upload_with_retries(
             signer.clone(),
             &server_url,
             file_data.clone(),
@@ -823,6 +857,7 @@ where
             retry_count,
             retry_spacing,
             cancel_flag.clone(),
+            preflight_first,
         ).await {
             Ok(url) => {
                 if !uploaded_blob_serves(&url).await {

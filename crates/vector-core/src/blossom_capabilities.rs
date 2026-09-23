@@ -150,6 +150,27 @@ pub fn has_fresh_capability_for(server_url: &str, mime_type: &str, is_encrypted:
     ).is_ok()
 }
 
+/// Whether a BUD-06 preflight to `server_url` could only say yes: a fresh upload of
+/// this kind at this size or larger went through, nothing this size has been refused
+/// since, and the server's own document for this account doesn't say no.
+pub fn preflight_redundant(server_url: &str, mime: &str, is_encrypted: bool, size_bytes: u64) -> bool {
+    let info = crate::blossom_info::cached(server_url).and_then(|d| d.accepts_size(size_bytes));
+    let servers = [server_url.to_string()];
+    let Ok(cache) = load_cache_for(&servers, mime, is_encrypted) else { return false };
+    known_to_take(cache.get(&norm_url(server_url)), info, size_bytes)
+}
+
+/// [`preflight_redundant`]'s rule over what is known, DB-free.
+fn known_to_take(state: Option<&CapabilityState>, info_verdict: Option<bool>, size_bytes: u64) -> bool {
+    info_verdict != Some(false)
+        && matches!(
+            state,
+            Some(st) if st.outcome == OUTCOME_ACCEPTED
+                && size_bytes <= st.max_accepted_size
+                && st.min_rejected_size.is_none_or(|m| size_bytes < m)
+        )
+}
+
 /// Drop every cached row for `server_url`. Called on hard-remove so a
 /// later re-add starts with a clean slate.
 pub fn purge_server(server_url: &str) -> Result<usize, String> {
@@ -615,5 +636,34 @@ mod tests {
     fn mime_rejection_no_status_no_body_hint_not_recorded() {
         assert!(!is_mime_rejection(None, "network error"));
         assert!(!is_mime_rejection(None, "timeout"));
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    fn took(max: u64, min_rejected: Option<u64>) -> CapabilityState {
+        CapabilityState { outcome: OUTCOME_ACCEPTED, max_accepted_size: max, min_rejected_size: min_rejected }
+    }
+
+    #[test]
+    fn a_server_that_took_as_much_needs_no_asking() {
+        assert!(known_to_take(Some(&took(10_000, None)), None, 9_000));
+        assert!(known_to_take(Some(&took(10_000, None)), Some(true), 10_000));
+    }
+
+    #[test]
+    fn anything_unproven_is_asked_first() {
+        assert!(!known_to_take(None, Some(true), 1), "never uploaded there: the document alone is not proof");
+        assert!(!known_to_take(Some(&took(10_000, None)), None, 10_001), "larger than it has taken");
+        assert!(!known_to_take(Some(&took(10_000, Some(9_000))), None, 9_500), "a refusal at this size since");
+        let mime_refused = CapabilityState { outcome: OUTCOME_REJECTED_MIME, max_accepted_size: 10_000, min_rejected_size: None };
+        assert!(!known_to_take(Some(&mime_refused), None, 1));
+    }
+
+    #[test]
+    fn the_servers_own_no_overrides_its_history() {
+        assert!(!known_to_take(Some(&took(10_000, None)), Some(false), 1), "a quota or tier change the history can't know");
     }
 }

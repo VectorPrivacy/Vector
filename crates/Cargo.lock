@@ -5918,6 +5918,7 @@ dependencies = [
  "base64-simd",
  "bip39",
  "bitcoin_hashes 1.2.0",
+ "bytes",
  "chacha20 0.9.1",
  "chacha20poly1305",
  "fast-thumbhash",
