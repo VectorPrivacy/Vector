@@ -21032,20 +21032,24 @@ body.profile-switcher-editing .profile-switcher-add {
   transform: none;
 }
 
-/* The anchors hang off a line, dots on it, the one being read lit. */
+/* The anchors hang off a line, dots on it, the one being read lit. A button clips what
+   it draws to its own box, so each row draws only its own stretch: from its dot down
+   for the first, through it for the middle, down to its dot for the last. */
 .cs-anchors {
   position: relative;
   padding: 4px 0 8px 10px;
 }
-.cs-anchors::before {
+.cs-anchor::after {
   content: '';
   position: absolute;
-  left: 13.5px;
-  top: 17px;
-  bottom: 21px;
+  left: 3.5px;
+  top: 0;
+  bottom: 0;
   width: 1px;
-  background-color: #333;
+  background-color: #3a3a3a;
 }
+.cs-anchor:first-child::after { top: 50%; }
+.cs-anchor:last-child::after { bottom: 50%; }
 .cs-anchor {
   position: relative;
   display: flex;
@@ -21082,16 +21086,14 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 .cs-anchor-icon {
   position: relative;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
-  border: 1px solid currentColor;
-  border-radius: 5px;
   opacity: 0.85;
 }
 .cs-anchor-icon .icon {
-  width: 11px;
-  height: 11px;
+  width: 16px;
+  height: 16px;
   background-color: currentColor;
 }
 .cs-anchor-label { min-width: 0; }
