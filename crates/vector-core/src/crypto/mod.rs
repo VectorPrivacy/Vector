@@ -1,4 +1,5 @@
 pub mod guarded_key;
+pub mod stream;
 pub use guarded_key::GuardedKey;
 
 mod signer;

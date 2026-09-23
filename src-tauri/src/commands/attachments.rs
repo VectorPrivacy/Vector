@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, Runtime};
+use tauri::Emitter;
 
 use crate::{STATE, TAURI_APP, ChatType, Attachment};
 use crate::{util, net, db};
@@ -100,25 +100,6 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
     }
 
     sanitized.to_string()
-}
-
-/// Decrypt and save an attachment to disk
-///
-/// Uses explicit key/nonce with AES-GCM (DM/Community attachments).
-///
-/// Returns (path, content_hash) if successful, or an error message if unsuccessful
-pub async fn decrypt_and_save_attachment<R: Runtime>(
-    _handle: &AppHandle<R>,
-    encrypted_data: Vec<u8>,
-    attachment: &Attachment
-) -> Result<(std::path::PathBuf, String), String> {
-    if attachment.group_id.is_some() {
-        return Err("Group chat attachments are no longer supported".to_string());
-    }
-    vector_core::crypto::decrypt_and_save_attachment_owned(
-        encrypted_data, &attachment.key, &attachment.nonce,
-        &attachment.name, &attachment.extension,
-    )
 }
 
 // ============================================================================
@@ -270,6 +251,105 @@ fn ensure_path_in_download_dir(path: &str) -> Result<(), String> {
     } else {
         Err("path is outside the download directory".to_string())
     }
+}
+
+/// Where partial downloads live inside the account's directory.
+const PARTIAL_DIR: &str = "partial-downloads";
+
+/// Partials untouched this long are abandoned, not paused.
+const PARTIAL_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// Remove abandoned partials and their checkpoints.
+fn sweep_stale_partials(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| now.duration_since(t).unwrap_or_default() > PARTIAL_MAX_AGE)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Why a finished download can't be used.
+enum Verdict {
+    /// These bytes aren't this blob: another source may still serve it.
+    BadSource(String),
+    /// Nothing another source could fix.
+    Fatal(String),
+}
+
+/// Check a finished download against its content address and the sender's claim,
+/// decrypting it into `staging` in the same pass. Returns the plaintext's path,
+/// hash and length. Runs on a blocking thread: each step is a pass over the file.
+fn verify_download(
+    part: &std::path::Path,
+    staging: &std::path::Path,
+    url: &str,
+    attachment: &Attachment,
+) -> Result<(std::path::PathBuf, String, u64), Verdict> {
+    use vector_core::crypto::stream::{decrypt_file, hash_file};
+    let address = vector_core::blossom::blob_hash(url);
+    let len = std::fs::metadata(part).map(|m| m.len()).map_err(|e| Verdict::Fatal(e.to_string()))?;
+    if len < 16 {
+        return Err(Verdict::BadSource(format!("Downloaded file too small ({} bytes)", len)));
+    }
+
+    // Plaintext public blob (no decryption tags): the content address and the
+    // sender's `ox` claim are the only integrity checks there are.
+    if attachment.key.is_empty() || attachment.nonce.is_empty() {
+        let (hash, len) = hash_file(part).map_err(Verdict::Fatal)?;
+        let claim = attachment.original_hash.as_deref();
+        if address.as_deref().is_some_and(|a| a != hash) || claim.is_some_and(|c| c != hash) {
+            return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
+        }
+        return Ok((part.to_path_buf(), hash, len));
+    }
+
+    match decrypt_file(part, staging, &attachment.key, &attachment.nonce) {
+        Ok(done) => {
+            if address.as_deref().is_some_and(|a| a != done.source_sha256) {
+                let _ = std::fs::remove_file(staging);
+                return Err(Verdict::BadSource("Source served corrupt bytes".to_string()));
+            }
+            Ok((staging.to_path_buf(), done.output_sha256, done.output_len))
+        }
+        Err(e) if e.contains("aead") => {
+            // Bytes that match their address but won't decrypt are the right blob
+            // with the wrong key; anything else is a bad copy.
+            let verified = address.is_some_and(|a| hash_file(part).map(|(h, _)| h == a).unwrap_or(false));
+            if verified {
+                Err(Verdict::Fatal("Decryption failed - file may be corrupted".to_string()))
+            } else {
+                Err(Verdict::BadSource("Decryption failed - file may be corrupted".to_string()))
+            }
+        }
+        Err(e) => Err(Verdict::Fatal(e)),
+    }
+}
+
+/// This account's paused downloads: each partial's attachment id, how far it got
+/// and how large the file is, for the Resume state a restart would otherwise lose.
+#[tauri::command]
+pub async fn get_paused_downloads() -> std::collections::HashMap<String, serde_json::Value> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(dir) = vector_core::db::current_account_dir().map(|d| d.join(PARTIAL_DIR)) else { return out };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return out };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("part") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        if let Some(at) = net::read_checkpoint(&path).filter(|c| c.offset > 0) {
+            out.insert(id.to_string(), serde_json::json!({ "offset": at.offset, "total": at.total }));
+        }
+    }
+    out
 }
 
 /// Stop an in-progress attachment download.
@@ -491,11 +571,29 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             }
         };
 
-        // Begin our download progress events
         let attachment_hex_id = util::bytes_to_hex_32(&attachment.id);
+
+        // The ciphertext streams into this account's partial file and survives any
+        // failure behind a checkpoint, so a retry, a mirror or the next launch picks
+        // up where the bytes stopped. Content-addressed sources serve identical bytes,
+        // so one partial serves them all.
+        let part = match vector_core::db::current_account_dir() {
+            Ok(dir) => dir.join(PARTIAL_DIR).join(format!("{}.part", attachment_hex_id)),
+            Err(e) => {
+                let mut state = STATE.lock().await;
+                state.update_attachment(&npub, &msg_id, &attachment_id, |att| att.set_downloading(false));
+                drop(state);
+                return fail(&e);
+            }
+        };
+        if let Some(dir) = part.parent() {
+            sweep_stale_partials(dir);
+        }
+        let resumed = net::read_checkpoint(&part).unwrap_or_default();
         handle.emit("attachment_download_progress", serde_json::json!({
             "id": &attachment_hex_id,
-            "progress": 0
+            "progress": resumed.total.filter(|&t| t > 0).map(|t| resumed.offset * 100 / t).unwrap_or(0),
+            "bytesDownloaded": resumed.offset,
         })).unwrap();
 
         // Walk the sources: primary URL first, then the BUD-04 `fallback` mirrors,
@@ -525,13 +623,15 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             let url = candidates[i].clone();
 
             // Fetch this source's bytes, retrying transient failures with backoff.
+            // Each retry resumes from the checkpoint rather than the first byte.
             let mut attempt: u32 = 0;
-            let bytes: Option<Vec<u8>> = loop {
-                match net::download(&url, handle, &attachment_hex_id, None).await {
-                    Ok(d) => break Some(d),
+            let fetched = loop {
+                let reporter = net::TauriProgressReporter::new(handle, &attachment_hex_id);
+                match net::download_to_file(&url, &part, &reporter).await {
+                    Ok(_) => break true,
                     Err(error) => {
                         if error == net::TRANSFER_CANCELLED {
-                            break None;
+                            break false;
                         }
                         attempt += 1;
                         last_error = error.to_string();
@@ -548,77 +648,42 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             tokio::time::sleep(std::time::Duration::from_secs(2 * attempt as u64)).await;
                             continue;
                         }
-                        break None;
+                        break false;
                     }
                 }
             };
 
-            'source: {
-                let Some(data) = bytes else { break 'source };
-
-                // Content-address check: a Blossom URL names its own sha256, so a
-                // body that fails it is provably not the blob, whatever the status
-                // code said.
-                let verified = match vector_core::blossom::verify_blob_content(&url, &data) {
-                    Some(true) => true,
-                    Some(false) => {
-                        vector_core::log_net_fail!(
-                            "[AttachmentDownload] {} served bytes that fail their content address — bad source",
-                            url
-                        );
-                        last_error = "Source served corrupt bytes".to_string();
-                        break 'source;
-                    }
-                    None => false,
-                };
-
-                if data.len() < 16 {
-                    vector_core::log_net_fail!(
-                        "[AttachmentDownload] {} served {} bytes — too small, bad source",
-                        url, data.len()
-                    );
-                    last_error = format!("Downloaded file too small ({} bytes)", data.len());
-                    break 'source;
-                }
-
-                // Plaintext public blob (no decryption tags): AES-GCM normally
-                // authenticates the bytes; here the sender's `ox` claim is the only
-                // integrity check, so enforce it per source before saving.
-                if attachment_for_decrypt.key.is_empty() {
-                    if let Some(claim) = attachment_for_decrypt.original_hash.as_deref() {
-                        if util::calculate_file_hash(&data) != claim {
-                            vector_core::log_net_fail!(
-                                "[AttachmentDownload] {} served plaintext that fails its hash claim — bad source",
-                                url
-                            );
-                            last_error = "Source served corrupt bytes".to_string();
-                            break 'source;
+            if fetched {
+                let (src, url_for_check, att) = (part.clone(), url.clone(), attachment_for_decrypt.clone());
+                let staging = vector_core::db::get_download_dir().join(format!(".{}.download", attachment_hex_id));
+                let outcome = tokio::task::spawn_blocking(move || verify_download(&src, &staging, &url_for_check, &att))
+                    .await
+                    .unwrap_or_else(|e| Err(Verdict::Fatal(e.to_string())));
+                match outcome {
+                    Ok((ready, file_hash, len)) => {
+                        let (name, extension) = (attachment_for_decrypt.name.clone(), attachment_for_decrypt.extension.clone());
+                        let hash = file_hash.clone();
+                        let placed = tokio::task::spawn_blocking(move || {
+                            vector_core::crypto::stream::place_download(&ready, &hash, len, &name, &extension)
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()));
+                        net::discard_partial(&part);
+                        match placed {
+                            Ok(path) => saved = Some((path, file_hash)),
+                            Err(e) => last_error = e,
                         }
                     }
-                }
-
-                match decrypt_and_save_attachment(handle, data, &attachment_for_decrypt).await {
-                    Ok(ok) => saved = Some(ok),
-                    Err(error) => {
-                        let is_decryption_error = error.contains("aead") || error.contains("decrypt");
-                        if is_decryption_error && !verified {
-                            // No content address to pre-check, so garbage bytes only
-                            // reveal themselves here — dead source, keep walking.
-                            vector_core::log_net_fail!(
-                                "[AttachmentDownload] bytes from {} fail decryption (unverifiable source) — trying next source",
-                                url
-                            );
-                            last_error = "Decryption failed - file may be corrupted".to_string();
-                            break 'source;
-                        }
-                        // Hash-verified ciphertext that won't decrypt is a key/nonce
-                        // problem no mirror can fix; filesystem errors likewise end
-                        // the walk.
-                        let reason = if is_decryption_error {
-                            "Decryption failed - file may be corrupted".to_string()
-                        } else {
-                            error
-                        };
+                    Err(Verdict::BadSource(reason)) => {
+                        // These bytes are wrong for this blob; the next source starts clean.
+                        vector_core::log_net_fail!("[AttachmentDownload] {} — bad source: {}", reason, url);
+                        net::discard_partial(&part);
+                        last_error = reason;
+                    }
+                    Err(Verdict::Fatal(reason)) => {
+                        // Verified ciphertext that won't decrypt is a key/nonce problem no
+                        // mirror can fix; filesystem errors likewise end the walk.
+                        net::discard_partial(&part);
                         vector_core::log_net_fail!(
                             "[AttachmentDownload] terminal failure: {} (msg {}, attachment {}, source {})",
                             reason, msg_id, attachment_id, url
@@ -682,6 +747,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 "[AttachmentDownload] stopped by the user (msg {}, attachment {})",
                 msg_id, attachment_id
             );
+            // A stop is a choice, not an outage: nothing is kept to resume.
+            net::discard_partial(&part);
             let mut state = STATE.lock().await;
             state.update_attachment(&npub, &msg_id, &attachment_id, |att| {
                 att.set_downloading(false);
@@ -700,7 +767,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         }
 
         let Some((hash_file_path, file_hash)) = saved else {
-            // Every source is dead. Persist the outcome and surface the last reason.
+            // Every source is dead for now. Whatever arrived stays behind its
+            // checkpoint, and the outcome says how far a resume would start.
             vector_core::log_net_fail!(
                 "[AttachmentDownload] failed: {} (msg {}, attachment {}) after {} source(s), url {}",
                 last_error, msg_id, attachment_id, candidates.len(), &*attachment.url
@@ -711,16 +779,18 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 att.set_downloaded(false);
             });
             drop(state);
+            let paused = net::read_checkpoint(&part).filter(|c| c.offset > 0);
             handle.emit("attachment_download_result", serde_json::json!({
                 "profile_id": npub,
                 "msg_id": msg_id,
                 "id": attachment_id,
                 "success": false,
-                "result": last_error
+                "result": last_error,
+                "resumeFrom": paused.map(|c| c.offset),
+                "total": paused.and_then(|c| c.total),
             })).unwrap();
             return false;
         };
-
 
         // Update state with successful download
         let path_str = hash_file_path.to_string_lossy().to_string();
@@ -897,3 +967,4 @@ pub(crate) async fn reconcile_missing_attachments_in_state(affected: &[String]) 
 // - generate_thumbhash_preview
 // - decode_thumbhash
 // - download_attachment
+

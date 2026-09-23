@@ -379,6 +379,13 @@ async function setupRustListeners() {
         downloadingAttachmentIds.delete(evt.payload.id);
         VectorSvelte.transferDone(matchId);
         VectorSvelte.transferDone(evt.payload.id);
+        // A failure that kept its bytes is paused; anything else leaves nothing to resume.
+        pausedDownloads.delete(evt.payload.id);
+        if (!evt.payload.success && !evt.payload.cancelled && evt.payload.resumeFrom > 0) {
+            pausedDownloads.set(matchId, { offset: evt.payload.resumeFrom, total: evt.payload.total ?? null });
+        } else {
+            pausedDownloads.delete(matchId);
+        }
 
         // Update the in-memory attachment (works for both DMs and Group Chats)
         let cChat = getChat(evt.payload.profile_id);

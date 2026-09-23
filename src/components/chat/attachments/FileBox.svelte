@@ -17,7 +17,7 @@
     // onActivate overrides the click
     // h: fileTypeInfo(ext), formatBytes(n, dec?, short?), assetUrl(path), loadMiniAppInfo(path), marketplaceApp(hash),
     //    backendCachedImg(img, url), openFile(att, msg), startDownload(att, msg, sender),
-    //    cancelDownload(att, msg), cancelUpload(id),
+    //    cancelDownload(att, msg), cancelUpload(id), pausedAt(att),
     //    getProfile, getProfileAvatarSrc, showTooltip, hideTooltip
 
     // Mount-time: an attachment's kind never changes under its box.
@@ -34,11 +34,14 @@
     const down = $derived(phase === 'downloading' ? transfer(att.id) : null);
     const moving = $derived(uploading || phase === 'downloading');
     const pct = $derived(moving ? (uploading ? up?.pct : down?.pct) : null);
+    // Part of the file is already here: the next download picks up from it.
+    const paused = $derived.by(() => { messageVersion(msg.id); return moving || phase === 'downloaded' ? null : h.pausedAt?.(att) || null; });
     // One word for the whole box: the stylesheet colours from it, nothing else has to agree.
     const state = $derived(
         uploading ? 'uploading'
         : phase === 'downloading' ? 'downloading'
         : phase === 'downloaded' ? 'local'
+        : paused ? 'paused'
         : (failed || att.download_failed) ? 'failed'
         : 'remote'
     );
@@ -91,6 +94,9 @@
     const kind = $derived(ext ? `.${ext}` : info.description);
     const sizeText = $derived(att.size > 0 ? h.formatBytes(att.size) : '');
     const restLine = $derived(sizeText ? `${kind} — ${sizeText}` : kind);
+    const pausedLine = $derived(paused
+        ? `Paused at ${h.formatBytes(paused.offset)}${paused.total ? ` of ${h.formatBytes(paused.total)}` : ''} · Tap to Resume`
+        : '');
     const failLine = $derived.by(() => {
         const reason = (att.download_error || '').slice(0, 64);
         return reason ? `Failed: ${reason} · Tap to Retry` : 'Download Failed · Tap to Retry';
@@ -151,7 +157,7 @@
                     {/if}
                 </span>
             {:else}
-                <span class="file-box-sub">{label ?? (state === 'failed' ? failLine : restLine)}</span>
+                <span class="file-box-sub">{label ?? (state === 'paused' ? pausedLine : state === 'failed' ? failLine : restLine)}</span>
             {/if}
         </span>
         {#if uploading && up?.phase !== 'publishing'}
@@ -164,6 +170,11 @@
             <button class="file-box-action is-cancel" aria-label="Cancel download"
                     onclick={(e) => { e.stopPropagation(); h.cancelDownload(att, msg); }}>
                 <span class="icon icon-x"></span>
+            </button>
+        {:else if state === 'paused'}
+            <button class="file-box-action" aria-label="Resume download"
+                    onclick={(e) => { e.stopPropagation(); click(); }}>
+                <span class="icon icon-download"></span>
             </button>
         {:else if state === 'failed'}
             <button class="file-box-action is-failed" aria-label="Retry download"

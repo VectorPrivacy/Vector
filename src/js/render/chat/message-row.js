@@ -242,6 +242,7 @@ const _dmsgContentHelpers = {
  *   attachImagePreview: (img: HTMLImageElement) => void,
  *   attachFileExtBadge: (img: HTMLImageElement, container: Element, ext: string) => void,
  *   cancelUpload: (pendingId: string) => Promise<void>,
+ *   pausedAt: (att: object) => ({ offset: number, total: number|null }|null),
  * }} MediaHelpers
  */
 const _dmsgMediaHelpers = {
@@ -250,6 +251,7 @@ const _dmsgMediaHelpers = {
     isAudio: (ext) => ['wav', 'mp3', 'flac', 'aac', 'm4a', 'ogg'].includes(ext),
     isVideo: (ext) => platformFeatures.os !== 'linux' && ['mp4', 'webm', 'mov'].includes(ext),
     isDownloading: (att) => !!att.downloading || downloadingAttachmentIds.has(att.id),
+    pausedAt: (att) => pausedDownloads.get(att.id) || null,
     willAutoDownload: (att, ctx) => AUTO_DOWNLOAD_ENABLED && !ctx.revealedBlocked && att.size > 0
         && att.size <= MAX_AUTO_DOWNLOAD_BYTES && !att.download_failed && !att.download_cancelled,
     // Once per attachment id across renders, or every repaint would re-fire the download.

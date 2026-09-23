@@ -948,6 +948,7 @@ pub fn run() {
             commands::attachments::generate_thumbhash_preview,
             commands::attachments::decode_thumbhash,
             commands::attachments::cancel_download,
+            commands::attachments::get_paused_downloads,
             commands::attachments::download_attachment,
             commands::attachments::open_attachment,
             commands::attachments::can_install_apks,

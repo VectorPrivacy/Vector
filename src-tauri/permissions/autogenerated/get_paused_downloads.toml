@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-paused-downloads"
+description = "Enables the get_paused_downloads command without any pre-configured scope."
+commands.allow = ["get_paused_downloads"]
+
+[[permission]]
+identifier = "deny-get-paused-downloads"
+description = "Denies the get_paused_downloads command without any pre-configured scope."
+commands.deny = ["get_paused_downloads"]

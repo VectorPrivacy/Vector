@@ -1026,6 +1026,12 @@ pub fn parse_blob_url(url_str: &str) -> Result<(Url, Sha256Hash), String> {
     Ok((origin, hash))
 }
 
+/// The SHA-256 a Blossom URL names, as hex: what its bytes must hash to. `None`
+/// for a URL that isn't content-addressed.
+pub fn blob_hash(url_str: &str) -> Option<String> {
+    parse_blob_url(url_str).ok().map(|(_, hash)| hash.to_string())
+}
+
 /// Verify a downloaded body against its URL's content address.
 /// `Some(true)` = bytes match the blob hash, `Some(false)` = the source served
 /// the wrong bytes, `None` = the URL carries no content address to check.

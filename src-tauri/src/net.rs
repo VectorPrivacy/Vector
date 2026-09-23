@@ -136,23 +136,212 @@ impl<'a, R: tauri::Runtime> ProgressReporter for TauriProgressReporter<'a, R> {
     }
 }
 
-/// Downloads the file in-memory at the given URL with progress reporting
-pub async fn download<R: tauri::Runtime>(
-    content_url: &str,
-    handle: &AppHandle<R>,
-    attachment_id: &str,
-    timeout: Option<std::time::Duration>,
-) -> Result<Vec<u8>, &'static str> {
-    let reporter = TauriProgressReporter::new(handle, attachment_id);
-    download_with_reporter(content_url, &reporter, timeout).await
-}
-
 /// Attach a proxied request's signed authorization, when there is one.
 fn with_auth(req: reqwest::RequestBuilder, auth: Option<&reqwest::header::HeaderValue>) -> reqwest::RequestBuilder {
     match auth {
         Some(v) => req.header(reqwest::header::AUTHORIZATION, v.clone()),
         None => req,
     }
+}
+
+/// How often a streamed download makes its progress durable: the bytes are synced
+/// and the checkpoint moved. A resume starts from the last one, never from the
+/// file's length, which a power cut can leave covering bytes that never landed.
+const CHECKPOINT_EVERY: u64 = 4 * 1024 * 1024;
+
+/// A partial download's durable progress, kept beside its bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Checkpoint {
+    /// Bytes known to be on disk.
+    pub offset: u64,
+    /// The whole file's size, once a response has said it.
+    pub total: Option<u64>,
+}
+
+fn checkpoint_path(part: &std::path::Path) -> std::path::PathBuf {
+    part.with_extension("ckpt")
+}
+
+/// The checkpoint beside `part`, if both it and enough bytes to back it exist.
+pub fn read_checkpoint(part: &std::path::Path) -> Option<Checkpoint> {
+    let raw = std::fs::read(checkpoint_path(part)).ok()?;
+    let raw: [u8; 16] = raw.try_into().ok()?;
+    let offset = u64::from_le_bytes(raw[..8].try_into().ok()?);
+    let total = u64::from_le_bytes(raw[8..].try_into().ok()?);
+    let on_disk = std::fs::metadata(part).ok()?.len();
+    (on_disk >= offset).then_some(Checkpoint { offset, total: (total > 0).then_some(total) })
+}
+
+fn write_checkpoint(part: &std::path::Path, at: Checkpoint) -> std::io::Result<()> {
+    let mut raw = [0u8; 16];
+    raw[..8].copy_from_slice(&at.offset.to_le_bytes());
+    raw[8..].copy_from_slice(&at.total.unwrap_or(0).to_le_bytes());
+    let tmp = part.with_extension("ckpt.tmp");
+    std::fs::write(&tmp, raw)?;
+    std::fs::rename(tmp, checkpoint_path(part))
+}
+
+/// Forget a partial download: its bytes and its checkpoint.
+pub fn discard_partial(part: &std::path::Path) {
+    let _ = std::fs::remove_file(part);
+    let _ = std::fs::remove_file(checkpoint_path(part));
+}
+
+/// Stream `content_url` into `part`, resuming from its checkpoint when there is
+/// one. Holds a chunk at a time, never the file. On any failure the bytes so far
+/// stay behind a fresh checkpoint for the next attempt, from this source or another
+/// serving the same blob. Returns the file's length once every byte is on disk.
+pub async fn download_to_file(
+    content_url: &str,
+    part: &std::path::Path,
+    reporter: &impl ProgressReporter,
+) -> Result<u64, &'static str> {
+    use tokio::io::AsyncWriteExt;
+
+    validate_url_not_private(content_url)?;
+    let vector_core::net::Egress { url: fetch_url, auth } = vector_core::net::egress(content_url).await;
+    let client = vector_core::net::build_http_client_with_options(None, Some(vector_core::net::TRANSFER_STALL), true)
+        .map_err(|_| "Failed to create HTTP client")?;
+    if let Some(dir) = part.parent() {
+        std::fs::create_dir_all(dir).map_err(|_| "Failed to prepare the download")?;
+    }
+
+    let mut at = read_checkpoint(part).unwrap_or_default();
+    // A checkpoint that already covers the whole file needs no request at all.
+    if at.total.is_some_and(|t| t > 0 && at.offset == t) {
+        return Ok(at.offset);
+    }
+    // Two passes at most: a server that answers the range with the wrong bytes is
+    // asked once more for the whole file.
+    for _ in 0..2 {
+        if reporter.cancelled() {
+            return Err(TRANSFER_CANCELLED);
+        }
+        let mut request = with_auth(client.get(&fetch_url), auth.as_ref());
+        if at.offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={}-", at.offset));
+        }
+        let res = request.send().await.map_err(|e| {
+            vector_core::log_warn!("[AttachmentDownload] request failed for {}: {}", fetch_url, e);
+            "Failed to download"
+        })?;
+
+        let status = res.status().as_u16();
+        let (start, total) = match status {
+            206 => {
+                // `bytes START-END/TOTAL`; anything else can't be trusted to line up.
+                let range = res.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok()).unwrap_or("");
+                let parsed = range.strip_prefix("bytes ").and_then(|r| {
+                    let (span, total) = r.split_once('/')?;
+                    let start = span.split_once('-')?.0.parse::<u64>().ok()?;
+                    Some((start, total.parse::<u64>().ok()))
+                });
+                match parsed {
+                    Some((start, total)) if start == at.offset => (start, total),
+                    _ => {
+                        at = Checkpoint::default();
+                        continue;
+                    }
+                }
+            }
+            // The whole body: the server ignored the range, or none was asked.
+            200 => (0, res.content_length().filter(|&n| n > 0)),
+            416 if at.offset > 0 => {
+                // Nothing past the offset: finished if the offset is the whole file.
+                if at.total == Some(at.offset) {
+                    return Ok(at.offset);
+                }
+                at = Checkpoint::default();
+                continue;
+            }
+            _ => {
+                vector_core::log_debug!("[AttachmentDownload] HTTP {} for {}", status, fetch_url);
+                return Err("Media server returned an error status");
+            }
+        };
+        let total = total.or_else(|| res.content_length().map(|n| n + start));
+        if total.is_some_and(|t| t > MAX_DOWNLOAD_BYTES) {
+            return Err("File exceeds the maximum download size");
+        }
+
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(part)
+            .await
+            .map_err(|_| "Failed to prepare the download")?;
+        file.set_len(start).await.map_err(|_| "Failed to prepare the download")?;
+        let mut file = tokio::io::BufWriter::with_capacity(256 * 1024, file);
+        tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(start))
+            .await
+            .map_err(|_| "Failed to prepare the download")?;
+
+        let mut written = start;
+        let mut durable = Checkpoint { offset: start, total };
+        let _ = write_checkpoint(part, durable);
+        let started = std::time::Instant::now();
+        let mut last_percentage: Option<u8> = None;
+        let report = |written: u64, secs: f64, last: &mut Option<u8>| -> Result<(), &'static str> {
+            let speed = (secs > 0.0).then(|| (written - start) as f64 / secs);
+            match total {
+                Some(t) if t > 0 => {
+                    let pct = ((written as f64 / t as f64) * 100.0).min(100.0) as u8;
+                    if *last != Some(pct) {
+                        *last = Some(pct);
+                        reporter.report_progress(Some(pct), Some(written), speed)?;
+                    }
+                    Ok(())
+                }
+                _ => reporter.report_progress(None, Some(written), speed),
+            }
+        };
+        // A resume paints where it stands before the first new byte.
+        report(written, 0.0, &mut last_percentage)?;
+
+        // Make everything so far durable; the failure path runs it too.
+        async fn settle(
+            file: &mut tokio::io::BufWriter<tokio::fs::File>,
+            part: &std::path::Path,
+            at: Checkpoint,
+        ) -> Result<(), &'static str> {
+            file.flush().await.map_err(|_| "Failed to save the download")?;
+            file.get_ref().sync_data().await.map_err(|_| "Failed to save the download")?;
+            write_checkpoint(part, at).map_err(|_| "Failed to save the download")
+        }
+
+        let mut stream = res.bytes_stream();
+        while let Some(item) = stream.next().await {
+            let chunk = match item {
+                Ok(c) => c,
+                Err(e) => {
+                    vector_core::log_warn!("[AttachmentDownload] stream interrupted for {}: {}", fetch_url, e);
+                    let _ = settle(&mut file, part, Checkpoint { offset: written, total }).await;
+                    return Err("Error downloading chunk");
+                }
+            };
+            if written + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
+                return Err("File exceeds the maximum download size");
+            }
+            file.write_all(&chunk).await.map_err(|_| "Failed to save the download")?;
+            written += chunk.len() as u64;
+            if written - durable.offset >= CHECKPOINT_EVERY {
+                durable = Checkpoint { offset: written, total };
+                settle(&mut file, part, durable).await?;
+            }
+            if let Err(e) = report(written, started.elapsed().as_secs_f64(), &mut last_percentage) {
+                let _ = settle(&mut file, part, Checkpoint { offset: written, total }).await;
+                return Err(e);
+            }
+        }
+        settle(&mut file, part, Checkpoint { offset: written, total: total.or(Some(written)) }).await?;
+        if total.is_some_and(|t| written < t) {
+            return Err("Error downloading chunk");
+        }
+        reporter.report_complete()?;
+        return Ok(written);
+    }
+    Err("Server did not honor range request")
 }
 
 /// Hard ceiling for any single download on this pipeline (attachments,
@@ -510,5 +699,6 @@ mod tests {
         assert_eq!(normalize_url("https://b.com/x", "https://a.com/"), "https://b.com/x");
     }
 }
+
 
 

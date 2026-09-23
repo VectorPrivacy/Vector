@@ -41,6 +41,7 @@
     "allow-set-suppress-everyone",
     "allow-message",
     "allow-cancel-download",
+    "allow-get-paused-downloads",
     "allow-cancel-upload",
     "allow-delete-failed-message",
     "allow-retry-failed-dm",

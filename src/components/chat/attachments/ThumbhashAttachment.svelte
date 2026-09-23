@@ -46,10 +46,13 @@
         return `${h.formatBytes(t.bps, t.bps >= 1048576 ? 2 : 0, true)}/s`;
     });
 
-    const failed = $derived(!!att.download_failed);
-    const title = $derived(failed ? 'Download Failed' : `Download ${(att.extension || '').toUpperCase()}`.trim());
+    // Part of the file is already here: the next download picks up from it.
+    const paused = $derived.by(() => { messageVersion(msg.id); return h.pausedAt?.(att) || null; });
+    const failed = $derived(!paused && !!att.download_failed);
+    const title = $derived(paused ? 'Resume Download' : failed ? 'Download Failed' : `Download ${(att.extension || '').toUpperCase()}`.trim());
     // A failed download carries the backend's reason, so a red box is diagnosable at a glance.
     const sub = $derived.by(() => {
+        if (paused) return `${h.formatBytes(paused.offset)}${paused.total ? ` of ${h.formatBytes(paused.total)}` : ''}`;
         if (failed) return (att.download_error || '').slice(0, 64) || 'Tap to Retry';
         return att.size > 0 ? h.formatBytes(att.size) : 'Unknown Size';
     });

@@ -8,6 +8,18 @@ const AUTO_DOWNLOAD_MIN_BYTES = 1_048_576;
 /** Set of attachment IDs currently being downloaded — prevents duplicate download requests */
 const downloadingAttachmentIds = new Set();
 
+/** Downloads a failure or a restart left part-way: attachment id → { offset, total }. */
+const pausedDownloads = new Map();
+
+/** Refill the paused set from this account's partial files. */
+async function loadPausedDownloads() {
+    pausedDownloads.clear();
+    try {
+        const paused = await invoke('get_paused_downloads');
+        for (const [id, at] of Object.entries(paused || {})) pausedDownloads.set(id, at);
+    } catch (_) {}
+}
+
 
 /**
  * Platform features retrieved from the backend

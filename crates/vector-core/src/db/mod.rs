@@ -1060,6 +1060,13 @@ pub fn account_dir(npub: &str) -> Result<PathBuf, String> {
     Ok(get_app_data_dir()?.join(npub))
 }
 
+/// The directory of the account this task belongs to, for files that are that
+/// account's alone. Resolved through the session, never the account on screen.
+pub fn current_account_dir() -> Result<PathBuf, String> {
+    let db = current_session().path()?;
+    db.parent().map(PathBuf::from).ok_or_else(|| "account directory unknown".to_string())
+}
+
 fn get_current_db_path() -> Result<PathBuf, String> {
     let npub = get_current_account()?;
     Ok(account_dir(&npub)?.join("vector.db"))

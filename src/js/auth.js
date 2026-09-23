@@ -215,6 +215,8 @@ async function login(skipAnimations = false) {
             _pinnedLoaded = false; // a fresh account's pins are not the last one's
             await ensurePinnedLoaded();
             loadRailLayout();
+            // Before the first chat paints, so a paused file offers Resume, not Download.
+            loadPausedDownloads();
 
             // Seed unread badges from the DB — boot loads only the last message per chat into RAM,
             // so the in-memory walk can't see a backlog received in a prior session. Fire-and-render
