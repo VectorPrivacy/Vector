@@ -4,12 +4,12 @@
 // app-wide state the player that triggered it renders.
 import { SvelteMap } from 'svelte/reactivity';
 
-const byId = new SvelteMap();   // att.id → { durationMs, title, coverArt, transcription }
+const byId = new SvelteMap();   // att.id → { durationMs, meta, transcription }
 
 function entry(id) {
     let e = byId.get(id);
     if (!e) {
-        e = { durationMs: 0, title: '', coverArt: '', transcription: null };
+        e = { durationMs: 0, meta: null, transcription: null };
         byId.set(id, e);
     }
     return e;
@@ -17,7 +17,9 @@ function entry(id) {
 
 export function audioInfo(id) { return byId.get(id) ?? null; }
 export function setAudioDuration(id, ms) { if (ms > 0) byId.set(id, { ...entry(id), durationMs: ms }); }
-export function setAudioMeta(id, { title, coverArt }) { byId.set(id, { ...entry(id), title: title || '', coverArt: coverArt || '' }); }
+/** meta: { track, artist, album, coverArt } strings, set once read even when the file has no tags;
+ *  `accent` is the art's colour once measured, null for grey art. */
+export function setAudioMeta(id, meta) { byId.set(id, { ...entry(id), meta: { track: '', artist: '', album: '', coverArt: '', ...meta } }); }
 /** transcription: { phase: 'loading' | 'ready' | 'error', sections, lang, error, open } */
 export function setTranscription(id, t) { byId.set(id, { ...entry(id), transcription: t }); }
 export function patchTranscription(id, fields) {
@@ -29,3 +31,21 @@ export function patchTranscription(id, fields) {
 const modelDownload = $state({ active: false, pct: 0, text: '', failed: false });
 export function modelDownloadState() { return modelDownload; }
 export function setModelDownload(fields) { Object.assign(modelDownload, fields); }
+
+// One sound at a time: starting a player stops whichever one holds the output.
+let holder = null;   // { id, stop }
+export function claimPlayback(id, stop) {
+    const prev = holder;
+    holder = { id, stop };
+    if (prev && prev.id !== id) prev.stop();
+}
+export function releasePlayback(id) { if (holder?.id === id) holder = null; }
+export function holdsPlayback(id) { return holder?.id === id; }
+
+// Mounted players, by attachment id: a finished voice message hands on to the next one.
+const players = new Map();
+export function registerPlayer(id, player) {
+    players.set(id, player);
+    return () => { if (players.get(id) === player) players.delete(id); };
+}
+export function playerFor(id) { return players.get(id) ?? null; }

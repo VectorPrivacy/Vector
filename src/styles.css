@@ -11008,25 +11008,47 @@ select:disabled:hover {
 
 /* Enhanced highlighting for the current section */
 .transcription-section.current {
-  background-color: rgba(89, 252, 179, 0.3);
-  color: #59fcb3;
-  font-weight: 500;
-  box-shadow: 0 0 8px rgba(89, 252, 179, 0.2);
+  background-color: color-mix(in srgb, var(--icon-color-primary) 16%, transparent);
+  color: var(--icon-color-primary);
 }
 
 .transcription-text {
   line-height: 1.5;
+  color: var(--file-box-title, rgba(255, 255, 255, 0.92));
   user-select: text;
   cursor: text;
 }
 
+/* An inset in the card: darker, borderless, the text the brightest thing in it. */
 .transcription-result {
   box-sizing: border-box;
   margin-top: 10px;
-  padding: 10px;
-  border-radius: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
   background-color: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.transcription-lang {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: 0.72em;
+  color: var(--file-box-dim, rgba(255, 255, 255, 0.34));
+}
+
+.transcription-lang-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--file-box-body, rgba(255, 255, 255, 0.55));
+}
+
+.transcription-lang-name img.emoji {
+  width: 14px;
+  height: 14px;
 }
 
 .transcription-result.hidden {
@@ -11093,7 +11115,8 @@ select:disabled:hover {
    one carrying meaning. A file that is on this device takes the theme colour, one
    that failed takes the danger colour, and everything else stays grey. */
 .file-box,
-.thumb-download {
+.thumb-download,
+.custom-audio-player {
     --file-box-bg: #161616;
     --file-box-bg-hover: #1d1d1d;
     --file-box-line: #262626;
@@ -11442,18 +11465,21 @@ select:disabled:hover {
     transform: translateX(-50%) translateY(0);
 }
 
-/* Custom Audio Player Styles */
+/* The audio player wears the file box's chrome, grey throughout, with the theme's
+   colour kept for the things that play: the button and the waveform. */
 .custom-audio-player {
     gap: 12px;
-    padding: 12px;
-    background: #17171750;
-    border: 1px solid rgba(89, 252, 179, 0.2);
+    padding: 10px 12px;
+    background: var(--file-box-bg);
+    border: 1px solid var(--file-box-line);
     border-radius: 12px;
     position: relative;
     overflow: hidden;
-    width: min(500px, calc(100vw - 100px));
+    /* Bounded by the row it sits in, whatever the layout: one player for every screen. */
+    width: min(100%, 500px);
+    min-width: 240px;
     box-sizing: border-box;
-    transition: all 0.3s ease;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
     margin-bottom: 6px;
 }
 
@@ -11476,8 +11502,8 @@ select:disabled:hover {
 }
 
 .custom-audio-player:hover {
-    border-color: rgba(89, 252, 179, 0.4);
-    background: rgba(22, 22, 22, 0.8);
+    border-color: var(--file-box-line-hover);
+    background: var(--file-box-bg-hover);
 }
 
 
@@ -11487,19 +11513,19 @@ select:disabled:hover {
     height: 40px;
     min-width: 40px;
     border-radius: 50%;
-    background: linear-gradient(135deg, #59fcb3 0%, #2b976c 100%);
+    background: var(--icon-color-primary);
     border: none;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: filter 0.2s ease, transform 0.1s ease;
     position: relative;
     overflow: hidden;
 }
 
 .audio-play-btn:hover {
-    transform: scale(1.1);
+    filter: brightness(1.08);
 }
 
 .audio-play-btn:active {
@@ -11507,10 +11533,10 @@ select:disabled:hover {
 }
 
 .audio-play-btn .icon {
-    width: 20px;
-    height: 20px;
-    background-color: #000;
-    mask-size: 20px;
+    width: 28px;
+    height: 28px;
+    background-color: #0a0a0a;
+    mask-size: 28px;
 }
 
 .icon-play {
@@ -11589,34 +11615,95 @@ select:disabled:hover {
     margin: 0;
 }
 
-.audio-cover-art-wrap {
-    position: relative;
-    margin: -12px -12px 8px -12px;
+/* With art, the card is an album: the art beside the track, the controls under the words.
+   A narrow card keeps the words beside a smaller tile and gives the controls the full row. */
+.custom-audio-player:has(.audio-album) {
+    container-type: inline-size;
 }
 
-.audio-cover-art-wrap::after {
-    content: '';
+.audio-album {
+    position: relative;
+    display: grid;
+    grid-template-columns: 128px minmax(0, 1fr);
+    grid-template-rows: 1fr auto;
+    grid-template-areas: "art text" "art controls";
+    column-gap: 14px;
+}
+
+.audio-album .audio-cover-art { grid-area: art; }
+.audio-album .audio-track-text { grid-area: text; align-self: center; }
+.audio-album .custom-audio-player-inner { grid-area: controls; }
+
+@container (max-width: 380px) {
+    .audio-album {
+        grid-template-columns: 64px minmax(0, 1fr);
+        grid-template-rows: auto auto;
+        grid-template-areas: "art text" "controls controls";
+        row-gap: 10px;
+    }
+}
+
+/* The art's own colour, blurred into the card, so the tile does not sit on flat grey. */
+.audio-art-glow {
     position: absolute;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: 40%;
-    background: linear-gradient(transparent 74.37%, rgba(22, 22, 22, 0.73));
+    inset: -30%;
+    width: 160%;
+    height: 160%;
+    object-fit: cover;
+    filter: blur(40px) saturate(1.4);
+    opacity: 0.22;
     pointer-events: none;
 }
 
 .audio-cover-art {
     width: 100%;
     aspect-ratio: 1;
-    border-radius: 12px 12px 0 0;
+    align-self: start;
+    padding: 0;
+    border: none;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--file-box-line);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+    cursor: zoom-in;
+    transition: filter 0.2s ease;
+}
+
+.audio-cover-art:hover {
+    filter: brightness(1.1);
+}
+
+.audio-cover-art img {
+    width: 100%;
+    height: 100%;
     object-fit: cover;
     display: block;
 }
 
+.audio-track-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.audio-track-title {
+    font-size: 1.05em;
+    font-weight: 600;
+    color: var(--file-box-title);
+    line-height: 1.25;
+}
+
+.audio-track-byline {
+    font-size: 0.8em;
+    color: var(--file-box-body);
+    line-height: 1.25;
+}
+
 .audio-filename {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.8);
-    line-height: 1;
+    font-size: 0.8em;
+    color: var(--file-box-title);
+    line-height: 1.25;
 }
 
 /* Visual feedback on hover */
@@ -11631,7 +11718,7 @@ select:disabled:hover {
 .waveform-bar {
     flex: 1;
     min-width: 2px;
-    background: #59fcb3;
+    background: var(--icon-color-primary);
     border-radius: 1.5px;
     height: 20px;
     transform: translateY(-9px) scaleY(0.15);
@@ -11653,36 +11740,55 @@ select:disabled:hover {
 }
 
 .audio-time-display {
-    font-size: 12px;
-    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.72em;
+    color: var(--file-box-body);
     white-space: nowrap;
-    font-family: monospace;
-    min-width: 80px;
+    font-variant-numeric: tabular-nums;
+    min-width: 72px;
     text-align: right;
 }
 
 .audio-time-display .current-time {
-    color: #ffffff66;
-    font-weight: bold;
+    color: var(--file-box-dim);
+    transition: color 0.2s ease;
 }
 
+.audio-time-display .current-time.is-moving {
+    color: var(--file-box-title);
+}
+
+.audio-time-sep {
+    margin: 0 4px;
+    color: var(--file-box-dim);
+}
+
+/* The file box's action button: grey until the transcript it opens is showing. */
 .audio-transcribe-btn {
-    padding: 12px;
-    margin-left: 5px;
-    background-color: transparent;
-    border: none;
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    margin-left: 10px;
+    border: 1px solid var(--file-box-line-hover);
+    border-radius: 8px;
+    background: transparent;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: background-color 0.2s ease;
 }
 
 .audio-transcribe-btn .icon {
-    background-color: #000;
-    width: 18px;
-    height: 18px;
+    background-color: var(--file-box-glyph);
+    width: 17px;
+    height: 17px;
+}
+
+.audio-transcribe-btn.is-open .icon {
+    background-color: var(--icon-color-primary);
 }
 
 .audio-transcribe-btn:hover {
-    transform: scale(1.1);
+    background: rgba(255, 255, 255, 0.06);
 }
 
 .audio-transcribe-btn.loading {
@@ -12560,37 +12666,6 @@ select:disabled:hover {
   transition: all 0.2s ease;
 }
 
-
-/* Responsive adjustments */
-@media (max-width: 480px) {
-    .custom-audio-player {
-        min-width: 240px;
-        gap: 8px;
-        padding: 10px;
-    }
-    
-    .audio-waveform {
-        flex: 1;
-        gap: 1px; /* Tighter spacing on mobile */
-    }
-    
-    .waveform-bar {
-        min-width: 1px;
-    }
-    
-    .audio-time-display {
-        font-size: 10px;
-        min-width: 70px;
-    }
-    
-    .audio-play-btn {
-        width: 25px;
-        height: 25px;
-        min-width: 25px;
-        padding: 0;
-        margin: 0;
-    }
-}
 
 /* Invites Tab Styles */
 #invites {

@@ -29,7 +29,10 @@ pub struct TranscriptionSection {
 #[derive(Serialize, Clone)]
 pub struct TranscriptionResult {
     pub sections: Vec<TranscriptionSection>,
+    /// A country for the flag: several languages share one, so it can't name the language.
     pub lang: String,
+    /// The detected language itself (ISO 639-1, e.g. "ru"), which can be named.
+    pub language: String,
     pub confidence: f32, // overall average confidence across all sections
 }
 
@@ -230,9 +233,10 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     const MIN_CONFIDENCE: f32 = 0.40;
 
     // Helper: extract results from a completed whisper state
-    let extract_results = |state: &whisper_rs::WhisperState| -> (Vec<TranscriptionSection>, f32, &'static str) {
+    let extract_results = |state: &whisper_rs::WhisperState| -> (Vec<TranscriptionSection>, f32, &'static str, &'static str) {
         let num_segments = state.full_n_segments();
         let detected_lang = state.full_lang_id_from_state();
+        let language = whisper_rs::get_lang_str(detected_lang).unwrap_or("");
         let lang_str = match detected_lang {
             0 => "GB",  1 => "CN",  2 => "DE",  3 => "ES",  4 => "RU",
             5 => "KR",  6 => "FR",  7 => "JP",  8 => "PT",  9 => "TR",
@@ -304,7 +308,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
             overall = 0.0;
         }
 
-        (sections, overall, lang_str)
+        (sections, overall, lang_str, language)
     };
 
     // --- Phase 5: Inference with confidence-gated retry ---
@@ -312,7 +316,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     state.full(params, &audio)?;
     let t_first_pass = t0.elapsed();
 
-    let (mut sections, mut overall_confidence, mut lang_str) = extract_results(&state);
+    let (mut sections, mut overall_confidence, mut lang_str, mut language) = extract_results(&state);
     let mut t_inference = t_first_pass;
     let mut retries_used = 0;
 
@@ -365,13 +369,14 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
             t_inference = t_inference + retry_elapsed;
             retries_used += 1;
 
-            let (new_sections, new_confidence, new_lang) = extract_results(&retry_state);
+            let (new_sections, new_confidence, new_lang, new_language) = extract_results(&retry_state);
 
             // Keep the retry result if it improved confidence
             if new_confidence > overall_confidence {
                 sections = new_sections;
                 overall_confidence = new_confidence;
                 lang_str = new_lang;
+                language = new_language;
             }
 
             // Good enough — stop retrying
@@ -405,6 +410,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     Ok(TranscriptionResult {
         sections,
         lang: lang_str.to_string(),
+        language: language.to_string(),
         confidence: overall_confidence,
     })
 }

@@ -203,21 +203,9 @@ select:disabled {
   background-color: #F9AA4B;
 }
 
-/* Custom Audio Player Theme Overrides */
 /* Default style */
-.custom-audio-player {
-  background: #F7931A40;
-  border-color: #F7931A25;
-}
 
-.custom-audio-player:hover {
-  background: #F7931A60;
-  border-color: #F7931A50;
-}
 
-.audio-play-btn {
-  background: var(--primary-color);
-}
 
 .audio-progress-fill {
   background: var(--primary-color);
@@ -227,21 +215,9 @@ select:disabled {
   background: #F7931A;
 }
 
-.waveform-bar {
-  background: linear-gradient(to top, #F9AA4B, #F7931A);
-}
 
-.custom-audio-player.playing .waveform-bar {
-  box-shadow: none;
-}
 
-.audio-time-display .current-time {
-  color: #ffffff60;
-}
 
-.audio-transcribe-btn .icon {
-  background-color: #F7931A;
-}
 
 .transcribe-progress-fill {
   background: linear-gradient(90deg, #F7931A, #B56C12);

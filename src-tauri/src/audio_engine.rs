@@ -1624,9 +1624,21 @@ struct WaveformComputer {
     hop_size: usize,
     prev_frame: Vec<f32>,
     fft_buffer: Vec<rustfft::num_complex::Complex<f32>>,
-    output: Vec<u8>,
+    /// Each frame's band levels in dB, normalised once the whole file is known.
+    levels: Vec<f32>,
     cursor: usize, // next sample index in the full stream to process
 }
+
+/// How far above the loudest band's ceiling a quiet band may be lifted: enough to even out
+/// a voice's tilt toward the bass, not so much that near-silent treble reads as activity.
+const BAND_MAX_LIFT_DB: f32 = 32.0;
+/// The narrowest range a band is stretched over, so a steady tone doesn't flicker.
+const BAND_MIN_RANGE_DB: f32 = 20.0;
+/// The widest, so a band's rare dropouts don't flatten everything else it does.
+const BAND_MAX_RANGE_DB: f32 = 48.0;
+/// No band's ceiling sits below this: a near-silent file (or stretch of one) stays flat
+/// rather than having its noise floor stretched into movement.
+const SILENCE_CEILING_DB: f32 = -45.0;
 
 impl WaveformComputer {
     fn new(sample_rate: u32) -> Self {
@@ -1667,7 +1679,7 @@ impl WaveformComputer {
             hop_size,
             prev_frame: vec![0.0f32; WAVEFORM_BINS],
             fft_buffer: vec![rustfft::num_complex::Complex::new(0.0f32, 0.0f32); FFT_WINDOW_SIZE],
-            output: Vec::new(),
+            levels: Vec::new(),
             cursor: 0,
         }
     }
@@ -1701,11 +1713,7 @@ impl WaveformComputer {
                     + (1.0 - SMOOTHING_FACTOR) * magnitude_sq;
                 self.prev_frame[bin] = smoothed;
 
-                let db = 10.0 * (smoothed.max(1e-20)).log10();
-                // Range: -60dB → 0, 0dB → 0.75, +20dB → 1.0
-                // Headroom above 0dB prevents music bass from clipping to 255
-                let normalized = ((db + 60.0) / 80.0).clamp(0.0, 1.0);
-                self.output.push((normalized * 255.0) as u8);
+                self.levels.push(10.0 * (smoothed.max(1e-20)).log10());
             }
 
             self.cursor += self.hop_size;
@@ -1713,13 +1721,54 @@ impl WaveformComputer {
     }
 
     /// Consume the computer and return the final waveform data.
+    ///
+    /// A fixed dB window makes every file lean the same way: voices and most music carry
+    /// far more energy low down, so the bass bands stand tall and the treble never moves,
+    /// and a loud master sits near the top of the window everywhere. Instead each band is
+    /// stretched over its own quiet-to-loud range across the file, within limits (see the
+    /// BAND_* constants), so every band moves with what it actually does.
     fn finish(self) -> Vec<u8> {
-        if self.output.is_empty() {
-            vec![0u8; WAVEFORM_BINS] // at least one frame of silence
-        } else {
-            self.output
-        }
+        normalise_levels(&self.levels, BAND_MAX_LIFT_DB)
     }
+}
+
+/// See [`WaveformComputer::finish`]: each band over its own range, `max_lift` dB at most
+/// above the loudest band's ceiling.
+fn normalise_levels(levels: &[f32], max_lift: f32) -> Vec<u8> {
+    if levels.is_empty() {
+        return vec![0u8; WAVEFORM_BINS]; // at least one frame of silence
+    }
+    let frames = levels.len() / WAVEFORM_BINS;
+    let percentile = |mut v: Vec<f32>, p: f32| -> f32 {
+        v.sort_by(|a, b| a.total_cmp(b));
+        v[((v.len() - 1) as f32 * p) as usize]
+    };
+    let columns: Vec<Vec<f32>> = (0..WAVEFORM_BINS)
+        .map(|bin| (0..frames).map(|f| levels[f * WAVEFORM_BINS + bin]).collect())
+        .collect();
+    let peaks: Vec<f32> = columns.iter().map(|c| percentile(c.clone(), 0.97)).collect();
+    // The loudest band's own ceiling: a percentile over every band would sink toward the
+    // quiet majority and let them be stretched to full scale.
+    let loudest = peaks.iter().copied().fold(f32::MIN, f32::max);
+    let bands: Vec<(f32, f32)> = columns
+        .into_iter()
+        .zip(&peaks)
+        .map(|(column, &peak)| {
+            let ceiling = peak.max(loudest - max_lift).max(SILENCE_CEILING_DB);
+            let floor = percentile(column, 0.2)
+                .min(ceiling - BAND_MIN_RANGE_DB)
+                .max(ceiling - BAND_MAX_RANGE_DB);
+            (floor, ceiling)
+        })
+        .collect();
+    levels
+        .iter()
+        .enumerate()
+        .map(|(i, db)| {
+            let (floor, ceiling) = bands[i % WAVEFORM_BINS];
+            (((db - floor) / (ceiling - floor)).clamp(0.0, 1.0) * 255.0) as u8
+        })
+        .collect()
 }
 
 /// Precompute FFT waveform for a complete sample buffer (batch mode).
@@ -1728,5 +1777,47 @@ fn precompute_fft_waveform(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     let mut computer = WaveformComputer::new(sample_rate);
     computer.process(samples);
     computer.finish()
+}
+
+
+
+#[cfg(test)]
+mod waveform_normalise_tests {
+    use super::*;
+
+    /// Frames of band levels in dB: `level(frame, band)`.
+    fn levels(frames: usize, level: impl Fn(usize, usize) -> f32) -> Vec<f32> {
+        (0..frames).flat_map(|f| (0..WAVEFORM_BINS).map(move |b| (f, b))).map(|(f, b)| level(f, b)).collect()
+    }
+
+    fn band_mean(wave: &[u8], band: usize) -> f32 {
+        let col: Vec<f32> = wave.chunks(WAVEFORM_BINS).map(|f| f[band] as f32).collect();
+        col.iter().sum::<f32>() / col.len() as f32
+    }
+
+    #[test]
+    fn a_spectrum_tilted_toward_the_bass_comes_out_level() {
+        // 24 dB quieter at the top than the bottom, every band pulsing the same way.
+        let tilted = levels(300, |f, b| -20.0 - b as f32 * 24.0 / WAVEFORM_BINS as f32 + if f % 10 < 5 { 0.0 } else { -20.0 });
+        let wave = normalise_levels(&tilted, BAND_MAX_LIFT_DB);
+        let (low, high) = (band_mean(&wave, 2), band_mean(&wave, WAVEFORM_BINS - 3));
+        assert!((low - high).abs() < 8.0, "bass {low} vs treble {high}: the tilt should be gone");
+        assert!(wave.iter().any(|&v| v > 240) && wave.iter().any(|&v| v < 15), "each band uses its whole range");
+    }
+
+    #[test]
+    fn silence_stays_flat() {
+        let quiet = levels(120, |f, b| -90.0 + ((f * 7 + b * 3) % 5) as f32);
+        // Under the player's resting size, so it never reads as movement.
+        assert!(normalise_levels(&quiet, BAND_MAX_LIFT_DB).iter().all(|&v| v < 30), "a noise floor must stay near the bottom");
+    }
+
+    #[test]
+    fn a_band_that_barely_sounds_is_not_blown_up() {
+        // One loud band, the rest 50 dB down: lifting them to full scale would fake activity.
+        let sparse = levels(200, |f, b| if b == 10 { -10.0 + (f % 7) as f32 } else { -60.0 + (f % 3) as f32 });
+        let wave = normalise_levels(&sparse, BAND_MAX_LIFT_DB);
+        assert!(band_mean(&wave, 40) < 40.0, "a band far below the loudest stays low, not stretched to full scale");
+    }
 }
 

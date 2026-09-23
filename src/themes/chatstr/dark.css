@@ -200,21 +200,9 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
   background-color: #b188e2;
 }
 
-/* Custom Audio Player Theme Overrides */
 /* Default style */
-.custom-audio-player {
-  background: rgba(37, 17, 52, 0.4);
-  border-color: rgba(177, 136, 226, 0.25);
-}
 
-.custom-audio-player:hover {
-  background: rgba(37, 17, 52, 0.6);
-  border-color: rgba(177, 136, 226, 0.5);
-}
 
-.audio-play-btn {
-  background: #b188e2;
-}
 
 .audio-progress-fill {
   background: linear-gradient(90deg, #b188e2 0%, #CD3DD3 100%);
@@ -224,21 +212,9 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
   background: #b188e2;
 }
 
-.waveform-bar {
-  background: linear-gradient(to top, #5749E4, #b188e2);
-}
 
-.custom-audio-player.playing .waveform-bar {
-  box-shadow: none;
-}
 
-.audio-time-display .current-time {
-  color: #ffffff60;
-}
 
-.audio-transcribe-btn .icon {
-  background-color: #b188e2;
-}
 
 .transcribe-progress-fill {
   background: var(--accent-color);

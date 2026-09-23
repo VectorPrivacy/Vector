@@ -382,16 +382,9 @@ body.ws .chat-messages {
   padding-top: 12px;
 }
 
-/* Voice notes and audio players size themselves off the VIEWPORT
-   (`min(500px, 100vw - 100px)`), which was the conversation's own width when the
-   conversation was the whole screen. Here it's the middle column: the 500px arm
-   wins on any normal window and the player runs out past the column, under the
-   member list. Bound it by the row it sits in and keep 500px as the cap it always
-   was. File boxes hug their content, so they only need the cap moved. */
-body.ws .custom-audio-player {
-  width: min(100%, 500px);
-}
-
+/* File boxes size their cap off the VIEWPORT (`min(500px, 100vw - 100px)`), which was
+   the conversation's own width when the conversation was the whole screen. Here it's the
+   middle column, so the cap moves to the row they sit in. */
 body.ws .file-attachment,
 body.ws .file-box {
   max-width: min(100%, 500px);

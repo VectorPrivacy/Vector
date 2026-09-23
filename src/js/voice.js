@@ -100,16 +100,10 @@ class VoiceRecorder {
         if (!this.previewSourceId) return;
 
         if (this.isPlaying) {
-            try {
-                await invoke('audio_pause', { id: this.previewSourceId });
-            } catch (err) {
-                console.error('Pause failed:', err);
-            }
-            this.isPlaying = false;
-            this._stopPreviewAnimation();
-            VectorSvelte.setVoicePreview({ playing: false });
+            await this._pausePreview();
         } else {
             VectorSvelte.setVoicePreview({ playing: true });
+            VectorSvelte.claimPlayback('voice-preview', () => this._pausePreview());
 
             try {
                 const posMs = await invoke('audio_play', { id: this.previewSourceId });
@@ -122,6 +116,19 @@ class VoiceRecorder {
                 VectorSvelte.setVoicePreview({ playing: false });
             }
         }
+    }
+
+    async _pausePreview() {
+        VectorSvelte.releasePlayback('voice-preview');
+        if (!this.isPlaying || !this.previewSourceId) return;
+        try {
+            await invoke('audio_pause', { id: this.previewSourceId });
+        } catch (err) {
+            console.error('Pause failed:', err);
+        }
+        this.isPlaying = false;
+        this._stopPreviewAnimation();
+        VectorSvelte.setVoicePreview({ playing: false });
     }
 
     /**
@@ -405,6 +412,7 @@ class VoiceRecorder {
      */
     async _onPreviewDelete() {
         this._stopPreviewAnimation();
+        VectorSvelte.releasePlayback('voice-preview');
         if (this.previewSourceId) {
             try { await invoke('audio_stop', { id: this.previewSourceId }); } catch {}
         }
@@ -426,6 +434,7 @@ class VoiceRecorder {
         if (this.state !== RecordingState.PREVIEW || !this.previewSourceId) return false;
 
         this._stopPreviewAnimation();
+        VectorSvelte.releasePlayback('voice-preview');
         if (this._audioEndedUnlisten) { this._audioEndedUnlisten(); this._audioEndedUnlisten = null; }
         if (this._audioWaveformUnlisten) { this._audioWaveformUnlisten(); this._audioWaveformUnlisten = null; }
         // Don't stop engine source here — send_recording will do it
@@ -645,6 +654,7 @@ class VoiceRecorder {
      */
     _onPreviewEnded() {
         this._stopPreviewAnimation();
+        VectorSvelte.releasePlayback('voice-preview');
 
         this.playStartPos = 0;
         this.isPlaying = false;
@@ -766,11 +776,13 @@ class VoiceTranscriptionUI {
  * @property {(path: string) => Promise<void>} transcribe
  * @property {() => void} cancelModelDownload
  * @property {(msg: object) => boolean} autoTranscribe
- * @property {() => boolean} autoTranslate
  * @property {(lang: string) => string} flag
  * @property {(el: Element) => void} twemojify
  * @property {(pendingId: string) => Promise<void>} cancelUpload
- * @property {(dy: number) => void} scrollBy
+ * @property {() => () => void} holdScroll  pins the conversation's distance from its bottom; call the result to re-apply it
+ * @property {(msgId: string) => string|null} nextVoice  the voice attachment of the message right after this one
+ * @property {(el: Element) => void} reveal  eases the conversation until `el` is in view
+ * @property {(src: string) => void} viewImage
  */
 const AUDIO_PLAYER_HELPERS = {
     probe: (path) => invoke('audio_probe', { path }),
@@ -800,9 +812,26 @@ const AUDIO_PLAYER_HELPERS = {
         const selected = window.voiceSettings.selectedModel || 'small';
         return !!window.voiceSettings.models?.find(m => m.model.name === selected)?.downloaded;
     },
-    autoTranslate: () => !!window.voiceSettings?.autoTranslate,
     flag: (lang) => isoToFlagEmoji(lang),
     twemojify: (el) => twemojify(el),
     cancelUpload: (pendingId) => invoke('cancel_upload', { pendingId }),
-    scrollBy: (px) => { domChatMessages.scrollTop += px; },
+    // Absolute, not a running sum of per-frame nudges: each nudge is rounded, and an
+    // open and a close rounded apart leave the conversation a little higher every time.
+    holdScroll: () => {
+        const fromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop;
+        return () => { domChatMessages.scrollTop = domChatMessages.scrollHeight - fromBottom; };
+    },
+    nextVoice: (msgId) => {
+        const msgs = _dmsgListHelpers.messages(strOpenChat);
+        const i = msgs.findIndex(m => m.id === msgId);
+        return msgs[i + 1]?.attachments?.find(a => !a.name && _dmsgMediaHelpers.isAudio(a.extension))?.id ?? null;
+    },
+    // The least travel that shows it, top first when it is taller than the view.
+    reveal: (el) => {
+        const view = domChatMessages.getBoundingClientRect(), r = el.getBoundingClientRect(), pad = 16;
+        const delta = r.bottom + pad > view.bottom ? Math.min(r.bottom + pad - view.bottom, r.top - pad - view.top)
+            : r.top - pad < view.top ? r.top - pad - view.top : 0;
+        if (delta) domChatMessages.scrollBy({ top: delta, behavior: 'smooth' });
+    },
+    viewImage: (src) => openImageViewer(src),
 };

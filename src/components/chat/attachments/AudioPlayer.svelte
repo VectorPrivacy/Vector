@@ -5,12 +5,14 @@
     // (animation, not markup), the same way a canvas would.
     import { transfer } from '../../lib/attachments.svelte.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
-    import { audioInfo, setAudioDuration, setAudioMeta, setTranscription, patchTranscription, modelDownloadState } from '../../lib/audio.svelte.js';
+    import { audioInfo, setAudioDuration, setAudioMeta, setTranscription, patchTranscription, modelDownloadState,
+             claimPlayback, releasePlayback, holdsPlayback, registerPlayer, playerFor } from '../../lib/audio.svelte.js';
     import Transcription from './Transcription.svelte';
 
     let { att, msg, h } = $props();   // h: AudioPlayerHelpers (js/voice.js)
     //    listen(event, fn) → unlisten, glowColor(), transcriptionSupported(att, msg), transcribe(path), autoTranscribe(msg),
-    //    cancelUpload(pendingId), formatTime(seconds), autoTranslate(), flag(lang), twemojify(el), scrollBy(px)
+    //    cancelUpload(pendingId), formatTime(seconds), flag(lang), twemojify(el), holdScroll(),
+    //    nextVoice(msgId), reveal(el), viewImage(src)
 
     // svelte-ignore state_referenced_locally
     const isVoiceMessage = !att.name;   // an attachment's name never changes under a mounted player
@@ -27,11 +29,23 @@
     let loading = $state(false);
     let positionMs = $state(0);          // what the time display shows
     let durationMs = $derived(info?.durationMs || 0);
-    const title = $derived(info?.title || att.name || '');
+    const meta = $derived(info?.meta ?? null);
+    const title = $derived(meta?.track ? (meta.artist ? `${meta.artist} — ${meta.track}` : meta.track) : (att.name || ''));
+    // The controls wear the art's colour on an album card; grey art leaves them white.
+    const accent = $derived(meta?.coverArt ? (meta.accent || 'rgb(242, 242, 242)') : null);
+    $effect(() => {
+        if (!meta?.coverArt || meta.accent !== undefined) return;
+        const m = meta;
+        artAccent(m.coverArt).then((accent) => setAudioMeta(att.id, { ...m, accent }));
+    });
+    const byline = $derived([meta?.artist, meta?.album !== meta?.track ? meta?.album : ''].filter(Boolean).join(' · '));
 
     let waveformData = null, waveformFps = 30, waveformBins = 64;
     let binDisplay = null;
-    let barOffsetY = -9;
+    // A bar at rest: this short, lifted this far. It is also the floor while playing, so
+    // a finished or paused wave settles into it rather than dipping below and snapping back.
+    const REST_SCALE = 0.15, REST_Y = -9;
+    let barOffsetY = REST_Y;
     let playStartTime = 0, playStartPos = 0;
     let animationId = null, windDownId = null;
     let unlisteners = [];
@@ -40,16 +54,54 @@
     $effect(() => {
         if (uploading) return;
         if (!durationMs) h.probe(att.path).then((ms) => setAudioDuration(att.id, ms)).catch(() => {});
-        if (!isVoiceMessage && att.path && !info?.title && !info?.coverArt) {
-            h.metadata(att.path).then((meta) => {
-                if (!meta) return;
-                setAudioMeta(att.id, {
-                    title: meta.title ? (meta.artist ? `${meta.artist} — ${meta.title}` : meta.title) : '',
-                    coverArt: meta.cover_art || '',
-                });
-            }).catch(() => {});
+        if (!isVoiceMessage && att.path && !meta) {
+            h.metadata(att.path).then((m) => {
+                setAudioMeta(att.id, { track: m?.title || '', artist: m?.artist || '', album: m?.album || '', coverArt: m?.cover_art || '' });
+            }).catch(() => setAudioMeta(att.id, {}));
         }
     });
+
+    // The art's most prominent colourful hue, lifted to a brightness the controls read at.
+    function artAccent(src) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.onerror = () => resolve(null);
+            img.onload = () => {
+                const N = 24, canvas = document.createElement('canvas');
+                canvas.width = canvas.height = N;
+                const ctx = canvas.getContext('2d', { willReadFrequently: true });
+                ctx.drawImage(img, 0, 0, N, N);
+                const px = ctx.getImageData(0, 0, N, N).data;
+                const bins = Array.from({ length: 12 }, () => ({ w: 0, r: 0, g: 0, b: 0 }));
+                let total = 0;
+                for (let i = 0; i < px.length; i += 4) {
+                    const r = px[i] / 255, g = px[i + 1] / 255, b = px[i + 2] / 255;
+                    const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+                    const sat = max === min ? 0 : (max - min) / (1 - Math.abs(2 * l - 1));
+                    // Near-black and near-white carry no colour worth naming.
+                    const w = sat * sat * (1 - Math.abs(2 * l - 1));
+                    total += 1;
+                    if (w < 0.02) continue;
+                    let hue = max === r ? ((g - b) / (max - min)) % 6 : max === g ? (b - r) / (max - min) + 2 : (r - g) / (max - min) + 4;
+                    const bin = bins[Math.floor(((hue * 60 + 360) % 360) / 30)];
+                    bin.w += w; bin.r += px[i] * w; bin.g += px[i + 1] * w; bin.b += px[i + 2] * w;
+                }
+                const top = bins.reduce((a, b) => (b.w > a.w ? b : a));
+                if (top.w / total < 0.03) { resolve(null); return; }
+                const [hh, ss] = toHsl(top.r / top.w, top.g / top.w, top.b / top.w);
+                resolve(`hsl(${Math.round(hh)}, ${Math.round(Math.min(0.85, Math.max(0.45, ss)) * 100)}%, 68%)`);
+            };
+            img.src = src;
+        });
+    }
+    function toHsl(r, g, b) {
+        r /= 255; g /= 255; b /= 255;
+        const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
+        if (!d) return [0, 0, l];
+        const s = d / (1 - Math.abs(2 * l - 1));
+        const h = max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+        return [h * 60, s, l];
+    }
 
     // ── bars ──
     let waveform = $state(null);
@@ -72,7 +124,14 @@
             if (target === barCount) return;
             const old = barState.slice(), oldCount = barCount;
             barState = Array.from({ length: target }, (_, i) => oldCount > 0 ? old[Math.min(Math.round(i * oldCount / target), oldCount - 1)] : undefined);
-            bars = [];
+            // The bars are keyed by position, so those below the new count stay mounted and
+            // never re-register: keep them (the painter finds nothing otherwise) and give
+            // them their remapped styles. Bars past the count unregister as they unmount.
+            bars.length = Math.min(bars.length, target);
+            bars.forEach((node, i) => {
+                const st = barState[i];
+                if (node && st) { node.style.transform = st.transform; node.style.opacity = st.opacity; node.style.boxShadow = st.boxShadow; }
+            });
             barCount = target;
         };
         requestAnimationFrame(sync);
@@ -97,24 +156,22 @@
             const offset = Math.floor((posMs / 1000) * waveformFps) * waveformBins;
             if (!binDisplay || binDisplay.length !== waveformBins) binDisplay = new Float32Array(waveformBins);
             barOffsetY *= 0.92;
-            // Mean deviation per frame: the spectral shape, with every bin weighted alike.
-            let frameMean = 0;
-            for (let i = 0; i < waveformBins; i++) frameMean += (offset + i < waveformData.length) ? waveformData[offset + i] / 255 : 0;
-            frameMean /= waveformBins;
-            const level = Math.min(1, Math.sqrt(frameMean * 2));
             for (let i = 0; i < waveformBins; i++) {
+                // Each band arrives already spread over its own range across the file (the
+                // engine's waveform), so a gentle curve is all it needs: quiet detail stays
+                // low and peaks stand out, without pinning the loud bands to the top.
                 const v = (offset + i < waveformData.length) ? waveformData[offset + i] / 255 : 0;
-                const target = Math.max(0.05, Math.min(1, (v - frameMean) * 2.5 + 0.5)) * level;
+                const target = Math.min(1, v * Math.sqrt(v));
                 binDisplay[i] = target > binDisplay[i] ? binDisplay[i] * 0.7 + target * 0.3 : binDisplay[i] * 0.85 + target * 0.15;
             }
-            const glow = h.glowColor();
+            const glow = accent || h.glowColor();
             for (let i = 0; i < barCount; i++) {
                 const val = binDisplay[Math.floor(i * waveformBins / barCount)];
                 const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
                 const barProgress = (i + 0.5) / barCount;
                 const opacity = (0.3 + val * 0.7) * (barProgress <= progress ? 1 : 0.4);
                 const shadow = val > 0.7 && barProgress <= progress ? `0 0 ${(val - 0.7) * 8}px ${glow}` : 'none';
-                paint(i, `${yOff}scaleY(${Math.max(0.1, val)})`, String(opacity), shadow);
+                paint(i, `${yOff}scaleY(${Math.max(REST_SCALE, val)})`, String(opacity), shadow);
             }
         } else {
             for (let i = 0; i < barCount; i++) {
@@ -128,22 +185,22 @@
 
     function windDown(progressOpacity) {
         const run = () => {
-            barOffsetY = barOffsetY * 0.92 + -9 * 0.08;
-            let settled = true;
+            barOffsetY = barOffsetY * 0.92 + REST_Y * 0.08;
+            let settled = Math.abs(barOffsetY - REST_Y) < 0.2;
             for (let i = 0; i < barCount; i++) {
                 const binIdx = Math.floor(i * waveformBins / barCount);
                 if (binDisplay && binIdx < binDisplay.length) {
                     binDisplay[binIdx] *= 0.94;
-                    if (binDisplay[binIdx] > 0.02) settled = false;
+                    if (binDisplay[binIdx] > REST_SCALE) settled = false;
                 }
-                const scale = Math.max(0.1, binDisplay ? binDisplay[binIdx] || 0.1 : 0.1);
+                const scale = Math.max(REST_SCALE, binDisplay ? binDisplay[binIdx] || 0 : 0);
                 const yOff = Math.abs(barOffsetY) > 0.5 ? `translateY(${barOffsetY}px) ` : '';
                 paint(i, `${yOff}scaleY(${scale})`, progressOpacity(i), 'none');
             }
             if (!settled) { windDownId = requestAnimationFrame(run); return; }
             windDownId = null;
-            barOffsetY = -9;
-            for (let i = 0; i < barCount; i++) paint(i, 'translateY(-9px) scaleY(0.15)', barState[i]?.opacity ?? '0.3', 'none');
+            barOffsetY = REST_Y;
+            for (let i = 0; i < barCount; i++) paint(i, `translateY(${REST_Y}px) scaleY(${REST_SCALE})`, barState[i]?.opacity ?? '0.3', 'none');
         };
         run();
     }
@@ -174,8 +231,11 @@
             }
             loading = false;
         }
+        claimPlayback(att.id, pause);
         try {
             const posMs = await h.play(sourceId);
+            // Another player started while this one was starting.
+            if (!holdsPlayback(att.id)) { h.pause(sourceId).catch(() => {}); return; }
             playStartTime = performance.now();
             playStartPos = posMs;
             if (windDownId) { cancelAnimationFrame(windDownId); windDownId = null; }
@@ -187,7 +247,8 @@
     }
 
     async function pause() {
-        if (!sourceId) return;
+        releasePlayback(att.id);
+        if (!sourceId || !playing) return;
         try { await h.pause(sourceId); } catch (err) { console.error('Audio pause failed:', err); }
         playing = false;
         if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
@@ -195,16 +256,24 @@
             const progress = Math.min(playStartPos + (performance.now() - playStartTime), durationMs) / durationMs;
             windDown((i) => (i + 0.5) / barCount <= progress ? '0.3' : '0.15');
         } else {
-            barOffsetY = -9;
+            barOffsetY = REST_Y;
         }
     }
 
     function onEnded() {
+        releasePlayback(att.id);
         playing = false;
         positionMs = 0;
         if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
         windDown(() => '0.3');
+        // A run of voice messages plays through, like one long one.
+        if (isVoiceMessage) playerFor(h.nextVoice(msg.id))?.start();
     }
+
+    let root;
+    $effect(() => registerPlayer(att.id, {
+        start: () => { if (playing || uploading) return; h.reveal(root); play(); },
+    }));
 
     // ── seek: visuals now, the engine throttled so a drag does not glitch the audio ──
     let dragging = false;
@@ -222,7 +291,7 @@
         if (!playing) {
             const progress = posMs / durationMs;
             for (let i = 0; i < barCount; i++) {
-                const s = barState[i] || { transform: 'translateY(-9px) scaleY(0.15)', boxShadow: 'none' };
+                const s = barState[i] || { transform: `translateY(${REST_Y}px) scaleY(${REST_SCALE})`, boxShadow: 'none' };
                 paint(i, s.transform, (i + 0.5) / barCount <= progress ? '0.3' : '0.15', s.boxShadow);
             }
         }
@@ -268,10 +337,10 @@
         setTranscription(att.id, { phase: 'loading', sections: [], lang: '', error: '', open: false });
         try {
             const data = await h.transcribe(att.path);
-            setTranscription(att.id, { phase: 'ready', sections: data.sections || [], lang: data.lang || '', error: '', open: true });
+            setTranscription(att.id, { phase: 'ready', sections: data.sections || [], lang: data.lang || '', language: data.language || '', error: '', open: true, fresh: true });
         } catch (err) {
             console.error('Transcription error:', err);
-            setTranscription(att.id, { phase: 'error', sections: [], lang: '', error: err?.message || 'Transcription failed', open: true });
+            setTranscription(att.id, { phase: 'error', sections: [], lang: '', error: err?.message || 'Transcription failed', open: true, fresh: true });
         }
     }
     // A fresh voice message transcribes itself when the setting is on and the model is here.
@@ -285,6 +354,7 @@
         if (windDownId) cancelAnimationFrame(windDownId);
         if (seekTimer) clearTimeout(seekTimer);
         if (sourceId) h.stop(sourceId).catch(() => {});
+        releasePlayback(att.id);
         for (const off of unlisteners) off();
         unlisteners = [];
     });
@@ -294,9 +364,20 @@
     const transcribeIcon = $derived(transcribing ? 'icon-loading spin' : (transcription?.phase === 'ready' && transcription.open ? 'icon-file-minus' : 'icon-file-plus'));
 </script>
 
-<div class="audio-message-container custom-audio-player" class:has-metadata={!isVoiceMessage && !!att.name}>
-    {#if info?.coverArt}
-        <div class="audio-cover-art-wrap"><img class="audio-cover-art" src={info.coverArt} alt="" onerror={() => setAudioMeta(att.id, { title: info.title, coverArt: '' })}></div>
+<div class="audio-message-container custom-audio-player" bind:this={root} class:has-metadata={!isVoiceMessage && !!att.name}
+     style:--icon-color-primary={accent}>
+    {#if meta?.coverArt}
+        <img class="audio-art-glow" src={meta.coverArt} alt="" aria-hidden="true">
+    {/if}
+    <div class:audio-album={!!meta?.coverArt}>
+    {#if meta?.coverArt}
+        <button class="audio-cover-art" aria-label="View cover art" onclick={() => h.viewImage(meta.coverArt)}>
+            <img src={meta.coverArt} alt="" onerror={() => setAudioMeta(att.id, { ...meta, coverArt: '' })}>
+        </button>
+        <div class="audio-track-text">
+            <div class="audio-track-title cutoff" title={meta.track || att.name}>{meta.track || att.name}</div>
+            {#if byline}<div class="audio-track-byline cutoff" title={byline}>{byline}</div>{/if}
+        </div>
     {/if}
     <div class="custom-audio-player-inner" class:playing>
         {#if uploading}
@@ -321,7 +402,7 @@
                 {/each}
             </div>
         {/snippet}
-        {#if !isVoiceMessage && att.name}
+        {#if !isVoiceMessage && att.name && !meta?.coverArt}
             <div class="audio-waveform-wrapper">
                 <div class="audio-filename cutoff" title={title}>{title}</div>
                 {@render waveformEl()}
@@ -330,7 +411,7 @@
             {@render waveformEl()}
         {/if}
         <div class="audio-time-display" style:display={download.active ? 'none' : null}>
-            <span class="current-time" style:color={positionMs > 0 ? '#ffffffb3' : null}>{currentText}</span> / <span class="duration">{durationText}</span>
+            <span class="current-time" class:is-moving={positionMs > 0}>{currentText}</span><span class="audio-time-sep">/</span><span class="duration">{durationText}</span>
         </div>
         {#if canTranscribe}
             {#if download.active}
@@ -343,17 +424,19 @@
                     </div>
                 </div>
             {:else}
-                <button class="audio-transcribe-btn" class:loading={transcribing} style:cursor={transcribing ? 'default' : null}
+                <button class="audio-transcribe-btn" class:loading={transcribing} class:is-open={transcription?.phase === 'ready' && transcription.open}
+                        style:cursor={transcribing ? 'default' : null}
                         aria-label={transcription?.phase === 'ready' ? (transcription.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe'} onclick={onTranscribe}>
                     <span class="icon {transcribeIcon}"></span>
                 </button>
             {/if}
         {/if}
     </div>
+    </div>
     {#if canTranscribe}
         <div class="transcribe-container"></div>
         {#if transcription && transcription.phase !== 'loading'}
-            <Transcription t={transcription} {positionMs} {playing} {h} onSeek={seekTo} />
+            <Transcription t={transcription} {positionMs} {playing} {h} onSeek={seekTo} onSettled={() => patchTranscription(att.id, { fresh: false })} />
         {/if}
     {/if}
 </div>
