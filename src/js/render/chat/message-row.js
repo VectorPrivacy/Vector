@@ -180,6 +180,7 @@ const _dmsgLookups = {
  *   resolveInvite: (key: string) => Promise<void>,
  *   joinedChat: (communityId: string) => object|null,
  *   joinFromCard: (key: string, communityId: string) => void,
+ *   openCommunity: (communityId: string) => void,
  *   fileSrc: (path: string) => string,
  *   showEditHistory: (msgId: string, el: Element) => void,
  *   xdcUrl: (msg: object) => string|null,
@@ -203,6 +204,11 @@ const _dmsgContentHelpers = {
     resolveInvite: (key) => _resolveCommunityInvitePreview(key),
     joinedChat: (communityId) => findCommunityChat(communityId),
     joinFromCard: (key, communityId) => _joinCommunityFromCard(key, communityId),
+    // Lands where the rail's shortcut would: the channel last read there, else its primary.
+    openCommunity: (communityId) => {
+        const target = wsChannelForCommunity(communityId) || findCommunityChat(communityId)?.id;
+        if (target) openChat(target);
+    },
     fileSrc: (path) => convertFileSrc(path),
     showEditHistory: (id, el) => showEditHistory(id, el),
     xdcUrl: (msg) => findXdcUrl(msg.content),

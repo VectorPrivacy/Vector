@@ -47,7 +47,7 @@
             <button class="cic-btn" type="button" disabled>Join</button>
         {:else if res.state === 'ok'}
             {#if joined}
-                <button class="cic-btn cic-btn-open" type="button" onclick={(e) => { e.stopPropagation(); h.openChat(joined.id); }}>Open</button>
+                <button class="cic-btn cic-btn-open" type="button" onclick={(e) => { e.stopPropagation(); h.openCommunity(res.info.community_id); }}>Open</button>
             {:else}
                 <button class="cic-btn" class:is-joining={joining} type="button" disabled={joining} onclick={join}>{joining ? 'Joining…' : 'Join'}</button>
             {/if}
