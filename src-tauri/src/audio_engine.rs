@@ -406,6 +406,8 @@ impl AudioEngine {
         }
         let old = self.stream.lock().unwrap_or_else(|e| e.into_inner()).replace(stream);
         drop(old);
+        // Only desktop keeps a sample-rate cache to invalidate.
+        #[cfg(desktop)]
         crate::audio::invalidate_device_sample_rate_cache();
         Ok(())
     }
