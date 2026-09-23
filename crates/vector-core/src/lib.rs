@@ -725,7 +725,7 @@ impl VectorCore {
                 last_err = "plaintext blob fails its hash claim".to_string();
                 next_source!();
             }
-            match crate::crypto::decrypt_data(&encrypted, &attachment.key, &attachment.nonce) {
+            match crate::crypto::decrypt_data_owned(encrypted, &attachment.key, &attachment.nonce) {
                 Ok(plain) => {
                     if i > 1 {
                         log_net_info!("[Download] fallback source {}/{} served {}", i, candidates.len(), url);

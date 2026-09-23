@@ -4351,7 +4351,7 @@ async fn download_decrypt_cache_image<R: tauri::Runtime>(
         encrypted.extend_from_slice(&chunk);
     }
 
-    let decrypted = vector_core::crypto::decrypt_data(&encrypted, &image.key, &image.nonce)?;
+    let decrypted = vector_core::crypto::decrypt_data_owned(encrypted, &image.key, &image.nonce)?;
     // Integrity: the plaintext must match the hash committed in the sealed metadata.
     if vector_core::crypto::sha256_hex(&decrypted) != image.hash {
         return Err("community image failed integrity check".to_string());

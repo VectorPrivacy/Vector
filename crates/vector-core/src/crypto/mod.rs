@@ -142,7 +142,10 @@ pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, S
         .map_err(|_| "Invalid nonce length".to_string())?;
     let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
 
-    let mut buffer = data.to_vec();
+    // Room for the tag up front: appending it to an exact-size copy would reallocate
+    // and move the whole ciphertext a second time.
+    let mut buffer = Vec::with_capacity(data.len() + 16);
+    buffer.extend_from_slice(data);
     let tag = cipher.encrypt_in_place_detached(&nonce, &[], &mut buffer)
         .map_err(|_| "Encryption failed".to_string())?;
 
@@ -153,18 +156,22 @@ pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, S
 /// Decrypt data with AES-256-GCM using a 16-byte nonce (0xChat-compatible).
 /// Input format: ciphertext || 16-byte auth tag.
 pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
+    decrypt_data_owned(encrypted_data.to_vec(), key_hex, nonce_hex)
+}
+
+/// [`decrypt_data`] in place, for a caller that owns the ciphertext: the plaintext
+/// comes back in the same allocation, so nothing the size of the file is copied.
+pub fn decrypt_data_owned(mut data: Vec<u8>, key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
     use aes::Aes256;
     use aes::cipher::typenum::U16;
     use aes_gcm::{AesGcm, AeadInPlace, KeyInit as AesKeyInit};
 
-    if encrypted_data.len() < 16 {
-        return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", encrypted_data.len()));
+    if data.len() < 16 {
+        return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", data.len()));
     }
 
     let key_bytes = hex::decode(key_hex).map_err(|e| format!("Invalid key: {}", e))?;
     let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {}", e))?;
-
-    let (ciphertext, tag_bytes) = encrypted_data.split_at(encrypted_data.len() - 16);
 
     let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
         .map_err(|_| "Invalid decryption key".to_string())?;
@@ -172,15 +179,15 @@ pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Re
     let nonce_arr: [u8; 16] = nonce_bytes.try_into()
         .map_err(|_| "Invalid nonce length".to_string())?;
     let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
-    let tag_arr: [u8; 16] = tag_bytes.try_into()
+    let tag_arr: [u8; 16] = data[data.len() - 16..].try_into()
         .map_err(|_| "Invalid tag length".to_string())?;
     let tag = aes_gcm::Tag::<U16>::from(tag_arr);
 
-    let mut buffer = ciphertext.to_vec();
-    cipher.decrypt_in_place_detached(&nonce, &[], &mut buffer, &tag)
+    data.truncate(data.len() - 16);
+    cipher.decrypt_in_place_detached(&nonce, &[], &mut data, &tag)
         .map_err(|e| e.to_string())?;
 
-    Ok(buffer)
+    Ok(data)
 }
 
 /// Calculate SHA-256 hash of data, returned as hex string.
@@ -492,13 +499,25 @@ pub fn decrypt_and_save_attachment(
     name: &str,
     extension: &str,
 ) -> Result<(std::path::PathBuf, String), String> {
+    decrypt_and_save_attachment_owned(encrypted_data.to_vec(), key, nonce, name, extension)
+}
+
+/// [`decrypt_and_save_attachment`] for a caller that owns the download: it is
+/// decrypted in place rather than copied first.
+pub fn decrypt_and_save_attachment_owned(
+    encrypted_data: Vec<u8>,
+    key: &str,
+    nonce: &str,
+    name: &str,
+    extension: &str,
+) -> Result<(std::path::PathBuf, String), String> {
     // Unencrypted foreign media (NIP-92 carries no decryption keys — those are
     // Vector's own extension): the downloaded bytes ARE the plaintext, so skip
     // AES-GCM and render best-effort. Hash/dedup/save below are identical either way.
     let decrypted = if key.is_empty() || nonce.is_empty() {
-        encrypted_data.to_vec()
+        encrypted_data
     } else {
-        decrypt_data(encrypted_data, key, nonce)?
+        decrypt_data_owned(encrypted_data, key, nonce)?
     };
     let file_hash = sha256_hex(&decrypted);
 

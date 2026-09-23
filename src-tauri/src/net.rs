@@ -1,4 +1,3 @@
-use std::cmp::min;
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
 
@@ -148,55 +147,12 @@ pub async fn download<R: tauri::Runtime>(
     download_with_reporter(content_url, &reporter, timeout).await
 }
 
-/// Determine a remote file's size without downloading it.
-/// Tries HTTP HEAD first, falls back to a 2-byte Range request.
-/// Returns None if size cannot be determined.
 /// Attach a proxied request's signed authorization, when there is one.
 fn with_auth(req: reqwest::RequestBuilder, auth: Option<&reqwest::header::HeaderValue>) -> reqwest::RequestBuilder {
     match auth {
         Some(v) => req.header(reqwest::header::AUTHORIZATION, v.clone()),
         None => req,
     }
-}
-
-pub async fn get_remote_file_size_with(url: &str, auth: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
-    validate_url_not_private(url).ok()?;
-    // Route through vector-core so the Tor failsafe applies — blackhole when
-    // Tor is enabled-but-inactive, proxy when Tor is up.
-    let client = vector_core::net::build_http_client(std::time::Duration::from_secs(8)).ok()?;
-
-    // Method 1: HEAD request
-    if let Ok(head_res) = with_auth(client.head(url), auth).send().await {
-        if let Some(length) = head_res.content_length() {
-            if length > 0 {
-                return Some(length);
-            }
-        }
-    }
-
-    // Method 2: Range request fallback
-    if let Ok(partial_res) = with_auth(client.get(url), auth)
-        .header("Range", "bytes=0-1")
-        .send()
-        .await
-    {
-        if let Some(content_range) = partial_res.headers().get("content-range") {
-            if let Ok(range_str) = content_range.to_str() {
-                if let Some(size_part) = range_str.split('/').nth(1) {
-                    if let Ok(size) = size_part.parse::<u64>() {
-                        return Some(size);
-                    }
-                }
-            }
-        }
-        if let Some(length) = partial_res.content_length() {
-            if length > 100 {
-                return Some(length);
-            }
-        }
-    }
-
-    None
 }
 
 /// Hard ceiling for any single download on this pipeline (attachments,
@@ -233,184 +189,20 @@ pub async fn download_with_reporter(
     )
     .map_err(|_| "Failed to create HTTP client")?;
 
-    // Determine file size using reusable probe
-    let total_size = get_remote_file_size_with(&fetch_url, authorization.as_ref()).await;
-    if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
-        return Err("File exceeds the maximum download size");
-    }
-    // The probe and the range sniff can burn seconds against a dead host without a
-    // byte to report, which is exactly when a user reaches for cancel.
-    if reporter.cancelled() {
-        return Err(TRANSFER_CANCELLED);
-    }
-
-    // Based on findings, choose the appropriate download method
-    match total_size {
-        Some(size) if supports_range(&fetch_url, &client, authorization.as_ref()).await => {
-            // Use range-based download with progress
-            download_with_ranges(&client, &fetch_url, size, reporter, authorization.as_ref()).await
-        }
-        Some(size) => {
-            // Use streaming download with known size
-            download_with_streaming(&client, &fetch_url, Some(size), reporter, authorization.as_ref()).await
-        }
-        None => {
-            // Use streaming download without known size
-            download_with_streaming(&client, &fetch_url, None, reporter, authorization.as_ref()).await
-        }
-    }
-}
-
-/// Checks if the server supports range requests
-async fn supports_range(url: &str, client: &Client, auth: Option<&reqwest::header::HeaderValue>) -> bool {
-    if let Ok(res) = with_auth(client.head(url), auth).send().await {
-        if let Some(accept_ranges) = res.headers().get("accept-ranges") {
-            if let Ok(value) = accept_ranges.to_str() {
-                return value.contains("bytes");
-            }
-        }
-    }
-
-    // Try a practical test with a range request
-    if let Ok(res) = with_auth(client.get(url), auth).header("Range", "bytes=0-10").send().await {
-        return res.status().as_u16() == 206; // 206 Partial Content
-    }
-
-    false
-}
-
-/// Downloads using HTTP range requests with adaptive chunk sizing and speed tracking
-async fn download_with_ranges(
-    client: &Client,
-    url: &str,
-    total_size: u64,
-    reporter: &impl ProgressReporter,
-    auth: Option<&reqwest::header::HeaderValue>,
-) -> Result<Vec<u8>, &'static str> {
-    if total_size > MAX_DOWNLOAD_BYTES {
-        return Err("File exceeds the maximum download size");
-    }
-    let mut result = Vec::with_capacity(total_size.min(MAX_PREALLOC_BYTES) as usize);
-    let mut downloaded: u64 = 0;
-    let mut last_emitted_percentage: u8 = 0;
-
-    // Adaptive chunk sizing: start at 128KB, adjust based on throughput
-    const MIN_CHUNK: u64 = 32_000;      // 32KB floor (considerate to extreme conditions)
-    const MAX_CHUNK: u64 = 2_000_000;   // 2MB ceiling
-    const TARGET_CHUNK_SECS: f64 = 1.0; // Target ~1 second per chunk
-    let mut chunk_size: u64 = 32_000;   // Start at 32KB (floor) for fast first-chunk response
-
-    // Speed tracking: rolling window of last 10 chunk measurements
-    let mut speed_samples: Vec<f64> = Vec::with_capacity(10);
-
-    while downloaded < total_size {
-        if reporter.cancelled() {
-            return Err(TRANSFER_CANCELLED);
-        }
-        let end = min(downloaded + chunk_size - 1, total_size - 1);
-        let chunk_start = std::time::Instant::now();
-
-        let chunk_res = with_auth(client.get(url), auth)
-            .header("Range", format!("bytes={}-{}", downloaded, end))
-            .send()
-            .await
-            .map_err(|e| {
-                vector_core::log_warn!("[AttachmentDownload] range request failed for {}: {}", url, e);
-                "Failed to download chunk"
-            })?;
-
-        let status = chunk_res.status().as_u16();
-        if status == 200 {
-            // Server ignored the Range header and returned the full file
-            // (common with media servers that advertise range support but
-            // don't honor it). The body IS the complete attachment — consume
-            // it and finish rather than failing the download.
-            if downloaded > 0 {
-                vector_core::log_warn!("[AttachmentDownload] unexpected HTTP 200 mid-range for {}", url);
-                return Err("Server did not honor range request");
-            }
-            if matches!(chunk_res.content_length(), Some(len) if len > MAX_DOWNLOAD_BYTES) {
-                return Err("File exceeds the maximum download size");
-            }
-            // Stream-capped, NOT .bytes(): a chunked 200 carries no
-            // Content-Length, so .bytes() would buffer an endless body —
-            // the exact unbounded read the byte cap exists to stop.
-            let mut stream = chunk_res.bytes_stream();
-            while let Some(item) = stream.next().await {
-                if reporter.cancelled() {
-                    return Err(TRANSFER_CANCELLED);
-                }
-                let chunk = item.map_err(|e| {
-                    vector_core::log_warn!("[AttachmentDownload] full-body read failed for {}: {}", url, e);
-                    "Failed to read chunk bytes"
-                })?;
-                result.extend_from_slice(&chunk);
-                if result.len() as u64 > MAX_DOWNLOAD_BYTES {
-                    return Err("File exceeds the maximum download size");
-                }
-            }
-            let _ = reporter.report_complete();
-            return Ok(result);
-        }
-        if status != 206 {
-            vector_core::log_debug!("[AttachmentDownload] HTTP {} (expected 206) for {}", status, url);
-            return Err("Server did not honor range request");
-        }
-
-        let chunk = chunk_res
-            .bytes()
-            .await
-            .map_err(|e| {
-                vector_core::log_warn!("[AttachmentDownload] range read failed for {}: {}", url, e);
-                "Failed to read chunk bytes"
-            })?;
-
-        let elapsed = chunk_start.elapsed().as_secs_f64();
-        result.extend_from_slice(&chunk);
-        downloaded += chunk.len() as u64;
-        if downloaded > MAX_DOWNLOAD_BYTES {
-            return Err("File exceeds the maximum download size");
-        }
-
-        // Track speed and adapt chunk size
-        if elapsed > 0.0 {
-            let bps = chunk.len() as f64 / elapsed;
-            speed_samples.push(bps);
-            if speed_samples.len() > 10 {
-                speed_samples.remove(0);
-            }
-
-            // Adapt chunk size: target ~1 second per chunk
-            let avg_bps = speed_samples.iter().sum::<f64>() / speed_samples.len() as f64;
-            chunk_size = ((avg_bps * TARGET_CHUNK_SECS) as u64).clamp(MIN_CHUNK, MAX_CHUNK);
-        }
-
-        // Report progress with speed
-        let progress = (downloaded as f64 / total_size as f64) * 100.0;
-        let current_percentage = progress as u8;
-        if current_percentage > last_emitted_percentage {
-            let avg_speed = if !speed_samples.is_empty() {
-                Some(speed_samples.iter().sum::<f64>() / speed_samples.len() as f64)
-            } else {
-                None
-            };
-            reporter.report_progress(Some(current_percentage), Some(downloaded), avg_speed)?;
-            last_emitted_percentage = current_percentage;
-        }
-    }
-
-    reporter.report_complete()?;
-    Ok(result)
+    // One GET: its Content-Length sizes the progress, so no probe round trips go first.
+    download_with_streaming(&client, &fetch_url, reporter, authorization.as_ref()).await
 }
 
 /// Downloads using a streaming approach with progress reporting
 async fn download_with_streaming(
     client: &Client,
     url: &str,
-    total_size: Option<u64>,
     reporter: &impl ProgressReporter,
     auth: Option<&reqwest::header::HeaderValue>,
 ) -> Result<Vec<u8>, &'static str> {
+    if reporter.cancelled() {
+        return Err(TRANSFER_CANCELLED);
+    }
     let res = with_auth(client.get(url), auth)
         .send()
         .await
@@ -428,6 +220,12 @@ async fn download_with_streaming(
         vector_core::log_debug!("[AttachmentDownload] HTTP {} for {}", res.status().as_u16(), url);
         return Err("Media server returned an error status");
     }
+
+    let total_size = res.content_length().filter(|&n| n > 0);
+    if matches!(total_size, Some(size) if size > MAX_DOWNLOAD_BYTES) {
+        return Err("File exceeds the maximum download size");
+    }
+    let started = std::time::Instant::now();
 
     // Create a buffer to store all data
     let capacity = total_size.unwrap_or(1024 * 1024).min(MAX_PREALLOC_BYTES) as usize;
@@ -462,7 +260,9 @@ async fn download_with_streaming(
 
             // Only emit events when percentage changes (to reduce events)
             if current_percentage > last_emitted_percentage {
-                reporter.report_progress(Some(current_percentage), Some(downloaded), None)?;
+                let secs = started.elapsed().as_secs_f64();
+                let speed = (secs > 0.0).then(|| downloaded as f64 / secs);
+                reporter.report_progress(Some(current_percentage), Some(downloaded), speed)?;
                 last_emitted_percentage = current_percentage;
             }
         } else {
@@ -710,4 +510,5 @@ mod tests {
         assert_eq!(normalize_url("https://b.com/x", "https://a.com/"), "https://b.com/x");
     }
 }
+
 

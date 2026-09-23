@@ -109,13 +109,13 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
 /// Returns (path, content_hash) if successful, or an error message if unsuccessful
 pub async fn decrypt_and_save_attachment<R: Runtime>(
     _handle: &AppHandle<R>,
-    encrypted_data: &[u8],
+    encrypted_data: Vec<u8>,
     attachment: &Attachment
 ) -> Result<(std::path::PathBuf, String), String> {
     if attachment.group_id.is_some() {
         return Err("Group chat attachments are no longer supported".to_string());
     }
-    vector_core::crypto::decrypt_and_save_attachment(
+    vector_core::crypto::decrypt_and_save_attachment_owned(
         encrypted_data, &attachment.key, &attachment.nonce,
         &attachment.name, &attachment.extension,
     )
@@ -597,7 +597,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     }
                 }
 
-                match decrypt_and_save_attachment(handle, &data, &attachment_for_decrypt).await {
+                match decrypt_and_save_attachment(handle, data, &attachment_for_decrypt).await {
                     Ok(ok) => saved = Some(ok),
                     Err(error) => {
                         let is_decryption_error = error.contains("aead") || error.contains("decrypt");

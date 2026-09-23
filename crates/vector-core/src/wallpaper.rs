@@ -646,7 +646,7 @@ pub async fn apply_received_wallpaper(
         }
     }
 
-    let plaintext = crypto::decrypt_data(&bytes, decryption_key, decryption_nonce)?;
+    let plaintext = crypto::decrypt_data_owned(bytes, decryption_key, decryption_nonce)?;
 
     if let Some(want_hash) = plaintext_hash {
         let got_hash = crypto::sha256_hex(&plaintext);
