@@ -8,6 +8,7 @@
     import { popIn } from '../lib/popin.js';
     import Avatar from '../ui/Avatar.svelte';
     import MemberRow from '../people/MemberRow.svelte';
+    import RolesSection from './RolesSection.svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
 
     // h: close(), pickIcon(), save(), reset(), unban() (the selection), name(npub), profile(npub),
@@ -21,7 +22,16 @@
     const NAME_MAX = 32;
     const DESCRIPTION_MAX = 500;
 
-    const SECTIONS = [
+    // The Roles section's anchors follow what it shows: the list, or one role open.
+    const roleAnchors = $derived(!st.roles.edit
+        ? [{ id: 'role-list', label: 'Role List', icon: 'shield-filled', keys: 'roles role list order rank create permissions' }]
+        : [
+            { id: 'role-display', label: 'Display', icon: 'palette', keys: 'role name colour color access channel scope' },
+            { id: 'role-permissions', label: 'Permissions', icon: 'shield-filled', keys: 'role permissions ban kick manage' },
+            ...(st.roles.edit.id !== null ? [{ id: 'role-members', label: 'Members', icon: 'add-user', keys: 'role members holders assign give' }] : []),
+        ]);
+
+    const SECTIONS = $derived([
         {
             id: 'overview',
             label: 'Overview',
@@ -38,6 +48,12 @@
             ],
         },
         {
+            id: 'roles',
+            label: 'Roles',
+            needs: 'canRoles',
+            anchors: roleAnchors,
+        },
+        {
             id: 'bans',
             label: 'Bans',
             needs: 'canBan',
@@ -45,7 +61,7 @@
                 { id: 'ban-list', label: 'Banned Members', icon: 'x-user', keys: 'bans banned unban blocked removed' },
             ],
         },
-    ];
+    ]);
 
     // A section only for those who can act in it: bans are a moderation surface.
     const sections = $derived(SECTIONS.filter((x) => !x.needs || st[x.needs]));
@@ -108,6 +124,18 @@
         ov.tick;
         activeAnchor = 'identity';
         if (scroller) scroller.scrollTop = 0;
+    });
+
+    // Opening a role, or going back to the list, is a new page: top of it, first anchor.
+    let lastRoleView = null;
+    $effect(() => {
+        const key = st.roles.edit ? `role:${st.roles.edit.id}` : 'list';
+        if (key === lastRoleView) return;
+        const first = lastRoleView === null;
+        lastRoleView = key;
+        if (first || section.id !== 'roles') return;
+        if (scroller) scroller.scrollTop = 0;
+        activeAnchor = roleAnchors[0]?.id;
     });
 
     // A refused close shakes the bar and turns its message into the reason.
@@ -250,6 +278,8 @@
                                           value={st.draft.description} oninput={(e) => csSetDraft({ description: e.currentTarget.value })}></textarea>
                             </div>
                         </section>
+                    {:else if section.id === 'roles'}
+                        <RolesSection {h} />
                     {:else if section.id === 'bans'}
                         <section class="cs-block" data-anchor="ban-list">
                             <h3 class="cs-heading">Banned Members</h3>
