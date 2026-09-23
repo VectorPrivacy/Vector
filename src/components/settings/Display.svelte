@@ -11,6 +11,7 @@
         { key: 'richComposer', id: 'rich-composer-toggle', label: 'Rich Composer' },
         { key: 'emoticons', id: 'emoticon-suggestions-toggle', label: 'Emoticon Suggestions' },
         { key: 'autocorrect', id: 'autocorrect-toggle', label: 'Autocorrect' },
+        { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player' },
     ];
     function info(key) {
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(key); };

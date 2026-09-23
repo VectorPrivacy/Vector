@@ -159,6 +159,24 @@ async function saveAutocorrect(bool) {
 }
 
 /**
+ * Load the Floating Player setting: media keeps playing after its chat is left.
+ * @returns {Promise<boolean>}
+ */
+async function loadFloatingPlayer() {
+    const value = await invoke('get_sql_setting', { key: 'floating_player' });
+    if (value === null || value === undefined) return true;
+    return value === 'true' || value === '1';
+}
+
+/**
+ * Save the Floating Player setting
+ * @param {boolean} bool
+ */
+async function saveFloatingPlayer(bool) {
+    return await invoke('set_sql_setting', { key: 'floating_player', value: bool ? 'true' : 'false' });
+}
+
+/**
  * Load the user's Send Typing Indicators setting
  * @returns {Promise<boolean>}
  */

@@ -9,6 +9,8 @@
 // platform convention. Tauri's dragDropEnabled swallows the HTML5 drag events, so this
 // is pointer-driven throughout. The pack rail and the pack-creator grid share it so the
 // picker teaches one gesture.
+import { lockSelection } from './draglock.js';
+
 const ARM_MS = 180;
 const MENU_MS = 500;
 const SLOP_PX = 8;          // matches the long-press tolerance for "held still"
@@ -47,6 +49,7 @@ export function reorderable(node, h) {
         let menuOpen = false;      // the long-press menu is showing but the finger is still down
         let armTimer = null;
         let menuTimer = null;
+        let unlock = null;
 
         const clearTimers = () => {
             if (armTimer) { clearTimeout(armTimer); armTimer = null; }
@@ -94,6 +97,7 @@ export function reorderable(node, h) {
                     cur.closeMenu?.();
                     menuOpen = false;
                     dragging = true;
+                    unlock = lockSelection();
                     cur.onDragStart(mv, node);
                     cur.onDragMove(mv);
                     return;
@@ -106,6 +110,7 @@ export function reorderable(node, h) {
                 if (dist < DRAG_PX) return;
                 clearTimers();   // moving rules out the long-press menu
                 dragging = true;
+                unlock = lockSelection();
                 cur.onDragStart(mv, node);
             }
             cur.onDragMove(mv);
@@ -115,6 +120,7 @@ export function reorderable(node, h) {
             window.removeEventListener('pointerup', onUp);
             window.removeEventListener('pointercancel', onUp);
             window.removeEventListener('touchmove', onTouchMove);
+            unlock?.();
             if (activeTeardown === teardown) activeTeardown = null;
         }
         activeTeardown?.();

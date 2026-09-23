@@ -28,6 +28,21 @@ export function patchTranscription(id, fields) {
     byId.set(id, { ...e, transcription: { ...e.transcription, ...fields } });
 }
 
+/** Transcribe an attachment once, whoever asks: the chat's player and the pop-out share the
+ *  result, and a request while one is running (or after one landed) starts nothing. */
+export async function transcribeAudio(id, path, transcribe) {
+    const phase = byId.get(id)?.transcription?.phase;
+    if (phase === 'loading' || phase === 'ready') return;
+    setTranscription(id, { phase: 'loading', sections: [], lang: '', error: '', open: false });
+    try {
+        const data = await transcribe(path);
+        setTranscription(id, { phase: 'ready', sections: data.sections || [], lang: data.lang || '', language: data.language || '', error: '', open: true, fresh: true });
+    } catch (err) {
+        console.error('Transcription error:', err);
+        setTranscription(id, { phase: 'error', sections: [], lang: '', error: err?.message || 'Transcription failed', open: true, fresh: true });
+    }
+}
+
 const modelDownload = $state({ active: false, pct: 0, text: '', failed: false });
 export function modelDownloadState() { return modelDownload; }
 export function setModelDownload(fields) { Object.assign(modelDownload, fields); }

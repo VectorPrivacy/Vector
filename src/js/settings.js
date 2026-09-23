@@ -939,6 +939,7 @@ const DISPLAY_EXPLAINERS = {
     richComposer: ['Rich Composer', 'The chat box formats <b>bold</b>, <i>italics</i>, code and links as you type.<br><br>Turn it off to use a plain text box instead. The change applies on the next app start.'],
     emoticons: ['Emoticon Suggestions', 'When enabled, text emoticons suggest the matching emoji as you type:<br><br><b>:)</b> → 🙂&nbsp;&nbsp; <b>:D</b> → 😄&nbsp;&nbsp; <b>:P</b> → 😛&nbsp;&nbsp; <b>:3</b> → 😺<br><br>Turn it off to type emoticons as plain text (e.g. <b>:3</b>) without the emoji selector getting in the way.'],
     autocorrect: ['Autocorrect', 'When enabled, your device corrects typos as you type in the chat box, using your system\'s autocorrect.<br><br>Turn it off if your system keeps "fixing" words you meant to type.'],
+    floatingPlayer: ['Floating Player', 'When enabled, <b>audio and video keep playing</b> when you leave their chat, in a small player you can move and resize anywhere.<br><br>Runs of voice messages play through, and a video can shrink to sound only.<br><br>Turn it off to stop media when you leave its chat.'],
 };
 
 /**
@@ -972,6 +973,10 @@ const DISPLAY_HANDLERS = {
                         applyAutocorrectSetting();
                         await saveAutocorrect(on);
                         break;
+                    case 'floatingPlayer':
+                        VectorSvelte.setPopoutEnabled(on);
+                        await saveFloatingPlayer(on);
+                        break;
                 }
             },
             explain: (key) => popupConfirm(...DISPLAY_EXPLAINERS[key], true),
@@ -984,12 +989,15 @@ async function initDisplaySettings() {
     emoticonSuggestionsEnabled = await loadEmoticonSuggestions();
     fAutocorrectEnabled = await loadAutocorrect();
     applyAutocorrectSetting();
+    const floatingPlayer = await loadFloatingPlayer();
+    VectorSvelte.setPopoutEnabled(floatingPlayer);
     VectorSvelte.setDisplaySettings({
         imageTypes: fDisplayImageTypes,
         chatBg,
         richComposer: localStorage.getItem('rich_composer') !== 'false',
         emoticons: emoticonSuggestionsEnabled,
         autocorrect: fAutocorrectEnabled,
+        floatingPlayer,
     });
 }
 

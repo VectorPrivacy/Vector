@@ -5,14 +5,16 @@
     // (animation, not markup), the same way a canvas would.
     import { transfer } from '../../lib/attachments.svelte.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
-    import { audioInfo, setAudioDuration, setAudioMeta, setTranscription, patchTranscription, modelDownloadState,
-             claimPlayback, releasePlayback, holdsPlayback, registerPlayer, playerFor } from '../../lib/audio.svelte.js';
+    import { untrack } from 'svelte';
+    import { audioInfo, setAudioDuration, setAudioMeta, patchTranscription, transcribeAudio, modelDownloadState, registerPlayer } from '../../lib/audio.svelte.js';
+    import { AudioSession, popOut, takeBack, yieldPopout } from '../../lib/popout.svelte.js';
+    import { lockSelection } from '../../lib/draglock.js';
     import Transcription from './Transcription.svelte';
 
     let { att, msg, h } = $props();   // h: AudioPlayerHelpers (js/voice.js)
     //    listen(event, fn) → unlisten, glowColor(), transcriptionSupported(att, msg), transcribe(path), autoTranscribe(msg),
     //    cancelUpload(pendingId), formatTime(seconds), flag(lang), twemojify(el), holdScroll(),
-    //    nextVoice(msgId), reveal(el), viewImage(src)
+    //    nextVoice(chatId, msgId), reveal(el), viewImage(src), openChat()
 
     // svelte-ignore state_referenced_locally
     const isVoiceMessage = !att.name;   // an attachment's name never changes under a mounted player
@@ -23,11 +25,13 @@
     const transcription = $derived(info?.transcription ?? null);
     const canTranscribe = $derived(!uploading && h.transcriptionSupported(att));
 
-    // ── playback ──
-    let sourceId = null;
-    let playing = $state(false);
-    let loading = $state(false);
-    let positionMs = $state(0);          // what the time display shows
+    // ── playback: a session this row owns, or takes back from the pop-out ──
+    // svelte-ignore state_referenced_locally
+    let session = $state(takeBack(att.id, 'audio', h.openChat())?.session ?? null);
+    const playing = $derived(!!session?.playing);
+    const loading = $derived(!!session?.loading);
+    // svelte-ignore state_referenced_locally
+    let positionMs = $state(session?.position() ?? 0);   // what the time display shows
     let durationMs = $derived(info?.durationMs || 0);
     const meta = $derived(info?.meta ?? null);
     const title = $derived(meta?.track ? (meta.artist ? `${meta.artist} — ${meta.track}` : meta.track) : (att.name || ''));
@@ -40,15 +44,12 @@
     });
     const byline = $derived([meta?.artist, meta?.album !== meta?.track ? meta?.album : ''].filter(Boolean).join(' · '));
 
-    let waveformData = null, waveformFps = 30, waveformBins = 64;
     let binDisplay = null;
     // A bar at rest: this short, lifted this far. It is also the floor while playing, so
     // a finished or paused wave settles into it rather than dipping below and snapping back.
     const REST_SCALE = 0.15, REST_Y = -9;
     let barOffsetY = REST_Y;
-    let playStartTime = 0, playStartPos = 0;
     let animationId = null, windDownId = null;
-    let unlisteners = [];
 
     // Header-only probe for the duration, and the tags for an uploaded file.
     $effect(() => {
@@ -149,9 +150,10 @@
     }
 
     function frame() {
-        if (!durationMs) { animationId = requestAnimationFrame(frame); return; }
-        const posMs = Math.min(playStartPos + (performance.now() - playStartTime), durationMs);
+        if (!durationMs || !session) { animationId = requestAnimationFrame(frame); return; }
+        const posMs = Math.min(session.position(), durationMs);
         const progress = posMs / durationMs;
+        const { data: waveformData, fps: waveformFps = 30, bins: waveformBins = 64 } = session.waveform || {};
         if (waveformData && waveformData.length > 0) {
             const offset = Math.floor((posMs / 1000) * waveformFps) * waveformBins;
             if (!binDisplay || binDisplay.length !== waveformBins) binDisplay = new Float32Array(waveformBins);
@@ -179,7 +181,7 @@
             }
         }
         positionMs = posMs;
-        if (posMs >= durationMs) return;   // the engine's ended event settles the rest
+        if (posMs >= durationMs) { animationId = null; return; }   // the engine's ended event settles the rest
         animationId = requestAnimationFrame(frame);
     }
 
@@ -187,6 +189,7 @@
         const run = () => {
             barOffsetY = barOffsetY * 0.92 + REST_Y * 0.08;
             let settled = Math.abs(barOffsetY - REST_Y) < 0.2;
+            const waveformBins = session?.waveform?.bins || 64;
             for (let i = 0; i < barCount; i++) {
                 const binIdx = Math.floor(i * waveformBins / barCount);
                 if (binDisplay && binIdx < binDisplay.length) {
@@ -205,70 +208,33 @@
         run();
     }
 
-    async function play() {
-        if (uploading || loading) return;
-        if (!sourceId) {
-            loading = true;
-            try {
-                // Listeners before the load: a WAV's FFT can finish before the load returns.
-                unlisteners.push(await h.listen('audio_ended', (e) => { if (e.payload.id === sourceId) onEnded(); }));
-                unlisteners.push(await h.listen('audio_waveform', (e) => {
-                    if (e.payload.id !== sourceId) return;
-                    waveformData = new Uint8Array(e.payload.waveform);
-                    waveformFps = e.payload.waveform_fps;
-                    waveformBins = e.payload.bins;
-                }));
-                unlisteners.push(await h.listen('audio_duration', (e) => { if (e.payload.id === sourceId) setAudioDuration(att.id, e.payload.duration_ms); }));
-                const result = await h.load(att.path);
-                sourceId = result.id;
-                if (result.duration_ms > 0) setAudioDuration(att.id, result.duration_ms);
-                waveformFps = result.waveform_fps;
-                waveformBins = result.bins;
-            } catch (err) {
-                console.error('Audio load failed:', err);
-                loading = false;
-                return;
+    function play() {
+        if (uploading) return;
+        if (!session) session = new AudioSession(h, att, msg, h.openChat());
+        yieldPopout(session);
+        session.play();
+    }
+    function pause() { session?.pause(); }
+
+    // The bars follow the session, whoever started or stopped it: this row, the one-at-a-time
+    // rule, the engine's end, or the pop-out before this row took it back.
+    let wasPlaying = false;
+    $effect(() => {
+        const on = playing;
+        untrack(() => {
+            if (on) {
+                if (windDownId) { cancelAnimationFrame(windDownId); windDownId = null; }
+                if (!animationId) frame();
+            } else if (wasPlaying) {
+                if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
+                const at = session?.pausedAt ?? 0;
+                positionMs = at;
+                const progress = durationMs > 0 ? at / durationMs : 0;
+                windDown(at === 0 ? () => '0.3' : (i) => (i + 0.5) / barCount <= progress ? '0.3' : '0.15');
             }
-            loading = false;
-        }
-        claimPlayback(att.id, pause);
-        try {
-            const posMs = await h.play(sourceId);
-            // Another player started while this one was starting.
-            if (!holdsPlayback(att.id)) { h.pause(sourceId).catch(() => {}); return; }
-            playStartTime = performance.now();
-            playStartPos = posMs;
-            if (windDownId) { cancelAnimationFrame(windDownId); windDownId = null; }
-            playing = true;
-            frame();
-        } catch (err) {
-            console.error('Audio play failed:', err);
-        }
-    }
-
-    async function pause() {
-        releasePlayback(att.id);
-        if (!sourceId || !playing) return;
-        try { await h.pause(sourceId); } catch (err) { console.error('Audio pause failed:', err); }
-        playing = false;
-        if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
-        if (durationMs > 0) {
-            const progress = Math.min(playStartPos + (performance.now() - playStartTime), durationMs) / durationMs;
-            windDown((i) => (i + 0.5) / barCount <= progress ? '0.3' : '0.15');
-        } else {
-            barOffsetY = REST_Y;
-        }
-    }
-
-    function onEnded() {
-        releasePlayback(att.id);
-        playing = false;
-        positionMs = 0;
-        if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
-        windDown(() => '0.3');
-        // A run of voice messages plays through, like one long one.
-        if (isVoiceMessage) playerFor(h.nextVoice(msg.id))?.start();
-    }
+        });
+        wasPlaying = on;
+    });
 
     let root;
     $effect(() => registerPlayer(att.id, {
@@ -278,12 +244,9 @@
     // ── seek: visuals now, the engine throttled so a drag does not glitch the audio ──
     let dragging = false;
     let seekTimer = null, pendingSeekMs = null;
-    function engineSeek(ms) {
-        h.seek(sourceId, ms).catch(() => {});
-        if (playing) { playStartTime = performance.now(); playStartPos = ms; }
-    }
+    function engineSeek(ms) { session?.seek(ms); }
     function seekVisual(clientX) {
-        if (!sourceId || !durationMs || !waveform) return;
+        if (!session || !durationMs || !waveform) return;
         const rect = waveform.getBoundingClientRect();
         const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
         const posMs = Math.floor((x / rect.width) * durationMs);
@@ -311,8 +274,9 @@
     function onMouseDown(e) {
         dragging = true;
         seekVisual(e.clientX);
+        const unlock = lockSelection();
         const move = (ev) => { if (dragging) seekVisual(ev.clientX); };
-        const stop = () => { stopDrag = null; dragging = false; flushSeek(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', stop); };
+        const stop = () => { stopDrag = null; dragging = false; unlock(); flushSeek(); document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', stop); };
         document.addEventListener('mousemove', move);
         document.addEventListener('mouseup', stop);
         stopDrag = stop;
@@ -322,26 +286,18 @@
     function onTouchEnd() { dragging = false; flushSeek(); }
 
     // A transcription section click.
-    async function seekTo(ms) {
-        if (!sourceId) return;
-        await h.seek(sourceId, ms);
-        if (playing) { playStartTime = performance.now(); playStartPos = ms; }
+    function seekTo(ms) {
+        if (!session) return;
+        session.seek(ms);
         positionMs = ms;
     }
 
     // ── transcription ──
     const transcribing = $derived(transcription?.phase === 'loading');
-    async function onTranscribe() {
+    function onTranscribe() {
         if (transcribing || download.active) return;
         if (transcription?.phase === 'ready') { patchTranscription(att.id, { open: !transcription.open }); return; }
-        setTranscription(att.id, { phase: 'loading', sections: [], lang: '', error: '', open: false });
-        try {
-            const data = await h.transcribe(att.path);
-            setTranscription(att.id, { phase: 'ready', sections: data.sections || [], lang: data.lang || '', language: data.language || '', error: '', open: true, fresh: true });
-        } catch (err) {
-            console.error('Transcription error:', err);
-            setTranscription(att.id, { phase: 'error', sections: [], lang: '', error: err?.message || 'Transcription failed', open: true, fresh: true });
-        }
+        transcribeAudio(att.id, att.path, h.transcribe);
     }
     // A fresh voice message transcribes itself when the setting is on and the model is here.
     $effect(() => {
@@ -353,10 +309,8 @@
         if (animationId) cancelAnimationFrame(animationId);
         if (windDownId) cancelAnimationFrame(windDownId);
         if (seekTimer) clearTimeout(seekTimer);
-        if (sourceId) h.stop(sourceId).catch(() => {});
-        releasePlayback(att.id);
-        for (const off of unlisteners) off();
-        unlisteners = [];
+        // Playing media follows you: the pop-out carries it on until this row is back.
+        if (!(session?.playing && popOut({ kind: 'audio', session }))) session?.dispose();
     });
 
     const currentText = $derived(h.formatTime(positionMs / 1000));

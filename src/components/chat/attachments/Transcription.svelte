@@ -111,6 +111,16 @@
     });
     $effect(() => () => { if (raf) cancelAnimationFrame(raf); });
 
+    // A box capped short enough to scroll keeps the spoken section in view.
+    $effect(() => {
+        const i = currentIdx;
+        if (i < 0 || !box || box.scrollHeight <= box.clientHeight + 1) return;
+        const el = sections[i];
+        if (!el) return;
+        const b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+        if (r.top < b.top || r.bottom > b.bottom) box.scrollBy({ top: r.top - b.top - b.height / 3, behavior: 'smooth' });
+    });
+
     function langInto(node, text) { node.textContent = text; h.twemojify(node); return { update(next) { node.textContent = next; h.twemojify(node); } }; }
     // The detected language, named in English and in itself ("Russian (Русский)"). English
     // goes unsaid; a transcript from before the language was reported has no name to give.

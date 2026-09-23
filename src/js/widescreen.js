@@ -294,6 +294,7 @@ function openCommunityDetails(chat) {
 function wsInitResizer() {
     let startX = 0;
     let startW = 0;
+    let unlock = null;
     const onMove = (ev) => {
         wsApplyListWidth(startW + (ev.clientX - startX));
     };
@@ -301,6 +302,7 @@ function wsInitResizer() {
         document.removeEventListener('pointermove', onMove);
         document.removeEventListener('pointerup', onUp);
         document.body.classList.remove('ws-resizing');
+        unlock?.();
         const applied = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ws-list-w'), 10);
         if (Number.isFinite(applied)) localStorage.setItem(WS_KEY_LIST_W, String(applied));
     };
@@ -311,6 +313,7 @@ function wsInitResizer() {
             startX = ev.clientX;
             startW = VectorSvelte.shellElements().chats?.getBoundingClientRect().width || 0;
             document.body.classList.add('ws-resizing');
+            unlock = VectorSvelte.lockSelection();
             document.addEventListener('pointermove', onMove);
             document.addEventListener('pointerup', onUp);
         },

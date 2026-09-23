@@ -780,7 +780,8 @@ class VoiceTranscriptionUI {
  * @property {(el: Element) => void} twemojify
  * @property {(pendingId: string) => Promise<void>} cancelUpload
  * @property {() => () => void} holdScroll  pins the conversation's distance from its bottom; call the result to re-apply it
- * @property {(msgId: string) => string|null} nextVoice  the voice attachment of the message right after this one
+ * @property {(chatId: string, msgId: string) => {att: object, msg: object}|null} nextVoice  the downloaded voice message right after this one
+ * @property {() => string} openChat
  * @property {(el: Element) => void} reveal  eases the conversation until `el` is in view
  * @property {(src: string) => void} viewImage
  */
@@ -821,11 +822,14 @@ const AUDIO_PLAYER_HELPERS = {
         const fromBottom = domChatMessages.scrollHeight - domChatMessages.scrollTop;
         return () => { domChatMessages.scrollTop = domChatMessages.scrollHeight - fromBottom; };
     },
-    nextVoice: (msgId) => {
-        const msgs = _dmsgListHelpers.messages(strOpenChat);
+    nextVoice: (chatId, msgId) => {
+        const msgs = _dmsgListHelpers.messages(chatId);
         const i = msgs.findIndex(m => m.id === msgId);
-        return msgs[i + 1]?.attachments?.find(a => !a.name && _dmsgMediaHelpers.isAudio(a.extension))?.id ?? null;
+        const msg = i >= 0 ? msgs[i + 1] : null;
+        const att = msg?.attachments?.find(a => !a.name && a.downloaded && a.path && _dmsgMediaHelpers.isAudio(a.extension));
+        return att ? { att, msg } : null;
     },
+    openChat: () => strOpenChat,
     // The least travel that shows it, top first when it is taller than the view.
     reveal: (el) => {
         const view = domChatMessages.getBoundingClientRect(), r = el.getBoundingClientRect(), pad = 16;
@@ -835,3 +839,45 @@ const AUDIO_PLAYER_HELPERS = {
     },
     viewImage: (src) => openImageViewer(src),
 };
+
+/**
+ * MediaPopoutHelpers: the floating player that carries media out of its chat.
+ * @typedef {Object} MediaPopoutHelpers
+ * @property {AudioPlayerHelpers} audio
+ * @property {(chatId: string) => string} chatName
+ * @property {(chatId: string) => {community: string, channel: string, icon: string}|null} channelOf  a community channel's place, null elsewhere
+ * @property {(msg: object, chatId: string) => {npub: string, name: string, avatar: string}} who
+ * @property {(chatId: string, msgId: string) => void} openAt
+ */
+const MEDIA_POPOUT_HELPERS = {
+    audio: AUDIO_PLAYER_HELPERS,
+    chatName: (chatId) => {
+        if (chatId === strPubkey) return 'Notes';
+        const chat = arrChats.find(c => c.id === chatId);
+        return chat && chatIsGroup(chat) ? communityChatTitle(chat) || '' : getName(chatId);
+    },
+    channelOf: (chatId) => {
+        const chat = arrChats.find(c => c.id === chatId);
+        if (!chat || !communityIdOfChat(chat)) return null;
+        const cf = chat.metadata?.custom_fields || {};
+        const cid = communityIdOfChat(chat);
+        const withIcon = chat.metadata?.avatar_cached ? chat : arrChats.find(c => c.metadata?.avatar_cached && communityIdOfChat(c) === cid);
+        const icon = withIcon ? convertFileSrc(withIcon.metadata.avatar_cached) : 'icons/group-placeholder.svg';
+        return { community: cf.name || '', channel: cf.channel_name || '', icon };
+    },
+    who: (msg, chatId) => {
+        const npub = msg.mine ? strPubkey : (msg.npub || chatId);
+        const p = getProfile(npub);
+        return { npub, name: getName(p || npub), avatar: getProfileAvatarSrc(p) || 'icons/user-placeholder.svg' };
+    },
+    openAt: async (chatId, msgId) => {
+        await openChat(chatId);
+        jumpToMessage(msgId);
+    },
+};
+
+document.addEventListener('DOMContentLoaded', () => {
+    // A reload (an account swap) never unmounts a player, so its sources would play on.
+    invoke('audio_stop_all').catch(() => {});
+    VectorSvelte.setScreen('mediaPopout', { h: MEDIA_POPOUT_HELPERS });
+});

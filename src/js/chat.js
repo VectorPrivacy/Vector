@@ -1428,8 +1428,6 @@ async function closeChat() {
     popBack('chat');
     popBack('new-chat');
     pinsOnChatClosed();
-    // Stop all audio engine playback (voice messages, music, etc.)
-    invoke('audio_stop_all').catch(() => {});
 
     // Clear any auto-scroll timer
     if (chatOpenAutoScrollTimer) {
@@ -1441,8 +1439,9 @@ async function closeChat() {
     // The rows are the list island's; only their media is touched here, and the store
     // empties the list so its own chrome (the hover toolbar, the swipe chip) survives.
     for (const domMedia of domChatMessages.querySelectorAll('.dmsg img, .dmsg audio, .dmsg video')) {
-        // Streamable media (audio + video) should be paused, then force-unloaded
-        if (domMedia instanceof HTMLMediaElement) {
+        // Streamable media (audio + video) should be paused, then force-unloaded. Playing
+        // media is left to its row, which hands it to the pop-out as it unmounts.
+        if (domMedia instanceof HTMLMediaElement && domMedia.paused) {
             domMedia.pause();
             domMedia.removeAttribute('src'); // Better than setting to empty string
             domMedia.load();

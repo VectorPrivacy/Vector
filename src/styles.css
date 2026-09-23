@@ -11116,7 +11116,8 @@ select:disabled:hover {
    that failed takes the danger colour, and everything else stays grey. */
 .file-box,
 .thumb-download,
-.custom-audio-player {
+.custom-audio-player,
+.media-popout {
     --file-box-bg: #161616;
     --file-box-bg-hover: #1d1d1d;
     --file-box-line: #262626;
@@ -11654,6 +11655,289 @@ select:disabled:hover {
     opacity: 0.22;
     pointer-events: none;
 }
+
+/* No text selection while anything is being dragged (lib/draglock.js). */
+body.drag-lock,
+body.drag-lock * {
+    user-select: none !important;
+    -webkit-user-select: none !important;
+}
+
+/* The pop-out: media that left its chat still playing. One grid holds every form, so a
+   video narrowed into sound-only moves its element instead of remounting it.
+     sound:  [thumb][words      ][actions]
+             [play ][wave       ][time   ]
+     video:  [video                       ]
+             [words             ][actions] */
+.media-popout {
+    position: fixed;
+    z-index: 8500;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    grid-template-areas: "thumb text actions" "play wave time";
+    align-items: center;
+    column-gap: 12px;
+    row-gap: 10px;
+    padding: 12px;
+    background: var(--file-box-bg);
+    border: 1px solid var(--file-box-line-hover);
+    border-radius: 14px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.85), 0 4px 14px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: grab;
+}
+
+.media-popout:active {
+    cursor: grabbing;
+}
+
+.media-popout > :not(.audio-art-glow, .popout-grip) {
+    position: relative;
+}
+
+.media-popout.is-video {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "thumb thumb" "text actions";
+    padding: 0 0 10px;
+    row-gap: 8px;
+}
+
+.media-popout.is-video .popout-text {
+    padding-left: 12px;
+}
+
+.media-popout.is-video .popout-actions {
+    padding-right: 8px;
+}
+
+.popout-thumb {
+    grid-area: thumb;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: none;
+    border-radius: 8px;
+    object-fit: cover;
+    background: var(--file-box-line);
+    overflow: hidden;
+    display: block;
+}
+
+.popout-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+button.popout-thumb {
+    cursor: zoom-in;
+}
+
+.popout-thumb.is-round {
+    border-radius: 50%;
+}
+
+.popout-thumb.is-glyph > .icon {
+    background-color: var(--file-box-glyph);
+    width: 22px;
+    height: 22px;
+}
+
+.media-popout.is-video .popout-video {
+    width: 100%;
+    height: auto;
+    border-radius: 0;
+    background: #000;
+}
+
+.popout-text {
+    grid-area: text;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.popout-title {
+    font-size: 0.92em;
+    font-weight: 600;
+    color: var(--file-box-title);
+    line-height: 1.25;
+}
+
+.popout-sub {
+    font-size: 0.78em;
+    color: var(--file-box-body);
+    line-height: 1.25;
+}
+
+.popout-place {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+}
+
+.popout-place > .cutoff {
+    min-width: 0;
+}
+
+/* The community yields its width before the channel does: the channel is the finer place. */
+.popout-place-community {
+    flex: 0 3 auto;
+}
+
+.popout-place-icon {
+    width: 14px;
+    height: 14px;
+    flex: none;
+    border-radius: 4px;
+    object-fit: cover;
+}
+
+.popout-place-sep {
+    flex: none;
+    opacity: 0.6;
+}
+
+.popout-actions {
+    grid-area: actions;
+    display: flex;
+    gap: 4px;
+    align-self: start;
+}
+
+.popout-action {
+    position: relative;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.popout-action > .icon {
+    width: 20px;
+    height: 20px;
+    background-color: var(--file-box-glyph);
+}
+
+.popout-action:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.popout-play {
+    grid-area: play;
+    justify-self: center;
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+}
+
+.media-popout .popout-play .icon {
+    width: 24px;
+    height: 24px;
+    mask-size: 24px;
+}
+
+.popout-wave {
+    grid-area: wave;
+    width: 100%;
+    height: 26px;
+    color: var(--icon-color-primary);
+    cursor: pointer;
+    touch-action: none;
+}
+
+.popout-track {
+    grid-area: wave;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    touch-action: none;
+    background: linear-gradient(var(--file-box-line-hover), var(--file-box-line-hover)) center / 100% 4px no-repeat;
+}
+
+.popout-track-fill {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--icon-color-primary);
+}
+
+.popout-time {
+    grid-area: time;
+    font-size: 0.75em;
+    color: var(--file-box-body);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* A transcript spans the box under the controls, capped so a long one scrolls. */
+.media-popout .transcription-result {
+    grid-column: 1 / -1;
+    margin-top: 0;
+    max-height: 180px;
+    overflow-y: auto;
+    font-size: 0.9em;
+    cursor: auto;
+    touch-action: pan-y;
+}
+
+.popout-action.is-open > .icon {
+    background-color: var(--icon-color-primary);
+}
+
+.popout-action:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* Resize grips on every corner; the corner opposite the grabbed one stays put. */
+.popout-grip {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    z-index: 2;
+}
+
+.popout-grip[data-corner="tl"] { top: 0; left: 0; cursor: nwse-resize; }
+.popout-grip[data-corner="tr"] { top: 0; right: 0; cursor: nesw-resize; }
+.popout-grip[data-corner="bl"] { bottom: 0; left: 0; cursor: nesw-resize; }
+.popout-grip[data-corner="br"] { bottom: 0; right: 0; cursor: nwse-resize; }
+
+.popout-grip::before {
+    content: '';
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border: 0 solid rgba(255, 255, 255, 0.55);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.popout-grip[data-corner="tl"]::before { top: 5px; left: 5px; border-top-width: 2px; border-left-width: 2px; border-top-left-radius: 3px; }
+.popout-grip[data-corner="tr"]::before { top: 5px; right: 5px; border-top-width: 2px; border-right-width: 2px; border-top-right-radius: 3px; }
+.popout-grip[data-corner="bl"]::before { bottom: 5px; left: 5px; border-bottom-width: 2px; border-left-width: 2px; border-bottom-left-radius: 3px; }
+.popout-grip[data-corner="br"]::before { bottom: 5px; right: 5px; border-bottom-width: 2px; border-right-width: 2px; border-bottom-right-radius: 3px; }
+
+/* Faint on the corner nearest the pointer, full on the grip under it. */
+.popout-grip.is-near::before {
+    opacity: 0.45;
+}
+
+.popout-grip.is-near:hover::before {
+    opacity: 1;
+}
+
 
 .audio-cover-art {
     width: 100%;
