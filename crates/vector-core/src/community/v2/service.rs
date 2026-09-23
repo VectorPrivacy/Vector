@@ -5020,7 +5020,21 @@ pub async fn create_role<T: Transport + ?Sized>(
         if name.is_empty() {
             return Err("a role needs a name".to_string());
         }
-        let floor = view.roles.roles.iter().map(|r| r.position).max().unwrap_or(0).max(author.rank);
+        // Channel access roles are parked at the bottom band on purpose (see
+        // `channel_access_role`), so a new role lands just above that band rather than
+        // in the one slot left beneath it, where the next would saturate into a peer.
+        let floor = view
+            .roles
+            .roles
+            .iter()
+            .map(|r| r.position)
+            .filter(|p| *p < ACCESS_ROLE_POSITION)
+            .max()
+            .unwrap_or(0)
+            .max(author.rank);
+        if floor.saturating_add(1) >= ACCESS_ROLE_POSITION {
+            return Err("there's no room beneath your role for a new one; reorder the roles first".to_string());
+        }
         let role = Role {
             role_id: crate::simd::hex::bytes_to_hex_32(&super::super::random_32()),
             name: name.to_string(),
@@ -6036,12 +6050,16 @@ pub async fn create_private_channel<T: Transport + ?Sized>(transport: &T, commun
 /// list (CORD-04 §2 `scope: {"kind":"channel"}`). Same name as the channel, and
 /// **no permission bits**: it confers read access, which is key possession, never
 /// authority. Position sits below every management role for the same reason.
+/// Where channel access roles sit: the bottom, so anyone who can manage roles outranks
+/// them and may hand out read access.
+pub const ACCESS_ROLE_POSITION: u32 = u32::MAX - 1;
+
 pub fn channel_access_role(channel_id: &ChannelId, name: &str) -> crate::community::roles::Role {
     use crate::community::roles::{Permissions, Role, RoleScope};
     Role {
         role_id: crate::simd::hex::bytes_to_hex_32(&super::super::random_32()),
         name: name.to_string(),
-        position: u32::MAX - 1,
+        position: ACCESS_ROLE_POSITION,
         permissions: Permissions::empty(),
         scope: RoleScope::Channel(crate::simd::hex::bytes_to_hex_32(&channel_id.0)),
         color: 0, extra: Default::default(),
@@ -12335,6 +12353,22 @@ mod tests {
 
         let again = reorder_roles(&bed.relay, &community, &[c, a, b]).await.unwrap();
         assert_eq!(again, 0, "the same order again publishes nothing");
+    }
+
+    #[tokio::test]
+    async fn new_roles_stack_above_the_access_band_and_never_share_a_position() {
+        use crate::community::roles::{Permissions, RoleScope};
+        let (bed, owner, _m) = TestBed::new();
+        bed.swap_to(&owner);
+        let community = create_community(&bed.relay, "Band", bed.relays.clone(), None).await.unwrap();
+        create_private_channel(&bed.relay, &community, "secret").await.unwrap();
+        let held = crate::db::community::load_community_v2(community.id()).unwrap().unwrap();
+        let a = create_role(&bed.relay, &held, "A", 0, Permissions::empty().0, RoleScope::Server).await.unwrap();
+        let b = create_role(&bed.relay, &held, "B", 0, Permissions::empty().0, RoleScope::Server).await.unwrap();
+        let view = fetch_authority(&bed.relay, &held).await;
+        let (pa, pb) = (folded_role(&view, &a).position, folded_role(&view, &b).position);
+        assert!(pa < pb, "each new role lands beneath the last");
+        assert!(pb < ACCESS_ROLE_POSITION, "and above the access band, never in the slot beneath it");
     }
 
     #[tokio::test]
