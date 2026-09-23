@@ -52,9 +52,12 @@
         },
     ];
 
-    // Discord's palette: 0 is "no colour", the theme's own.
-    const COLORS = [0x1abc9c, 0x2ecc71, 0x3498db, 0x9b59b6, 0xe91e63, 0xf1c40f, 0xe67e22, 0xe74c3c, 0x95a5a6, 0x607d8b,
-        0x11806a, 0x1f8b4c, 0x206694, 0x71368a, 0xad1457, 0xc27c0e, 0xa84300, 0x992d22, 0x979c9f, 0x546e7a];
+    // Vector's palette, two rows of eight: brights, then warm and muted. 0 is "no colour",
+    // the theme's own.
+    const COLORS = [
+        0x59fcb3, 0x4ade80, 0x38bdf8, 0x60a5fa, 0x818cf8, 0xa78bfa, 0xe879c9, 0xff2ea9,
+        0xfb7185, 0xf87171, 0xfb923c, 0xfbbf24, 0xa3a380, 0x5eead4, 0x94a3b8, 0x64748b,
+    ];
     const hex = (c) => `#${c.toString(16).padStart(6, '0')}`;
     const tint = (c) => (c ? hex(c) : '#99aab5');
 
@@ -228,18 +231,22 @@
         <div class="cs-field cs-field-gap">
             <span class="cs-label">Role Colour</span>
             <div class="cs-swatches">
-                <button class="cs-swatch cs-swatch-default" class:on={edit.color === 0} disabled={!editable}
-                        title="Default" aria-label="Default colour" onclick={() => csPatchRoleEdit({ color: 0 })}></button>
-                <label class="cs-swatch cs-swatch-custom" class:on={edit.color !== 0 && !COLORS.includes(edit.color)}
-                       style:background-color={edit.color !== 0 && !COLORS.includes(edit.color) ? hex(edit.color) : null} title="Custom colour">
-                    <span class="icon icon-palette"></span>
-                    <input type="color" disabled={!editable} value={hex(edit.color || 0x99aab5)}
-                           oninput={(e) => csPatchRoleEdit({ color: parseInt(e.currentTarget.value.slice(1), 16) || 0 })}>
-                </label>
-                {#each COLORS as c (c)}
-                    <button class="cs-swatch" class:on={edit.color === c} style:background-color={hex(c)} disabled={!editable}
-                            aria-label={hex(c)} onclick={() => csPatchRoleEdit({ color: c })}></button>
-                {/each}
+                <div class="cs-swatch-specials">
+                    <button class="cs-swatch cs-swatch-default" class:on={edit.color === 0} disabled={!editable}
+                            title="Default" aria-label="Default colour" onclick={() => csPatchRoleEdit({ color: 0 })}></button>
+                    <label class="cs-swatch cs-swatch-custom" class:on={edit.color !== 0 && !COLORS.includes(edit.color)}
+                           style:background-color={edit.color !== 0 && !COLORS.includes(edit.color) ? hex(edit.color) : null} title="Custom colour">
+                        <span class="icon icon-palette"></span>
+                        <input type="color" disabled={!editable} value={hex(edit.color || 0x99aab5)}
+                               oninput={(e) => csPatchRoleEdit({ color: parseInt(e.currentTarget.value.slice(1), 16) || 0 })}>
+                    </label>
+                </div>
+                <div class="cs-swatch-grid">
+                    {#each COLORS as c (c)}
+                        <button class="cs-swatch" class:on={edit.color === c} style:background-color={hex(c)} disabled={!editable}
+                                aria-label={hex(c)} onclick={() => csPatchRoleEdit({ color: c })}></button>
+                    {/each}
+                </div>
             </div>
             <div class="cs-role-preview">
                 <span class="cs-role-dot" style:background-color={tint(edit.color)}></span>
