@@ -24,15 +24,28 @@ function registerMiniProfile() {
             onClose: hideMiniProfile,
             onMessage: (npub) => { hideMiniProfile(); openChat(npub); },
             onView: _miniProfileOpenFull,
+            onAddRole: (anchor) => {
+                const { npub, communityId } = VectorSvelte.miniProfile();
+                const r = anchor.getBoundingClientRect();
+                openMemberRoleMenu(communityId, npub, r.left, r.bottom + 4);
+            },
+            onRemoveRole: (roleId) => removeMiniProfileRole(roleId),
         },
     });
 }
 // Registered once every script is in: the bag names helpers from files that load later.
 document.addEventListener('DOMContentLoaded', registerMiniProfile, { once: true });
 
-/** Open the mini profile for `npub`, anchored to the tapped element (null = centred). */
-function showMiniProfile(npub, anchorEl) {
+/**
+ * Open the mini profile for `npub`, anchored to the tapped element (null = centred).
+ * Within a community (`communityId`, else the open channel's) it lists their roles there.
+ */
+function showMiniProfile(npub, anchorEl, communityId = undefined) {
     if (!npub) return;
+    if (communityId === undefined) {
+        const open = arrChats.find(c => c.id === strOpenChat);
+        communityId = open ? communityIdOfChat(open) : null;
+    }
     // A mention chip INSIDE the open popup replaces it in place: keep the spot rather
     // than re-anchoring to a chip that is about to be torn down.
     let reuse = null;
@@ -47,7 +60,8 @@ function showMiniProfile(npub, anchorEl) {
     }
 
     hideMiniProfile();
-    VectorSvelte.openMiniProfile(npub, anchorEl, reuse);
+    VectorSvelte.openMiniProfile(npub, anchorEl, reuse, communityId);
+    if (communityId) loadMiniProfileRoles(npub, communityId);
     // The Android hardware back button closes the popup, not the tab beneath it.
     pushBack('mini-profile', hideMiniProfile);
 
@@ -77,6 +91,8 @@ document.addEventListener('click', (e) => {
     // Not on the avatar/name that opened it: the click delegate is about to re-open it
     // on the same chip, so let it own the lifecycle. The command line's bot chip too.
     if (e.target.closest('.dmsg-avatar, .dmsg-author, .dmsg-command-bot-avatar, .dmsg-command-bot')) return;
+    // A menu the popup opened (its role picker) sits outside it.
+    if (e.target.closest('.context-menu')) return;
     hideMiniProfile();
 });
 

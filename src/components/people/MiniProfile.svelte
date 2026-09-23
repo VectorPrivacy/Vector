@@ -8,7 +8,7 @@
     import { miniProfile, settleMiniProfile, bindMiniProfileEl } from '../lib/miniprofile.svelte.js';
     import Avatar from '../ui/Avatar.svelte';
 
-    let { h } = $props();   // h: getProfile, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView
+    let { h } = $props();   // h: getProfile, getProfileAvatarSrc, getProfileBannerSrc, isMobile, twemojify, renderCustomEmojiShortcodes, renderMentions, showTooltip, hideTooltip, onClose, onMessage, onView, onAddRole, onRemoveRole
 
     // Relays stay silent for an identity with no metadata; after this long, call it Anon.
     const ANON_FALLBACK_MS = 6000;
@@ -34,6 +34,9 @@
             bot: !!p?.bot,
             fingerprint: npub.length > 16 ? `${npub.slice(0, 12)}…${npub.slice(-4)}` : npub,
             about: (p?.about || '').trim(),
+            // Their standing in the community it was opened within, once read.
+            roles: m.roles && (m.roles.owner || m.roles.roles.length || m.roles.addable) ? m.roles : null,
+            roleBusy: m.roleBusy,
         };
     });
 
@@ -80,6 +83,15 @@
             pos = {
                 left: Math.max(margin, Math.min(m.reuse.left, window.innerWidth - popupRect.width - margin)),
                 top: Math.max(margin, Math.min(m.reuse.top, window.innerHeight - popupRect.height - margin)),
+            };
+            return;
+        }
+        // A late repaint (the roles landing) whose anchor has since been re-rendered
+        // away keeps the spot and only re-clamps for the new height.
+        if (!m.anchor.isConnected) {
+            pos = {
+                left: pos.left,
+                top: Math.max(margin, Math.min(pos.top, window.innerHeight - popupRect.height - margin)),
             };
             return;
         }
@@ -130,6 +142,34 @@
             <div class="mini-profile-sub">{view.fingerprint}</div>
             {#if view.about}
                 <div class="mini-profile-about" use:textInto={[view.about, null, true]}></div>
+            {/if}
+            {#if view.roles}
+                <div class="mini-profile-section-label">Roles</div>
+                <div class="mini-profile-roles">
+                    {#if view.roles.owner}
+                        <span class="mini-profile-role is-owner"><span class="icon icon-crown"></span><span class="mini-profile-role-name">Owner</span></span>
+                    {/if}
+                    {#each view.roles.roles as r (r.id)}
+                        <span class="mini-profile-role" class:is-busy={view.roleBusy === r.id} class:is-removable={r.removable}>
+                            {#if r.removable}
+                                <button type="button" class="mini-profile-role-dot" style:--tint={r.tint} aria-label="Remove {r.name}"
+                                        disabled={!!view.roleBusy}
+                                        onclick={(e) => { e.stopPropagation(); h.onRemoveRole(r.id); }}>
+                                    <span class="icon icon-x"></span>
+                                </button>
+                            {:else}
+                                <span class="mini-profile-role-dot" style:--tint={r.tint}></span>
+                            {/if}
+                            <span class="mini-profile-role-name">{#if r.channel && r.channel === r.name}<span class="mini-profile-role-hash">#</span>{/if}{r.name}</span>
+                        </span>
+                    {/each}
+                    {#if view.roles.addable}
+                        <button type="button" class="mini-profile-role-add" aria-label="Add role" disabled={!!view.roleBusy}
+                                onclick={(e) => { e.stopPropagation(); h.onAddRole(e.currentTarget); }}>
+                            <span class="icon icon-plus"></span>
+                        </button>
+                    {/if}
+                </div>
             {/if}
             <div class="mini-profile-actions">
                 <button type="button" class="mini-profile-action mini-profile-action-primary" onclick={(e) => { e.stopPropagation(); h.onMessage(view.npub); }}>Send Message</button>

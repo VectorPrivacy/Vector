@@ -4091,6 +4091,110 @@ body.chat-bg-disabled .chat-messages::before {
   filter: brightness(1.08);
 }
 
+/* A member's roles in the community the popup was opened within. A removable pill
+   trades its dot for a cross on hover, so taking a role off is one press. */
+.mini-profile-section-label {
+  margin-top: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.45);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mini-profile-roles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mini-profile-role {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 8px 0 6px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.07);
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.88);
+  box-sizing: border-box;
+  transition: opacity 0.15s ease;
+}
+.mini-profile-role.is-busy {
+  opacity: 0.45;
+  animation: miniProfileRolePulse 1s ease-in-out infinite alternate;
+}
+@keyframes miniProfileRolePulse { to { opacity: 0.25; } }
+.mini-profile-role-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-profile-role-hash {
+  margin-right: 1px;
+  color: rgba(255,255,255,0.4);
+}
+.mini-profile-role-dot {
+  position: relative;
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--tint);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.15);
+  transition: transform 0.12s ease;
+}
+button.mini-profile-role-dot { cursor: pointer; }
+.mini-profile-role-dot .icon {
+  width: 100%;
+  height: 100%;
+  background-color: #1a1a1a;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.mini-profile-role.is-removable:hover .mini-profile-role-dot .icon { opacity: 1; }
+.mini-profile-role.is-removable:hover .mini-profile-role-dot { transform: scale(1.2); }
+.mini-profile-role.is-owner .icon {
+  position: relative;
+  width: 11px;
+  height: 11px;
+  margin: 0;
+  background-color: #fce459;
+}
+.mini-profile-role.is-owner .mini-profile-role-name { color: #fce459; }
+.mini-profile-role-add {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px dashed rgba(255,255,255,0.18);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.mini-profile-role-add .icon {
+  width: 12px;
+  height: 12px;
+  background-color: rgba(255,255,255,0.6);
+}
+.mini-profile-role-add:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.3);
+}
+.mini-profile-role-add:hover .icon { background-color: #fff; }
+.mini-profile-role-add:disabled,
+button.mini-profile-role-dot:disabled { cursor: default; }
+
 /* Mobile / no-anchor fallback: centered modal */
 .mini-profile-popup.mini-profile-centered {
   left: 50%;
@@ -13024,51 +13128,11 @@ select:disabled:hover {
     background-color: var(--icon-color-primary);
 }
 
-.member-pick-admin {
-    width: 22px;
-    height: 22px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    border-radius: 4px;
-    margin-right: 6px;
-    position: relative;
-    z-index: 2;
-    opacity: 0.3;
-    transition: opacity 0.15s ease;
-    flex-shrink: 0;
-}
-.member-pick-admin:hover { opacity: 0.7; }
-.member-pick-admin.active { opacity: 1; }
-.member-pick-admin .icon { width: 14px; height: 14px; background-color: var(--icon-color-primary, #59fcb3); }
-/* Owner crown stays gold (matches the in-chat Owner tag); admin crowns are green (Admin tag). */
-.member-pick-admin.owner-crown .icon { background-color: #fce459; }
-
-/* Member-list LEFT crown slot: fixed width so every avatar aligns whether or not the row has a
-   crown. Layout per the mockup: [crown-or-spacer] [avatar] [name] ... [ban/kick on the right]. */
-.member-crown-slot {
-    width: 22px;
-    margin-right: 6px;
-    flex-shrink: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.member-crown-slot .member-pick-admin { margin-right: 0; }
-/* Promotable member (owner hovering a non-admin): the faint crown appears only on row hover, so
-   the rest state matches the mockup (crown shows only on actual owner/admins). */
-.member-pick-admin.promote { opacity: 0; }
-.member-pick-row:hover .member-pick-admin.promote { opacity: 0.35; }
-.member-pick-admin.promote:hover { opacity: 0.75; }
-
 /* An action in flight pins its own indicator visible: the spinner is the ONLY signal that a
    kick/ban/role change is still running, and the hover-reveal above would otherwise hide it the
    moment the pointer leaves the row — reading as though nothing had happened. Must stay after the
    hover rules; both sides carry equal specificity, so source order decides. */
-.member-pick-row.is-acting .member-pick-actions,
-.member-pick-row.is-acting .member-pick-admin,
-.member-pick-row.is-acting .member-pick-admin.promote { opacity: 1; }
+.member-pick-row.is-acting .member-pick-actions { opacity: 1; }
 
 /* Group Overview Edit Controls */
 .group-editable {

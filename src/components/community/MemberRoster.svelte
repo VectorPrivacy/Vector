@@ -1,10 +1,10 @@
 <script>
-    // The community overview's member roster: rank sections, search, the admin crown,
-    // and kick/ban through the row menu. The banlist itself lives in Community Settings.
+    // The community overview's member roster: rank sections, search, and roles and
+    // kick/ban through the row menu. The banlist itself lives in Community Settings.
     //
     // The roster owns its live lists (members, admins, banned, role graph, filter) as
     // $state; the vanilla side feeds it through setRoster / setProfiles / setFilter and
-    // learns of member-driven changes (a kick, a promotion) through the onChange callback
+    // learns of member-driven changes (a kick) through the onChange callback
     // so its caches stay in step. Every mutation flows: confirm → act (row pinned busy) →
     // re-read the settled truth → patch state; nothing is re-rendered by hand.
     import MemberRow from '../people/MemberRow.svelte';
@@ -15,7 +15,7 @@
         communityId,
         myNpub = '',
         ownerNpub = null,          // PROVEN owner (verified attestation), or null
-        caps = {},                 // community capabilities: manage_admin_role, kick, ban
+        caps = {},                 // community capabilities: manage_roles, kick, ban
         profiles = [],             // initial snapshot; later loads ride setProfiles()
         members = [],              // [{ npub }]
         admins = [],
@@ -113,6 +113,15 @@
         return !adminSet.has(npub);
     }
 
+    // Whether the row menu offers their roles: Manage Roles and a strict outrank, the
+    // backend's own gate, read off the graph so the handle shows without a fetch.
+    function mayRole(npub) {
+        if (!caps.manage_roles || npub === ownerNpub || npub === myNpub) return false;
+        if (iAmOwner) return true;
+        const mine = heldBy.get(myNpub)?.position ?? Infinity;
+        return mine < (heldBy.get(npub)?.position ?? Infinity);
+    }
+
     // A member's section is their HIGHEST role (lowest position number).
     const heldBy = $derived.by(() => {
         const roleById = new Map((graph?.roles || []).map((r) => [r.role_id, r]));
@@ -175,11 +184,8 @@
                 isAdmin,
                 rank: isOwner ? 'owner' : isAdmin ? 'admin' : null,
                 rankLabel: heldBy.get(m.npub)?.name || null,
-                // The crown gutter exists only when there is a control to hold.
-                crown: !isOwner && caps.manage_admin_role
-                    ? { active: isAdmin, promote: !isAdmin, title: isAdmin ? 'Remove admin' : 'Make admin' }
-                    : null,
                 canModerate: iOutrank(m.npub) && !!(caps.kick || caps.ban),
+                canRole: mayRole(m.npub),
                 tier: tierOf(m.npub),
             });
         }
@@ -276,41 +282,6 @@
         acting = next;
     }
 
-    async function toggleAdmin(vm, e) {
-        e.stopPropagation();
-        if (acting.has(vm.npub)) return;
-        const makeAdmin = !vm.isAdmin;
-        const confirmed = await h.popupConfirm(
-            makeAdmin ? 'Make Admin' : 'Remove Admin',
-            makeAdmin
-                ? `Make <b>${h.escapeHtml(vm.display)}</b> an admin? They'll be able to moderate this community (ban, hide messages, manage settings).`
-                : `Remove <b>${h.escapeHtml(vm.display)}</b> as an admin? They'll lose all moderation powers.`,
-            false, '', 'vector_warning.svg');
-        if (!confirmed) return;
-        setActing(vm.npub, true);
-        try {
-            await h.invoke(makeAdmin ? 'grant_community_admin' : 'revoke_community_admin', { communityId, npub: vm.npub });
-            // Re-read the roster the backend settled on rather than assuming the flip: a
-            // published edition the fold hasn't adopted yet would otherwise show as done
-            // and silently revert on the next open.
-            const settled = await h.invoke('get_community_admins', { communityId }).catch(() => null);
-            if (settled) {
-                adminList = settled;
-                if (settled.includes(vm.npub) !== makeAdmin) h.showToast('Published, but not confirmed yet. It should apply shortly.');
-            } else {
-                adminList = makeAdmin ? [...new Set([...adminList, vm.npub])] : adminList.filter((n) => n !== vm.npub);
-            }
-            // The in-chat tags read the shared roster cache, not this panel's copy.
-            h.applyCommunityAdmins(communityId, adminList);
-            h.dmsgClearDeleteMetaCache();
-            onChange(getRoster());
-        } catch (err) {
-            h.showToast(String(err));
-        } finally {
-            setActing(vm.npub, false);
-        }
-    }
-
     async function remove(vm, ban) {
         const confirmed = await h.popupConfirm(
             ban ? 'Ban member' : 'Kick member',
@@ -336,8 +307,8 @@
         }
     }
 
-    // Moderation lives on the row menu (right-click / long-press), with a "⋯" handle
-    // on hover so it is discoverable without welding destructive buttons onto every row.
+    // Roles and moderation live on the row menu (right-click / long-press), with a "⋯"
+    // handle on hover so it is discoverable without welding destructive buttons onto every row.
     function menuItems(vm) {
         const items = [];
         if (caps.kick) items.push({ label: 'Kick', hint: 'can rejoin with an invite', icon: 'x', onClick: () => remove(vm, false) });
@@ -345,24 +316,43 @@
         return items;
     }
 
-    // Gated at press time: a row's moderability changes with the admin set while it stays mounted.
+    // Their roles lead, as a submenu that toggles in place; kick and ban follow. The
+    // submenu is built on entry from the context each toggle refreshes.
+    async function rowItems(vm) {
+        const items = vm.canModerate ? menuItems(vm) : [];
+        if (vm.canRole) {
+            const view = await h.memberRolesView(communityId);
+            if (view && h.memberRolesOffered(view, vm.npub)) {
+                const ctx = { communityId, npub: vm.npub, view, busy: null };
+                items.unshift({ label: 'Roles', submenu: () => h.memberRoleItems(ctx) }, ...(items.length ? [{ divider: true }] : []));
+            }
+        }
+        return items;
+    }
+
+    async function showRowMenu(vm, x, y) {
+        const items = await rowItems(vm);
+        if (items.length) h.showContextMenu({ x, y, items });
+    }
+
+    // Gated at press time: a row's standing changes with the role graph while it stays mounted.
     function rowMenu(node, vm) {
         let cur = vm;
-        h.attachLongPressContextMenu(node, (x, y) => { if (cur.canModerate) h.showContextMenu({ x, y, items: menuItems(cur) }); });
+        h.attachLongPressContextMenu(node, (x, y) => { if (cur.canModerate || cur.canRole) showRowMenu(cur, x, y); });
         return { update: (v) => { cur = v; } };
     }
 
     function openMenu(vm, e) {
         e.stopPropagation();
         const r = e.currentTarget.getBoundingClientRect();
-        h.showContextMenu({ x: r.left, y: r.bottom + 4, items: menuItems(vm) });
+        showRowMenu(vm, r.left, r.bottom + 4);
     }
 
     // Row → mini-profile. stopPropagation so the opening click doesn't reach the
     // document-level outside-click handler that would dismiss the just-opened popup.
     function openProfile(npub, e) {
         e.stopPropagation();
-        h.showMiniProfile(npub, e.currentTarget.querySelector('.member-pick-avatar'));
+        h.showMiniProfile(npub, e.currentTarget.querySelector('.member-pick-avatar'), communityId);
     }
 </script>
 
@@ -401,28 +391,10 @@
                         onactivate={(e) => openProfile(vm.npub, e)}
                         {ui}
                     >
-                        {#snippet gutter()}
-                            {#if vm.crown}
-                                <div class="member-crown-slot">
-                                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                                    <div
-                                        class="member-pick-admin"
-                                        class:active={vm.crown.active || acting.has(vm.npub)}
-                                        class:promote={vm.crown.promote}
-                                        title={vm.crown.title}
-                                        style:cursor="pointer"
-                                        style:pointer-events={acting.has(vm.npub) ? 'none' : null}
-                                        onclick={(e) => toggleAdmin(vm, e)}
-                                    >
-                                        <span class="icon {acting.has(vm.npub) ? 'icon-loading spin' : 'icon-crown'}"></span>
-                                    </div>
-                                </div>
-                            {/if}
-                        {/snippet}
                         {#snippet trailing()}
-                            {#if vm.canModerate}
+                            {#if vm.canModerate || vm.canRole}
                                 <div class="member-pick-actions">
-                                    <div class="member-pick-more" title="Moderate" role="button" tabindex="0"
+                                    <div class="member-pick-more" title="More" role="button" tabindex="0"
                                         onclick={(e) => openMenu(vm, e)}
                                         onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), openMenu(vm, e))}
                                     >

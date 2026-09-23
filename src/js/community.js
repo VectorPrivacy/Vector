@@ -885,8 +885,9 @@ async function renderCommunityOverview(chat, preserveSearch = false) {
                     invoke, popupConfirm, escapeHtml, showToast, showContextMenu,
                     attachLongPressContextMenu, showMiniProfile, getProfileAvatarSrc, getProfile,
                     twemojify, renderCustomEmojiShortcodes, showGlobalTooltip, hideGlobalTooltip,
-                    applyCommunityAdmins, dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
+                    dmsgClearDeleteMetaCache, refreshCommunityMemberCount,
                     memberSectionClosed, setMemberSectionClosed,
+                    memberRolesView, memberRolesOffered, memberRoleItems,
                 },
                 onChange: ({ members }) => {
                     communityMembersCache.set(communityId, members);

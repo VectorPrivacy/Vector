@@ -15,8 +15,13 @@
  *     { label: 'Mute', icon: 'volume-mute', submenu: [ ...items ] },
  *     { label: 'Allow', disabled: true, hint: 'App Settings' },
  *     { label: 'Remove', icon: 'x', danger: true, onClick: () => {...} },
+ *     { label: 'Admin', checked: true, keepOpen: true, onClick: (repaint) => {...} },
  *   ],
  * });
+ *
+ * A `keepOpen` item acts without closing the menu; its handler gets `repaint(items)`
+ * to redraw the frame it sits in (a no-op once the user has moved elsewhere). A
+ * `submenu` may be a function, built afresh on each entry.
  *
  * A `submenu` drills DOWN in place behind a back row rather than flying out
  * beside the panel. One model for right-click and long-press, and a panel that
@@ -31,6 +36,8 @@ let _ctxMenuTrail = [];
 let _ctxMenuAnchor = { x: 0, y: 0 };
 /** The frame on screen, so drilling in can put it on the trail. */
 let _ctxMenuFrame = [];
+/** Bumped on every navigation, so a late repaint can tell its frame is gone. */
+let _ctxMenuNav = 0;
 
 /** True if an outside tap just dismissed a visible menu. Lets an underlying
  *  click handler (e.g. the chatlist open) swallow that same tap, so dismissing
@@ -43,10 +50,23 @@ function wasContextMenuJustDismissed() {
 VectorSvelte.setContextMenuHandlers({
     activate: (item) => {
         if (item.disabled) return;
-        if (item.back) { _showContextMenuFrame(_ctxMenuTrail.pop() || []); return; }
-        if (Array.isArray(item.submenu)) {
+        if (item.back) { _ctxMenuNav++; _showContextMenuFrame(_ctxMenuTrail.pop() || []); return; }
+        if (item.submenu) {
+            const sub = typeof item.submenu === 'function' ? item.submenu() : item.submenu;
+            if (!Array.isArray(sub)) return;
+            _ctxMenuNav++;
             _ctxMenuTrail.push(_ctxMenuFrame);
-            _showContextMenuFrame([{ back: true, label: item.label }, ...item.submenu]);
+            _showContextMenuFrame([{ back: true, label: item.label }, ...sub]);
+            return;
+        }
+        if (item.keepOpen) {
+            const nav = _ctxMenuNav;
+            const lead = _ctxMenuFrame[0]?.back ? [_ctxMenuFrame[0]] : [];
+            const repaint = (items) => {
+                if (_ctxMenuVisible && nav === _ctxMenuNav) _showContextMenuFrame([...lead, ...items]);
+            };
+            try { item.onClick && item.onClick(repaint); }
+            catch (err) { console.warn('[context-menu] item handler failed:', err); }
             return;
         }
         hideContextMenu();
@@ -58,6 +78,7 @@ VectorSvelte.setContextMenuHandlers({
 /** Android back: up one frame if we have drilled in, otherwise dismiss. */
 function contextMenuBack() {
     if (_ctxMenuTrail.length) {
+        _ctxMenuNav++;
         _showContextMenuFrame(_ctxMenuTrail.pop());
         pushBack('context-menu', contextMenuBack);
         return;
@@ -68,6 +89,7 @@ function contextMenuBack() {
 function hideContextMenu() {
     if (!_ctxMenuVisible) return;
     _ctxMenuVisible = false;
+    _ctxMenuNav++;
     _ctxMenuTrail = [];
     VectorSvelte.setContextMenu({ open: false });
     popBack('context-menu');
@@ -75,6 +97,7 @@ function hideContextMenu() {
 
 function showContextMenu({ x, y, items }) {
     if (!Array.isArray(items) || items.length === 0) return;
+    _ctxMenuNav++;
     _ctxMenuTrail = [];
     _ctxMenuAnchor = { x, y };
     _showContextMenuFrame(items);

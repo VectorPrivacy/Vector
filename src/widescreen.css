@@ -2224,18 +2224,6 @@ body.ws .ws-member-search .emoji-search-icon {
   background-color: #5b6060 !important;
 }
 
-/* The admin's rank is the shield beside their name; the gutter crown is the
-   DEMOTE control, so it only needs to exist under the pointer. Left always-on it
-   said "admin" a second time, in a second colour, in a second place. */
-body.ws #group-overview .member-pick-admin.active {
-  opacity: 0;
-}
-
-body.ws #group-overview .member-pick-row:hover .member-pick-admin.active,
-body.ws #group-overview .member-pick-row.is-acting .member-pick-admin.active {
-  opacity: 1;
-}
-
 /* The details column's collapse chevron shares the header with the search. */
 body.ws #group-overview > .chat-header .ws-member-search {
   margin-left: 54px;

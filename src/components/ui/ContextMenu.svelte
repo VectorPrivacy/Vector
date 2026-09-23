@@ -29,6 +29,8 @@
                 <span>{item.label}{#if item.hint}<span class="context-menu-item-hint">{item.hint}</span>{/if}</span>
                 {#if item.submenu}
                     <span class="icon icon-chevron-right"></span>
+                {:else if item.busy}
+                    <span class="icon icon-loading spin"></span>
                 {:else if item.checked}
                     <span class="icon icon-check"></span>
                 {:else if item.icon}

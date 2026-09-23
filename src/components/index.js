@@ -206,5 +206,5 @@ export function mountPackPreviewCard(target, props) {
 mount(App, { target: document.body, props: {} });
 flushSync();
 export { reactionEls } from './lib/reactionpopups.svelte.js';
-export { miniProfileEls } from './lib/miniprofile.svelte.js';
+export { miniProfileEls, setMiniProfileRoles, setMiniProfileRoleBusy } from './lib/miniprofile.svelte.js';
 export { railEls, setRailLayout } from './lib/rail.svelte.js';
