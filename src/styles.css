@@ -11196,8 +11196,24 @@ select:disabled:hover {
     color: var(--icon-color-primary);
 }
 
-/* Size and speed ride the title line while the bar owns the line below it. */
+/* Size and speed ride the title line while the bar owns the line below it. The name is
+   what gives way to a narrow box; the size, speed and stage always stay in view. */
+.file-box-title.is-moving {
+    display: flex;
+    align-items: baseline;
+    white-space: nowrap;
+}
+
+.file-box-name {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .file-box-meta {
+    flex: none;
+    white-space: pre;
     color: var(--file-box-dim);
     font-size: 0.85em;
     font-variant-numeric: tabular-nums;

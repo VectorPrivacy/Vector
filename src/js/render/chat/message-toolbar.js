@@ -518,7 +518,7 @@ function _dmsgSelectReply(targetMsgId, { focus = true } = {}) {
         const start = performance.now();
         const followPin = () => {
             beginProgrammaticScroll();
-            domChatMessages.scrollTop = domChatMessages.scrollHeight;
+            scrollToEnd(domChatMessages);
             if (performance.now() - start < 280) requestAnimationFrame(followPin);
         };
         requestAnimationFrame(followPin);

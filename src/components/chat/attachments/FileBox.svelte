@@ -134,9 +134,10 @@
             {/if}
         </span>
         <span class="file-box-text">
-            <span class="file-box-title cutoff">
-                <!-- The bar says it is moving, so the title line only says how big and how fast. -->
-                {title}{#if moving}<span class="file-box-meta">{sizeText ? ` — ${sizeText}` : ''}<span class="file-box-rate" class:is-visible={!!(note || speed)}>{note || speed}</span></span>{/if}
+            <span class="file-box-title cutoff" class:is-moving={moving}>
+                <!-- The bar says it is moving, so the title line only says how big and how fast;
+                     a long name shortens before those do. -->
+                {#if moving}<span class="file-box-name">{title}</span><span class="file-box-meta">{sizeText ? ` — ${sizeText}` : ''}<span class="file-box-rate" class:is-visible={!!(note || speed)}>{note || speed}</span></span>{:else}{title}{/if}
             </span>
             {#if moving}
                 <span class="file-box-bar" data-attachment-id={phase === 'downloading' ? att.id : undefined}

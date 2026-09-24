@@ -163,10 +163,22 @@ function scrollToBottom(domElement, fSmooth = true) {
     // misread it as the user moving. No-op for non-chat scrollables (the guard
     // only matters for #chat-messages); harmless elsewhere.
     beginProgrammaticScroll();
-    domElement.scrollTo({
-        top: domElement.scrollHeight,
-        behavior: fSmooth ? 'smooth' : 'auto'
-    });
+    if (!fSmooth) { scrollToEnd(domElement); return; }
+    domElement.scrollTo({ top: Math.max(0, domElement.scrollHeight - domElement.clientHeight), behavior: 'smooth' });
+}
+
+/**
+ * Put a scroller at its true end: the exact maximum, never scrollHeight. WKWebView hands a
+ * programmatic scroll to its scrolling layer, which clamps an overshoot against a content
+ * size that can be a frame stale while rows land, and then paints the view past the end
+ * (blank below, hover landing a row high) while layout sits at the real one, until the
+ * user scrolls. Restating the position as a real 1px move makes it push a fresh position
+ * even when this call would otherwise change nothing.
+ */
+function scrollToEnd(el) {
+    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (max > 0) el.scrollTop = max - 1;
+    el.scrollTop = max;
 }
 
 /**
