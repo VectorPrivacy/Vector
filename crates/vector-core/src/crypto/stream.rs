@@ -248,6 +248,13 @@ pub fn place_download(src: &Path, file_hash: &str, len: u64, name: &str, extensi
     let dir = crate::db::get_download_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create directory: {}", e))?;
     let target_name = if name.is_empty() { format!("{}.{}", file_hash, extension) } else { name.to_string() };
+    // One plain component, or nothing: the name and extension come from the sender.
+    let mut parts = Path::new(&target_name).components();
+    if !matches!((parts.next(), parts.next()), (Some(std::path::Component::Normal(_)), None))
+        || target_name.contains(['/', '\\'])
+    {
+        return Err("Refusing a download name outside the download folder".to_string());
+    }
 
     let candidate = dir.join(&target_name);
     let identical = std::fs::metadata(&candidate).map(|m| m.len() == len).unwrap_or(false)
@@ -278,6 +285,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_download_never_lands_outside_its_folder() {
+        let dir = scratch("escape");
+        let src = dir.join("plain");
+        std::fs::write(&src, b"x").unwrap();
+        for bad in ["..\\..\\evil.bat", "../evil", "sub/evil", ".."] {
+            assert!(place_download(&src, "abc", 1, bad, "bin").is_err(), "{bad}");
+        }
+        assert!(place_download(&src, "abc", 1, "", "..\\evil").is_err());
     }
 
     fn roundtrip(len: usize) {

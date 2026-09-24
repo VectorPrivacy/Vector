@@ -415,10 +415,13 @@ pub fn extension_from_mime(mime: &str) -> String {
         "application/x-font-otf" | "font/otf" => "otf",
         "font/woff" => "woff",
         "font/woff2" => "woff2",
-        // Fallback: extract subtype
+        // Fallback: the subtype, when it can be a file extension. The MIME string is the
+        // sender's, and a Windows path separator in it would climb out of the download folder.
         _ => {
             let lower = mime.trim().to_lowercase();
-            return lower.split('/').nth(1).unwrap_or("bin").to_string();
+            let sub = lower.split('/').nth(1).unwrap_or("");
+            let safe = !sub.is_empty() && sub.len() <= 16 && sub.bytes().all(|b| b.is_ascii_alphanumeric());
+            return if safe { sub.to_string() } else { "bin".to_string() };
         }
     }.to_string()
 }
@@ -1059,6 +1062,17 @@ pub fn generate_image_metadata(file_bytes: &[u8]) -> Option<crate::types::ImageM
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_senders_mime_can_only_name_a_plain_extension() {
+        use super::extension_from_mime;
+        assert_eq!(extension_from_mime("image/png"), "png");
+        assert_eq!(extension_from_mime("application/x-bittorrent"), "bin");
+        assert_eq!(extension_from_mime("audio/opus"), "opus");
+        assert_eq!(extension_from_mime("x/.\\..\\..\\AppData\\Startup\\a.bat"), "bin");
+        assert_eq!(extension_from_mime("x/../../etc"), "bin");
+        assert_eq!(extension_from_mime("nothing"), "bin");
+    }
+
     use super::*;
 
     /// A consumer that judges media by its BYTES needs the bytes to be
