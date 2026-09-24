@@ -114,10 +114,14 @@ pub struct AudioMetadata {
     pub album: Option<String>,
     /// Base64 data URI for embedded cover art, e.g. "data:image/jpeg;base64,..."
     pub cover_art: Option<String>,
+    pub lyrics: Option<crate::lyrics::Lyrics>,
+    pub year: Option<u16>,
+    /// An album in one file; empty for a single track.
+    pub chapters: Vec<crate::chapters::Chapter>,
 }
 
 /// Extract metadata (title, artist, album, cover art) from an audio file's tags.
-/// Returns `None` if the file has no useful metadata (no title AND no cover art).
+/// Returns `None` if the file has no useful metadata (no title, cover art or lyrics).
 #[tauri::command]
 pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, String> {
     tokio::task::spawn_blocking(move || {
@@ -150,12 +154,16 @@ pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, S
             format!("data:{};base64,{}", mime_str, b64)
         });
 
+        let lyrics = crate::lyrics::read(&path, &tagged_file);
+        let year = tag.date().map(|d| d.year);
+        let chapters = crate::chapters::read(&path, &tagged_file);
+
         // Only return if there's something useful to display
-        if title.is_none() && cover_art.is_none() {
+        if title.is_none() && cover_art.is_none() && lyrics.is_none() && chapters.is_empty() {
             return Ok(None);
         }
 
-        Ok(Some(AudioMetadata { title, artist, album, cover_art }))
+        Ok(Some(AudioMetadata { title, artist, album, cover_art, lyrics, year, chapters }))
     })
     .await
     .map_err(|e| format!("Task error: {}", e))?

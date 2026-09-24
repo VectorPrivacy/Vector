@@ -81,6 +81,12 @@ mod audio;
 // Unified audio engine: persistent cpal stream, mixing, precomputed FFT waveform
 mod audio_engine;
 
+// Lyrics embedded in audio files: LRC text and ID3 SYLT
+mod lyrics;
+
+// Tracks inside one audio file: ID3 chapters and cue sheets
+mod chapters;
+
 // Which microphone and speaker every audio path opens
 mod audio_devices;
 /// Sleep and App Nap holds for calls and Mini Apps.

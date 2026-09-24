@@ -13,7 +13,15 @@ export class AudioSession {
     pausedAt = $state(0);
     waveform = null;   // { data: Uint8Array, fps, bins }
 
+    // An album in one file: its tracks, the one under the playhead, and the listener's way
+    // through them. Tracks are places in the file, so moving on inside it is gapless.
+    tracks = $state([]);      // [{ start, end, title }]; the last one's end is null: the file's end
+    track = $state(-1);
+    shuffle = $state(false);
+    repeat = $state('off');   // off | all | one
+
     #h; #sourceId = null; #startTime = 0; #startPos = 0; #offs = []; #disposed = false;
+    #order = []; #orderAt = 0; #watch = null;
 
     /** h: AudioPlayerHelpers. */
     constructor(h, att, msg, chatId) {
@@ -23,6 +31,22 @@ export class AudioSession {
         this.chatId = chatId;
         this.id = att.id;
         this.voice = !att.name;
+    }
+
+    setTracks(chapters) {
+        this.tracks = (chapters || []).map((c) => ({ start: c.start_ms, end: c.end_ms ?? null, title: c.title }));
+        this.track = this.trackAt(this.position());
+        this.#reorder();
+    }
+    trackAt(ms) {
+        let at = -1;
+        for (let i = 0; i < this.tracks.length && this.tracks[i].start <= ms + 1; i++) at = i;
+        return at;
+    }
+    /** Where track `i` runs in the file. */
+    span(i) {
+        const t = this.tracks[i];
+        return t ? { start: t.start, end: t.end ?? this.durationMs } : { start: 0, end: this.durationMs };
     }
 
     position() {
@@ -77,10 +101,12 @@ export class AudioSession {
         this.#startTime = performance.now();
         this.#startPos = posMs;
         this.playing = true;
+        if (this.tracks.length && !this.#watch) this.#watch = setInterval(() => this.#tick(), 50);
     }
 
     async pause() {
         releasePlayback(this.id);
+        this.#unwatch();
         if (!this.playing) return;
         this.pausedAt = this.position();
         this.playing = false;
@@ -91,17 +117,116 @@ export class AudioSession {
         if (this.#sourceId) this.#h.seek(this.#sourceId, ms).catch(() => {});
         if (this.playing) { this.#startTime = performance.now(); this.#startPos = ms; }
         else this.pausedAt = ms;
+        // A seek is a choice, not the song moving on: the track follows it quietly.
+        if (this.tracks.length) this.track = this.trackAt(ms);
+    }
+
+    // ── moving through an album ──
+    /** Play track `i` from its start, whatever the order was. */
+    playTrack(i) {
+        if (!this.tracks[i]) return;
+        this.#goto(i);
+        if (this.shuffle) { this.#reorder(); }
+        if (!this.playing) this.play();
+    }
+    next() {
+        const n = this.#nextIndex();
+        if (n != null) this.#goto(n);
+    }
+    /** Back to the start of the song, or, near its start already, to the song before. */
+    prev() {
+        const i = Math.max(0, this.track);
+        if (this.position() - this.span(i).start > 3000) { this.#goto(i); return; }
+        if (this.shuffle && this.#orderAt > 0) { this.#goto(this.#order[--this.#orderAt], true); return; }
+        if (!this.shuffle && i > 0) { this.#goto(i - 1); return; }
+        if (!this.shuffle && this.repeat === 'all') { this.#goto(this.tracks.length - 1); return; }
+        this.#goto(i);
+    }
+    setShuffle(on) {
+        this.shuffle = !!on;
+        this.#reorder();
+    }
+    cycleRepeat() {
+        this.repeat = this.repeat === 'off' ? 'all' : this.repeat === 'all' ? 'one' : 'off';
+    }
+
+    // The listener's way through: the tracks in order, or shuffled with the current first.
+    #reorder() {
+        const n = this.tracks.length, cur = Math.max(0, this.track);
+        const rest = [...Array(n).keys()].filter((i) => i !== cur);
+        if (this.shuffle) {
+            for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [rest[i], rest[j]] = [rest[j], rest[i]]; }
+        }
+        this.#order = n ? [cur, ...rest] : [];
+        this.#orderAt = 0;
+    }
+    #nextIndex() {
+        if (!this.tracks.length) return null;
+        if (this.shuffle) {
+            if (this.#orderAt + 1 < this.#order.length) return this.#order[this.#orderAt + 1];
+            if (this.repeat !== 'all') return null;
+            const last = this.#order[this.#orderAt];
+            this.#reorder();
+            // A fresh round never starts with the song that just ended.
+            if (this.#order.length > 1 && this.#order[0] === last) this.#order.push(this.#order.shift());
+            this.#orderAt = -1;
+            return this.#order[0];
+        }
+        const i = this.track + 1;
+        if (i < this.tracks.length) return i;
+        return this.repeat === 'all' ? 0 : null;
+    }
+    #goto(i, keepOrder = false) {
+        if (this.shuffle && !keepOrder) {
+            const at = this.#order.indexOf(i);
+            if (at >= 0) this.#orderAt = at;
+        }
+        this.seek(this.span(i).start);
+        this.track = i;
+    }
+    // While an album plays: note the song moving on, and step in when the listener's way
+    // is not simply the next song in the file.
+    #tick() {
+        const i = this.trackAt(this.position());
+        if (i === this.track) return;
+        const from = this.track;
+        this.track = i;
+        if (i !== from + 1) return;
+        if (this.repeat === 'one') { this.#goto(from); return; }
+        if (this.shuffle) {
+            const n = this.#nextIndex();
+            if (n == null) { this.pause(); this.#goto(this.#order[0] ?? 0); return; }
+            this.#orderAt++;
+            this.#goto(n, true);
+        }
+    }
+    #unwatch() {
+        if (this.#watch) { clearInterval(this.#watch); this.#watch = null; }
     }
 
     #ended() {
         releasePlayback(this.id);
+        this.#unwatch();
         this.playing = false;
         this.pausedAt = 0;
+        if (this.tracks.length) {
+            // The file's end is the last track's end: the listener's way decides what follows.
+            const last = this.track;
+            const n = this.repeat === 'one' ? last : this.#nextIndex();
+            if (n != null && n >= 0) {
+                if (this.shuffle && this.repeat !== 'one') this.#orderAt++;
+                this.#goto(n, true);
+                this.play();
+                return;
+            }
+            this.track = this.trackAt(0);
+        }
         if (this.voice) playNextVoice(this.#h, this);
     }
 
     dispose() {
         this.#disposed = true;
+        this.#unwatch();
         releasePlayback(this.id);
         this.playing = false;
         if (this.#sourceId) this.#h.stop(this.#sourceId).catch(() => {});
@@ -157,10 +282,17 @@ export function takeBack(id, kind, chatId) {
     popout.item = null;
     return it;
 }
-/** Media starting in the open chat replaces the pop-out rather than queueing behind it. */
-export function yieldPopout(session = null) {
+/** Media starting in the open chat replaces the pop-out's media of the same kind rather
+ *  than queueing behind it; a video over music (or music over a video) leaves it be. */
+export function yieldPopout(kind, session = null) {
     const it = popout.item;
-    if (it && !(it.kind === 'audio' && it.session === session)) closePopout();
+    if (it && it.kind === kind && !(kind === 'audio' && it.session === session)) closePopout();
+}
+/** Whether the pop-out is busy with music: a video leaving its chat then stops rather than
+ *  taking the player from it. */
+export function popoutPlayingAudio() {
+    const it = popout.item;
+    return !!(it && it.kind === 'audio' && it.session.playing);
 }
 export function closePopout() {
     const it = popout.item;

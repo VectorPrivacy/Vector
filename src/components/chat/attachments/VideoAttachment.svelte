@@ -4,7 +4,7 @@
     import UploadOverlay from './UploadOverlay.svelte';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { claimPlayback, releasePlayback } from '../../lib/audio.svelte.js';
-    import { popOut, takeBack, yieldPopout } from '../../lib/popout.svelte.js';
+    import { popOut, takeBack, yieldPopout, popoutPlayingAudio } from '../../lib/popout.svelte.js';
     let { att, msg, h } = $props();   // h: mediaUrl(path), onVideoMeta(video), cancelUpload, openChat()
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     let container = $state(null);
@@ -37,7 +37,7 @@
     // One sound at a time, and a playing video follows you out of the chat.
     function playback(video) {
         const key = `video:${att.id}`;
-        const onPlay = () => { yieldPopout(); claimPlayback(key, () => video.pause()); };
+        const onPlay = () => { yieldPopout('video'); claimPlayback(key, () => video.pause()); };
         const onPause = () => releasePlayback(key);
         video.addEventListener('play', onPlay);
         video.addEventListener('pause', onPause);
@@ -45,7 +45,7 @@
             destroy() {
                 video.removeEventListener('play', onPlay);
                 video.removeEventListener('pause', onPause);
-                if (!video.paused && !video.ended) {
+                if (!video.paused && !video.ended && !popoutPlayingAudio()) {
                     popOut({
                         kind: 'video', id: att.id, att, msg, chatId, src: video.currentSrc || video.src,
                         time: video.currentTime, playing: true, muted: video.muted, volume: video.volume,

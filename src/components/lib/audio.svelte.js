@@ -4,12 +4,12 @@
 // app-wide state the player that triggered it renders.
 import { SvelteMap } from 'svelte/reactivity';
 
-const byId = new SvelteMap();   // att.id → { durationMs, meta, transcription }
+const byId = new SvelteMap();   // att.id → { durationMs, meta, transcription, lyricsOpen }
 
 function entry(id) {
     let e = byId.get(id);
     if (!e) {
-        e = { durationMs: 0, meta: null, transcription: null };
+        e = { durationMs: 0, meta: null, transcription: null, lyricsOpen: false };
         byId.set(id, e);
     }
     return e;
@@ -18,10 +18,27 @@ function entry(id) {
 export function audioInfo(id) { return byId.get(id) ?? null; }
 export function setAudioDuration(id, ms) { if (ms > 0) byId.set(id, { ...entry(id), durationMs: ms }); }
 /** meta: { track, artist, album, coverArt } strings, set once read even when the file has no tags;
- *  `accent` is the art's colour once measured, null for grey art. */
+ *  `accent` is the art's colour once measured, null for grey art; `lyrics` as src-tauri lyrics.rs
+ *  returns them, or null. */
 export function setAudioMeta(id, meta) { byId.set(id, { ...entry(id), meta: { track: '', artist: '', album: '', coverArt: '', ...meta } }); }
 /** transcription: { phase: 'loading' | 'ready' | 'error', sections, lang, error, open } */
 export function setTranscription(id, t) { byId.set(id, { ...entry(id), transcription: t }); }
+// An edition note ("2012 Remaster", "Live", "Radio Edit") is split off so the song's own
+// name can lead and the note be dimmed.
+const EDITION_NOTE = /\s*(?:\(([^()]*\b(?:remaster(?:ed)?|remix|live|mono|stereo|edit|version|demo|acoustic|deluxe|bonus)\b[^()]*)\)|-\s*((?:\d{4}\s*)?remaster(?:ed)?(?:\s*\d{4})?|live|radio edit))\s*$/i;
+export function splitTitle(t) {
+    const m = (t || '').match(EDITION_NOTE);
+    return m ? { main: t.slice(0, m.index).trim(), note: (m[1] || m[2]).trim() } : { main: t || '', note: '' };
+}
+
+/** An album's lyrics while one of its songs plays: the lines within that song's stretch. */
+export function songLyrics(lyrics, span) {
+    if (!lyrics?.synced || !span) return lyrics;
+    return { synced: true, lines: lyrics.lines.filter((l) => l.at_ms >= span.start - 50 && l.at_ms < span.end - 50) };
+}
+
+/** The lyrics sheet is the attachment's: open in the chat's card means open in the pop-out. */
+export function setLyricsOpen(id, open) { byId.set(id, { ...entry(id), lyricsOpen: !!open }); }
 export function patchTranscription(id, fields) {
     const e = entry(id);
     if (!e.transcription) return;
@@ -47,15 +64,18 @@ const modelDownload = $state({ active: false, pct: 0, text: '', failed: false })
 export function modelDownloadState() { return modelDownload; }
 export function setModelDownload(fields) { Object.assign(modelDownload, fields); }
 
-// One sound at a time: starting a player stops whichever one holds the output.
-let holder = null;   // { id, stop }
+// One at a time, per lane: a song stops the song before it and a video the video before
+// it, but a video watched over music leaves the music playing. Videos claim as `video:<id>`.
+const holders = { audio: null, video: null };   // lane → { id, stop }
+const laneOf = (id) => (String(id).startsWith('video:') ? 'video' : 'audio');
 export function claimPlayback(id, stop) {
-    const prev = holder;
-    holder = { id, stop };
+    const lane = laneOf(id);
+    const prev = holders[lane];
+    holders[lane] = { id, stop };
     if (prev && prev.id !== id) prev.stop();
 }
-export function releasePlayback(id) { if (holder?.id === id) holder = null; }
-export function holdsPlayback(id) { return holder?.id === id; }
+export function releasePlayback(id) { const lane = laneOf(id); if (holders[lane]?.id === id) holders[lane] = null; }
+export function holdsPlayback(id) { return holders[laneOf(id)]?.id === id; }
 
 // Mounted players, by attachment id: a finished voice message hands on to the next one.
 const players = new Map();

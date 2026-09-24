@@ -115,6 +115,13 @@
   mask-image: url("./icons/align-left.svg");
 }
 
+.icon-skip-back { mask-image: url("./icons/skip-back.svg"); }
+.icon-skip-forward { mask-image: url("./icons/skip-forward.svg"); }
+.icon-shuffle { mask-image: url("./icons/shuffle.svg"); }
+.icon-repeat { mask-image: url("./icons/repeat.svg"); }
+.icon-repeat-one { mask-image: url("./icons/repeat-one.svg"); }
+.icon-list-music { mask-image: url("./icons/list-music.svg"); }
+
 .icon-grip {
   mask-image: url("./icons/grip.svg");
 }
@@ -11636,6 +11643,8 @@ select:disabled:hover {
    A narrow card keeps the words beside a smaller tile and gives the controls the full row. */
 .custom-audio-player:has(.audio-album) {
     container-type: inline-size;
+    /* WebKit leaves the blurred art glow's square corners outside the rounding otherwise. */
+    clip-path: inset(0 round 12px);
 }
 
 .audio-album {
@@ -11660,6 +11669,219 @@ select:disabled:hover {
     }
 }
 
+/* An album: its head beside the art, the tracklist, then the current song's controls. */
+.audio-album.is-full {
+    grid-template-rows: auto auto auto;
+    grid-template-areas: "art text" "tracks tracks" "controls controls";
+    row-gap: 12px;
+}
+
+.audio-album.no-art {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "text" "controls";
+}
+
+.audio-album.is-full.no-art {
+    grid-template-areas: "text" "tracks" "controls";
+}
+
+@container (max-width: 380px) {
+    .audio-album.is-full {
+        grid-template-areas: "art text" "tracks tracks" "controls controls";
+    }
+}
+
+.title-note {
+    margin-left: 0.3em;
+    font-weight: 400;
+    opacity: 0.5;
+}
+
+.album-stats {
+    margin-top: 1px;
+    font-size: 0.76em;
+    color: var(--file-box-dim);
+}
+
+.album-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.album-play,
+.album-shuffle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 14px 6px 10px;
+    border-radius: 999px;
+    font: inherit;
+    font-size: 0.82em;
+    font-weight: 600;
+    cursor: pointer;
+    transition: filter 0.15s ease, background-color 0.15s ease;
+}
+
+.album-play {
+    border: none;
+    background: var(--icon-color-primary);
+    color: #0a0a0a;
+}
+
+.album-shuffle {
+    border: 1px solid var(--file-box-line-hover);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--file-box-title);
+}
+
+.album-play:hover { filter: brightness(1.08); }
+.album-shuffle:hover { background: rgba(255, 255, 255, 0.09); }
+.album-play:disabled, .album-shuffle:disabled { opacity: 0.4; cursor: default; }
+
+.album-play > .icon,
+.album-shuffle > .icon {
+    position: relative;
+    inset: auto;
+    margin: 0;
+    width: 16px;
+    height: 16px;
+}
+
+.album-play > .icon { background-color: #0a0a0a; }
+.album-shuffle > .icon { width: 14px; height: 14px; background-color: var(--file-box-glyph); }
+
+.album-toggles {
+    display: inline-flex;
+    gap: 2px;
+    margin-left: auto;
+}
+
+.album-toggle,
+.audio-skip {
+    position: relative;
+    flex: none;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.album-toggle:hover,
+.audio-skip:hover {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.album-toggle > .icon {
+    width: 16px;
+    height: 16px;
+    background-color: var(--file-box-dim);
+}
+
+.album-toggle.is-on > .icon {
+    background-color: var(--icon-color-primary);
+}
+
+.audio-skip > .icon {
+    width: 20px;
+    height: 20px;
+    background-color: var(--file-box-title);
+}
+
+.custom-audio-player-inner > .audio-skip {
+    margin: 0 2px;
+}
+
+.album-tracks {
+    grid-area: tracks;
+    list-style: none;
+    margin: 0;
+    padding: 4px 0 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.album-track {
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 6px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--file-box-title);
+    font: inherit;
+    font-size: 0.88em;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.album-track:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.album-track.is-current {
+    color: var(--icon-color-primary);
+    font-weight: 600;
+}
+
+.album-track-no,
+.album-track-len {
+    color: var(--file-box-dim);
+    font-variant-numeric: tabular-nums;
+    font-weight: 400;
+}
+
+.album-track-no {
+    display: flex;
+    justify-content: center;
+}
+
+.album-eq {
+    display: inline-flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 12px;
+}
+
+.album-eq > span {
+    width: 3px;
+    border-radius: 1px;
+    background: var(--icon-color-primary);
+    animation: album-eq 0.9s ease-in-out infinite;
+}
+
+.album-eq > span:nth-child(2) { animation-delay: -0.3s; }
+.album-eq > span:nth-child(3) { animation-delay: -0.6s; }
+
+@keyframes album-eq {
+    0%, 100% { height: 30%; }
+    50% { height: 100%; }
+}
+
+.album-more {
+    display: block;
+    width: 100%;
+    padding: 7px 0 3px;
+    border: none;
+    background: transparent;
+    color: var(--file-box-body);
+    font: inherit;
+    font-size: 0.8em;
+    cursor: pointer;
+}
+
+.album-more:hover {
+    color: var(--file-box-title);
+}
+
 /* The art's own colour, blurred into the card, so the tile does not sit on flat grey. */
 .audio-art-glow {
     position: absolute;
@@ -11679,6 +11901,161 @@ body.drag-lock * {
     -webkit-user-select: none !important;
 }
 
+/* Lyrics: a sheet that slides open under the card (and in the pop-out). */
+.lyrics-panel {
+    display: grid;
+    grid-template-rows: 0fr;
+    margin-top: 0;
+    transition: grid-template-rows 0.4s cubic-bezier(0.22, 1, 0.36, 1), margin-top 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lyrics-panel.is-open {
+    grid-template-rows: 1fr;
+    margin-top: 12px;
+}
+
+.lyrics-panel-inner {
+    min-height: 0;
+    overflow: hidden;
+}
+
+@property --fade-top {
+    syntax: '<percentage>';
+    inherits: false;
+    initial-value: 0%;
+}
+
+@property --fade-bottom {
+    syntax: '<percentage>';
+    inherits: false;
+    initial-value: 0%;
+}
+
+/* No padding to scroll past: the first line sits at the top at the start and the last at
+   the bottom at the end. An edge fades only where more lines lie beyond it. */
+.lyrics {
+    position: relative;
+    height: 260px;
+    overflow-y: auto;
+    scrollbar-width: none;
+    padding: 0 4px;
+    box-sizing: border-box;
+    --fade-top: 0%;
+    --fade-bottom: 0%;
+    -webkit-mask-image: linear-gradient(transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent);
+    mask-image: linear-gradient(transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent);
+    transition: --fade-top 0.3s ease, --fade-bottom 0.3s ease;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.lyrics.more-above {
+    --fade-top: 18%;
+}
+
+.lyrics.more-below {
+    --fade-bottom: 20%;
+}
+
+.lyrics::-webkit-scrollbar {
+    display: none;
+}
+
+.lyrics-line {
+    padding: 5px 2px;
+    font-size: 1.3em;
+    font-weight: 700;
+    line-height: 1.3;
+    color: #fff;
+    opacity: 0.75;
+    filter: blur(var(--blur, 0px));
+    cursor: pointer;
+    transition: opacity 0.6s ease, filter 0.6s ease;
+}
+
+/* Past lines are fully lit and faded, upcoming ones unlit and less faded: the same dimness
+   either side of the sung line, so moving on is only a fade. */
+.lyrics-line.is-past {
+    opacity: 0.3;
+}
+
+.lyrics-line.is-current,
+.lyrics-line:hover {
+    opacity: 1;
+}
+
+.lyrics-line.is-break {
+    opacity: 0.4;
+}
+
+.lyrics-line.is-break.is-current {
+    opacity: 1;
+}
+
+@property --fill {
+    syntax: '<number>';
+    inherits: false;
+    initial-value: 0;
+}
+
+/* A word lights from the left, a soft edge moving through it. */
+.lyrics-word {
+    background: linear-gradient(90deg,
+        rgba(255, 255, 255, 1) calc(var(--fill) * 110% - 10%),
+        rgba(255, 255, 255, 0.4) calc(var(--fill) * 110%));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.lyrics-word.is-whole {
+    transition: --fill 0.6s ease;
+}
+
+.lyrics-dots {
+    display: inline-flex;
+    gap: 7px;
+    padding: 6px 0;
+}
+
+.lyrics-dots > span {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: currentColor;
+}
+
+.lyrics-line.is-current .lyrics-dots > span {
+    animation: lyrics-dot 1.4s ease-in-out infinite;
+}
+
+.lyrics-line.is-current .lyrics-dots > span:nth-child(2) { animation-delay: 0.2s; }
+.lyrics-line.is-current .lyrics-dots > span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes lyrics-dot {
+    0%, 100% { transform: scale(0.75); opacity: 0.5; }
+    50% { transform: scale(1.1); opacity: 1; }
+}
+
+/* Plain lyrics: text to read, nothing to follow. */
+.lyrics:not(.is-synced) {
+    padding: 4px;
+}
+
+.lyrics:not(.is-synced) .lyrics-line {
+    padding: 0 2px;
+    font-size: 0.95em;
+    font-weight: 500;
+    line-height: 1.55;
+    color: rgba(255, 255, 255, 0.82);
+    opacity: 1;
+    cursor: default;
+}
+
+.lyrics:not(.is-synced) .lyrics-line.is-break {
+    height: 0.8em;
+}
+
 /* The pop-out: media that left its chat still playing. One grid holds every form, so a
    video narrowed into sound-only moves its element instead of remounting it.
      sound:  [thumb][words      ][actions]
@@ -11690,11 +12067,15 @@ body.drag-lock * {
     z-index: 8500;
     box-sizing: border-box;
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr) auto;
-    grid-template-areas: "thumb text actions" "play wave time";
+    /* The header's buttons straddle the last two columns and the time needs only the last,
+       so the waveform runs on under the buttons instead of the time sitting in their width. */
+    grid-template-columns: 44px minmax(0, 1fr) auto auto;
+    grid-template-areas: "thumb text actions actions" "play wave wave time";
     align-items: center;
     column-gap: 12px;
-    row-gap: 10px;
+    /* Rows space themselves (see below): a closed panel is a zero-height row, and a row
+       gap would still count it. */
+    row-gap: 0;
     padding: 12px;
     background: var(--file-box-bg);
     border: 1px solid var(--file-box-line-hover);
@@ -11711,8 +12092,25 @@ body.drag-lock * {
     cursor: grabbing;
 }
 
-.media-popout > :not(.audio-art-glow, .popout-grip) {
+/* Nothing in the box, nor the empty-state logo it often floats over, is a drag source: a press
+   at a rounded corner's tip falls through to what lies behind it. */
+.media-popout img,
+#ws-conv-empty img {
+    -webkit-user-drag: none;
+    user-select: none;
+}
+
+.media-popout > :not(.popout-glow, .popout-grip) {
     position: relative;
+}
+
+.popout-glow {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    border-radius: inherit;
+    clip-path: inset(0 round 14px);
+    pointer-events: none;
 }
 
 .media-popout.is-video {
@@ -11720,6 +12118,10 @@ body.drag-lock * {
     grid-template-areas: "thumb thumb" "text actions";
     padding: 0 0 10px;
     row-gap: 8px;
+}
+
+.media-popout.is-sound > :is(.popout-play, .popout-play-group, .popout-wave, .popout-track, .popout-time) {
+    margin-top: 10px;
 }
 
 .media-popout.is-video .popout-text {
@@ -11823,6 +12225,7 @@ button.popout-thumb {
 
 .popout-actions {
     grid-area: actions;
+    justify-self: end;
     display: flex;
     gap: 4px;
     align-self: start;
@@ -11891,16 +12294,64 @@ button.popout-thumb {
 
 .popout-time {
     grid-area: time;
+    justify-self: end;
     font-size: 0.75em;
     color: var(--file-box-body);
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
 
+/* An album in the pop-out: previous and next flank play, and the songs slide open. The
+   controls take a second column under the words, so the cover's column stays its own size. */
+.media-popout.is-album {
+    grid-template-columns: 44px auto minmax(0, 1fr) auto auto;
+    grid-template-areas: "thumb text text actions actions" "play play wave wave time";
+}
+
+.popout-play-group {
+    grid-area: play;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.popout-play-group .popout-play {
+    grid-area: auto;
+}
+
+.media-popout .popout-tracks .album-tracks {
+    max-height: 200px;
+    overflow-y: auto;
+    border-top: none;
+    padding: 0;
+}
+
+.media-popout .popout-tracks .album-track {
+    padding: 6px 4px;
+    font-size: 0.82em;
+}
+
+/* Lyrics and the song list span the pop-out, spaced only while open. */
+.media-popout .lyrics-panel {
+    grid-column: 1 / -1;
+}
+
+.media-popout .lyrics-panel.is-open {
+    margin-top: 10px;
+}
+
+.media-popout .lyrics {
+    height: 200px;
+}
+
+.media-popout .lyrics-line {
+    font-size: 1.1em;
+}
+
 /* A transcript spans the box under the controls, capped so a long one scrolls. */
 .media-popout .transcription-result {
     grid-column: 1 / -1;
-    margin-top: 0;
+    margin-top: 10px;
     max-height: 180px;
     overflow-y: auto;
     font-size: 0.9em;

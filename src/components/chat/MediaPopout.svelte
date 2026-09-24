@@ -8,8 +8,10 @@
     // moves the same <video> element rather than remounting it.
     import { untrack, flushSync } from 'svelte';
     import { popoutState, closePopout } from '../lib/popout.svelte.js';
-    import { audioInfo, claimPlayback, releasePlayback, patchTranscription, transcribeAudio, modelDownloadState } from '../lib/audio.svelte.js';
+    import { audioInfo, claimPlayback, releasePlayback, patchTranscription, transcribeAudio, modelDownloadState, setLyricsOpen,
+             splitTitle, songLyrics } from '../lib/audio.svelte.js';
     import Transcription from './attachments/Transcription.svelte';
+    import Lyrics from './attachments/Lyrics.svelte';
     import { profileVersion, chatVersion } from '../lib/signals.svelte.js';
 
     let { h } = $props();   // h: MediaPopoutHelpers (js/voice.js)
@@ -38,9 +40,29 @@
     // The box is anchored at its bottom and grows upward: nothing in the chat to hold still.
     // svelte-ignore state_referenced_locally
     const transcriptH = { ...h.audio, holdScroll: () => () => {} };
-    // Once a transcript has slid open or shut, the box may have grown past the top.
+    // A track's lyrics, open here exactly when they are open on its card.
+    // An album: the current song leads, its stretch of the file is what the wave and time show.
+    const isAlbum = $derived((session?.tracks.length ?? 0) > 1);
+    const trackIdx = $derived(isAlbum ? Math.max(0, session.track) : -1);
+    const curSpan = $derived.by(() => { session?.track; session?.durationMs; return session ? session.span(isAlbum ? trackIdx : -1) : { start: 0, end: 0 }; });
+    let tracksOpen = $state(false);
+    // Narrow, the box keeps what it needs to play and close: the song list, the lyrics and an
+    // album's times step aside (the lyrics stay open on the card), and come back with room.
+    const COMPACT_W = 340;
+    const compact = $derived(width < COMPACT_W);
+    const lyrics = $derived(isAlbum ? songLyrics(meta?.lyrics ?? null, curSpan) : (meta?.lyrics ?? null));
+    const lyricsOpen = $derived(!!(session && audioInfo(session.id)?.lyricsOpen));
+    function lyricsFrom(ms) {
+        session.seek(ms);
+        positionMs = ms;
+        kick();
+        if (!session.playing) session.play();
+    }
+
+    // Once a transcript or the lyrics have slid open or shut, the box may have grown past the top.
     $effect(() => {
         transcription?.open;
+        lyricsOpen;
         const t = setTimeout(clampPlace, 400);
         return () => clearTimeout(t);
     });
@@ -55,6 +77,10 @@
             const who = h.who(ref.msg, ref.chatId);
             profileVersion(who.npub);
             return { title: who.name, sub: chat && chat !== who.name ? chat : 'Voice Message', place, avatar: who.avatar };
+        }
+        if (isAlbum) {
+            const t = splitTitle(session.tracks[trackIdx]?.title);
+            return { title: t.main, sub: [`${trackIdx + 1} of ${session.tracks.length}`, splitTitle(meta?.album || '').main || meta?.artist].filter(Boolean).join(' · ') };
         }
         if (meta?.artist) return { title: meta.track || ref.att.name, sub: meta.artist };
         return { title: meta?.track || ref.att.name || (isVideo ? 'Video' : 'Audio'), sub: chat, place };
@@ -98,6 +124,25 @@
         window.addEventListener('resize', keep);
         return () => window.removeEventListener('resize', keep);
     });
+    // A panel opening (songs, lyrics, a transcript) or a change of shape grows the box
+    // toward the open space: a box in the upper half keeps its top edge and grows down, one
+    // in the lower half keeps its bottom edge and grows up (the anchor it already has). Kept
+    // edge by edge as the height animates, so opening and closing retrace the same path.
+    let lastH = 0;
+    $effect(() => {
+        if (!box) return;
+        const ro = new ResizeObserver(() => {
+            const h = box.offsetHeight;
+            if (lastH && h !== lastH && !gesture) {
+                const prevTop = winH - bottom - lastH;
+                if (prevTop + lastH / 2 < winH / 2) bottom = Math.max(8, winH - prevTop - h);
+            }
+            lastH = h;
+        });
+        ro.observe(box);
+        return () => { ro.disconnect(); lastH = 0; };
+    });
+
     // A new size or kind can push the box past an edge; never mid-resize, where the
     // pinned corner decides the place.
     $effect(() => { width; soundOnly; item; untrack(() => requestAnimationFrame(() => { if (!gesture?.corner) clampPlace(); })); });
@@ -110,7 +155,7 @@
     // The native controls' strip along a video's bottom stays the video's.
     const VIDEO_CONTROLS_H = 44;
     function onPointerDown(e) {
-        if (e.button !== 0 || e.target.closest('button, canvas, .popout-track, .transcription-result')) return;
+        if (e.button !== 0 || e.target.closest('button, canvas, .popout-track, .transcription-result, .lyrics')) return;
         const onVideo = e.target.closest('video');
         if (onVideo && !soundOnly && e.clientY > onVideo.getBoundingClientRect().bottom - VIDEO_CONTROLS_H) return;
         const grip = e.target.closest('.popout-grip');
@@ -124,11 +169,18 @@
             // the video, a drag moves the box.
             gesture = { sx: e.clientX, sy: e.clientY, right, bottom, pending: !!onVideo };
         }
-        if (!gesture.pending) e.currentTarget.setPointerCapture(e.pointerId);
+        if (!gesture.pending) {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            // A press here is the box's: never the start of a native drag of what lies under it.
+            e.preventDefault();
+        }
     }
     // Only the corner nearest the pointer shows its grip mark.
     let nearCorner = $state(null);
     function onPointerMove(e) {
+        // No button held means the release happened where this box never heard it (a native
+        // drag swallowed it): the gesture is over, not still following the pointer.
+        if (gesture && e.buttons === 0) { onPointerUp(); return; }
         if (!gesture) {
             const r = box.getBoundingClientRect();
             nearCorner = (e.clientY - r.top < r.bottom - e.clientY ? 't' : 'b') + (e.clientX - r.left < r.right - e.clientX ? 'l' : 'r');
@@ -191,14 +243,20 @@
         const dpr = window.devicePixelRatio || 1;
         const W = canvas.clientWidth, H = canvas.clientHeight;
         if (!W || !H) return;
-        if (canvas.width !== Math.round(W * dpr)) { canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); }
+        // Both sides: a width that happens to match the canvas default (300) would otherwise
+        // leave the default height (150), squashing the bars into the top of the box.
+        if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+            canvas.width = Math.round(W * dpr);
+            canvas.height = Math.round(H * dpr);
+        }
         const ctx = canvas.getContext('2d');
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, W, H);
         const n = Math.max(12, Math.floor(W / 5)), gap = 2, bw = (W - gap * (n - 1)) / n;
         if (!bins || bins.length !== n) bins = new Float32Array(n);
-        const pos = session.position(), dur = session.durationMs;
-        const progress = dur ? pos / dur : 0;
+        const pos = session.position();
+        const sp = session.span(isAlbum ? Math.max(0, session.track) : -1);
+        const progress = sp.end > sp.start ? (pos - sp.start) / (sp.end - sp.start) : 0;
         const wf = session.waveform;
         let moving = false;
         for (let i = 0; i < n; i++) {
@@ -229,6 +287,13 @@
     }
     $effect(() => { session?.playing; session?.pausedAt; canvas; accent; untrack(kick); });
     $effect(() => () => { if (raf) cancelAnimationFrame(raf); });
+    // A resize while paused redraws too: nothing else would until playback moves.
+    $effect(() => {
+        if (!canvas) return;
+        const ro = new ResizeObserver(() => kick());
+        ro.observe(canvas);
+        return () => ro.disconnect();
+    });
 
     function seekAt(e, el) {
         const r = el.getBoundingClientRect();
@@ -244,7 +309,7 @@
         if (!scrubbing) return;
         const f = seekAt(e, e.currentTarget);
         if (session && session.durationMs) {
-            session.seek(Math.floor(f * session.durationMs));
+            session.seek(Math.floor(curSpan.start + f * (curSpan.end - curSpan.start)));
             positionMs = session.position();
             kick();
         } else if (video && vDur) {
@@ -320,7 +385,7 @@
     $effect(() => { if (!item && video) video.pause(); });
 
     const fmt = (ms) => h.audio.formatTime(ms / 1000);
-    const timeText = $derived(isVideo ? `${fmt(vTime * 1000)} / ${fmt(vDur * 1000)}` : `${fmt(positionMs)} / ${fmt(session?.durationMs || 0)}`);
+    const timeText = $derived(isVideo ? `${fmt(vTime * 1000)} / ${fmt(vDur * 1000)}` : `${fmt(Math.max(0, positionMs - curSpan.start))} / ${fmt(Math.max(0, curSpan.end - curSpan.start))}`);
 
     function openInChat() {
         const { chatId, msg } = ref;
@@ -330,11 +395,14 @@
 
 {#if item}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="media-popout" bind:this={box} in:cardPop={{ duration: 160 }} out:cardPop={{ duration: 150 }} class:is-video={isVideo && !soundOnly} class:is-sound={!isVideo || soundOnly}
+    <div class="media-popout" class:is-album={isAlbum} bind:this={box} in:cardPop={{ duration: 160 }} out:cardPop={{ duration: 150 }} class:is-video={isVideo && !soundOnly} class:is-sound={!isVideo || soundOnly}
          style:width="{width}px" style:right="{right}px" style:bottom="{bottom}px" style:--icon-color-primary={accent}
          onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp}
+         onlostpointercapture={() => { if (gesture && !gesture.pending) onPointerUp(); }} ondragstart={(e) => e.preventDefault()}
          onpointerleave={() => { if (!gesture) nearCorner = null; }}>
-        {#if art}<img class="audio-art-glow" src={art} alt="" aria-hidden="true">{/if}
+        <!-- Its own rounded clip: WebKit leaves a blurred layer's square corners outside the
+             box's rounding, and clipping the box itself would cut off its shadow. -->
+        {#if art}<div class="popout-glow"><img class="audio-art-glow" src={art} alt="" aria-hidden="true"></div>{/if}
         {#each ['tl', 'tr', 'bl', 'br'] as corner (corner)}
             <div class="popout-grip" data-corner={corner} class:is-near={nearCorner === corner}></div>
         {/each}
@@ -367,6 +435,18 @@
             {/if}
         </div>
         <div class="popout-actions">
+            {#if isAlbum && !compact}
+                <button class="popout-action" class:is-open={tracksOpen} aria-label={tracksOpen ? 'Hide songs' : 'Songs'} title={tracksOpen ? 'Hide songs' : 'Songs'}
+                        onclick={() => (tracksOpen = !tracksOpen)}>
+                    <span class="icon icon-list-music"></span>
+                </button>
+            {/if}
+            {#if lyrics && !compact}
+                <button class="popout-action" class:is-open={lyricsOpen} aria-label={lyricsOpen ? 'Hide lyrics' : 'Show lyrics'}
+                        title={lyricsOpen ? 'Hide lyrics' : 'Lyrics'} onclick={() => setLyricsOpen(session.id, !lyricsOpen)}>
+                    <span class="icon icon-align-left"></span>
+                </button>
+            {/if}
             {#if canTranscribe}
                 <button class="popout-action" class:is-open={transcription?.phase === 'ready' && transcription.open} disabled={download.active}
                         aria-label={transcription?.phase === 'ready' ? (transcription.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe'}
@@ -384,9 +464,13 @@
         </div>
 
         {#if !isVideo || soundOnly}
-            <button class="audio-play-btn popout-play" aria-label={playing ? 'Pause' : 'Play'} onclick={toggle}>
-                <span class="icon {loading ? 'icon-loading spin' : (playing ? 'icon-pause' : 'icon-play')}"></span>
-            </button>
+            <span class="popout-play-group">
+                {#if isAlbum}<button class="audio-skip" aria-label="Previous" onclick={() => session.prev()}><span class="icon icon-skip-back"></span></button>{/if}
+                <button class="audio-play-btn popout-play" aria-label={playing ? 'Pause' : 'Play'} onclick={toggle}>
+                    <span class="icon {loading ? 'icon-loading spin' : (playing ? 'icon-pause' : 'icon-play')}"></span>
+                </button>
+                {#if isAlbum}<button class="audio-skip" aria-label="Next" onclick={() => session.next()}><span class="icon icon-skip-forward"></span></button>{/if}
+            </span>
             {#if isVideo}
                 <div class="popout-track" onpointerdown={scrubStart} onpointermove={scrub} onpointerup={scrubEnd} onpointercancel={scrubEnd}>
                     <div class="popout-track-fill" style:width="{vDur ? (vTime / vDur) * 100 : 0}%"></div>
@@ -394,7 +478,34 @@
             {:else}
                 <canvas class="popout-wave" bind:this={canvas} onpointerdown={scrubStart} onpointermove={scrub} onpointerup={scrubEnd} onpointercancel={scrubEnd}></canvas>
             {/if}
-            <span class="popout-time">{timeText}</span>
+            {#if !(compact && isAlbum)}<span class="popout-time">{timeText}</span>{/if}
+        {/if}
+
+        {#if isAlbum}
+            <div class="lyrics-panel popout-tracks" class:is-open={tracksOpen && !compact}>
+                <div class="lyrics-panel-inner">
+                    <ol class="album-tracks">
+                        {#each session.tracks as t, i (i)}
+                            {@const name = splitTitle(t.title)}
+                            <li>
+                                <button class="album-track" class:is-current={i === trackIdx} onclick={() => session.playTrack(i)}>
+                                    <span class="album-track-no">{#if i === trackIdx && playing}<span class="album-eq"><span></span><span></span><span></span></span>{:else}{i + 1}{/if}</span>
+                                    <span class="album-track-title cutoff">{name.main}{#if name.note}<span class="title-note">{name.note}</span>{/if}</span>
+                                    <span class="album-track-len">{fmt((t.end ?? session.durationMs) - t.start)}</span>
+                                </button>
+                            </li>
+                        {/each}
+                    </ol>
+                </div>
+            </div>
+        {/if}
+
+        {#if lyrics}
+            {#key session.id}
+                <div class="lyrics-panel" class:is-open={lyricsOpen && !compact}>
+                    <div class="lyrics-panel-inner"><Lyrics {lyrics} {positionMs} playing={session.playing} onSeek={lyricsFrom} /></div>
+                </div>
+            {/key}
         {/if}
 
         {#if transcription && transcription.phase !== 'loading'}

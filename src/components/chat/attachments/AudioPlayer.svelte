@@ -6,10 +6,12 @@
     import { transfer } from '../../lib/attachments.svelte.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { untrack } from 'svelte';
-    import { audioInfo, setAudioDuration, setAudioMeta, patchTranscription, transcribeAudio, modelDownloadState, registerPlayer } from '../../lib/audio.svelte.js';
+    import { audioInfo, setAudioDuration, setAudioMeta, patchTranscription, transcribeAudio, modelDownloadState, registerPlayer, setLyricsOpen,
+             splitTitle, songLyrics } from '../../lib/audio.svelte.js';
     import { AudioSession, popOut, takeBack, yieldPopout } from '../../lib/popout.svelte.js';
     import { lockSelection } from '../../lib/draglock.js';
     import Transcription from './Transcription.svelte';
+    import Lyrics from './Lyrics.svelte';
 
     let { att, msg, h } = $props();   // h: AudioPlayerHelpers (js/voice.js)
     //    listen(event, fn) → unlisten, glowColor(), transcriptionSupported(att, msg), transcribe(path), autoTranscribe(msg),
@@ -42,6 +44,25 @@
         const m = meta;
         artAccent(m.coverArt).then((accent) => setAudioMeta(att.id, { ...m, accent }));
     });
+    // ── an album in one file ──
+    const chapters = $derived(meta?.chapters ?? []);
+    const isAlbum = $derived(chapters.length > 1);
+    const albumTitle = $derived(splitTitle(meta?.album || meta?.track || att.name));
+    const albumByline = $derived([meta?.artist, meta?.year].filter(Boolean).join(' · '));
+    const trackIdx = $derived(session && session.tracks.length ? session.track : -1);
+    const trackLen = (i) => (chapters[i].end_ms ?? durationMs) - chapters[i].start_ms;
+    const albumStats = $derived(`${chapters.length} songs${durationMs ? ` · ${Math.round(durationMs / 60000)} min` : ''}`);
+    let showAllTracks = $state(false);
+    const shownTracks = $derived(showAllTracks ? chapters.length : Math.min(4, chapters.length));
+    // The stretch of the file the controls show: the current song of an album, or all of it.
+    function spanNow() {
+        if (!isAlbum) return { start: 0, end: durationMs };
+        const c = chapters[session ? Math.max(0, session.track) : 0];
+        return { start: c.start_ms, end: c.end_ms ?? durationMs };
+    }
+    const curSpan = $derived.by(() => { session?.track; durationMs; return spanNow(); });
+    const nowTitle = $derived(isAlbum ? splitTitle(chapters[Math.max(0, trackIdx)]?.title) : null);
+
     const byline = $derived([meta?.artist, meta?.album !== meta?.track ? meta?.album : ''].filter(Boolean).join(' · '));
 
     let binDisplay = null;
@@ -51,13 +72,16 @@
     let barOffsetY = REST_Y;
     let animationId = null, windDownId = null;
 
-    // Header-only probe for the duration, and the tags for an uploaded file.
+    // Header-only probe for the duration, and the tags for a named file. An upload is read
+    // too: the file is already on this device, so the card is whole from its first frame
+    // and only the ring becomes a play button when the upload lands.
     $effect(() => {
-        if (uploading) return;
+        if (!att.path) return;
         if (!durationMs) h.probe(att.path).then((ms) => setAudioDuration(att.id, ms)).catch(() => {});
         if (!isVoiceMessage && att.path && !meta) {
             h.metadata(att.path).then((m) => {
-                setAudioMeta(att.id, { track: m?.title || '', artist: m?.artist || '', album: m?.album || '', coverArt: m?.cover_art || '' });
+                setAudioMeta(att.id, { track: m?.title || '', artist: m?.artist || '', album: m?.album || '', coverArt: m?.cover_art || '',
+                    lyrics: m?.lyrics || null, year: m?.year || null, chapters: m?.chapters || [] });
             }).catch(() => setAudioMeta(att.id, {}));
         }
     });
@@ -152,7 +176,8 @@
     function frame() {
         if (!durationMs || !session) { animationId = requestAnimationFrame(frame); return; }
         const posMs = Math.min(session.position(), durationMs);
-        const progress = posMs / durationMs;
+        const sp = spanNow();
+        const progress = (posMs - sp.start) / Math.max(1, sp.end - sp.start);
         const { data: waveformData, fps: waveformFps = 30, bins: waveformBins = 64 } = session.waveform || {};
         if (waveformData && waveformData.length > 0) {
             const offset = Math.floor((posMs / 1000) * waveformFps) * waveformBins;
@@ -208,12 +233,32 @@
         run();
     }
 
+    function ensureSession() {
+        if (!session) session = new AudioSession(h, att, msg, h.openChat());
+        if (isAlbum && !session.tracks.length) session.setTracks(chapters);
+        return session;
+    }
     function play() {
         if (uploading) return;
-        if (!session) session = new AudioSession(h, att, msg, h.openChat());
-        yieldPopout(session);
+        ensureSession();
+        yieldPopout('audio', session);
         session.play();
     }
+    function playAlbum(shuffled) {
+        if (uploading) return;
+        const s = ensureSession();
+        yieldPopout('audio', s);
+        s.setShuffle(shuffled);
+        s.playTrack(shuffled ? Math.floor(Math.random() * chapters.length) : 0);
+    }
+    function playTrackAt(i) {
+        if (uploading) return;
+        const s = ensureSession();
+        yieldPopout('audio', s);
+        s.playTrack(i);
+    }
+    // A session that was handed over, or that began before the tags landed, learns its tracks.
+    $effect(() => { if (isAlbum && session && !session.tracks.length) untrack(() => session.setTracks(chapters)); });
     function pause() { session?.pause(); }
 
     // The bars follow the session, whoever started or stopped it: this row, the one-at-a-time
@@ -229,7 +274,8 @@
                 if (animationId) { cancelAnimationFrame(animationId); animationId = null; }
                 const at = session?.pausedAt ?? 0;
                 positionMs = at;
-                const progress = durationMs > 0 ? at / durationMs : 0;
+                const sp = spanNow();
+                const progress = sp.end > sp.start ? (at - sp.start) / (sp.end - sp.start) : 0;
                 windDown(at === 0 ? () => '0.3' : (i) => (i + 0.5) / barCount <= progress ? '0.3' : '0.15');
             }
         });
@@ -249,10 +295,11 @@
         if (!session || !durationMs || !waveform) return;
         const rect = waveform.getBoundingClientRect();
         const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
-        const posMs = Math.floor((x / rect.width) * durationMs);
+        const sp = spanNow();
+        const posMs = Math.floor(sp.start + (x / rect.width) * (sp.end - sp.start));
         positionMs = posMs;
         if (!playing) {
-            const progress = posMs / durationMs;
+            const progress = (posMs - sp.start) / Math.max(1, sp.end - sp.start);
             for (let i = 0; i < barCount; i++) {
                 const s = barState[i] || { transform: `translateY(${REST_Y}px) scaleY(${REST_SCALE})`, boxShadow: 'none' };
                 paint(i, s.transform, (i + 0.5) / barCount <= progress ? '0.3' : '0.15', s.boxShadow);
@@ -292,6 +339,28 @@
         positionMs = ms;
     }
 
+    // ── lyrics ──
+    const allLyrics = $derived(meta?.lyrics ?? null);
+    const lyrics = $derived(isAlbum ? songLyrics(allLyrics, curSpan) : allLyrics);
+    const lyricsOpen = $derived(!!info?.lyricsOpen);
+    // A line is a place in the song: play from it, starting playback if need be.
+    function playFrom(ms) {
+        if (uploading) return;
+        ensureSession();
+        session.seek(ms);
+        positionMs = ms;
+        if (!session.playing) play();
+    }
+    // The sheet slides open under the card; the conversation holds its distance from the
+    // bottom for as long as the slide runs.
+    function toggleLyrics() {
+        setLyricsOpen(att.id, !lyricsOpen);
+        const hold = h.holdScroll();
+        const until = performance.now() + 450;
+        const step = () => { hold(); if (performance.now() < until) requestAnimationFrame(step); };
+        requestAnimationFrame(step);
+    }
+
     // ── transcription ──
     const transcribing = $derived(transcription?.phase === 'loading');
     function onTranscribe() {
@@ -313,8 +382,8 @@
         if (!(session?.playing && popOut({ kind: 'audio', session }))) session?.dispose();
     });
 
-    const currentText = $derived(h.formatTime(positionMs / 1000));
-    const durationText = $derived(h.formatTime(durationMs / 1000));
+    const currentText = $derived(h.formatTime(Math.max(0, positionMs - curSpan.start) / 1000));
+    const durationText = $derived(h.formatTime(Math.max(0, curSpan.end - curSpan.start) / 1000));
     const transcribeIcon = $derived(transcribing ? 'icon-loading spin' : (transcription?.phase === 'ready' && transcription.open ? 'icon-file-minus' : 'icon-file-plus'));
 </script>
 
@@ -323,11 +392,43 @@
     {#if meta?.coverArt}
         <img class="audio-art-glow" src={meta.coverArt} alt="" aria-hidden="true">
     {/if}
-    <div class:audio-album={!!meta?.coverArt}>
+    <div class:audio-album={!!meta?.coverArt || isAlbum} class:is-full={isAlbum} class:no-art={!meta?.coverArt}>
     {#if meta?.coverArt}
         <button class="audio-cover-art" aria-label="View cover art" onclick={() => h.viewImage(meta.coverArt)}>
             <img src={meta.coverArt} alt="" onerror={() => setAudioMeta(att.id, { ...meta, coverArt: '' })}>
         </button>
+    {/if}
+    {#if isAlbum}
+        <div class="audio-track-text album-head">
+            <div class="audio-track-title cutoff" title={meta.album || meta.track}>{albumTitle.main}{#if albumTitle.note}<span class="title-note">{albumTitle.note}</span>{/if}</div>
+            {#if albumByline}<div class="audio-track-byline cutoff">{albumByline}</div>{/if}
+            <div class="album-stats">{albumStats}</div>
+            <div class="album-actions">
+                <button class="album-play" disabled={uploading} onclick={() => playAlbum(false)}><span class="icon icon-play"></span>Play</button>
+                <button class="album-shuffle" disabled={uploading} onclick={() => playAlbum(true)}><span class="icon icon-shuffle"></span>Shuffle</button>
+                <span class="album-toggles">
+                    <button class="album-toggle" class:is-on={session?.shuffle} aria-label="Shuffle" title="Shuffle" onclick={() => ensureSession().setShuffle(!session.shuffle)}><span class="icon icon-shuffle"></span></button>
+                    <button class="album-toggle" class:is-on={session && session.repeat !== 'off'} aria-label="Repeat" title={session?.repeat === 'one' ? 'Repeat one' : session?.repeat === 'all' ? 'Repeat all' : 'Repeat'}
+                            onclick={() => ensureSession().cycleRepeat()}><span class="icon {session?.repeat === 'one' ? 'icon-repeat-one' : 'icon-repeat'}"></span></button>
+                </span>
+            </div>
+        </div>
+        <ol class="album-tracks">
+            {#each chapters.slice(0, shownTracks) as c, i (i)}
+                {@const t = splitTitle(c.title)}
+                <li>
+                    <button class="album-track" class:is-current={i === trackIdx} onclick={() => playTrackAt(i)}>
+                        <span class="album-track-no">{#if i === trackIdx && playing}<span class="album-eq"><span></span><span></span><span></span></span>{:else}{i + 1}{/if}</span>
+                        <span class="album-track-title cutoff">{t.main}{#if t.note}<span class="title-note">{t.note}</span>{/if}</span>
+                        <span class="album-track-len">{h.formatTime(trackLen(i) / 1000)}</span>
+                    </button>
+                </li>
+            {/each}
+            {#if chapters.length > 4}
+                <li><button class="album-more" onclick={() => (showAllTracks = !showAllTracks)}>{showAllTracks ? 'Show fewer' : `Show all ${chapters.length} songs`}</button></li>
+            {/if}
+        </ol>
+    {:else if meta?.coverArt}
         <div class="audio-track-text">
             <div class="audio-track-title cutoff" title={meta.track || att.name}>{meta.track || att.name}</div>
             {#if byline}<div class="audio-track-byline cutoff" title={byline}>{byline}</div>{/if}
@@ -343,9 +444,11 @@
                 {/if}
             </div>
         {:else}
+            {#if isAlbum}<button class="audio-skip" aria-label="Previous" onclick={() => ensureSession().prev()}><span class="icon icon-skip-back"></span></button>{/if}
             <button class="audio-play-btn" class:loading disabled={download.active} aria-label={playing ? 'Pause' : 'Play'} onclick={() => { if (playing) pause(); else play(); }}>
                 <span class="icon {loading ? 'icon-loading spin' : (playing ? 'icon-pause' : 'icon-play')}"></span>
             </button>
+            {#if isAlbum}<button class="audio-skip" aria-label="Next" onclick={() => ensureSession().next()}><span class="icon icon-skip-forward"></span></button>{/if}
         {/if}
         {#snippet waveformEl()}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -356,7 +459,12 @@
                 {/each}
             </div>
         {/snippet}
-        {#if !isVoiceMessage && att.name && !meta?.coverArt}
+        {#if isAlbum}
+            <div class="audio-waveform-wrapper">
+                <div class="audio-filename cutoff">{nowTitle.main}</div>
+                {@render waveformEl()}
+            </div>
+        {:else if !isVoiceMessage && att.name && !meta?.coverArt}
             <div class="audio-waveform-wrapper">
                 <div class="audio-filename cutoff" title={title}>{title}</div>
                 {@render waveformEl()}
@@ -385,8 +493,19 @@
                 </button>
             {/if}
         {/if}
+        {#if allLyrics}
+            <button class="audio-transcribe-btn" class:is-open={lyricsOpen} aria-label={lyricsOpen ? 'Hide lyrics' : 'Show lyrics'}
+                    title={lyricsOpen ? 'Hide lyrics' : 'Lyrics'} onclick={toggleLyrics}>
+                <span class="icon icon-align-left"></span>
+            </button>
+        {/if}
     </div>
     </div>
+    {#if allLyrics}
+        <div class="lyrics-panel" class:is-open={lyricsOpen}>
+            <div class="lyrics-panel-inner"><Lyrics {lyrics} {positionMs} {playing} onSeek={playFrom} /></div>
+        </div>
+    {/if}
     {#if canTranscribe}
         <div class="transcribe-container"></div>
         {#if transcription && transcription.phase !== 'loading'}
