@@ -618,7 +618,7 @@ pub async fn send_dm(
     let emoji_tags = crate::emoji_packs::resolve_outbound_emoji_tags(content);
 
     // Build pending message and add to state
-    let msg = Message {
+    let mut msg = Message {
         id: pending_id.clone(),
         content: content.to_string(),
         replied_to: reply_to.unwrap_or("").to_string(),
@@ -630,6 +630,8 @@ pub async fn send_dm(
         expiration: config.expiration,
         ..Default::default()
     };
+    // The quote rides the message itself: the parent may be nowhere in the UI's memory.
+    let _ = crate::db::events::populate_reply_context(&mut msg).await;
 
     {
         let mut state = STATE.lock().await;
@@ -1007,7 +1009,7 @@ pub async fn send_file_dm_from(
         webxdc_topic: webxdc_topic.clone(),
         ..Default::default()
     };
-    let msg = Message {
+    let mut msg = Message {
         id: pending_id.clone(), content: content.unwrap_or("").to_string(),
         replied_to: reply_to.unwrap_or("").to_string(),
         at: now.as_millis() as u64, pending: true, mine: true,
@@ -1016,6 +1018,7 @@ pub async fn send_file_dm_from(
         expiration: if config.self_destruct_secs.is_some() { None } else { config.expiration },
         ..Default::default()
     };
+    let _ = crate::db::events::populate_reply_context(&mut msg).await;
     {
         let mut state = STATE.lock().await;
         state.add_message_to_participant(receiver_npub, &msg);

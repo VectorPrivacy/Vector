@@ -1061,7 +1061,7 @@ pub async fn send_community_message(
             let message_id = rumor.id.ok_or("inner rumor has no id")?.to_hex();
 
             // 1. Optimistic message — renders instantly, keyed by its real id.
-            let pending_msg = Message {
+            let mut pending_msg = Message {
                 id: message_id.clone(),
                 content: content.clone(),
                 at: ms,
@@ -1074,6 +1074,8 @@ pub async fn send_community_message(
                 expiration: expiry,
                 ..Default::default()
             };
+            // The quote rides the message itself: the parent may be nowhere in the UI's memory.
+            let _ = vector_core::db::events::populate_reply_context(&mut pending_msg).await;
             {
                 let mut state = vector_core::state::STATE.lock().await;
                 state.add_message_to_chat(&channel_id, &pending_msg);
@@ -1173,7 +1175,7 @@ pub async fn send_community_message(
         let message_id = unsigned.id.ok_or("inner event has no id")?.to_hex();
 
         // 1. Optimistic message — renders instantly (parity with DMs), keyed by its real id.
-        let pending_msg = Message {
+        let mut pending_msg = Message {
             id: message_id.clone(),
             content: content.clone(),
             at: ms,
@@ -1185,6 +1187,8 @@ pub async fn send_community_message(
             addressed_bots: addressed_bots.clone(),
             ..Default::default()
         };
+        // The quote rides the message itself: the parent may be nowhere in the UI's memory.
+        let _ = vector_core::db::events::populate_reply_context(&mut pending_msg).await;
         {
             let mut state = vector_core::state::STATE.lock().await;
             state.add_message_to_chat(&channel_id, &pending_msg);
@@ -1635,7 +1639,7 @@ async fn dispatch_community_attachment_message(
         // Optimistic bubble — attachments carry empty URLs (plaintext is already on disk for the
         // sender's preview); the upload fills them in.
         let optimistic_attachments: Vec<_> = prepared.iter().map(|p| p.attachment.clone()).collect();
-        let pending_msg = Message {
+        let mut pending_msg = Message {
             id: pending_id.clone(),
             content: content.clone(),
             at: ms,
@@ -1648,6 +1652,8 @@ async fn dispatch_community_attachment_message(
             expiration: None,
             ..Default::default()
         };
+        // The quote rides the message itself: the parent may be nowhere in the UI's memory.
+        let _ = vector_core::db::events::populate_reply_context(&mut pending_msg).await;
         {
             let mut state = vector_core::state::STATE.lock().await;
             state.add_message_to_chat(&channel_id, &pending_msg);

@@ -8,6 +8,7 @@
 // confirms them (or after the TTL if the send died without an error).
 const pendingReactions = new Map();
 const PENDING_REACTION_TTL_MS = 10000;
+const REPLY_CONTEXT_FIELDS = ['replied_to_content', 'replied_to_npub', 'replied_to_has_attachment', 'replied_to_attachment_extension', 'replied_to_emoji_tags'];
 
 /**
  * Setup our Rust Event listeners, used for relaying the majority of backend changes
@@ -894,6 +895,16 @@ async function setupRustListeners() {
 
         const nMsgIdx = cChat.messages.findIndex(m => m.id === evt.payload.old_id);
         if (nMsgIdx === -1) return;
+
+        // The backend's in-memory copy keeps only part of a reply quote: what the row
+        // already knew about the same parent stays.
+        const prev = cChat.messages[nMsgIdx];
+        const next = evt.payload.message;
+        if (next.replied_to && next.replied_to === prev.replied_to) {
+            for (const k of REPLY_CONTEXT_FIELDS) {
+                if (next[k] == null && prev[k] != null) next[k] = prev[k];
+            }
+        }
 
         // Update it. The row's key rides along, so the finalized message keeps its row.
         evt.payload.message._key = cChat.messages[nMsgIdx]._key || evt.payload.old_id;
