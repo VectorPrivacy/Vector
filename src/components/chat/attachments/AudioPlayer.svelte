@@ -6,8 +6,9 @@
     import { transfer } from '../../lib/attachments.svelte.js';
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { untrack } from 'svelte';
-    import { audioInfo, setAudioDuration, setAudioMeta, patchTranscription, transcribeAudio, modelDownloadState, registerPlayer, setLyricsOpen,
-             splitTitle, songLyrics } from '../../lib/audio.svelte.js';
+    import { audioInfo, setAudioDuration, setAudioMeta, patchTranscription, modelDownloadState, registerPlayer, setLyricsOpen,
+             splitTitle, songLyrics, accentOf, ensureAccent, smoothBin, toggleTranscript, transcriptButton } from '../../lib/audio.svelte.js';
+    import AlbumTrackList from './AlbumTrackList.svelte';
     import { AudioSession, popOut, takeBack, yieldPopout } from '../../lib/popout.svelte.js';
     import { lockSelection } from '../../lib/draglock.js';
     import Transcription from './Transcription.svelte';
@@ -38,31 +39,21 @@
     const meta = $derived(info?.meta ?? null);
     const title = $derived(meta?.track ? (meta.artist ? `${meta.artist} — ${meta.track}` : meta.track) : (att.name || ''));
     // The controls wear the art's colour on an album card; grey art leaves them white.
-    const accent = $derived(meta?.coverArt ? (meta.accent || 'rgb(242, 242, 242)') : null);
-    $effect(() => {
-        if (!meta?.coverArt || meta.accent !== undefined) return;
-        const m = meta;
-        artAccent(m.coverArt).then((accent) => {
-            // Onto the metadata as it stands now: the art may have failed to load meanwhile.
-            const now = audioInfo(att.id)?.meta;
-            if (now?.coverArt === m.coverArt) setAudioMeta(att.id, { ...now, accent });
-        });
-    });
+    const accent = $derived(accentOf(meta));
+    $effect(() => { if (meta?.coverArt) ensureAccent(att.id); });
     // ── an album in one file ──
     const chapters = $derived(meta?.chapters ?? []);
     const isAlbum = $derived(chapters.length > 1);
     const albumTitle = $derived(splitTitle(meta?.album || meta?.track || att.name));
     const albumByline = $derived([meta?.artist, meta?.year].filter(Boolean).join(' · '));
     const trackIdx = $derived(session && session.tracks.length ? session.track : -1);
-    const trackLen = (i) => (chapters[i].end_ms ?? durationMs) - chapters[i].start_ms;
+    const albumTracks = $derived(chapters.map((c) => ({ title: c.title, lengthMs: (c.end_ms ?? durationMs) - c.start_ms })));
     const albumStats = $derived(`${chapters.length} songs${durationMs ? ` · ${Math.round(durationMs / 60000)} min` : ''}`);
-    let showAllTracks = $state(false);
-    const shownTracks = $derived(showAllTracks ? chapters.length : Math.min(4, chapters.length));
     // The stretch of the file the controls show: the current song of an album, or all of it.
     function spanNow() {
         if (!isAlbum) return { start: 0, end: durationMs };
-        const c = chapters[session ? Math.max(0, session.track) : 0];
-        return { start: c.start_ms, end: c.end_ms ?? durationMs };
+        if (session?.tracks.length) return session.span(Math.max(0, session.track));
+        return { start: chapters[0].start_ms, end: chapters[0].end_ms ?? durationMs };
     }
     const curSpan = $derived.by(() => { session?.track; durationMs; return spanNow(); });
     const nowTitle = $derived(isAlbum ? splitTitle(chapters[Math.max(0, trackIdx)]?.title) : null);
@@ -93,48 +84,6 @@
             }
         });
     });
-
-    // The art's most prominent colourful hue, lifted to a brightness the controls read at.
-    function artAccent(src) {
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.onerror = () => resolve(null);
-            img.onload = () => {
-                const N = 24, canvas = document.createElement('canvas');
-                canvas.width = canvas.height = N;
-                const ctx = canvas.getContext('2d', { willReadFrequently: true });
-                ctx.drawImage(img, 0, 0, N, N);
-                const px = ctx.getImageData(0, 0, N, N).data;
-                const bins = Array.from({ length: 12 }, () => ({ w: 0, r: 0, g: 0, b: 0 }));
-                let total = 0;
-                for (let i = 0; i < px.length; i += 4) {
-                    const r = px[i] / 255, g = px[i + 1] / 255, b = px[i + 2] / 255;
-                    const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
-                    const sat = max === min ? 0 : (max - min) / (1 - Math.abs(2 * l - 1));
-                    // Near-black and near-white carry no colour worth naming.
-                    const w = sat * sat * (1 - Math.abs(2 * l - 1));
-                    total += 1;
-                    if (w < 0.02) continue;
-                    let hue = max === r ? ((g - b) / (max - min)) % 6 : max === g ? (b - r) / (max - min) + 2 : (r - g) / (max - min) + 4;
-                    const bin = bins[Math.floor(((hue * 60 + 360) % 360) / 30)];
-                    bin.w += w; bin.r += px[i] * w; bin.g += px[i + 1] * w; bin.b += px[i + 2] * w;
-                }
-                const top = bins.reduce((a, b) => (b.w > a.w ? b : a));
-                if (top.w / total < 0.03) { resolve(null); return; }
-                const [hh, ss] = toHsl(top.r / top.w, top.g / top.w, top.b / top.w);
-                resolve(`hsl(${Math.round(hh)}, ${Math.round(Math.min(0.85, Math.max(0.45, ss)) * 100)}%, 68%)`);
-            };
-            img.src = src;
-        });
-    }
-    function toHsl(r, g, b) {
-        r /= 255; g /= 255; b /= 255;
-        const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
-        if (!d) return [0, 0, l];
-        const s = d / (1 - Math.abs(2 * l - 1));
-        const h = max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
-        return [h * 60, s, l];
-    }
 
     // ── bars ──
     let waveform = $state(null);
@@ -205,8 +154,7 @@
                 // engine's waveform), so a gentle curve is all it needs: quiet detail stays
                 // low and peaks stand out, without pinning the loud bands to the top.
                 const v = (offset + i < waveformData.length) ? waveformData[offset + i] / 255 : 0;
-                const target = Math.min(1, v * Math.sqrt(v));
-                binDisplay[i] = target > binDisplay[i] ? binDisplay[i] * 0.7 + target * 0.3 : binDisplay[i] * 0.85 + target * 0.15;
+                binDisplay[i] = smoothBin(binDisplay[i], v);
             }
             const glow = accent || h.glowColor();
             for (let i = 0; i < barCount; i++) {
@@ -381,9 +329,7 @@
     // ── transcription ──
     const transcribing = $derived(transcription?.phase === 'loading');
     function onTranscribe() {
-        if (transcribing || download.active) return;
-        if (transcription?.phase === 'ready') { patchTranscription(att.id, { open: !transcription.open }); return; }
-        transcribeAudio(att.id, att.path, h.transcribe);
+        if (!download.active) toggleTranscript(att.id, att.path, h.transcribe);
     }
     // A fresh voice message transcribes itself when the setting is on and the model is here.
     $effect(() => {
@@ -401,7 +347,7 @@
 
     const currentText = $derived(h.formatTime(Math.max(0, positionMs - curSpan.start) / 1000));
     const durationText = $derived(h.formatTime(Math.max(0, curSpan.end - curSpan.start) / 1000));
-    const transcribeIcon = $derived(transcribing ? 'icon-loading spin' : (transcription?.phase === 'ready' && transcription.open ? 'icon-file-minus' : 'icon-file-plus'));
+    const tb = $derived(transcriptButton(transcription));
 </script>
 
 <div class="audio-message-container custom-audio-player" bind:this={root} class:has-metadata={!isVoiceMessage && !!att.name}
@@ -430,21 +376,7 @@
                 </span>
             </div>
         </div>
-        <ol class="album-tracks">
-            {#each chapters.slice(0, shownTracks) as c, i (i)}
-                {@const t = splitTitle(c.title)}
-                <li>
-                    <button class="album-track" class:is-current={i === trackIdx} onclick={() => playTrackAt(i)}>
-                        <span class="album-track-no">{#if i === trackIdx && playing}<span class="album-eq"><span></span><span></span><span></span></span>{:else}{i + 1}{/if}</span>
-                        <span class="album-track-title cutoff">{t.main}{#if t.note}<span class="title-note">{t.note}</span>{/if}</span>
-                        <span class="album-track-len">{h.formatTime(trackLen(i) / 1000)}</span>
-                    </button>
-                </li>
-            {/each}
-            {#if chapters.length > 4}
-                <li><button class="album-more" onclick={() => (showAllTracks = !showAllTracks)}>{showAllTracks ? 'Show fewer' : `Show all ${chapters.length} songs`}</button></li>
-            {/if}
-        </ol>
+        <AlbumTrackList tracks={albumTracks} current={trackIdx} {playing} limit={4} formatTime={h.formatTime} onPick={playTrackAt} />
     {:else if meta?.coverArt}
         <div class="audio-track-text">
             <div class="audio-track-title cutoff" title={meta.track || att.name}>{meta.track || att.name}</div>
@@ -503,10 +435,9 @@
                     </div>
                 </div>
             {:else}
-                <button class="audio-transcribe-btn" class:loading={transcribing} class:is-open={transcription?.phase === 'ready' && transcription.open}
-                        style:cursor={transcribing ? 'default' : null}
-                        aria-label={transcription?.phase === 'ready' ? (transcription.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe'} onclick={onTranscribe}>
-                    <span class="icon {transcribeIcon}"></span>
+                <button class="audio-transcribe-btn" class:loading={transcribing} class:is-open={tb.open}
+                        style:cursor={transcribing ? 'default' : null} aria-label={tb.label} onclick={onTranscribe}>
+                    <span class="icon {tb.icon}"></span>
                 </button>
             {/if}
         {/if}

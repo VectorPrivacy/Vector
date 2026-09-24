@@ -3,6 +3,7 @@
 // playback itself belongs to the mounted player. The Whisper model download is one
 // app-wide state the player that triggered it renders.
 import { SvelteMap } from 'svelte/reactivity';
+import { artAccent } from './artcolor.js';
 
 const byId = new SvelteMap();   // att.id → { durationMs, meta, transcription, lyricsOpen }
 
@@ -43,6 +44,48 @@ export function waveformBytes(b64) {
     const out = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
     return out;
+}
+
+/** An album card's control colour: the art's own, white where the art has no colour. */
+export function accentOf(meta) {
+    return meta?.coverArt ? (meta.accent || 'rgb(242, 242, 242)') : null;
+}
+/** Measure the art's colour once per attachment, whichever player shows it first. */
+const accentRuns = new Set();
+export function ensureAccent(id) {
+    const m = byId.get(id)?.meta;
+    if (!m?.coverArt || m.accent !== undefined || accentRuns.has(id)) return;
+    accentRuns.add(id);
+    artAccent(m.coverArt).then((accent) => {
+        accentRuns.delete(id);
+        // Onto the metadata as it stands now: the art may have failed to load meanwhile.
+        const now = byId.get(id)?.meta;
+        if (now?.coverArt === m.coverArt) setAudioMeta(id, { ...now, accent });
+    });
+}
+
+/** One waveform bar's next height from its last and the band's level (0-1): a gentle curve,
+ *  quick to rise and slower to fall. The engine has already spread each band over its range. */
+export function smoothBin(prev, level) {
+    const target = Math.min(1, level * Math.sqrt(level));
+    return target > prev ? prev * 0.7 + target * 0.3 : prev * 0.85 + target * 0.15;
+}
+
+/** The transcript button: open or shut one that's ready, or make it. */
+export function toggleTranscript(id, path, transcribe) {
+    const t = byId.get(id)?.transcription;
+    if (t?.phase === 'loading') return;
+    if (t?.phase === 'ready') { patchTranscription(id, { open: !t.open }); return; }
+    transcribeAudio(id, path, transcribe);
+}
+/** How that button looks for transcript `t`. */
+export function transcriptButton(t) {
+    const ready = t?.phase === 'ready';
+    return {
+        icon: t?.phase === 'loading' ? 'icon-loading spin' : (ready && t.open ? 'icon-file-minus' : 'icon-file-plus'),
+        label: ready ? (t.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe',
+        open: ready && !!t.open,
+    };
 }
 
 /** The lyrics sheet is the attachment's: open in the chat's card means open in the pop-out. */

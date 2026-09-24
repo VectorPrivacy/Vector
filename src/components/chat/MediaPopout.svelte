@@ -8,8 +8,9 @@
     // moves the same <video> element rather than remounting it.
     import { untrack, flushSync } from 'svelte';
     import { popoutState, closePopout } from '../lib/popout.svelte.js';
-    import { audioInfo, claimPlayback, releasePlayback, patchTranscription, transcribeAudio, modelDownloadState, setLyricsOpen,
-             splitTitle, songLyrics } from '../lib/audio.svelte.js';
+    import { audioInfo, claimPlayback, releasePlayback, patchTranscription, modelDownloadState, setLyricsOpen,
+             splitTitle, songLyrics, accentOf, ensureAccent, smoothBin, toggleTranscript, transcriptButton } from '../lib/audio.svelte.js';
+    import AlbumTrackList from './attachments/AlbumTrackList.svelte';
     import Transcription from './attachments/Transcription.svelte';
     import Lyrics from './attachments/Lyrics.svelte';
     import { profileVersion, chatVersion } from '../lib/signals.svelte.js';
@@ -24,19 +25,18 @@
     const ref = $derived(session || item);
     const meta = $derived(session ? audioInfo(session.id)?.meta ?? null : null);
     const art = $derived(meta?.coverArt || '');
-    const accent = $derived(art ? (meta.accent || 'rgb(242, 242, 242)') : null);
+    const accent = $derived(accentOf(meta));
+    $effect(() => { if (art && session) ensureAccent(session.id); });
 
     // A voice message's transcript is the attachment's, shared with its row in the chat:
     // made once by whichever side asks first, and open or closed in both.
     const transcription = $derived(session?.voice ? audioInfo(session.id)?.transcription ?? null : null);
     const canTranscribe = $derived(!!session?.voice && h.audio.transcriptionSupported(session.att));
     const download = modelDownloadState();
-    const transcribing = $derived(transcription?.phase === 'loading');
     function onTranscribe() {
-        if (transcribing || download.active) return;
-        if (transcription?.phase === 'ready') { patchTranscription(session.id, { open: !transcription.open }); return; }
-        transcribeAudio(session.id, session.att.path, h.audio.transcribe);
+        if (!download.active) toggleTranscript(session.id, session.att.path, h.audio.transcribe);
     }
+    const tb = $derived(transcriptButton(transcription));
     // The box is anchored at its bottom and grows upward: nothing in the chat to hold still.
     // svelte-ignore state_referenced_locally
     const transcriptH = { ...h.audio, holdScroll: () => () => {} };
@@ -260,12 +260,10 @@
         const wf = session.waveform;
         let moving = false;
         for (let i = 0; i < n; i++) {
-            let target = 0;
-            if (session.playing && wf?.data) {
-                const v = (wf.data[Math.floor((pos / 1000) * wf.fps) * wf.bins + Math.floor(i * wf.bins / n)] ?? 0) / 255;
-                target = Math.min(1, v * Math.sqrt(v));
-            }
-            bins[i] = target > bins[i] ? bins[i] * 0.7 + target * 0.3 : bins[i] * 0.85 + target * 0.15;
+            const v = session.playing && wf?.data
+                ? (wf.data[Math.floor((pos / 1000) * wf.fps) * wf.bins + Math.floor(i * wf.bins / n)] ?? 0) / 255
+                : 0;
+            bins[i] = smoothBin(bins[i], v);
             if (bins[i] > 0.01) moving = true;
         }
         ctx.fillStyle = colour;
@@ -456,10 +454,9 @@
                 </button>
             {/if}
             {#if canTranscribe}
-                <button class="popout-action" class:is-open={transcription?.phase === 'ready' && transcription.open} disabled={download.active}
-                        aria-label={transcription?.phase === 'ready' ? (transcription.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe'}
-                        title={transcription?.phase === 'ready' ? (transcription.open ? 'Hide transcript' : 'Show transcript') : 'Transcribe'} onclick={onTranscribe}>
-                    <span class="icon {transcribing ? 'icon-loading spin' : (transcription?.phase === 'ready' && transcription.open ? 'icon-file-minus' : 'icon-file-plus')}"></span>
+                <button class="popout-action" class:is-open={tb.open} disabled={download.active}
+                        aria-label={tb.label} title={tb.label} onclick={onTranscribe}>
+                    <span class="icon {tb.icon}"></span>
                 </button>
             {/if}
             {#if isVideo}
@@ -492,18 +489,8 @@
         {#if isAlbum}
             <div class="lyrics-panel popout-tracks" class:is-open={tracksOpen && !compact}>
                 <div class="lyrics-panel-inner">
-                    <ol class="album-tracks">
-                        {#each session.tracks as t, i (i)}
-                            {@const name = splitTitle(t.title)}
-                            <li>
-                                <button class="album-track" class:is-current={i === trackIdx} onclick={() => session.playTrack(i)}>
-                                    <span class="album-track-no">{#if i === trackIdx && playing}<span class="album-eq"><span></span><span></span><span></span></span>{:else}{i + 1}{/if}</span>
-                                    <span class="album-track-title cutoff">{name.main}{#if name.note}<span class="title-note">{name.note}</span>{/if}</span>
-                                    <span class="album-track-len">{fmt((t.end ?? session.durationMs) - t.start)}</span>
-                                </button>
-                            </li>
-                        {/each}
-                    </ol>
+                    <AlbumTrackList tracks={session.tracks.map((t) => ({ title: t.title, lengthMs: (t.end ?? session.durationMs) - t.start }))}
+                                    current={trackIdx} {playing} formatTime={h.audio.formatTime} onPick={(i) => session.playTrack(i)} />
                 </div>
             </div>
         {/if}
