@@ -510,22 +510,20 @@ impl AudioEngine {
             return Err("Audio file not found".to_string());
         }
 
-        // Read file into memory (stays in page cache, fast)
-        let file_bytes = std::fs::read(&path_buf)
-            .map_err(|e| format!("Failed to read audio file: {}", e))?;
-
-        // Try WAV fast path — synchronous, instant decode
-        if let Some((mono_samples, sample_rate)) = crate::audio::wav_fast_decode_for_engine(&file_bytes) {
-            return self.load_from_samples(mono_samples, sample_rate);
+        // Only a WAV is read whole; every other decoder opens its own handle on the file.
+        if has_wav_header(&path_buf) {
+            let file_bytes = std::fs::read(&path_buf)
+                .map_err(|e| format!("Failed to read audio file: {}", e))?;
+            if let Some((mono_samples, sample_rate)) = crate::audio::wav_fast_decode_for_engine(&file_bytes) {
+                return self.load_from_samples(mono_samples, sample_rate);
+            }
         }
-
-        // Non-WAV: probe metadata, create source, stream-decode in background
-        self.load_streaming(file_bytes, &path_buf)
+        self.load_streaming(&path_buf)
     }
 
     /// Stream-decode a non-WAV audio file. Probes metadata synchronously (fast),
     /// creates an empty source, then spawns a background thread for packet-by-packet decode.
-    fn load_streaming(&self, file_bytes: Vec<u8>, path: &std::path::Path) -> Result<AudioLoadResult, String> {
+    fn load_streaming(&self, path: &std::path::Path) -> Result<AudioLoadResult, String> {
         // Probe metadata from file (re-opens from disk, already in page cache — <1ms)
         let (sample_rate, channels, est_frames) = probe_audio_metadata(path)?;
         if sample_rate == 0 || self.shared.device_sample_rate.load(Ordering::Relaxed) == 0 {
@@ -541,7 +539,7 @@ impl AudioEngine {
         self.evict_if_needed();
 
         if est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
-            return self.load_windowed(id, file_bytes, path, sample_rate, channels, src_channels, rate_ratio, duration_ms);
+            return self.load_windowed(id, path, sample_rate, channels, src_channels, rate_ratio, duration_ms);
         }
 
         let source = AudioSource {
@@ -571,11 +569,11 @@ impl AudioEngine {
 
         // Spawn background decode thread
         let shared = Arc::clone(&self.shared);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+        let path = path.to_path_buf();
         std::thread::Builder::new()
             .name("audio-decode".into())
             .spawn(move || {
-                stream_decode_worker(id, file_bytes, &ext, channels, sample_rate, est_frames, &shared);
+                stream_decode_worker(id, &path, sample_rate, est_frames, &shared);
             })
             .map_err(|e| format!("Failed to spawn decode thread: {}", e))?;
 
@@ -594,7 +592,6 @@ impl AudioEngine {
     fn load_windowed(
         &self,
         id: u32,
-        file_bytes: Vec<u8>,
         path: &std::path::Path,
         sample_rate: u32,
         channels: usize,
@@ -626,21 +623,19 @@ impl AudioEngine {
         };
         self.shared.sources.lock().map_err(|_| "Lock poisoned")?.insert(id, source);
 
-        let bytes = Arc::new(file_bytes);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
         {
-            let (bytes, ext, shared) = (Arc::clone(&bytes), ext.clone(), Arc::clone(&self.shared));
+            let (path, shared) = (path.to_path_buf(), Arc::clone(&self.shared));
             std::thread::Builder::new()
                 .name("audio-window".into())
-                .spawn(move || window_decode_worker(id, bytes, &ext, channels, sample_rate, ctl, &shared))
+                .spawn(move || window_decode_worker(id, &path, channels, sample_rate, ctl, &shared))
                 .map_err(|e| format!("Failed to spawn window decoder: {}", e))?;
         }
         {
-            let shared = Arc::clone(&self.shared);
+            let (path, shared) = (path.to_path_buf(), Arc::clone(&self.shared));
             let est_frames = duration_ms * sample_rate as u64 / 1000;
             std::thread::Builder::new()
                 .name("audio-waveform".into())
-                .spawn(move || waveform_pass(id, bytes, &ext, sample_rate, est_frames, shared))
+                .spawn(move || waveform_pass(id, &path, sample_rate, est_frames, shared))
                 .map_err(|e| format!("Failed to spawn waveform pass: {}", e))?;
         }
         Ok(AudioLoadResult { id, duration_ms, waveform_fps: WAVEFORM_FPS as u8, bins: WAVEFORM_BINS as u8 })
@@ -903,6 +898,14 @@ pub fn probe_duration(path: &str) -> Result<u64, String> {
     } else {
         Ok(0)
     }
+}
+
+fn has_wav_header(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 12];
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok()
+        && &head[0..4] == b"RIFF"
+        && &head[8..12] == b"WAVE"
 }
 
 /// Fast WAV duration probe: reads RIFF header, computes duration from data chunk size.
@@ -1208,64 +1211,14 @@ fn probe_audio_metadata(path: &std::path::Path) -> Result<(u32, usize, u64), Str
 /// Background decode entry: long files split into parallel segments (each
 /// core decodes its own slice, seam-primed by a warmup pre-roll); short files
 /// take the simple sequential path.
-fn stream_decode_worker(
-    id: u32,
-    file_bytes: Vec<u8>,
-    ext: &str,
-    channels: usize,
-    sample_rate: u32,
-    est_frames: u64,
-    shared: &SharedState,
-) {
+fn stream_decode_worker(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: u64, shared: &SharedState) {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let workers = cores.saturating_sub(2).min(MAX_DECODE_WORKERS);
     let est_secs = if sample_rate > 0 { est_frames / sample_rate as u64 } else { 0 };
     if workers >= 2 && est_secs >= PARALLEL_MIN_SECS {
-        parallel_stream_decode(id, file_bytes, ext, channels, sample_rate, est_frames, workers, shared);
+        parallel_stream_decode(id, path, sample_rate, est_frames, workers, shared);
     } else {
-        sequential_stream_decode(id, file_bytes, ext, channels, sample_rate, shared);
-    }
-}
-
-/// Zero-copy shared view over the file bytes so N segment decoders don't each
-/// clone a multi-MB Vec.
-struct SharedBytesReader {
-    bytes: Arc<Vec<u8>>,
-    pos: u64,
-}
-
-impl std::io::Read for SharedBytesReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let start = (self.pos as usize).min(self.bytes.len());
-        let n = buf.len().min(self.bytes.len() - start);
-        buf[..n].copy_from_slice(&self.bytes[start..start + n]);
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl std::io::Seek for SharedBytesReader {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        let len = self.bytes.len() as i64;
-        let new = match pos {
-            std::io::SeekFrom::Start(o) => o as i64,
-            std::io::SeekFrom::End(o) => len + o,
-            std::io::SeekFrom::Current(o) => self.pos as i64 + o,
-        };
-        if new < 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"));
-        }
-        self.pos = new as u64;
-        Ok(self.pos)
-    }
-}
-
-impl symphonia::core::io::MediaSource for SharedBytesReader {
-    fn is_seekable(&self) -> bool {
-        true
-    }
-    fn byte_len(&self) -> Option<u64> {
-        Some(self.bytes.len() as u64)
+        sequential_stream_decode(id, path, sample_rate, shared);
     }
 }
 
@@ -1312,145 +1265,140 @@ fn append_packet_frames(
     }
 }
 
-type OpenedDecoder = (
-    Box<dyn symphonia::core::formats::FormatReader>,
-    Box<dyn symphonia::core::codecs::Decoder>,
-    u32,
-    Option<symphonia::core::units::TimeBase>,
-);
-
-/// A fresh demuxer and decoder over the shared file bytes.
-fn open_decoder(bytes: Arc<Vec<u8>>, ext: &str) -> Result<OpenedDecoder, String> {
-    use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
-    let reader = SharedBytesReader { bytes, pos: 0 };
-    let media_source = MediaSourceStream::new(Box::new(reader), Default::default());
-    let mut hint = Hint::new();
-    if !ext.is_empty() {
-        hint.with_extension(ext);
-    }
-    let probed = symphonia::default::get_probe()
-        .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
-        .map_err(|e| format!("segment probe: {}", e))?;
-    let format = probed.format;
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .ok_or("segment: no audio track")?;
-    let track_id = track.id;
-    let time_base = track.codec_params.time_base;
-    let decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-        .map_err(|e| format!("segment decoder: {}", e))?;
-    Ok((format, decoder, track_id, time_base))
+/// A demuxer and decoder over their own handle on the file, counting frames as they go.
+struct PacketCursor {
+    format: Box<dyn symphonia::core::formats::FormatReader>,
+    decoder: Box<dyn symphonia::core::codecs::Decoder>,
+    track_id: u32,
+    time_base: Option<symphonia::core::units::TimeBase>,
+    buf: Option<symphonia::core::audio::SampleBuffer<f32>>,
+    /// The frame after the last packet handed out.
+    frame: u64,
 }
 
-/// Seek a warmup margin before `frame` and return the frame the decoder resumes at. The
-/// discarded run-in re-primes the codec's inter-frame state (MP3 bit reservoir, IMDCT
-/// overlap-add) so what follows matches a straight-through decode.
-fn seek_before(opened: &mut OpenedDecoder, frame: u64, sample_rate: u32) -> Result<u64, String> {
-    use symphonia::core::formats::{SeekMode, SeekTo};
-    use symphonia::core::units::Time;
-    let (format, decoder, track_id, time_base) = opened;
-    let warmup = (SEGMENT_WARMUP_SECS * sample_rate as f64) as u64;
-    let target_secs = frame.saturating_sub(warmup) as f64 / sample_rate as f64;
-    let seeked = format
-        .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(target_secs), track_id: Some(*track_id) })
-        .map_err(|e| format!("segment seek: {}", e))?;
-    decoder.reset();
-    Ok(match time_base {
-        Some(tb) => {
-            let t = tb.calc_time(seeked.actual_ts);
-            ((t.seconds as f64 + t.frac) * sample_rate as f64).round() as u64
+impl PacketCursor {
+    fn open(path: &std::path::Path) -> Result<Self, String> {
+        use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let file = std::fs::File::open(path).map_err(|e| format!("open: {}", e))?;
+        let media_source = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
         }
-        None => seeked.actual_ts,
-    })
+        let format = symphonia::default::get_probe()
+            .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
+            .map_err(|e| format!("probe: {}", e))?
+            .format;
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .ok_or("no audio track")?;
+        let (track_id, time_base) = (track.id, track.codec_params.time_base);
+        let decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .map_err(|e| format!("decoder: {}", e))?;
+        Ok(Self { format, decoder, track_id, time_base, buf: None, frame: 0 })
+    }
+
+    /// Seek a warmup margin before `frame`, counting from wherever the seek lands. The
+    /// discarded run-in re-primes the codec's inter-frame state (MP3 bit reservoir, IMDCT
+    /// overlap-add) so what follows matches a straight-through decode.
+    fn seek_before(&mut self, frame: u64, sample_rate: u32) -> Result<(), String> {
+        use symphonia::core::formats::{SeekMode, SeekTo};
+        use symphonia::core::units::Time;
+        let warmup = (SEGMENT_WARMUP_SECS * sample_rate as f64) as u64;
+        let target_secs = frame.saturating_sub(warmup) as f64 / sample_rate as f64;
+        let seeked = self
+            .format
+            .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(target_secs), track_id: Some(self.track_id) })
+            .map_err(|e| format!("seek: {}", e))?;
+        self.decoder.reset();
+        self.frame = match self.time_base {
+            Some(tb) => {
+                let t = tb.calc_time(seeked.actual_ts);
+                ((t.seconds as f64 + t.frac) * sample_rate as f64).round() as u64
+            }
+            None => seeked.actual_ts,
+        };
+        Ok(())
+    }
+
+    /// The next packet as (interleaved samples, channels, first frame); None once the
+    /// stream ends or can't go on.
+    fn next(&mut self) -> Option<(&[f32], usize, u64)> {
+        use symphonia::core::audio::SampleBuffer;
+        use symphonia::core::errors::Error as SymphoniaError;
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(SymphoniaError::ResetRequired) => {
+                    self.decoder.reset();
+                    continue;
+                }
+                Err(_) => return None,
+            };
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            match self.decoder.decode(&packet) {
+                Ok(audio_buf) => {
+                    let channels = audio_buf.spec().channels.count().max(1);
+                    let buf = self
+                        .buf
+                        .get_or_insert_with(|| SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec()));
+                    buf.copy_interleaved_ref(audio_buf);
+                    let start = self.frame;
+                    self.frame += (buf.samples().len() / channels) as u64;
+                    return Some((buf.samples(), channels, start));
+                }
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
 }
 
 /// Decode frames [start_frame, end_frame), handing each packet's kept frames to `sink`
 /// as (interleaved samples, channels, frames to skip, frames to take). The sink returns
 /// false to stop.
 fn decode_range(
-    bytes: Arc<Vec<u8>>,
-    ext: &str,
+    path: &std::path::Path,
     sample_rate: u32,
     start_frame: u64,
     end_frame: u64,
     cancel: &std::sync::atomic::AtomicBool,
     sink: &mut dyn FnMut(&[f32], usize, usize, usize) -> bool,
 ) -> Result<(), String> {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::errors::Error as SymphoniaError;
-
-    let mut opened = open_decoder(bytes, ext)?;
-    // Frame counter in source frames, seeded from where the seek actually landed.
-    let mut counter: u64 = 0;
+    let mut cursor = PacketCursor::open(path)?;
     if start_frame > 0 {
-        counter = seek_before(&mut opened, start_frame, sample_rate)?;
+        cursor.seek_before(start_frame, sample_rate)?;
     }
-    let (format, decoder, track_id, _) = &mut opened;
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
-
-    loop {
-        if counter >= end_frame || cancel.load(Ordering::Relaxed) {
+    while cursor.frame < end_frame && !cancel.load(Ordering::Relaxed) {
+        let Some((samples, channels, start)) = cursor.next() else { break };
+        let end = start + (samples.len() / channels) as u64;
+        if end <= start_frame {
+            continue; // still inside the warmup run-in
+        }
+        let skip = start_frame.saturating_sub(start) as usize;
+        let take = (end.min(end_frame) - start) as usize - skip;
+        if take > 0 && !sink(samples, channels, skip, take) {
             break;
-        }
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymphoniaError::ResetRequired) => {
-                decoder.reset();
-                continue;
-            }
-            Err(SymphoniaError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(_) => break,
-        };
-        if packet.track_id() != *track_id {
-            continue;
-        }
-        match decoder.decode(&packet) {
-            Ok(audio_buf) => {
-                let pkt_channels = audio_buf.spec().channels.count().max(1);
-                if sample_buf.is_none() {
-                    sample_buf = Some(SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec()));
-                }
-                if let Some(ref mut buf) = sample_buf {
-                    buf.copy_interleaved_ref(audio_buf);
-                    let samples = buf.samples();
-                    let frames = (samples.len() / pkt_channels) as u64;
-                    let pkt_start = counter;
-                    counter += frames;
-                    if counter <= start_frame {
-                        continue; // still inside the warmup run-in
-                    }
-                    let skip = start_frame.saturating_sub(pkt_start) as usize;
-                    let take = (counter.min(end_frame).saturating_sub(pkt_start)) as usize - skip;
-                    if take == 0 {
-                        continue;
-                    }
-                    if !sink(samples, pkt_channels, skip, take) {
-                        break;
-                    }
-                }
-            }
-            Err(SymphoniaError::DecodeError(_)) => continue,
-            Err(_) => break,
         }
     }
     Ok(())
 }
 
-/// Decode frames [start_frame, end_frame) with a fresh decoder over the shared
-/// bytes, kept exactly as a straight-through decode would produce them.
+/// Decode frames [start_frame, end_frame) with a fresh decoder, kept exactly as a straight-through decode would produce them.
 /// `progressive` flushes playback batches into the source as they land (the head
 /// segment's instant-start path).
 fn decode_segment(
-    bytes: Arc<Vec<u8>>,
-    ext: &str,
+    path: &std::path::Path,
     sample_rate: u32,
     start_frame: u64,
     end_frame: u64,
@@ -1459,7 +1407,7 @@ fn decode_segment(
 ) -> Result<SegmentOut, String> {
     let mut out = SegmentOut { samples: Vec::new(), mono: Vec::new() };
     let mut removed = false;
-    decode_range(bytes, ext, sample_rate, start_frame, end_frame, cancel, &mut |samples, ch, skip, take| {
+    decode_range(path, sample_rate, start_frame, end_frame, cancel, &mut |samples, ch, skip, take| {
         append_packet_frames(samples, ch, skip, take, &mut out.samples, &mut out.mono);
         if let Some((id, shared)) = progressive {
             if out.samples.len() >= DECODE_BATCH_SIZE && !flush_decode_batch(id, &mut out.samples, shared) {
@@ -1492,17 +1440,13 @@ fn window_capacity(sample_rate: u32, src_channels: usize) -> usize {
 /// buffer built outside the lock and swapped in: the audio thread never waits on a copy.
 fn window_decode_worker(
     id: u32,
-    bytes: Arc<Vec<u8>>,
-    ext: &str,
+    path: &std::path::Path,
     channels: usize,
     sample_rate: u32,
     ctl: Arc<StreamCtl>,
     shared: &SharedState,
 ) {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::errors::Error as SymphoniaError;
-
-    let mut opened = match open_decoder(bytes, ext) {
+    let mut cursor = match PacketCursor::open(path) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("[AudioEngine] Window decoder failed to open source {}: {}", id, e);
@@ -1516,13 +1460,11 @@ fn window_decode_worker(
     let cap = window_capacity(sample_rate, src_ch);
     let mut mirror: Vec<f32> = Vec::with_capacity(cap);
     let mut base: u64 = 0;
-    let mut counter: u64 = 0;
     let mut skip_until: u64 = 0;
     let mut gen: u64 = 0;
     let mut eof = false;
     let mut batch: Vec<f32> = Vec::with_capacity(DECODE_BATCH_SIZE * 2);
     let mut mono_scratch: Vec<f32> = Vec::new();
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
 
     loop {
         // Where the playhead is, and any redirect with its generation, read together.
@@ -1552,8 +1494,8 @@ fn window_decode_worker(
             mirror.clear();
             base = target;
             skip_until = target;
-            match seek_before(&mut opened, target, sample_rate) {
-                Ok(at) => { counter = at; eof = false; }
+            match cursor.seek_before(target, sample_rate) {
+                Ok(()) => eof = false,
                 Err(e) => {
                     // Nowhere to decode from (past the end, or a demuxer that can't seek):
                     // the window ends here rather than playing the old place as the new one.
@@ -1604,51 +1546,21 @@ fn window_decode_worker(
         }
 
         // Decode one batch, abandoning it if a redirect lands meanwhile.
-        let (format, decoder, track_id, _) = &mut opened;
         while batch.len() < DECODE_BATCH_SIZE && !eof {
             if ctl.redirected.load(Ordering::Relaxed) {
                 break;
             }
-            let packet = match format.next_packet() {
-                Ok(p) => p,
-                Err(SymphoniaError::ResetRequired) => {
-                    decoder.reset();
-                    continue;
-                }
-                Err(_) => {
-                    eof = true;
-                    break;
-                }
+            let Some((samples, channels, start)) = cursor.next() else {
+                eof = true;
+                break;
             };
-            if packet.track_id() != *track_id {
+            let frames = samples.len() / channels;
+            if start + frames as u64 <= skip_until {
                 continue;
             }
-            match decoder.decode(&packet) {
-                Ok(audio_buf) => {
-                    let pkt_channels = audio_buf.spec().channels.count().max(1);
-                    if sample_buf.is_none() {
-                        sample_buf = Some(SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec()));
-                    }
-                    if let Some(ref mut buf) = sample_buf {
-                        buf.copy_interleaved_ref(audio_buf);
-                        let samples = buf.samples();
-                        let frames = (samples.len() / pkt_channels) as u64;
-                        let pkt_start = counter;
-                        counter += frames;
-                        if counter <= skip_until {
-                            continue;
-                        }
-                        let skip = skip_until.saturating_sub(pkt_start) as usize;
-                        append_packet_frames(samples, pkt_channels, skip, frames as usize - skip, &mut batch, &mut mono_scratch);
-                        mono_scratch.clear();
-                    }
-                }
-                Err(SymphoniaError::DecodeError(_)) => continue,
-                Err(_) => {
-                    eof = true;
-                    break;
-                }
-            }
+            let skip = skip_until.saturating_sub(start) as usize;
+            append_packet_frames(samples, channels, skip, frames - skip, &mut batch, &mut mono_scratch);
+            mono_scratch.clear();
         }
         if ctl.redirected.load(Ordering::Relaxed) {
             batch.clear();
@@ -1684,7 +1596,7 @@ const WAVEFORM_LIVENESS_PACKETS: u32 = 256;
 
 type WaveformPart = (Vec<f32>, u64);
 
-fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_frames: u64, shared: Arc<SharedState>) {
+fn waveform_pass(id: u32, path: &std::path::Path, sample_rate: u32, est_frames: u64, shared: Arc<SharedState>) {
     let t0 = std::time::Instant::now();
     let hop = WaveformComputer::new(sample_rate).hop_size as u64;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -1696,7 +1608,7 @@ fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_
     for w in 0..workers {
         let start = per * w as u64;
         let end = if w + 1 == workers { u64::MAX } else { per * (w as u64 + 1) };
-        let (bytes, ext, tx, stop, shared) = (Arc::clone(&bytes), ext.to_string(), tx.clone(), Arc::clone(&cancel), Arc::clone(&shared));
+        let (path, tx, stop, shared) = (path.to_path_buf(), tx.clone(), Arc::clone(&cancel), Arc::clone(&shared));
         let spawned = std::thread::Builder::new()
             .name(format!("audio-waveform-{}", w))
             .spawn(move || {
@@ -1705,7 +1617,7 @@ fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_
                 let mut scratch: Vec<f32> = Vec::new();
                 let mut frames = 0u64;
                 let mut packets = 0u32;
-                let r = decode_range(bytes, &ext, sample_rate, start, end, &stop, &mut |samples, ch, skip, take| {
+                let r = decode_range(&path, sample_rate, start, end, &stop, &mut |samples, ch, skip, take| {
                     packets += 1;
                     if packets.is_multiple_of(WAVEFORM_LIVENESS_PACKETS)
                         && !shared.sources.lock().map(|s| s.contains_key(&id)).unwrap_or(false)
@@ -1787,16 +1699,13 @@ fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_
 #[allow(clippy::too_many_arguments)]
 fn parallel_stream_decode(
     id: u32,
-    file_bytes: Vec<u8>,
-    ext: &str,
-    channels: usize,
+    path: &std::path::Path,
     sample_rate: u32,
     est_frames: u64,
     workers: usize,
     shared: &SharedState,
 ) {
     let t0 = std::time::Instant::now();
-    let bytes = Arc::new(file_bytes);
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let head_end = (PARALLEL_HEAD_SECS * sample_rate as u64).min(est_frames);
     let span = (est_frames.saturating_sub(head_end)) / workers as u64;
@@ -1807,14 +1716,13 @@ fn parallel_stream_decode(
         // The last segment runs to EOF so an estimate that undershoots never
         // truncates the file; overshooting estimates just yield empty tails.
         let end = if w + 1 == workers { u64::MAX } else { head_end + span * (w as u64 + 1) };
-        let bytes = Arc::clone(&bytes);
-        let ext = ext.to_string();
+        let path = path.to_path_buf();
         let tx = tx.clone();
         let cancel = Arc::clone(&cancel);
         std::thread::Builder::new()
             .name(format!("audio-decode-{}", w))
             .spawn(move || {
-                let r = decode_segment(bytes, &ext, sample_rate, start, end, None, &cancel);
+                let r = decode_segment(&path, sample_rate, start, end, None, &cancel);
                 let _ = tx.send((w, r));
             })
             .ok();
@@ -1825,7 +1733,7 @@ fn parallel_stream_decode(
     // sequential path's instant start.
     let mut waveform_computer = WaveformComputer::new(sample_rate);
     let mut mono_acc: Vec<f32> = Vec::new();
-    let mut head = match decode_segment(Arc::clone(&bytes), ext, sample_rate, 0, head_end, Some((id, shared)), &cancel) {
+    let mut head = match decode_segment(path, sample_rate, 0, head_end, Some((id, shared)), &cancel) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("[AudioEngine] Head decode failed for source {}: {}", id, e);
@@ -1886,7 +1794,7 @@ fn parallel_stream_decode(
         cancel.store(true, Ordering::Relaxed);
         let resume = mono_acc.len() as u64;
         let fresh_cancel = std::sync::atomic::AtomicBool::new(false);
-        match decode_segment(Arc::clone(&bytes), ext, sample_rate, resume, u64::MAX, None, &fresh_cancel) {
+        match decode_segment(path, sample_rate, resume, u64::MAX, None, &fresh_cancel) {
             Ok(mut rest) => {
                 if !flush_decode_batch(id, &mut rest.samples, shared) {
                     return;
@@ -1930,134 +1838,34 @@ fn parallel_stream_decode(
             });
         }
     }
-    let _ = channels; // layout decisions ride each packet's own spec
 }
 
 /// Sequential decode worker: decodes audio packets progressively and appends
 /// decoded samples to the source in batches. When complete, triggers FFT
 /// waveform computation and emits actual duration.
-fn sequential_stream_decode(
-    id: u32,
-    file_bytes: Vec<u8>,
-    ext: &str,
-    channels: usize,
-    sample_rate: u32,
-    shared: &SharedState,
-) {
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
-    use symphonia::core::errors::Error as SymphoniaError;
-    use symphonia::core::formats::FormatOptions;
-    use symphonia::core::io::MediaSourceStream;
-    use symphonia::core::meta::MetadataOptions;
-    use symphonia::core::probe::Hint;
-
+fn sequential_stream_decode(id: u32, path: &std::path::Path, sample_rate: u32, shared: &SharedState) {
     let t0 = std::time::Instant::now();
-
-    let cursor = std::io::Cursor::new(file_bytes);
-    let media_source = MediaSourceStream::new(Box::new(cursor), Default::default());
-
-    let mut hint = Hint::new();
-    if !ext.is_empty() {
-        hint.with_extension(ext);
-    }
-
-    let probed = match symphonia::default::get_probe()
-        .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
-    {
-        Ok(p) => p,
+    let mut cursor = match PacketCursor::open(path) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("[AudioEngine] Decode probe failed for source {}: {}", id, e);
+            eprintln!("[AudioEngine] Decoder failed to open source {}: {}", id, e);
             mark_decode_complete(id, shared);
             return;
         }
     };
 
-    let mut format = probed.format;
-    let track = match format.tracks().iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-    {
-        Some(t) => t,
-        None => {
-            eprintln!("[AudioEngine] No audio track found for source {}", id);
-            mark_decode_complete(id, shared);
-            return;
-        }
-    };
-
-    let track_id = track.id;
-    let mut decoder = match symphonia::default::get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
-    {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("[AudioEngine] Decoder creation failed for source {}: {}", id, e);
-            mark_decode_complete(id, shared);
-            return;
-        }
-    };
-
-    let mut sample_buf: Option<SampleBuffer<f32>> = None;
     let mut batch = Vec::with_capacity(DECODE_BATCH_SIZE);
-    // Thread-local accumulator for FFT: keeps all decoded samples so we can
-    // compute waveform frames incrementally without touching the engine's lock.
+    // A mono mix of everything decoded: the waveform's input and the true duration.
     let mut all_decoded = Vec::new();
-    // Incremental FFT waveform — computed alongside decoding, not after
     let mut waveform_computer = WaveformComputer::new(sample_rate);
 
-    loop {
-        let packet = match format.next_packet() {
-            Ok(p) => p,
-            Err(SymphoniaError::ResetRequired) => {
-                decoder.reset();
-                continue;
-            }
-            Err(SymphoniaError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(_) => break,
-        };
-
-        if packet.track_id() != track_id {
-            continue;
-        }
-
-        match decoder.decode(&packet) {
-            Ok(audio_buf) => {
-                if sample_buf.is_none() {
-                    sample_buf = Some(SampleBuffer::<f32>::new(
-                        audio_buf.capacity() as u64,
-                        *audio_buf.spec(),
-                    ));
-                }
-                if let Some(ref mut buf) = sample_buf {
-                    buf.copy_interleaved_ref(audio_buf);
-                    let samples = buf.samples();
-                    if channels > 1 {
-                        // Playback keeps the stereo field (front L/R on >2ch
-                        // sources); the FFT/duration accumulator stays a mono
-                        // mix. Whole frames only, so a batch flush can never
-                        // split an interleaved pair.
-                        for chunk in samples.chunks_exact(channels) {
-                            batch.push(chunk[0]);
-                            batch.push(chunk[1]);
-                            let sum: f32 = chunk.iter().sum();
-                            all_decoded.push(sum / channels as f32);
-                        }
-                    } else {
-                        batch.extend_from_slice(samples);
-                        all_decoded.extend_from_slice(samples);
-                    }
-                }
-            }
-            Err(SymphoniaError::DecodeError(_)) => continue,
-            Err(_) => break,
-        }
-
-        // Flush batch to source periodically (minimize lock contention)
+    while let Some((samples, channels, _)) = cursor.next() {
+        append_packet_frames(samples, channels, 0, samples.len() / channels, &mut batch, &mut all_decoded);
+        // Flush in batches to keep lock contention low.
         if batch.len() >= DECODE_BATCH_SIZE {
             if !flush_decode_batch(id, &mut batch, shared) {
                 return; // Source was removed, stop decoding
             }
-            // Compute FFT frames for newly available samples (incremental)
             waveform_computer.process(&all_decoded);
         }
     }
@@ -2459,9 +2267,11 @@ mod window_tests {
             wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
         });
         let shared = shared_with(&ctl);
+        let wav = std::env::temp_dir().join(format!("vector-window-{}.wav", std::process::id()));
+        std::fs::write(&wav, stamped_wav()).unwrap();
         let worker = {
-            let (shared, ctl, bytes) = (Arc::clone(&shared), Arc::clone(&ctl), Arc::new(stamped_wav()));
-            std::thread::spawn(move || window_decode_worker(1, bytes, "wav", 1, RATE, ctl, &shared))
+            let (shared, ctl, path) = (Arc::clone(&shared), Arc::clone(&ctl), wav.clone());
+            std::thread::spawn(move || window_decode_worker(1, &path, 1, RATE, ctl, &shared))
         };
         settles_at(&shared, 0);
 
@@ -2485,6 +2295,7 @@ mod window_tests {
         shared.sources.lock().unwrap().remove(&1);
         ctl.nudge();
         worker.join().unwrap();
+        let _ = std::fs::remove_file(&wav);
     }
 }
 
