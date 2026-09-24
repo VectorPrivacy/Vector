@@ -161,12 +161,14 @@ pub struct Assembled {
     pub corpus: usize,
 }
 
-#[allow(clippy::type_complexity)]
+/// `(member, joined_at_ms, is_staff, role names, invite label)`.
+pub(crate) type MemberRow = (PublicKey, Option<u64>, bool, Vec<String>, Option<String>);
+
 pub fn assemble(
     community_id_hex: &str,
     owner: &PublicKey,
     me: Option<&PublicKey>,
-    members: &[(PublicKey, Option<u64>, bool, Vec<String>, Option<String>)],
+    members: &[MemberRow],
     now_ms: u64,
 ) -> Result<Assembled, String> {
     let rows = crate::db::community::community_policy_messages(community_id_hex, caps::WINDOW_MAX_MESSAGES)?;
@@ -528,6 +530,7 @@ fn screen_at(message_at_ms: u64) -> u64 {
     message_at_ms.saturating_add(1)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn screen_message(
     community_id_hex: &str,
     owner: &PublicKey,
@@ -870,10 +873,8 @@ pub fn console_report(
                         let slot = cohorts.entry(skeleton_hash.0).or_insert((0, sample.clone()));
                         slot.0 = slot.0.max(*size as usize);
                     }
-                    Evidence::Burst { size, from, to } => {
-                        if *size > burst.0 {
-                            burst = (*size, *from, *to);
-                        }
+                    Evidence::Burst { size, from, to } if *size > burst.0 => {
+                        burst = (*size, *from, *to);
                     }
                     _ => {}
                 }

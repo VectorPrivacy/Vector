@@ -11,7 +11,7 @@
 //!     be cheaply biased — the authority-first lens is layered on by the caller via the roster);
 //!   - a **gap** (a higher version whose `prev_hash` doesn't link contiguously to what we hold) leaves
 //!     the head at the highest *contiguous* version and is reported, so the caller can fail closed for
-//! that entity and refetch the missing prereqs from the quorum (H1/M8) rather than fail open.
+//!     that entity and refetch the missing prereqs from the quorum (H1/M8) rather than fail open.
 
 use sha2::{Digest, Sha256};
 

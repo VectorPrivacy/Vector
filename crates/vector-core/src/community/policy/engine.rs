@@ -105,7 +105,7 @@ pub fn evaluate_as(
 ) -> ModerationReport {
     let mut reports: Vec<PolicyReport> =
         policies.iter().map(|p| evaluate_one(signals, p, overrides, now_ms, mode)).collect();
-    reports.sort_by(|a, b| a.policy_hash.0.cmp(&b.policy_hash.0));
+    reports.sort_by_key(|a| a.policy_hash.0);
 
     // Report-level coverage spans the UNION of every evaluated policy's clamped
     // corpus: policies declare different windows, so one field cannot describe
@@ -131,7 +131,7 @@ pub fn evaluate_as(
             ChannelCoverage { channel: *c, messages, from: if from == u64::MAX { 0 } else { from }, to }
         })
         .collect();
-    channels.sort_by(|a, b| a.channel.0.cmp(&b.channel.0));
+    channels.sort_by_key(|a| a.channel.0);
     let mut relays = signals.relays.clone();
     relays.sort_by(|a, b| a.url.as_bytes().cmp(b.url.as_bytes()));
 
@@ -313,13 +313,13 @@ fn evaluate_one(
             });
         }
     }
-    subjects.sort_by(|a, b| a.subject.0.cmp(&b.subject.0));
+    subjects.sort_by_key(|a| a.subject.0);
 
     // Citations are a SET holding exactly what retained convictions reference.
     let retained: BTreeSet<[u8; 32]> =
         subjects.iter().flat_map(|s| s.convictions.iter()).flat_map(|c| c.citations.iter()).map(|c| c.0).collect();
     all_citations.retain(|c| retained.contains(&c.id.0));
-    all_citations.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    all_citations.sort_by_key(|a| a.id.0);
     all_citations.dedup_by(|a, b| a.id == b.id);
 
     let floor = now_ms.saturating_sub(policy.window.hours.saturating_mul(3_600_000));
@@ -540,7 +540,7 @@ fn push_direct_with(
     mut citations: Vec<Citation>,
     out: &mut RuleOutcome,
 ) {
-    citations.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    citations.sort_by_key(|a| a.id.0);
     citations.dedup_by(|a, b| a.id == b.id);
     let citation_count = citations.len() as u32;
     let earliest = citations.iter().map(|c| c.at).min().unwrap_or(0);
@@ -612,7 +612,8 @@ fn content_rule(
         _ => Vec::new(),
     };
     // (subject, message) -> hits, plus the citations each produced.
-    let mut per_message: BTreeMap<([u8; 32], [u8; 32]), (u32, u64, Vec<Citation>)> = BTreeMap::new();
+    type MessageHits = (u32, u64, Vec<Citation>);
+    let mut per_message: BTreeMap<([u8; 32], [u8; 32]), MessageHits> = BTreeMap::new();
 
     for m in corpus {
         // Exempt content is barred from being CITED, but stays in every corpus
@@ -713,7 +714,7 @@ fn content_rule(
                 continue;
             }
             // The highest rung reached: rungs validate strictly ascending.
-            let Some((idx, rung)) = rungs.iter().enumerate().filter(|(_, g)| hits >= g.hits).next_back() else {
+            let Some((idx, rung)) = rungs.iter().enumerate().rfind(|(_, g)| hits >= g.hits) else {
                 continue;
             };
             if gated(shields, &subject, rule, usize::from(rung.pierces_trusted)) {
@@ -838,7 +839,7 @@ fn cohort_rule(
                     .flat_map(|(_, ms)| ms.iter().copied())
                     .filter(|m| !exempt_channels.contains(&m.channel.0))
                     .collect();
-                candidates.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+                candidates.sort_by_key(|a| a.id.0);
                 candidates.first().map(|m| m.text.clone()).unwrap_or_default()
             })
             .unwrap_or_default();
@@ -846,7 +847,7 @@ fn cohort_rule(
             .get(&key)
             .map(|a| a.keys().filter(|k| **k != author_bytes).map(|k| SubjectId(*k)).collect())
             .unwrap_or_default();
-        peers.sort_by(|a, b| a.0.cmp(&b.0));
+        peers.sort_by_key(|a| a.0);
         peers.truncate(caps::COHORT_SAMPLE_CAP);
         use sha2::Digest;
         let mut hasher = sha2::Sha256::default();
@@ -1040,7 +1041,7 @@ fn window_rule(
             _ => continue,
         };
 
-        let Some((idx, rung)) = rungs.iter().enumerate().filter(|(_, g)| hits >= g.hits).next_back() else {
+        let Some((idx, rung)) = rungs.iter().enumerate().rfind(|(_, g)| hits >= g.hits) else {
             continue;
         };
         if gated(shields, &subject, rule, usize::from(rung.pierces_trusted)) {
@@ -1080,7 +1081,7 @@ fn push_tiered(
     mut citations: Vec<Citation>,
     out: &mut RuleOutcome,
 ) {
-    citations.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+    citations.sort_by_key(|a| a.id.0);
     citations.dedup_by(|a, b| a.id == b.id);
     // Counts and timestamps come from the FULL set, so a truncated exhibit list
     // never reads as fewer offenses nor flips `retroactive`.

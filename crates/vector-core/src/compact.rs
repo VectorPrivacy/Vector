@@ -1360,7 +1360,7 @@ impl CompactMessageVec {
         for (pos, msg) in self.messages.iter().enumerate() {
             self.id_index.push((msg.id, pos as u32));
         }
-        self.id_index.sort_by(|(a, _), (b, _)| a.cmp(b));
+        self.id_index.sort_by_key(|(a, _)| *a);
     }
 
     /// Batch insert messages - optimized for different scenarios.
@@ -1413,7 +1413,7 @@ impl CompactMessageVec {
                 .map(|(i, msg)| (msg.id, base_pos + i as u32))
                 .collect();
             self.messages.extend(to_add);
-            new_index_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            new_index_entries.sort_by_key(|(a, _)| *a);
 
             // Merge sorted index entries in O(n + k) instead of O(k * n) — mirrors the
             // prepend path; a per-message binary-search-insert shifts the whole index each time.
@@ -1450,7 +1450,7 @@ impl CompactMessageVec {
                 .enumerate()
                 .map(|(i, msg)| (msg.id, i as u32))
                 .collect();
-            new_index_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            new_index_entries.sort_by_key(|(a, _)| *a);
 
             // Merge sorted index entries in O(n + k) instead of O(k * n)
             let old_index = std::mem::take(&mut self.id_index);

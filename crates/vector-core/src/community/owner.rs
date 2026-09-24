@@ -7,6 +7,7 @@
 //!   - you cannot frame an innocent npub (that requires their key to sign), and
 //!   - the binding can't be transplanted to another community (the unique id is inside the signed
 //!     payload, so an attestation for community X can't be replayed as community Y's).
+//!
 //! Members verify it against the very community id they already hold. Server-root encrypted in
 //! transit, so outsiders learn nothing; only members see who the owner is. (The community is
 //! keyless — there is no management/authority key to bind; `community_id` alone is the anchor.)

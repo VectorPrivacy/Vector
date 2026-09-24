@@ -316,7 +316,7 @@ fn list_account_npubs_in(app_data: &std::path::Path) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(entries) = std::fs::read_dir(app_data) {
         for entry in entries.flatten() {
-            if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if is_valid_npub(&name) {
                     out.push(name);
@@ -1375,7 +1375,7 @@ pub fn get_accounts() -> Result<Vec<String>, String> {
 
     if let Ok(entries) = std::fs::read_dir(app_data) {
         for entry in entries.flatten() {
-            if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+            if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with("npub1") {
                     // Check if vector.db exists

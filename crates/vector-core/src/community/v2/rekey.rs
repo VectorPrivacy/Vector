@@ -702,6 +702,7 @@ pub async fn build_rekey_chunks<S: crate::signer::VectorSigner + ?Sized>(
 /// original recipient that reads as their own removal. Disjoint indices merge as
 /// a pure union under every fetch order, and [`Rotation::is_complete`] only
 /// requires `1..=declared_first_seen`, which extras never break.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_rekey_chunk_extension<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     rotator_pk: PublicKey,

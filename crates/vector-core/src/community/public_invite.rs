@@ -76,7 +76,7 @@ pub struct PublicInviteBundle {
 
 impl PublicInviteBundle {
     pub fn is_expired(&self, now_secs: u64) -> bool {
-        self.expires_at.map_or(false, |e| now_secs >= e)
+        self.expires_at.is_some_and(|e| now_secs >= e)
     }
 }
 

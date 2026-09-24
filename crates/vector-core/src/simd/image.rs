@@ -95,7 +95,7 @@ fn downsample_neon(
                 v = vsetq_lane_u32(p1, v, 1);
                 v = vsetq_lane_u32(p2, v, 2);
                 v = vsetq_lane_u32(p3, v, 3);
-                vst1q_u32(dst_ptr.add(dst_idx) as *mut u32, v);
+                vst1q_u32(dst_ptr.add(dst_idx), v);
                 dst_idx += 4;
             }
 

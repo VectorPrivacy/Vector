@@ -145,11 +145,9 @@ pub(crate) async fn purge_one(id: &str, db_fallback: Option<(Vec<crate::types::A
         // url the ledger says another message still rides (smart-forward).
         if mine {
             let urls: Vec<String> = crate::deletion::scrub_safe_urls(&unique, id);
-            if !urls.is_empty() {
-                if crate::state::nostr_client().is_some() {
-                    if let Ok(signer) = crate::signer::active_signer() {
-                        crate::blossom::delete_blobs_best_effort(signer, urls);
-                    }
+            if !urls.is_empty() && crate::state::nostr_client().is_some() {
+                if let Ok(signer) = crate::signer::active_signer() {
+                    crate::blossom::delete_blobs_best_effort(signer, urls);
                 }
             }
         }

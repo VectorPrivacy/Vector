@@ -875,8 +875,8 @@ pub fn fold_roster(
     }
 }
 
-/// Filter a [`fold_roster`] result by the **delegation chain** → the AUTHORIZED roster. Binding
-/// + a valid signature prove an edition was *well-formed and authentic*, NOT that its signer was
+/// Filter a [`fold_roster`] result by the **delegation chain** → the AUTHORIZED roster. Binding +
+/// a valid signature prove an edition was *well-formed and authentic*, NOT that its signer was
 /// *allowed* to make it — without this layer a member could self-sign an Admin grant and have every
 /// peer fold it into their roster. Here an entry is trusted only if its signer was authorized:
 ///

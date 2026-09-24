@@ -434,7 +434,7 @@ fn breaker_tripped_at(generation: u64, url: &str) -> bool {
     with_breaker_at(generation, |map| {
         map.get(url)
             .and_then(|e| e.tripped_until)
-            .map_or(false, |t| std::time::Instant::now() < t)
+            .is_some_and(|t| std::time::Instant::now() < t)
     })
 }
 
@@ -513,7 +513,7 @@ fn disconnect_clients(clients: Vec<Client>) {
         Ok(handle) => {
             for c in clients {
                 handle.spawn(async move {
-                    let _ = c.disconnect();
+                    c.disconnect().await;
                 });
             }
         }
@@ -749,16 +749,16 @@ pub async fn fetch_relay_eose_filters(
             Err(_) => return Err(EoseFail::Deadline), // timeout is NOT EOSE
         };
         match notification {
-            RelayNotification::Event { subscription_id, event } if subscription_id == sub_id => {
-                if seen.insert(event.id) {
-                    events.push(*event);
-                }
+            RelayNotification::Event { subscription_id, event }
+                if subscription_id == sub_id && seen.insert(event.id) =>
+            {
+                events.push(*event);
             }
             RelayNotification::Message { message } => match *message {
-                RelayMessage::Event { subscription_id, event } if *subscription_id == sub_id => {
-                    if seen.insert(event.id) {
-                        events.push(event.into_owned());
-                    }
+                RelayMessage::Event { subscription_id, event }
+                    if *subscription_id == sub_id && seen.insert(event.id) =>
+                {
+                    events.push(event.into_owned());
                 }
                 RelayMessage::EndOfStoredEvents(id) if *id == sub_id => return Ok(events),
                 RelayMessage::Closed { subscription_id, .. } if *subscription_id == sub_id => {
@@ -766,9 +766,7 @@ pub async fn fetch_relay_eose_filters(
                 }
                 _ => {}
             },
-            RelayNotification::RelayStatus { status }
-                if status == nostr_sdk::prelude::RelayStatus::Shutdown =>
-            {
+            RelayNotification::RelayStatus { status: nostr_sdk::prelude::RelayStatus::Shutdown } => {
                 return Err(EoseFail::Gone);
             }
             _ => {}
@@ -805,7 +803,7 @@ impl UnionPlan {
     pub(crate) fn satisfied(&self) -> bool {
         match self.evidence {
             Evidence::Fast => self.successes >= 1,
-            Evidence::Quorum => self.successes >= (self.attempted / 2) + 1,
+            Evidence::Quorum => self.successes > (self.attempted / 2),
             Evidence::Full => self.resolved >= self.attempted,
         }
     }

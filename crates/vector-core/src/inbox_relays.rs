@@ -403,11 +403,11 @@ where
         // Periodic cleanup: remove dead Weak entries every PRUNE_INTERVAL accesses.
         // Avoids O(n) scan in global critical section on every cache miss; instead
         // amortizes cost to O(n/PRUNE_INTERVAL) per miss under heavy fan-out.
-        if PRUNE_COUNTER.fetch_add(1, Ordering::Relaxed) % PRUNE_INTERVAL == 0 {
+        if PRUNE_COUNTER.fetch_add(1, Ordering::Relaxed).is_multiple_of(PRUNE_INTERVAL) {
             locks.retain(|_, weak| Weak::strong_count(weak) > 0);
         }
 
-        let weak = locks.entry(*pubkey).or_insert_with(|| Weak::new());
+        let weak = locks.entry(*pubkey).or_default();
         // Try to upgrade the weak reference; if it fails (Arc was dropped),
         // create a new Arc and update the map.
         let key_lock = match weak.upgrade() {
@@ -570,7 +570,7 @@ pub async fn send_event_pool_first_ok(
         .filter(|(_, r)| r.capabilities().load().can_write())
         .map(|(url, _)| url.clone())
         .collect();
-    send_event_first_ok(&client, write_urls, event).await
+    send_event_first_ok(client, write_urls, event).await
 }
 
 /// Build a NIP-59 kind-1059 gift wrap from a sealed event, returning

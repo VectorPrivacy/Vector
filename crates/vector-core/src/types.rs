@@ -9,7 +9,7 @@ use std::sync::Arc;
 // Message
 // ============================================================================
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct Message {
     pub id: String,
     pub content: String,
@@ -66,35 +66,6 @@ pub struct Message {
 pub struct EmojiTag {
     pub shortcode: String,
     pub url: String,
-}
-
-impl Default for Message {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            content: String::new(),
-            replied_to: String::new(),
-            replied_to_content: None,
-            replied_to_npub: None,
-            replied_to_has_attachment: None,
-            replied_to_attachment_extension: None,
-            replied_to_emoji_tags: None,
-            preview_metadata: None,
-            attachments: Vec::new(),
-            reactions: Vec::new(),
-            at: 0,
-            expiration: None,
-            pending: false,
-            failed: false,
-            mine: false,
-            npub: None,
-            wrapper_event_id: None,
-            edited: false,
-            edit_history: None,
-            emoji_tags: Vec::new(),
-            addressed_bots: Vec::new(),
-        }
-    }
 }
 
 impl EmojiTag {
@@ -223,7 +194,7 @@ impl Message {
     pub fn mentions_me(&self) -> bool {
         crate::state::my_public_key()
             .and_then(|pk| nostr_sdk::prelude::ToBech32::to_bech32(&pk).ok())
-            .map_or(false, |my_npub| self.content.contains(&format!("@{}", my_npub)))
+            .is_some_and(|my_npub| self.content.contains(&format!("@{}", my_npub)))
     }
 
     /// Check if this message contains an `@everyone` ping.

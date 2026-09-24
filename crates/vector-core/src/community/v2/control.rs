@@ -224,7 +224,7 @@ impl ControlPlane {
         match community.control_pk {
             None => ControlPlane {
                 pk: read.pk(),
-                conv_key: read.conv_key().clone(),
+                conv_key: *read.conv_key(),
                 signer: Some(read.keys().clone()),
                 restricted: false,
             },
@@ -236,7 +236,7 @@ impl ControlPlane {
                     let s = control_signer_group_key(&cr, community.id(), community.root_epoch);
                     (s.pk() == pk).then(|| s.keys().clone())
                 });
-                ControlPlane { pk, conv_key: read.conv_key().clone(), signer, restricted: true }
+                ControlPlane { pk, conv_key: *read.conv_key(), signer, restricted: true }
             }
         }
     }
@@ -245,7 +245,7 @@ impl ControlPlane {
     pub fn legacy(group: &GroupKey) -> ControlPlane {
         ControlPlane {
             pk: group.pk(),
-            conv_key: group.conv_key().clone(),
+            conv_key: *group.conv_key(),
             signer: Some(group.keys().clone()),
             restricted: false,
         }
@@ -277,7 +277,7 @@ impl ControlPlane {
     /// fails the plane's signature check at every reader and relay.
     pub fn write_group(&self) -> Result<GroupKey, String> {
         match &self.signer {
-            Some(keys) => Ok(GroupKey::from_parts(keys.clone(), self.conv_key.clone())),
+            Some(keys) => Ok(GroupKey::from_parts(keys.clone(), self.conv_key)),
             None => Err("only community staff hold this community's write key; ask an admin to re-send your promotion".to_string()),
         }
     }
@@ -312,7 +312,7 @@ impl std::fmt::Debug for ControlPlane {
 pub fn split_write_group(control_root: &[u8; 32], community_root: &[u8; 32], community_id: &CommunityId, epoch: Epoch) -> GroupKey {
     let signer = control_signer_group_key(control_root, community_id, epoch);
     let read = control_group_key(community_root, community_id, epoch);
-    GroupKey::from_parts(signer.keys().clone(), read.conv_key().clone())
+    GroupKey::from_parts(signer.keys().clone(), *read.conv_key())
 }
 
 // ── Seal / open over the stream ──────────────────────────────────────────────

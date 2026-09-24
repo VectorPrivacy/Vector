@@ -46,7 +46,7 @@ pub fn validate_url(url: &str) -> Result<String, String> {
     if scheme != "https" && scheme != "http" {
         return Err("URL must use https:// or http://".to_string());
     }
-    if parsed.host_str().map_or(true, str::is_empty) {
+    if parsed.host_str().is_none_or(str::is_empty) {
         return Err("URL must include a host".to_string());
     }
     Ok(with_scheme.trim_end_matches('/').to_string())
@@ -350,9 +350,10 @@ pub async fn fetch_and_merge_own_list(
 /// author hex → (servers, fetched_at). Public network data keyed by FOREIGN
 /// pubkey, so it's account-agnostic and survives swaps safely. Empty lists
 /// cache too — a sender with no 10063 mustn't be re-queried per broken blob.
-static USER_SERVER_LIST_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, (Vec<String>, std::time::Instant)>>,
-> = std::sync::LazyLock::new(Default::default);
+type UserServerLists = std::collections::HashMap<String, (Vec<String>, std::time::Instant)>;
+
+static USER_SERVER_LIST_CACHE: std::sync::LazyLock<std::sync::Mutex<UserServerLists>> =
+    std::sync::LazyLock::new(Default::default);
 const USER_SERVER_LIST_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 const USER_SERVER_LIST_MAX: usize = 8;
 

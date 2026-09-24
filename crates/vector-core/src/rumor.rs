@@ -363,7 +363,7 @@ fn process_text_message(
 ///
 /// Blossom URLs typically follow the format: https://server.com/<sha256hash>[.ext]
 pub fn extract_hash_from_blossom_url(url: &str) -> Option<String> {
-    let path = url.split('/').last()?;
+    let path = url.split('/').next_back()?;
     let hash_part = path.split('.').next()?;
     if hash_part.len() == 64 && hash_part.chars().all(|c| c.is_ascii_hexdigit()) {
         Some(hash_part.to_string())
@@ -469,7 +469,7 @@ fn process_file_attachment(
     let file_name = rumor.tags
         .find_kind("name")
         .and_then(|tag| tag.content())
-        .map(|s| sanitize_filename(s))
+        .map(sanitize_filename)
         .unwrap_or_default();
 
     // Use the extension from the original filename when available (more accurate than MIME for

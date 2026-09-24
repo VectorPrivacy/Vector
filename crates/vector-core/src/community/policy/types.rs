@@ -112,6 +112,7 @@ pub enum Retroactive {
 ///  * `Indeterminate` — informational ONLY (tenure unknowable): the subject is
 ///    judged exactly as if unshielded; a consumer can tell "not trusted" from
 ///    "we could not tell".
+///
 /// Precedence when several apply: Protected > Trusted > Indeterminate > None.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -591,7 +592,7 @@ pub fn override_hash(overrides: &[Override]) -> Hash32 {
 /// framed member count, members sorted ascending.
 pub fn roster_version(owner: &SubjectId, roles: &[(Hash32, u64, BTreeSet<SubjectId>)]) -> Hash32 {
     let mut sorted: Vec<_> = roles.iter().collect();
-    sorted.sort_by(|a, b| a.0 .0.cmp(&b.0 .0));
+    sorted.sort_by_key(|a| a.0 .0);
     let mut p = Vec::new();
     frame(&mut p, &owner.0);
     frame(&mut p, &(sorted.len() as u32).to_be_bytes());

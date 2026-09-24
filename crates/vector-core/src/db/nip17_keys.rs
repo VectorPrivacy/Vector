@@ -162,8 +162,7 @@ pub fn purge_wrap_keys(wrap_event_ids: &[EventId]) -> Result<(), String> {
         return Ok(());
     }
     let conn = super::get_write_connection_guard_static()?;
-    let placeholders = std::iter::repeat("?")
-        .take(wrap_event_ids.len())
+    let placeholders = std::iter::repeat_n("?", wrap_event_ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(

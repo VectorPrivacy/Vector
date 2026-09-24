@@ -607,14 +607,14 @@ impl VectorCore {
     pub async fn send_dm(&self, to_npub: &str, content: &str) -> Result<sending::SendResult> {
         let config = SendConfig { self_send: false, ..SendConfig::headless() };
         sending::send_dm(to_npub, content, None, &config, Arc::new(NoOpSendCallback)).await
-            .map_err(|e| VectorError::Other(e))
+            .map_err(VectorError::Other)
     }
 
     /// Send a DM as a threaded reply to `replied_to` (an existing message's event id).
     pub async fn send_dm_reply(&self, to_npub: &str, replied_to: &str, content: &str) -> Result<sending::SendResult> {
         let config = SendConfig { self_send: false, ..SendConfig::headless() };
         sending::send_dm(to_npub, content, Some(replied_to), &config, Arc::new(NoOpSendCallback)).await
-            .map_err(|e| VectorError::Other(e))
+            .map_err(VectorError::Other)
     }
 
     /// Download a received attachment and decrypt it to plaintext bytes. Fetches the encrypted blob
@@ -748,7 +748,7 @@ impl VectorCore {
     pub async fn send_file(&self, to_npub: &str, file_path: &str) -> Result<sending::SendResult> {
         let path = std::path::Path::new(file_path);
         let bytes = std::fs::read(path)
-            .map_err(|e| VectorError::Io(e))?;
+            .map_err(VectorError::Io)?;
         let filename = path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file");
@@ -765,7 +765,7 @@ impl VectorCore {
             None,
             &SendConfig::default(),
             Arc::new(NoOpSendCallback),
-        ).await.map_err(|e| VectorError::Other(e))
+        ).await.map_err(VectorError::Other)
     }
 
     /// The id of our own reaction to `message_id` with `emoji`, if we already have
@@ -1390,19 +1390,18 @@ const RAID_REPORT_TTL_SECS: u64 = 90;
 /// Per-account: the verdict is derived from this account's database and its roster.
 struct RaidReportCache;
 
-#[allow(clippy::type_complexity)]
 struct PolicyReportCache;
+
+type ReportCache<T> = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<T>)>>>;
 
 /// The engine's console report, memoised like the assessor's was: evaluating
 /// decrypts a four-thousand-message window and clusters every author, so a
 /// header badge asking on every render would be a real cost.
-fn policy_report_cache(
-) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<serde_json::Value>)>>> {
+fn policy_report_cache() -> ReportCache<serde_json::Value> {
     crate::db::current_session().scoped::<PolicyReportCache, _>()
 }
 
-fn raid_report_cache(
-) -> std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, std::sync::Arc<crate::community::raid::RaidReport>)>>> {
+fn raid_report_cache() -> ReportCache<crate::community::raid::RaidReport> {
     crate::db::current_session().scoped::<RaidReportCache, _>()
 }
 
@@ -1866,9 +1865,7 @@ impl VectorCore {
         }
         let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
         // Dual-stack: mint a v2 link for a v2 community (naddr#fragment).
-        if let Some(Some(crate::community::ConcordProtocol::V2)) =
-            crate::db::community::community_protocol(&cid).ok()
-        {
+        if let Ok(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid) {
             let community = crate::db::community::load_community_v2(&cid)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -1915,9 +1912,7 @@ impl VectorCore {
             // Direct Invite is an ungateable key handoff (CORD-05 §6 — "any keyholder
             // can whisper keys"), so any member may extend one; the real access cut is
             // the rekey, not a permission on inviting.
-            if let Some(Some(crate::community::ConcordProtocol::V2)) =
-                crate::db::community::community_protocol(&cid).ok()
-            {
+            if let Ok(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid) {
                 let recipient = nostr_sdk::prelude::PublicKey::parse(invitee_npub)
                     .map_err(|e| VectorError::Other(format!("bad invitee npub: {e}")))?;
                 let client = crate::state::nostr_client().ok_or_else(|| VectorError::Other("Not connected".into()))?;
@@ -2026,7 +2021,7 @@ impl VectorCore {
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(20));
         // Dual-stack: a v2 link is retired by its 16-byte token hex (re-post the
         // coordinate as a tombstone + tombstone the 13303 entry + refresh the Registry).
-        if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+        if let Ok(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid) {
             let community = crate::db::community::load_community_v2(&cid)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -2439,7 +2434,7 @@ impl VectorCore {
             let community = crate::db::community::load_community_v2(&id)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
-            let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(&channel_id));
+            let ch = crate::community::ChannelId(crate::simd::hex::hex_to_bytes_32(channel_id));
             crate::community::v2::service::send_delete(
                 &transport, &community, &ch, message_id, crate::community::v2::kind::MESSAGE,
             )
@@ -2452,7 +2447,7 @@ impl VectorCore {
             }
             // Layer 2 — cooperative tombstone so peers hide it.
             self.publish_community_control(
-                &channel_id, stored_event::event_kind::COMMUNITY_DELETE, "", message_id, &[],
+                channel_id, stored_event::event_kind::COMMUNITY_DELETE, "", message_id, &[],
             ).await?;
         }
         // Layer 3 — best-effort attachment blob delete.
@@ -2469,7 +2464,7 @@ impl VectorCore {
         };
         let _ = crate::db::events::delete_event(message_id).await;
         traits::emit_event_json("message_removed", serde_json::json!({
-            "id": message_id, "chat_id": removed_chat.as_deref().unwrap_or(&channel_id), "reason": "deleted",
+            "id": message_id, "chat_id": removed_chat.as_deref().unwrap_or(channel_id), "reason": "deleted",
         }));
         Ok(())
     }
@@ -2736,7 +2731,7 @@ impl VectorCore {
             use crate::community::inbound;
             let mut outcomes = {
                 let mut st = state::STATE.lock().await;
-                inbound::process_channel_batch(&mut st, &events, &channel, &my_pk)
+                inbound::process_channel_batch(&mut st, events, channel, &my_pk)
             };
             let mut new = 0usize;
             // Message saves COLLECT into one batched transaction; deletes are flush barriers
@@ -2768,7 +2763,7 @@ impl VectorCore {
                         pending.push(message);
                     }
                     inbound::IncomingEvent::Removed { target_id } => {
-                        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                        crate::db::events::flush_message_batch(channel_id, &mut pending, session).await;
                         // Tombstone FIRST, exactly as the DM delete does. Dropping the row
                         // alone only hides it until the next full sync re-serves the
                         // original from a relay: nothing recorded that it was removed, so
@@ -2784,7 +2779,7 @@ impl VectorCore {
                     inbound::IncomingEvent::ReactionRemoved { reaction_id, .. } => {
                         // save_message is additive, so a revoked reaction's kind-7 row must be
                         // dropped explicitly or it resurrects on reload.
-                        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                        crate::db::events::flush_message_batch(channel_id, &mut pending, session).await;
                         let _ = crate::db::events::delete_event(reaction_id).await;
                     }
                     inbound::IncomingEvent::Presence { npub, joined, event_id, created_at, invited_by, invited_label } => {
@@ -2813,7 +2808,7 @@ impl VectorCore {
                         // community's local state but RETAIN the held epoch keys (later self-scrub). The core-level
                         // half of leaving; a client shell layers on subscription-refresh + chat-row teardown + UI.
                         // Stop the batch — the community is gone, so later same-batch writes would orphan rows.
-                        crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+                        crate::db::events::flush_message_batch(channel_id, &mut pending, session).await;
                         let _ = crate::db::community::delete_community_retain_keys(community_id);
                         break;
                     }
@@ -2822,7 +2817,7 @@ impl VectorCore {
                     }
                 }
             }
-            crate::db::events::flush_message_batch(channel_id, &mut pending, &session).await;
+            crate::db::events::flush_message_batch(channel_id, &mut pending, session).await;
             new
         })
         .await
@@ -3310,7 +3305,6 @@ impl VectorCore {
     /// from a form alone, only from a preview that named who it would catch.
     pub fn preview_community_policy(&self, community_id: &str, bytes: &str) -> Result<serde_json::Value> {
         use crate::community::v2::guestbook::GuestbookEntry;
-        use nostr_sdk::prelude::PublicKey;
         let community = Self::load_v2_if_v2(community_id)?
             .ok_or_else(|| VectorError::Other("policies require a Concord v2 community".into()))?;
         let cid_hex = crate::simd::hex::bytes_to_hex_32(&community.id().0);
@@ -3350,7 +3344,7 @@ impl VectorCore {
                 invite_label.entry(hex).or_insert_with(|| label.clone());
             }
         }
-        let members: Vec<(PublicKey, Option<u64>, bool, Vec<String>, Option<String>)> =
+        let members: Vec<crate::community::policy::harness::MemberRow> =
             crate::community::v2::service::stored_memberlist(&community)
                 .unwrap_or_default()
                 .into_iter()
@@ -3469,7 +3463,6 @@ impl VectorCore {
     /// across six runs.
     fn policy_console_report(cid_hex: &str, community: &crate::community::v2::community::CommunityV2) -> Result<std::sync::Arc<serde_json::Value>> {
         use crate::community::v2::guestbook::GuestbookEntry;
-        use nostr_sdk::prelude::PublicKey;
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -3525,7 +3518,7 @@ impl VectorCore {
             }
         }
 
-        let members: Vec<(PublicKey, Option<u64>, bool, Vec<String>, Option<String>)> =
+        let members: Vec<crate::community::policy::harness::MemberRow> =
             crate::community::v2::service::stored_memberlist(community)
                 .unwrap_or_default()
                 .into_iter()
@@ -3915,6 +3908,7 @@ impl VectorCore {
     /// and PAGES backwards until it reaches messages it already holds, then
     /// ingests through the shared pipeline. The boot volley fetches its own
     /// batches and shares only [`Self::v2_ingest_chat_page`].
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn v2_backfill_channel(
         id: &crate::community::CommunityId,
         channel_id: &str,
@@ -3934,6 +3928,7 @@ impl VectorCore {
     /// served as well as what was new. A back-page over history we already hold is
     /// new-count 0 with a non-empty fetch, so only `fetched` can answer "is there
     /// anything older" — new-count alone stops a scroll at the first known page.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn v2_backfill_channel_counted(
         id: &crate::community::CommunityId,
         channel_id: &str,
@@ -4885,7 +4880,7 @@ impl VectorCore {
         let transport = LiveTransport::with_timeout(std::time::Duration::from_secs(12));
         // Dual-stack: a v2 community dissolves at its own `community_id`-derived
         // dissolved plane (CORD-02 §9), NOT v1's control-plane roster edition.
-        if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+        if let Ok(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid) {
             let community = crate::db::community::load_community_v2(&cid)
                 .map_err(VectorError::Other)?
                 .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -4908,7 +4903,7 @@ impl VectorCore {
         // the icon/banner for every member (CORD-02 §6).
         if community_id.len() == 64 {
             let cid = CommunityId(crate::simd::hex::hex_to_bytes_32(community_id));
-            if let Some(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid).ok() {
+            if let Ok(Some(crate::community::ConcordProtocol::V2)) = crate::db::community::community_protocol(&cid) {
                 let community = crate::db::community::load_community_v2(&cid)
                     .map_err(VectorError::Other)?
                     .ok_or_else(|| VectorError::Other("v2 community not found".into()))?;
@@ -5079,7 +5074,7 @@ impl VectorCore {
             // fresh no-NIP-77 verdict skip the doomed reconcile and get a bounded
             // REQ pass below instead.
             let relay_map = client.relays().await;
-            let (all_relays, no_neg_relays): (Vec<(RelayUrl, Relay)>, Vec<(RelayUrl, Relay)>) =
+            let (all_relays, no_neg_relays): (Vec<_>, Vec<_>) =
                 relay_map.iter()
                     .map(|(url, relay)| (url.clone(), relay.clone()))
                     .partition(|(url, _)| negentropy::neg_supported_cached(url.as_str()) != Some(false));
@@ -5475,7 +5470,7 @@ impl VectorCore {
                                 )
                                 .await;
                                 if !matches!(probe, Ok(Ok(_))) {
-                                    let _ = relay.disconnect();
+                                    relay.disconnect();
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                                     let _ = relay.try_connect().timeout(crate::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
                                 }

@@ -7,14 +7,14 @@
 //!
 //!  * `none`        — verbatim.
 //!  * `fold`        — NFC → full case-fold → strip default-ignorables → NFC.
-//!                    The trailing re-normalization is required: full folding
-//!                    can denormalize (`ẞ`, `ﬁ`).
+//!    The trailing re-normalization is required: full folding
+//!    can denormalize (`ẞ`, `ﬁ`).
 //!  * `skeleton`    — `fold`, then keep only Alphabetic scalars whose
-//!                    `Numeric_Type` is None, plus the shortcode resolution
-//!                    below. Digits are one line of attacker code to vary.
+//!    `Numeric_Type` is None, plus the shortcode resolution
+//!    below. Digits are one line of attacker code to vary.
 //!  * `confusables` — `fold` then the UTS-39 mapping (Phase 2; the table is a
-//!                    bundle artifact, so it is declared and refused for now
-//!                    rather than silently approximated).
+//!    bundle artifact, so it is declared and refused for now
+//!    rather than silently approximated).
 //!
 //! Shortcode resolution belongs to `skeleton` ALONE — `fold` resolving them
 //! would change every `keyword` span in any message containing `:smile:`. Three

@@ -197,7 +197,7 @@ impl<'a> BatchingPersist<'a> {
                 return Ok(0);
             }
             // Group by chat preserving first-seen chat order + per-chat arrival order.
-            let mut groups: Vec<(String, Vec<(&Message, Option<([u8; 32], u64)>)>)> = Vec::new();
+            let mut groups: Vec<crate::db::events::ChatBatch<'_>> = Vec::new();
             for e in &drained {
                 match groups.iter_mut().find(|(c, _)| c == &e.chat_id) {
                     Some((_, v)) => v.push((&e.msg, e.wrapper)),
@@ -296,6 +296,7 @@ impl InboundEventHandler for BatchingPersist<'_> {
 }
 
 /// Result of Phase 1 (prepare_event) — everything needed for sequential commit.
+#[allow(clippy::large_enum_variant)] // boxing a public variant's payload is an API break
 pub enum PreparedEvent {
     /// Fully processed DM rumor — ready for state commit.
     Processed {
@@ -642,7 +643,7 @@ pub async fn commit_prepared_event(
             if !is_mine {
                 let blocked = {
                     let state = crate::state::STATE.lock().await;
-                    state.get_profile(&contact).map_or(false, |p| p.flags.is_blocked())
+                    state.get_profile(&contact).is_some_and(|p| p.flags.is_blocked())
                 };
                 if blocked {
                     let _ = crate::db::wrappers::save_processed_wrapper(&wrapper_event_id_bytes, wrapper_created_at, crate::db::wrappers::TRANSPORT_NIP17);
@@ -1028,10 +1029,10 @@ async fn commit_dm_message(
         // also owns the wrapper-ledger write, inside its flush transaction). On the immediate
         // path the wrapper ledgers only after a successful save: a failed save left unledgered
         // re-delivers on the next reconciliation instead of being lost.
-        if !handler.buffer_persist(contact, &msg, Some((wrapper_event_id_bytes, wrapper_created_at))) {
-            if crate::db::events::save_message(contact, &msg).await.is_ok() {
-                ledger_wrapper();
-            }
+        if !handler.buffer_persist(contact, &msg, Some((wrapper_event_id_bytes, wrapper_created_at)))
+            && crate::db::events::save_message(contact, &msg).await.is_ok()
+        {
+            ledger_wrapper();
         }
     } else {
         // STATE-level duplicate: a same-session twin owns the row; this wrapper carried

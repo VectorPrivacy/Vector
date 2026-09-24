@@ -130,8 +130,11 @@ pub fn user_agent() -> String {
 /// options. With HTTP/2 negotiated to the edges, hundreds of small fetches
 /// share one connection. Emptied by [`rebuild_shared_http_client`] when Tor
 /// flips, since a client carries the proxy it was built with.
-static CLIENTS_BY_OPTIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<(Option<std::time::Duration>, Option<std::time::Duration>, bool), reqwest::Client>>> =
+static CLIENTS_BY_OPTIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<ClientOptions, reqwest::Client>>> =
     OnceLock::new();
+
+/// `(timeout, read_timeout, follow_redirects)`.
+type ClientOptions = (Option<std::time::Duration>, Option<std::time::Duration>, bool);
 
 pub fn build_http_client_with_options(
     timeout: Option<std::time::Duration>,
@@ -829,6 +832,7 @@ pub async fn get_remote_file_size(url: &str) -> Option<u64> {
 /// launches GUI apps with a soft limit of 256; past it every socket, file and
 /// child process fails, and the first system UI to lazily load a resource
 /// bundle traps the process. Returns the new soft limit, `None` if unchanged.
+#[allow(clippy::unnecessary_cast)] // rlim_t is u32 on 32-bit Android
 pub fn raise_fd_limit() -> Option<u64> {
     #[cfg(not(unix))]
     {

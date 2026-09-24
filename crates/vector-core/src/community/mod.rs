@@ -253,7 +253,7 @@ impl Channel {
         } else {
             self.epoch_keys.clone()
         };
-        keys.sort_by(|a, b| b.0.0.cmp(&a.0.0));
+        keys.sort_by_key(|k| std::cmp::Reverse(k.0.0));
         keys
     }
 }

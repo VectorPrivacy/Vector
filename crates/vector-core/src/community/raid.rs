@@ -259,7 +259,7 @@ pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidR
         list.truncate(COHORT_SAMPLE_CAP);
         cohorts.push(Cohort { sample: sample_of.get(sk).cloned().unwrap_or_default(), size, members: list });
     }
-    cohorts.sort_by(|a, b| b.size.cmp(&a.size));
+    cohorts.sort_by_key(|c| std::cmp::Reverse(c.size));
 
     // ── Join burst: the densest run of joins within `burst_gap_secs` ─────────
     let mut joins: Vec<(u64, &str)> = signals
@@ -353,7 +353,7 @@ pub fn assess(signals: &[MemberSignals], now_secs: u64, p: &RaidParams) -> RaidR
             // Trust is checked BEFORE the cohort, so a member with real history is
             // never unticked by default. The asymmetry is deliberate: a missed raider
             // is one click to add, an evicted two-year member is not recoverable.
-            if (long_tenure && talks) || (talks && varied) {
+            if talks && (long_tenure || varied) {
                 // The row already prints the numbers; this says what they earned.
                 reasons.clear();
                 reasons.push(if long_tenure && talks {

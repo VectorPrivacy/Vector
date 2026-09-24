@@ -216,12 +216,17 @@ struct BatchRow<'a> {
     wrapper: Option<([u8; 32], u64)>,
 }
 
+/// `(wrapper_id_bytes, wrapper_created_at)` of the gift wrap a message arrived in.
+pub(crate) type WrapperStamp = ([u8; 32], u64);
+/// One chat's messages in a multi-chat batch save.
+pub(crate) type ChatBatch<'a> = (String, Vec<(&'a Message, Option<WrapperStamp>)>);
+
 /// Phase 1 of a batched save (async): resolve ids, build StoredEvents, encrypt contents.
 /// ALL id_cache lookups happen here — get_or_create can write a fresh chat/user row, so it
 /// must never run while phase 2 holds the write-connection guard.
 async fn prepare_batch_rows<'a>(
     chat_id: &str,
-    messages: &[(&'a Message, Option<([u8; 32], u64)>)],
+    messages: &[(&'a Message, Option<WrapperStamp>)],
     rows: &mut Vec<BatchRow<'a>>,
 ) -> Result<(), String> {
     let chat_int_id = super::id_cache::get_or_create_chat_id(chat_id)?;
@@ -247,8 +252,8 @@ async fn prepare_batch_rows<'a>(
     Ok(())
 }
 
-/// Phase 2 of a batched save (sync): ONE transaction for every event + attachment + reaction
-/// + wrapper-ledger row. Insert order follows slice order, preserving the rowid tiebreak
+/// Phase 2 of a batched save (sync): ONE transaction for every event + attachment + reaction +
+/// wrapper-ledger row. Insert order follows slice order, preserving the rowid tiebreak
 /// that same-timestamp pagination depends on. A poison message SKIPS (logged) rather than
 /// aborting the batch — one bad row must not lose the other 49. Returns how many messages
 /// were written.
@@ -317,7 +322,7 @@ pub async fn save_messages_batch(
         if messages.is_empty() {
             return Ok(0);
         }
-        let with_wrappers: Vec<(&Message, Option<([u8; 32], u64)>)> =
+        let with_wrappers: Vec<(&Message, Option<WrapperStamp>)> =
             messages.iter().map(|m| (*m, None)).collect();
         let mut rows = Vec::with_capacity(messages.len());
         prepare_batch_rows(chat_id, &with_wrappers, &mut rows).await?;
@@ -331,7 +336,7 @@ pub async fn save_messages_batch(
 /// gift-wrap ledger entry, committed in the SAME transaction right after its row (see
 /// `BatchRow::wrapper`). Groups keep their slice order; everything lands in ONE transaction.
 pub async fn save_messages_batch_multi(
-    groups: &[(String, Vec<(&Message, Option<([u8; 32], u64)>)>)],
+    groups: &[ChatBatch<'_>],
 ) -> Result<usize, String> {
     crate::db::scoped(async move {
         let total: usize = groups.iter().map(|(_, m)| m.len()).sum();
@@ -445,6 +450,7 @@ pub async fn save_system_event_by_id(
 /// Like [`save_system_event_by_id`] but stamps `created_at` from the event's own authenticated timestamp
 /// (clamped to not exceed local now, since the inner author sets it) so a HISTORICALLY-synced presence
 /// (join/leave) sorts at the time it happened, not at ingest-time now. `received_at` stays local now.
+#[allow(clippy::too_many_arguments)]
 pub async fn save_system_event_at(
     event_id: &str,
     conversation_id: &str,
@@ -1014,7 +1020,7 @@ pub async fn get_reply_contexts(
         return Ok(HashMap::new());
     }
 
-    let (events, edits): (Vec<(String, i32, String, Option<String>, Option<String>)>, Vec<(String, String, Option<String>)>) = {
+    let (events, edits) = {
         let conn = super::get_db_connection_guard_static()?;
 
         let placeholders: String = (0..message_ids.len())
@@ -1164,7 +1170,7 @@ pub async fn populate_reply_context(message: &mut Message) -> Result<(), String>
         return Ok(());
     }
 
-    let contexts = get_reply_contexts(&[message.replied_to.clone()]).await?;
+    let contexts = get_reply_contexts(std::slice::from_ref(&message.replied_to)).await?;
 
     if let Some(ctx) = contexts.get(&message.replied_to) {
         message.replied_to_content = Some(ctx.content.clone());
@@ -1869,7 +1875,7 @@ pub async fn compute_unread_anchor(chat_identifier: &str) -> Result<UnreadMark, 
         Some(t) => t,
         None => return Ok(UnreadMark::NoOp), // no contact message to surface
     };
-    if newest_ts.map_or(false, |n| n > target_ts) {
+    if newest_ts.is_some_and(|n| n > target_ts) {
         return Ok(UnreadMark::NoOp); // a strictly-newer own message → we spoke last
     }
 
@@ -3139,7 +3145,10 @@ mod tests {
 
 /// The stored context a pin proof needs to recover a message's wrap: its
 /// `wrapper_event_id` and the rumor's stored tags (for the epoch binding).
-pub fn get_event_wrap_context(event_id: &str) -> Result<Option<(Option<String>, Vec<Vec<String>>)>, String> {
+/// `(wrapper_event_id, rumor tags)`.
+type WrapContext = (Option<String>, Vec<Vec<String>>);
+
+pub fn get_event_wrap_context(event_id: &str) -> Result<Option<WrapContext>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let row: Option<(Option<String>, String)> = conn
         .query_row(

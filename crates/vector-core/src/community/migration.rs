@@ -184,7 +184,7 @@ pub fn open_m(held_roots: &[(u64, [u8; 32])], m_b64: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut roots: Vec<&(u64, [u8; 32])> = held_roots.iter().collect();
-    roots.sort_by(|a, b| b.0.cmp(&a.0));
+    roots.sort_by_key(|r| std::cmp::Reverse(r.0));
     for (_, key) in roots {
         if let Ok(plain) = cipher::open(key, m_b64) {
             return Some(plain);

@@ -128,6 +128,7 @@ where
 /// invalidate on `reset_session`, and a stale one signs the new account's events
 /// under the old identity.
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // boxing a public variant's payload is an API break
 pub enum ActiveSigner {
     /// Local key from the GuardedKey vault.
     Local(crate::crypto::GuardedSigner),

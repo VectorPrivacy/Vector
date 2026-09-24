@@ -90,7 +90,9 @@ static V2_FOLLOW_URGENT: LazyLock<StdMutex<HashSet<[u8; 32]>>> = LazyLock::new(|
 /// `false`), so correctness can't ride on it: whichever path runs, the follow body
 /// executes under this lock and two follows of one community can never interleave
 /// their whole-row saves. Bounded by the held-community count; reset on swap.
-static V2_FOLLOW_LOCKS: LazyLock<StdMutex<std::collections::HashMap<[u8; 32], Arc<Mutex<()>>>>> =
+type FollowLocks = std::collections::HashMap<[u8; 32], Arc<Mutex<()>>>;
+
+static V2_FOLLOW_LOCKS: LazyLock<StdMutex<FollowLocks>> =
     LazyLock::new(|| StdMutex::new(std::collections::HashMap::new()));
 
 /// The follow lock for one community (created on first use).
@@ -440,7 +442,7 @@ pub async fn refresh_subscription(client: &Client) {
                 println!(
                     "[v2-sub] poolwide {}: ok {:?} failed {:?}",
                     *out,
-                    out.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+                    out.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
                     out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
                 );
                 *pw = Some(out.value);
@@ -458,7 +460,7 @@ pub async fn refresh_subscription(client: &Client) {
             println!(
                 "[v2-sub] targeted {}: ok {:?} failed {:?}",
                 *out,
-                out.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+                out.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
                 out.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
             );
             *sub_guard = Some(out.value);
@@ -748,7 +750,7 @@ fn prioritize_by_activity(
 ) -> Vec<CommunityId> {
     let mut keyed: Vec<(u64, CommunityId)> = batch.into_iter().map(|id| (activity(&id), id)).collect();
     // Stable: equal activity keeps the order the ids arrived in.
-    keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    keyed.sort_by_key(|k| std::cmp::Reverse(k.0));
     keyed.into_iter().map(|(_, id)| id).collect()
 }
 

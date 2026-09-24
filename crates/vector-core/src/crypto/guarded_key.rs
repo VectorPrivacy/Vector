@@ -64,7 +64,10 @@ const LANE_WIDTH: usize = ARRAY_SIZE / LANE_COUNT;
 /// 128 vault arrays — all identical, all OsRng-initialized, all modified during set().
 /// Memory: 128 × 4096 × size_of::<usize>() = 4 MB on 64-bit, 2 MB on 32-bit.
 static VAULTS: [[AtomicUsize; ARRAY_SIZE]; ARRAY_COUNT] = {
+    // Array-repeat seeds for this static only; each use is a fresh copy.
+    #[allow(clippy::declare_interior_mutable_const)]
     const ZERO: AtomicUsize = AtomicUsize::new(0);
+    #[allow(clippy::declare_interior_mutable_const, clippy::large_const_arrays)]
     const ROW: [AtomicUsize; ARRAY_SIZE] = [ZERO; ARRAY_SIZE];
     [ROW; ARRAY_COUNT]
 };
@@ -373,6 +376,7 @@ impl GuardedKey {
         }
         shares[NUM_SHARES - 1] = key;
         for i in 0..NUM_SHARES - 1 {
+            #[allow(clippy::needless_range_loop)] // reads and writes two rows of one array
             for j in 0..32 {
                 shares[NUM_SHARES - 1][j] ^= shares[i][j];
             }

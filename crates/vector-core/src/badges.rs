@@ -36,8 +36,7 @@ fn unix_now() -> u64 {
 /// a timestamp inside the (half-open) event window. Pure so it's unit-testable.
 fn is_valid_fawkes_claim(content: &str, created_at: u64) -> bool {
     content == "fawkes_badge_claimed"
-        && created_at >= FAWKES_DAY_START
-        && created_at < FAWKES_DAY_END
+        && (FAWKES_DAY_START..FAWKES_DAY_END).contains(&created_at)
 }
 
 /// Fetch + validate whether `pubkey` holds the V for Vector (Guy Fawkes 2025)
@@ -448,9 +447,7 @@ pub async fn refresh_own_bug_hunter() {
     }
 
     let cached = bug_hunter_tier();
-    let new_tier = if seen_tier > cached {
-        seen_tier
-    } else if seen_tier < cached && saw_revocation {
+    let new_tier = if seen_tier > cached || (seen_tier < cached && saw_revocation) {
         seen_tier
     } else {
         cached

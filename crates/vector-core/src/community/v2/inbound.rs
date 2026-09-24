@@ -417,7 +417,7 @@ pub fn dispatch_wrap(
     // at the next epoch. Same author-set the subscription rides — one source of
     // truth ([`super::realtime::rekey_authors`]) so recognition and subscription
     // can't drift.
-    if super::realtime::rekey_authors(community).iter().any(|p| *p == wrap.pubkey) {
+    if super::realtime::rekey_authors(community).contains(&wrap.pubkey) {
         return DispatchedV2::Rekey { community_id: crate::simd::hex::bytes_to_hex_32(&community.id().0) };
     }
 

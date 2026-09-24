@@ -61,7 +61,7 @@ pub fn derive_url_topic_id(url: &str, msg_id: &str) -> String {
 /// codec exactly — the two must agree for topic tags to decode.
 pub fn base32_nopad_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut out = String::with_capacity((bytes.len() * 8 + 4) / 5);
+    let mut out = String::with_capacity((bytes.len() * 8).div_ceil(5));
     let mut buf: u64 = 0;
     let mut bits: u32 = 0;
     for &b in bytes {

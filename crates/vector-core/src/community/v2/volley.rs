@@ -158,7 +158,7 @@ pub async fn paint_all(targets: Vec<PaintTarget>) -> (Vec<(String, usize)>, Voll
                         if k == community.community_root {
                             continue;
                         }
-                        if best.map_or(true, |(be, _)| ep.0 > be.0) {
+                        if best.is_none_or(|(be, _)| ep.0 > be.0) {
                             best = Some((ep, k));
                         }
                     }

@@ -1098,7 +1098,7 @@ fn all_ascii_hex(h: &[u8]) -> bool {
 #[inline]
 pub fn hex_string_to_bytes_checked(s: &str) -> Option<Vec<u8>> {
     let h = s.as_bytes();
-    if h.len() % 2 != 0 || !all_ascii_hex(h) {
+    if !h.len().is_multiple_of(2) || !all_ascii_hex(h) {
         return None;
     }
     Some(hex_string_to_bytes(s))

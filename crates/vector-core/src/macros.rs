@@ -1,10 +1,10 @@
-/// Log macros shared across all Vector clients.
-///
-/// `log_info!`, `log_debug!`, `log_trace!` compile to no-ops in release builds.
-/// `log_warn!` always compiles in (with UTC timestamps). In ALL builds each
-/// macro is gated at runtime by the active level (see `crate::logging`): default
-/// WARN, override with `VECTOR_LOG=trace|debug|info|warn|error|off`. The level
-/// check is cheap and the message args aren't formatted when suppressed.
+//! Log macros shared across all Vector clients.
+//!
+//! `log_info!`, `log_debug!`, `log_trace!` compile to no-ops in release builds.
+//! `log_warn!` always compiles in (with UTC timestamps). In ALL builds each
+//! macro is gated at runtime by the active level (see `crate::logging`): default
+//! WARN, override with `VECTOR_LOG=trace|debug|info|warn|error|off`. The level
+//! check is cheap and the message args aren't formatted when suppressed.
 
 // Release builds strip the info/debug/trace bodies entirely, so a variable
 // referenced only inside one of these macros would go unused. `keep_used!`

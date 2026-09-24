@@ -315,6 +315,7 @@ pub fn wrap_seal_with_tags(
 /// bunker (or NIP-55) account yields wire-identical output to the local-keys
 /// path. Only the seal signature needs the identity key; the seal content
 /// (symmetric group-key encrypt, or plaintext) and the group-key wrap do not.
+#[allow(clippy::too_many_arguments)]
 pub async fn seal_and_wrap_signed<S: crate::signer::VectorSigner + ?Sized>(
     signer: &S,
     author: PublicKey,

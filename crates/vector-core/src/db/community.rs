@@ -60,13 +60,13 @@ pub fn save_community(community: &Community) -> Result<(), String> {
     let icon_json = community
         .icon
         .as_ref()
-        .map(|i| serde_json::to_string(i))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| e.to_string())?;
     let banner_json = community
         .banner
         .as_ref()
-        .map(|b| serde_json::to_string(b))
+        .map(serde_json::to_string)
         .transpose()
         .map_err(|e| e.to_string())?;
     // Atomic: the community row + all its channel rows commit together, so a crash mid-save
@@ -445,8 +445,8 @@ pub fn advance_server_root_epoch(community_id: &str, new_epoch: u64, new_root: &
 /// SAME-EPOCH convergence for the server root (concurrent re-founding heal): two BAN-holders who
 /// re-founded at the same time each sit on their OWN root at the SAME epoch. `advance_server_root_epoch`
 /// refuses to switch (its guard is strictly monotonic), so this is the sibling that REPLACES the head root
-/// at `epoch` with the deterministic winner (lowest root bytes — the caller decides). Archives the new root
-/// + swaps the head, but ONLY while we're still AT `epoch` (a later real rotation must win over a stale
+/// at `epoch` with the deterministic winner (lowest root bytes — the caller decides). Archives the new root +
+/// swaps the head, but ONLY while we're still AT `epoch` (a later real rotation must win over a stale
 /// converge). Returns whether it switched.
 pub fn converge_server_root_epoch(community_id: &str, epoch: u64, new_root: &[u8; 32]) -> Result<bool, String> {
     let conn = super::get_write_connection_guard_static()?;
@@ -1388,7 +1388,7 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
     // Member iff active, not banned, and last activity is at-or-after the last leave.
     let mut out: Vec<(String, u64)> = active
         .into_iter()
-        .filter(|(npub, at)| !banned.contains(npub) && left.get(npub).map_or(true, |l| at >= l))
+        .filter(|(npub, at)| !banned.contains(npub) && left.get(npub).is_none_or(|l| at >= l))
         .collect();
 
     // RE-ASSERT authorized members AFTER the activity/leave filter: the proven owner + every
@@ -1418,7 +1418,7 @@ pub fn community_member_activity_capped(community_id: &str, capped: bool) -> Res
             }
         }
     }
-    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out.sort_by_key(|m| std::cmp::Reverse(m.1));
     if capped {
         out.truncate(COMMUNITY_MEMBER_CAP);
     }
@@ -1752,9 +1752,10 @@ pub fn community_recent_texts(community_id: &str, limit: usize) -> Result<Vec<(S
 // coherent by write-through in `set_community_banlist` and eviction in
 // `delete_community_inner`, and cleared wholesale on account swap via
 // `clear_id_caches`. Absent entry = not yet loaded (lazy-fills from DB on first read).
-static BANLIST_CACHE: std::sync::LazyLock<
-    std::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<std::collections::HashSet<[u8; 32]>>>>,
-> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+type BanlistMap = std::collections::HashMap<String, std::sync::Arc<std::collections::HashSet<[u8; 32]>>>;
+
+static BANLIST_CACHE: std::sync::LazyLock<std::sync::RwLock<BanlistMap>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
 fn banlist_set_from_hexes(hexes: &[String]) -> std::collections::HashSet<[u8; 32]> {
     hexes.iter().filter_map(|h| crate::simd::hex::hex_to_bytes_32_checked(h)).collect()
@@ -2172,7 +2173,12 @@ pub fn get_all_edition_heads(community_id: &str) -> Result<std::collections::Has
 /// Every tracked head as `entity_hex → (epoch, version, self_hash, inner_id)` — the epoch-primary
 /// floor INCLUDING the deterministic tiebreak key, so a fold can resolve a same-version fork at the
 /// floor (converge to the lower inner id) instead of wedging on it.
-pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections::HashMap<String, (u64, u64, [u8; 32], Option<[u8; 32]>)>, String> {
+/// `(epoch, version, self_hash, inner_id)`.
+type EditionHeadFull = (u64, u64, [u8; 32], Option<[u8; 32]>);
+/// `(epoch, version, self_hash)`.
+type EditionHead = (u64, u64, [u8; 32]);
+
+pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections::HashMap<String, EditionHeadFull>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT entity_id, epoch, version, self_hash, inner_id FROM community_edition_heads WHERE community_id = ?1")
@@ -2201,7 +2207,7 @@ pub fn get_all_edition_heads_full(community_id: &str) -> Result<std::collections
     Ok(out)
 }
 
-pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collections::HashMap<String, (u64, u64, [u8; 32])>, String> {
+pub fn get_all_edition_heads_epoched(community_id: &str) -> Result<std::collections::HashMap<String, EditionHead>, String> {
     let conn = super::get_db_connection_guard_static()?;
     let mut stmt = conn
         .prepare("SELECT entity_id, epoch, version, self_hash FROM community_edition_heads WHERE community_id = ?1")
@@ -2901,7 +2907,7 @@ pub fn save_community_v2(c: &crate::community::v2::community::CommunityV2) -> Re
         tx.execute("DELETE FROM community_channels WHERE community_id=?1", params![id_hex])
             .map_err(|e| format!("prune v2 channels: {e}"))?;
     } else {
-        let placeholders = std::iter::repeat("?").take(keep.len()).collect::<Vec<_>>().join(",");
+        let placeholders = std::iter::repeat_n("?", keep.len()).collect::<Vec<_>>().join(",");
         let sql = format!("DELETE FROM community_channels WHERE community_id=? AND channel_id NOT IN ({placeholders})");
         let mut binds: Vec<String> = Vec::with_capacity(keep.len() + 1);
         binds.push(id_hex.clone());

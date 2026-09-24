@@ -322,7 +322,7 @@ impl Default for Window {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Shields {
     pub trusted: TrustedBar,
 }
@@ -364,12 +364,6 @@ impl Default for TrustedBar {
             veteran_secs: 30 * 24 * 3600,
             roles_trust: true,
         }
-    }
-}
-
-impl Default for Shields {
-    fn default() -> Self {
-        Shields { trusted: TrustedBar::default() }
     }
 }
 
@@ -579,10 +573,10 @@ impl Policy {
             // viewer-local and time-varying, so the same bytes would validate
             // for the author and fail for a mod who joined yesterday.
             match m {
-                Match::Keyword { patterns, .. } | Match::Regex { patterns, .. } => {
-                    if patterns.iter().any(|p| min_branch_literals(p) < caps::REFUSE_MIN_LITERAL_CHARS) {
-                        return Err(code::REFUSE_TOO_BROAD);
-                    }
+                Match::Keyword { patterns, .. } | Match::Regex { patterns, .. }
+                    if patterns.iter().any(|p| min_branch_literals(p) < caps::REFUSE_MIN_LITERAL_CHARS) =>
+                {
+                    return Err(code::REFUSE_TOO_BROAD);
                 }
                 // Rule types whose rung 1 is satisfiable by an arbitrary message
                 // may not refuse unless they narrow it. An allowlist-shaped

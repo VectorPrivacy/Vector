@@ -49,6 +49,8 @@ impl WrapperIdCache {
     }
 
     pub fn len(&self) -> usize { self.historical.len() + self.pending.len() }
+
+    pub fn is_empty(&self) -> bool { self.historical.is_empty() && self.pending.is_empty() }
 }
 
 impl Default for WrapperIdCache {
@@ -836,6 +838,7 @@ impl ChatState {
     /// `primary_channel` is the community's primary channel id — equal to `channel_id` on
     /// that row, and what the UI uses to render one list row per community while still
     /// holding a chat per channel.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_community_chat(
         &mut self,
         channel_id: &str,
@@ -1143,7 +1146,7 @@ impl ChatState {
             }
             if !chat.is_community() {
                 if let Some(id) = self.interner.lookup(&chat.id) {
-                    if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) {
+                    if self.get_profile_by_id(id).is_some_and(|p| p.flags.is_blocked()) {
                         continue;
                     }
                 }
@@ -1207,7 +1210,7 @@ impl ChatState {
             let is_group = chat.is_community();
             if !is_group {
                 if let Some(id) = self.interner.lookup(&chat.id) {
-                    if self.get_profile_by_id(id).map_or(false, |p| p.flags.is_blocked()) { continue; }
+                    if self.get_profile_by_id(id).is_some_and(|p| p.flags.is_blocked()) { continue; }
                 }
             } else if !chat_has_a_row(chat) {
                 continue;
@@ -1218,7 +1221,7 @@ impl ChatState {
                 if chat.last_read != [0u8; 32] && msg.id == chat.last_read { break; }
                 if is_group && msg.npub_idx != NO_NPUB {
                     if muted_senders.contains(&msg.npub_idx) { continue; }
-                    if self.get_profile_by_id(msg.npub_idx).map_or(false, |p| p.flags.is_blocked()) { continue; }
+                    if self.get_profile_by_id(msg.npub_idx).is_some_and(|p| p.flags.is_blocked()) { continue; }
                 }
                 unread_count += 1;
             }

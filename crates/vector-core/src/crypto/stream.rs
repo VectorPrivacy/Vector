@@ -37,7 +37,7 @@ pub const CANCELLED: &str = "Upload cancelled";
 /// Tell `progress` when `done` of `total` reaches a new whole percentage; false when
 /// it asks the pass to stop.
 fn report(done: u64, total: u64, reported: &mut u8, progress: &mut dyn FnMut(u8) -> bool) -> bool {
-    let pct = if total == 0 { 100 } else { (done.saturating_mul(100) / total).min(100) as u8 };
+    let pct = done.saturating_mul(100).checked_div(total).map_or(100, |p| p.min(100) as u8);
     if pct > *reported {
         *reported = pct;
         return progress(pct);

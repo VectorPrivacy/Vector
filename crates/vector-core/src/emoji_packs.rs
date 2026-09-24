@@ -408,7 +408,7 @@ pub fn parse_pack_from_event(event: &Event, my_pubkey_hex: Option<&str>) -> Opti
         return None;
     }
 
-    let is_own = my_pubkey_hex.map_or(false, |me| me == pubkey);
+    let is_own = my_pubkey_hex.is_some_and(|me| me == pubkey);
 
     Some(EmojiPack {
         id,
@@ -763,9 +763,7 @@ pub fn apply_pack_health(addr: &str, outcome: &PackFetchOutcome, now: i64) -> Re
         PackFetchOutcome::Found => (PACK_STATUS_ACTIVE as i64, 0, 0, 0),
         PackFetchOutcome::Tombstoned => (PACK_STATUS_REVOKED as i64, 0, 0, 0),
         PackFetchOutcome::CleanMiss => {
-            if status == PACK_STATUS_REVOKED as i64 {
-                (status, miss_count, first_missed_at, last_miss_counted_at)
-            } else if now - last_miss_counted_at < PACK_MISS_RATELIMIT_SECS {
+            if status == PACK_STATUS_REVOKED as i64 || now - last_miss_counted_at < PACK_MISS_RATELIMIT_SECS {
                 (status, miss_count, first_missed_at, last_miss_counted_at)
             } else {
                 let first = if miss_count == 0 { now } else { first_missed_at };
@@ -1692,7 +1690,7 @@ pub async fn fetch_subscribed_packs(
         // picker live — not only on its next open. Our own republish echoes back
         // unchanged, so this stays quiet on self-echo.
         let list_changed = load_subscriptions().unwrap_or_default() != addr_strings
-            || fetched_anchor.as_deref().map_or(false, |a| a != load_theme_slot_anchor());
+            || fetched_anchor.as_deref().is_some_and(|a| a != load_theme_slot_anchor());
 
         // Persist the full subscription list (10030-driven, or local-mirror
         // when 10030 was missing). Per-pack fetch failures don't shrink it —
@@ -1877,7 +1875,7 @@ pub async fn publish_emoji_list(client: &Client) -> Result<(), String> {
         .map_err(|e| format!("nip44 encrypt emoji list: {}", e))?;
 
     let builder = EventBuilder::new(Kind::Custom(KIND_EMOJI_LIST), content);
-    crate::sign_and_send(&client, builder).await
+    crate::sign_and_send(client, builder).await
         .map_err(|e| format!("Failed to publish emoji list (kind 10030): {}", e))?;
 
     crate::log_info!("[EmojiPacks] Published encrypted kind 10030 with {} pack subscription(s)", addrs.len());

@@ -235,7 +235,7 @@ pub async fn fetch_self_lists(
                 Some(INVITE_LIST_D_TAG) => &mut invite_ev,
                 _ => continue,
             };
-            if slot.as_ref().map_or(true, |cur| ev.created_at > cur.created_at) {
+            if slot.as_ref().is_none_or(|cur| ev.created_at > cur.created_at) {
                 *slot = Some(ev);
             }
         }

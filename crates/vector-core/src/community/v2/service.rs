@@ -485,6 +485,7 @@ fn own_echo_pin_duty(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn publish_chat<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -598,6 +599,7 @@ pub async fn fetch_channel<T: Transport + ?Sized>(
 /// limitation (the `ms` tag can't be filtered server-side).
 ///
 /// Returns everything opened, deduped by rumor id, oldest→newest.
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_channel_history<T: Transport + ?Sized>(
     transport: &T,
     community: &CommunityV2,
@@ -963,7 +965,7 @@ fn live_signers_for(list: &invite::InviteList, community_id_hex: &str, now_ms: u
     list.entries
         .iter()
         .filter(|e| e.community_id == community_id_hex && !dead.contains(e.token.as_str()))
-        .filter(|e| !e.expires_at.is_some_and(|exp| now_ms > exp))
+        .filter(|e| e.expires_at.is_none_or(|exp| now_ms <= exp))
         .filter_map(|e| Keys::parse(&e.signer_sk).ok().map(|k| k.public_key()))
         .collect()
 }
@@ -3251,7 +3253,7 @@ async fn refound_community_with<T: Transport + ?Sized>(transport: &T, community:
         let local_len = local.len();
         union.extend(local);
         let mut recipients: Vec<PublicKey> = union.into_iter().filter(|m| !removed_set.contains(&m.to_bytes())).collect();
-        if !recipients.iter().any(|p| *p == my_pk) {
+        if !recipients.contains(&my_pk) {
             recipients.push(my_pk);
         }
 
@@ -4344,7 +4346,7 @@ pub async fn retire_dead_invite<T: Transport + ?Sized>(transport: &T, community_
     if let Some(cid) = crate::simd::hex::hex_to_bytes_32_checked(community_id_hex) {
         let id = crate::community::CommunityId(cid);
         let at = now_ms();
-        if tombstone_community_list(transport, &id, &relays.to_vec(), at).await.is_err() {
+        if tombstone_community_list(transport, &id, relays, at).await.is_err() {
             // The row is already gone locally; make sure the suppression still
             // reaches sibling devices once the relays cooperate.
             tombstone_community_list_durable(id, relays.to_vec(), at);
@@ -6156,7 +6158,6 @@ pub async fn create_private_channel_with_id<T: Transport + ?Sized>(transport: &T
     .await
 }
 
-/// Tombstone a channel (CORD-03 §2, `deleted: true`) + drop it locally. Reader-gated by
 // ── Receiving a key vend (CORD-03 "delivered on grant") ──────────────────────
 
 /// What a client should do with a vended Private-Channel key right now.
@@ -7245,7 +7246,7 @@ async fn adopt_my_control_wrap(community: &CommunityV2, editions: &[ParsedEditio
         .iter()
         .filter(|e| e.vsk == vsk::GRANT && e.entity_id == my_eid)
         .collect();
-    candidates.sort_by(|a, b| b.version.cmp(&a.version));
+    candidates.sort_by_key(|e| std::cmp::Reverse(e.version));
     for ed in candidates {
         let Some(wrap_b64) = super::roles::parse_grant_control_wrap(&ed.content) else { continue };
         // The granter is the edition's sealed author — the pairwise key's other
@@ -7309,7 +7310,8 @@ struct ControlFold {
 }
 
 /// Per-entity floor: `(version, self_hash, inner_id)` of the committed head.
-type Floors = std::collections::HashMap<String, (u64, [u8; 32], Option<[u8; 32]>)>;
+type Floor = (u64, [u8; 32], Option<[u8; 32]>);
+type Floors = std::collections::HashMap<String, Floor>;
 
 /// Fold owner-authored control editions into an updated community using the
 /// PERSISTED per-entity version floor (refuse-downgrade). Per entity, fold with
@@ -7326,6 +7328,7 @@ type Floors = std::collections::HashMap<String, (u64, [u8; 32], Option<[u8; 32]>
 ///   - BOOTSTRAPPING (`floor == 0` — a fresh joiner, or a fresh epoch after a
 ///     Refounding, since the caller epoch-filters the floor) takes the highest
 ///     signed head (author already owner-filtered).
+///
 /// This matches CORD-04 §1 and mirrors v1's `fold_roster`. Epoch-filtering makes a
 /// compaction at a new epoch auto-bootstrap, converging with Armada's acceptance of
 /// a compacted head across a dangling `prev` (Armada doesn't persist a floor, so a
@@ -7437,7 +7440,7 @@ fn apply_control_fold(community: &CommunityV2, editions: &[ParsedEdition], floor
 /// head, what Armada shows across a compaction's dangling prev); adopt the chain-
 /// anchored head, paging on an upper gap; converge a same-version fork at the floor to
 /// the lower-inner-id winner; and fail closed otherwise.
-fn fold_head(fold_eds: &[version::Edition], floor: Option<&(u64, [u8; 32], Option<[u8; 32]>)>) -> (Option<usize>, bool) {
+fn fold_head(fold_eds: &[version::Edition], floor: Option<&Floor>) -> (Option<usize>, bool) {
     let floor_v = floor.map(|f| f.0).unwrap_or(0);
     if floor_v == 0 {
         return (version::bootstrap_head(fold_eds, 0), false);
@@ -8128,7 +8131,7 @@ pub(crate) fn channel_rekey_addressing_roots(cur_root: [u8; 32], cid_hex: &str) 
     let mut roots: Vec<[u8; 32]> = vec![cur_root];
     let mut archived = crate::db::community::held_epoch_keys(cid_hex, crate::community::SERVER_ROOT_SCOPE_HEX)
         .unwrap_or_default();
-    archived.sort_by(|a, b| b.0 .0.cmp(&a.0 .0));
+    archived.sort_by_key(|a| std::cmp::Reverse(a.0 .0));
     for (_, r) in archived {
         if !roots.contains(&r) {
             roots.push(r);
@@ -8602,7 +8605,7 @@ pub async fn follow_rekeys<T: Transport + ?Sized>(
 
             for (cid, held_key, held_epoch, next) in fan {
                 let ch_hex = crate::simd::hex::bytes_to_hex_32(&cid.0);
-                let mut batches: Vec<(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)> = Vec::new();
+                let mut batches: Vec<RekeyBatch> = Vec::new();
                 for ri in 0..addressing_roots.len() {
                     if let Some(chunks) = prefetched.remove(&(cid.0, ri)) {
                         batches.push((chunks, held_key.map(|k| (held_epoch, k))));
@@ -8904,6 +8907,9 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
     Ok(out)
 }
 
+/// One addressing root's chunks, with the key held at that scope as `(epoch, key)`.
+type RekeyBatch = (Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>);
+
 /// Decide how a scope advances from per-addressing-root chunk batches (pure). Each
 /// batch pairs the chunks fetched under one root with the continuity to demand of
 /// them: a rotation qualifies when it's rotator-authorized (`rotator_ok`),
@@ -8917,8 +8923,9 @@ async fn fetch_rekey_chunks<T: Transport + ?Sized>(
 /// came from a rotator who may remove ME (`rotator_may_remove_me`, the CORD-06
 /// strict-outrank rule) — else Stay; for a keyless holder they merely advance the
 /// scan cursor (any bit-holder's real rotation is scan progress, never a loss).
+#[allow(clippy::too_many_arguments)]
 async fn advance_scope<S: crate::signer::VectorSigner + ?Sized>(
-    batches: &[(Vec<rekey::RekeyChunk>, Option<(Epoch, [u8; 32])>)],
+    batches: &[RekeyBatch],
     scope: RekeyScope,
     community_id: &crate::community::CommunityId,
     rotator_ok: &(dyn Fn(&PublicKey) -> bool + Sync),

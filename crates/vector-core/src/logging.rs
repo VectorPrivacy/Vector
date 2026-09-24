@@ -80,8 +80,9 @@ pub fn set_log_level_str(s: &str) -> bool {
 // registers a sink at startup and failure-class messages route through it.
 // Unregistered (CLI/SDK/tests) = stderr only, exactly as before.
 
-static PERSIST_SINK: std::sync::OnceLock<Box<dyn Fn(&str) + Send + Sync>> =
-    std::sync::OnceLock::new();
+type PersistSink = Box<dyn Fn(&str) + Send + Sync>;
+
+static PERSIST_SINK: std::sync::OnceLock<PersistSink> = std::sync::OnceLock::new();
 
 /// Register the shell's persistent-log writer. First registration wins.
 pub fn set_persist_sink(sink: impl Fn(&str) + Send + Sync + 'static) {

@@ -168,9 +168,9 @@ pub async fn control_probe_coordinates() -> (Vec<String>, HashMap<String, String
             relays.insert(r.clone());
         }
         let mut add = |coord: String| {
-            if !map.contains_key(&coord) {
-                coords.push(coord.clone());
-                map.insert(coord, cid.clone());
+            if let std::collections::hash_map::Entry::Vacant(slot) = map.entry(coord) {
+                coords.push(slot.key().clone());
+                slot.insert(cid.clone());
             }
         };
         add(roster::control_pseudonym(&community.server_root_key, &community.id, community.server_root_epoch));

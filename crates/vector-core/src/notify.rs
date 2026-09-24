@@ -266,11 +266,11 @@ pub fn everyone_allowed(community_id: Option<&str>) -> bool {
     let globally_muted = crate::db::settings::get_sql_setting("notif_mute_everyone".to_string())
         .ok()
         .flatten()
-        .map_or(false, |v| v == "true");
+        .is_some_and(|v| v == "true");
     if globally_muted {
         return false;
     }
-    !community_id.map_or(false, |cid| prefs(cid).suppress_everyone.unwrap_or(false))
+    !community_id.is_some_and(|cid| prefs(cid).suppress_everyone.unwrap_or(false))
 }
 
 /// Walk the chain for one scope. `community_id` is the channel's community, or
@@ -324,7 +324,7 @@ pub fn muted_for_chat(chat: &crate::chat::Chat) -> bool {
 /// Whether a chat's COMMUNITY is itself silenced, rather than this one room inside it.
 /// A surface that stands for the whole space must not grey because one channel is quiet.
 pub fn community_muted_for_chat(chat: &crate::chat::Chat) -> bool {
-    community_of(chat).map_or(false, |id| prefs(id).muted_at(now_ms()))
+    community_of(chat).is_some_and(|id| prefs(id).muted_at(now_ms()))
 }
 
 /// The predicate the older `vector/mutes` projection is both WRITTEN and READ

@@ -308,6 +308,7 @@ where
 
 /// Upload to a single Blossom server with progress callbacks.
 /// `retry_count` defaults to 0; `retry_spacing` defaults to 1s.
+#[allow(clippy::too_many_arguments)]
 pub async fn upload_blob_with_progress<T>(
     signer: T,
     server_url: &Url,
@@ -665,7 +666,7 @@ where
     let upload_url = server_url.join("upload")
         .map_err(|e| UploadFailure::Other(format!("Invalid server URL: {}", e)))?;
 
-    let hash = Sha256Hash::hash(&*file_data);
+    let hash = Sha256Hash::hash(&file_data);
     let total_size = file_data.len() as u64;
 
     let auth_header = build_auth_header(&signer, hash).await.map_err(UploadFailure::Other)?;

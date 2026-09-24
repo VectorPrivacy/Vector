@@ -206,9 +206,7 @@ pub fn list_for_server(server_url: &str) -> Result<Vec<CapabilityEntry>, String>
         })
     }).map_err(|e| format!("Query failed: {}", e))?;
     let mut out = Vec::new();
-    for r in rows {
-        if let Ok(entry) = r { out.push(entry); }
-    }
+    for entry in rows.flatten() { out.push(entry); }
     Ok(out)
 }
 
@@ -387,10 +385,8 @@ fn load_cache_for(servers: &[String], mime: &str, is_encrypted: bool) -> Result<
         }))
     }).map_err(|e| format!("Query failed: {}", e))?;
     let mut out = HashMap::new();
-    for r in rows {
-        if let Ok((url, state)) = r {
-            out.insert(url, state);
-        }
+    for (url, state) in rows.flatten() {
+        out.insert(url, state);
     }
     Ok(out)
 }

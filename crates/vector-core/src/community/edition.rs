@@ -102,6 +102,7 @@ impl AuthorityCitation {
 /// signature is the authorship proof. `entity_id` is the entity's 32-byte id, `prev_hash` is the
 /// previous edition's [`version::edition_hash`] (`None` for the first edition), `content` is the
 /// entity payload JSON, and `created_at_secs` is the authored time (the version-fold tiebreak).
+#[allow(clippy::too_many_arguments)]
 pub fn build_edition_inner(
     author: PublicKey,
     vsk: &str,

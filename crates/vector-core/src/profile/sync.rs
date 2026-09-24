@@ -328,7 +328,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
 
     match fetch_result {
         Ok(meta) => {
-            if meta.is_some() {
+            if let Some(meta) = meta {
                 let save_data = {
                     let mut state = STATE.lock().await;
                     let id = match state.interner.lookup(&npub) {
@@ -361,7 +361,7 @@ pub async fn load_profile(npub: String, handler: &dyn ProfileSyncHandler) -> boo
                         }
 
                         // Update metadata
-                        let metadata_changed = profile.from_metadata(meta.unwrap());
+                        let metadata_changed = profile.from_metadata(meta);
 
                         // Update timestamp
                         profile.last_updated = secs_to_compact(

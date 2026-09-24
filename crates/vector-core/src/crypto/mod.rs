@@ -92,7 +92,7 @@ mod hex {
     }
 
     pub fn decode(hex: &str) -> Result<Vec<u8>, String> {
-        if hex.len() % 2 != 0 {
+        if !hex.len().is_multiple_of(2) {
             return Err("Odd-length hex string".to_string());
         }
         // SIMD-validated decode (NEON/SSE2 in-register hex validation). Runs on every message read
@@ -726,10 +726,9 @@ fn is_all_lowercase_hex(bytes: &[u8]) -> bool {
 /// Encrypt a string using ENCRYPTION_KEY vault (ChaCha20-Poly1305).
 /// If `password` is Some, derives a key from it instead.
 pub async fn maybe_encrypt_inner(mut input: String, password: Option<String>) -> String {
-    let mut key: [u8; 32] = if password.is_none() {
-        crate::state::ENCRYPTION_KEY.get().expect("Encryption key must be set")
-    } else {
-        hash_pass(&password.unwrap()).await
+    let mut key: [u8; 32] = match password {
+        None => crate::state::ENCRYPTION_KEY.get().expect("Encryption key must be set"),
+        Some(password) => hash_pass(&password).await,
     };
 
     let mut rng = rand::thread_rng();

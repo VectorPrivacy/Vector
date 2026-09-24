@@ -323,6 +323,7 @@ fn spawn_self_send(client: Client, my_pk: PublicKey, rumor: UnsignedEvent) {
 /// ephemeral key is persisted via `db::nip17_keys::store_wrap_key`
 /// BEFORE the first publish — a wrap can land without us ever seeing
 /// the OK, and the user must still be able to NIP-09 it later.
+#[allow(clippy::too_many_arguments)]
 async fn retry_send_gift_wrap(
     client: &Client,
     receiver: &PublicKey,
@@ -403,7 +404,9 @@ async fn retry_send_gift_wrap(
         }
         let confirm_ref = confirm.as_ref().unwrap();
 
-        if targets.is_none() {
+        if let Some(t) = targets.as_ref() {
+            crate::inbox_relays::reconnect_gift_wrap_targets(t).await;
+        } else {
             let t = crate::inbox_relays::resolve_gift_wrap_targets(client, receiver).await;
             // First send only: persist the wrap key (NIP-09 delete) AND retain
             // the exact wrap event + rumor (byte-identical resend on manual
@@ -428,8 +431,6 @@ async fn retry_send_gift_wrap(
                 }
             }
             targets = Some(t);
-        } else {
-            crate::inbox_relays::reconnect_gift_wrap_targets(targets.as_ref().unwrap()).await;
         }
         let targets_ref = targets.as_ref().unwrap();
 
@@ -543,6 +544,7 @@ async fn retry_send_gift_wrap(
 
 /// Success epilogue shared by every confirmed path in the retry loop:
 /// finalize the pending message, notify, persist, fire the self-send.
+#[allow(clippy::too_many_arguments)]
 async fn finalize_gift_wrap_sent(
     client: &Client,
     my_pk: PublicKey,
@@ -770,6 +772,7 @@ pub async fn resend_failed_dm(
 /// Send a NIP-17 gift-wrapped file attachment DM.
 ///
 /// Flow: hash → save locally → pending → encrypt → upload → build Kind 15 rumor → gift-wrap + send.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_file_dm(
     receiver_npub: &str,
     file_bytes: Arc<Vec<u8>>,
@@ -884,8 +887,6 @@ pub async fn seal_or_reuse(
     Ok(sealed)
 }
 
-/// [`send_file_dm_with_meta`] from either source.
-#[allow(clippy::too_many_arguments)]
 /// Mark a pending file message failed (in state, in the UI, on disk) and hand back `err`.
 async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str, pending_id: &str, err: String) -> String {
     let failed_msg = {
@@ -902,6 +903,8 @@ async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str,
     err
 }
 
+/// [`send_file_dm_with_meta`] from either source.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_file_dm_from(
     receiver_npub: &str,
     source: FileSource,

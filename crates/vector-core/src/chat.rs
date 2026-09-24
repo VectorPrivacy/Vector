@@ -239,7 +239,7 @@ impl Chat {
 
     pub fn is_dm_with(&self, npub: &str, interner: &NpubInterner) -> bool {
         matches!(self.chat_type, ChatType::DirectMessage)
-            && interner.lookup(npub).map_or(false, |h| self.participants.contains(&h))
+            && interner.lookup(npub).is_some_and(|h| self.participants.contains(&h))
     }
 
     pub fn is_community(&self) -> bool { matches!(self.chat_type, ChatType::Community) }
@@ -265,7 +265,7 @@ impl Chat {
     }
 
     pub fn has_participant(&self, npub: &str, interner: &NpubInterner) -> bool {
-        interner.lookup(npub).map_or(false, |h| self.participants.contains(&h))
+        interner.lookup(npub).is_some_and(|h| self.participants.contains(&h))
     }
 
     pub fn get_active_typers(&self, interner: &NpubInterner) -> Vec<String> {

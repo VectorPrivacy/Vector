@@ -77,7 +77,7 @@ impl CacheStats {
 
     /// Check if we should log (every N inserts)
     pub fn should_log(&self, interval: u64) -> bool {
-        self.insert_count > 0 && self.insert_count % interval == 0
+        self.insert_count > 0 && self.insert_count.is_multiple_of(interval)
     }
 }
 

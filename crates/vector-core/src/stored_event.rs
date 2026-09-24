@@ -79,8 +79,8 @@ pub mod event_kind {
     // 3307 is RETIRED. Never reuse the number.
     /// Cooperative kick: an inner directive signed by a `KICK`-permissioned member, naming a
     /// target member (content = target hex) and carrying the actor's `vac` authority citation. NOT a
-    /// rekey and NOT folded — soft removal. On receipt the TARGET self-removes (drops the community keys
-    /// + wipes local chat data, like a leave); peers drop the target from their observed member list. A
+    /// rekey and NOT folded — soft removal. On receipt the TARGET self-removes (drops the community keys +
+    /// wipes local chat data, like a leave); peers drop the target from their observed member list. A
     /// target that ignores it (malicious) is escalated to a BAN (the cryptographic rekey).
     pub const COMMUNITY_KICK: u16 = 3309;
     /// Control-plane authority entity (keyless/real-npub model): a per-entity append

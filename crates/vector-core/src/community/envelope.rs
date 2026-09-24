@@ -179,6 +179,7 @@ pub fn build_inner_event(
 /// the replied-to message (3300), the reacted-to message (3301), or the edited message
 /// (3302). The inner kind is mirrored to the outer on seal, and the receiver enforces the
 /// binding triad (kind/channel/epoch).
+#[allow(clippy::too_many_arguments)]
 pub fn build_inner_typed(
     author: PublicKey,
     channel_id: &ChannelId,
@@ -196,6 +197,7 @@ pub fn build_inner_typed(
 /// used for NIP-92 `imeta` attachment tags (a 3300 message mixing a caption with N files, via
 /// `attachments::attachment_to_imeta`). They are added before signing, so the inner signature
 /// covers them; readers pick out what they need by exact tag name.
+#[allow(clippy::too_many_arguments)]
 pub fn build_inner_full(
     author: PublicKey,
     channel_id: &ChannelId,

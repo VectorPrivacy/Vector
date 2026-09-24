@@ -9,7 +9,7 @@
 //! Each blob is:
 //! - **located** by `recipient_pseudonym(pairwise_secret, scope, epoch)`: an opaque tag only the
 //!   sender↔recipient pair can compute, so a recipient jumps straight to their own blob (no
-//! trial-decryption) and a removed member can't even find a slot for a pair they're not in; and
+//!   trial-decryption) and a removed member can't even find a slot for a pair they're not in; and
 //! - **wrapped** under the same pairwise secret via NIP-44 v2 (`cipher`), so only that recipient
 //!   decrypts it.
 //!

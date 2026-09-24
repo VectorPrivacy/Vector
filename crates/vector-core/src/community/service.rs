@@ -1318,7 +1318,7 @@ pub async fn delete_message<T: Transport + ?Sized>(
 /// - if we already OWN a Community with this id, refuse (a member-view save would clobber
 ///   our owner state);
 /// - if we already hold it as a member under a DIFFERENT server root, refuse —
-/// `community_id` is unauthenticated random bytes, so a hostile bundle reusing
+///   `community_id` is unauthenticated random bytes, so a hostile bundle reusing
 ///   a known id must not be able to swap out our channel keys / authority / relays.
 ///
 /// `std::sync::Arc<crate::db::Session>`-gated: the accept may straddle a relay-fetch in the caller, and the
@@ -1661,7 +1661,7 @@ pub async fn fetch_public_invite<T: Transport + ?Sized>(
             },
             Err(super::public_invite::PublicInviteError::Revoked) => {
                 let at = ev.created_at.as_secs();
-                if revoked_at.map_or(true, |r| at > r) { revoked_at = Some(at); }
+                if revoked_at.is_none_or(|r| at > r) { revoked_at = Some(at); }
             }
             Err(_) => {} // impostor / junk / undecryptable — ignore
         }
@@ -1714,7 +1714,7 @@ pub async fn revoke_public_invite<T: Transport + ?Sized>(
         }
         let my_locators_before: Vec<String> = crate::db::community::list_public_invites(&cid)?
             .iter()
-            .filter(|r| r.expires_at.map_or(true, |e| (e as u64) > now))
+            .filter(|r| r.expires_at.is_none_or(|e| (e as u64) > now))
             .map(|r| public_invite::locator_hex(&crate::simd::hex::hex_to_bytes_32(&r.token)))
             .collect();
         // B1 fix: refresh the aggregate from relays FIRST, so the privatize decision sees OTHER creators'
@@ -2059,7 +2059,8 @@ async fn fetch_and_apply_metadata_inner<T: Transport + ?Sized>(
         // (entity_hex, version, self_hash, inner_id, is_converge) of each edition applied — written AFTER a
         // successful save. `is_converge` routes a same-version fork-resolution to converge_edition_head; a
         // strictly-higher version is a plain advance.
-        let mut head_updates: Vec<(String, u64, [u8; 32], [u8; 32], bool)> = Vec::new();
+        type HeadUpdate = (String, u64, [u8; 32], [u8; 32], bool);
+        let mut head_updates: Vec<HeadUpdate> = Vec::new();
 
         // Decide whether a folded display head should apply, and how. A strictly-higher version ADVANCES the
         // refuse-downgrade floor. An equal version with a DIFFERENT, lower-inner-id edition CONVERGES a
@@ -2173,7 +2174,7 @@ async fn republish_my_invite_links<T: Transport + ?Sized>(
         .unwrap_or(0);
     let locators: Vec<String> = crate::db::community::list_public_invites(&cid)?
         .iter()
-        .filter(|r| r.expires_at.map_or(true, |e| (e as u64) > now))
+        .filter(|r| r.expires_at.is_none_or(|e| (e as u64) > now))
         .map(|r| public_invite::locator_hex(&crate::simd::hex::hex_to_bytes_32(&r.token)))
         .collect();
     publish_my_invite_links(transport, community, &locators).await?;
@@ -2501,8 +2502,8 @@ fn mint_or_reuse_rotation_key(cid: &str, scope_id: &str, epoch: u64) -> Result<z
 }
 
 /// Publish a rotation's per-recipient blobs as one OR MORE 3303 events, SPLIT into chunks of
-/// `MAX_REKEY_BLOBS` so each stays under the relay size limit (e.g. 200 recipients → a 120-blob event
-/// + an 80-blob event). All chunks share the SAME address (the builder derives it from scope/epoch, not
+/// `MAX_REKEY_BLOBS` so each stays under the relay size limit (e.g. 200 recipients → a 120-blob event +
+/// an 80-blob event). All chunks share the SAME address (the builder derives it from scope/epoch, not
 /// the blobs) and carry the SAME new key, so a recipient finds + recovers their key from whichever chunk
 /// holds their blob. Each chunk is published durably; FAIL-FAST if a chunk reaches no relay (the caller
 /// leaves its head unadvanced; because the key is persisted + reused on retry, re-publishing carries the
@@ -2977,6 +2978,7 @@ const MAX_REKEY_CATCHUP_ROUNDS: usize = 64;
 /// Converge DOWN only: a held epoch is re-keyed only to a sibling STRICTLY lower than the key it already
 /// holds, so a flaky round that returns just the higher sibling can't re-fork a converged epoch. Epochs I do
 /// NOT hold are left to the gap-fill / forward walk (recovery via `apply`, not a same-epoch swap).
+#[allow(clippy::too_many_arguments)]
 async fn heal_channel_fork_epochs<T: Transport + ?Sized>(
     transport: &T,
     community: &Community,
@@ -3403,7 +3405,7 @@ pub async fn catch_up_server_root<T: Transport + ?Sized>(
                     continue;
                 }
                 if let Ok(Some(root)) = peek_my_server_root(p) {
-                    if best.as_ref().map_or(true, |(_, br)| root < *br) {
+                    if best.as_ref().is_none_or(|(_, br)| root < *br) {
                         best = Some((p, root));
                     }
                 }
