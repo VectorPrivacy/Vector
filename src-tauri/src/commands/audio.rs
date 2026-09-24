@@ -154,9 +154,15 @@ pub async fn get_audio_metadata(path: String) -> Result<Option<AudioMetadata>, S
             format!("data:{};base64,{}", mime_str, b64)
         });
 
-        let lyrics = crate::lyrics::read(&path, &tagged_file);
+        // An MP3's raw ID3 tag carries what the generic tag drops (SYLT, CHAP): read it once.
+        let id3 = path.to_ascii_lowercase().ends_with(".mp3").then(|| {
+            use lofty::file::AudioFile;
+            let mut file = std::fs::File::open(&path).ok()?;
+            lofty::mpeg::MpegFile::read_from(&mut file, lofty::config::ParseOptions::new()).ok()?.id3v2().cloned()
+        }).flatten();
+        let lyrics = crate::lyrics::read(&tagged_file, id3.as_ref());
         let year = tag.date().map(|d| d.year);
-        let chapters = crate::chapters::read(&path, &tagged_file);
+        let chapters = crate::chapters::read(&path, &tagged_file, id3.as_ref());
 
         // Only return if there's something useful to display
         if title.is_none() && cover_art.is_none() && lyrics.is_none() && chapters.is_empty() {

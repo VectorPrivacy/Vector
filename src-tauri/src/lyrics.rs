@@ -204,10 +204,11 @@ pub fn from_sylt(entries: &[(u32, String)]) -> Option<Lyrics> {
 }
 
 /// Everything a file carries, synchronised lyrics first.
-pub fn read(path: &str, tagged: &lofty::file::TaggedFile) -> Option<Lyrics> {
+/// `id3` is an MP3's raw tag, read once by the caller for this and the chapters.
+pub fn read(tagged: &lofty::file::TaggedFile, id3: Option<&lofty::id3::v2::Id3v2Tag>) -> Option<Lyrics> {
     use lofty::file::TaggedFileExt;
     use lofty::tag::ItemKey;
-    if let Some(sylt) = read_sylt(path) {
+    if let Some(sylt) = id3.and_then(read_sylt) {
         return Some(sylt);
     }
     let mut best: Option<Lyrics> = None;
@@ -225,17 +226,8 @@ pub fn read(path: &str, tagged: &lofty::file::TaggedFile) -> Option<Lyrics> {
 }
 
 /// ID3v2's SYLT, which lofty keeps as raw bytes; only millisecond stamps can be followed.
-fn read_sylt(path: &str) -> Option<Lyrics> {
-    use lofty::config::ParseOptions;
-    use lofty::file::AudioFile;
+fn read_sylt(tag: &lofty::id3::v2::Id3v2Tag) -> Option<Lyrics> {
     use lofty::id3::v2::{Frame, SynchronizedTextFrame, TimestampFormat};
-    let lower = path.to_ascii_lowercase();
-    if !lower.ends_with(".mp3") {
-        return None;
-    }
-    let mut file = std::fs::File::open(path).ok()?;
-    let mpeg = lofty::mpeg::MpegFile::read_from(&mut file, ParseOptions::new()).ok()?;
-    let tag = mpeg.id3v2()?;
     for frame in tag {
         if frame.id_str() != "SYLT" {
             continue;

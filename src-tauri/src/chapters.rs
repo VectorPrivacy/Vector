@@ -84,13 +84,8 @@ pub fn parse_chap(body: &[u8], v24: bool) -> Option<Chapter> {
     Some(Chapter { start_ms: start, end_ms: None, title })
 }
 
-fn read_id3(path: &str) -> Vec<Chapter> {
-    use lofty::config::ParseOptions;
-    use lofty::file::AudioFile;
+fn read_id3(tag: &lofty::id3::v2::Id3v2Tag) -> Vec<Chapter> {
     use lofty::id3::v2::{Frame, Id3v2Version};
-    let Ok(mut file) = std::fs::File::open(path) else { return Vec::new() };
-    let Ok(mpeg) = lofty::mpeg::MpegFile::read_from(&mut file, ParseOptions::new()) else { return Vec::new() };
-    let Some(tag) = mpeg.id3v2() else { return Vec::new() };
     let v24 = matches!(tag.original_version(), Id3v2Version::V4);
     let chapters = tag
         .into_iter()
@@ -189,11 +184,12 @@ fn read_flac_cues(path: &str) -> Vec<Chapter> {
 }
 
 /// Every source a file might carry, most descriptive first; empty when it is one track.
-pub fn read(path: &str, tagged: &lofty::file::TaggedFile) -> Vec<Chapter> {
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".mp3") {
-        return read_id3(path);
+/// `id3` is an MP3's raw tag, read once by the caller for this and the lyrics.
+pub fn read(path: &str, tagged: &lofty::file::TaggedFile, id3: Option<&lofty::id3::v2::Id3v2Tag>) -> Vec<Chapter> {
+    if let Some(tag) = id3 {
+        return read_id3(tag);
     }
+    let lower = path.to_ascii_lowercase();
     let from_cue = read_cue_comment(tagged);
     if !from_cue.is_empty() {
         return from_cue;
