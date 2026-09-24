@@ -22,7 +22,11 @@ async function _showChatRowContextMenu(chat, isGroup, nUnread, x, y) {
         items.push({
             label: 'Mark as Read',
             icon: 'check',
-            onClick: () => { markChatCaughtUp(chat, /* explicit */ true); chatChanged(chat); },
+            onClick: () => {
+                const communityId = isGroup && chat.metadata?.custom_fields?.community_id;
+                if (communityId) markCommunityCaughtUp(communityId);
+                else { markChatCaughtUp(chat, /* explicit */ true); chatChanged(chat); }
+            },
         });
     } else if (!chat.muted && chatCanMarkUnread(chat)) {
         // Muted chats never show an unread badge, so offering it there would be a silent no-op.

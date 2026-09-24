@@ -573,6 +573,21 @@ function foldCommunity(chat, per) {
     return total;
 }
 
+/** Whether any of a community's channels has something unread. */
+function communityHasUnread(communityId) {
+    return arrChats.some(c => c.chat_type === 'Community'
+        && c.metadata?.custom_fields?.community_id === communityId
+        && computeRowUnreadCount(c) > 0);
+}
+
+/** Catch up every channel of a community, not just the one anchoring its row. */
+function markCommunityCaughtUp(communityId) {
+    for (const c of arrChats) {
+        if (c.chat_type !== 'Community' || c.metadata?.custom_fields?.community_id !== communityId) continue;
+        if (computeRowUnreadCount(c) > 0) markChatCaughtUp(c, /* explicit */ true);
+    }
+}
+
 function computeListRowBadgeCount(chat) { return foldCommunity(chat, computeRowBadgeCount); }
 function computeListRowUnreadCount(chat) { return foldCommunity(chat, computeRowUnreadCount); }
 function computeCommunityPingCount(chat) { return foldCommunity(chat, countPingMessages); }

@@ -244,6 +244,14 @@ async function openCommunityMenu(chat, ev, at) {
     // sentence-long label stretched the menu to twice its useful width. It reads in
     // the details pane, which has the room for it.
     const items = [];
+    if (cf.community_id && communityHasUnread(cf.community_id)) {
+        items.push({
+            label: 'Mark as Read',
+            icon: 'check',
+            onClick: () => markCommunityCaughtUp(cf.community_id),
+        });
+        items.push({ divider: true });
+    }
 
     // Awaited before the menu is built: a late push lands in an array the component
     // has already read.
