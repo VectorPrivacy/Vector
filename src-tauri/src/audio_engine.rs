@@ -49,6 +49,17 @@ const PARALLEL_HEAD_SECS: u64 = 12;
 const SEGMENT_WARMUP_SECS: f64 = 0.3;
 /// Cap on parallel segment workers (plus the head decode on the coordinator).
 const MAX_DECODE_WORKERS: usize = 6;
+/// Files at least this long play from a window around the playhead instead of being
+/// decoded whole: an album or a mix would otherwise hold a gigabyte, and a seek deep into
+/// it would wait for everything before.
+const STREAM_MIN_SECS: u64 = 8 * 60;
+/// How far ahead of the playhead a window keeps decoded.
+const WINDOW_AHEAD_SECS: u64 = 20;
+/// How much already-played audio a window keeps, for a short seek back.
+const WINDOW_BEHIND_SECS: u64 = 4;
+/// Played audio is let go once this much has built up behind the playhead.
+const WINDOW_TRIM_SECS: u64 = 12;
+
 
 // ============================================================================
 // Global singleton
@@ -137,7 +148,40 @@ struct AudioSource {
     duration_ms: u64,            // estimated until decode completes, then actual
     oneshot: bool,               // notification sounds — auto-remove on finish
     crossfade: Option<Crossfade>,
-    decode_complete: bool,       // true when all samples have been decoded
+    decode_complete: bool,       // true when all samples have been decoded (a window: up to the file's end)
+    /// The file frame `samples` starts at: 0 for a whole decode, the window's start otherwise.
+    base_frame: u64,
+    /// A streamed file's decoder, which a seek outside the window redirects.
+    stream: Option<Arc<StreamCtl>>,
+    /// Bumped by each redirect, so a batch decoded for the old place is never added.
+    window_gen: u64,
+}
+
+/// How the engine redirects a streamed file's decoder.
+struct StreamCtl {
+    /// The frame to decode from next; u64::MAX when there is nowhere new to go.
+    seek_to: AtomicU64,
+    wake: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+
+impl StreamCtl {
+    fn redirect(&self, frame: u64) {
+        self.seek_to.store(frame, Ordering::Relaxed);
+        self.nudge();
+    }
+    fn nudge(&self) {
+        let (lock, cv) = &self.wake;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+    }
+    fn wait(&self, dur: std::time::Duration) {
+        let (lock, cv) = &self.wake;
+        let mut woken = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if !*woken {
+            woken = cv.wait_timeout(woken, dur).map(|(g, _)| g).unwrap_or_else(|e| e.into_inner().0);
+        }
+        *woken = false;
+    }
 }
 
 /// Active crossfade state: blends old position out while new position fades in
@@ -469,6 +513,10 @@ impl AudioEngine {
 
         self.evict_if_needed();
 
+        if est_frames >= STREAM_MIN_SECS * sample_rate as u64 {
+            return self.load_windowed(id, file_bytes, path, sample_rate, channels, src_channels, rate_ratio, duration_ms);
+        }
+
         let source = AudioSource {
             id,
             samples: Vec::with_capacity(est_frames as usize * src_channels),
@@ -482,6 +530,9 @@ impl AudioEngine {
             oneshot: false,
             crossfade: None,
             decode_complete: false,
+            base_frame: 0,
+            stream: None,
+            window_gen: 0,
         };
 
         self.shared
@@ -506,6 +557,64 @@ impl AudioEngine {
             waveform_fps: WAVEFORM_FPS as u8,
             bins: WAVEFORM_BINS as u8,
         })
+    }
+
+    /// A long file plays from a window around the playhead: a decoder follows the playhead
+    /// (and jumps with a seek), and a separate pass builds the waveform, keeping none of
+    /// the audio it decodes.
+    #[allow(clippy::too_many_arguments)]
+    fn load_windowed(
+        &self,
+        id: u32,
+        file_bytes: Vec<u8>,
+        path: &std::path::Path,
+        sample_rate: u32,
+        channels: usize,
+        src_channels: usize,
+        rate_ratio: f64,
+        duration_ms: u64,
+    ) -> Result<AudioLoadResult, String> {
+        let ctl = Arc::new(StreamCtl {
+            seek_to: AtomicU64::new(u64::MAX),
+            wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let source = AudioSource {
+            id,
+            samples: Vec::with_capacity(window_capacity(sample_rate, src_channels)),
+            src_channels,
+            source_sample_rate: sample_rate,
+            rate_ratio,
+            position: 0.0,
+            playing: false,
+            volume: 1.0,
+            duration_ms,
+            oneshot: false,
+            crossfade: None,
+            decode_complete: false,
+            base_frame: 0,
+            stream: Some(Arc::clone(&ctl)),
+            window_gen: 0,
+        };
+        self.shared.sources.lock().map_err(|_| "Lock poisoned")?.insert(id, source);
+
+        let bytes = Arc::new(file_bytes);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+        {
+            let (bytes, ext, shared) = (Arc::clone(&bytes), ext.clone(), Arc::clone(&self.shared));
+            std::thread::Builder::new()
+                .name("audio-window".into())
+                .spawn(move || window_decode_worker(id, bytes, &ext, channels, sample_rate, ctl, &shared))
+                .map_err(|e| format!("Failed to spawn window decoder: {}", e))?;
+        }
+        {
+            let shared = Arc::clone(&self.shared);
+            let est_frames = duration_ms * sample_rate as u64 / 1000;
+            std::thread::Builder::new()
+                .name("audio-waveform".into())
+                .spawn(move || waveform_pass(id, bytes, &ext, sample_rate, est_frames, &shared))
+                .map_err(|e| format!("Failed to spawn waveform pass: {}", e))?;
+        }
+        Ok(AudioLoadResult { id, duration_ms, waveform_fps: WAVEFORM_FPS as u8, bins: WAVEFORM_BINS as u8 })
     }
 
     /// Load audio from pre-decoded f32 samples (already mono, at native sample rate).
@@ -560,6 +669,9 @@ impl AudioEngine {
             oneshot: false,
             crossfade: None,
             decode_complete: true, // All samples already available
+            base_frame: 0,
+            stream: None,
+            window_gen: 0,
         };
 
         self.shared
@@ -582,10 +694,14 @@ impl AudioEngine {
         let source = sources.get_mut(&id).ok_or("Source not found")?;
         // Auto-rewind if at end (so replay works without explicit seek)
         // Mixer stops when frame pos+1 isn't fully decoded, so position ends near the last frame
-        if source.decode_complete
-            && ((source.position as usize) + 2) * source.src_channels > source.samples.len()
-        {
+        let end_of_window = ((source.position - source.base_frame as f64).max(0.0) as usize + 2) * source.src_channels
+            > source.samples.len();
+        if source.decode_complete && end_of_window {
             source.position = 0.0;
+            // A window that ends at the file's end holds no start to rewind to.
+            if source.base_frame > 0 {
+                redirect_window(source, 0);
+            }
         }
         source.playing = true;
         let pos_ms = (source.position / source.source_sample_rate as f64 * 1000.0) as u64;
@@ -607,19 +723,32 @@ impl AudioEngine {
         let source = sources.get_mut(&id).ok_or("Source not found")?;
         let frame_pos = position_ms as f64 * source.source_sample_rate as f64 / 1000.0;
         let old_position = source.position;
+        if source.stream.is_some() {
+            let frames_len = (source.samples.len() / source.src_channels) as u64;
+            let end_frame = source.duration_ms * source.source_sample_rate as u64 / 1000;
+            let target = (frame_pos as u64).min(end_frame.saturating_sub(1));
+            let in_window = target >= source.base_frame && target + 2 < source.base_frame + frames_len;
+            if !in_window {
+                source.position = target as f64;
+                redirect_window(source, target);
+                return Ok(());
+            }
+        }
         // During streaming decode, allow seeking beyond decoded data — the mixer
         // outputs silence until decode catches up. For fully-decoded sources,
         // clamp to file length to prevent seeking past the end.
-        let frames_len = (source.samples.len() / source.src_channels) as f64;
+        let base = source.base_frame as f64;
+        let frames_end = base + (source.samples.len() / source.src_channels) as f64;
         source.position = if source.decode_complete {
-            frame_pos.min(frames_len)
+            frame_pos.min(frames_end)
         } else {
             frame_pos
         };
         // Only crossfade if the new position has decoded audio to blend into.
         // Seeking beyond decoded data during streaming → no crossfade (just silence).
         if source.playing
-            && ((source.position as usize) + 2) * source.src_channels <= source.samples.len()
+            && source.position >= base
+            && (((source.position - base) as usize) + 2) * source.src_channels <= source.samples.len()
         {
             source.crossfade = Some(Crossfade {
                 old_position,
@@ -673,6 +802,9 @@ impl AudioEngine {
             oneshot: true,
             crossfade: None,
             decode_complete: true,
+            base_frame: 0,
+            stream: None,
+            window_gen: 0,
         };
 
         self.shared
@@ -787,6 +919,16 @@ fn wav_probe_duration(path: &std::path::Path) -> Option<u64> {
     None
 }
 
+/// Send a streamed file's decoder to `frame`: the old window's audio stops at once and the
+/// new place is silent for the moments it takes to decode.
+fn redirect_window(source: &mut AudioSource, frame: u64) {
+    let Some(ctl) = source.stream.clone() else { return };
+    source.crossfade = None;
+    source.decode_complete = false;
+    source.window_gen += 1;
+    ctl.redirect(frame);
+}
+
 // ============================================================================
 // Mixer callback (runs on cpal audio thread)
 // ============================================================================
@@ -812,9 +954,16 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
             continue;
         }
         let src_ch = source.src_channels;
+        // Positions are file frames; a window's samples begin at base_frame.
+        let base = source.base_frame as f64;
 
         for frame in output.chunks_mut(channels) {
-            let pos_floor = source.position as usize;
+            // Before a window's start: its decoder is still filling the new place.
+            if source.position < base {
+                break;
+            }
+            let rel = source.position - base;
+            let pos_floor = rel as usize;
 
             // Interpolation reads frames pos_floor and pos_floor+1 — both must
             // be fully decoded (frame-aligned in the interleaved buffer).
@@ -831,7 +980,7 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
                 break;
             }
 
-            let frac = (source.position - pos_floor as f64) as f32;
+            let frac = (rel - pos_floor as f64) as f32;
             let base0 = pos_floor * src_ch;
             let base1 = base0 + src_ch;
 
@@ -840,9 +989,12 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
             // 1 = flat tail sample, 0 = past the end (silence).
             let (xf_t, xf_base, xf_frac, xf_mode) = if let Some(ref mut xfade) = source.crossfade {
                 let t = xfade.remaining as f32 / CROSSFADE_SAMPLES as f32;
-                let old_floor = xfade.old_position as usize;
-                let old_frac = (xfade.old_position - old_floor as f64) as f32;
-                let mode: u8 = if (old_floor + 2) * src_ch <= source.samples.len() {
+                let old_rel = (xfade.old_position - base).max(0.0);
+                let old_floor = old_rel as usize;
+                let old_frac = (old_rel - old_floor as f64) as f32;
+                let mode: u8 = if xfade.old_position < base {
+                    0
+                } else if (old_floor + 2) * src_ch <= source.samples.len() {
                     2
                 } else if (old_floor + 1) * src_ch <= source.samples.len() {
                     1
@@ -1127,27 +1279,20 @@ fn append_packet_frames(
     }
 }
 
-/// Decode frames [start_frame, end_frame) with a fresh decoder over the shared
-/// bytes. Seeks a warmup margin early and discards the run-in so the kept
-/// samples match a straight-through decode. `progressive` flushes playback
-/// batches into the source as they land (the head segment's instant-start path).
-fn decode_segment(
-    bytes: Arc<Vec<u8>>,
-    ext: &str,
-    sample_rate: u32,
-    start_frame: u64,
-    end_frame: u64,
-    progressive: Option<(u32, &SharedState)>,
-    cancel: &std::sync::atomic::AtomicBool,
-) -> Result<SegmentOut, String> {
-    use symphonia::core::audio::SampleBuffer;
+type OpenedDecoder = (
+    Box<dyn symphonia::core::formats::FormatReader>,
+    Box<dyn symphonia::core::codecs::Decoder>,
+    u32,
+    Option<symphonia::core::units::TimeBase>,
+);
+
+/// A fresh demuxer and decoder over the shared file bytes.
+fn open_decoder(bytes: Arc<Vec<u8>>, ext: &str) -> Result<OpenedDecoder, String> {
     use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
-    use symphonia::core::errors::Error as SymphoniaError;
-    use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
+    use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::MediaSourceStream;
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
-    use symphonia::core::units::Time;
 
     let reader = SharedBytesReader { bytes, pos: 0 };
     let media_source = MediaSourceStream::new(Box::new(reader), Default::default());
@@ -1158,7 +1303,7 @@ fn decode_segment(
     let probed = symphonia::default::get_probe()
         .format(&hint, media_source, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|e| format!("segment probe: {}", e))?;
-    let mut format = probed.format;
+    let format = probed.format;
     let track = format
         .tracks()
         .iter()
@@ -1166,33 +1311,57 @@ fn decode_segment(
         .ok_or("segment: no audio track")?;
     let track_id = track.id;
     let time_base = track.codec_params.time_base;
-    let mut decoder = symphonia::default::get_codecs()
+    let decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("segment decoder: {}", e))?;
+    Ok((format, decoder, track_id, time_base))
+}
 
+/// Seek a warmup margin before `frame` and return the frame the decoder resumes at. The
+/// discarded run-in re-primes the codec's inter-frame state (MP3 bit reservoir, IMDCT
+/// overlap-add) so what follows matches a straight-through decode.
+fn seek_before(opened: &mut OpenedDecoder, frame: u64, sample_rate: u32) -> Result<u64, String> {
+    use symphonia::core::formats::{SeekMode, SeekTo};
+    use symphonia::core::units::Time;
+    let (format, decoder, track_id, time_base) = opened;
+    let warmup = (SEGMENT_WARMUP_SECS * sample_rate as f64) as u64;
+    let target_secs = frame.saturating_sub(warmup) as f64 / sample_rate as f64;
+    let seeked = format
+        .seek(SeekMode::Accurate, SeekTo::Time { time: Time::from(target_secs), track_id: Some(*track_id) })
+        .map_err(|e| format!("segment seek: {}", e))?;
+    decoder.reset();
+    Ok(match time_base {
+        Some(tb) => {
+            let t = tb.calc_time(seeked.actual_ts);
+            ((t.seconds as f64 + t.frac) * sample_rate as f64).round() as u64
+        }
+        None => seeked.actual_ts,
+    })
+}
+
+/// Decode frames [start_frame, end_frame), handing each packet's kept frames to `sink`
+/// as (interleaved samples, channels, frames to skip, frames to take). The sink returns
+/// false to stop.
+fn decode_range(
+    bytes: Arc<Vec<u8>>,
+    ext: &str,
+    sample_rate: u32,
+    start_frame: u64,
+    end_frame: u64,
+    cancel: &std::sync::atomic::AtomicBool,
+    sink: &mut dyn FnMut(&[f32], usize, usize, usize) -> bool,
+) -> Result<(), String> {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::errors::Error as SymphoniaError;
+
+    let mut opened = open_decoder(bytes, ext)?;
     // Frame counter in source frames, seeded from where the seek actually landed.
     let mut counter: u64 = 0;
     if start_frame > 0 {
-        let warmup = (SEGMENT_WARMUP_SECS * sample_rate as f64) as u64;
-        let target_secs = start_frame.saturating_sub(warmup) as f64 / sample_rate as f64;
-        let seeked = format
-            .seek(
-                SeekMode::Accurate,
-                SeekTo::Time { time: Time::from(target_secs), track_id: Some(track_id) },
-            )
-            .map_err(|e| format!("segment seek: {}", e))?;
-        decoder.reset();
-        counter = match time_base {
-            Some(tb) => {
-                let t = tb.calc_time(seeked.actual_ts);
-                ((t.seconds as f64 + t.frac) * sample_rate as f64).round() as u64
-            }
-            None => seeked.actual_ts,
-        };
+        counter = seek_before(&mut opened, start_frame, sample_rate)?;
     }
-
+    let (format, decoder, track_id, _) = &mut opened;
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
-    let mut out = SegmentOut { samples: Vec::new(), mono: Vec::new() };
 
     loop {
         if counter >= end_frame || cancel.load(Ordering::Relaxed) {
@@ -1207,17 +1376,14 @@ fn decode_segment(
             Err(SymphoniaError::IoError(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(_) => break,
         };
-        if packet.track_id() != track_id {
+        if packet.track_id() != *track_id {
             continue;
         }
         match decoder.decode(&packet) {
             Ok(audio_buf) => {
                 let pkt_channels = audio_buf.spec().channels.count().max(1);
                 if sample_buf.is_none() {
-                    sample_buf = Some(SampleBuffer::<f32>::new(
-                        audio_buf.capacity() as u64,
-                        *audio_buf.spec(),
-                    ));
+                    sample_buf = Some(SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec()));
                 }
                 if let Some(ref mut buf) = sample_buf {
                     buf.copy_interleaved_ref(audio_buf);
@@ -1233,22 +1399,323 @@ fn decode_segment(
                     if take == 0 {
                         continue;
                     }
-                    append_packet_frames(samples, pkt_channels, skip, take, &mut out.samples, &mut out.mono);
+                    if !sink(samples, pkt_channels, skip, take) {
+                        break;
+                    }
                 }
             }
             Err(SymphoniaError::DecodeError(_)) => continue,
             Err(_) => break,
         }
+    }
+    Ok(())
+}
 
+/// Decode frames [start_frame, end_frame) with a fresh decoder over the shared
+/// bytes, kept exactly as a straight-through decode would produce them.
+/// `progressive` flushes playback batches into the source as they land (the head
+/// segment's instant-start path).
+fn decode_segment(
+    bytes: Arc<Vec<u8>>,
+    ext: &str,
+    sample_rate: u32,
+    start_frame: u64,
+    end_frame: u64,
+    progressive: Option<(u32, &SharedState)>,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<SegmentOut, String> {
+    let mut out = SegmentOut { samples: Vec::new(), mono: Vec::new() };
+    let mut removed = false;
+    decode_range(bytes, ext, sample_rate, start_frame, end_frame, cancel, &mut |samples, ch, skip, take| {
+        append_packet_frames(samples, ch, skip, take, &mut out.samples, &mut out.mono);
         if let Some((id, shared)) = progressive {
             if out.samples.len() >= DECODE_BATCH_SIZE && !flush_decode_batch(id, &mut out.samples, shared) {
-                cancel.store(true, Ordering::Relaxed);
-                return Err("source removed".to_string());
+                removed = true;
+                return false;
             }
         }
+        true
+    })?;
+    if removed {
+        cancel.store(true, Ordering::Relaxed);
+        return Err("source removed".to_string());
     }
-
     Ok(out)
+}
+
+// ============================================================================
+// Windowed playback: long files decode around the playhead
+// ============================================================================
+
+/// Room for the window at its largest (ahead, the trim margin, a spare batch), reserved
+/// once so an append under the audio lock never reallocates.
+fn window_capacity(sample_rate: u32, src_channels: usize) -> usize {
+    ((WINDOW_AHEAD_SECS + WINDOW_TRIM_SECS + 4) * sample_rate as u64) as usize * src_channels + DECODE_BATCH_SIZE * 4
+}
+
+/// Keeps a streamed source's window filled: up to WINDOW_AHEAD_SECS past the playhead,
+/// letting played audio go past WINDOW_TRIM_SECS, and starting over wherever a seek outside
+/// the window sends it. A mirror of the window lives here, so letting audio go is a fresh
+/// buffer built outside the lock and swapped in: the audio thread never waits on a copy.
+fn window_decode_worker(
+    id: u32,
+    bytes: Arc<Vec<u8>>,
+    ext: &str,
+    channels: usize,
+    sample_rate: u32,
+    ctl: Arc<StreamCtl>,
+    shared: &SharedState,
+) {
+    use symphonia::core::audio::SampleBuffer;
+    use symphonia::core::errors::Error as SymphoniaError;
+
+    let mut opened = match open_decoder(bytes, ext) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("[AudioEngine] Window decoder failed to open source {}: {}", id, e);
+            mark_decode_complete(id, shared);
+            return;
+        }
+    };
+    let src_ch = channels.min(2).max(1);
+    let rate = sample_rate as u64;
+    let (ahead, behind, trim) = (WINDOW_AHEAD_SECS * rate, WINDOW_BEHIND_SECS * rate, WINDOW_TRIM_SECS * rate);
+    let cap = window_capacity(sample_rate, src_ch);
+    let mut mirror: Vec<f32> = Vec::with_capacity(cap);
+    let mut base: u64 = 0;
+    let mut counter: u64 = 0;
+    let mut skip_until: u64 = 0;
+    let mut gen: u64 = 0;
+    let mut eof = false;
+    let mut batch: Vec<f32> = Vec::with_capacity(DECODE_BATCH_SIZE * 2);
+    let mut mono_scratch: Vec<f32> = Vec::new();
+    let mut sample_buf: Option<SampleBuffer<f32>> = None;
+
+    loop {
+        // Redirected: start again from the new place with an empty window.
+        let target = ctl.seek_to.swap(u64::MAX, Ordering::Relaxed);
+        if target != u64::MAX {
+            counter = match seek_before(&mut opened, target, sample_rate) {
+                Ok(at) => at,
+                Err(e) => {
+                    eprintln!("[AudioEngine] Window seek failed for source {}: {}", id, e);
+                    target
+                }
+            };
+            skip_until = target;
+            eof = false;
+            batch.clear();
+            mirror.clear();
+            base = target;
+            match shared.sources.lock() {
+                Ok(mut sources) => match sources.get_mut(&id) {
+                    Some(src) => {
+                        src.samples.clear();
+                        src.base_frame = target;
+                        gen = src.window_gen;
+                    }
+                    None => return,
+                },
+                Err(_) => return,
+            }
+            continue;
+        }
+
+        let pos = match shared.sources.lock() {
+            Ok(sources) => match sources.get(&id) {
+                Some(src) => src.position.max(0.0) as u64,
+                None => return,
+            },
+            Err(_) => return,
+        };
+        let end = base + (mirror.len() / src_ch) as u64;
+
+        // Let go of what has played.
+        if pos > base + trim && pos <= end {
+            let keep_from = pos - behind;
+            let cut = ((keep_from - base) as usize) * src_ch;
+            let mut fresh = Vec::with_capacity(cap);
+            fresh.extend_from_slice(&mirror[cut..]);
+            let swapped = match shared.sources.lock() {
+                Ok(mut sources) => match sources.get_mut(&id) {
+                    Some(src) if src.window_gen == gen => {
+                        std::mem::swap(&mut src.samples, &mut fresh);
+                        src.base_frame = keep_from;
+                        true
+                    }
+                    Some(_) => false,
+                    None => return,
+                },
+                Err(_) => return,
+            };
+            // `fresh` now holds the old window: freed here, off the lock.
+            drop(fresh);
+            if swapped {
+                mirror.drain(..cut);
+                base = keep_from;
+            }
+            continue;
+        }
+
+        if eof || end >= pos + ahead {
+            ctl.wait(std::time::Duration::from_millis(40));
+            continue;
+        }
+
+        // Decode one batch, abandoning it if a redirect lands meanwhile.
+        let (format, decoder, track_id, _) = &mut opened;
+        while batch.len() < DECODE_BATCH_SIZE && !eof {
+            if ctl.seek_to.load(Ordering::Relaxed) != u64::MAX {
+                break;
+            }
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(SymphoniaError::ResetRequired) => {
+                    decoder.reset();
+                    continue;
+                }
+                Err(_) => {
+                    eof = true;
+                    break;
+                }
+            };
+            if packet.track_id() != *track_id {
+                continue;
+            }
+            match decoder.decode(&packet) {
+                Ok(audio_buf) => {
+                    let pkt_channels = audio_buf.spec().channels.count().max(1);
+                    if sample_buf.is_none() {
+                        sample_buf = Some(SampleBuffer::<f32>::new(audio_buf.capacity() as u64, *audio_buf.spec()));
+                    }
+                    if let Some(ref mut buf) = sample_buf {
+                        buf.copy_interleaved_ref(audio_buf);
+                        let samples = buf.samples();
+                        let frames = (samples.len() / pkt_channels) as u64;
+                        let pkt_start = counter;
+                        counter += frames;
+                        if counter <= skip_until {
+                            continue;
+                        }
+                        let skip = skip_until.saturating_sub(pkt_start) as usize;
+                        append_packet_frames(samples, pkt_channels, skip, frames as usize - skip, &mut batch, &mut mono_scratch);
+                        mono_scratch.clear();
+                    }
+                }
+                Err(SymphoniaError::DecodeError(_)) => continue,
+                Err(_) => {
+                    eof = true;
+                    break;
+                }
+            }
+        }
+        if ctl.seek_to.load(Ordering::Relaxed) != u64::MAX {
+            batch.clear();
+            continue;
+        }
+
+        let added = match shared.sources.lock() {
+            Ok(mut sources) => match sources.get_mut(&id) {
+                Some(src) if src.window_gen == gen => {
+                    src.samples.extend_from_slice(&batch);
+                    if eof {
+                        src.decode_complete = true;
+                    }
+                    true
+                }
+                Some(_) => false,
+                None => return,
+            },
+            Err(_) => return,
+        };
+        if added {
+            mirror.extend_from_slice(&batch);
+        }
+        batch.clear();
+    }
+}
+
+/// A streamed file's waveform, from a pass that decodes it in parallel and keeps nothing
+/// but the band levels: 64 bytes per frame at 30 fps, not the audio itself.
+fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_frames: u64, shared: &SharedState) {
+    let t0 = std::time::Instant::now();
+    let hop = WaveformComputer::new(sample_rate).hop_size as u64;
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let workers = cores.saturating_sub(2).clamp(1, MAX_DECODE_WORKERS);
+    // Segments start on a hop so each one's frames line up with the whole file's.
+    let per = ((est_frames / workers as u64) / hop).max(1) * hop;
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<(usize, Result<(Vec<f32>, u64), String>)>();
+    for w in 0..workers {
+        let start = per * w as u64;
+        let end = if w + 1 == workers { u64::MAX } else { per * (w as u64 + 1) };
+        let (bytes, ext, tx, cancel) = (Arc::clone(&bytes), ext.to_string(), tx.clone(), Arc::clone(&cancel));
+        std::thread::Builder::new()
+            .name(format!("audio-waveform-{}", w))
+            .spawn(move || {
+                let mut computer = WaveformComputer::new(sample_rate);
+                let mut pending: Vec<f32> = Vec::new();
+                let mut scratch: Vec<f32> = Vec::new();
+                let mut frames = 0u64;
+                let r = decode_range(bytes, &ext, sample_rate, start, end, &cancel, &mut |samples, ch, skip, take| {
+                    append_packet_frames(samples, ch, skip, take, &mut scratch, &mut pending);
+                    scratch.clear();
+                    frames += take as u64;
+                    if pending.len() >= DECODE_BATCH_SIZE {
+                        computer.feed(&mut pending);
+                    }
+                    true
+                });
+                computer.feed(&mut pending);
+                let _ = tx.send((w, r.map(|_| (computer.levels, frames))));
+            })
+            .ok();
+    }
+    drop(tx);
+
+    let mut parts: Vec<Option<(Vec<f32>, u64)>> = (0..workers).map(|_| None).collect();
+    for (w, r) in rx {
+        match r {
+            Ok(part) => parts[w] = Some(part),
+            Err(e) => {
+                eprintln!("[AudioEngine] Waveform segment {} failed for source {}: {}", w, id, e);
+                cancel.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+        // A source let go of mid-pass needs no waveform.
+        let alive = shared.sources.lock().map(|s| s.contains_key(&id)).unwrap_or(false);
+        if !alive {
+            cancel.store(true, Ordering::Relaxed);
+            return;
+        }
+    }
+    let mut levels: Vec<f32> = Vec::new();
+    let mut frames = 0u64;
+    for (part_levels, part_frames) in parts.into_iter().flatten() {
+        levels.extend(part_levels);
+        frames += part_frames;
+    }
+    let waveform = normalise_levels(&levels, BAND_MAX_LIFT_DB);
+    let duration_ms = frames * 1000 / sample_rate.max(1) as u64;
+    let alive = match shared.sources.lock() {
+        Ok(mut sources) => match sources.get_mut(&id) {
+            Some(src) => {
+                src.duration_ms = duration_ms;
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    };
+    if !alive {
+        return;
+    }
+    println!("[AudioEngine] Waveform pass for streamed source {}: {}ms, {} workers, took {:?}", id, duration_ms, workers, t0.elapsed());
+    if let Some(app) = TAURI_APP.get() {
+        let _ = app.emit("audio_waveform", AudioWaveformPayload { id, waveform, waveform_fps: WAVEFORM_FPS as u8, bins: WAVEFORM_BINS as u8 });
+        let _ = app.emit("audio_duration", AudioDurationPayload { id, duration_ms });
+    }
 }
 
 /// Parallel decode: the head span decodes on this thread with progressive
@@ -1720,6 +2187,15 @@ impl WaveformComputer {
         }
     }
 
+    /// Process what `pending` holds and let go of what no later frame needs, so a whole
+    /// file can pass through without being kept.
+    fn feed(&mut self, pending: &mut Vec<f32>) {
+        self.process(pending);
+        let used = self.cursor.min(pending.len());
+        pending.drain(..used);
+        self.cursor -= used;
+    }
+
     /// Consume the computer and return the final waveform data.
     ///
     /// A fixed dB window makes every file lean the same way: voices and most music carry
@@ -1783,6 +2259,21 @@ fn precompute_fft_waveform(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod waveform_normalise_tests {
+    #[test]
+    fn a_waveform_fed_in_pieces_matches_one_fed_whole() {
+        let rate = 44_100;
+        let samples: Vec<f32> = (0..rate * 3).map(|i| ((i as f32) * 0.031).sin() * ((i as f32) * 0.0007).cos()).collect();
+        let mut whole = WaveformComputer::new(rate as u32);
+        whole.process(&samples);
+        let mut pieces = WaveformComputer::new(rate as u32);
+        let mut pending = Vec::new();
+        for chunk in samples.chunks(7_919) {
+            pending.extend_from_slice(chunk);
+            pieces.feed(&mut pending);
+        }
+        assert_eq!(whole.levels.len(), pieces.levels.len());
+        assert!(whole.levels.iter().zip(&pieces.levels).all(|(a, b)| (a - b).abs() < 1e-4));
+    }
     use super::*;
 
     /// Frames of band levels in dB: `level(frame, band)`.
