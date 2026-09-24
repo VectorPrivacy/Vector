@@ -2259,3 +2259,10 @@ body.ws #group-overview .member-pick-row {
   min-height: 46px;
   box-sizing: border-box;
 }
+
+/* The empty-state logo is no drag source: a press that misses a floating player's rounded
+   corner lands on it. */
+#ws-conv-empty img {
+    -webkit-user-drag: none;
+    user-select: none;
+}

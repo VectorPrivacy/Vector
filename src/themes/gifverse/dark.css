@@ -226,13 +226,7 @@ select:disabled {
 
 
 
-.audio-progress-fill {
-  background: linear-gradient(90deg, #F7FFAE 40%, #AEFFDF 60%, #B6AEFF 80%, #FFAECE 100%);
-}
 
-.audio-progress-handle {
-  background: #F7FFAE;
-}
 
 
 

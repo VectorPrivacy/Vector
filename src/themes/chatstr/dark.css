@@ -204,13 +204,7 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
 
 
 
-.audio-progress-fill {
-  background: linear-gradient(90deg, #b188e2 0%, #CD3DD3 100%);
-}
 
-.audio-progress-handle {
-  background: #b188e2;
-}
 
 
 

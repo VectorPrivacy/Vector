@@ -436,7 +436,7 @@
                 </div>
             {:else}
                 <button class="audio-transcribe-btn" class:loading={transcribing} class:is-open={tb.open}
-                        style:cursor={transcribing ? 'default' : null} aria-label={tb.label} onclick={onTranscribe}>
+                        aria-label={tb.label} onclick={onTranscribe}>
                     <span class="icon {tb.icon}"></span>
                 </button>
             {/if}

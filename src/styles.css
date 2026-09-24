@@ -11136,6 +11136,7 @@ select:disabled:hover {
     --file-box-body: rgba(255, 255, 255, 0.55);
     --file-box-dim: rgba(255, 255, 255, 0.34);
     --file-box-glyph: rgba(255, 255, 255, 0.7);
+    --file-box-hover: rgba(255, 255, 255, 0.07);
 }
 
 .file-box {
@@ -11270,27 +11271,35 @@ select:disabled:hover {
     transition: --progress 0.3s ease;
 }
 
-.file-box-action {
+/* The icon buttons on files and players: one look, each sized where it sits. */
+:is(.file-box-action, .audio-transcribe-btn, .popout-action, .album-toggle, .audio-skip) {
     position: relative;
     flex: none;
-    width: 34px;
-    height: 34px;
     padding: 0;
-    border: 1px solid var(--file-box-line-hover);
+    border: none;
     border-radius: 8px;
     background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     cursor: pointer;
-    transition: background-color 0.2s ease, border-color 0.2s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+:is(.file-box-action, .audio-transcribe-btn, .popout-action, .album-toggle, .audio-skip):hover {
+    background: var(--file-box-hover);
+}
+
+.file-box-action,
+.audio-transcribe-btn {
+    width: 34px;
+    height: 34px;
+    border: 1px solid var(--file-box-line-hover);
 }
 
 .file-box-action > .icon {
     width: 17px;
     height: 17px;
     background-color: var(--icon-color-primary);
-}
-
-.file-box-action:hover {
-    background: rgba(255, 255, 255, 0.06);
 }
 
 .file-box-action.is-failed {
@@ -11539,6 +11548,7 @@ select:disabled:hover {
     width: 40px;
     height: 40px;
     min-width: 40px;
+    padding: 0;
     border-radius: 50%;
     background: var(--icon-color-primary);
     border: none;
@@ -11573,48 +11583,6 @@ select:disabled:hover {
 
 .icon-pause {
     mask-image: url("./icons/pause.svg");
-}
-
-.audio-progress-container {
-    flex: 1;
-    padding: 0 8px;
-    cursor: pointer;
-}
-
-.audio-progress-bar {
-    position: relative;
-    height: 6px;
-    background: rgba(255, 255, 255, 0.1);
-    border-radius: 3px;
-    overflow: visible;
-}
-
-.audio-progress-fill {
-    position: absolute;
-    top: 0;
-    left: 0;
-    height: 100%;
-    background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
-    border-radius: 3px;
-    width: 0%;
-    transition: width 0.1s ease;
-}
-
-.audio-progress-handle {
-    position: absolute;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: 14px;
-    height: 14px;
-    background: #59fcb3;
-    border-radius: 50%;
-    left: 0%;
-    transition: left 0.1s ease;
-    opacity: 0;
-}
-
-.custom-audio-player:hover .audio-progress-handle {
-    opacity: 1;
 }
 
 .audio-waveform {
@@ -11690,12 +11658,6 @@ select:disabled:hover {
     grid-template-areas: "text" "tracks" "controls";
 }
 
-@container (max-width: 380px) {
-    .audio-album.is-full {
-        grid-template-areas: "art text" "tracks tracks" "controls controls";
-    }
-}
-
 .title-note {
     margin-left: 0.3em;
     font-weight: 400;
@@ -11765,21 +11727,8 @@ select:disabled:hover {
 
 .album-toggle,
 .audio-skip {
-    position: relative;
-    flex: none;
     width: 30px;
     height: 30px;
-    padding: 0;
-    border: none;
-    border-radius: 8px;
-    background: transparent;
-    cursor: pointer;
-    transition: background-color 0.15s ease;
-}
-
-.album-toggle:hover,
-.audio-skip:hover {
-    background: rgba(255, 255, 255, 0.07);
 }
 
 .album-toggle > .icon {
@@ -12002,9 +11951,14 @@ body.drag-lock * {
     opacity: 0.3;
 }
 
-.lyrics-line.is-current,
-.lyrics-line:hover {
+.lyrics-line.is-current {
     opacity: 1;
+}
+
+@media (hover: hover) {
+    .lyrics-line:hover {
+        opacity: 1;
+    }
 }
 
 .lyrics-line.is-break {
@@ -12115,10 +12069,8 @@ body.drag-lock * {
     cursor: grabbing;
 }
 
-/* Nothing in the box, nor the empty-state logo it often floats over, is a drag source: a press
-   at a rounded corner's tip falls through to what lies behind it. */
-.media-popout img,
-#ws-conv-empty img {
+/* Nothing in the box is a drag source. */
+.media-popout img {
     -webkit-user-drag: none;
     user-select: none;
 }
@@ -12143,7 +12095,7 @@ body.drag-lock * {
     row-gap: 8px;
 }
 
-.media-popout.is-sound > :is(.popout-play, .popout-play-group, .popout-wave, .popout-track, .popout-time) {
+.media-popout.is-sound > :is(.popout-play-group, .popout-wave, .popout-track, .popout-time) {
     margin-top: 10px;
 }
 
@@ -12255,15 +12207,8 @@ button.popout-thumb {
 }
 
 .popout-action {
-    position: relative;
     width: 32px;
     height: 32px;
-    padding: 0;
-    border: none;
-    border-radius: 7px;
-    background: transparent;
-    cursor: pointer;
-    transition: background-color 0.15s ease;
 }
 
 .popout-action > .icon {
@@ -12272,13 +12217,7 @@ button.popout-thumb {
     background-color: var(--file-box-glyph);
 }
 
-.popout-action:hover {
-    background: rgba(255, 255, 255, 0.08);
-}
-
 .popout-play {
-    grid-area: play;
-    justify-self: center;
     width: 36px;
     height: 36px;
     min-width: 36px;
@@ -12338,8 +12277,8 @@ button.popout-thumb {
     gap: 2px;
 }
 
-.popout-play-group .popout-play {
-    grid-area: auto;
+.media-popout:not(.is-album) .popout-play-group {
+    justify-self: center;
 }
 
 .media-popout .popout-tracks .album-tracks {
@@ -12389,6 +12328,20 @@ button.popout-thumb {
 .popout-action:disabled {
     opacity: 0.4;
     cursor: default;
+}
+
+@media (pointer: coarse) {
+    .popout-grip {
+        width: 28px;
+        height: 28px;
+    }
+}
+
+/* Keyboard focus shows on the players' buttons; the global button rule removes it. */
+:is(.file-box-action, .audio-transcribe-btn, .popout-action, .album-toggle, .audio-skip, .album-play,
+    .album-shuffle, .album-track, .album-more, .audio-play-btn, .popout-thumb, .audio-cover-art):focus-visible {
+    outline: 2px solid var(--icon-color-primary);
+    outline-offset: 2px;
 }
 
 /* Resize grips on every corner; the corner opposite the grabbed one stays put. */
@@ -12501,14 +12454,6 @@ button.popout-thumb {
     transition: opacity 0.1s ease, box-shadow 0.2s ease;
 }
 
-/* Remove the old animation since we're using real frequency data */
-.custom-audio-player.playing .waveform-bar,
-.custom-audio-player-inner.playing .waveform-bar {
-    animation: none;
-}
-
-/* Subtle pulse effect for the entire waveform container when playing */
-.custom-audio-player.playing .audio-waveform,
 .custom-audio-player-inner.playing .audio-waveform {
     opacity: 1;
 }
@@ -12538,17 +12483,7 @@ button.popout-thumb {
 
 /* The file box's action button: grey until the transcript it opens is showing. */
 .audio-transcribe-btn {
-    position: relative;
-    flex: none;
-    width: 34px;
-    height: 34px;
-    padding: 0;
     margin-left: 10px;
-    border: 1px solid var(--file-box-line-hover);
-    border-radius: 8px;
-    background: transparent;
-    cursor: pointer;
-    transition: background-color 0.2s ease;
 }
 
 .audio-transcribe-btn .icon {
@@ -12561,16 +12496,8 @@ button.popout-thumb {
     background-color: var(--icon-color-primary);
 }
 
-.audio-transcribe-btn:hover {
-    background: rgba(255, 255, 255, 0.06);
-}
-
 .audio-transcribe-btn.loading {
     cursor: default;
-}
-
-.audio-transcribe-btn.loading:hover {
-    transform: none;
 }
 
 .network-list {
@@ -17225,7 +17152,7 @@ hr {
   border-radius: 50%;
   z-index: 3;
 }
-.audio-upload-cancel::after {
+.upload-cancel-btn.audio-upload-cancel::after {
   content: '\2715';
   color: white;
   font-size: 14px;
@@ -22224,12 +22151,13 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-role + .cs-role { border-top: 1px solid #1e1e1e; }
 .cs-role:hover { background-color: #131313; }
 .cs-role.is-dragging { opacity: 0.3; }
-.cs-role-ghost {
+/* Both classes: the clone carries .cs-role too, whose background and transition this beats. */
+.cs-role.cs-role-ghost {
   opacity: 0.92;
   border-radius: 10px;
-  background-color: #161616 !important;
+  background-color: #161616;
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.55);
-  transition: none !important;
+  transition: none;
 }
 /* The pack rail's glowing insertion line. */
 .cs-role.drop-above::after,
