@@ -2,7 +2,7 @@
 // started it, or the pop-out once that row unmounts (a chat switch, a trimmed window).
 // A row that mounts for the same attachment takes it back, so leaving and returning is
 // seamless in both directions.
-import { claimPlayback, releasePlayback, holdsPlayback, setAudioDuration, playerFor } from './audio.svelte.js';
+import { claimPlayback, releasePlayback, holdsPlayback, setAudioDuration, playerFor, waveformBytes } from './audio.svelte.js';
 
 /** One audio attachment on the engine, whoever is showing it. */
 export class AudioSession {
@@ -65,7 +65,7 @@ export class AudioSession {
             this.#offs.push(await h.listen('audio_ended', (e) => { if (e.payload.id === this.#sourceId) this.#ended(); }));
             this.#offs.push(await h.listen('audio_waveform', (e) => {
                 if (e.payload.id !== this.#sourceId) return;
-                this.waveform = { data: new Uint8Array(e.payload.waveform), fps: e.payload.waveform_fps, bins: e.payload.bins };
+                this.waveform = { data: waveformBytes(e.payload.waveform), fps: e.payload.waveform_fps, bins: e.payload.bins };
             }));
             this.#offs.push(await h.listen('audio_duration', (e) => { if (e.payload.id === this.#sourceId) this.#setDuration(e.payload.duration_ms); }));
         }

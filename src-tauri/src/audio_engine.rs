@@ -212,9 +212,34 @@ struct AudioEndedPayload {
 #[derive(Serialize, Clone)]
 struct AudioWaveformPayload {
     id: u32,
-    waveform: Vec<u8>,
-    waveform_fps: u8,
+    /// Base64 of `bins` bytes per frame: a number array is several times larger as JSON.
+    waveform: String,
+    waveform_fps: f32,
     bins: u8,
+}
+
+/// At most this many frames reach the webview (20 minutes at 30 fps): past it frames are
+/// pooled, keeping each group's peak, and the rate drops to match. Android's IPC is JSON.
+const MAX_WAVEFORM_FRAMES: usize = 36_000;
+
+impl AudioWaveformPayload {
+    fn new(id: u32, waveform: Vec<u8>) -> Self {
+        let frames = waveform.len() / WAVEFORM_BINS;
+        let (data, fps) = if frames > MAX_WAVEFORM_FRAMES {
+            let factor = frames.div_ceil(MAX_WAVEFORM_FRAMES);
+            let mut pooled = Vec::with_capacity(frames.div_ceil(factor) * WAVEFORM_BINS);
+            for group in (0..frames).step_by(factor) {
+                let end = (group + factor).min(frames);
+                for bin in 0..WAVEFORM_BINS {
+                    pooled.push((group..end).map(|f| waveform[f * WAVEFORM_BINS + bin]).max().unwrap_or(0));
+                }
+            }
+            (pooled, WAVEFORM_FPS as f32 / factor as f32)
+        } else {
+            (waveform, WAVEFORM_FPS as f32)
+        };
+        AudioWaveformPayload { id, waveform: base64_simd::STANDARD.encode_to_string(&data), waveform_fps: fps, bins: WAVEFORM_BINS as u8 }
+    }
 }
 
 /// Event payload emitted when actual duration is known after streaming decode completes
@@ -647,12 +672,7 @@ impl AudioEngine {
             .spawn(move || {
                 let waveform = precompute_fft_waveform(&samples_for_fft, sample_rate);
                 if let Some(app) = TAURI_APP.get() {
-                    let _ = app.emit("audio_waveform", AudioWaveformPayload {
-                        id,
-                        waveform,
-                        waveform_fps: WAVEFORM_FPS as u8,
-                        bins: WAVEFORM_BINS as u8,
-                    });
+                    let _ = app.emit("audio_waveform", AudioWaveformPayload::new(id, waveform));
                 }
             })
             .ok();
@@ -1754,7 +1774,7 @@ fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_
     }
     println!("[AudioEngine] Waveform pass for streamed source {}: {}ms, {} workers, took {:?}", id, duration_ms, workers, t0.elapsed());
     if let Some(app) = TAURI_APP.get() {
-        let _ = app.emit("audio_waveform", AudioWaveformPayload { id, waveform, waveform_fps: WAVEFORM_FPS as u8, bins: WAVEFORM_BINS as u8 });
+        let _ = app.emit("audio_waveform", AudioWaveformPayload::new(id, waveform));
         let _ = app.emit("audio_duration", AudioDurationPayload { id, duration_ms });
     }
 }
@@ -1903,12 +1923,7 @@ fn parallel_stream_decode(
 
     if source_exists {
         if let Some(app) = TAURI_APP.get() {
-            let _ = app.emit("audio_waveform", AudioWaveformPayload {
-                id,
-                waveform,
-                waveform_fps: WAVEFORM_FPS as u8,
-                bins: WAVEFORM_BINS as u8,
-            });
+            let _ = app.emit("audio_waveform", AudioWaveformPayload::new(id, waveform));
             let _ = app.emit("audio_duration", AudioDurationPayload {
                 id,
                 duration_ms: actual_duration_ms,
@@ -2078,12 +2093,7 @@ fn sequential_stream_decode(
     // Emit waveform + duration immediately — no separate FFT thread needed
     if source_exists {
         if let Some(app) = TAURI_APP.get() {
-            let _ = app.emit("audio_waveform", AudioWaveformPayload {
-                id,
-                waveform,
-                waveform_fps: WAVEFORM_FPS as u8,
-                bins: WAVEFORM_BINS as u8,
-            });
+            let _ = app.emit("audio_waveform", AudioWaveformPayload::new(id, waveform));
             let _ = app.emit("audio_duration", AudioDurationPayload {
                 id,
                 duration_ms: actual_duration_ms,
@@ -2254,23 +2264,25 @@ fn normalise_levels(levels: &[f32], max_lift: f32) -> Vec<u8> {
         return vec![0u8; WAVEFORM_BINS]; // at least one frame of silence
     }
     let frames = levels.len() / WAVEFORM_BINS;
-    let percentile = |mut v: Vec<f32>, p: f32| -> f32 {
-        v.sort_by(|a, b| a.total_cmp(b));
-        v[((v.len() - 1) as f32 * p) as usize]
+    // One reused column and a partial selection: an hour of levels is tens of MB, and only
+    // two ranks per band are ever read.
+    let mut column: Vec<f32> = Vec::with_capacity(frames);
+    let mut percentile = |bin: usize, p: f32| -> f32 {
+        column.clear();
+        column.extend((0..frames).map(|f| levels[f * WAVEFORM_BINS + bin]));
+        let rank = ((frames - 1) as f32 * p) as usize;
+        *column.select_nth_unstable_by(rank, |a, b| a.total_cmp(b)).1
     };
-    let columns: Vec<Vec<f32>> = (0..WAVEFORM_BINS)
-        .map(|bin| (0..frames).map(|f| levels[f * WAVEFORM_BINS + bin]).collect())
-        .collect();
-    let peaks: Vec<f32> = columns.iter().map(|c| percentile(c.clone(), 0.97)).collect();
+    let peaks: Vec<f32> = (0..WAVEFORM_BINS).map(|bin| percentile(bin, 0.97)).collect();
     // The loudest band's own ceiling: a percentile over every band would sink toward the
     // quiet majority and let them be stretched to full scale.
     let loudest = peaks.iter().copied().fold(f32::MIN, f32::max);
-    let bands: Vec<(f32, f32)> = columns
-        .into_iter()
-        .zip(&peaks)
-        .map(|(column, &peak)| {
+    let bands: Vec<(f32, f32)> = peaks
+        .iter()
+        .enumerate()
+        .map(|(bin, &peak)| {
             let ceiling = peak.max(loudest - max_lift).max(SILENCE_CEILING_DB);
-            let floor = percentile(column, 0.2)
+            let floor = percentile(bin, 0.2)
                 .min(ceiling - BAND_MIN_RANGE_DB)
                 .max(ceiling - BAND_MAX_RANGE_DB);
             (floor, ceiling)
@@ -2473,5 +2485,29 @@ mod window_tests {
         shared.sources.lock().unwrap().remove(&1);
         ctl.nudge();
         worker.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod waveform_payload_tests {
+    use super::*;
+
+    #[test]
+    fn a_long_waveform_pools_to_the_frame_cap_keeping_its_peaks() {
+        let frames = MAX_WAVEFORM_FRAMES * 2 + 1;
+        let mut levels = vec![10u8; frames * WAVEFORM_BINS];
+        levels[(frames - 1) * WAVEFORM_BINS + 5] = 250;   // a lone peak in the last frame
+        let p = AudioWaveformPayload::new(7, levels);
+        let bytes = base64_simd::STANDARD.decode_to_vec(&p.waveform).unwrap();
+        assert!(bytes.len() / WAVEFORM_BINS <= MAX_WAVEFORM_FRAMES);
+        assert_eq!(p.waveform_fps, WAVEFORM_FPS as f32 / 3.0);
+        assert_eq!(bytes[bytes.len() - WAVEFORM_BINS + 5], 250);
+    }
+
+    #[test]
+    fn a_short_waveform_travels_whole() {
+        let p = AudioWaveformPayload::new(7, vec![1, 2, 3, 4].repeat(WAVEFORM_BINS));
+        assert_eq!(base64_simd::STANDARD.decode_to_vec(&p.waveform).unwrap().len(), 4 * WAVEFORM_BINS);
+        assert_eq!(p.waveform_fps, WAVEFORM_FPS as f32);
     }
 }

@@ -156,7 +156,11 @@
             const target = Math.max(16, Math.min(64, Math.floor(w / 5)));
             if (target === barCount) return;
             const old = barState.slice(), oldCount = barCount;
-            barState = Array.from({ length: target }, (_, i) => oldCount > 0 ? old[Math.min(Math.round(i * oldCount / target), oldCount - 1)] : undefined);
+            // Copies, not shared records: paint() updates each bar's own in place.
+            barState = Array.from({ length: target }, (_, i) => {
+                const from = oldCount > 0 ? old[Math.min(Math.round(i * oldCount / target), oldCount - 1)] : undefined;
+                return from ? { ...from } : undefined;
+            });
             // The bars are keyed by position, so those below the new count stay mounted and
             // never re-register: keep them (the painter finds nothing otherwise) and give
             // them their remapped styles. Bars past the count unregister as they unmount.
@@ -172,13 +176,18 @@
         ro.observe(waveform);
         return () => ro.disconnect();
     });
+    // Per bar per frame: the record is reused and only what changed is written.
     function paint(i, transform, opacity, boxShadow) {
+        const st = (barState[i] ??= { transform: '', opacity: '', boxShadow: '' });
         const el = bars[i];
-        barState[i] = { transform, opacity, boxShadow };
-        if (!el) return;
-        el.style.transform = transform;
-        el.style.opacity = opacity;
-        el.style.boxShadow = boxShadow;
+        if (el) {
+            if (st.transform !== transform) el.style.transform = transform;
+            if (st.opacity !== opacity) el.style.opacity = opacity;
+            if (st.boxShadow !== boxShadow) el.style.boxShadow = boxShadow;
+        }
+        st.transform = transform;
+        st.opacity = opacity;
+        st.boxShadow = boxShadow;
     }
 
     function frame() {

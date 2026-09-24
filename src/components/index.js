@@ -114,7 +114,7 @@ export { setRekey } from './lib/rekey.svelte.js';
 export { setInviteModalHandlers, setInviteModal, setInviteModalStatus, inviteModalPicker } from './lib/invitemodal.svelte.js';
 export { badgeCardState, badgeCardEls, setBadgeCardHandlers, setBadgeCard, setBadgeTiltVars } from './lib/badgecard.svelte.js';
 export { imageViewerState, imageViewerEls, setImageViewerHandlers, setImageViewer, setImageViewerZoom, setImageViewerTip } from './lib/imageviewer.svelte.js';
-export { setModelDownload, claimPlayback, releasePlayback } from './lib/audio.svelte.js';
+export { setModelDownload, claimPlayback, releasePlayback, waveformBytes } from './lib/audio.svelte.js';
 export { lockSelection } from './lib/draglock.js';
 export { setPopoutEnabled } from './lib/popout.svelte.js';
 export { setVoiceState, setVoiceStatusText, setVoiceTimer, setVoiceDrag, setVoiceDot, setVoiceLockFading, setVoiceTooltip, setVoicePreview, voiceFadeIn, setVoiceHandlers, voiceEls } from './lib/voicerecorder.svelte.js';

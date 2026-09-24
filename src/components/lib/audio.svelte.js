@@ -37,6 +37,14 @@ export function songLyrics(lyrics, span) {
     return { synced: true, lines: lyrics.lines.filter((l) => l.at_ms >= span.start - 50 && l.at_ms < span.end - 50) };
 }
 
+/** The engine's waveform, which travels as base64 (a JSON number array is several times larger). */
+export function waveformBytes(b64) {
+    const raw = atob(b64);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+}
+
 /** The lyrics sheet is the attachment's: open in the chat's card means open in the pop-out. */
 export function setLyricsOpen(id, open) { byId.set(id, { ...entry(id), lyricsOpen: !!open }); }
 export function patchTranscription(id, fields) {

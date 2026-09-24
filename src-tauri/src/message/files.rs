@@ -1134,16 +1134,19 @@ pub fn cleanup_zip() -> Result<(), String> {
 /// run still in progress, for a send that will use the compressed bytes; otherwise a
 /// run in progress is dropped on arrival.
 ///
-/// The wait is time-bounded: the notifier fires via notify_waiters() (which stores no
-/// permit), so a completion landing between the status read and the await would
-/// otherwise hang forever; on timeout the cache is simply re-read.
+/// The notifier fires via notify_waiters(), which stores no permit, so the waiter is
+/// registered before the status is read: a completion in between still wakes it. The
+/// timeout is only a backstop.
 pub(crate) async fn take_precompressed(file_path: &str, wait: bool) -> Option<CachedCompressedImage> {
     if wait {
-        let status = { COMPRESSION_CACHE.lock().await.get(file_path).cloned() };
-        if let Some(None) = status {
-            let notify = { super::types::COMPRESSION_NOTIFY.lock().await.get(file_path).cloned() };
-            if let Some(n) = notify {
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), n.notified()).await;
+        let notify = { super::types::COMPRESSION_NOTIFY.lock().await.get(file_path).cloned() };
+        if let Some(n) = notify {
+            let notified = n.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let running = matches!(COMPRESSION_CACHE.lock().await.get(file_path), Some(None));
+            if running {
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(30), notified).await;
             }
         }
     }

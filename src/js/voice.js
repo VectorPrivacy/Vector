@@ -339,7 +339,7 @@ class VoiceRecorder {
         }
         this._audioWaveformUnlisten = await window.__TAURI__.event.listen('audio_waveform', (event) => {
             if (this.previewSourceId && event.payload.id === this.previewSourceId) {
-                this.waveformData = new Uint8Array(event.payload.waveform);
+                this.waveformData = VectorSvelte.waveformBytes(event.payload.waveform);
                 this.waveformFps = event.payload.waveform_fps;
                 this.waveformBins = event.payload.bins;
                 if (this._audioWaveformUnlisten) { this._audioWaveformUnlisten(); this._audioWaveformUnlisten = null; }

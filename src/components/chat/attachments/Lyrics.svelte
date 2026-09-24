@@ -138,7 +138,7 @@
             {@const d = current < 0 ? 0 : Math.abs(i - current)}
             <!-- svelte-ignore a11y_click_events_have_key_events -->
             <div class="lyrics-line" class:is-current={i === current} class:is-past={i < current} class:is-break={!line.text}
-                 style:--blur={playing && i !== current ? `${Math.min(d, 4) * 0.55}px` : '0px'}
+                 style:--blur={playing && d > 0 && d <= 6 ? `${Math.min(d, 4) * 0.55}px` : '0px'}
                  use:lineEl={i} onclick={() => jump(i)}>
                 {#if !line.text}
                     <span class="lyrics-dots"><span></span><span></span><span></span></span>

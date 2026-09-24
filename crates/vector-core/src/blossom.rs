@@ -97,8 +97,9 @@ impl UploadBody {
         match self {
             Self::Memory(data) => Box::pin(ProgressTrackingStream::new(Arc::clone(data), bytes_sent)),
             Self::File { path, len, .. } => {
-                // Larger than a memory slice: every read is a trip to the blocking pool.
-                const FILE_SLICE: u64 = 64 * 1024;
+                // Large: every read is a trip to the blocking pool, and each slice is handed
+                // to the body whole, so fewer, bigger ones (about a thousand per GB).
+                const FILE_SLICE: u64 = 1024 * 1024;
                 let start = (None::<tokio::fs::File>, path.clone(), *len);
                 Box::pin(futures_util::stream::unfold(start, move |(file, path, remaining)| {
                     let bytes_sent = Arc::clone(&bytes_sent);
