@@ -1488,10 +1488,19 @@ async fn process_outbound_community_attachment_path(
         // where the filesystem has them.
         let _ = std::fs::create_dir_all(&dir);
         let local = dir.join(format!("{}.{}", hash, ext));
-        if !local.exists() {
-            let tmp = dir.join(format!(".{}.{}.tmp", hash, ext));
+        // Reused only when it really is these bytes: an edited or truncated copy under the
+        // hash's name would be sealed and sent as this file.
+        let intact = std::fs::metadata(&local).is_ok_and(|m| m.len() == len)
+            && vector_core::crypto::stream::hash_file(&local).is_ok_and(|(h, _)| h == hash);
+        if !intact {
+            // Named for this send: two sends of the same file must not share one.
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+            let tmp = dir.join(format!(".{}.{}.{}.tmp", hash, nonce, ext));
             std::fs::copy(&path, &tmp).map_err(|e| format!("read attachment: {e}"))?;
-            std::fs::rename(&tmp, &local).map_err(|e| format!("save attachment: {e}"))?;
+            if let Err(e) = std::fs::rename(&tmp, &local) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("save attachment: {e}"));
+            }
         }
         Ok((hash, local))
     })

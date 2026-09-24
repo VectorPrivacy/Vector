@@ -124,10 +124,17 @@ pub fn encrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_h
     result
 }
 
+/// GCM's limit for one message (2^36 - 32 bytes): past it the 32-bit counter wraps and
+/// the keystream repeats.
+const GCM_MAX_PLAINTEXT: u64 = (1 << 36) - 32;
+
 fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64), String> {
     let (mut ctr, tag_mask, mut ghash) = gcm_start(key_hex, nonce_hex)?;
     let mut input = std::fs::File::open(src).map_err(|e| format!("open file: {e}"))?;
     let total = input.metadata().map(|m| m.len()).unwrap_or(0);
+    if total > GCM_MAX_PLAINTEXT {
+        return Err("File too large to encrypt as one attachment (over 64 GiB)".to_string());
+    }
     let mut reported = 0u8;
     let mut output = std::io::BufWriter::with_capacity(
         CHUNK,
@@ -178,6 +185,9 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
         return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", total));
     }
     let ciphertext_len = total - 16;
+    if ciphertext_len > GCM_MAX_PLAINTEXT {
+        return Err("Invalid Input: encrypted data exceeds the AES-GCM limit".to_string());
+    }
     let mut reported = 0u8;
 
     let mut source_hash = Sha256::new();
@@ -269,8 +279,14 @@ pub fn place_download(src: &Path, file_hash: &str, len: u64, name: &str, extensi
     // copy beside the destination, then rename that into place.
     if std::fs::rename(src, &dest).is_err() {
         let staging = dir.join(format!(".{}.{}.tmp", file_hash, extension));
-        std::fs::copy(src, &staging).map_err(|e| format!("Failed to write file: {}", e))?;
-        std::fs::rename(&staging, &dest).map_err(|e| format!("Failed to rename file: {}", e))?;
+        let copied = std::fs::copy(src, &staging)
+            .map_err(|e| format!("Failed to write file: {}", e))
+            .and_then(|_| std::fs::File::open(&staging).and_then(|f| f.sync_all()).map_err(|e| format!("Failed to write file: {}", e)))
+            .and_then(|_| std::fs::rename(&staging, &dest).map_err(|e| format!("Failed to rename file: {}", e)));
+        if let Err(e) = copied {
+            let _ = std::fs::remove_file(&staging);
+            return Err(e);
+        }
         let _ = std::fs::remove_file(src);
     }
     Ok(dest)

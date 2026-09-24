@@ -1029,7 +1029,8 @@ fn orientation_app1(orientation: u8) -> Vec<u8> {
 
 /// Where a JPEG's compressed data ends: just past EOI, walking marker segments by
 /// their lengths and the entropy-coded runs between them, so bytes inside a table
-/// can't pass for an EOI. `None` for a file that never reaches one.
+/// can't pass for an EOI. `None` for a file that never reaches one, or that carries
+/// metadata between its scans.
 fn jpeg_scan_end(bytes: &[u8], mut i: usize) -> Option<usize> {
     while i + 1 < bytes.len() {
         if bytes[i] != 0xFF {
@@ -1040,6 +1041,9 @@ fn jpeg_scan_end(bytes: &[u8], mut i: usize) -> Option<usize> {
             0xD9 => return Some(i + 2),
             0xFF => { i += 1; continue; }
             0x01 | 0xD0..=0xD7 => i += 2,
+            // Metadata between scans (a progressive file may carry it there) would pass
+            // through with the scan data: no end, so the caller re-encodes instead.
+            0xE0..=0xEF | 0xFE => return None,
             _ => {
                 if i + 4 > bytes.len() {
                     return None;
@@ -1611,6 +1615,17 @@ mod lossless_strip_tests {
             let out = strip_metadata_keep_orientation(&v, "jpg").unwrap();
             assert_eq!(contains(&out, &payload), kept);
         }
+    }
+
+    #[test]
+    fn metadata_between_scans_sends_it_to_a_re_encode() {
+        let t = tagged_photo();
+        let (_, scan) = jpeg_segments(&t).unwrap();
+        let end = jpeg_scan_end(&t, scan).unwrap();
+        let mut v = t[..end - 2].to_vec();
+        v.extend(seg(0xFE, b"hidden-between-scans"));
+        v.extend_from_slice(&t[end - 2..]);
+        assert!(strip_metadata_keep_orientation(&v, "jpg").is_none());
     }
 
     #[test]

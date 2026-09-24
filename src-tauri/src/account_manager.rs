@@ -724,7 +724,15 @@ pub async fn reset_session() {
         u.clear();
     }
     crate::message::clear_all_message_caches().await;
-    { crate::commands::attachments::ACTIVE_DOWNLOADS.lock().await.clear(); }
+    // The previous account's downloads stop, not merely go unlisted: left running, one
+    // could share a staging file with the same download started in the next account.
+    {
+        let mut active = crate::commands::attachments::ACTIVE_DOWNLOADS.lock().await;
+        for id in active.iter() {
+            crate::net::cancel_transfer(id);
+        }
+        active.clear();
+    }
     { crate::image_cache::DOWNLOADS_IN_PROGRESS.lock().await.clear(); }
 
     // Identity caches.

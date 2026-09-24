@@ -39,6 +39,18 @@ const PREVIEW_GIF_VERBATIM_MAX: usize = 4 * 1024 * 1024;
 const PREVIEW_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 static PREVIEW_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+
+/// A path's extension, lower-cased, or `bin` when it has none: never the whole path, as
+/// splitting on the last dot gives for `README` or `/a.dir/readme`.
+fn path_extension(file_path: &str) -> String {
+    std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_else(|| "bin".to_string())
+}
+
 fn is_previewable_extension(extension: &str) -> bool {
     matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico")
 }
@@ -249,7 +261,7 @@ fn has_metadata(file_path: String) -> Result<bool, String> {
             None => false,
         })
     } else {
-        let ext = file_path.rsplit('.').next().unwrap_or("").to_lowercase();
+        let ext = path_extension(&file_path);
         // A JPEG or PNG is answered from its segment headers, never read whole.
         if matches!(ext.as_str(), "jpg" | "jpeg" | "png") {
             return Ok(std::fs::File::open(&file_path)
@@ -401,7 +413,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
     // Anything that isn't processed first streams from disk, whatever its size.
     #[cfg(not(target_os = "android"))]
     {
-        let extension = file_path.rsplit('.').next().unwrap_or("bin").to_lowercase();
+        let extension = path_extension(&file_path);
         if !matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "tiff" | "tif" | "ico") {
             match std::fs::metadata(&file_path) {
                 Ok(m) if m.len() > 0 => {}
@@ -427,11 +439,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                 .await
                 .map_err(|e| e.to_string())??;
 
-            let extension = file_path
-                .rsplit('.')
-                .next()
-                .unwrap_or("bin")
-                .to_lowercase();
+            let extension = path_extension(&file_path);
 
             AttachmentFile {
                 bytes: Arc::new(file_bytes),
@@ -475,11 +483,7 @@ pub async fn file_message(receiver: String, replied_to: String, file_path: Strin
                     // Regular file path (e.g., marketplace apps) - use standard file I/O
                     let file_bytes = read_file_checked(&file_path)?;
 
-                    let extension = file_path
-                        .rsplit('.')
-                        .next()
-                        .unwrap_or("bin")
-                        .to_lowercase();
+                    let extension = path_extension(&file_path);
 
                     AttachmentFile {
                         bytes: Arc::new(file_bytes),
@@ -1160,7 +1164,7 @@ pub async fn send_cached_compressed_file(receiver: String, replied_to: String, f
     // Keep-metadata re-derives from the original, so only the default path waits.
     let precompressed = take_precompressed(&file_path, !keep_metadata).await;
 
-    let extension = file_path.rsplit('.').next().unwrap_or("bin").to_lowercase();
+    let extension = path_extension(&file_path);
 
     // Default strip+compress reuses the pre-compressed result. Keep-metadata
     // (needs EXIF re-attach) and cache misses re-derive from the original file.

@@ -177,7 +177,9 @@ fn write_checkpoint(part: &std::path::Path, at: Checkpoint) -> std::io::Result<(
     raw[..8].copy_from_slice(&at.offset.to_le_bytes());
     raw[8..].copy_from_slice(&at.total.unwrap_or(0).to_le_bytes());
     let tmp = part.with_extension("ckpt.tmp");
-    std::fs::write(&tmp, raw)?;
+    let mut f = std::fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut f, &raw)?;
+    f.sync_all()?;
     std::fs::rename(tmp, checkpoint_path(part))
 }
 

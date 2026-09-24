@@ -275,6 +275,39 @@ fn sweep_stale_partials(dir: &std::path::Path) {
     }
 }
 
+/// How long one of our dot-files in the download folder may sit before it's litter: a
+/// decrypt or save that died mid-way leaves one, with plaintext nobody verified.
+const STAGING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Clear what crashed transfers left in the user's download folder: only our own
+/// dot-files (a dot, then a 64-hex content hash), never anything else there.
+fn sweep_stale_staging(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let ours = name.len() > 65
+            && name.starts_with('.')
+            && name.as_bytes()[1..65].iter().all(u8::is_ascii_hexdigit)
+            && (name.ends_with(".download") || name.ends_with(".tmp"));
+        let stale = ours && entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| now.duration_since(t).unwrap_or_default() > STAGING_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Emit only while the account that started the download is the one on screen.
+fn emit_for(sid: u64, handle: &tauri::AppHandle, event: &str, payload: serde_json::Value) {
+    if vector_core::db::current_session_id() == sid {
+        let _ = handle.emit(event, payload);
+    }
+}
+
 /// Why a finished download can't be used.
 enum Verdict {
     /// The user stopped it while it was being opened.
@@ -298,9 +331,6 @@ fn verify_download(
     use vector_core::crypto::stream::{decrypt_file_with_progress, hash_file};
     let address = vector_core::blossom::blob_hash(url);
     let len = std::fs::metadata(part).map(|m| m.len()).map_err(|e| Verdict::Fatal(e.to_string()))?;
-    if len < 16 {
-        return Err(Verdict::BadSource(format!("Downloaded file too small ({} bytes)", len)));
-    }
 
     // Plaintext public blob (no decryption tags): the content address and the
     // sender's `ox` claim are the only integrity checks there are.
@@ -313,6 +343,10 @@ fn verify_download(
         return Ok((part.to_path_buf(), hash, len));
     }
 
+    // Anything sealed carries at least its 16-byte tag.
+    if len < 16 {
+        return Err(Verdict::BadSource(format!("Downloaded file too small ({} bytes)", len)));
+    }
     match decrypt_file_with_progress(part, staging, &attachment.key, &attachment.nonce, progress) {
         Ok(done) => {
             if address.as_deref().is_some_and(|a| a != done.source_sha256) {
@@ -373,6 +407,9 @@ pub async fn cancel_download(attachment_id: String) -> bool {
 /// Download and decrypt an attachment
 #[tauri::command]
 pub async fn download_attachment(npub: String, msg_id: String, attachment_id: String) -> bool {
+    // A command runs unbound: after a swap the "current" account is the new one, so the
+    // account this download belongs to is pinned here and every emission checks it.
+    let sid = vector_core::db::current_session_id();
     vector_core::db::scoped(async move {
         let handle = TAURI_APP.get().unwrap();
         // The multi-source walk (mirrors + hash-swap) can run for minutes against
@@ -388,13 +425,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 "[AttachmentDownload] refused: {} (msg {}, attachment {})",
                 reason, msg_id, attachment_id
             );
-            handle.emit("attachment_download_result", serde_json::json!({
+            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                 "profile_id": &npub,
                 "msg_id": &msg_id,
                 "id": &attachment_id,
                 "success": false,
                 "result": reason
-            })).ok();
+            }));
             false
         };
 
@@ -495,13 +532,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                                     attachment.path = file_path.to_string_lossy().to_string().into_boxed_str();
 
                                     // Emit success event
-                                    handle.emit("attachment_download_result", serde_json::json!({
+                                    emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                                         "profile_id": npub,
                                         "msg_id": msg_id,
                                         "id": attachment_id,
                                         "success": true,
                                         "result": file_path.to_string_lossy().to_string()
-                                    })).unwrap();
+                                    }));
 
                                     // Also update the database
                                     let chat_id_for_db = chat.id().to_string();
@@ -593,12 +630,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         if let Some(dir) = part.parent() {
             sweep_stale_partials(dir);
         }
+        sweep_stale_staging(&vector_core::db::get_download_dir());
         let resumed = net::read_checkpoint(&part).unwrap_or_default();
-        handle.emit("attachment_download_progress", serde_json::json!({
+        emit_for(sid, handle, "attachment_download_progress", serde_json::json!({
             "id": &attachment_hex_id,
             "progress": resumed.total.filter(|&t| t > 0).map(|t| resumed.offset * 100 / t).unwrap_or(0),
             "bytesDownloaded": resumed.offset,
-        })).unwrap();
+        }));
 
         // Walk the sources: primary URL first, then the BUD-04 `fallback` mirrors,
         // then BUD-03 hash-swap candidates from the author's server list. Per
@@ -617,6 +655,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
         let mut saved: Option<(std::path::PathBuf, String)> = None;
         let mut last_error: String = "Download failed".to_string();
         let mut hash_swap_tried = false;
+        // The source already given a fresh start: bytes it didn't serve can't condemn it twice.
+        let mut clean_retry: Option<usize> = None;
         let mut i = 0;
         while i < candidates.len() {
             // A stop outranks the walk: a dead source must not buy the next one a
@@ -625,6 +665,8 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 break;
             }
             let url = candidates[i].clone();
+            // Bytes already on disk came from an earlier source or launch, not this one.
+            let inherited = net::read_checkpoint(&part).is_some_and(|c| c.offset > 0);
 
             // Fetch this source's bytes, retrying transient failures with backoff.
             // Each retry resumes from the checkpoint rather than the first byte.
@@ -659,11 +701,12 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
 
             if fetched {
                 let (src, url_for_check, att) = (part.clone(), url.clone(), attachment_for_decrypt.clone());
-                let staging = vector_core::db::get_download_dir().join(format!(".{}.download", attachment_hex_id));
+                // Named for this account too: the same file downloading in two can't share it.
+                let staging = vector_core::db::get_download_dir().join(format!(".{}.{}.download", attachment_hex_id, sid));
                 // The last byte is in, but the file isn't ready until it's opened: the
                 // bubble says so rather than sitting on a full bar.
                 let stage = |stage: &str, pct: Option<u8>| {
-                    let _ = handle.emit("attachment_download_stage", serde_json::json!({
+                    emit_for(sid, handle, "attachment_download_stage", serde_json::json!({
                         "id": &attachment_hex_id, "stage": stage, "progress": pct,
                     }));
                 };
@@ -672,7 +715,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 let (stage_handle, stage_id) = (handle.clone(), attachment_hex_id.clone());
                 let outcome = tokio::task::spawn_blocking(move || {
                     verify_download(&src, &staging, &url_for_check, &att, &mut |pct| {
-                        let _ = stage_handle.emit("attachment_download_stage", serde_json::json!({
+                        emit_for(sid, &stage_handle, "attachment_download_stage", serde_json::json!({
                             "id": &stage_id, "stage": "decrypting", "progress": pct,
                         }));
                         !net::transfer_cancelled(&stage_id)
@@ -685,6 +728,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         stage("saving", None);
                         let (name, extension) = (attachment_for_decrypt.name.clone(), attachment_for_decrypt.extension.clone());
                         let hash = file_hash.clone();
+                        let ready_path = ready.clone();
                         let placed = tokio::task::spawn_blocking(move || {
                             vector_core::crypto::stream::place_download(&ready, &hash, len, &name, &extension)
                         })
@@ -693,16 +737,29 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                         net::discard_partial(&part);
                         match placed {
                             Ok(path) => saved = Some((path, file_hash)),
-                            Err(e) => last_error = e,
+                            // The bytes were right and this device couldn't keep them (full,
+                            // no permission): another mirror's copy would fail the same way.
+                            Err(e) => {
+                                if ready_path != part { let _ = std::fs::remove_file(&ready_path); }
+                                last_error = e;
+                                break;
+                            }
                         }
                     }
                     // The stop is handled with every other stop, after the walk.
                     Err(Verdict::Cancelled) => break,
                     Err(Verdict::BadSource(reason)) => {
-                        // These bytes are wrong for this blob; the next source starts clean.
-                        vector_core::log_net_fail!("[AttachmentDownload] {} — bad source: {}", reason, url);
                         net::discard_partial(&part);
                         last_error = reason;
+                        // Part of these bytes came from elsewhere: this source gets one clean
+                        // run of its own before it is judged.
+                        if inherited && clean_retry != Some(i) {
+                            clean_retry = Some(i);
+                            vector_core::log_net_fail!("[AttachmentDownload] {} — refetching whole from {}", last_error, url);
+                            continue;
+                        }
+                        // These bytes are wrong for this blob; the next source starts clean.
+                        vector_core::log_net_fail!("[AttachmentDownload] {} — bad source: {}", last_error, url);
                     }
                     Err(Verdict::Fatal(reason)) => {
                         // Verified ciphertext that won't decrypt is a key/nonce problem no
@@ -718,13 +775,13 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                             att.set_downloaded(false);
                         });
                         drop(state);
-                        handle.emit("attachment_download_result", serde_json::json!({
+                        emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                             "profile_id": npub,
                             "msg_id": msg_id,
                             "id": attachment_id,
                             "success": false,
                             "result": reason
-                        })).unwrap();
+                        }));
                         return false;
                     }
                 }
@@ -779,14 +836,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 att.set_downloaded(false);
             });
             drop(state);
-            handle.emit("attachment_download_result", serde_json::json!({
+            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                 "profile_id": npub,
                 "msg_id": msg_id,
                 "id": attachment_id,
                 "success": false,
                 "cancelled": true,
                 "result": net::TRANSFER_CANCELLED
-            })).ok();
+            }));
             return false;
         }
 
@@ -804,7 +861,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             });
             drop(state);
             let paused = net::read_checkpoint(&part).filter(|c| c.offset > 0);
-            handle.emit("attachment_download_result", serde_json::json!({
+            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                 "profile_id": npub,
                 "msg_id": msg_id,
                 "id": attachment_id,
@@ -812,7 +869,7 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 "result": last_error,
                 "resumeFrom": paused.map(|c| c.offset),
                 "total": paused.and_then(|c| c.total),
-            })).unwrap();
+            }));
             return false;
         };
 
@@ -837,14 +894,14 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
             });
 
             // Emit the finished download with both old and new IDs
-            handle.emit("attachment_download_result", serde_json::json!({
+            emit_for(sid, handle, "attachment_download_result", serde_json::json!({
                 "profile_id": npub,
                 "msg_id": msg_id,
                 "old_id": attachment_id,
                 "id": file_hash,
                 "success": true,
                 "result": &path_str,
-            })).unwrap();
+            }));
 
             // Persist updated message/attachment metadata to the database
             if let Some(handle) = TAURI_APP.get() {
@@ -861,11 +918,11 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                 };
 
                 // Update the frontend state
-                handle.emit("message_update", serde_json::json!({
+                emit_for(sid, handle, "message_update", serde_json::json!({
                     "old_id": &updated_message.id,
                     "message": &updated_message,
                     "chat_id": &chat_id
-                })).unwrap();
+                }));
 
                 // In-memory backfill: update EVERY resident message sharing the
                 // attachment hash — across ALL chats, not just this one. The same
@@ -899,11 +956,11 @@ pub async fn download_attachment(npub: String, msg_id: String, attachment_id: St
                     if let Some(chat_ref) = state.get_chat(backfill_chat) {
                         if let Some(compact_msg) = chat_ref.messages.find_by_hex_id(backfill_id) {
                             let backfill_msg = compact_msg.to_message(&state.interner);
-                            handle.emit("message_update", serde_json::json!({
+                            emit_for(sid, handle, "message_update", serde_json::json!({
                                 "old_id": &backfill_msg.id,
                                 "message": &backfill_msg,
                                 "chat_id": backfill_chat
-                            })).unwrap();
+                            }));
                         }
                     }
                 }

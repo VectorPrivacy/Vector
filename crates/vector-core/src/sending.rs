@@ -820,6 +820,22 @@ impl Drop for TempFile {
 
 /// [`send_file_dm_with_meta`] from either source.
 #[allow(clippy::too_many_arguments)]
+/// Mark a pending file message failed (in state, in the UI, on disk) and hand back `err`.
+async fn mark_send_failed(callback: &Arc<dyn SendCallback>, receiver_npub: &str, pending_id: &str, err: String) -> String {
+    let failed_msg = {
+        let mut state = STATE.lock().await;
+        state.update_message(pending_id, |msg| {
+            msg.set_failed(true);
+            msg.set_pending(false);
+        })
+    };
+    if let Some((_chat_id, ref msg)) = failed_msg {
+        callback.on_failed(receiver_npub, pending_id, msg);
+        callback.on_persist(receiver_npub, msg);
+    }
+    err
+}
+
 pub async fn send_file_dm_from(
     receiver_npub: &str,
     source: FileSource,
@@ -860,6 +876,7 @@ pub async fn send_file_dm_from(
             FileSource::Path(path) => FileSource::Path(path.clone()),
         };
         let (filename, extension) = (filename.to_string(), extension.to_string());
+        let tmp_tag = pending_id.clone();
         tokio::task::spawn_blocking(move || -> Result<_, String> {
             let (file_hash, plain_len) = match &source {
                 FileSource::Bytes(bytes) => (crypto::sha256_hex(bytes), bytes.len() as u64),
@@ -881,10 +898,11 @@ pub async fn send_file_dm_from(
             let local_path = crypto::resolve_unique_filename(&download_dir, &local_name);
             // Atomic write: temp file then rename. A file source copies file to file
             // (a clone where the filesystem has them), never through memory.
-            let tmp = download_dir.join(format!(".{}.tmp", &file_hash));
+            // Named for this send: two sends of the same file must not share one.
+            let tmp = download_dir.join(format!(".{}.{}.tmp", &file_hash, &tmp_tag));
             let img_meta = match &source {
                 FileSource::Bytes(bytes) => {
-                    let _ = std::fs::write(&tmp, &**bytes);
+                    std::fs::write(&tmp, &**bytes).map_err(|e| format!("Failed to save the file: {e}"))?;
                     img_meta.or_else(|| crypto::generate_image_metadata(bytes))
                 }
                 FileSource::Path(path) => {
@@ -892,7 +910,10 @@ pub async fn send_file_dm_from(
                     img_meta
                 }
             };
-            let _ = std::fs::rename(&tmp, &local_path);
+            if let Err(e) = std::fs::rename(&tmp, &local_path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("Failed to save the file: {e}"));
+            }
             Ok((file_hash, local_path.to_string_lossy().to_string(), img_meta, plain_len))
         })
         .await
@@ -965,7 +986,7 @@ pub async fn send_file_dm_from(
             });
             (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size, None)
         }
-        None => {
+        None => match async {
             let key = params.key.clone();
             let nonce = params.nonce.clone();
             // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
@@ -986,7 +1007,7 @@ pub async fn send_file_dm_from(
                     crate::blossom::UploadBody::Memory(Arc::new(sealed))
                 }
                 FileSource::Path(_) => {
-                    // Sealed from the local copy, which nothing else will move or edit.
+                    // Sealed from the local copy made above, not the source the caller may still change.
                     let _ = std::fs::create_dir_all(&outgoing);
                     let sealed_path = outgoing.join(format!("{}.enc", pending_id));
                     _ciphertext_file = Some(TempFile(sealed_path.clone()));
@@ -1007,8 +1028,12 @@ pub async fn send_file_dm_from(
             };
             callback.on_upload_stage(&pending_id, "starting", None);
             let size = body.len();
-            (params.key, params.nonce, String::new(), size, Some(body))
-        }
+            Ok::<_, String>((params.key.clone(), params.nonce.clone(), String::new(), size, Some(body)))
+        }.await {
+            Ok(sealed) => sealed,
+            // The bubble is up: a seal that fails (or is cancelled) must say so, not stay pending.
+            Err(e) => return Err(mark_send_failed(&callback, receiver_npub, &pending_id, e).await),
+        },
     };
 
     // Upload to Blossom — bridge SendCallback.on_upload_progress to Blossom ProgressCallback
@@ -1054,20 +1079,7 @@ pub async fn send_file_dm_from(
                 cancel.clone(),
             ).await {
                 Ok(accepted) => accepted,
-                Err(e) => {
-                    let failed_msg = {
-                        let mut state = STATE.lock().await;
-                        state.update_message(&pending_id, |msg| {
-                            msg.set_failed(true);
-                            msg.set_pending(false);
-                        })
-                    };
-                    if let Some((_chat_id, ref msg)) = failed_msg {
-                        callback.on_failed(receiver_npub, &pending_id, msg);
-                        callback.on_persist(receiver_npub, msg);
-                    }
-                    return Err(format!("Upload failed: {}", e));
-                }
+                Err(e) => return Err(mark_send_failed(&callback, receiver_npub, &pending_id, format!("Upload failed: {}", e)).await),
             };
 
             let upload_url = accepted.url.clone();
