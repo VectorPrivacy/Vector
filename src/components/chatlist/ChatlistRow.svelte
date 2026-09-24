@@ -13,6 +13,7 @@
     import ChannelList from './ChannelList.svelte';
     import Avatar from '../ui/Avatar.svelte';
     import { chatVersion, profileVersion, communityVersion } from '../lib/signals.svelte.js';
+    import { transfer } from '../lib/attachments.svelte.js';
 
     // COMMUNITY_UNREAD_PLUS_THRESHOLD (row.js): past one synced page the count is a
     // lower bound, so render "N+" rather than a false exact figure.
@@ -48,6 +49,14 @@
             joining: !!chat._joining,
         };
     });
+
+    // A row still sending counts its upload up. Kept apart from vm, which the per-frame
+    // transfer updates would otherwise rebuild.
+    const sendPct = $derived.by(() => {
+        const t = vm.preview.pendingId ? transfer(vm.preview.pendingId) : null;
+        return t?.kind === 'upload' && t.phase === 'active' && t.pct > 0 ? t.pct : null;
+    });
+    const preview = $derived(sendPct == null ? vm.preview : { ...vm.preview, text: `Sending (${sendPct}%)` });
 
     // Emulated presence: last incoming message <5m online, <30m away (row.js).
     function presenceOf(chat) {
@@ -164,7 +173,7 @@
                 <span class="chatlist-contact-inline-time">{h.timeAgo(vm.last.at)}</span>
             {/if}
         </div>
-        <p class="cutoff" class:typing-indicator-text={vm.preview.isTyping} use:previewInto={vm.preview}></p>
+        <p class="cutoff" class:typing-indicator-text={vm.preview.isTyping} use:previewInto={preview}></p>
     </div>
     {#if vm.nUnread}
         <span class="chatlist-contact-count">{countText(vm)}</span>

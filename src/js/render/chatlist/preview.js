@@ -127,7 +127,7 @@ function generateChatPreviewText(chat) {
 
     // Pending message
     if (cLastMsg.pending) {
-        return { text: 'Sending...', isTyping: false, needsTwemoji: false };
+        return { text: 'Sending...', isTyping: false, needsTwemoji: false, pendingId: cLastMsg.id };
     }
 
     // Build sender prefix for groups
