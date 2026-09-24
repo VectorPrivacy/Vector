@@ -810,12 +810,78 @@ pub enum FileSource {
 }
 
 /// Removes a file when dropped: the ciphertext of an upload that ended either way.
-struct TempFile(std::path::PathBuf);
+pub struct TempFile(std::path::PathBuf);
 
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// An outgoing attachment, ready for the upload.
+pub enum Sealed {
+    /// A live blob of these bytes already exists: the message just names it.
+    Reused(crate::db::attachments::ReusableUpload),
+    /// Freshly sealed. A disk body's ciphertext goes when the guard drops.
+    Body(crate::blossom::UploadBody, Option<TempFile>),
+}
+
+/// Reuse a live blob of the plaintext `hash`, or seal `plain` under `key`/`nonce`,
+/// reporting each stage against `pending_id`. A file seals file to file, costing no memory.
+pub async fn seal_or_reuse(
+    plain: FileSource,
+    hash: &str,
+    key: &str,
+    nonce: &str,
+    pending_id: &str,
+    callback: Arc<dyn SendCallback>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<Sealed, String> {
+    // Every verified send or download of these bytes left url+key+nonce behind. Liveness
+    // is proven, never assumed: a dead or unreachable blob falls through to a fresh upload.
+    if let Ok(Some(r)) = crate::db::attachments::find_reusable_by_hash(hash) {
+        if crate::blossom::blob_is_served(&r.url, std::time::Duration::from_secs(5)).await {
+            crate::log_info!("[SmartForward] {} reused ({}, {} KB) — no upload", &hash[..8.min(hash.len())], if r.mine { "own blob" } else { "foreign blob, mirroring in background" }, r.size / 1024);
+            return Ok(Sealed::Reused(r));
+        }
+    }
+
+    let (key, nonce) = (key.to_string(), nonce.to_string());
+    // Resolved here, on the task that carries the account, not on a blocking thread.
+    let outgoing = crate::db::current_account_dir()
+        .map(|d| d.join("outgoing"))
+        .unwrap_or_else(|_| std::env::temp_dir());
+    // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
+    callback.on_upload_stage(pending_id, "encrypting", matches!(plain, FileSource::Path(_)).then_some(0));
+    let sealed = match plain {
+        FileSource::Bytes(bytes) => {
+            let sealed = tokio::task::spawn_blocking(move || {
+                crypto::encrypt_data(&bytes, &crypto::EncryptionParams { key, nonce })
+            })
+            .await
+            .map_err(|e| format!("Encryption failed: {}", e))??;
+            Sealed::Body(crate::blossom::UploadBody::Memory(Arc::new(sealed)), None)
+        }
+        FileSource::Path(path) => {
+            let _ = std::fs::create_dir_all(&outgoing);
+            let out = outgoing.join(format!("{}-{}.enc", hash, pending_id));
+            let guard = TempFile(out.clone());
+            let target = out.clone();
+            let (stage_cb, pid) = (callback.clone(), pending_id.to_string());
+            let (sealed_hash, len) = tokio::task::spawn_blocking(move || {
+                crypto::stream::encrypt_file_with_progress(&path, &target, &key, &nonce, &mut |pct| {
+                    stage_cb.on_upload_stage(&pid, "encrypting", Some(pct));
+                    // A cancel lands here, not after the whole file is sealed.
+                    !cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
+                })
+            })
+            .await
+            .map_err(|e| format!("Encryption failed: {}", e))??;
+            Sealed::Body(crate::blossom::UploadBody::file(out, len, &sealed_hash)?, Some(guard))
+        }
+    };
+    callback.on_upload_stage(pending_id, "starting", None);
+    Ok(sealed)
 }
 
 /// [`send_file_dm_with_meta`] from either source.
@@ -954,26 +1020,24 @@ pub async fn send_file_dm_from(
     callback.on_pending(receiver_npub, &msg);
     let cancel = config.cancel_token.clone().or_else(|| callback.cancel_token(&pending_id));
 
-    // === Smart-forward: reuse a prior upload of this exact plaintext ===
-    //
-    // The ledger is the attachments table: every verified send or download of
-    // these bytes left url+key+nonce behind. A live blob means no encrypt, no
-    // upload — the message just references it. Liveness is proven, never
-    // assumed: a dead or unreachable blob falls through to the fresh upload.
-    let reused: Option<crate::db::attachments::ReusableUpload> =
-        match crate::db::attachments::find_reusable_by_hash(&file_hash) {
-            Ok(Some(r)) if crate::blossom::blob_is_served(&r.url, std::time::Duration::from_secs(5)).await => {
-                crate::log_info!("[SmartForward] {} reused ({}, {} KB) — no upload", &file_hash[..8], if r.mine { "own blob" } else { "foreign blob, mirroring in background" }, r.size / 1024);
-                Some(r)
-            }
-            _ => None,
-        };
-
-    // === Encrypt → upload → build rumor → send (skipped wholesale on reuse) ===
+    // Encrypt and upload, or reference a live blob of the same bytes and skip both.
+    // A file seals from the local copy made above, not the source the caller may still change.
+    let plain = match source {
+        FileSource::Bytes(bytes) => FileSource::Bytes(bytes),
+        FileSource::Path(_) => FileSource::Path(std::path::PathBuf::from(&local_path_str)),
+    };
+    let sealed = match seal_or_reuse(plain, &file_hash, &params.key, &params.nonce, &pending_id, callback.clone(), cancel.clone()).await {
+        Ok(sealed) => sealed,
+        // The bubble is up: a seal that fails (or is cancelled) must say so, not stay pending.
+        Err(e) => return Err(mark_send_failed(&callback, receiver_npub, &pending_id, e).await),
+    };
     // Held to the end of the send, so the ciphertext goes however it ends.
-    let mut _ciphertext_file: Option<TempFile> = None;
-    let (att_key, att_nonce, att_url, encrypted_size, encrypted) = match &reused {
-        Some(r) => {
+    let (reused, encrypted, _ciphertext_file) = match sealed {
+        Sealed::Reused(r) => (Some(r), None, None),
+        Sealed::Body(body, guard) => (None, Some(body), guard),
+    };
+    let (att_key, att_nonce, att_url, encrypted_size) = match (&reused, &encrypted) {
+        (Some(r), _) => {
             let adopted = crate::compact::CompactAttachment::from_attachment(&Attachment {
                 key: r.key.clone(), nonce: r.nonce.clone(), url: r.url.clone(), size: r.size,
                 ..attachment.clone()
@@ -984,56 +1048,9 @@ pub async fn send_file_dm_from(
                     *att = adopted.clone();
                 }
             });
-            (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size, None)
+            (r.key.clone(), r.nonce.clone(), r.url.clone(), r.size)
         }
-        None => match async {
-            let key = params.key.clone();
-            let nonce = params.nonce.clone();
-            // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
-            let streamed = matches!(source, FileSource::Path(_));
-            callback.on_upload_stage(&pending_id, "encrypting", streamed.then_some(0));
-            // Resolved here, on the task that carries the account, not on a blocking thread.
-            let outgoing = crate::db::current_account_dir()
-                .map(|d| d.join("outgoing"))
-                .unwrap_or_else(|_| std::env::temp_dir());
-            let body = match &source {
-                FileSource::Bytes(bytes) => {
-                    let bytes = Arc::clone(bytes);
-                    let sealed = tokio::task::spawn_blocking(move || {
-                        crypto::encrypt_data(&bytes, &crypto::EncryptionParams { key, nonce })
-                    })
-                    .await
-                    .map_err(|e| format!("Encryption failed: {}", e))??;
-                    crate::blossom::UploadBody::Memory(Arc::new(sealed))
-                }
-                FileSource::Path(_) => {
-                    // Sealed from the local copy made above, not the source the caller may still change.
-                    let _ = std::fs::create_dir_all(&outgoing);
-                    let sealed_path = outgoing.join(format!("{}.enc", pending_id));
-                    _ciphertext_file = Some(TempFile(sealed_path.clone()));
-                    let plain = std::path::PathBuf::from(&local_path_str);
-                    let out = sealed_path.clone();
-                    let (stage_cb, pid, stop) = (callback.clone(), pending_id.clone(), cancel.clone());
-                    let (hash, len) = tokio::task::spawn_blocking(move || {
-                        crypto::stream::encrypt_file_with_progress(&plain, &out, &key, &nonce, &mut |pct| {
-                            stage_cb.on_upload_stage(&pid, "encrypting", Some(pct));
-                            // A cancel lands here, not after the whole file is sealed.
-                            !stop.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))
-                        })
-                    })
-                    .await
-                    .map_err(|e| format!("Encryption failed: {}", e))??;
-                    crate::blossom::UploadBody::file(sealed_path, len, &hash)?
-                }
-            };
-            callback.on_upload_stage(&pending_id, "starting", None);
-            let size = body.len();
-            Ok::<_, String>((params.key.clone(), params.nonce.clone(), String::new(), size, Some(body)))
-        }.await {
-            Ok(sealed) => sealed,
-            // The bubble is up: a seal that fails (or is cancelled) must say so, not stay pending.
-            Err(e) => return Err(mark_send_failed(&callback, receiver_npub, &pending_id, e).await),
-        },
+        (None, body) => (params.key.clone(), params.nonce.clone(), String::new(), body.as_ref().map_or(0, |b| b.len())),
     };
 
     // Upload to Blossom — bridge SendCallback.on_upload_progress to Blossom ProgressCallback
@@ -1514,5 +1531,50 @@ mod tests {
         // Simulate cancel
         token.store(true, std::sync::atomic::Ordering::Relaxed);
         assert!(c.cancel_token.as_ref().unwrap().load(std::sync::atomic::Ordering::Relaxed));
+    }
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Stages(Mutex<Vec<(String, Option<u8>)>>);
+    impl SendCallback for Stages {
+        fn on_upload_stage(&self, _: &str, stage: &str, pct: Option<u8>) {
+            self.0.lock().unwrap().push((stage.to_string(), pct));
+        }
+    }
+
+    #[tokio::test]
+    async fn bytes_and_files_seal_to_what_their_key_opens() {
+        let plain: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let params = crypto::generate_encryption_params();
+        let hash = crypto::sha256_hex(&plain);
+        let src = std::env::temp_dir().join(format!("vector-seal-{}.bin", std::process::id()));
+        std::fs::write(&src, &plain).unwrap();
+
+        for source in [FileSource::Bytes(Arc::new(plain.clone())), FileSource::Path(src.clone())] {
+            let from_file = matches!(source, FileSource::Path(_));
+            let stages = Arc::new(Stages::default());
+            let sealed = seal_or_reuse(source, &hash, &params.key, &params.nonce, "pending-1", stages.clone(), None).await.unwrap();
+            let Sealed::Body(body, guard) = sealed else { panic!("nothing to reuse without a database") };
+            let ciphertext = match &body {
+                crate::blossom::UploadBody::Memory(b) => b.to_vec(),
+                crate::blossom::UploadBody::File { path, .. } => std::fs::read(path).unwrap(),
+            };
+            assert_eq!(body.len(), plain.len() as u64 + 16);
+            assert_eq!(crypto::decrypt_data(&ciphertext, &params.key, &params.nonce).unwrap(), plain);
+            let stages = stages.0.lock().unwrap().clone();
+            assert_eq!(stages.first().unwrap().0, "encrypting");
+            assert_eq!(stages.last().unwrap(), &("starting".to_string(), None));
+            assert_eq!(guard.is_some(), from_file);
+            if let crate::blossom::UploadBody::File { path, .. } = &body {
+                drop(guard);
+                assert!(!path.exists(), "the ciphertext goes with its guard");
+            }
+        }
+        let _ = std::fs::remove_file(&src);
     }
 }

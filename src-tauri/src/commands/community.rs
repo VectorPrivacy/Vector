@@ -15,7 +15,7 @@ use vector_core::community::invite::{build_invite_rumor, CommunityInvite};
 use vector_core::community::public_invite::{parse_invite_url, PublicInvitePreview};
 use vector_core::community::transport::LiveTransport;
 use vector_core::community::{service, CommunityId};
-use vector_core::sending::{send_rumor_dm, NoOpSendCallback, SendCallback, SendConfig};
+use vector_core::sending::{send_rumor_dm, FileSource, NoOpSendCallback, Sealed, SendCallback, SendConfig};
 #[cfg(debug_assertions)]
 use vector_core::ClientRelayExt;
 
@@ -1252,7 +1252,7 @@ struct PreparedCommunityAttachment {
     /// ones the upload will seal with, unless a live blob of these bytes is reused.
     attachment: vector_core::types::Attachment,
     /// What gets sealed once the bubble is up: bytes in hand, or the local copy on disk.
-    plain: Plain,
+    plain: FileSource,
     /// Original MIME (servers reject `application/octet-stream` but accept the same bytes
     /// under their real type) — used for capability-aware server routing.
     mime: String,
@@ -1334,26 +1334,10 @@ async fn process_outbound_community_attachment(
     process_outbound_community_attachment_bytes(bytes, &name, use_compression, keep_metadata, precompressed).await
 }
 
-/// Removes a sealed ciphertext file when dropped.
-struct SealedFile(std::path::PathBuf);
-
-impl Drop for SealedFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-/// The plaintext an outbound Community attachment is sealed from.
-enum Plain {
-    Bytes(Vec<u8>),
-    /// The local copy on disk, sealed file to file.
-    File(std::path::PathBuf),
-}
-
 /// Build the optimistic attachment for bytes ready to seal. Nothing touches the network
 /// or seals here: both wait until the bubble is up, where they can say what they're doing.
 fn stage_community_attachment(
-    plain: Plain,
+    plain: FileSource,
     plain_len: u64,
     plaintext_hash: String,
     local_path: std::path::PathBuf,
@@ -1392,78 +1376,6 @@ fn stage_community_attachment(
         fallback_urls: Vec::new(), // filled by the post-upload mirror fan-out
     };
     PreparedCommunityAttachment { attachment, plain, mime }
-}
-
-/// What the upload loop will send for one attachment.
-enum Sealed {
-    /// A live blob of these bytes already exists; the attachment now names it.
-    Reused { foreign: bool },
-    /// Freshly sealed; a disk body's file goes with the guard once the send is done.
-    Body(vector_core::blossom::UploadBody, Option<SealedFile>),
-}
-
-/// Reuse a live blob of the attachment's bytes, or seal them under its key, reporting
-/// each stage against the pending bubble.
-async fn seal_for_upload(
-    attachment: &mut vector_core::types::Attachment,
-    plain: Plain,
-    pending_id: &str,
-    callback: &crate::message::sending::TauriSendCallback,
-) -> Result<Sealed, String> {
-    use vector_core::blossom::UploadBody;
-    use vector_core::sending::SendCallback;
-
-    // Resolved on the task, which carries the account; a blocking thread does not.
-    let outgoing = vector_core::db::current_account_dir()
-        .map(|d| d.join("outgoing"))
-        .unwrap_or_else(|_| std::env::temp_dir());
-
-    // Smart-forward: a prior verified send/download of these exact bytes left a
-    // decryptable blob behind — reference it instead of re-encrypting and
-    // re-uploading. Liveness is proven (strict HEAD), never assumed.
-    if let Ok(Some(r)) = vector_core::db::attachments::find_reusable_by_hash(&attachment.id) {
-        if vector_core::blossom::blob_is_served(&r.url, Duration::from_secs(5)).await {
-            vector_core::log_info!("[SmartForward] {} reused ({}, {} KB) — no upload", &attachment.id[..8], if r.mine { "own blob" } else { "foreign blob, mirroring in background" }, r.size / 1024);
-            attachment.key = r.key;
-            attachment.nonce = r.nonce;
-            attachment.url = r.url;
-            attachment.size = r.size;
-            return Ok(Sealed::Reused { foreign: !r.mine });
-        }
-    }
-
-    let (key, nonce) = (attachment.key.clone(), attachment.nonce.clone());
-    // Only a streamed seal can count its progress; bytes in hand are sealed in one go.
-    callback.on_upload_stage(pending_id, "encrypting", matches!(plain, Plain::File(_)).then_some(0));
-    let sealed = match plain {
-        Plain::Bytes(bytes) => {
-            let p = vector_core::crypto::EncryptionParams { key, nonce };
-            let sealed_bytes = tokio::task::spawn_blocking(move || vector_core::crypto::encrypt_data(&bytes, &p))
-                .await
-                .map_err(|e| e.to_string())??;
-            Sealed::Body(UploadBody::Memory(std::sync::Arc::new(sealed_bytes)), None)
-        }
-        Plain::File(path) => {
-            let _ = std::fs::create_dir_all(&outgoing);
-            let out = outgoing.join(format!("{}-{}.enc", attachment.id, pending_id));
-            let guard = SealedFile(out.clone());
-            let target = out.clone();
-            let (pid, stage_cb) = (pending_id.to_string(), *callback);
-            let stop = crate::message::upload_cancel_flags().lock().unwrap().get(pending_id).cloned();
-            let (hash, len) = tokio::task::spawn_blocking(move || {
-                vector_core::crypto::stream::encrypt_file_with_progress(&path, &target, &key, &nonce, &mut |pct| {
-                    stage_cb.on_upload_stage(&pid, "encrypting", Some(pct));
-                    // A cancel lands here, not after the whole file is sealed.
-                    !stop.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed))
-                })
-            })
-            .await
-            .map_err(|e| e.to_string())??;
-            Sealed::Body(UploadBody::file(out, len, &hash)?, Some(guard))
-        }
-    };
-    callback.on_upload_stage(pending_id, "starting", None);
-    Ok(sealed)
 }
 
 /// Prepare a file that needs no processing straight from disk: hashed, copied into
@@ -1507,7 +1419,7 @@ async fn process_outbound_community_attachment_path(
     .await
     .map_err(|e| e.to_string())??;
     let plain_len = std::fs::metadata(&local_path).map(|m| m.len()).map_err(|e| format!("read attachment: {e}"))?;
-    Ok(stage_community_attachment(Plain::File(local_path.clone()), plain_len, plaintext_hash, local_path, extension, name, None))
+    Ok(stage_community_attachment(FileSource::Path(local_path.clone()), plain_len, plaintext_hash, local_path, extension, name, None))
 }
 
 /// Encrypt a single outbound file (raw bytes + filename) for a Community message.
@@ -1567,7 +1479,7 @@ async fn process_outbound_community_attachment_bytes(
     .map_err(|e| e.to_string())??;
 
     let plain_len = bytes.len() as u64;
-    Ok(stage_community_attachment(Plain::Bytes(bytes), plain_len, plaintext_hash, local_path, extension, name, img_meta))
+    Ok(stage_community_attachment(FileSource::Bytes(std::sync::Arc::new(bytes)), plain_len, plaintext_hash, local_path, extension, name, img_meta))
 }
 
 /// Post a Community message carrying a caption (`content`, may be empty) plus one or more
@@ -1758,7 +1670,10 @@ async fn dispatch_community_attachment_message(
         let mut uploaded: Vec<vector_core::types::Attachment> = Vec::with_capacity(prepared.len());
         for prep in prepared {
             let PreparedCommunityAttachment { mut attachment, plain, mime } = prep;
-            let sealed = match seal_for_upload(&mut attachment, plain, &pending_id, &callback).await {
+            let sealed = match vector_core::sending::seal_or_reuse(
+                plain, &attachment.id, &attachment.key, &attachment.nonce, &pending_id,
+                std::sync::Arc::new(callback), cancel_flag.clone(),
+            ).await {
                 Ok(sealed) => sealed,
                 Err(e) => {
                     let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
@@ -1770,7 +1685,9 @@ async fn dispatch_community_attachment_message(
                 // Smart-forward: the attachment now references a live blob — no
                 // upload, no fan-out; the send is just the message. A foreign blob
                 // gets a background mirror as availability insurance.
-                Sealed::Reused { foreign } => {
+                Sealed::Reused(r) => {
+                    let foreign = !r.mine;
+                    (attachment.key, attachment.nonce, attachment.url, attachment.size) = (r.key, r.nonce, r.url, r.size);
                     {
                         let adopted = vector_core::compact::CompactAttachment::from_attachment(&attachment);
                         let mut state = vector_core::state::STATE.lock().await;
