@@ -92,6 +92,43 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.little_exif]
 opt-level = 3
+# The audio stack: unoptimized, a song's decode (and so its waveform) takes ~80x longer.
+[profile.dev.package.symphonia]
+opt-level = 3
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-adpcm]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 3
+[profile.dev.package.symphonia-format-mkv]
+opt-level = 3
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+[profile.dev.package.symphonia-metadata]
+opt-level = 3
+[profile.dev.package.symphonia-utils-xiph]
+opt-level = 3
+[profile.dev.package.rustfft]
+opt-level = 3
+[profile.dev.package.transpose]
+opt-level = 3
+[profile.dev.package.strength_reduce]
+opt-level = 3
+[profile.dev.package.primal-check]
+opt-level = 3
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
