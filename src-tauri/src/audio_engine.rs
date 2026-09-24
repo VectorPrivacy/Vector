@@ -6,7 +6,9 @@
 //! - Mixer callback sums all active sources per buffer with on-the-fly rate conversion
 //! - Sources: voice message playback + notification oneshots (desktop)
 //! - Non-WAV files stream-decode in background (playback starts immediately)
-//! - FFT waveform precomputed after decode completes, sent via Tauri event
+//! - Files past STREAM_MIN_SECS play from a window around the playhead instead
+//! - FFT waveform sent via Tauri event: built during the decode, or by its own pass
+//!   for a windowed file
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -155,20 +157,20 @@ struct AudioSource {
     stream: Option<Arc<StreamCtl>>,
     /// Bumped by each redirect, so a batch decoded for the old place is never added.
     window_gen: u64,
+    /// Where a redirect sent the window, until its decoder takes it (with the generation,
+    /// in one critical section, so a later redirect is never mistaken for this one).
+    pending_seek: Option<u64>,
 }
 
 /// How the engine redirects a streamed file's decoder.
 struct StreamCtl {
-    /// The frame to decode from next; u64::MAX when there is nowhere new to go.
-    seek_to: AtomicU64,
+    /// A hint that a redirect is waiting, so a batch for the old place is abandoned early.
+    /// The redirect itself lives on the source, under its lock.
+    redirected: std::sync::atomic::AtomicBool,
     wake: (std::sync::Mutex<bool>, std::sync::Condvar),
 }
 
 impl StreamCtl {
-    fn redirect(&self, frame: u64) {
-        self.seek_to.store(frame, Ordering::Relaxed);
-        self.nudge();
-    }
     fn nudge(&self) {
         let (lock, cv) = &self.wake;
         *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
@@ -509,7 +511,7 @@ impl AudioEngine {
         let rate_ratio = sample_rate as f64 / self.shared.device_sample_rate.load(Ordering::Relaxed) as f64;
         let duration_ms = if sample_rate > 0 { est_frames * 1000 / sample_rate as u64 } else { 0 };
         // Music keeps its stereo field; >2ch sources carry front L/R.
-        let src_channels = channels.min(2).max(1);
+        let src_channels = channels.clamp(1, 2);
 
         self.evict_if_needed();
 
@@ -533,6 +535,7 @@ impl AudioEngine {
             base_frame: 0,
             stream: None,
             window_gen: 0,
+            pending_seek: None,
         };
 
         self.shared
@@ -575,7 +578,7 @@ impl AudioEngine {
         duration_ms: u64,
     ) -> Result<AudioLoadResult, String> {
         let ctl = Arc::new(StreamCtl {
-            seek_to: AtomicU64::new(u64::MAX),
+            redirected: std::sync::atomic::AtomicBool::new(false),
             wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
         });
         let source = AudioSource {
@@ -594,6 +597,7 @@ impl AudioEngine {
             base_frame: 0,
             stream: Some(Arc::clone(&ctl)),
             window_gen: 0,
+            pending_seek: None,
         };
         self.shared.sources.lock().map_err(|_| "Lock poisoned")?.insert(id, source);
 
@@ -611,7 +615,7 @@ impl AudioEngine {
             let est_frames = duration_ms * sample_rate as u64 / 1000;
             std::thread::Builder::new()
                 .name("audio-waveform".into())
-                .spawn(move || waveform_pass(id, bytes, &ext, sample_rate, est_frames, &shared))
+                .spawn(move || waveform_pass(id, bytes, &ext, sample_rate, est_frames, shared))
                 .map_err(|e| format!("Failed to spawn waveform pass: {}", e))?;
         }
         Ok(AudioLoadResult { id, duration_ms, waveform_fps: WAVEFORM_FPS as u8, bins: WAVEFORM_BINS as u8 })
@@ -672,6 +676,7 @@ impl AudioEngine {
             base_frame: 0,
             stream: None,
             window_gen: 0,
+            pending_seek: None,
         };
 
         self.shared
@@ -721,12 +726,13 @@ impl AudioEngine {
     pub fn seek(&self, id: u32, position_ms: u64) -> Result<(), String> {
         let mut sources = self.shared.sources.lock().map_err(|_| "Lock poisoned")?;
         let source = sources.get_mut(&id).ok_or("Source not found")?;
-        let frame_pos = position_ms as f64 * source.source_sample_rate as f64 / 1000.0;
+        // Never past the file: the mixer indexes from this position on the audio thread.
+        let end_frame = (source.duration_ms.saturating_mul(source.source_sample_rate as u64) / 1000).max(1);
+        let frame_pos = (position_ms as f64 * source.source_sample_rate as f64 / 1000.0).min((end_frame - 1) as f64);
         let old_position = source.position;
         if source.stream.is_some() {
             let frames_len = (source.samples.len() / source.src_channels) as u64;
-            let end_frame = source.duration_ms * source.source_sample_rate as u64 / 1000;
-            let target = (frame_pos as u64).min(end_frame.saturating_sub(1));
+            let target = frame_pos as u64;
             let in_window = target >= source.base_frame && target + 2 < source.base_frame + frames_len;
             if !in_window {
                 source.position = target as f64;
@@ -805,6 +811,7 @@ impl AudioEngine {
             base_frame: 0,
             stream: None,
             window_gen: 0,
+            pending_seek: None,
         };
 
         self.shared
@@ -923,10 +930,16 @@ fn wav_probe_duration(path: &std::path::Path) -> Option<u64> {
 /// new place is silent for the moments it takes to decode.
 fn redirect_window(source: &mut AudioSource, frame: u64) {
     let Some(ctl) = source.stream.clone() else { return };
+    // Emptied here, under the lock: a second seek before the decoder wakes must see no
+    // window to land in, or it would land in the old one.
+    source.samples.clear();
+    source.base_frame = frame;
     source.crossfade = None;
     source.decode_complete = false;
     source.window_gen += 1;
-    ctl.redirect(frame);
+    source.pending_seek = Some(frame);
+    ctl.redirected.store(true, Ordering::Relaxed);
+    ctl.nudge();
 }
 
 // ============================================================================
@@ -967,7 +980,7 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
 
             // Interpolation reads frames pos_floor and pos_floor+1 — both must
             // be fully decoded (frame-aligned in the interleaved buffer).
-            if (pos_floor + 2) * src_ch > source.samples.len() {
+            if pos_floor.saturating_add(2).saturating_mul(src_ch) > source.samples.len() {
                 if source.decode_complete {
                     // True end of file
                     source.playing = false;
@@ -1477,7 +1490,7 @@ fn window_decode_worker(
             return;
         }
     };
-    let src_ch = channels.min(2).max(1);
+    let src_ch = channels.clamp(1, 2);
     let rate = sample_rate as u64;
     let (ahead, behind, trim) = (WINDOW_AHEAD_SECS * rate, WINDOW_BEHIND_SECS * rate, WINDOW_TRIM_SECS * rate);
     let cap = window_capacity(sample_rate, src_ch);
@@ -1492,42 +1505,49 @@ fn window_decode_worker(
     let mut sample_buf: Option<SampleBuffer<f32>> = None;
 
     loop {
-        // Redirected: start again from the new place with an empty window.
-        let target = ctl.seek_to.swap(u64::MAX, Ordering::Relaxed);
-        if target != u64::MAX {
-            counter = match seek_before(&mut opened, target, sample_rate) {
-                Ok(at) => at,
-                Err(e) => {
-                    eprintln!("[AudioEngine] Window seek failed for source {}: {}", id, e);
-                    target
-                }
-            };
-            skip_until = target;
-            eof = false;
-            batch.clear();
-            mirror.clear();
-            base = target;
-            match shared.sources.lock() {
-                Ok(mut sources) => match sources.get_mut(&id) {
-                    Some(src) => {
-                        src.samples.clear();
-                        src.base_frame = target;
+        // Where the playhead is, and any redirect with its generation, read together.
+        let (pos, redirect) = match shared.sources.lock() {
+            Ok(mut sources) => match sources.get_mut(&id) {
+                Some(src) => {
+                    let redirect = src.pending_seek.take();
+                    if redirect.is_some() {
+                        ctl.redirected.store(false, Ordering::Relaxed);
                         gen = src.window_gen;
+                    } else if src.position + 2.0 < src.base_frame as f64 {
+                        // Behind the window with nothing on its way: go to the playhead.
+                        let at = src.position.max(0.0) as u64;
+                        redirect_window(src, at);
+                        continue;
                     }
-                    None => return,
-                },
-                Err(_) => return,
-            }
-            continue;
-        }
-
-        let pos = match shared.sources.lock() {
-            Ok(sources) => match sources.get(&id) {
-                Some(src) => src.position.max(0.0) as u64,
+                    (src.position.max(0.0) as u64, redirect)
+                }
                 None => return,
             },
             Err(_) => return,
         };
+
+        // Redirected: start again from the new place (the source's window is already empty).
+        if let Some(target) = redirect {
+            batch.clear();
+            mirror.clear();
+            base = target;
+            skip_until = target;
+            match seek_before(&mut opened, target, sample_rate) {
+                Ok(at) => { counter = at; eof = false; }
+                Err(e) => {
+                    // Nowhere to decode from (past the end, or a demuxer that can't seek):
+                    // the window ends here rather than playing the old place as the new one.
+                    eprintln!("[AudioEngine] Window seek failed for source {}: {}", id, e);
+                    eof = true;
+                    if let Ok(mut sources) = shared.sources.lock() {
+                        if let Some(src) = sources.get_mut(&id) {
+                            if src.window_gen == gen { src.decode_complete = true; }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let end = base + (mirror.len() / src_ch) as u64;
 
         // Let go of what has played.
@@ -1538,7 +1558,8 @@ fn window_decode_worker(
             fresh.extend_from_slice(&mirror[cut..]);
             let swapped = match shared.sources.lock() {
                 Ok(mut sources) => match sources.get_mut(&id) {
-                    Some(src) if src.window_gen == gen => {
+                    // Not if the reader seeked back into what this would let go.
+                    Some(src) if src.window_gen == gen && src.position >= keep_from as f64 => {
                         std::mem::swap(&mut src.samples, &mut fresh);
                         src.base_frame = keep_from;
                         true
@@ -1565,7 +1586,7 @@ fn window_decode_worker(
         // Decode one batch, abandoning it if a redirect lands meanwhile.
         let (format, decoder, track_id, _) = &mut opened;
         while batch.len() < DECODE_BATCH_SIZE && !eof {
-            if ctl.seek_to.load(Ordering::Relaxed) != u64::MAX {
+            if ctl.redirected.load(Ordering::Relaxed) {
                 break;
             }
             let packet = match format.next_packet() {
@@ -1609,7 +1630,7 @@ fn window_decode_worker(
                 }
             }
         }
-        if ctl.seek_to.load(Ordering::Relaxed) != u64::MAX {
+        if ctl.redirected.load(Ordering::Relaxed) {
             batch.clear();
             continue;
         }
@@ -1637,7 +1658,13 @@ fn window_decode_worker(
 
 /// A streamed file's waveform, from a pass that decodes it in parallel and keeps nothing
 /// but the band levels: 64 bytes per frame at 30 fps, not the audio itself.
-fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_frames: u64, shared: &SharedState) {
+/// Segments this many packets apart check the source still exists, so a pass for a song the
+/// listener moved on from stops rather than decoding the rest of the file.
+const WAVEFORM_LIVENESS_PACKETS: u32 = 256;
+
+type WaveformPart = (Vec<f32>, u64);
+
+fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_frames: u64, shared: Arc<SharedState>) {
     let t0 = std::time::Instant::now();
     let hop = WaveformComputer::new(sample_rate).hop_size as u64;
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
@@ -1645,19 +1672,27 @@ fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_
     // Segments start on a hop so each one's frames line up with the whole file's.
     let per = ((est_frames / workers as u64) / hop).max(1) * hop;
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<(usize, Result<(Vec<f32>, u64), String>)>();
+    let (tx, rx) = mpsc::channel::<(usize, Result<WaveformPart, String>)>();
     for w in 0..workers {
         let start = per * w as u64;
         let end = if w + 1 == workers { u64::MAX } else { per * (w as u64 + 1) };
-        let (bytes, ext, tx, cancel) = (Arc::clone(&bytes), ext.to_string(), tx.clone(), Arc::clone(&cancel));
-        std::thread::Builder::new()
+        let (bytes, ext, tx, stop, shared) = (Arc::clone(&bytes), ext.to_string(), tx.clone(), Arc::clone(&cancel), Arc::clone(&shared));
+        let spawned = std::thread::Builder::new()
             .name(format!("audio-waveform-{}", w))
             .spawn(move || {
                 let mut computer = WaveformComputer::new(sample_rate);
                 let mut pending: Vec<f32> = Vec::new();
                 let mut scratch: Vec<f32> = Vec::new();
                 let mut frames = 0u64;
-                let r = decode_range(bytes, &ext, sample_rate, start, end, &cancel, &mut |samples, ch, skip, take| {
+                let mut packets = 0u32;
+                let r = decode_range(bytes, &ext, sample_rate, start, end, &stop, &mut |samples, ch, skip, take| {
+                    packets += 1;
+                    if packets.is_multiple_of(WAVEFORM_LIVENESS_PACKETS)
+                        && !shared.sources.lock().map(|s| s.contains_key(&id)).unwrap_or(false)
+                    {
+                        stop.store(true, Ordering::Relaxed);
+                        return false;
+                    }
                     append_packet_frames(samples, ch, skip, take, &mut scratch, &mut pending);
                     scratch.clear();
                     frames += take as u64;
@@ -1668,27 +1703,33 @@ fn waveform_pass(id: u32, bytes: Arc<Vec<u8>>, ext: &str, sample_rate: u32, est_
                 });
                 computer.feed(&mut pending);
                 let _ = tx.send((w, r.map(|_| (computer.levels, frames))));
-            })
-            .ok();
-    }
-    drop(tx);
-
-    let mut parts: Vec<Option<(Vec<f32>, u64)>> = (0..workers).map(|_| None).collect();
-    for (w, r) in rx {
-        match r {
-            Ok(part) => parts[w] = Some(part),
-            Err(e) => {
-                eprintln!("[AudioEngine] Waveform segment {} failed for source {}: {}", w, id, e);
-                cancel.store(true, Ordering::Relaxed);
-                return;
-            }
-        }
-        // A source let go of mid-pass needs no waveform.
-        let alive = shared.sources.lock().map(|s| s.contains_key(&id)).unwrap_or(false);
-        if !alive {
+            });
+        // A missing segment would shift every level after it: no waveform beats a wrong one.
+        if spawned.is_err() {
             cancel.store(true, Ordering::Relaxed);
             return;
         }
+    }
+    drop(tx);
+
+    let mut parts: Vec<Option<WaveformPart>> = (0..workers).map(|_| None).collect();
+    for (w, r) in rx {
+        parts[w] = Some(match r {
+            Ok(part) => part,
+            // A segment that can't start is past the real end: a size estimate that overshot.
+            Err(e) if w > 0 => {
+                eprintln!("[AudioEngine] Waveform segment {} empty for source {}: {}", w, id, e);
+                (Vec::new(), 0)
+            }
+            Err(e) => {
+                eprintln!("[AudioEngine] Waveform pass failed for source {}: {}", id, e);
+                cancel.store(true, Ordering::Relaxed);
+                return;
+            }
+        });
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return;
     }
     let mut levels: Vec<f32> = Vec::new();
     let mut frames = 0u64;
@@ -2082,9 +2123,7 @@ fn mark_decode_complete(id: u32, shared: &SharedState) {
 // FFT waveform computation (incremental — processes samples as they arrive)
 // ============================================================================
 
-/// Incremental FFT waveform computer. Processes samples as they arrive from
-/// the streaming decoder, producing waveform data progressively. By the time
-/// decode finishes, the waveform is already complete — no post-decode pass.
+/// Incremental FFT waveform computer: fed as samples arrive, whole when they stop.
 struct WaveformComputer {
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     bin_ranges: Vec<(usize, usize)>,
@@ -2152,7 +2191,7 @@ impl WaveformComputer {
     }
 
     /// Process all available FFT frames from the sample buffer.
-    /// Call after appending new samples to `all_decoded`.
+    /// `samples` is everything fed so far; the cursor remembers where the last call stopped.
     fn process(&mut self, samples: &[f32]) {
         let hann = get_hann_window();
 
@@ -2312,3 +2351,127 @@ mod waveform_normalise_tests {
     }
 }
 
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    const RATE: u32 = 8_000;
+    const SECS: u32 = 60;
+
+    /// A mono 16-bit WAV whose every sample names its own frame (mod 30000), so any window
+    /// can be checked against the place it claims to hold.
+    fn stamped_wav() -> Vec<u8> {
+        let frames = RATE * SECS;
+        let data_len = frames * 2;
+        let mut b = Vec::with_capacity(44 + data_len as usize);
+        b.extend(b"RIFF");
+        b.extend((36 + data_len).to_le_bytes());
+        b.extend(b"WAVEfmt ");
+        b.extend(16u32.to_le_bytes());
+        b.extend(1u16.to_le_bytes());
+        b.extend(1u16.to_le_bytes());
+        b.extend(RATE.to_le_bytes());
+        b.extend((RATE * 2).to_le_bytes());
+        b.extend(2u16.to_le_bytes());
+        b.extend(16u16.to_le_bytes());
+        b.extend(b"data");
+        b.extend(data_len.to_le_bytes());
+        for f in 0..frames {
+            b.extend(((f % 30_000) as i16).to_le_bytes());
+        }
+        b
+    }
+
+    fn frame_of(sample: f32) -> u32 {
+        (sample * 32_768.0).round() as u32
+    }
+
+    fn shared_with(ctl: &Arc<StreamCtl>) -> Arc<SharedState> {
+        let (tx, _rx) = mpsc::channel();
+        let shared = Arc::new(SharedState {
+            sources: std::sync::Mutex::new(HashMap::new()),
+            live: std::sync::RwLock::new(None),
+            device_sample_rate: AtomicU32::new(RATE),
+            next_id: AtomicU32::new(2),
+            ended_tx: tx,
+        });
+        shared.sources.lock().unwrap().insert(1, AudioSource {
+            id: 1,
+            samples: Vec::with_capacity(window_capacity(RATE, 1)),
+            src_channels: 1,
+            source_sample_rate: RATE,
+            rate_ratio: 1.0,
+            position: 0.0,
+            playing: false,
+            volume: 1.0,
+            duration_ms: SECS as u64 * 1000,
+            oneshot: false,
+            crossfade: None,
+            decode_complete: false,
+            base_frame: 0,
+            stream: Some(Arc::clone(ctl)),
+            window_gen: 0,
+            pending_seek: None,
+        });
+        shared
+    }
+
+    /// Wait until the window starts at `base` and holds the playhead, then check that what it
+    /// holds really is that stretch of the file.
+    fn settles_at(shared: &SharedState, base: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            {
+                let sources = shared.sources.lock().unwrap();
+                let src = sources.get(&1).unwrap();
+                let len = src.samples.len() as u64;
+                if src.base_frame == base && len > 0 && src.pending_seek.is_none() {
+                    for (k, s) in src.samples.iter().enumerate().step_by(997) {
+                        assert_eq!(frame_of(*s), ((base + k as u64) % 30_000) as u32, "sample {k} after base {base}");
+                    }
+                    if base + len > src.position as u64 {
+                        return;
+                    }
+                }
+            }
+            assert!(std::time::Instant::now() < deadline, "window never settled at {base}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_window_follows_seeks_trims_and_ends_with_its_source() {
+        let ctl = Arc::new(StreamCtl {
+            redirected: std::sync::atomic::AtomicBool::new(false),
+            wake: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        });
+        let shared = shared_with(&ctl);
+        let worker = {
+            let (shared, ctl, bytes) = (Arc::clone(&shared), Arc::clone(&ctl), Arc::new(stamped_wav()));
+            std::thread::spawn(move || window_decode_worker(1, bytes, "wav", 1, RATE, ctl, &shared))
+        };
+        settles_at(&shared, 0);
+
+        // Two seeks before the decoder wakes: the second must win, never the first.
+        {
+            let mut sources = shared.sources.lock().unwrap();
+            let src = sources.get_mut(&1).unwrap();
+            for secs in [40u64, 10] {
+                src.position = (secs * RATE as u64) as f64;
+                redirect_window(src, secs * RATE as u64);
+            }
+        }
+        settles_at(&shared, 10 * RATE as u64);
+
+        // Playing on past the trim point lets the start of the window go, and nothing else.
+        let played = (10 + WINDOW_TRIM_SECS + 2) * RATE as u64;
+        shared.sources.lock().unwrap().get_mut(&1).unwrap().position = played as f64;
+        ctl.nudge();
+        settles_at(&shared, played - WINDOW_BEHIND_SECS * RATE as u64);
+
+        shared.sources.lock().unwrap().remove(&1);
+        ctl.nudge();
+        worker.join().unwrap();
+    }
+}

@@ -74,11 +74,12 @@ pub fn parse_chap(body: &[u8], v24: bool) -> Option<Chapter> {
         } else {
             u32::from_be_bytes(raw) as usize
         };
-        let Some(frame) = subs.get(10..10 + size) else { break };
+        let Some(end) = size.checked_add(10) else { break };
+        let Some(frame) = subs.get(10..end) else { break };
         if id == b"TIT2" {
             title = id3_text(frame);
         }
-        subs = &subs[10 + size..];
+        subs = &subs[end..];
     }
     Some(Chapter { start_ms: start, end_ms: None, title })
 }
@@ -105,7 +106,7 @@ fn read_id3(path: &str) -> Vec<Chapter> {
 fn cue_time(s: &str) -> Option<u32> {
     let mut it = s.trim().split(':');
     let (m, sec, f) = (it.next()?.parse::<u32>().ok()?, it.next()?.parse::<u32>().ok()?, it.next()?.parse::<u32>().ok()?);
-    Some(m * 60_000 + sec * 1000 + f * 1000 / 75)
+    m.checked_mul(60_000)?.checked_add(sec.checked_mul(1000)?)?.checked_add(f.checked_mul(1000)? / 75)
 }
 
 fn unquote(s: &str) -> String {
@@ -174,10 +175,15 @@ fn read_flac_cues(path: &str) -> Vec<Chapter> {
     };
     let format = probed.format;
     let Some(rate) = format.default_track().and_then(|t| t.codec_params.sample_rate) else { return Vec::new() };
+    // Tracks 170 (CD) and 255 are the lead-out: the end of the disc, not a song.
     let chapters = format
         .cues()
         .iter()
-        .map(|c| Chapter { start_ms: (c.start_ts * 1000 / rate as u64) as u32, end_ms: None, title: String::new() })
+        .filter(|c| c.index != 170 && c.index != 255)
+        .filter_map(|c| {
+            let ms = c.start_ts.checked_mul(1000)? / rate as u64;
+            Some(Chapter { start_ms: u32::try_from(ms).ok()?, end_ms: None, title: String::new() })
+        })
         .collect();
     finish(chapters)
 }
@@ -249,6 +255,19 @@ mod tests {
     #[test]
     fn one_chapter_is_no_album() {
         assert!(finish(vec![Chapter { start_ms: 0, end_ms: None, title: "Only".into() }]).is_empty());
+    }
+
+    #[test]
+    fn hostile_chapters_neither_panic_nor_wrap() {
+        // A sub-frame claiming more bytes than exist, and one claiming the maximum.
+        let mut b = b"c\0".to_vec();
+        b.extend([0u8; 16]);
+        b.extend(b"TIT2");
+        b.extend([0xff, 0xff, 0xff, 0xff, 0, 0]);
+        assert!(parse_chap(&b, false).is_some());
+        assert!(parse_chap(&b, true).is_some());
+        assert_eq!(cue_time("4294967295:00:00"), None);
+        assert!(parse_cue("TRACK 01 AUDIO\nINDEX 01 99999999999:00:00").is_empty());
     }
 
     #[test]

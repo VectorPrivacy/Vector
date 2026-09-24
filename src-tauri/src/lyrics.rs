@@ -6,6 +6,12 @@
 
 use serde::Serialize;
 
+/// The file is someone else's: a lyrics tag past these is not lyrics, and each stamp on a
+/// line copies the line, so an unbounded count is a memory bomb.
+const MAX_LYRICS_BYTES: usize = 512 * 1024;
+const MAX_STAMPS_PER_LINE: usize = 64;
+const MAX_LINES: usize = 5_000;
+
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct Word {
     pub at_ms: u32,
@@ -46,7 +52,7 @@ fn parse_stamp(s: &str) -> Option<u32> {
         0 => 0,
         n => frac.parse::<u32>().ok()? * 10u32.pow(3 - n as u32),
     };
-    Some(min * 60_000 + sec * 1000 + frac_ms)
+    min.checked_mul(60_000)?.checked_add(sec * 1000 + frac_ms)
 }
 
 /// The leading `[..]` stamps of an LRC line, and what follows them.
@@ -54,6 +60,9 @@ fn leading_stamps(line: &str) -> (Vec<u32>, &str) {
     let mut stamps = Vec::new();
     let mut rest = line.trim_start();
     while let Some(body) = rest.strip_prefix('[') {
+        if stamps.len() >= MAX_STAMPS_PER_LINE {
+            break;
+        }
         let Some(end) = body.find(']') else { break };
         match parse_stamp(&body[..end]) {
             Some(ms) => { stamps.push(ms); rest = &body[end + 1..]; }
@@ -105,7 +114,7 @@ fn split_words(text: &str, line_at: u32) -> (String, Vec<Word>) {
 /// plain text otherwise.
 pub fn parse_text(raw: &str) -> Option<Lyrics> {
     let raw = raw.trim_start_matches('\u{feff}');
-    if raw.trim().is_empty() {
+    if raw.trim().is_empty() || raw.len() > MAX_LYRICS_BYTES {
         return None;
     }
     let mut offset: i64 = 0;
@@ -135,6 +144,9 @@ pub fn parse_text(raw: &str) -> Option<Lyrics> {
         }
         stamped_lines += 1;
         for at in stamps {
+            if timed.len() >= MAX_LINES {
+                break;
+            }
             let (text, words) = split_words(text, at);
             timed.push(Line { at_ms: Some(at), text, words });
         }
@@ -142,7 +154,7 @@ pub fn parse_text(raw: &str) -> Option<Lyrics> {
     if content_lines > 0 && stamped_lines * 2 > content_lines {
         // A positive offset shows the lyrics sooner.
         for line in &mut timed {
-            let shift = |ms: u32| (ms as i64 - offset).max(0) as u32;
+            let shift = |ms: u32| (ms as i64).saturating_sub(offset).clamp(0, u32::MAX as i64) as u32;
             line.at_ms = line.at_ms.map(shift);
             for w in &mut line.words { w.at_ms = shift(w.at_ms); }
         }
@@ -151,6 +163,7 @@ pub fn parse_text(raw: &str) -> Option<Lyrics> {
     }
     let lines = raw
         .lines()
+        .take(MAX_LINES)
         .map(|l| Line { at_ms: None, text: l.trim().to_string(), words: Vec::new() })
         .collect::<Vec<_>>();
     // Trailing and leading blank lines carry nothing; blank lines inside are verse breaks.
@@ -200,7 +213,7 @@ pub fn read(path: &str, tagged: &lofty::file::TaggedFile) -> Option<Lyrics> {
     let mut best: Option<Lyrics> = None;
     for tag in tagged.tags() {
         for key in [ItemKey::Lyrics, ItemKey::UnsyncLyrics] {
-            let Some(text) = tag.get_string(key.clone()) else { continue };
+            let Some(text) = tag.get_string(key) else { continue };
             let Some(lyrics) = parse_text(text) else { continue };
             if lyrics.synced {
                 return Some(lyrics);
@@ -303,6 +316,17 @@ mod tests {
     #[test]
     fn empty_text_is_no_lyrics() {
         assert_eq!(parse_text("  \n\n"), None);
+    }
+
+    #[test]
+    fn hostile_lyrics_neither_panic_nor_balloon() {
+        assert_eq!(parse_stamp("99999999:00.00"), None);
+        let l = parse_text("[offset:-9223372036854775807]\n[00:01.00]a\n[00:02.00]b").unwrap();
+        assert!(l.lines.iter().all(|x| x.at_ms.is_some()));
+        let bomb = format!("{}x", "[00:00]".repeat(10_000));
+        let l = parse_text(&bomb).unwrap();
+        assert!(l.lines.len() <= MAX_STAMPS_PER_LINE);
+        assert_eq!(parse_text(&"a\n".repeat(MAX_LYRICS_BYTES)), None);
     }
 
     #[test]
