@@ -281,7 +281,7 @@ pub async fn reauthorize_bunker<R: Runtime>(handle: AppHandle<R>) -> Result<Stri
 
 
         let relays: Vec<RelayUrl> = vector_core::state::TRUSTED_RELAYS.iter()
-            .filter_map(|s| RelayUrl::parse(*s).ok())
+            .filter_map(|s| RelayUrl::parse(s).ok())
             .collect();
         if relays.is_empty() {
             return Err("No trusted relays configured".into());
@@ -846,7 +846,7 @@ pub async fn connect_bunker<R: Runtime>(
             if let Ok(new_remote_hex) = vector_core::parse_bunker_remote_pubkey(&bunker_url) {
                 // Both sides are forced lowercase to defend against any
                 // call-site that ever stores a mixed-case hex form.
-                if new_remote_hex.to_ascii_lowercase() == prev_remote_hex.to_ascii_lowercase() {
+                if new_remote_hex.eq_ignore_ascii_case(&prev_remote_hex) {
                     return Ok(LoginResult { public: existing_npub, existing: false });
                 }
             }
@@ -1012,7 +1012,7 @@ pub async fn start_nostrconnect_session<R: Runtime>(
     // by design — single-relay would mean any one relay outage locks the
     // user out of reconnecting to their own account.
     let relays: Vec<RelayUrl> = vector_core::state::TRUSTED_RELAYS.iter()
-        .filter_map(|s| RelayUrl::parse(*s).ok())
+        .filter_map(|s| RelayUrl::parse(s).ok())
         .collect();
     if relays.is_empty() {
         return Err("No trusted relays configured".into());
@@ -1360,7 +1360,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
         if let Some(client) = nostr_client() {
             // Clone the data we need before the async block
             let invite_code = pending_invite.invite_code.clone();
-            let inviter_pubkey = pending_invite.inviter_pubkey.clone();
+            let inviter_pubkey = pending_invite.inviter_pubkey;
 
             // Spawn the broadcast in a separate task to avoid blocking
             vector_core::db::spawn_bound(async move {
@@ -1374,7 +1374,7 @@ pub async fn encrypt(input: String, password: Option<String>) -> String {
                 match vector_core::sign_builder(event_builder).await {
                     Ok(event) => {
                         // Send only to trusted relays
-                        match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
+                        match client.send_event(&event).to(active_trusted_relays().await).await {
                             Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                             Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                         }
@@ -1658,25 +1658,13 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
         }
     }
 
-    // Signer dispatch: bunker accounts wire the live NostrConnect handle
-    // (installed by attempt_bunker_login above) into the Client; NIP-55
-    // accounts install a Nip55Signer over the Amber IPC bridge; local accounts
-    // use GuardedSigner over MY_SECRET_KEY as before.
-    let client = if is_bunker_account {
-        let _bunker = vector_core::bunker_signer()
-            .ok_or("Bunker signer not installed after prewarm")?;
-        vector_core::nostr_client_builder()
-            .monitor(Monitor::new(1024))
-            .build()
-    } else if is_nip55_account {
-        vector_core::nostr_client_builder()
-            .monitor(Monitor::new(1024))
-            .build()
-    } else {
-        vector_core::nostr_client_builder()
-            .monitor(Monitor::new(1024))
-            .build()
-    };
+    // A bunker account cannot log in without the signer attempt_bunker_login installed.
+    if is_bunker_account {
+        vector_core::bunker_signer().ok_or("Bunker signer not installed after prewarm")?;
+    }
+    let client = vector_core::nostr_client_builder()
+        .monitor(Monitor::new(1024))
+        .build();
     // The standalone background-sync path on Android can install a client
     // before the Activity reaches this login command. The early-return guard
     // above catches the common case, but a concurrent install between guard
@@ -2114,7 +2102,7 @@ fn stamp_fresh_account_profile() {
             .tag(Tag::custom("client", vec!["vector"]));
         match vector_core::sign_builder(builder).await {
             Ok(event) => {
-                match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
+                match client.send_event(&event).to(active_trusted_relays().await).await {
                     Ok(_) => println!("Stamped the new account's profile as a Vector client"),
                     Err(e) => eprintln!("Failed to stamp the new account's profile: {}", e),
                 }
@@ -2143,7 +2131,7 @@ fn broadcast_pending_invite_if_any() {
             .tag(Tag::public_key(inviter_pubkey));
         match vector_core::sign_builder(event_builder).await {
             Ok(event) => {
-                match client.send_event(&event).to(active_trusted_relays().await.into_iter()).await {
+                match client.send_event(&event).to(active_trusted_relays().await).await {
                     Ok(_) => println!("Successfully broadcast invite acceptance to trusted relays"),
                     Err(e) => eprintln!("Failed to broadcast invite acceptance: {}", e),
                 }

@@ -30,6 +30,7 @@ pub use vector_core::state::TRUSTED_RELAYS as DEFAULT_RELAYS;
 
 /// Metrics tracked per relay
 #[derive(serde::Serialize, Clone, Debug)]
+#[derive(Default)]
 pub struct RelayMetrics {
     pub ping_ms: Option<u64>,
     pub bytes_up: u64,
@@ -39,18 +40,6 @@ pub struct RelayMetrics {
     pub events_sent: u64,
 }
 
-impl Default for RelayMetrics {
-    fn default() -> Self {
-        Self {
-            ping_ms: None,
-            bytes_up: 0,
-            bytes_down: 0,
-            last_check: None,
-            events_received: 0,
-            events_sent: 0,
-        }
-    }
-}
 
 /// A single log entry for a relay
 #[derive(serde::Serialize, Clone, Debug)]
@@ -779,7 +768,7 @@ pub async fn add_custom_relay<R: Runtime>(handle: AppHandle<R>, url: String, mod
     save_custom_relays(&handle, &relays).await?;
 
     if let Some(client) = nostr_client() {
-        if client.relays().await.len() > 0 {
+        if !client.relays().await.is_empty() {
             match add_relay_failsafe(&client, &new_relay.url, || {
                 relay_capabilities_for_mode(&relay_mode)
             }).await {
@@ -1195,62 +1184,59 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         "status": status_str
                     }));
 
-                    match status {
-                        RelayStatus::Connected => {
-                            // Only trigger single-relay sync for REconnections (mid-session).
-                            // During initial sync, the main sync already covers all relays.
-                            let is_syncing = {
-                                let state = crate::STATE.lock().await;
-                                state.is_syncing
+                    if status == RelayStatus::Connected {
+                        // Only trigger single-relay sync for REconnections (mid-session).
+                        // During initial sync, the main sync already covers all relays.
+                        let is_syncing = {
+                            let state = crate::STATE.lock().await;
+                            state.is_syncing
+                        };
+                        if !is_syncing {
+                            let handle_inner = handle_clone.clone();
+                            let url_string = url_str.clone();
+                            // spawn-detached: one relay's status toast.
+                            tokio::spawn(async move {
+                                crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
+                            });
+                            // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
+                            // sweep — coalesces a multi-relay reconnect burst into one sweep.
+                            // Discovery-MODE relays (kind-10050 indexers that are not also
+                            // default relays — mirrors the pool-add rule) hold no community
+                            // planes: their reconnects must not queue a full sweep. A relay
+                            // whose pooled flags include READ is a real user/default relay
+                            // regardless of list membership and keeps its resync.
+                            let norm = vector_core::inbox_relays::normalize_relay_url(&url_str);
+                            let has_read = if let Some(client) = vector_core::state::nostr_client() {
+                                matches!(
+                                    client.relay(&url_str).await,
+                                    Ok(Some(r)) if r.capabilities().has_read()
+                                )
+                            } else {
+                                false
                             };
-                            if !is_syncing {
-                                let handle_inner = handle_clone.clone();
-                                let url_string = url_str.clone();
-                                // spawn-detached: one relay's status toast.
+                            let discovery_only = !has_read
+                                && vector_core::state::discovery_relay_iter()
+                                    .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm)
+                                && !DEFAULT_RELAYS
+                                    .iter()
+                                    .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm);
+                            if !discovery_only {
+                                crate::commands::community::trigger_community_reconnect_resync();
+                            }
+                            // A catch-up fetch is not a subscription: Vector owns reconnects
+                            // (`reconnect(false)`), so the fresh socket carries no live sub and
+                            // only an AUTH-gating relay's challenge re-sent one. Without this
+                            // every stream on a plain relay (DMs, self-sync lists, v1 + v2
+                            // communities) goes silent after its first drop.
+                            if let (Some(client), Ok(relay_url)) =
+                                (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
+                            {
+                                // spawn-detached: reconnecting one relay — socket work, no account storage.
                                 tokio::spawn(async move {
-                                    crate::commands::sync::fetch_messages(handle_inner, false, Some(url_string)).await;
+                                    vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;
                                 });
-                                // Communities re-sync on reconnect too (NIP-17 parity). Debounced full
-                                // sweep — coalesces a multi-relay reconnect burst into one sweep.
-                                // Discovery-MODE relays (kind-10050 indexers that are not also
-                                // default relays — mirrors the pool-add rule) hold no community
-                                // planes: their reconnects must not queue a full sweep. A relay
-                                // whose pooled flags include READ is a real user/default relay
-                                // regardless of list membership and keeps its resync.
-                                let norm = vector_core::inbox_relays::normalize_relay_url(&url_str);
-                                let has_read = if let Some(client) = vector_core::state::nostr_client() {
-                                    matches!(
-                                        client.relay(&url_str).await,
-                                        Ok(Some(r)) if r.capabilities().has_read()
-                                    )
-                                } else {
-                                    false
-                                };
-                                let discovery_only = !has_read
-                                    && vector_core::state::discovery_relay_iter()
-                                        .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm)
-                                    && !DEFAULT_RELAYS
-                                        .iter()
-                                        .any(|d| vector_core::inbox_relays::normalize_relay_url(d) == norm);
-                                if !discovery_only {
-                                    crate::commands::community::trigger_community_reconnect_resync();
-                                }
-                                // A catch-up fetch is not a subscription: Vector owns reconnects
-                                // (`reconnect(false)`), so the fresh socket carries no live sub and
-                                // only an AUTH-gating relay's challenge re-sent one. Without this
-                                // every stream on a plain relay (DMs, self-sync lists, v1 + v2
-                                // communities) goes silent after its first drop.
-                                if let (Some(client), Ok(relay_url)) =
-                                    (vector_core::state::nostr_client(), nostr_sdk::prelude::RelayUrl::parse(&url_str))
-                                {
-                                    // spawn-detached: reconnecting one relay — socket work, no account storage.
-                                    tokio::spawn(async move {
-                                        vector_core::resubscribe_relay_after_reconnect(&client, &relay_url).await;
-                                    });
-                                }
                             }
                         }
-                        _ => {}
                     }
                 }
             }
@@ -1304,7 +1290,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         }
                         Ok(Err(e)) => {
                             add_relay_log(&url_str, "warn", &format!("Health check failed: {}", e));
-                            let _ = relay.disconnect();
+                            relay.disconnect();
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             add_relay_log(&url_str, "info", "Attempting reconnection...");
                             let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
@@ -1316,7 +1302,7 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
                         }
                         Err(_) => {
                             add_relay_log(&url_str, "warn", "Health check failed: timeout");
-                            let _ = relay.disconnect();
+                            relay.disconnect();
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             add_relay_log(&url_str, "info", "Attempting reconnection...");
                             let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(10))).await;
@@ -1371,15 +1357,14 @@ pub async fn monitor_relay_connections() -> Result<bool, String> {
 
                 // Re-add anything in the desired set that's missing entirely.
                 for (url, mode) in &desired {
-                    if !pool_keys.iter().any(|k| k == &norm(url)) {
-                        if pool.add_managed_relay(url.as_str()).capabilities(relay_capabilities_for_mode(mode)).await.is_ok() {
+                    if !pool_keys.iter().any(|k| k == &norm(url))
+                        && pool.add_managed_relay(url.as_str()).capabilities(relay_capabilities_for_mode(mode)).await.is_ok() {
                             println!("[Reconcile] re-added missing relay {}; connecting...", url);
                             add_relay_log(url.as_str(), "info", "Reconcile: re-added missing relay; connecting...");
                             if let Ok(Some(relay)) = pool.relay(url.as_str()).await {
                                 let _ = relay.try_connect().timeout(vector_core::relay_connect_timeout(std::time::Duration::from_secs(8))).await;
                             }
                         }
-                    }
                 }
 
                 // Rescue relays wedged in `Pending`. `Relay::connect()` marks a relay

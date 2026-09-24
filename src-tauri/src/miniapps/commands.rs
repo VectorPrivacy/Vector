@@ -645,8 +645,6 @@ fn get_miniapp_base_url(partition: &str) -> Result<tauri::Url, Error> {
     }
 }
 
-/// Get Chromium hardening browser args for Windows
-/// This disables WebRTC, blocks DNS queries, and sets up the dummy proxy
 // Note: Chromium hardening browser args were removed for Windows because they cause WebView2 to freeze.
 // The CSP (Content Security Policy) provides the primary security layer for mini apps.
 // See: https://delta.chat/en/2023-05-22-webxdc-security for background on webxdc security.
@@ -726,9 +724,7 @@ pub async fn miniapp_load_info_from_cached_file() -> Result<MiniAppInfo, Error> 
 fn load_info_from_bytes(bytes: &[u8], file_name: &str) -> Result<MiniAppInfo, Error> {
     // Extract name without extension for fallback
     let fallback_name = file_name
-        .rsplit('.')
-        .skip(1)
-        .next()
+        .rsplit('.').nth(1)
         .unwrap_or(file_name)
         .to_string();
 
@@ -1556,13 +1552,13 @@ pub async fn miniapp_join_realtime_channel(
 
         // Iroh is pre-initialized by preconnect — this is instant (~5ns atomic load)
         let iroh = state.realtime.get_or_init().await
-            .map_err(|e| Error::RealtimeError(e.to_string()))?;
+            .map_err(|e| Error::Realtime(e.to_string()))?;
 
         // Create the gossip channel WITH the event target — no data can be dropped
         let event_target = EventTarget::TauriChannel(channel);
         let ws_targets = Some(state.realtime.ws_senders.clone());
         let (is_rejoin, _) = iroh.join_channel(topic, vec![], Some(event_target), Some(app.clone()), label.to_string(), ws_targets).await
-            .map_err(|e| Error::RealtimeError(e.to_string()))?;
+            .map_err(|e| Error::Realtime(e.to_string()))?;
 
         let topic_encoded_clone = topic_encoded.clone();
         if is_rejoin {
@@ -1662,7 +1658,7 @@ pub async fn miniapp_send_realtime_data(
     let label = window.label();
 
     if data.len() > 128_000 {
-        return Err(Error::RealtimeError(format!("Data too large: {} bytes", data.len())));
+        return Err(Error::Realtime(format!("Data too large: {} bytes", data.len())));
     }
 
     // Get the topic for this instance
@@ -1670,10 +1666,10 @@ pub async fn miniapp_send_realtime_data(
         .ok_or(Error::RealtimeChannelNotActive)?;
 
     let iroh = state.realtime.get_or_init().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        .map_err(|e| Error::Realtime(e.to_string()))?;
 
     iroh.send_data(topic, data).await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        .map_err(|e| Error::Realtime(e.to_string()))?;
 
     Ok(())
 }
@@ -1727,14 +1723,14 @@ pub async fn miniapp_add_realtime_peer(
     
     // Decode the peer address
     let peer = super::realtime::decode_node_addr(&peer_addr)
-        .map_err(|e| Error::RealtimeError(format!("Invalid peer address: {}", e)))?;
+        .map_err(|e| Error::Realtime(format!("Invalid peer address: {}", e)))?;
     
     // Add the peer
     let iroh = state.realtime.get_or_init().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        .map_err(|e| Error::Realtime(e.to_string()))?;
     
     iroh.add_peer(topic, peer).await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        .map_err(|e| Error::Realtime(e.to_string()))?;
     
     log_info!("Added peer to realtime channel for Mini App: {}", label);
     
@@ -1747,12 +1743,12 @@ pub async fn miniapp_get_realtime_node_addr(
     state: State<'_, MiniAppsState>,
 ) -> Result<String, Error> {
     let iroh = state.realtime.get_or_init().await
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        .map_err(|e| Error::Realtime(e.to_string()))?;
     
     let addr = iroh.get_node_addr();
 
     super::realtime::encode_node_addr(&addr)
-        .map_err(|e| Error::RealtimeError(e.to_string()))
+        .map_err(|e| Error::Realtime(e.to_string()))
 }
 
 /// Realtime channel status info
@@ -1778,7 +1774,7 @@ pub async fn miniapp_get_realtime_status(
     topic_id: String,
 ) -> Result<RealtimeChannelInfo, Error> {
     let topic = super::realtime::decode_topic_id(&topic_id)
-        .map_err(|e| Error::RealtimeError(e.to_string()))?;
+        .map_err(|e| Error::Realtime(e.to_string()))?;
 
     // Check if WE are actively playing (have a Mini App window open for this topic)
     let we_are_playing = {
@@ -1813,7 +1809,7 @@ pub async fn miniapp_record_opened(
     attachment_ref: String,
 ) -> Result<(), Error> {
     crate::db::record_miniapp_opened(name, src_url, attachment_ref)
-        .map_err(|e| Error::DatabaseError(e))
+        .map_err(Error::Database)
 }
 
 /// Get the Mini Apps history (recently used apps)
@@ -1824,7 +1820,7 @@ pub async fn miniapp_get_history(
     limit: Option<i64>,
 ) -> Result<Vec<crate::db::MiniAppHistoryEntry>, Error> {
     crate::db::get_miniapps_history(limit)
-        .map_err(|e| Error::DatabaseError(e))
+        .map_err(Error::Database)
 }
 
 /// Removes a Mini App from history by name
@@ -1834,7 +1830,7 @@ pub async fn miniapp_remove_from_history(
     name: String,
 ) -> Result<(), Error> {
     crate::db::remove_miniapp_from_history(&name)
-        .map_err(|e| Error::DatabaseError(e))
+        .map_err(Error::Database)
 }
 
 #[tauri::command]
@@ -1843,7 +1839,7 @@ pub async fn miniapp_toggle_favorite(
     id: i64,
 ) -> Result<bool, Error> {
     crate::db::toggle_miniapp_favorite(id)
-        .map_err(|e| Error::DatabaseError(e))
+        .map_err(Error::Database)
 }
 
 #[tauri::command]
@@ -1853,7 +1849,7 @@ pub async fn miniapp_set_favorite(
     is_favorite: bool,
 ) -> Result<(), Error> {
     crate::db::set_miniapp_favorite(id, is_favorite)
-        .map_err(|e| Error::DatabaseError(e))
+        .map_err(Error::Database)
 }
 
 // ============================================================================
@@ -2007,6 +2003,8 @@ pub async fn marketplace_update_app(
 
 /// Publish a Mini App to the marketplace
 /// This uploads the .xdc file to Blossom and publishes a Nostr event with the metadata
+// Tauri commands take their arguments individually from JS; a struct would change the IPC shape.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn marketplace_publish_app(
     _app: AppHandle,
@@ -2034,20 +2032,18 @@ pub async fn marketplace_publish_app(
     // Convert categories to &str for the function
     let category_refs: Vec<&str> = categories.iter().map(|s| s.as_str()).collect();
 
-    super::marketplace::publish_to_marketplace(
-        signer,
-        &file_path,
-        &app_id,
-        &name,
-        &description,
-        &version,
-        category_refs,
-        changelog.as_deref(),
-        developer.as_deref(),
-        source_url.as_deref(),
-        permissions.as_deref(),
-        blossom_servers,
-    )
+    let listing = super::marketplace::MarketplaceListing {
+        app_id: &app_id,
+        name: &name,
+        description: &description,
+        version: &version,
+        categories: category_refs,
+        changelog: changelog.as_deref(),
+        developer: developer.as_deref(),
+        source_url: source_url.as_deref(),
+        permissions: permissions.as_deref(),
+    };
+    super::marketplace::publish_to_marketplace(signer, &file_path, &listing, blossom_servers)
     .await
     .map_err(|e| Error::Anyhow(anyhow::anyhow!(e)))
 }

@@ -257,7 +257,7 @@ async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>
     }
     let rumor = builder.finalize_unsigned_with_id(me);
     let relays = active_trusted_relays().await;
-    match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
+    match vector_core::send_gift_wrap(&client, relays, &pubkey, rumor, []).await {
         Ok(_) => true,
         Err(e) => {
             log_warn!("[CALLS] Failed to send {signal} to {peer}: {e}");
@@ -892,7 +892,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 let id = id.to_string();
                 vector_core::db::spawn_bound(async move { on_link_closed(&id).await });
             }),
-            on_caps: Arc::new(|encode, decode| set_video_caps(encode, decode)),
+            on_caps: Arc::new(set_video_caps),
             audio: Arc::clone(&stats),
             peer_video,
             share,
@@ -1021,7 +1021,7 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
                 peer: stats.peer_level(),
             });
             tick += 1;
-            if tick % 10 != 0 {
+            if !tick.is_multiple_of(10) {
                 continue;
             }
             let received = stats.received.load(Ordering::Relaxed);

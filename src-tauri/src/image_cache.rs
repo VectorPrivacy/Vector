@@ -638,7 +638,7 @@ pub fn backfill_animated_cache<R: Runtime>(handle: &AppHandle<R>) {
             .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("gif"))
             .filter_map(|p| std::fs::metadata(&p).ok().map(|m| (m.len(), p)))
             .collect();
-        paths.sort_by(|a, b| b.0.cmp(&a.0));
+        paths.sort_by_key(|p| std::cmp::Reverse(p.0));
         for (_, path) in paths {
             let Ok(bytes) = std::fs::read(&path) else { continue };
             if crate::shared::image::animated_format(&bytes).is_none()
@@ -723,11 +723,10 @@ pub fn clear_cache<R: Runtime>(
 
     if let Ok(entries) = std::fs::read_dir(&cache_dir) {
         for entry in entries.flatten() {
-            if entry.path().is_file() {
-                if std::fs::remove_file(entry.path()).is_ok() {
+            if entry.path().is_file()
+                && std::fs::remove_file(entry.path()).is_ok() {
                     count += 1;
                 }
-            }
         }
     }
 

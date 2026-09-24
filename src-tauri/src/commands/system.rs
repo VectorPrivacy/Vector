@@ -130,7 +130,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
                 if name.starts_with('.') {
                     continue;
                 }
-                let extension = match name.split('.').last() {
+                let extension = match name.split('.').next_back() {
                     Some(ext) => ext.to_lowercase(),
                     None => continue,
                 };
@@ -162,7 +162,7 @@ pub async fn get_storage_info() -> Result<serde_json::Value, String> {
         // Calculate total size of downloaded Whisper models
         let mut ai_models_size = 0;
         for model in whisper::MODELS {
-            if whisper::is_model_downloaded(&handle, model.name) {
+            if whisper::is_model_downloaded(handle, model.name) {
                 // Convert MB to bytes (model sizes are in MB)
                 ai_models_size += (model.size as u64) * 1024 * 1024;
             }
@@ -234,7 +234,7 @@ async fn clear_attachment_files<R: Runtime>(
                         let ext = std::path::Path::new(&*attachment.path)
                             .file_name()
                             .and_then(|n| n.to_str())
-                            .and_then(|n| n.split('.').last())
+                            .and_then(|n| n.split('.').next_back())
                             .map(|e| e.to_lowercase());
                         if !ext.is_some_and(|e| set.contains(&e)) {
                             continue;
@@ -245,16 +245,13 @@ async fn clear_attachment_files<R: Runtime>(
                     // send, symlink) is left fully intact: it isn't Vector's
                     // storage. A path that no longer resolves is a dangling ref:
                     // nothing to delete, but the metadata still needs the reset
-                    match std::path::Path::new(&*attachment.path).canonicalize() {
-                        Ok(real) => {
-                            match &download_dir {
-                                Some(dir) if real.starts_with(dir) => {
-                                    let _ = std::fs::remove_file(&real);
-                                }
-                                _ => continue,
+                    if let Ok(real) = std::path::Path::new(&*attachment.path).canonicalize() {
+                        match &download_dir {
+                            Some(dir) if real.starts_with(dir) => {
+                                let _ = std::fs::remove_file(&real);
                             }
+                            _ => continue,
                         }
-                        Err(_) => {}
                     }
                     // Reset attachment properties
                     attachment.set_downloaded(false);
@@ -353,7 +350,7 @@ fn sweep_dir_by_ext(dir: &std::path::Path, exts: &std::collections::HashSet<Stri
             }
             let matches = name
                 .split('.')
-                .last()
+                .next_back()
                 .is_some_and(|e| exts.contains(&e.to_lowercase()));
             if matches {
                 let _ = std::fs::remove_file(entry.path());

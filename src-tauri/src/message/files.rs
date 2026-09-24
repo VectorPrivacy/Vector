@@ -20,8 +20,11 @@ use super::sending::{message, MessageSendResult};
 #[cfg(target_os = "android")]
 use crate::android::filesystem;
 
+/// (bytes, file name, extension)
+type JsCachedFile = (Arc<Vec<u8>>, String, String);
+
 /// Cache for bytes received from JavaScript (for Android file handling)
-pub(crate) static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<(Arc<Vec<u8>>, String, String)>>> =
+pub(crate) static JS_FILE_CACHE: LazyLock<std::sync::Mutex<Option<JsCachedFile>>> =
     LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Cache for compressed bytes from JavaScript file
@@ -912,7 +915,6 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
     const MAX_DEPTH: u32 = 128;
 
     fn walk_dir(
-        base: &std::path::Path,
         current: &std::path::Path,
         entries: &mut Vec<(std::path::PathBuf, bool, u64)>,
         total_size: &mut u64,
@@ -940,7 +942,7 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
 
             if meta.is_dir() {
                 entries.push((path.clone(), true, 0));
-                walk_dir(base, &path, entries, total_size, depth + 1)?;
+                walk_dir(&path, entries, total_size, depth + 1)?;
             } else if meta.is_file() {
                 let size = meta.len();
                 *total_size += size;
@@ -950,7 +952,7 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
         Ok(())
     }
 
-    walk_dir(dir, dir, &mut entries, &mut total_size, 0)?;
+    walk_dir(dir, &mut entries, &mut total_size, 0)?;
 
     if entries.is_empty() {
         return Err("Directory is empty".to_string());
@@ -1057,8 +1059,8 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
                 offset = end;
 
                 // Emit progress (only when percent changes, only if still current generation)
-                if total_size > 0 {
-                    let percent = ((bytes_written * 100) / total_size).min(100);
+                if let Some(percent) = (bytes_written * 100).checked_div(total_size) {
+                    let percent = percent.min(100);
                     if percent != last_emitted_percent {
                         last_emitted_percent = percent;
                         if ZIP_GENERATION.load(std::sync::atomic::Ordering::Relaxed) == my_generation {

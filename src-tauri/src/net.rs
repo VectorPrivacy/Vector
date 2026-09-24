@@ -549,10 +549,7 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
     let domain = {
         // URL format: "scheme://host/..." — find the third '/'
         let bytes = url.as_bytes();
-        let scheme_end = match bytes.iter().position(|&b| b == b':') {
-            Some(i) => i,
-            None => 0,
-        };
+        let scheme_end = bytes.iter().position(|&b| b == b':').unwrap_or(0);
         let host_start = if scheme_end + 2 < bytes.len() && bytes[scheme_end + 1] == b'/' && bytes[scheme_end + 2] == b'/' {
             scheme_end + 3
         } else {
@@ -664,8 +661,7 @@ pub async fn fetch_site_metadata(url: &str) -> Result<SiteMetadata, String> {
 fn normalize_url(url: &str, domain: &str) -> String {
     if url.starts_with("https://") {
         url.to_string()
-    } else if url.starts_with("http://") {
-        let rest = &url[7..];
+    } else if let Some(rest) = url.strip_prefix("http://") {
         let mut s = String::with_capacity(8 + rest.len());
         s.push_str("https://");
         s.push_str(rest);

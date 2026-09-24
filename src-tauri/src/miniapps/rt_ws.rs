@@ -78,6 +78,8 @@ async fn handle_connection(
     let label_for_cb = label.clone();
     let token_ref = state.token.clone();
 
+    // The callback's error type is fixed by tungstenite.
+    #[allow(clippy::result_large_err)]
     let ws_stream = tokio_tungstenite::accept_hdr_async(
         stream,
         move |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -180,9 +182,9 @@ async fn handle_connection(
             }
             _ = stats_interval.tick() => {
                 if msg_count > 0 || recv_count > 0 {
-                    let avg_us = if msg_count > 0 { (total_nanos / msg_count) / 1_000 } else { 0 };
+                    let avg_us = total_nanos.checked_div(msg_count).map_or(0, |n| n / 1_000);
                     let peak_us = peak_nanos / 1_000;
-                    let avg_kb = if msg_count > 0 { total_bytes / msg_count / 1024 } else { 0 };
+                    let avg_kb = total_bytes.checked_div(msg_count).map_or(0, |b| b / 1024);
                     log_info!(
                         "[WEBXDC] RT WS stats: {msg_count} sent/{recv_count} recv in 5s ({}/s), avg {avg_us}μs, peak {peak_us}μs, avg {avg_kb}KB/msg",
                         msg_count / 5

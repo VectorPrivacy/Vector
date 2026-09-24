@@ -402,24 +402,41 @@ pub fn parse_marketplace_event(event: &Event) -> Option<MarketplaceApp> {
     })
 }
 
+/// The publisher-supplied metadata of a marketplace listing.
+pub struct MarketplaceListing<'a> {
+    pub app_id: &'a str,
+    pub name: &'a str,
+    pub description: &'a str,
+    pub version: &'a str,
+    pub categories: Vec<&'a str>,
+    pub changelog: Option<&'a str>,
+    pub developer: Option<&'a str>,
+    pub source_url: Option<&'a str>,
+    /// Comma-separated permissions string
+    pub permissions: Option<&'a str>,
+}
+
 /// Build a Nostr event for publishing a Mini App to the marketplace
 #[allow(dead_code)]
 pub async fn build_marketplace_event<T: vector_core::signer::VectorSigner>(
     signer: &T,
-    app_id: &str,
-    name: &str,
-    description: &str,
-    version: &str,
+    listing: &MarketplaceListing<'_>,
     blossom_hash: &str,
     download_url: &str,
     size: u64,
     icon_info: Option<(&str, &str)>, // (url, mime_type)
-    categories: Vec<&str>,
-    changelog: Option<&str>,
-    developer: Option<&str>,
-    source_url: Option<&str>,
-    permissions: Option<&str>, // comma-separated permissions string
 ) -> Result<Event, String> {
+    let MarketplaceListing {
+        app_id,
+        name,
+        description,
+        version,
+        ref categories,
+        changelog,
+        developer,
+        source_url,
+        permissions,
+    } = *listing;
     let mut tags = vec![
         Tag::custom("d", vec![app_id.to_string()]),
         Tag::custom("name", vec![name.to_string()]),
@@ -1020,15 +1037,7 @@ pub async fn update_marketplace_app<R: tauri::Runtime>(
 pub async fn publish_to_marketplace<T: vector_core::signer::VectorSigner + Clone>(
     signer: T,
     xdc_path: &str,
-    app_id: &str,
-    name: &str,
-    description: &str,
-    version: &str,
-    categories: Vec<&str>,
-    changelog: Option<&str>,
-    developer: Option<&str>,
-    source_url: Option<&str>,
-    permissions: Option<&str>,
+    listing: &MarketplaceListing<'_>,
     blossom_servers: Vec<String>,
 ) -> Result<String, String> {
     // Read the .xdc file into memory
@@ -1094,19 +1103,11 @@ pub async fn publish_to_marketplace<T: vector_core::signer::VectorSigner + Clone
     // Build and publish the marketplace event
     let event = build_marketplace_event(
         &signer,
-        app_id,
-        name,
-        description,
-        version,
+        listing,
         &blossom_hash,
         &download_url,
         file_size,
         icon_info.as_ref().map(|(url, mime)| (url.as_str(), *mime)),
-        categories,
-        changelog,
-        developer,
-        source_url,
-        permissions,
     )
     .await?;
 
@@ -1117,7 +1118,7 @@ pub async fn publish_to_marketplace<T: vector_core::signer::VectorSigner + Clone
         .await
         .map_err(|e| format!("Failed to publish marketplace event: {}", e))?;
 
-    log_info!("Published marketplace event for app: {}", app_id);
+    log_info!("Published marketplace event for app: {}", listing.app_id);
     Ok(event.id.to_hex())
 }
 

@@ -529,7 +529,7 @@ async fn switch_relay_transport(_tor_enabled: bool) -> Result<(), String> {
     // unwinding, and skips spawning a new one if it hasn't — wedging the relay in a
     // status nothing can recover from.
     let budget = vector_core::relay_connect_timeout(std::time::Duration::from_secs(15));
-    for (_url, relay) in &relays {
+    for relay in relays.values() {
         relay.disconnect();
     }
 

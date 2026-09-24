@@ -277,7 +277,7 @@ pub fn list_accounts_with_metadata<R: Runtime>(
             out.push(meta);
         }
     }
-    out.sort_by(|a, b| b.last_active.unwrap_or(0).cmp(&a.last_active.unwrap_or(0)));
+    out.sort_by_key(|m| std::cmp::Reverse(m.last_active.unwrap_or(0)));
     Ok(out)
 }
 

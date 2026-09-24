@@ -691,7 +691,7 @@ fn share_thread(
                         } else if lag_ms > LAG_HIGH_MS {
                             // Trailing further than the tail should carry: hold the
                             // reference back with silence, the capture stays intact.
-                            far.splice(0..0, std::iter::repeat(0.0).take((lag - target) as usize));
+                            far.splice(0..0, std::iter::repeat_n(0.0, (lag - target) as usize));
                             probe.reset();
                             eprintln!("[Calls] share echo lag {lag_ms} ms (corr {corr:.2}): held the reference back to +{LAG_TARGET_MS} ms");
                         } else {

@@ -178,7 +178,6 @@ async fn generate_and_wrap(
         // rather than re-deriving it.
         let key = crate::crypto::hash_pass((*secret).clone()).await;
 
-        let session = vector_core::db::current_session();
         let alias = keystore_alias(npub);
 
         let wrapped = tokio::task::spawn_blocking(move || {

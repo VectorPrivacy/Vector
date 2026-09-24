@@ -619,7 +619,7 @@ pub async fn fetch_messages<R: Runtime>(
                         }
 
                         // Sort chats by last message time (do once at the end, not per-chat)
-                        state.chats.sort_by(|a, b| b.last_message_time().cmp(&a.last_message_time()));
+                        state.chats.sort_by_key(|c| std::cmp::Reverse(c.last_message_time()));
 
                         // Record startup load timing (debug builds only)
                         #[cfg(debug_assertions)]
@@ -1395,7 +1395,7 @@ pub async fn fetch_messages<R: Runtime>(
                                         event, &bg_client, my_public_key,
                                     ).await;
                                     processed += 1;
-                                    if processed % 250 == 0 {
+                                    if processed.is_multiple_of(250) {
                                         vector_core::emit_event("sync_progress", &serde_json::json!({
                                             "mode": "Syncing",
                                             "current": processed,

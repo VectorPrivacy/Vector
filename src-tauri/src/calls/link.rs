@@ -91,8 +91,8 @@ pub fn url() -> Result<String, String> {
 fn token_matches(given: &str, token: &str) -> bool {
     let (a, b) = (given.as_bytes(), token.as_bytes());
     let mut diff = (a.len() ^ b.len()) as u8;
-    for i in 0..b.len() {
-        diff |= a.get(i).copied().unwrap_or(0) ^ b[i];
+    for (i, &y) in b.iter().enumerate() {
+        diff |= a.get(i).copied().unwrap_or(0) ^ y;
     }
     diff == 0
 }
@@ -101,13 +101,15 @@ fn token_matches(given: &str, token: &str) -> bool {
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 async fn handle(stream: tokio::net::TcpStream, token: &str) -> Result<(), String> {
+    // The callback's error type is fixed by tungstenite.
+    #[allow(clippy::result_large_err)]
     let handshake = tokio_tungstenite::accept_hdr_async(stream, |req: &http::Request<()>, resp: http::Response<()>| {
         let path_ok = token_matches(req.uri().path().trim_start_matches('/'), token);
         let origin_ok = req
             .headers()
             .get("origin")
             .and_then(|v| v.to_str().ok())
-            .map_or(false, origin_allowed);
+            .is_some_and(origin_allowed);
         if path_ok && origin_ok {
             Ok(resp)
         } else {
@@ -141,6 +143,8 @@ async fn handle(stream: tokio::net::TcpStream, token: &str) -> Result<(), String
         }
     });
     while let Some(Ok(msg)) = source.next().await {
+        // As a guard the send would move `b` before the arm binds it.
+        #[allow(clippy::collapsible_match)]
         match msg {
             Message::Binary(b) => {
                 if from_web_tx.send(b).await.is_err() {

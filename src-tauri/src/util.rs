@@ -13,7 +13,7 @@ pub use vector_core::crypto::{
 pub fn data_uri(mime: &str, bytes: &[u8]) -> String {
     // "data:" + mime + ";base64," = 5 + mime.len() + 8
     let prefix_len = 13 + mime.len();
-    let base64_len = (bytes.len() + 2) / 3 * 4;
+    let base64_len = bytes.len().div_ceil(3) * 4;
     let mut result = String::with_capacity(prefix_len + base64_len);
     result.push_str("data:");
     result.push_str(mime);

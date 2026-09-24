@@ -27,7 +27,7 @@ use tokio::task::JoinHandle;
 /// BASE32 no-pad encoding (RFC 4648), replacing the `data-encoding` crate.
 fn base32_nopad_encode(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut out = String::with_capacity((bytes.len() * 8 + 4) / 5);
+    let mut out = String::with_capacity((bytes.len() * 8).div_ceil(5));
     let mut buf: u64 = 0;
     let mut bits: u32 = 0;
     for &b in bytes {
@@ -293,7 +293,7 @@ impl IrohState {
         event_target: Option<EventTarget>,
         app_handle: Option<AppHandle>,
         label: String,
-        ws_event_targets: Option<Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>>,
+        ws_event_targets: Option<WsSenders>,
     ) -> Result<(bool, Option<oneshot::Receiver<()>>)> {
         let mut channels = self.channels.write().await;
 
@@ -672,6 +672,9 @@ impl EventTargetState {
 
 pub(crate) type SharedEventTarget = Arc<std::sync::RwLock<EventTargetState>>;
 
+/// Realtime WebSocket senders, keyed by mini app window label.
+pub(crate) type WsSenders = Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>;
+
 /// Shared peer count that can be updated by the subscribe loop
 pub(crate) type SharedPeerCount = Arc<AtomicUsize>;
 
@@ -755,6 +758,7 @@ fn emit_realtime_status(app_handle: &Option<AppHandle>, topic_encoded: &str, pee
 }
 
 /// Run the subscribe loop for a gossip topic
+#[allow(clippy::too_many_arguments)]
 async fn run_subscribe_loop(
     mut receiver: GossipReceiver,
     sender: GossipSender,
@@ -870,7 +874,7 @@ pub struct RealtimeManager {
     send_handles: Arc<std::sync::RwLock<HashMap<String, SendHandle>>>,
     /// Map of window_label → WS sender for bi-directional receive.
     /// WS handler registers sender on connect, join_channel wires it into the event target.
-    pub(crate) ws_senders: Arc<std::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<Vec<u8>>>>>,
+    pub(crate) ws_senders: WsSenders,
 }
 
 impl RealtimeManager {

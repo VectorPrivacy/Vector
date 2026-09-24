@@ -64,10 +64,7 @@ pub async fn send_webxdc_peer_advertisement(
 
             let relays = active_trusted_relays().await;
             // Gift Wrap and send to receiver via our Trusted Relays
-            match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
-                Ok(_) => true,
-                Err(_) => false,
-            }
+            vector_core::send_gift_wrap(&client, relays, &pubkey, rumor, []).await.is_ok()
         }
         // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
         Err(_) => send_community_webxdc_signal(&receiver, &topic_id, Some(&node_addr)).await,
@@ -95,10 +92,7 @@ pub async fn send_webxdc_peer_left(
                 .finalize_unsigned_with_id(my_public_key);
 
             let relays = active_trusted_relays().await;
-            match vector_core::send_gift_wrap(&client, relays.into_iter(), &pubkey, rumor, []).await {
-                Ok(_) => true,
-                Err(_) => false,
-            }
+            vector_core::send_gift_wrap(&client, relays, &pubkey, rumor, []).await.is_ok()
         }
         // Non-bech32 target = a Community channel id → the Concord carrier (kind 3310).
         Err(_) => send_community_webxdc_signal(&receiver, &topic_id, None).await,

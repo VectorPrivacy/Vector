@@ -144,7 +144,7 @@ pub fn derive_privkey_from_code(code: &str) -> [u8; 32] {
 
     for _ in 0..PROMO_KEY_ITERATIONS {
         let mut hasher = Sha256::new();
-        hasher.update(&hash);
+        hasher.update(hash);
         hash = hasher.finalize().into();
     }
 
@@ -154,7 +154,7 @@ pub fn derive_privkey_from_code(code: &str) -> [u8; 32] {
 /// Double SHA256 (for checksums)
 fn double_sha256(data: &[u8]) -> [u8; 32] {
     let first = Sha256::digest(data);
-    Sha256::digest(&first).into()
+    Sha256::digest(first).into()
 }
 
 /// RIPEMD-160 hash (used in address derivation)
@@ -187,7 +187,7 @@ pub fn privkey_to_address(privkey: &[u8; 32]) -> Result<String, String> {
     let pubkey_bytes = public_key.serialize();
 
     // SHA256 then RIPEMD160 (Hash160)
-    let sha256_hash = Sha256::digest(&pubkey_bytes);
+    let sha256_hash = Sha256::digest(pubkey_bytes);
     let hash160 = ripemd160_hash(&sha256_hash);
 
     // Prepend version byte
@@ -214,7 +214,7 @@ fn decode_pivx_address(address: &str) -> Result<[u8; 20], String> {
 
     // Verify checksum
     let checksum = double_sha256(&decoded[0..21]);
-    if &decoded[21..25] != &checksum[0..4] {
+    if decoded[21..25] != checksum[0..4] {
         return Err("Invalid address checksum".to_string());
     }
 
@@ -299,6 +299,7 @@ pub async fn fetch_balance(address: &str) -> Result<f64, String> {
 /// Distributes addresses across explorers (round-robin) for efficiency:
 /// - Address 0 → Explorer 0, Address 1 → Explorer 1, Address 2 → Explorer 2, etc.
 /// - If an explorer fails, falls back to trying others
+///
 /// Returns a HashMap of address -> balance (failed fetches are omitted)
 pub async fn fetch_balances_batch(addresses: &[String]) -> HashMap<String, f64> {
     let mut results = HashMap::new();
@@ -1302,11 +1303,11 @@ pub async fn pivx_send_existing_promo<R: Runtime>(
     // Verify the promo exists and get its balance
     let promo_data: (String, f64) = {
         let conn = crate::account_manager::get_db_connection_guard_static()?;
-        let result = conn.query_row(
+                conn.query_row(
             "SELECT address, COALESCE(amount_piv, 0) FROM pivx_promos WHERE gift_code = ?1",
             rusqlite::params![gift_code],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?)),
-        ).map_err(|_| "Promo code not found")?;        result
+        ).map_err(|_| "Promo code not found")?
     };
 
     let (address, amount_piv) = promo_data;

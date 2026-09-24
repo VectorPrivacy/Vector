@@ -20,7 +20,7 @@ use crate::android::filesystem;
 /// The 2x2 of behaviours:
 /// - compress + strip  -> resize to MAX_DIMENSION and re-encode (metadata dropped)
 /// - compress + keep   -> resize + re-encode, then re-attach the original EXIF
-///                        (orientation normalised, since pixels are baked upright)
+///   (orientation normalised, since pixels are baked upright)
 /// - full-res + strip  -> re-encode at full resolution (metadata dropped, orientation baked)
 /// - full-res + keep   -> ship the original bytes untouched (all metadata + orientation intact)
 ///

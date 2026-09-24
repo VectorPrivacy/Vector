@@ -451,7 +451,7 @@ impl AudioEngine {
                         for f in self.device_listeners.lock().unwrap_or_else(|e| e.into_inner()).iter() {
                             // A panicking listener must not take the watchdog with it:
                             // the thread dying ends device following for the process.
-                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f())).is_err() {
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
                                 eprintln!("[AudioEngine] A device listener panicked");
                             }
                         }
@@ -1080,8 +1080,7 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
     }
 
     // Handle finished oneshot sources
-    for i in 0..finished_count {
-        let (id, is_oneshot) = finished_buf[i];
+    for &(id, is_oneshot) in &finished_buf[..finished_count] {
         if is_oneshot {
             sources.remove(&id);
         }
@@ -1123,8 +1122,7 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
     }
 
     // Defer audio_ended events to background thread (no allocations on RT thread)
-    for i in 0..finished_count {
-        let (id, is_oneshot) = finished_buf[i];
+    for &(id, is_oneshot) in &finished_buf[..finished_count] {
         if !is_oneshot {
             let _ = shared.ended_tx.send(id);
         }
@@ -1365,6 +1363,9 @@ impl PacketCursor {
     }
 }
 
+/// Receives (interleaved samples, channels, frames to skip, frames to take).
+type FrameSink<'a> = dyn FnMut(&[f32], usize, usize, usize) -> bool + 'a;
+
 /// Decode frames [start_frame, end_frame), handing each packet's kept frames to `sink`
 /// as (interleaved samples, channels, frames to skip, frames to take). The sink returns
 /// false to stop.
@@ -1374,7 +1375,7 @@ fn decode_range(
     start_frame: u64,
     end_frame: u64,
     cancel: &std::sync::atomic::AtomicBool,
-    sink: &mut dyn FnMut(&[f32], usize, usize, usize) -> bool,
+    sink: &mut FrameSink<'_>,
 ) -> Result<(), String> {
     let mut cursor = PacketCursor::open(path)?;
     if start_frame > 0 {

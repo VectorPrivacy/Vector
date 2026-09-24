@@ -543,7 +543,7 @@ async fn rate_loop(conn: Connection, shared: Arc<Shared>, hooks: Arc<Hooks>) {
         let backlog = stale > last_stale || (skipped - last_skipped) * BACKLOG_SKIP_SHARE > fps;
         tick += 1;
         let received = shared.stats.received.load(Ordering::Relaxed);
-        if tick % 2 == 0 && (sent != last_sent || received != last_received) {
+        if tick.is_multiple_of(2) && (sent != last_sent || received != last_received) {
             let net = conn.stats();
             let (cwnd, cong) = {
                 let paths = conn.paths();

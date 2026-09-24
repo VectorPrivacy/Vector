@@ -26,7 +26,7 @@ fn trim_silence_i16(samples: &[i16], sample_rate: u32) -> Vec<i16> {
     };
 
     // Single pass: compute RMS for every chunk, reuse for threshold + scanning
-    let chunk_rms_vals: Vec<f64> = samples.chunks(chunk_size).map(|c| rms(c)).collect();
+    let chunk_rms_vals: Vec<f64> = samples.chunks(chunk_size).map(rms).collect();
 
     // Adaptive threshold from the quietest 10% of chunks (noise floor)
     let mut sorted = chunk_rms_vals.clone();
@@ -104,7 +104,7 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     pub fn global() -> &'static AudioRecorder {
-        RECORDER.get_or_init(|| AudioRecorder::new())
+        RECORDER.get_or_init(AudioRecorder::new)
     }
 
     fn new() -> Self {

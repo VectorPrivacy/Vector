@@ -132,7 +132,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
 
     let model_def = MODELS.iter().find(|m| m.name == model_name);
     // Safety net: low-quality models (tiny/base) produce unreliable translations
-    let translate = translate && model_def.map_or(false, |m| m.supports_translate);
+    let translate = translate && model_def.is_some_and(|m| m.supports_translate);
     let audio_duration_ms = (audio.len() as f64 / 16.0) as u64; // 16kHz -> ms
 
     // --- Phase 1: Model path resolution (downloads if needed) ---
@@ -147,10 +147,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     let mut cache_guard = WHISPER_CTX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
 
     let t0 = Instant::now();
-    let cache_hit = match cache_guard.as_ref() {
-        Some(cached) if cached.model_path == model_path => true,
-        _ => false,
-    };
+    let cache_hit = matches!(cache_guard.as_ref(), Some(cached) if cached.model_path == model_path);
 
     if !cache_hit {
         // Different model or first run — create new context
@@ -218,7 +215,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
     // frames instead of the full 30s window, giving 3-5x speedup on short audio.
     // suppress_blank must be disabled for ACFT — truncated audio_ctx can produce
     // legitimate blanks, and suppressing them causes decoder hallucination loops.
-    if model_def.map_or(false, |m| m.acft) {
+    if model_def.is_some_and(|m| m.acft) {
         let audio_ctx = std::cmp::min(1500, (audio.len() as f64 / 320.0).ceil() as i32 + 32);
         params.set_audio_ctx(audio_ctx);
         params.set_suppress_blank(false);
@@ -288,7 +285,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
                !trimmed.eq("[BLANK_AUDIO]") {
                 sections.push(TranscriptionSection {
                     text: segment,
-                    at: (start_time as i64) * 10,
+                    at: start_time * 10,
                     confidence: avg_prob,
                 });
             }
@@ -356,7 +353,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
             if audio.len() < 16000 * 5 {
                 retry_params.set_single_segment(true);
             }
-            if model_def.map_or(false, |m| m.acft) {
+            if model_def.is_some_and(|m| m.acft) {
                 let audio_ctx = std::cmp::min(1500, (audio.len() as f64 / 320.0).ceil() as i32 + 32);
                 retry_params.set_audio_ctx(audio_ctx);
                 retry_params.set_suppress_blank(false);
@@ -366,7 +363,7 @@ pub async fn transcribe<R: Runtime>(handle: &AppHandle<R>, model_name: &str, tra
             let mut retry_state = cached.ctx.create_state()?;
             retry_state.full(retry_params, &audio)?;
             let retry_elapsed = t_retry.elapsed();
-            t_inference = t_inference + retry_elapsed;
+            t_inference += retry_elapsed;
             retries_used += 1;
 
             let (new_sections, new_confidence, new_lang, new_language) = extract_results(&retry_state);
@@ -592,8 +589,8 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
         None => {
             let error_msg = last_error.unwrap_or_else(|| 
                 "Failed to download model from all sources".to_string());
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::Other, error_msg)));
+            return Err(Box::new(std::io::Error::other(
+                error_msg)));
         }
     };
     
@@ -629,8 +626,7 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
                 downloaded += chunk.len() as u64;
 
                 // Emit progress on every percentage change
-                if total_size > 0 {
-                    let percent = (downloaded * 100) / total_size;
+                if let Some(percent) = (downloaded * 100).checked_div(total_size) {
                     if percent != last_percent {
                         last_percent = percent;
                         let elapsed = start_time.elapsed().as_secs_f64();
@@ -655,8 +651,7 @@ pub async fn download_whisper_model<R: Runtime>(handle: &AppHandle<R>, model_nam
                 println!("\nError downloading chunk: {}", e);
                 drop(file);
                 let _ = std::fs::remove_file(&model_path);
-                return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other,
-                           format!("Failed to download chunk: {}", e))));
+                return Err(Box::new(std::io::Error::other(format!("Failed to download chunk: {}", e))));
             }
         }
     }

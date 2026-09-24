@@ -303,7 +303,7 @@ pub fn has_alpha_transparency(rgba_pixels: &[u8]) -> bool {
     if rgba_pixels.len() > PARALLEL_THRESHOLD {
         rgba_pixels
             .par_chunks(CHUNK_SIZE)
-            .any(|chunk| check_fn(chunk))
+            .any(check_fn)
     } else {
         check_fn(rgba_pixels)
     }

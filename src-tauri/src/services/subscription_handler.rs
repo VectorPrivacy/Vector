@@ -239,8 +239,8 @@ pub(crate) async fn show_community_notification(chat_id: &str, msg: &vector_core
         // question: the row is pruned when the channel stops being listed.
         if community_id.is_none() {
             false
-        } else if state.get_profile(sender_npub).map_or(false, |p| p.flags.is_blocked())
-            || state.get_chat(sender_npub).map_or(false, |c| vector_core::notify::muted_for_chat(c))
+        } else if state.get_profile(sender_npub).is_some_and(|p| p.flags.is_blocked())
+            || state.get_chat(sender_npub).is_some_and(vector_core::notify::muted_for_chat)
         {
             // A blocked or muted SENDER is silent in every channel, at every level.
             false
@@ -314,7 +314,7 @@ fn community_sender_is_admin(channel_id: &str, sender_npub: &str) -> bool {
             .as_ref()
             .and_then(|att| vector_core::community::owner::verify_owner_attestation(att, &community_id))
     })
-    .map_or(false, |pk| pk.to_hex() == sender_hex);
+    .is_some_and(|pk| pk.to_hex() == sender_hex);
     if owner_is_sender {
         return true;
     }
@@ -391,7 +391,7 @@ async fn subscribe_dms_verbose(label: &str) -> Result<nostr_sdk::prelude::Subscr
     println!(
         "[dm-sub] {label}: id {} — ok on {:?}, failed on {:?}",
         *output,
-        output.success.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
+        output.success.keys().map(|r| r.to_string()).collect::<Vec<_>>(),
         output.failed.iter().map(|(r, e)| format!("{r}: {e:?}")).collect::<Vec<_>>()
     );
     Ok(output.value)
@@ -600,7 +600,7 @@ pub(crate) async fn start_subscriptions() -> Result<bool, String> {
                     t.elapsed(),
                     flood_micros / 1000
                 );
-            } else if flood_count % 500 == 0 {
+            } else if flood_count.is_multiple_of(500) {
                 println!(
                     "[lag-probe] community lane: {flood_count} events folded, {}ms cumulative",
                     flood_micros / 1000

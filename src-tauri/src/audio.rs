@@ -53,6 +53,7 @@ static CACHED_DEVICE_SAMPLE_RATE: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(desktop)]
 /// In-memory cache for decoded and resampled notification samples
+#[derive(Default)]
 struct SoundCache {
     /// Pre-resampled samples ready to play (at device sample rate)
     samples: Option<Arc<Vec<f32>>>,
@@ -62,18 +63,6 @@ struct SoundCache {
     last_used: Option<Instant>,
     /// Device sample rate the cached samples are resampled to
     cached_at_rate: u32,
-}
-
-#[cfg(desktop)]
-impl Default for SoundCache {
-    fn default() -> Self {
-        Self {
-            samples: None,
-            cached_sound: None,
-            last_used: None,
-            cached_at_rate: 0,
-        }
-    }
 }
 
 #[cfg(desktop)]
@@ -237,8 +226,10 @@ fn load_raw_samples(path: &Path) -> Result<Vec<f32>, String> {
 /// Represents the notification sound choice
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "path")]
+#[derive(Default)]
 pub enum NotificationSound {
     /// Default built-in sound - Prélude (notif-prelude.mp3)
+    #[default]
     Default,
     /// Techno ping sound (notif-techno.mp3)
     Techno,
@@ -246,13 +237,6 @@ pub enum NotificationSound {
     None,
     /// Custom user-selected sound file
     Custom(String),
-}
-
-#[cfg(desktop)]
-impl Default for NotificationSound {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 #[cfg(desktop)]
@@ -455,12 +439,9 @@ fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
                     // Check if exact integer decimation to target rate is possible
                     // (e.g., 48kHz→16kHz = 3:1, 32kHz→16kHz = 2:1)
                     // If so, skip fused path — regular SIMD + integer decimation in caller is faster
-                    let (_exact_ratio, is_exact) = if target_rate > 0 {
-                        let r = sample_rate / target_rate;
-                        (r, r >= 2 && r * target_rate == sample_rate)
-                    } else {
-                        (0, false)
-                    };
+                    let is_exact = sample_rate
+                        .checked_div(target_rate)
+                        .is_some_and(|r| r >= 2 && r * target_rate == sample_rate);
 
                     // SIMD fused: stereo→mono + 2:1 decimation in one pass
                     // Only when exact integer decimation isn't possible (e.g., 44.1kHz→22.05kHz)
@@ -542,7 +523,7 @@ fn wav_fast_decode(bytes: &[u8], target_rate: u32) -> Option<(Vec<f32>, u32)> {
 
         // Advance to next chunk (WAV chunks are 2-byte aligned)
         pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 { pos += 1; }
+        if !chunk_size.is_multiple_of(2) { pos += 1; }
     }
 
     None
@@ -776,7 +757,7 @@ fn wav_channel_count(bytes: &[u8]) -> Option<u16> {
             return Some(u16::from_le_bytes([bytes[pos + 10], bytes[pos + 11]]));
         }
         pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 {
+        if !chunk_size.is_multiple_of(2) {
             pos += 1;
         }
     }
@@ -835,14 +816,14 @@ fn get_bundled_sound_path<R: Runtime>(
         NotificationSound::Custom(path) => {
             // If path is empty or doesn't exist, fall back to default sound
             if path.is_empty() {
-                return get_bundled_sound_path(handle, &NotificationSound::Default);
+                return find_sound("notif-prelude.mp3");
             }
             let p = PathBuf::from(path);
             if p.exists() {
                 Some(p)
             } else {
                 // Custom file not found - fall back to default instead of silent failure
-                get_bundled_sound_path(handle, &NotificationSound::Default)
+                find_sound("notif-prelude.mp3")
             }
         }
         NotificationSound::None => None,
@@ -1031,8 +1012,8 @@ fn save_notification_settings_internal<R: Runtime>(
 
 #[cfg(desktop)]
 fn parse_notification_sound(value: &str) -> NotificationSound {
-    if value.starts_with("custom:") {
-        NotificationSound::Custom(value[7..].to_string())
+    if let Some(path) = value.strip_prefix("custom:") {
+        NotificationSound::Custom(path.to_string())
     } else {
         match value {
             "default" => NotificationSound::Default,

@@ -107,7 +107,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             let rings = {
                 let state = STATE.lock().await;
                 // No row yet means nobody has asked for quiet, so it rings.
-                state.get_chat(&chat_id).map_or(true, |c| {
+                state.get_chat(&chat_id).is_none_or(|c| {
                     vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All
                 })
             };
@@ -154,7 +154,7 @@ impl vector_core::InboundEventHandler for TauriEventHandler {
             let rings = {
                 let state = STATE.lock().await;
                 // No row yet means nobody has asked for quiet, so it rings.
-                state.get_chat(&chat_id).map_or(true, |c| {
+                state.get_chat(&chat_id).is_none_or(|c| {
                     vector_core::notify::ring_for_chat(c) == vector_core::notify::NotifyLevel::All
                 })
             };

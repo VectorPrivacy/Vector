@@ -513,7 +513,7 @@ fn transcode_animated_opts(
             // Keyframe flush: tolerance lets slow drift go stale, and over
             // enough frames the reused patches read as a dirty window. A full
             // frame at intervals bounds how long any residue can live.
-            if count % 12 == 0 {
+            if count.is_multiple_of(12) {
                 shown = resized.clone();
                 write_frame(&mut enc, resized.into_raw(), canvas, (0, 0), delay)?;
             } else {
@@ -935,9 +935,12 @@ struct JpegHeader {
     orientation: Option<u8>,
 }
 
+/// Marker segments as `(offset, marker, total length)`, plus the scan's offset.
+type JpegSegments = (Vec<(usize, u8, usize)>, usize);
+
 /// Each marker segment ahead of the first scan: `(offset, marker, total length)`,
 /// or `None` for a file that isn't a JPEG or breaks off before its scan.
-fn jpeg_segments(bytes: &[u8]) -> Option<(Vec<(usize, u8, usize)>, usize)> {
+fn jpeg_segments(bytes: &[u8]) -> Option<JpegSegments> {
     if bytes.len() < 4 || bytes[0] != 0xFF || bytes[1] != 0xD8 {
         return None;
     }

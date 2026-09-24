@@ -97,9 +97,9 @@ impl MiniAppPackage {
             Some(mut file) => {
                 let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
                 let contents = String::from_utf8(bytes)
-                    .map_err(|e| Error::ManifestParseError(e.to_string()))?;
+                    .map_err(|e| Error::ManifestParse(e.to_string()))?;
                 toml::from_str(&contents)
-                    .map_err(|e| Error::ManifestParseError(e.to_string()))?
+                    .map_err(|e| Error::ManifestParse(e.to_string()))?
             }
             None => {
                 let name = path.file_stem()
@@ -166,9 +166,9 @@ impl MiniAppPackage {
             Some(mut file) => {
                 let bytes = Self::read_entry_capped(&mut file, 1024 * 1024)?;
                 let contents = String::from_utf8(bytes)
-                    .map_err(|e| Error::ManifestParseError(e.to_string()))?;
+                    .map_err(|e| Error::ManifestParse(e.to_string()))?;
                 toml::from_str(&contents)
-                    .map_err(|e| Error::ManifestParseError(e.to_string()))?
+                    .map_err(|e| Error::ManifestParse(e.to_string()))?
             }
             None => {
                 // No manifest, use fallback name

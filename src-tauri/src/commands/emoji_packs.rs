@@ -853,16 +853,11 @@ async fn decode_animated_emoji_uncached<R: tauri::Runtime>(
             return Err("emoji too large".to_string());
         }
         let mut body = Vec::new();
-        loop {
-            match resp.chunk().await.map_err(|e| format!("read body: {}", e))? {
-                Some(chunk) => {
-                    if body.len() + chunk.len() > MAX_EMOJI_DECODE_BYTES {
-                        return Err("emoji too large".to_string());
-                    }
-                    body.extend_from_slice(&chunk);
-                }
-                None => break,
+        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read body: {}", e))? {
+            if body.len() + chunk.len() > MAX_EMOJI_DECODE_BYTES {
+                return Err("emoji too large".to_string());
             }
+            body.extend_from_slice(&chunk);
         }
         (body, ct)
     };
@@ -1070,7 +1065,7 @@ fn decode_static_fallback(bytes: &[u8]) -> Result<Vec<(image::RgbaImage, u32)>, 
 fn extract_frame(f: image::Frame) -> (image::RgbaImage, u32) {
     // image::Frame::delay is `Delay` which gives (numer, denom) for ms.
     let (numer, denom) = f.delay().numer_denom_ms();
-    let dur = if denom == 0 { 100 } else { (numer / denom).max(20) };
+    let dur = numer.checked_div(denom).map_or(100, |d| d.max(20));
     (f.into_buffer(), dur)
 }
 

@@ -95,7 +95,7 @@ pub async fn download_whisper_model<R: Runtime>(
     // Download (or simply return the cached path of) a Whisper Model
     match whisper::download_whisper_model(&handle, &model_name).await {
         Ok(path) => Ok(path),
-        Err(e) => Err(format!("Model Download error: {}", e.to_string())),
+        Err(e) => Err(format!("Model Download error: {}", e)),
     }
 }
 

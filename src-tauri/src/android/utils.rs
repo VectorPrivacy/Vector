@@ -120,22 +120,6 @@ where
     out
 }
 
-/// Get a system service by name
-pub fn get_system_service<'a>(env: &mut JNIEnv<'a>, activity: &JObject<'a>, service_name: &str) -> Result<JObject<'a>, String> {
-    let service_str = env.new_string(service_name)
-        .map_err(|e| format!("Failed to create service name string: {:?}", e))?;
-    
-    env.call_method(
-        activity,
-        "getSystemService",
-        "(Ljava/lang/String;)Ljava/lang/Object;",
-        &[(&service_str).into()],
-    )
-    .map_err(|e| format!("Failed to get {} service: {:?}", service_name, e))?
-    .l()
-    .map_err(|e| format!("Failed to convert {} service object: {:?}", service_name, e))
-}
-
 /// Get the ContentResolver
 pub fn get_content_resolver<'a>(env: &mut JNIEnv<'a>, activity: &JObject<'a>) -> Result<JObject<'a>, String> {
     env.call_method(

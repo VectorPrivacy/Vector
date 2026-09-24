@@ -170,7 +170,7 @@ pub fn run() {
             // Append to log file (shared with log_error!)
             if let Ok(data_dir) = account_manager::get_app_data_dir() {
                 if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir.join("vector.log")) {
-                    let _ = write!(f, "{}\n", &msg);
+                    let _ = writeln!(f, "{}", &msg);
                 }
             }
         }));
@@ -520,7 +520,7 @@ pub fn run() {
             // Route vector-core's failure-class logs (log_net_fail!/log_net_info!)
             // into the user-copyable vector.log — Copy Logs must tell the whole
             // blossom story, and most of it happens inside vector-core.
-            vector_core::logging::set_persist_sink(|line| append_vector_log(line));
+            vector_core::logging::set_persist_sink(append_vector_log);
 
             // Register the Android NIP-55 (Amber) signer backend so keyless
             // offline accounts can sign/encrypt/decrypt over local IPC.

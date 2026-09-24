@@ -293,7 +293,7 @@ pub async fn upload_avatar(filepath: String, upload_type: Option<String>) -> Res
     } else {
         image_cache::ImageType::Avatar
     };
-    image_cache::precache_image_bytes(&handle, &upload_url, &bytes_for_cache, image_type);
+    image_cache::precache_image_bytes(handle, &upload_url, &bytes_for_cache, image_type);
 
     // Point our own profile at the just-uploaded image now, rather than
     // waiting for the kind-0 metadata to echo back and re-cache (a 10-40s

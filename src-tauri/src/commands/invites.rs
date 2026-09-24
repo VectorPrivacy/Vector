@@ -86,7 +86,7 @@ pub async fn get_or_create_invite_code() -> Result<String, String> {
     let event = vector_core::sign_builder(event_builder).await.map_err(|e| e.to_string())?;
 
     // Send only to trusted relays
-    client.send_event(&event).to(active_trusted_relays().await.into_iter()).await.map_err(|e| e.to_string())?;
+    client.send_event(&event).to(active_trusted_relays().await).await.map_err(|e| e.to_string())?;
 
     // Store locally
     db::set_sql_setting("invite_code".to_string(), new_code.clone())
@@ -147,7 +147,7 @@ pub async fn accept_invite_code(invite_code: String) -> Result<String, String> {
     // Store the pending invite acceptance (will be broadcast after encryption setup)
     let pending_invite = PendingInviteAcceptance {
         invite_code: invite_code.clone(),
-        inviter_pubkey: inviter_pubkey.clone(),
+        inviter_pubkey,
     };
 
     // First-invite-wins: a second invite acceptance during the same

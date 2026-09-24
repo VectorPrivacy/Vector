@@ -10,18 +10,18 @@ pub enum Error {
     InstanceNotFoundByLabel(String),
     InvalidPackage(String),
     FileNotFound(String),
-    ManifestParseError(String),
+    ManifestParse(String),
     BlackholeProxyUnavailable,
     Anyhow(anyhow::Error),
     RealtimeChannelAlreadyActive,
     RealtimeChannelNotActive,
-    RealtimeError(String),
-    DatabaseError(String),
+    Realtime(String),
+    Database(String),
 }
 
 impl From<String> for Error {
     fn from(s: String) -> Self {
-        Error::DatabaseError(s)
+        Error::Database(s)
     }
 }
 
@@ -35,13 +35,13 @@ impl std::fmt::Display for Error {
             Error::InstanceNotFoundByLabel(s) => write!(f, "Mini App instance not found by window label: {}", s),
             Error::InvalidPackage(s) => write!(f, "Invalid Mini App package: {}", s),
             Error::FileNotFound(s) => write!(f, "File not found in Mini App: {}", s),
-            Error::ManifestParseError(s) => write!(f, "Failed to parse manifest: {}", s),
+            Error::ManifestParse(s) => write!(f, "Failed to parse manifest: {}", s),
             Error::BlackholeProxyUnavailable => write!(f, "Blackhole proxy unavailable for network isolation"),
             Error::Anyhow(e) => write!(f, "{}", e),
             Error::RealtimeChannelAlreadyActive => write!(f, "Realtime channel already active - call leave() first"),
             Error::RealtimeChannelNotActive => write!(f, "Realtime channel not active - call joinRealtimeChannel() first"),
-            Error::RealtimeError(s) => write!(f, "Realtime channel error: {}", s),
-            Error::DatabaseError(s) => write!(f, "Database error: {}", s),
+            Error::Realtime(s) => write!(f, "Realtime channel error: {}", s),
+            Error::Database(s) => write!(f, "Database error: {}", s),
         }
     }
 }

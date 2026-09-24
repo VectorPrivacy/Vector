@@ -808,12 +808,13 @@ pub(crate) async fn teardown_community_local_at(
 
 /// Disconnect + remove relays that belonged to a just-left community, but ONLY the ones nothing
 /// else needs. Three protections, any of which keeps a relay:
-///   1. another community still lists it (`still_needed`);
-///   2. the user reads/writes it — their own primary/imported relay, or a relay that's BOTH theirs
-///      and a community's (READ/WRITE flag set; community relays are GOSSIP|PING — see
-///      `community_relay_options`). DM recipient inbox relays are added READ+WRITE too, so this
-///      also shields any transient chat relay;
-///   3. it's a NIP-65 GOSSIP relay (the pool itself refuses to remove those).
+/// 1. another community still lists it (`still_needed`);
+/// 2. the user reads/writes it — their own primary/imported relay, or a relay that's BOTH theirs
+///    and a community's (READ/WRITE flag set; community relays are GOSSIP|PING — see
+///    `community_relay_options`). DM recipient inbox relays are added READ+WRITE too, so this
+///    also shields any transient chat relay;
+/// 3. it's a NIP-65 GOSSIP relay (the pool itself refuses to remove those).
+///
 /// So leaving a community can never sever the user's own connectivity or another chat's relays.
 /// Delegates to the shared vector-core prune (same keep-set logic also used by the invite-preload
 /// TTL cleanup, #297) so the two paths can't drift.
@@ -1710,7 +1711,7 @@ async fn dispatch_community_attachment_message(
                 }
                 Sealed::Body(body, guard) => (body, guard),
             };
-            let cb_for_progress = callback.clone();
+            let cb_for_progress = callback;
             let pid_for_progress = pending_id.clone();
             let progress_cb: vector_core::blossom::ProgressCallback =
                 std::sync::Arc::new(move |percentage, bytes| {
@@ -2395,7 +2396,7 @@ pub async fn debug_v2_community_state(community_id: String) -> Result<serde_json
             })
         })
         .collect();
-    let plane_authors: Vec<String> = vector_core::community::v2::realtime::plane_authors(&[c.clone()])
+    let plane_authors: Vec<String> = vector_core::community::v2::realtime::plane_authors(std::slice::from_ref(&c))
         .into_iter()
         .map(|p| p.to_hex())
         .collect();
@@ -2911,11 +2912,6 @@ async fn rehydrate_listed_communities(
     .await
 }
 
-/// Boot sweep: sync the LATEST page of every joined Community channel, most-recent-activity
-/// first (so the top of the chat list refreshes first), through a sliding window of 3 to avoid
-/// overwhelming the relays/bandwidth. ONE IPC call drives the whole sweep — no per-channel
-/// frontend round-trips. Each page emits `message_new` as it lands, so the chat list fills in
-/// progressively. Per-channel anti-stampede makes this safe to overlap with reconnect re-syncs.
 // ── Coalesced control-plane probe (change detector) ─────────────────────────
 // One Quorum fetch over every held v1 community's control/rekey coordinates tells
 // the boot sweep which communities actually changed, so the unchanged majority
@@ -3095,6 +3091,11 @@ async fn run_hot_v1_lane(
     hot_set
 }
 
+/// Boot sweep: sync the LATEST page of every joined Community channel, most-recent-activity
+/// first (so the top of the chat list refreshes first), through a sliding window of 3 to avoid
+/// overwhelming the relays/bandwidth. ONE IPC call drives the whole sweep — no per-channel
+/// frontend round-trips. Each page emits `message_new` as it lands, so the chat list fills in
+/// progressively. Per-channel anti-stampede makes this safe to overlap with reconnect re-syncs.
 #[tauri::command]
 pub async fn sync_communities_boot() -> Result<(), String> {
     vector_core::db::scoped(async move {
@@ -3256,7 +3257,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
                     }
                 }
             }
-            with_activity.sort_by(|a, b| b.1.cmp(&a.1));
+            with_activity.sort_by_key(|t| std::cmp::Reverse(t.1));
             let volley_count = with_activity.len();
             let targets: Vec<_> = with_activity.into_iter().map(|(t, _)| t).collect();
 
@@ -3266,7 +3267,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            hot_v1.sort_by(|a, b| b.1.cmp(&a.1));
+            hot_v1.sort_by_key(|t| std::cmp::Reverse(t.1));
             hot_v1.retain(|(_, at)| *at > 0 && now_ms.saturating_sub(*at) <= HOT_V1_WINDOW_MS);
             hot_v1.truncate(HOT_V1_MAX);
             let hot_v1_input: Vec<String> = hot_v1.iter().map(|(c, _)| c.clone()).collect();
@@ -3377,7 +3378,7 @@ pub async fn sync_communities_boot() -> Result<(), String> {
         // Hot-lane channels already ran the full chain — don't re-queue them.
         channels.retain(|c| !hot_set.contains(c));
         // Most-recent-activity first.
-        channels.sort_by(|a, b| activity(b).cmp(&activity(a)));
+        channels.sort_by_key(|c| std::cmp::Reverse(activity(c)));
 
         // No coverage cap — every joined Community syncs at boot (NIP-17 parity: bulk catch-up here,
         // realtime after, re-sync on reconnect; nothing on-demand). A sliding window (not fixed
@@ -4258,8 +4259,7 @@ pub async fn rename_community_channel(
         let ch_bytes = hex_to_id32(&channel_id)?;
         let ch_id = vector_core::community::ChannelId(ch_bytes);
         if is_v2_community(&community_id) {
-            let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))
-                .map_err(|e| e)?
+            let community = vector_core::db::community::load_community_v2(&CommunityId(id_bytes))?
                 .ok_or("Community not found")?;
             let held = community.channel(&ch_id).ok_or("Channel not found in Community")?;
             // Rebuild from the held document — a rename must never strip vsk-2
