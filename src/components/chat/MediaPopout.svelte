@@ -124,10 +124,8 @@
         window.addEventListener('resize', keep);
         return () => window.removeEventListener('resize', keep);
     });
-    // A panel opening (songs, lyrics, a transcript) or a change of shape grows the box
-    // toward the open space: a box in the upper half keeps its top edge and grows down, one
-    // in the lower half keeps its bottom edge and grows up (the anchor it already has). Kept
-    // edge by edge as the height animates, so opening and closing retrace the same path.
+    // A height change grows the box toward the open space: in the upper half it keeps its top
+    // edge, in the lower half its bottom one, frame by frame so closing retraces opening.
     let lastH = 0;
     $effect(() => {
         if (!box) return;
@@ -145,12 +143,10 @@
 
     // A new size or kind can push the box past an edge; never mid-resize, where the
     // pinned corner decides the place.
-    $effect(() => { width; soundOnly; item; untrack(() => requestAnimationFrame(() => { if (!gesture?.corner) clampPlace(); })); });
+    $effect(() => { width; soundOnly; item; requestAnimationFrame(() => { if (!gesture?.corner) clampPlace(); }); });
 
-    // A move drags the box; a resize pins the corner opposite the grabbed one and sizes
-    // the box from where the pointer is relative to it. Absolute, not a running delta: a
-    // box that changes shape mid-drag (video into sound-only) can never leave the pointer
-    // chasing a corner that jumped away, because only the pointer's place counts.
+    // A resize pins the corner opposite the grabbed one and sizes the box from the pointer's
+    // place, never a running delta, so a shape change mid-drag can't strand the pointer.
     let gesture = null;
     // The native controls' strip along a video's bottom stays the video's.
     const VIDEO_CONTROLS_H = 44;

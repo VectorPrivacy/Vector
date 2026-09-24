@@ -720,20 +720,18 @@ where
     }
 }
 
-/// Post-upload liveness gate: confirm the server actually SERVES the blob it
-/// just ACKed. Some servers 2xx an upload they dedupe against a stale index
-/// or quietly drop — the ACK is worthless, only a cache-cold fetch tells the
-/// truth. A definitive 404/410 (after a short grace retry) fails the server;
 /// STRICT liveness for smart-forward reuse: only a positive 2xx HEAD counts.
-/// The post-upload verifier above fails OPEN (an unreachable server shouldn't
-/// sink an upload that ACKed); a REUSE decision is the opposite — on anything
-/// but proof the blob serves, we fall through to a fresh upload, which always
-/// works. Never assume here.
+/// The post-upload verifier (`uploaded_blob_serves`) fails OPEN, since an unreachable
+/// server shouldn't sink an upload that ACKed; a REUSE decision is the opposite: on
+/// anything but proof the blob serves, fall through to a fresh upload, which always works.
 pub async fn blob_is_served(url: &str, timeout: std::time::Duration) -> bool {
     matches!(crate::net::remote_status(url, timeout).await, Some(200..=299))
 }
 
-/// anything else passes, so a flaky HEAD can't sink a good upload.
+/// Post-upload liveness gate: confirm the server actually SERVES the blob it just ACKed.
+/// Some servers 2xx an upload they dedupe against a stale index or quietly drop, so only a
+/// cache-cold fetch tells the truth. A definitive 404/410 (after a short grace retry) fails
+/// the server; anything else passes, so a flaky HEAD can't sink a good upload.
 async fn uploaded_blob_serves(url: &str) -> bool {
     for attempt in 0..2 {
         if attempt > 0 {
@@ -918,7 +916,6 @@ where
     let size_bytes = body.len();
     let mime_for_routing = mime_type.unwrap_or("application/octet-stream");
     let ranked = crate::blossom_capabilities::rank_servers(server_urls, mime_for_routing, is_encrypted, size_bytes);
-    // Pin capability writes to the account that started the upload.
 
     for (index, server_url_str) in ranked.iter().enumerate() {
         if let Some(ref flag) = cancel_flag {

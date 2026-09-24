@@ -943,43 +943,45 @@ const DISPLAY_EXPLAINERS = {
 };
 
 /**
- * Mount the Display section and load its toggles. Rich Composer lives in
- * localStorage: the composer is built at module scope before the settings load,
- * and it is a per-device compatibility choice.
+ * DisplayHelpers: the Display section's toggles. Rich Composer lives in localStorage: the
+ * composer is built at module scope before the settings load, and it is a per-device choice.
+ * @typedef {Object} DisplayHelpers
+ * @property {(key: string, on: boolean) => Promise<void>} change  persist and apply one toggle
+ * @property {(key: string) => void} explain  the toggle's info popup
  */
 const DISPLAY_HANDLERS = {
-            change: async (key, on) => {
-                switch (key) {
-                    case 'imageTypes':
-                        fDisplayImageTypes = on;
-                        await saveDisplayImageTypes(on);
-                        break;
-                    case 'chatBg':
-                        document.body.classList.toggle('chat-bg-disabled', !on);
-                        await saveChatBgEnabled(on);
-                        refreshChatWallpaper();
-                        break;
-                    case 'richComposer':
-                        localStorage.setItem('rich_composer', on ? 'true' : 'false');
-                        // The input is built once at startup, so the swap needs a fresh load.
-                        popupConfirm('Restart required', 'The composer changes on the next app start.', true);
-                        break;
-                    case 'emoticons':
-                        emoticonSuggestionsEnabled = on;
-                        await saveEmoticonSuggestions(on);
-                        break;
-                    case 'autocorrect':
-                        fAutocorrectEnabled = on;
-                        applyAutocorrectSetting();
-                        await saveAutocorrect(on);
-                        break;
-                    case 'floatingPlayer':
-                        VectorSvelte.setPopoutEnabled(on);
-                        await saveFloatingPlayer(on);
-                        break;
-                }
-            },
-            explain: (key) => popupConfirm(...DISPLAY_EXPLAINERS[key], true),
+    change: async (key, on) => {
+        switch (key) {
+            case 'imageTypes':
+                fDisplayImageTypes = on;
+                await saveDisplayImageTypes(on);
+                break;
+            case 'chatBg':
+                document.body.classList.toggle('chat-bg-disabled', !on);
+                await saveChatBgEnabled(on);
+                refreshChatWallpaper();
+                break;
+            case 'richComposer':
+                localStorage.setItem('rich_composer', on ? 'true' : 'false');
+                // The input is built once at startup, so the swap needs a fresh load.
+                popupConfirm('Restart required', 'The composer changes on the next app start.', true);
+                break;
+            case 'emoticons':
+                emoticonSuggestionsEnabled = on;
+                await saveEmoticonSuggestions(on);
+                break;
+            case 'autocorrect':
+                fAutocorrectEnabled = on;
+                applyAutocorrectSetting();
+                await saveAutocorrect(on);
+                break;
+            case 'floatingPlayer':
+                VectorSvelte.setPopoutEnabled(on);
+                await saveFloatingPlayer(on);
+                break;
+        }
+    },
+    explain: (key) => popupConfirm(...DISPLAY_EXPLAINERS[key], true),
 };
 
 async function initDisplaySettings() {
@@ -1012,27 +1014,27 @@ function soundWire(sound) {
  * settings the backend reads at notify time (values: full | hide_content | hide_all).
  */
 const NOTIF_HANDLERS = {
-            saveSounds: ({ globalMute, muteEveryone, sound }) =>
-                saveNotificationSettings({ global_mute: globalMute, mute_everyone: muteEveryone, sound: soundWire(sound) })
-                    .catch((e) => console.error('Failed to save notification settings:', e)),
-            saveMuteEveryone: (on) => invoke('set_sql_setting', { key: 'notif_mute_everyone', value: on ? 'true' : 'false' }),
-            savePrivacy: (value) => invoke('set_sql_setting', { key: 'notif_content_privacy', value }),
-            pickCustom: async () => {
-                try {
-                    return await selectCustomNotificationSound();
-                } catch (e) {
-                    if (e === 'FILE_TOO_LARGE') {
-                        popupConfirm('File Too Large', 'Notification sounds must be under 1MB. Please choose a shorter audio clip.', true);
-                    } else if (e === 'AUDIO_TOO_LONG') {
-                        popupConfirm('Audio Too Long', 'Notification sounds must be 10 seconds or less.', true);
-                    } else if (e !== 'No file selected') {
-                        console.error('Failed to select custom sound:', e);
-                    }
-                    return null;
-                }
-            },
-            preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
-            explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
+    saveSounds: ({ globalMute, muteEveryone, sound }) =>
+        saveNotificationSettings({ global_mute: globalMute, mute_everyone: muteEveryone, sound: soundWire(sound) })
+            .catch((e) => console.error('Failed to save notification settings:', e)),
+    saveMuteEveryone: (on) => invoke('set_sql_setting', { key: 'notif_mute_everyone', value: on ? 'true' : 'false' }),
+    savePrivacy: (value) => invoke('set_sql_setting', { key: 'notif_content_privacy', value }),
+    pickCustom: async () => {
+        try {
+            return await selectCustomNotificationSound();
+        } catch (e) {
+            if (e === 'FILE_TOO_LARGE') {
+                popupConfirm('File Too Large', 'Notification sounds must be under 1MB. Please choose a shorter audio clip.', true);
+            } else if (e === 'AUDIO_TOO_LONG') {
+                popupConfirm('Audio Too Long', 'Notification sounds must be 10 seconds or less.', true);
+            } else if (e !== 'No file selected') {
+                console.error('Failed to select custom sound:', e);
+            }
+            return null;
+        }
+    },
+    preview: (sound) => previewNotificationSound(soundWire(sound)).catch((e) => console.error('Failed to preview sound:', e)),
+    explain: (kind) => popupConfirm(...NOTIF_EXPLAINERS[kind], true),
 };
 
 async function initNotificationSettings() {

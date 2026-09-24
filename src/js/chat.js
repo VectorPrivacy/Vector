@@ -1825,12 +1825,8 @@ function handleChatScrollIntent() {
     // back at the true bottom. Drop-top compensations move scrollTop up too,
     // but they're wrapped in beginProgrammaticScroll, so isProgrammatic gates them out.
     //
-    // A SHRINK clamp is not a scroll-up: switching to a shorter chat (or hiding
-    // rows) makes the engine pull scrollTop down on its own, outside any
-    // programmatic window. That latched "the user left" on chat-open, and the
-    // latch outlives the open — every later scroll-to-bottom then refused to run.
-    // A clamp always lands at the bottom, which is what separates it from a real
-    // scroll-up (that leaves real distance below).
+    // A shrink clamp (a shorter chat, hidden rows) moves scrollTop without the user and
+    // lands at the bottom; a real scroll-up leaves distance below.
     const clampedByShrink = scrollHeight < prevHeight && pxFromBottom < BOTTOM_EPSILON_PX;
     if (!isProgrammatic && scrollTop < lastScrollTop - 1 && !clampedByShrink) {
         _userScrolledAway = true;
@@ -1846,13 +1842,8 @@ function handleChatScrollIntent() {
     revealUnreadFrontierIfReached();
 
     const wasPinned = chatPinnedToBottom;
-    // Only the USER leaves the bottom. Distance alone used to release the pin, so
-    // media resolving after a chat-open — which drops hundreds of px in below the
-    // fold in one frame — blew past PIN_THRESHOLD_PX and silently released it,
-    // after which every scroll-to-bottom path refused to run and the chat sat
-    // short forever. So the pin also survives while the app is actively holding
-    // the bottom, and whenever the content simply grew beneath a view that didn't
-    // move up. A seek moves the view up, so it still releases normally.
+    // Only the user leaves the bottom: the pin survives an active hold and content growing
+    // under a view that didn't move up. A seek moves the view up, so it still releases.
     chatPinnedToBottom =
         (pxFromBottom < PIN_THRESHOLD_PX || chatBottomHoldPending() || (wasPinned && grewUnderUs))
         && !_userScrolledAway;

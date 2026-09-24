@@ -760,15 +760,15 @@ class VoiceTranscriptionUI {
 /** What the audio player component (components/chat/attachments/AudioPlayer.svelte) needs
  *  from the app: the Rust engine, the tag reader, the transcriber and a few facts. */
 /**
- * AudioPlayerHelpers: the in-chat audio player and its transcription panel.
+ * AudioPlayerHelpers: the audio players (the card, the pop-out) and their transcription panel.
  * @typedef {Object} AudioPlayerHelpers
- * @property {(path: string) => Promise<object|null>} probe
- * @property {(path: string) => Promise<object|null>} metadata
- * @property {(path: string) => Promise<string>} load          returns the source id
- * @property {(sourceId: string) => void} play
- * @property {(sourceId: string) => void} pause
- * @property {(sourceId: string, ms: number) => void} seek
- * @property {(sourceId: string) => void} stop
+ * @property {(path: string) => Promise<number>} probe          the duration in ms
+ * @property {(path: string) => Promise<object|null>} metadata  tags, cover art, lyrics, chapters
+ * @property {(path: string) => Promise<{id: number, duration_ms: number, waveform_fps: number, bins: number}>} load
+ * @property {(sourceId: number) => Promise<number>} play       the position it plays from, in ms
+ * @property {(sourceId: number) => Promise<number>} pause      the position it paused at, in ms
+ * @property {(sourceId: number, ms: number) => Promise<void>} seek
+ * @property {(sourceId: number) => Promise<void>} stop
  * @property {(event: string, fn: (e: object) => void) => Promise<() => void>} listen
  * @property {() => string} glowColor
  * @property {(secs: number) => string} formatTime

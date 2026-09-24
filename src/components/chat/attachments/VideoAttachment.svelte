@@ -5,7 +5,7 @@
     import { messageVersion } from '../../lib/chatview.svelte.js';
     import { claimPlayback, releasePlayback } from '../../lib/audio.svelte.js';
     import { popOut, takeBack, yieldPopout, popoutPlayingAudio } from '../../lib/popout.svelte.js';
-    let { att, msg, h } = $props();   // h: mediaUrl(path), onVideoMeta(video), cancelUpload, openChat()
+    let { att, msg, h } = $props();   // h: MediaHelpers (js/render/chat/message-row.js)
     const uploading = $derived.by(() => { messageVersion(msg.id); return !!(msg.mine && msg.pending); });
     let container = $state(null);
     // The ring covers the media, not the wrapper: the overlay is sized to the media's rendered

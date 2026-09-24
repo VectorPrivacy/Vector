@@ -803,10 +803,7 @@ function holdChatBottom(ms = BOTTOM_HOLD_MS) {
         if (!el || !strOpenChat) { _bottomHoldUntil = 0; return; }  // no chat: end the hold
         if (!chatPinnedToBottom) { _bottomHoldUntil = 0; return; }  // user took over: end it,
         // and drop the deadline so the pin recompute stops treating the view as held.
-        // A render or a seek owning the viewport is TRANSIENT — skip the frame and
-        // keep watching. Ending the hold here is what let the open-time render
-        // (which sets _windowSuppressAutoScroll across its await) kill the hold
-        // before a single pixel of media had resolved.
+        // A render or a seek owning the viewport is transient: skip the frame, keep watching.
         const viewportBusy = _windowSuppressAutoScroll || _unreadJumpResolving
             || !isAtDataBottom();
         if (!viewportBusy) {

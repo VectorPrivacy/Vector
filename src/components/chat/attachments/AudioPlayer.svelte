@@ -15,9 +15,6 @@
     import Lyrics from './Lyrics.svelte';
 
     let { att, msg, h } = $props();   // h: AudioPlayerHelpers (js/voice.js)
-    //    listen(event, fn) → unlisten, glowColor(), transcriptionSupported(att, msg), transcribe(path), autoTranscribe(msg),
-    //    cancelUpload(pendingId), formatTime(seconds), flag(lang), twemojify(el), holdScroll(),
-    //    nextVoice(chatId, msgId), reveal(el), viewImage(src), openChat()
 
     // svelte-ignore state_referenced_locally
     const isVoiceMessage = !att.name;   // an attachment's name never changes under a mounted player
@@ -55,7 +52,7 @@
         if (session?.tracks.length) return session.span(Math.max(0, session.track));
         return { start: chapters[0].start_ms, end: chapters[0].end_ms ?? durationMs };
     }
-    const curSpan = $derived.by(() => { session?.track; durationMs; return spanNow(); });
+    const curSpan = $derived(spanNow());
     const nowTitle = $derived(isAlbum ? splitTitle(chapters[Math.max(0, trackIdx)]?.title) : null);
 
     const byline = $derived([meta?.artist, meta?.album !== meta?.track ? meta?.album : ''].filter(Boolean).join(' · '));
@@ -350,7 +347,7 @@
     const tb = $derived(transcriptButton(transcription));
 </script>
 
-<div class="audio-message-container custom-audio-player" bind:this={root} class:has-metadata={!isVoiceMessage && !!att.name}
+<div class="audio-message-container custom-audio-player" bind:this={root} class:has-metadata={!!att.name}
      style:--icon-color-primary={accent}>
     {#if meta?.coverArt}
         <img class="audio-art-glow" src={meta.coverArt} alt="" aria-hidden="true">

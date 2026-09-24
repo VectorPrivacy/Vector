@@ -15,10 +15,7 @@
     // phase: 'downloaded' | 'download' | 'downloading'; label overrides the second line,
     // failed paints the failed state for a caller whose attachment carries no flag,
     // onActivate overrides the click
-    // h: fileTypeInfo(ext), formatBytes(n, dec?, short?), assetUrl(path), loadMiniAppInfo(path), marketplaceApp(hash),
-    //    backendCachedImg(img, url), openFile(att, msg), startDownload(att, msg, sender),
-    //    cancelDownload(att, msg), cancelUpload(id), pausedAt(att),
-    //    getProfile, getProfileAvatarSrc, showTooltip, hideTooltip
+    // h: MediaHelpers (js/render/chat/message-row.js)
 
     // Mount-time: an attachment's kind never changes under its box.
     // svelte-ignore state_referenced_locally
