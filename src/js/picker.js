@@ -837,13 +837,6 @@ async function _onRailClick(e) {
     if (!btn) return;
     e.stopPropagation();
 
-    // A just-completed drag-reorder fires a trailing click — swallow it so the
-    // dragged tab doesn't also jump-scroll to its section.
-    if (btn.dataset.suppressClick === '1') {
-        delete btn.dataset.suppressClick;
-        return;
-    }
-
     // "+" creator tab — enter creator mode (handled in its own listener too,
     // but stopPropagation here keeps the active-tab toggle from cycling).
     if (btn.classList.contains('emoji-pack-tab-create')) return;

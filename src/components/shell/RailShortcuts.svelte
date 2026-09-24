@@ -210,7 +210,6 @@
                 onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); drop = resolve(src, mv.clientY); autoScroll(mv.clientY); },
                 onDragEnd: (up) => {
                     autoStop();
-                    els.get(id)?.el.setAttribute('data-suppress-click', '1');
                     const landed = resolve(src, up.clientY);
                     draggingId = null;
                     dragSrc = null;

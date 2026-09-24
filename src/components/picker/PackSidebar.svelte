@@ -59,7 +59,6 @@
             onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); drop = resolve(mv.clientY); autoScroll(mv.clientY); },
             onDragEnd: (up) => {
                 autoStop();
-                tabEls.get(pack.id)?.setAttribute('data-suppress-click', '1');
                 dragging = null;
                 ghost?.remove(); ghost = null;
                 const t = resolve(up.clientY);

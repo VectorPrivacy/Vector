@@ -53,7 +53,6 @@
 
     // A community's shortcut returns you to the channel you left it in, not its primary.
     function open(e) {
-        if (e.currentTarget.dataset.suppressClick === '1') { delete e.currentTarget.dataset.suppressClick; return; }
         h.openChat(isCommunity ? (h.wsChannelForCommunity(vm.communityId) || chat.id) : chat.id);
     }
 

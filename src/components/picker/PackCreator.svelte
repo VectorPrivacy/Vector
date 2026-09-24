@@ -89,7 +89,6 @@
             },
             onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); dropAt = resolve(mv.clientX, mv.clientY); },
             onDragEnd: (up) => {
-                cellEls.get(idx)?.setAttribute('data-suppress-click', '1');
                 dragging = -1;
                 ghost?.remove(); ghost = null;
                 const t = resolve(up.clientX, up.clientY);
@@ -137,7 +136,7 @@
              class:is-drag-armed={armed === idx} class:is-dragging={dragging === idx}
              class:drop-before={dropAt?.key === idx && dropAt.before} class:drop-after={dropAt?.key === idx && !dropAt.before}
              onmouseenter={() => { if (dragging === -1) hovered = idx; }} onmouseleave={() => { if (hovered === idx) hovered = -1; }}
-             onclick={(ev) => { if (ev.target.closest('.emoji-creator-cell-remove')) return; if (ev.currentTarget.dataset.suppressClick === '1') { delete ev.currentTarget.dataset.suppressClick; return; } h.cellClick(idx, !!broken); }}
+             onclick={(ev) => { if (ev.target.closest('.emoji-creator-cell-remove')) return; h.cellClick(idx, !!broken); }}
              use:cellEl={idx} use:reorderable={gestures(idx)}>
             <img alt=":{e.shortcode}:" draggable="false" use:image={[e, idx]}>
             {#if !h.isMobile()}

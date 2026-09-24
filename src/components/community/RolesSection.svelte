@@ -95,7 +95,6 @@
             onDragMove: (mv) => { ghost?.move(mv.clientX, mv.clientY); drop = resolve(mv.clientY); },
             onDragEnd: (up) => {
                 const t = resolve(up.clientY);
-                rowEls.get(role.role_id)?.setAttribute('data-suppress-click', '1');
                 ghost?.remove(); ghost = null;
                 dragging = null; drop = null;
                 if (!t || t.key === role.role_id) return;
@@ -110,7 +109,6 @@
         };
     }
     function rowClick(e, role) {
-        if (e.currentTarget.dataset.suppressClick === '1') { delete e.currentTarget.dataset.suppressClick; return; }
         openRole(role);
     }
 

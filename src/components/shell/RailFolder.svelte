@@ -40,7 +40,6 @@
     const color = $derived(folder.hue == null ? null : `hsl(${folder.hue} 65% 62%)`);
 
     function toggle(e) {
-        if (e.currentTarget.dataset.suppressClick === '1') { delete e.currentTarget.dataset.suppressClick; return; }
         toggleRailFolder(folder.id);
     }
 

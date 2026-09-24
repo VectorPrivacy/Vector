@@ -17,6 +17,14 @@ const SLOP_PX = 8;          // matches the long-press tolerance for "held still"
 const MENU_DRAG_PX = 14;    // menu → drag promotion: larger than DRAG_PX so a lifting finger's wobble keeps the menu
 const DRAG_PX = 6;
 
+/** The click that ends a drag or a long-press lands wherever the pointer lifted, often on a
+ *  different item than the one pressed: swallow exactly that one, and nothing after it. */
+function swallowNextClick() {
+    const stop = (e) => { e.stopPropagation(); e.preventDefault(); };
+    window.addEventListener('click', stop, { capture: true, once: true });
+    setTimeout(() => window.removeEventListener('click', stop, { capture: true }), 0);
+}
+
 /**
  * use:reorderable={handlers}
  * @param {HTMLElement} node
@@ -75,7 +83,6 @@ export function reorderable(node, h) {
             menuTimer = setTimeout(() => {
                 menuTimer = null;
                 menuOpen = true;
-                node.dataset.suppressClick = '1';
                 navigator.vibrate?.(14);
                 cur.onMenu(startX, startY);
                 // The gesture stays live: the held press may still promote to a drag.
@@ -131,6 +138,7 @@ export function reorderable(node, h) {
             const wasDragging = dragging;
             dragging = false;
             disarm();
+            if (wasDragging || menuOpen) swallowNextClick();
             if (wasDragging) cur.onDragEnd(up);
         };
         window.addEventListener('pointermove', onMove);
