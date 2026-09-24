@@ -147,9 +147,19 @@ function openFolderMenu(folder, x, y) {
         try { VectorSvelte.setRailLayout(await invoke(cmd, { folderId: folder.id, ...args })); }
         catch (e) { showToast(String(e)); }
     };
+    const communityIds = folder.members.map(communityIdOfChat).filter(Boolean);
+    const catchUp = communityIds.some(communityHasUnread) ? [
+        {
+            label: 'Mark as Read',
+            icon: 'check',
+            onClick: () => communityIds.forEach(markCommunityCaughtUp),
+        },
+        { divider: true },
+    ] : [];
     showContextMenu({
         x, y,
         items: [
+            ...catchUp,
             {
                 label: 'Rename Folder',
                 icon: 'edit',
