@@ -910,43 +910,44 @@ fn has_wav_header(path: &std::path::Path) -> bool {
 
 /// Fast WAV duration probe: reads RIFF header, computes duration from data chunk size.
 fn wav_probe_duration(path: &std::path::Path) -> Option<u64> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+    use std::io::{Read, Seek, SeekFrom};
+    // Header chunks only: the data chunk's size gives the length without reading the audio.
+    let mut file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut riff = [0u8; 12];
+    file.read_exact(&mut riff).ok()?;
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
         return None;
     }
 
-    let mut pos = 12;
     let mut sample_rate = 0u32;
     let mut channels = 0u16;
     let mut bits_per_sample = 0u16;
     let mut audio_format = 0u16;
 
-    while pos + 8 <= bytes.len() {
-        let chunk_id = &bytes[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
+    loop {
+        let mut header = [0u8; 8];
+        file.read_exact(&mut header).ok()?;
+        let chunk_size = u32::from_le_bytes(header[4..8].try_into().ok()?) as u64;
+        let mut skip = chunk_size + chunk_size % 2;
 
-        if chunk_id == b"fmt " {
-            if chunk_size < 16 || pos + 8 + 16 > bytes.len() { return None; }
-            let d = &bytes[pos + 8..];
+        if &header[0..4] == b"fmt " {
+            if chunk_size < 16 { return None; }
+            let mut d = [0u8; 16];
+            file.read_exact(&mut d).ok()?;
+            skip -= 16;
             audio_format = u16::from_le_bytes([d[0], d[1]]);
             channels = u16::from_le_bytes([d[2], d[3]]);
             sample_rate = u32::from_le_bytes([d[4], d[5], d[6], d[7]]);
             bits_per_sample = u16::from_le_bytes([d[14], d[15]]);
-        } else if chunk_id == b"data" {
+        } else if &header[0..4] == b"data" {
             if audio_format != 1 && audio_format != 3 { return None; }
             if channels == 0 || sample_rate == 0 || bits_per_sample == 0 { return None; }
-            let bytes_per_sample = bits_per_sample as u32 / 8;
-            let bytes_per_frame = bytes_per_sample * channels as u32;
+            let bytes_per_frame = (bits_per_sample as u64 / 8) * channels as u64;
             if bytes_per_frame == 0 { return None; }
-            let total_frames = chunk_size as u64 / bytes_per_frame as u64;
-            return Some(total_frames * 1000 / sample_rate as u64);
+            return Some(chunk_size / bytes_per_frame * 1000 / sample_rate as u64);
         }
-
-        pos += 8 + chunk_size;
-        if chunk_size % 2 != 0 { pos += 1; }
+        file.seek(SeekFrom::Current(skip as i64)).ok()?;
     }
-
-    None
 }
 
 /// Send a streamed file's decoder to `frame`: the old window's audio stops at once and the
@@ -2201,6 +2202,23 @@ mod window_tests {
             b.extend(((f % 30_000) as i16).to_le_bytes());
         }
         b
+    }
+
+    #[test]
+    fn a_wav_length_comes_from_its_headers_past_any_chunk_before_the_data() {
+        let plain = stamped_wav();
+        // An odd-sized LIST chunk between fmt and data, padded to even as RIFF requires.
+        let mut listed = plain[..36].to_vec();
+        listed.extend(b"LIST");
+        listed.extend(5u32.to_le_bytes());
+        listed.extend(b"INFO!\0");
+        listed.extend(&plain[36..]);
+        for (tag, bytes) in [("plain", plain), ("listed", listed)] {
+            let path = std::env::temp_dir().join(format!("vector-wav-probe-{}-{tag}.wav", std::process::id()));
+            std::fs::write(&path, bytes).unwrap();
+            assert_eq!(wav_probe_duration(&path), Some(SECS as u64 * 1000), "{tag}");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     fn frame_of(sample: f32) -> u32 {
