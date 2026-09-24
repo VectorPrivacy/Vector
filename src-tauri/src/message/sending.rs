@@ -130,7 +130,7 @@ impl SendCallback for TauriSendCallback {
             let session = vector_core::db::current_session();
             vector_core::db::spawn_bound(async move {
                 if !session.is_live() { return; }
-                let _ = vector_core::db::events::delete_event(&pending_id);
+                let _ = vector_core::db::events::delete_event(&pending_id).await;
             });
         }
         if let Some(handle) = TAURI_APP.get() {
