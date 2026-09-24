@@ -37,8 +37,8 @@
     // One sound at a time, and a playing video follows you out of the chat.
     function playback(video) {
         const key = `video:${att.id}`;
-        const onPlay = () => { yieldPopout('video'); claimPlayback(key, () => video.pause()); };
-        const onPause = () => releasePlayback(key);
+        const onPlay = () => { yieldPopout('video'); claimPlayback(key, () => video.pause(), 'video'); };
+        const onPause = () => releasePlayback(key, 'video');
         video.addEventListener('play', onPlay);
         video.addEventListener('pause', onPause);
         return {
@@ -52,7 +52,7 @@
                         aspect: video.videoWidth && video.videoHeight ? video.videoWidth / video.videoHeight : 16 / 9,
                     });
                 }
-                releasePlayback(key);
+                releasePlayback(key, 'video');
                 video.pause();
                 video.removeAttribute('src');
                 video.load();

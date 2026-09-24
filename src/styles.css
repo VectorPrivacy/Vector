@@ -11062,10 +11062,13 @@ select:disabled:hover {
   display: none;
 }
 
-.btn-transcribe.downloading {
-    padding: 8px 12px;
-    cursor: default;
-    background: rgba(30, 30, 30, 0.8);
+.transcribe-download {
+    flex: 1;
+    min-width: 0;
+    margin-left: 10px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.25);
 }
 
 .transcribe-progress-container {
@@ -11091,7 +11094,7 @@ select:disabled:hover {
 }
 
 .transcribe-progress-text {
-    color: #59fcb3;
+    color: var(--icon-color-primary);
     font-size: 12px;
     text-align: center;
     white-space: nowrap;
@@ -11615,6 +11618,8 @@ select:disabled:hover {
 }
 
 .audio-waveform {
+    /* A drag across it scrubs; the chat must not scroll under the finger. */
+    touch-action: none;
     display: flex;
     align-items: center;
     gap: 2px;

@@ -283,11 +283,6 @@ input[type="checkbox"]:checked + .neon-toggle:hover {
   color: #fff;
 }
 
-.transcription-section.current {
-  background-color: #59FCF430;
-  color: #59FCF4;
-  box-shadow: 0 0 8px #59FCF420;
-}
 
 /* Update Settings Section Styles */
 #current-version,

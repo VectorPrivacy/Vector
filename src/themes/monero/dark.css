@@ -286,11 +286,6 @@ select:disabled {
   color: #fff;
 }
 
-.transcription-section.current {
-  background-color: #FF660030;
-  color: #FF6600;
-  box-shadow: 0 0 8px #FF660020;
-}
 
 /* Update Settings Section Styles */
 #current-version,

@@ -80,6 +80,8 @@ function stop(id) {
  *  cancel from here, so every surface drops its button rather than offering one that
  *  would abandon the blob. */
 function markPublishing(id) {
+    // Every byte is sent: whatever stage was waiting to be shown is over.
+    clearStage(id);
     const already = map.get(id)?.phase === 'publishing';
     stop(id);
     patch(id, { kind: 'upload', phase: 'publishing', pct: 100, bps: 0 });

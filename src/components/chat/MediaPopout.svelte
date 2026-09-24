@@ -281,10 +281,10 @@
         if (session.playing || moving) raf = requestAnimationFrame(draw);
     }
     function kick() {
-        if (!canvas) return;
-        colour = getComputedStyle(canvas).color;
-        if (!raf) raf = requestAnimationFrame(draw);
+        if (canvas && !raf) raf = requestAnimationFrame(draw);
     }
+    // The bar colour changes only with the accent or the canvas, not per draw.
+    $effect(() => { accent; if (canvas) colour = getComputedStyle(canvas).color; });
     $effect(() => { session?.playing; session?.pausedAt; canvas; accent; untrack(kick); });
     $effect(() => () => { if (raf) cancelAnimationFrame(raf); });
     // A resize while paused redraws too: nothing else would until playback moves.
@@ -305,31 +305,39 @@
         e.currentTarget.setPointerCapture(e.pointerId);
         scrub(e);
     }
+    // A drag seeks many times a second; the engine hears the latest at most every 50ms so
+    // the audio doesn't stutter under it, and the time follows the finger at once.
+    let seekTimer = null, pendingSeek = null;
+    function flushSeek() {
+        clearTimeout(seekTimer);
+        seekTimer = null;
+        if (pendingSeek != null && session) session.seek(pendingSeek);
+        pendingSeek = null;
+        kick();
+    }
     function scrub(e) {
         if (!scrubbing) return;
         const f = seekAt(e, e.currentTarget);
         if (session && session.durationMs) {
-            session.seek(Math.floor(curSpan.start + f * (curSpan.end - curSpan.start)));
-            positionMs = session.position();
-            kick();
+            pendingSeek = Math.floor(curSpan.start + f * (curSpan.end - curSpan.start));
+            positionMs = pendingSeek;
+            if (!seekTimer) seekTimer = setTimeout(flushSeek, 50);
         } else if (video && vDur) {
             video.currentTime = f * vDur;
             vTime = video.currentTime;
         }
     }
-    function scrubEnd() { scrubbing = false; }
+    function scrubEnd() { scrubbing = false; flushSeek(); }
+    $effect(() => () => clearTimeout(seekTimer));
 
-    // A finished item with nothing after it leaves on its own. A voice run hands on in the
-    // tick the engine reports the end, swapping the session; only the same session going
-    // from playing to its start means nothing followed.
-    let watched = null, wasPlaying = false;
+    // Playback that ended with nothing to follow it leaves on its own; the session says so.
+    let watched = null, seenFinished = 0;
     $effect(() => {
         const s = session;
-        const on = !!s?.playing;
-        const done = !!s && s === watched && wasPlaying && !on && s.pausedAt === 0;
+        const n = s ? s.finished : 0;
+        if (s && s === watched && n !== seenFinished) untrack(closePopout);
         watched = s;
-        wasPlaying = on;
-        if (done) untrack(closePopout);
+        seenFinished = n;
     });
 
     // ── video ──
@@ -349,12 +357,12 @@
         vPlaying = true;
         item.playing = true;
         const el = video;
-        claimPlayback(vKey, () => el.pause());
+        claimPlayback(vKey, () => el.pause(), 'video');
     }
     function onVideoPause() {
         vPlaying = false;
         if (item) item.playing = false;
-        releasePlayback(vKey);
+        releasePlayback(vKey, 'video');
     }
     function onVideoTime() {
         // A leaving box's video still reports while it fades; the item has already gone.
@@ -367,7 +375,7 @@
     }
     $effect(() => {
         const key = vKey;
-        return () => { if (key) releasePlayback(key); };
+        return () => { if (key) releasePlayback(key, 'video'); };
     });
 
     const playing = $derived(isVideo ? vPlaying : !!session?.playing);

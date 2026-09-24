@@ -19,6 +19,8 @@ export class AudioSession {
     track = $state(-1);
     shuffle = $state(false);
     repeat = $state('off');   // off | all | one
+    /** Bumped each time playback ends with nothing to follow it, for whoever shows it. */
+    finished = $state(0);
 
     #h; #sourceId = null; #startTime = 0; #startPos = 0; #offs = []; #disposed = false;
     #order = []; #orderAt = 0; #watch = null;
@@ -37,6 +39,7 @@ export class AudioSession {
         this.tracks = (chapters || []).map((c) => ({ start: c.start_ms, end: c.end_ms ?? null, title: c.title }));
         this.track = this.trackAt(this.position());
         this.#reorder();
+        if (this.playing) this.#watchTracks();
     }
     trackAt(ms) {
         let at = -1;
@@ -76,36 +79,50 @@ export class AudioSession {
     async play() {
         if (this.loading || this.playing) return;
         const h = this.#h;
+        // Claimed at the press, not after the load: a later press elsewhere outranks this
+        // one, and a pause while it loads calls it off.
+        claimPlayback(this, () => this.pause());
         if (!this.#sourceId) {
             this.loading = true;
-            try { await this.#load(); } catch (err) { console.error('Audio load failed:', err); this.loading = false; return; }
+            try {
+                await this.#load();
+            } catch (err) {
+                console.error('Audio load failed:', err);
+                this.loading = false;
+                releasePlayback(this);
+                if (this.#disposed) this.dispose();
+                return;
+            }
             this.loading = false;
             if (this.#disposed) { this.dispose(); return; }
+            if (!holdsPlayback(this)) return;
             if (this.pausedAt) await h.seek(this.#sourceId, this.pausedAt).catch(() => {});
         }
-        claimPlayback(this.id, () => this.pause());
         let posMs;
         try {
             posMs = await h.play(this.#sourceId);
         } catch (_) {
+            if (this.#disposed) { this.dispose(); return; }
             // The engine evicts paused sources past its cap: load it again where it was.
             try {
+                h.stop(this.#sourceId).catch(() => {});
+                this.#sourceId = null;
                 await this.#load();
                 if (this.pausedAt) await h.seek(this.#sourceId, this.pausedAt);
                 posMs = await h.play(this.#sourceId);
-            } catch (err) { console.error('Audio play failed:', err); releasePlayback(this.id); return; }
+            } catch (err) { console.error('Audio play failed:', err); releasePlayback(this); return; }
         }
         // Disposed or outrun by another player while this one was starting.
         if (this.#disposed) { this.dispose(); return; }
-        if (!holdsPlayback(this.id)) { h.pause(this.#sourceId).catch(() => {}); return; }
+        if (!holdsPlayback(this)) { h.pause(this.#sourceId).catch(() => {}); return; }
         this.#startTime = performance.now();
         this.#startPos = posMs;
         this.playing = true;
-        if (this.tracks.length && !this.#watch) this.#watch = setInterval(() => this.#tick(), 50);
+        this.#watchTracks();
     }
 
     async pause() {
-        releasePlayback(this.id);
+        releasePlayback(this);
         this.#unwatch();
         if (!this.playing) return;
         this.pausedAt = this.position();
@@ -184,6 +201,9 @@ export class AudioSession {
         this.seek(this.span(i).start);
         this.track = i;
     }
+    #watchTracks() {
+        if (this.tracks.length && !this.#watch) this.#watch = setInterval(() => this.#tick(), 50);
+    }
     // While an album plays: note the song moving on, and step in when the listener's way
     // is not simply the next song in the file.
     #tick() {
@@ -195,9 +215,10 @@ export class AudioSession {
         if (this.repeat === 'one') { this.#goto(from); return; }
         if (this.shuffle) {
             const n = this.#nextIndex();
-            if (n == null) { this.pause(); this.#goto(this.#order[0] ?? 0); return; }
+            if (n == null) { this.pause(); this.#goto(this.#order[0] ?? 0); this.finished++; return; }
             this.#orderAt++;
-            this.#goto(n, true);
+            // Already there: the shuffle's pick is the song the file moved into.
+            if (n !== i) this.#goto(n, true);
         }
     }
     #unwatch() {
@@ -205,7 +226,7 @@ export class AudioSession {
     }
 
     #ended() {
-        releasePlayback(this.id);
+        releasePlayback(this);
         this.#unwatch();
         this.playing = false;
         this.pausedAt = 0;
@@ -221,13 +242,14 @@ export class AudioSession {
             }
             this.track = this.trackAt(0);
         }
-        if (this.voice) playNextVoice(this.#h, this);
+        if (this.voice && playNextVoice(this.#h, this)) return;
+        this.finished++;
     }
 
     dispose() {
         this.#disposed = true;
         this.#unwatch();
-        releasePlayback(this.id);
+        releasePlayback(this);
         this.playing = false;
         if (this.#sourceId) this.#h.stop(this.#sourceId).catch(() => {});
         this.#sourceId = null;
@@ -238,17 +260,20 @@ export class AudioSession {
 
 // A run of voice messages plays through, like one long one: in the row when it is on
 // screen, in the pop-out when it is not.
+/** Whether anything followed. */
 function playNextVoice(h, done) {
     const next = h.nextVoice(done.chatId, done.msg.id);
-    if (!next) return;
+    if (!next) return false;
     const row = playerFor(next.att.id);
     if (row) {
         if (popout.item?.session === done) closePopout();
         row.start();
-        return;
+        return true;
     }
     const session = new AudioSession(h, next.att, next.msg, done.chatId);
-    if (popOut({ kind: 'audio', session })) session.play();
+    if (!popOut({ kind: 'audio', session })) return false;
+    session.play();
+    return true;
 }
 
 // ── the pop-out's one item ──

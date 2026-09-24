@@ -42,7 +42,11 @@
     $effect(() => {
         if (!meta?.coverArt || meta.accent !== undefined) return;
         const m = meta;
-        artAccent(m.coverArt).then((accent) => setAudioMeta(att.id, { ...m, accent }));
+        artAccent(m.coverArt).then((accent) => {
+            // Onto the metadata as it stands now: the art may have failed to load meanwhile.
+            const now = audioInfo(att.id)?.meta;
+            if (now?.coverArt === m.coverArt) setAudioMeta(att.id, { ...now, accent });
+        });
     });
     // ── an album in one file ──
     const chapters = $derived(meta?.chapters ?? []);
@@ -76,14 +80,18 @@
     // too: the file is already on this device, so the card is whole from its first frame
     // and only the ring becomes a play button when the upload lands.
     $effect(() => {
-        if (!att.path) return;
-        if (!durationMs) h.probe(att.path).then((ms) => setAudioDuration(att.id, ms)).catch(() => {});
-        if (!isVoiceMessage && att.path && !meta) {
-            h.metadata(att.path).then((m) => {
-                setAudioMeta(att.id, { track: m?.title || '', artist: m?.artist || '', album: m?.album || '', coverArt: m?.cover_art || '',
-                    lyrics: m?.lyrics || null, year: m?.year || null, chapters: m?.chapters || [] });
-            }).catch(() => setAudioMeta(att.id, {}));
-        }
+        const path = att.path;
+        if (!path) return;
+        // Once per file: what the reads write back must not set them off again.
+        untrack(() => {
+            if (!durationMs) h.probe(path).then((ms) => setAudioDuration(att.id, ms)).catch(() => {});
+            if (!isVoiceMessage && !meta) {
+                h.metadata(path).then((m) => {
+                    setAudioMeta(att.id, { track: m?.title || '', artist: m?.artist || '', album: m?.album || '', coverArt: m?.cover_art || '',
+                        lyrics: m?.lyrics || null, year: m?.year || null, chapters: m?.chapters || [] });
+                }).catch(() => setAudioMeta(att.id, {}));
+            }
+        });
     });
 
     // The art's most prominent colourful hue, lifted to a brightness the controls read at.
@@ -478,7 +486,7 @@
         {#if canTranscribe}
             {#if download.active}
                 <!-- A model download is progress with its own Cancel, not a button. -->
-                <div class="audio-transcribe-btn downloading" style:margin-left="auto" style:margin-right="auto">
+                <div class="transcribe-download">
                     <div class="transcribe-progress-container">
                         <div class="transcribe-progress-text">{download.text}</div>
                         <div class="transcribe-progress-bar"><div class="transcribe-progress-fill" style:width="{download.pct}%" style:background={download.failed ? '#ff5e5e' : null}></div></div>

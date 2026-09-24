@@ -65,17 +65,16 @@ export function modelDownloadState() { return modelDownload; }
 export function setModelDownload(fields) { Object.assign(modelDownload, fields); }
 
 // One at a time, per lane: a song stops the song before it and a video the video before
-// it, but a video watched over music leaves the music playing. Videos claim as `video:<id>`.
-const holders = { audio: null, video: null };   // lane → { id, stop }
-const laneOf = (id) => (String(id).startsWith('video:') ? 'video' : 'audio');
-export function claimPlayback(id, stop) {
-    const lane = laneOf(id);
+// it, but a video watched over music leaves the music playing. A key is whatever plays:
+// an audio session itself (the same file in two chats is two sessions), a video's id.
+const holders = { audio: null, video: null };   // lane → { key, stop }
+export function claimPlayback(key, stop, lane = 'audio') {
     const prev = holders[lane];
-    holders[lane] = { id, stop };
-    if (prev && prev.id !== id) prev.stop();
+    holders[lane] = { key, stop };
+    if (prev && prev.key !== key) prev.stop();
 }
-export function releasePlayback(id) { const lane = laneOf(id); if (holders[lane]?.id === id) holders[lane] = null; }
-export function holdsPlayback(id) { return holders[laneOf(id)]?.id === id; }
+export function releasePlayback(key, lane = 'audio') { if (holders[lane]?.key === key) holders[lane] = null; }
+export function holdsPlayback(key, lane = 'audio') { return holders[lane]?.key === key; }
 
 // Mounted players, by attachment id: a finished voice message hands on to the next one.
 const players = new Map();
