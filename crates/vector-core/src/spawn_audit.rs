@@ -115,7 +115,8 @@ pub fn account_access_off_task(crate_root: &Path, src_root: &Path) -> Vec<String
                 if line.trim_start().starts_with("//") {
                     continue;
                 }
-                let body = lines[i..(i + 14).min(lines.len())].join("\n");
+                let window = lines[i..(i + 14).min(lines.len())].join("\n");
+                let body = spawned_call(&window);
                 if body.contains("db::") || body.contains("STATE.") {
                     offenders.push(format!("{rel}:{}", i + 1));
                 }
@@ -124,6 +125,26 @@ pub fn account_access_off_task(crate_root: &Path, src_root: &Path) -> Vec<String
     }
     offenders.sort();
     offenders
+}
+
+/// The spawn call itself, from its name to its closing paren: what follows it runs back
+/// on the task.
+fn spawned_call(text: &str) -> &str {
+    let from = text.find("spawn_blocking").or_else(|| text.find("std::thread::spawn")).unwrap_or(0);
+    let mut depth = 0i32;
+    for (at, c) in text[from..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &text[from..from + at + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    &text[from..]
 }
 
 /// The assertion both crates run. `pending` is a shrink-only worklist of files
@@ -194,5 +215,13 @@ mod tests {
     #[test]
     fn test_code_spawns_freely() {
         assert!(!has_unbound_spawn("#[cfg(test)]\nmod t { fn f() { tokio::spawn(async {}); } }"));
+    }
+
+    #[test]
+    fn only_the_blocking_closure_counts_not_what_follows_it() {
+        let inside = "let x = spawn_blocking(move || {\n    db::get(1)\n}).await;";
+        let after = "let x = spawn_blocking(move || work(a, b)).await;\ndb::spawn_bound(async {});";
+        assert!(spawned_call(inside).contains("db::"));
+        assert!(!spawned_call(after).contains("db::"));
     }
 }
