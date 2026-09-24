@@ -1660,7 +1660,7 @@ async fn dispatch_community_attachment_message(
 
         let _client = vector_core::state::nostr_client().ok_or("Not logged in")?;
         let signer = vector_core::signer::active_signer().map_err(|e| format!("Signer unavailable: {e}"))?;
-        let servers = vector_core::blossom_servers::compute_enabled_servers();
+        let servers = vector_core::state::get_blossom_servers();
         if servers.is_empty() {
             let _ = mark_attachment_send_failed(&callback, &channel_id, &pending_id).await;
             return Err("No Blossom servers configured.".to_string());
@@ -1700,7 +1700,7 @@ async fn dispatch_community_attachment_message(
                         vector_core::db::spawn_bound(async move {
                             let _ = vector_core::blossom::mirror_blob_to_servers(
                                 signer_bg, &url_bg,
-                                vector_core::blossom_servers::compute_enabled_servers(),
+                                vector_core::state::get_blossom_servers(),
                                 1, Duration::from_secs(8), &[],
                             ).await;
                         });
@@ -4532,7 +4532,7 @@ pub async fn set_community_image(
 
         let _client = vector_core::state::nostr_client().ok_or("Nostr client not initialised")?;
         let signer = vector_core::signer::active_signer().map_err(|e| format!("signer: {e}"))?;
-        let servers = vector_core::blossom_servers::compute_enabled_servers();
+        let servers = vector_core::state::get_blossom_servers();
         if servers.is_empty() {
             return Err("No Blossom servers configured.".to_string());
         }

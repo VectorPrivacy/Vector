@@ -117,15 +117,10 @@ pub async fn active_trusted_relays() -> Vec<&'static str> {
 ///
 /// Per-account, and consequential — it decides where THIS account's
 /// attachments are uploaded, so account A's self-hosted destination must never
-/// still be selected under account B. Starts as the seed list until the
-/// account's database is open and the resolver refreshes it.
-struct BlossomServers(std::sync::Mutex<Vec<String>>);
-
-impl Default for BlossomServers {
-    fn default() -> Self {
-        Self(std::sync::Mutex::new(init_blossom_servers()))
-    }
-}
+/// still be selected under account B. Resolved from the account's settings on first
+/// use, and replaced by `blossom_servers::refresh_cache` after an edit.
+#[derive(Default)]
+struct BlossomServers(std::sync::Mutex<Option<Vec<String>>>);
 
 pub fn init_blossom_servers() -> Vec<String> {
     crate::blossom_servers::DEFAULT_BLOSSOM_SERVERS
@@ -134,14 +129,21 @@ pub fn init_blossom_servers() -> Vec<String> {
 
 pub fn get_blossom_servers() -> Vec<String> {
     let owner = crate::db::current_session().scoped::<BlossomServers, BlossomServers>();
-    let servers = owner.0.lock().unwrap().clone();
-    servers
+    if let Some(servers) = owner.0.lock().unwrap().clone() {
+        return servers;
+    }
+    // Resolved outside the lock. Until the account's database opens there is nothing to
+    // resolve from, so the defaults stand in without being kept.
+    match crate::blossom_servers::resolve_if_open() {
+        Some(servers) => owner.0.lock().unwrap().get_or_insert(servers).clone(),
+        None => init_blossom_servers(),
+    }
 }
 
 /// Install this account's resolved server list.
 pub fn set_blossom_servers(servers: Vec<String>) {
     let owner = crate::db::current_session().scoped::<BlossomServers, BlossomServers>();
-    *owner.0.lock().unwrap() = servers;
+    *owner.0.lock().unwrap() = Some(servers);
 }
 
 pub static MNEMONIC_SEED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);

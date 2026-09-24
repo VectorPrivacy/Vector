@@ -521,6 +521,8 @@ mod tests {
 
     #[test]
     fn a_noted_upload_moves_the_usage_counters() {
+        // The cache lives on the session, which a concurrent database test can replace.
+        let _serialized = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
         let info = ServerInfo::parse(&magnitude_doc()).unwrap();
         store("https://m.example/", Some(info));
         note_upload("https://M.example", 250);

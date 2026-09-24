@@ -175,6 +175,12 @@ pub fn list_all_servers() -> Vec<BlossomServerInfo> {
     out
 }
 
+/// The resolved list, or None while no database is open to resolve it from.
+pub fn resolve_if_open() -> Option<Vec<String>> {
+    crate::db::get_sql_setting("custom_blossom_servers".to_string()).ok()?;
+    Some(compute_enabled_servers())
+}
+
 /// Refresh this account's resolved server list. Call after edits + on login.
 pub fn refresh_cache() {
     crate::state::set_blossom_servers(compute_enabled_servers());
@@ -447,6 +453,25 @@ pub async fn author_swap_servers(author_npub: Option<&str>, is_own_blob: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fresh_session_resolves_its_account_list_without_a_refresh() {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::db::close_database();
+        crate::db::clear_id_caches();
+        use nostr_sdk::prelude::ToBech32;
+        let account = nostr_sdk::prelude::Keys::generate().public_key().to_bech32().unwrap();
+        crate::db::set_app_data_dir(crate::db::shared_test_data_dir().to_path_buf());
+        crate::db::set_current_account(account.clone()).unwrap();
+        crate::db::init_database(&account).unwrap();
+
+        save_custom_blossom_servers(&[custom("https://self.hosted", true)]).unwrap();
+        save_disabled_default_blossom_servers(&[DEFAULT_BLOSSOM_SERVERS[0].to_string()]).unwrap();
+
+        let servers = crate::state::get_blossom_servers();
+        assert_eq!(servers.first().map(String::as_str), Some("https://self.hosted"));
+        assert!(!servers.iter().any(|s| s == DEFAULT_BLOSSOM_SERVERS[0]), "{servers:?}");
+    }
 
     fn custom(url: &str, enabled: bool) -> CustomBlossomServer {
         CustomBlossomServer { url: url.to_string(), enabled }
