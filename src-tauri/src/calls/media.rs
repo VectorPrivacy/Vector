@@ -421,6 +421,12 @@ fn capture_thread(
             stats.clicks_cut.store(declick.triggers() as u64, Ordering::Relaxed);
             aec.configure(settings::current());
             aec.process(&near_i16, &far_i16, &mut clean);
+            let gain = settings::mic_gain();
+            if gain < 1.0 {
+                for s in clean.iter_mut() {
+                    *s = (*s as f32 * gain) as i16;
+                }
+            }
             stats.mic_level.store(level_of(&clean).to_bits(), Ordering::Relaxed);
 
             let Some(conn) = conn.as_ref() else {
@@ -571,7 +577,7 @@ fn share_thread(
         }
     };
     // Cancel only: gain riding and noise suppression would chew on music.
-    let music = AudioSettings { auto_gain: false, echo_cancel: true, noise_suppress: false };
+    let music = AudioSettings { auto_gain: false, echo_cancel: true, noise_suppress: false, ..AudioSettings::default() };
     aec_l.configure(music);
     aec_r.configure(music);
     let mut enc = match ShareEncoder::new() {

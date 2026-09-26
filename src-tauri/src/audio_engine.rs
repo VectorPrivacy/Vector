@@ -1099,10 +1099,11 @@ fn mixer_callback(output: &mut [f32], shared: &SharedState, channels: usize) {
                 let frames = block.len() / channels;
                 let got = link.play.pop(&mut mono[..frames]);
                 mono[got..frames].fill(0.0);
-                let gain = link.gain();
+                let speaker = crate::calls::settings::speaker_gain();
+                let gain = link.gain() * speaker;
                 let got2 = link.share_play.pop(&mut stereo[..frames * 2]);
                 stereo[got2..frames * 2].fill(0.0);
-                let share_gain = link.share_gain();
+                let share_gain = link.share_gain() * speaker;
                 for (i, frame) in block.chunks_mut(channels).enumerate() {
                     for (c, out) in frame.iter_mut().enumerate() {
                         let side = stereo[i * 2 + c.min(1)];
