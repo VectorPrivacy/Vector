@@ -10,7 +10,6 @@
     const tor = torState();
     const state = $derived(tor.state);
     const cls = $derived(h.stateClass(state));
-    const connected = $derived(!!state?.running);
     const checked = $derived(!!state?.running || !!state?.enabled);
     const disabled = $derived(!state || !state.supported || tor.locked || h.isTransitional(state));
     const status = $derived(tor.statusOverride || h.formatStatus(state));
@@ -56,7 +55,7 @@
     function glyphInto(svg) { h.injectGlyph(svg); }
 </script>
 
-<div class="form-group tor-card" id="settings-tor-card" class:has-advanced={connected} bind:this={card}>
+<div class="form-group tor-card" id="settings-tor-card" bind:this={card}>
     <div class="tor-glyph-wrap">
         <svg class="tor-glyph" viewBox="0 0 120 120" aria-hidden="true" bind:this={glyph} use:glyphInto></svg>
     </div>

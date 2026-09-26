@@ -133,7 +133,7 @@
     }
 </script>
 
-<div class="form-group">
+<div class="form-group storage-summary">
     <p>{summary}</p>
 </div>
 <div class="form-group">

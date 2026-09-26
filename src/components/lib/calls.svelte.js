@@ -26,8 +26,8 @@ const video = $state({ encode: [], decode: [], link: false,
     prefs: { camera: { rung: null, fps: null }, screen: { rung: null, fps: null } },
     // Whether the platform gave the share an audio track, and whether it is being sent.
     shareAudio: { available: false, on: false } });
-// The voice processing switches and the microphone test, shared by the pill and Settings.
-const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, loaded: false,
+// The voice processing switches, the call volumes and the microphone test, shared by the pill and Settings.
+const audio = $state({ autoGain: true, echoCancel: true, noiseSuppress: true, micVolume: 1, speakerVolume: 1, loaded: false,
     micTest: false, micLevel: 0,
     // Every microphone and speaker on the machine, the defaults, and the preference (null = default).
     devices: { inputs: [], outputs: [], defaultInput: '', defaultOutput: '', input: null, output: null } });
@@ -67,6 +67,7 @@ export function setCallLevels(l) {
 export function setCallAudio(s) {
     if (!s) return;
     audio.autoGain = !!s.auto_gain; audio.echoCancel = !!s.echo_cancel; audio.noiseSuppress = !!s.noise_suppress;
+    audio.micVolume = s.mic_volume ?? 1; audio.speakerVolume = s.speaker_volume ?? 1;
     audio.loaded = true;
 }
 

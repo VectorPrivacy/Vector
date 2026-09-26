@@ -102,8 +102,8 @@ function isTorTransitional(state) {
     return false;
 }
 
-/** Cached so re-expanding the disclosure doesn't re-build a circuit unless the
- *  user explicitly hits Refresh (or Tor reconnects, which clears this flag). */
+/** Cached so revisiting Settings doesn't re-build a circuit unless the user
+ *  explicitly hits New (or Tor reconnects, which clears this flag). */
 let _torCircuitsLoaded = false;
 let _torCircuitsLoading = false;
 
@@ -152,21 +152,27 @@ function _bridgesStatus(status, statusClass = '') {
  */
 async function setTorBridgesEnabled(enabled) {
     const b = VectorSvelte.settingsScreen().bridges;
+    // Off, Tor has nothing to reconnect: the choice is only saved for the next start.
+    const running = !!VectorSvelte.torState().state?.running;
     VectorSvelte.setSettingsScreen({ bridges: { enabled } });
     refreshObfs4Banner(b.lines);
     // On with nothing typed yet: expand and wait for Apply, skipping a wasted reconfigure.
-    if (enabled && !b.lines.trim()) { _bridgesStatus('Add bridge lines, then Apply.'); return; }
+    if (enabled && !b.lines.trim()) { _bridgesStatus(running ? 'Add bridge lines, then Apply.' : 'Add bridge lines, then Save.'); return; }
 
     VectorSvelte.setSettingsScreen({ bridges: { busy: true } });
     VectorSvelte.setTorLocked(true);
-    _bridgesStatus(enabled ? 'Enabling bridges, reconnecting…' : 'Disabling bridges, reconnecting…');
+    if (running) _bridgesStatus(enabled ? 'Enabling bridges, reconnecting…' : 'Disabling bridges, reconnecting…');
     try {
         await invoke('tor_set_bridges', { enabled, lines: b.lines });
         // The toggle persisted the text as a side effect, so Apply has nothing left to do.
         VectorSvelte.setSettingsScreen({ bridges: { saved: b.lines } });
-        // tor_set_bridges already cycled relays; a forced new circuit would cycle them twice.
-        try { await loadTorCircuits(true, false); } catch (_) {}
-        _bridgesStatus(enabled ? 'Bridges enabled. Tor reconnected.' : 'Bridges disabled. Tor reconnected directly.', 'is-ok');
+        if (running) {
+            // tor_set_bridges already cycled relays; a forced new circuit would cycle them twice.
+            try { await loadTorCircuits(true, false); } catch (_) {}
+            _bridgesStatus(enabled ? 'Bridges enabled. Tor reconnected.' : 'Bridges disabled. Tor reconnected directly.', 'is-ok');
+        } else {
+            _bridgesStatus(enabled ? 'Bridges on. Tor will connect through them.' : 'Bridges off. Tor will connect directly.', 'is-ok');
+        }
     } catch (err) {
         console.error('[Tor] tor_set_bridges (toggle) failed:', err);
         // Roll back to the backend's unchanged state; the body stays open to show the error.
@@ -187,12 +193,17 @@ function onTorBridgesInput() {
 /** Persist the editor and restart Tor on the new bridges. The main toggle locks meanwhile. */
 async function applyTorBridges() {
     const b = VectorSvelte.settingsScreen().bridges;
+    const running = !!VectorSvelte.torState().state?.running;
     VectorSvelte.setSettingsScreen({ bridges: { busy: true } });
     VectorSvelte.setTorLocked(true);
-    _bridgesStatus('Applying & reconnecting…');
+    _bridgesStatus(running ? 'Applying & reconnecting…' : 'Saving…');
     try {
         const res = await invoke('tor_set_bridges', { enabled: b.enabled, lines: b.lines });
         VectorSvelte.setSettingsScreen({ bridges: { saved: b.lines } });
+        if (!running) {
+            _bridgesStatus('Bridges saved. Tor will use them when you turn it on.', 'is-ok');
+            return;
+        }
         try { await loadTorCircuits(true, false); } catch (_) {}
         _bridgesStatus(res && res.enabled ? 'Bridges applied. Tor reconnected.' : 'Bridges saved. Tor will use them when next enabled.', 'is-ok');
     } catch (err) {
@@ -1752,6 +1763,7 @@ const SETTINGS_HELP = {
         'When enabled, Vector routes <b>all TCP traffic</b> (Nostr relays, Blossom uploads, link previews, image fetches) through the Tor network using an embedded Arti client.<br><br>'
         + 'This hides your IP address from relays and remote servers, at the cost of slower connections (Tor circuits add latency).<br><br>'
         + '<small style="opacity: 0.6;">Tor and the Tor logo are trademarks of The Tor Project; all rights reserved. More information at <b>torproject.org</b>. Vector is not endorsed or sponsored by, or affiliated with, The Tor Project.</small>'],
+    torBridges: ['Use Bridges', 'Bridges are private Tor relays that aren\'t listed publicly, so a network that blocks Tor can\'t block them as easily.<br><br>Turn this on if Tor fails to connect where you are, then paste bridge lines from <b>bridges.torproject.org</b>. You can set them up before turning Tor on.'],
     battery: ['Run in Background', 'When enabled, Vector runs a <b>background service</b> to keep your connection alive and deliver <b>instant notifications</b>.<br><br>This requires disabling Android\'s battery optimization for Vector, otherwise the system may kill the service and delay or prevent notifications.'],
     gallery: ['Hide Media from Gallery', 'By default, photos and videos you receive in Vector appear in your phone\'s Gallery app.<br><br>When enabled, Vector hides its media from the Gallery (and other apps). Existing media is removed from the Gallery too. Your files stay on the device and remain visible inside Vector.'],
     autoDownload: ['Auto-Download Media', 'When enabled, Vector automatically downloads incoming photos, videos, voice messages and files (up to the size limit below).<br><br>Turn this off to keep attachments as previews and download them by hand, one at a time.'],
@@ -1828,11 +1840,7 @@ const SETTINGS_HELPERS = {
         injectGlyph: injectTorGlyph,
         help: showSettingsHelp,
         openLink: (key) => openUrl(SETTINGS_LINKS[key]),
-        toggleAdvanced: () => {
-            const willOpen = !VectorSvelte.torState().advancedOpen;
-            VectorSvelte.setTorAdvancedOpen(willOpen);
-            if (willOpen) loadTorCircuits(false);
-        },
+        loadCircuits: () => loadTorCircuits(false),
         // A new circuit rotates the isolation token AND cycles relay sockets; the
         // bridges flows only refresh the display.
         newCircuit: () => loadTorCircuits(true, true),

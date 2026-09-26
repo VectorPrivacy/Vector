@@ -30,7 +30,7 @@
      all 7 themes get a coherent rail/list without per-theme overrides. */
   --ws-rail-bg: rgba(255, 255, 255, 0.024);
   --ws-list-bg: rgba(255, 255, 255, 0.012);
-  --ws-seam: #393b3c;
+  --ws-seam: #171717;
   --ws-hover: rgba(255, 255, 255, 0.045);
   /* Selection is a brighter step of the same neutral, not the accent: the accent
      is the app's "this is live/yours" signal, and spending it on every selected
@@ -436,14 +436,12 @@ body.ws #chats > .fadeout-bottom {
    its banner-anchored Edit button on top of the rail. */
 body.ws .profile-header,
 body.ws .profile-content,
-body.ws .chat-new-header,
-body.ws #settings {
+body.ws .chat-new-header {
   left: var(--ws-main-left);
 }
 
-/* Settings is fixed, so it can't be grid-placed; it's inset to the same column
-   by hand. The tab handlers all hide the details pane, so ws-details is normally
-   off here — the variant is for the frame where it hasn't caught up yet. */
+/* The tab handlers all hide the details pane, so ws-details is normally off while
+   Settings shows; the variant is for the frame where it hasn't caught up yet. */
 body.ws.ws-details #settings {
   right: var(--ws-details-w);
 }
@@ -541,25 +539,25 @@ body.ws #settings {
   bottom: 0;
 }
 
-/* Settings is the one pane that was never a card over a backdrop: it relied on
-   being the only thing on screen, so widescreen has to give it a surface. Its
-   rows are built for a phone column, hence the centred measure. */
+/* Settings takes the list column as well as the active pane: its nav sits where
+   the list does, at the list's width, and its page fills the rest. Fixed, so it is
+   inset by hand rather than grid-placed; under the resizer, so the drag still
+   sizes the nav. The rail's own layer, not above it: the rail's seam overhangs
+   this edge by its border, and the rail comes later in the DOM. */
 body.ws #settings {
   top: var(--chrome-h);   /* its 10px inset would let the list peek above it */
+  left: var(--ws-rail-w);
   right: 0;               /* the stock 2px would leave a seam at the pane's edge */
+  display: flex;
+  overflow: hidden;
+  z-index: 40;
   background-color: #030303;
-  padding-left: 20px;
-  padding-right: 20px;
 }
 
-/* Settings' rows are built for a phone column, so they get a centred measure —
-   applied to the CHILDREN, not as percentage padding on #settings itself: it is
-   position: fixed, so a percentage there resolves against the viewport rather
-   than the pane and swallows most of the column. */
-body.ws #settings > * {
-  max-width: 760px;
-  margin-left: auto;
-  margin-right: auto;
+body.ws #settings > .cs-nav {
+  width: var(--ws-list-w);
+  background-color: var(--ws-list-bg);
+  border-right: 1px solid var(--ws-seam);
 }
 
 /* The account row moves into the rail footer (see widescreen.js), so its

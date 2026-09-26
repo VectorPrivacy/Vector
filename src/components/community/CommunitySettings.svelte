@@ -10,6 +10,8 @@
     import MemberRow from '../people/MemberRow.svelte';
     import RolesSection from './RolesSection.svelte';
     import { profileVersion } from '../lib/signals.svelte.js';
+    import { anchorScroll } from '../lib/anchorscroll.svelte.js';
+    import SectionNav from '../settings/SectionNav.svelte';
 
     // h: close(), pickIcon(), save(), reset(), unban() (the selection), name(npub), profile(npub),
     //    avatarSrc(npub), ui (MemberRow's { twemojify, showTooltip, hideTooltip })
@@ -35,6 +37,7 @@
         {
             id: 'overview',
             label: 'Overview',
+            icon: 'info',
             anchors: [
                 { id: 'identity', label: 'Icon & Name', icon: 'image', keys: 'icon avatar logo picture image name title rename' },
                 { id: 'description', label: 'Description', icon: 'align-left', keys: 'description about bio summary' },
@@ -43,6 +46,7 @@
         {
             id: 'relays',
             label: 'Relays',
+            icon: 'globe',
             anchors: [
                 { id: 'relay-list', label: 'Hosting Relays', icon: 'globe', keys: 'relays servers hosting network nostr' },
             ],
@@ -50,12 +54,14 @@
         {
             id: 'roles',
             label: 'Roles',
+            icon: 'shield-filled',
             needs: 'canRoles',
             anchors: roleAnchors,
         },
         {
             id: 'bans',
             label: 'Bans',
+            icon: 'x-user',
             needs: 'canBan',
             anchors: [
                 { id: 'ban-list', label: 'Banned Members', icon: 'x-user', keys: 'bans banned unban blocked removed' },
@@ -67,41 +73,13 @@
     const sections = $derived(SECTIONS.filter((x) => !x.needs || st[x.needs]));
     const section = $derived(sections.find((x) => x.id === st.section) || sections[0]);
 
-    // A search lists every matching anchor, whichever section holds it.
-    const nav = $derived.by(() => {
-        const q = st.query.trim().toLowerCase();
-        if (!q) return sections.map((sec) => ({ ...sec, open: sec.id === section.id }));
-        return sections.map((sec) => ({
-            ...sec,
-            open: true,
-            anchors: sec.anchors.filter((a) => `${sec.label} ${a.label} ${a.keys}`.toLowerCase().includes(q)),
-        })).filter((sec) => sec.anchors.length);
-    });
-
-    // ── scroll spy ──
-    // The anchor whose block crosses the scroller's midline is the one being read; the
-    // last one wins once the scroll bottoms out, however short its block.
-    let scroller = $state(null);
-    let activeAnchor = $state('identity');
-    let spyMutedUntil = 0;
-    function spy() {
-        if (!scroller || performance.now() < spyMutedUntil) return;
-        const blocks = [...scroller.querySelectorAll('[data-anchor]')];
-        if (!blocks.length) return;
-        const top = scroller.getBoundingClientRect().top;
-        const mid = top + scroller.clientHeight / 2;
-        let current = blocks[0];
-        for (const b of blocks) if (b.getBoundingClientRect().top <= mid) current = b;
-        if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2) current = blocks[blocks.length - 1];
-        activeAnchor = current.dataset.anchor;
-    }
+    const anchors = anchorScroll('identity');
 
     async function goSection(id) {
         if (st.section === id) return;
         csSetSection(id);
         await tick();
-        if (scroller) scroller.scrollTop = 0;
-        activeAnchor = sections.find((x) => x.id === id)?.anchors[0]?.id;
+        anchors.top(sections.find((x) => x.id === id)?.anchors[0]?.id);
     }
 
     async function goAnchor(sectionId, anchorId) {
@@ -109,21 +87,13 @@
             csSetSection(sectionId);
             await tick();
         }
-        const block = scroller?.querySelector(`[data-anchor="${anchorId}"]`);
-        if (!block) return;
-        activeAnchor = anchorId;
-        // The smooth scroll passes every block between here and there; the spy would
-        // strobe the timeline through each of them.
-        spyMutedUntil = performance.now() + 700;
-        const offset = block.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-        scroller.scrollTo({ top: scroller.scrollTop + offset - 28, behavior: 'smooth' });
+        anchors.jump(anchorId);
     }
 
     // Opening lands on the first section with the search cleared.
     $effect(() => {
         ov.tick;
-        activeAnchor = 'identity';
-        if (scroller) scroller.scrollTop = 0;
+        anchors.top('identity');
     });
 
     // Opening a role, or going back to the list, is a new page: top of it, first anchor.
@@ -134,8 +104,7 @@
         const first = lastRoleView === null;
         lastRoleView = key;
         if (first || section.id !== 'roles') return;
-        if (scroller) scroller.scrollTop = 0;
-        activeAnchor = roleAnchors[0]?.id;
+        anchors.top(roleAnchors[0]?.id);
     });
 
     // A refused close shakes the bar and turns its message into the reason.
@@ -196,38 +165,13 @@
 <div class="mod-overlay cs-overlay" class:active={ov.active} class:closing={ov.closing}
      onclick={(e) => { if (e.target === e.currentTarget) h.close(); }}>
     <div class="cs-card" use:popIn={ov.tick}>
-        <aside class="cs-nav">
-            <div class="cs-search">
-                <span class="icon icon-search"></span>
-                <input placeholder="Search" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-                       value={st.query} oninput={(e) => csSetQuery(e.currentTarget.value)}>
-            </div>
-            <div class="cs-nav-scroll">
-                <div class="cs-nav-head">
-                    <Avatar src={st.saved.iconSrc} size={28} group={true} class="cs-nav-avatar" />
-                    <span class="cs-nav-title cutoff">{st.saved.name || 'Community'}</span>
-                </div>
-                {#each nav as sec (sec.id)}
-                    <button class="cs-section" class:active={!st.query && sec.id === section.id} onclick={() => goSection(sec.id)}>{sec.label}</button>
-                    <!-- Always mounted, so opening and shutting can animate rather than jump. -->
-                    <div class="cs-anchors-wrap" class:open={sec.open}>
-                        <div class="cs-anchors">
-                            {#each sec.anchors as a (a.id)}
-                                <button class="cs-anchor" class:active={sec.id === section.id && activeAnchor === a.id}
-                                        tabindex={sec.open ? 0 : -1} onclick={() => goAnchor(sec.id, a.id)}>
-                                    <span class="cs-anchor-dot"></span>
-                                    <span class="cs-anchor-icon"><span class="icon icon-{a.icon}"></span></span>
-                                    <span class="cs-anchor-label cutoff">{a.label}</span>
-                                </button>
-                            {/each}
-                        </div>
-                    </div>
-                {/each}
-                {#if !nav.length}
-                    <p class="cs-nav-empty">Nothing matches "{st.query.trim()}"</p>
-                {/if}
-            </div>
-        </aside>
+        <SectionNav {sections} section={section.id} anchor={anchors.active} query={st.query}
+                    onquery={csSetQuery} ongo={goSection} onanchor={goAnchor}>
+            {#snippet head()}
+                <Avatar src={st.saved.iconSrc} size={28} group={true} class="cs-nav-avatar" />
+                <span class="cs-nav-title cutoff">{st.saved.name || 'Community'}</span>
+            {/snippet}
+        </SectionNav>
 
         <main class="cs-main">
             <header class="cs-top">
@@ -238,7 +182,7 @@
                 </button>
             </header>
 
-            <div class="cs-scroll" bind:this={scroller} onscroll={spy}>
+            <div class="cs-scroll" bind:this={anchors.el} onscroll={() => anchors.spy()}>
                 {#key section.id}
                 <div class="cs-content cs-content-enter" class:loading={st.loading}>
                     {#if section.id === 'overview'}

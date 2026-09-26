@@ -2,6 +2,7 @@
     // The Voice section body: the two toggles, the model picker with its delete
     // control, the status line and the download controls, from voice state.
     import { voiceState } from '../lib/settings.svelte.js';
+    import Select from '../ui/Select.svelte';
     let { h } = $props();   // h: formatBytes, explain(kind), setTranslate, setTranscribe, selectModel, download, deleteModel, cancelDownload
 
     const v = voiceState();
@@ -15,6 +16,10 @@
         else if (m.model.name === v.recommended) text += ' [Recommended]';
         return { name: m.model.name, text, disabled: !canRun };
     }));
+    // While the list loads or fails, the picker holds one line saying so.
+    const choices = $derived(v.loading ? [{ value: '', label: 'Loading models...', disabled: true }]
+        : v.error && !v.models.length ? [{ value: '', label: 'Error loading models', disabled: true }]
+        : options.map((o) => ({ value: o.name, label: o.text, disabled: o.disabled })));
     function info(kind) {
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(kind); };
     }
@@ -48,25 +53,16 @@
 
 <div class="form-group" style="margin-top: 30px;">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <label for="whisper-model" style="display: inline-flex; align-items: center;">Whisper Model
-        <span class="icon icon-info btn notif-info" style="vertical-align: baseline;" onclick={info('model')}></span></label>
+    <span class="model-label" style="display: inline-flex; align-items: center;">Whisper Model
+        <span class="icon icon-info btn notif-info" style="vertical-align: baseline;" onclick={info('model')}></span></span>
     <div class="model-select-container">
-        <select id="whisper-model" class="form-control" style="margin-top: 10px;" disabled={busy || v.loading} value={v.selected} onchange={(e) => h.selectModel(e.target.value)}>
-            {#if v.loading}
-                <option value="" disabled selected>Loading models...</option>
-            {:else if v.error && !v.models.length}
-                <option value="" disabled>Error loading models</option>
-            {:else}
-                {#each options as o (o.name)}
-                    <option value={o.name} disabled={o.disabled}>{o.text}</option>
-                {/each}
-            {/if}
-        </select>
         {#if current?.downloaded && !busy}
-            <button class="btn-delete-model downloaded" title="Delete {current.model.display_name}" onclick={h.deleteModel}>
+            <button class="btn-delete-model" title="Delete {current.model.display_name}" onclick={h.deleteModel}>
                 <span class="icon-trash"></span>
             </button>
         {/if}
+        <Select class="vselect-fill" options={choices} value={v.loading || !v.models.length ? '' : v.selected}
+                disabled={busy || v.loading} onchange={(name) => h.selectModel(name)} />
     </div>
     <div id="model-status" class="model-status">
         {#if busy}

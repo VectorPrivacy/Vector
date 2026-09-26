@@ -2,23 +2,25 @@
     // The Display section: toggle rows derived from display state. Each change
     // hands the new value to the app, which persists and applies it.
     import { displayState } from '../lib/settings.svelte.js';
-    let { h } = $props();   // h: DisplayHelpers (js/settings.js)
+    // grouped: a faint label above each run of rows that share a group.
+    let { h, grouped = false } = $props();   // h: DisplayHelpers (js/settings.js)
 
     const d = displayState();
     const rows = [
-        { key: 'imageTypes', id: 'display-image-types-toggle', label: 'Display Image Types' },
-        { key: 'chatBg', id: 'chat-bg-toggle', label: 'Background Wallpaper' },
-        { key: 'richComposer', id: 'rich-composer-toggle', label: 'Rich Composer' },
-        { key: 'emoticons', id: 'emoticon-suggestions-toggle', label: 'Emoticon Suggestions' },
-        { key: 'autocorrect', id: 'autocorrect-toggle', label: 'Autocorrect' },
-        { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player' },
+        { key: 'imageTypes', id: 'display-image-types-toggle', label: 'Display Image Types', group: 'Chat' },
+        { key: 'chatBg', id: 'chat-bg-toggle', label: 'Background Wallpaper', group: 'Chat' },
+        { key: 'richComposer', id: 'rich-composer-toggle', label: 'Rich Composer', group: 'Composer' },
+        { key: 'emoticons', id: 'emoticon-suggestions-toggle', label: 'Emoticon Suggestions', group: 'Composer' },
+        { key: 'autocorrect', id: 'autocorrect-toggle', label: 'Autocorrect', group: 'Composer' },
+        { key: 'floatingPlayer', id: 'floating-player-toggle', label: 'Floating Player', group: 'Media' },
     ];
     function info(key) {
         return (e) => { e.preventDefault(); e.stopPropagation(); h.explain(key); };
     }
 </script>
 
-{#each rows as r (r.key)}
+{#each rows as r, i (r.key)}
+    {#if grouped && r.group !== rows[i - 1]?.group}<p class="st-group">{r.group}</p>{/if}
     <div class="form-group">
         <label class="toggle-container">
             <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->

@@ -7712,6 +7712,7 @@ audio {
 }
 
 #settings {
+  font-family: Rubik, sans-serif;
   position: fixed;
   top: calc(10px + var(--chrome-h));
   bottom: 70px;
@@ -7752,10 +7753,6 @@ select {
   transition: all 0.3s ease;
 }
 
-#whisper-model option {
-  background: #171717;
-  padding: 10px;
-}
 
 /* Download Button Styles */
 #download-model {
@@ -8357,6 +8354,7 @@ select {
   display: flex;
   align-items: center;
   gap: 16px;
+  margin-bottom: 16px;
   padding: 14px 16px;
   border-radius: 14px;
   background: rgba(255,255,255,0.03);
@@ -8560,6 +8558,7 @@ select {
 .tor-card-body {
   flex: 1;
   min-width: 0;
+  text-align: center;
 }
 .tor-card-title {
   font-size: 15px;
@@ -8589,116 +8588,24 @@ select {
   margin: 0;
 }
 
-/* ---- Tor Advanced disclosure -------------------------------------------
-   Design intent: read as a continuation of the Tor card, not a separate
-   block. No purple wash, no halo. A single hairline rule under the toggle
-   marks the seam; everything else is typography + tight rhythm. */
+/* The card is only the toggle; Tor's settings follow it as ordinary rows. */
 #settings-tor-card {
   box-shadow: none !important;
 }
 
-.tor-card.has-advanced:has(+ #settings-tor-advanced.expanded) {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  border-bottom-color: transparent;
-}
 
-.tor-advanced {
-  margin-top: 0;
-  border: 1px solid transparent;
-  border-top: 0;
-  border-bottom-left-radius: 14px;
-  border-bottom-right-radius: 14px;
-  background: transparent;
-  overflow: hidden;
-  position: relative;
-  isolation: isolate;
-  transition:
-    background 0.22s ease,
-    border-color 0.22s ease;
-}
-/* Expanded panel mirrors the connected card's purple surface + border so
-   the two read as one continuous element. (`.tor-state-connected` uses
-   `rgba(149,48,244,0.10)` bg + `rgba(149,48,244,0.30)` border — match
-   exactly.) Card's box-shadow halo is killed by `#settings-tor-card`'s
-   `box-shadow: none` rule above, so no glow bleeds across the seam. */
-.tor-advanced.expanded {
-  border-color: rgba(149,48,244,0.30);
-  background: rgba(149,48,244,0.10);
-}
-
-.tor-advanced-toggle {
-  width: 100%;
-  background: transparent;
-  border: 0;
-  padding: 8px 16px 6px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,0.50);
-  cursor: pointer;
-  transition: color 0.18s ease;
-  -webkit-user-select: none;
-  user-select: none;
-  line-height: 1.5;
-  position: relative;
-}
-.tor-advanced-toggle:hover { color: rgba(217,179,255,0.95); }
-.tor-advanced.expanded .tor-advanced-toggle {
-  color: rgba(217,179,255,0.78);
-}
-
-/* Hairline that separates the toggle from the panel content. Inset 16px
-   on each side, fades to transparent at the edges so it doesn't crash
-   into the rounded corners. */
-.tor-advanced.expanded .tor-advanced-toggle::after {
-  content: "";
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 0;
-  height: 1px;
-  background: linear-gradient(to right,
-    transparent 0,
-    rgba(178,102,255,0.22) 14%,
-    rgba(178,102,255,0.22) 86%,
-    transparent 100%);
-  pointer-events: none;
-}
-
-.tor-advanced-chevron {
-  width: 9px;
-  height: 9px;
-  background-color: currentColor;
-  flex-shrink: 0;
-  position: relative;
-  margin: 0;
-  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.tor-advanced.expanded .tor-advanced-chevron { transform: rotate(180deg); }
-
-.tor-advanced-panel {
-  padding: 0 18px 14px;
-}
-
-/* Header above the circuit list. The hairline below the toggle replaces
-   the previous border-top here — fewer rules, cleaner read. */
+/* The circuit, once connected: a faint label with New beside it, the hops below. */
+.tor-circuit { margin-top: 14px; }
 .tor-circuits-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 0 6px;
+  padding: 0 0 6px;
 }
 .tor-circuits-head-label {
-  font-size: 10px;
-  letter-spacing: 0.26em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,0.58);
-  font-weight: 700;
+  color: #474747;
+  font-size: 14px;
+  line-height: 17px;
 }
 
 /* Rebuild button: subtle filled chip with conviction, not a ghost outline. */
@@ -8878,7 +8785,7 @@ select {
 
 /* Pulse fades in parked at Guard, travels the rail, fades out parked at
    Exit. Anchors recalibrated for the tighter row padding. */
-.tor-advanced.expanded .tor-circuits:has(.tor-hop)::after {
+.tor-circuit .tor-circuits:has(.tor-hop)::after {
   content: "";
   position: absolute;
   left: 9px;
@@ -8901,65 +8808,16 @@ select {
   100% { top: calc(100% - 17px);   opacity: 0;    }
 }
 @media (prefers-reduced-motion: reduce) {
-  .tor-advanced.expanded .tor-circuits:has(.tor-hop)::after { animation: none; opacity: 0; }
+  .tor-circuit .tor-circuits:has(.tor-hop)::after { animation: none; opacity: 0; }
 }
 
-/* ---- Bridges section ---------------------------------------------------
-   No container box, no border-around — section reads as a continuation
-   below the circuit list, separated by the same fading hairline used at
-   the top of the panel. */
-.tor-bridges {
-  margin-top: 14px;
-  padding-top: 12px;
-  position: relative;
-}
-.tor-bridges::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 1px;
-  background: linear-gradient(to right,
-    transparent 0,
-    rgba(178,102,255,0.20) 14%,
-    rgba(178,102,255,0.20) 86%,
-    transparent 100%);
-}
-
-.tor-bridges-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.tor-bridges-head-text {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-.tor-bridges-head-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: rgba(255,255,255,0.78);
-}
-.tor-bridges-head-sub {
-  font-size: 11px;
-  color: rgba(255,255,255,0.58);
-  margin-top: 3px;
-  line-height: 1.4;
-}
-.tor-bridges-toggle-wrap {
-  margin: 0;
-  flex-shrink: 0;
-}
+/* ---- Bridges: the editor under the Use Bridges row, while it is on ---- */
 .tor-bridges-body {
-  margin-top: 10px;
+  margin: 0 0 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  text-align: left;
 }
 .tor-bridges-textarea {
   width: 100%;
@@ -8991,7 +8849,7 @@ select {
   color: rgba(255,255,255,0.28);
 }
 .tor-bridges-help {
-  font-size: 11px;
+  font-size: 13px;
   color: rgba(255,255,255,0.55);
   line-height: 1.5;
 }
@@ -9049,7 +8907,7 @@ select {
   margin-top: 2px;
 }
 .tor-bridges-status {
-  font-size: 11px;
+  font-size: 13px;
   color: rgba(255,255,255,0.62);
   flex: 1;
   min-width: 0;
@@ -9058,42 +8916,6 @@ select {
 .tor-bridges-status.is-error { color: #ff8c75; }
 .tor-bridges-status.is-ok    { color: #c9a4ff; }
 
-/* Apply: a real CTA. Soft purple gradient fill + visible disabled state
-   so users can see when their changes are stale vs. ready. */
-.tor-bridges-apply {
-  background: linear-gradient(180deg,
-    rgba(178,102,255,0.32) 0%,
-    rgba(149,48,244,0.32) 100%);
-  border: 1px solid rgba(178,102,255,0.55);
-  color: #f1e1ff;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  padding: 6px 14px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.12s ease, opacity 0.18s ease, box-shadow 0.18s ease;
-  flex-shrink: 0;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
-}
-.tor-bridges-apply:hover {
-  background: linear-gradient(180deg,
-    rgba(178,102,255,0.48) 0%,
-    rgba(149,48,244,0.48) 100%);
-  border-color: rgba(217,179,255,0.78);
-  color: #fff;
-}
-.tor-bridges-apply:active { transform: scale(0.97); }
-.tor-bridges-apply:disabled {
-  opacity: 0.55;
-  cursor: default;
-  transform: none;
-  background: rgba(255,255,255,0.04);
-  border-color: rgba(255,255,255,0.08);
-  color: rgba(255,255,255,0.50);
-  box-shadow: none;
-}
 
 /* "Via bridge" annotation on the guard hop when bridges are active. */
 .tor-hop[data-bridge="true"] .tor-hop-pos::after {
@@ -9242,6 +9064,8 @@ select {
   font-weight: 600;
   color: #fff;
 }
+.st-page #storage-donut-value { font-size: 24px; line-height: 28px; font-weight: 700; }
+.st-page #storage-donut-label { color: #5b6060; line-height: 14px; }
 
 #storage-donut-label {
   font-size: 12px;
@@ -9347,22 +9171,17 @@ select {
   color: rgba(255, 255, 255, 0.8);
   white-space: nowrap;
 }
-#notif-privacy-group .select-container {
-  margin: 0;
+#notif-privacy-group .vselect {
   flex: 0 1 240px;
-}
-#notif-privacy-select {
-  width: 100%;
-  margin: 0;
-  padding: 8px 14px;
 }
 @media (max-width: 600px) {
   #notif-privacy-group {
     flex-direction: column;
     align-items: stretch;
   }
-  #notif-privacy-group .select-container {
+  #notif-privacy-group .vselect {
     flex: 1 1 auto;
+    width: 100%;
   }
 }
 
@@ -9412,27 +9231,151 @@ input[type="checkbox"]:checked + .neon-toggle:before {
     inset 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
-#theme-select {
-  text-align: center;
-  text-align-last: center;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 12px center;
-  background-size: 10px;
-  padding-right: 36px;
+/* ── Select: the in-app dropdown (ui/Select.svelte) ── */
+.vselect {
+  position: relative;
+  width: 230px;
+}
+.vselect-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background-color: #0a0a0a;
+  backdrop-filter: none;
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 400;
+  text-align: left;
+  transition: border-color 0.12s ease;
+}
+.vselect-btn:hover,
+.vselect.open .vselect-btn { border-color: #474747; }
+.vselect-btn:focus { outline: none; }
+.vselect-label { flex: 1; min-width: 0; }
+.vselect-caret {
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid #888;
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+.vselect.open .vselect-caret { transform: rotate(180deg); }
+.vselect-lead {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.vselect-list {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  padding: 4px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background-color: #111;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 0.14s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.vselect.open .vselect-list {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+.vselect-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: #cfcfcf;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.vselect-item span.cutoff { flex: 1; min-width: 0; }
+.vselect-item.hi { background-color: #1f1f1f; color: #fff; }
+.vselect-item.selected { color: #fff; }
+.vselect-item .icon-check {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex-shrink: 0;
+  background-color: var(--icon-color-primary);
 }
 
-/* Remove default focus outline and apply custom styling */
-#theme-select:focus {
-  outline: none;
+.vselect-fill { width: 100%; }
+.vselect-narrow { width: 120px; }
+.vselect.disabled { opacity: 0.45; }
+.vselect-btn:disabled { cursor: not-allowed; }
+.vselect-item.disabled { opacity: 0.4; cursor: default; }
+.vselect.up .vselect-list {
+  top: auto;
+  bottom: calc(100% + 6px);
+  transform: translateY(4px);
 }
 
-/* Style options to match whisper model */
-#theme-select option {
-  background: #171717;
-  text-align: center;
-  padding: 10px;
+/* The notification sound's preview: a bare icon beside its picker, as the model's delete is. */
+.notif-preview-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-width: 28px;
+  height: 36px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  opacity: 0.75;
+  transition: opacity 0.12s ease;
+}
+.notif-preview-btn:hover { opacity: 1; }
+.notif-preview-btn img { width: 20px; height: 20px; }
+
+/* A lead icon inside a picker, clear of the base class's absolute inset. */
+.vselect-lead .icon {
+  position: relative;
+  inset: auto;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  background-color: #b2b2b2;
+}
+
+/* The theme picker's leads: Vector's logo, every other theme its palette. */
+.theme-logo {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+.theme-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+/* The phone layout's column measure, as the OS select it replaces had. */
+.theme-picker {
+  width: 75%;
+  margin: 0 auto 15px;
 }
 
 /* For Windows specifically, override the forced focus color */
@@ -9443,68 +9386,35 @@ select:focus::-ms-value {
 
 /* Model select container styles */
 .model-select-container {
-  position: relative;
   display: flex;
   align-items: center;
+  gap: 8px;
   width: 100%;
-  margin-left: auto;
-  margin-right: auto;
+  margin: 10px auto 0;
 }
 
-/* Sound Notification Selection container styles */
-#notif-sound-select option {
-  background: #171717;
-  padding: 10px;
-  text-align: center;
-}
 
-/* Down Arrow added to Dropdown Button */
-#notif-sound-select {
-    text-align: center;
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
-    background-size: 10px;
-    padding-right: 36px;
-}
 
-#auto-download-limit {
-    text-align: center;
-    text-align-last: center;
-    appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: right 12px center;
-    background-size: 10px;
-    padding-right: 36px;
-    width: auto;
-}
-
-#auto-download-limit option {
-    background: #171717;
-    text-align: center;
-    padding: 10px;
-}
-
-/* Delete model button with trash bin icon */
+/* Delete the downloaded model: a bare icon beside the picker, centred on its height. */
 .btn-delete-model {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 24px;
-  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 36px;
   padding: 0;
-  background: transparent;
+  flex-shrink: 0;
   border: none;
+  background: none;
+  backdrop-filter: none;
   cursor: pointer;
-  opacity: 0.5;
-  transition: all 0.2s ease;
-  display: none; /* Hidden by default */
+  opacity: 0.75;
+  transition: opacity 0.12s ease;
 }
 
 .btn-delete-model .icon-trash {
+  width: 20px;
+  height: 20px;
   background-color: var(--danger-color);
 }
 
@@ -9536,35 +9446,8 @@ select:focus::-ms-value {
   filter: blur(0.5px);
 }
 
-/* For downloaded models - make it more prominent */
-.btn-delete-model.downloaded {
-  opacity: 0.8;
-  display: block;
-}
 
-.btn-delete-model.downloaded:hover {
-  opacity: 1;
-  transform: translateY(-50%) scale(1.1);
-}
 
-/* Adjust select to accommodate delete button */
-#whisper-model {
-  padding-right: 30px;
-  appearance: none;
-  -webkit-appearance: none;
-}
-
-/* Fix to not get white border in model selection dropdown */
-#whisper-model:focus,
-#whisper-model:active,
-#whisper-model:focus-visible {
-  outline: none !important;
-  box-shadow: none !important;
-}
-
-#whisper-model.form-control {
-    text-align: center !important;
-}
 
 /* Disabled select styles for visual feedback */
 select:disabled {
@@ -21666,17 +21549,18 @@ body.profile-switcher-editing .profile-switcher-add {
   .mod-tally { justify-content: center; width: 100%; }
 }
 
-/* ── Community Settings ──────────────────────────────────────────────────────
-   The settings layout the app is moving to, trialled in a modal: sections on the
-   left, each with a timeline of anchors into its content, and the content as
-   headed blocks in one centred column. Rides the moderation overlay's backdrop
-   and open/close animation. */
+/* ── Settings layout ─────────────────────────────────────────────────────────
+   Shared by Community Settings (a modal riding the moderation overlay's backdrop
+   and animation) and widescreen Settings: sections on the left, each with a
+   timeline of anchors into its content, and the content as headed blocks in one
+   centred column. */
 
 .cs-overlay.closing .cs-card {
   animation: modal-card-pop-out 0.15s ease-out forwards;
 }
 
 .cs-card {
+  font-family: Rubik, sans-serif;
   display: flex;
   width: 100%;
   max-width: 1180px;
@@ -21694,10 +21578,11 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-nav {
   display: flex;
   flex-direction: column;
+  text-align: left;
   width: 248px;
   flex-shrink: 0;
   background-color: #0b0b0b;
-  border-right: 1px solid #262626;
+  border-right: 1px solid #171717;
   -webkit-user-select: none;
   user-select: none;
 }
@@ -21706,79 +21591,123 @@ body.profile-switcher-editing .profile-switcher-add {
   position: relative;
   display: flex;
   align-items: center;
-  height: 64px;
-  padding: 0 14px;
-  border-bottom: 1px solid #262626;
+  height: 50px;
+  padding: 0 10px;
+  border-bottom: 1px solid #171717;
   box-sizing: border-box;
   flex-shrink: 0;
 }
+/* The icon draws across 20 of its 24 units: a 17px box gives the design's 14px glyph. */
 .cs-search .icon {
   position: absolute;
   inset: auto;
-  left: 25px;
+  left: 20.5px;
   top: 50%;
-  width: 16px;
-  height: 16px;
+  width: 17px;
+  height: 17px;
   margin: 0;
   transform: translateY(-50%);
-  background-color: #8a8a8a;
+  background-color: #b2b2b2;
 }
 .cs-search input {
   width: 100%;
-  height: 36px;
-  padding: 0 12px 0 36px;
+  height: 34px;
+  padding: 0 12px 0 34px;
   border: none;
   border-radius: 8px;
   background-color: #1f1f1f;
   color: #fff;
+  font-family: inherit;
   font-size: 14px;
+  font-weight: 400;
   outline: none;
   box-sizing: border-box;
 }
-.cs-search input::placeholder { color: #8a8a8a; }
+.cs-search input::placeholder { color: #899090; }
 .cs-search input:focus { box-shadow: inset 0 0 0 1px #3a3a3a; }
 
 .cs-nav-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 12px 24px;
+  padding: 18px 10px 24px;
 }
 
+/* The divider spans the column less 20px a side; the glyph sits a little outside it. */
 .cs-nav-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 8px 16px;
+  gap: 8px;
+  margin: 0 10px 17px;
+  padding: 0 0 16px;
+  border-bottom: 1px solid #262626;
+}
+.cs-nav-glyph {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  margin-left: -3px;
+  flex-shrink: 0;
+}
+.cs-nav-glyph .icon {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background-color: #fff;
 }
 .cs-nav-head .cs-nav-avatar {
   border-radius: 8px !important;
   flex-shrink: 0;
 }
 .cs-nav-title {
-  font-size: 16px;
+  font-size: 14px;
+  line-height: 17px;
   font-weight: 700;
   color: #fff;
 }
 
 .cs-section {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
-  padding: 8px 10px;
-  margin: 2px 0;
+  height: 34px;
+  padding: 0 8px;
+  margin: 0 0 1px;
   border: none;
   border-radius: 8px;
   background: none;
-  color: #cfcfcf;
+  color: #b2b2b2;
   font-family: inherit;
-  font-size: 15px;
+  font-size: 16px;
+  line-height: 19px;
   font-weight: 400;
   text-align: left;
   cursor: pointer;
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 .cs-section:hover { background-color: #151515; color: #fff; }
+/* No backdrop blur (the base button has one): a composited row escapes its fold's clip. */
+.cs-section,
+.cs-anchor { backdrop-filter: none; }
 .cs-section.active { background-color: #1b1b1b; color: #fff; }
+.cs-section.danger { color: var(--danger-color); }
+.cs-section-icon {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.cs-section-icon .icon {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  background-color: #5b6060;
+  transition: background-color 0.12s ease;
+}
+.cs-section:hover .cs-section-icon .icon,
+.cs-section.active .cs-section-icon .icon { background-color: #fff; }
+.cs-section.danger .cs-section-icon .icon { background-color: var(--danger-color); }
 
 /* A section's anchors open beneath it the way a rail folder does: the row
    grows while its contents fade and settle into place. */
@@ -21802,8 +21731,8 @@ body.profile-switcher-editing .profile-switcher-add {
     padding 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .cs-anchors-wrap.open > .cs-anchors {
-  padding-top: 4px;
-  padding-bottom: 8px;
+  padding-top: 1px;
+  padding-bottom: 20px;
   opacity: 1;
   transform: none;
 }
@@ -21813,44 +21742,57 @@ body.profile-switcher-editing .profile-switcher-add {
    for the first, through it for the middle, down to its dot for the last. */
 .cs-anchors {
   position: relative;
-  padding: 4px 0 8px 10px;
+  /* The design's indent: each dot's centre 53.5px into the column. */
+  padding: 1px 0 20px 38px;
 }
 .cs-anchor::after {
   content: '';
   position: absolute;
-  left: 3.5px;
+  left: 4.5px;
   top: 0;
   bottom: 0;
-  width: 1px;
-  background-color: #3a3a3a;
+  width: 2px;
+  background-color: #444;
 }
-.cs-anchor:first-child::after { top: 50%; }
-.cs-anchor:last-child::after { bottom: 50%; }
+.cs-anchor.first::after { top: 50%; }
+.cs-anchor.last::after { bottom: 50%; }
+.cs-anchor.shut::after { opacity: 0; }
 .cs-anchor {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  height: 30px;
-  padding: 0 8px 0 0;
+  height: 26px;
+  /* The row clips so it can fold shut; the left inset keeps the lit dot's growth inside it. */
+  padding: 0 8px 0 2px;
   border: none;
   background: none;
-  color: #9a9a9a;
+  color: #b2b2b2;
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 14px;
   font-weight: 400;
   text-align: left;
   cursor: pointer;
-  transition: color 0.15s ease;
+  overflow: hidden;
+  /* Square: the timeline runs past the row's corners, and a rounded one notches it. */
+  border-radius: 0;
+  transition: color 0.15s ease, height 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+}
+.cs-anchor.shut {
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
 }
 .cs-anchor:hover { color: #e6e6e6; }
 .cs-anchor.active { color: #fff; }
 .cs-anchor-dot {
   position: relative;
   z-index: 1;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
+  margin-right: 2px;
   flex-shrink: 0;
   border-radius: 50%;
   background-color: #444;
@@ -21862,23 +21804,55 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 .cs-anchor-icon {
   position: relative;
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   flex-shrink: 0;
   opacity: 0.85;
 }
 .cs-anchor-icon .icon {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   background-color: currentColor;
 }
 .cs-anchor-label { min-width: 0; }
+
+/* A search folds non-matching sections shut rather than unmounting them. */
+.cs-fold {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease;
+}
+.cs-fold.shut {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+.cs-fold-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+/* The empty line never shares the list with a match: it leaves at once, and
+   arrives only after the sections have folded away. */
+.cs-fold-empty:not(.shut) { transition-delay: 0.22s; }
+.cs-fold-empty.shut { transition: none; }
 
 .cs-nav-empty {
   margin: 12px 10px;
   color: #6f6f6f;
   font-size: 13px;
 }
+
+.cs-nav-foot {
+  margin-top: 12px;
+  padding: 16px 8px 0;
+  border-top: 1px solid #262626;
+}
+.cs-nav-foot .settings-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+.cs-nav-foot .settings-footer span { font-size: 12px; line-height: 14px; }
 
 /* Content */
 .cs-main {
@@ -21892,17 +21866,19 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-top {
   display: flex;
   align-items: center;
-  height: 64px;
+  height: 50px;
   padding: 0 18px 0 28px;
-  border-bottom: 1px solid #262626;
+  border-bottom: 1px solid #171717;
   box-sizing: border-box;
   flex-shrink: 0;
 }
 .cs-top-title {
   flex: 1;
+  text-align: left;
   margin: 0;
-  font-size: 18px;
-  font-weight: 500;
+  font-size: 16px;
+  line-height: 19px;
+  font-weight: 400;
   color: #fff;
 }
 
@@ -21943,7 +21919,7 @@ body.profile-switcher-editing .profile-switcher-add {
 }
 
 .cs-content {
-  max-width: 600px;
+  max-width: 584px;
   margin: 0 auto;
   /* The save bar floats over the bottom; the last block must scroll clear of it. */
   padding: 12px 36px 140px;
@@ -21970,7 +21946,8 @@ body.profile-switcher-editing .profile-switcher-add {
 .cs-heading {
   margin: 0 0 20px;
   font-size: 24px;
-  font-weight: 800;
+  line-height: 28px;
+  font-weight: 700;
   color: #fff;
 }
 
@@ -22113,6 +22090,305 @@ body.profile-switcher-editing .profile-switcher-add {
   user-select: text;
 }
 .cs-relay-scheme { color: #6a6a6a; }
+
+/* Settings rows. `.st-line` is a label, its explainer and a control on one line
+   (the phone layout's storage rows); `.st-row` is the same line with its explainer
+   after the label. */
+.st-line {
+  display: flex;
+  align-items: center;
+  margin-top: 15px;
+}
+.st-line-label {
+  flex: 1;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.8);
+}
+.st-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 36px;
+  margin-bottom: 10px;
+}
+.st-row-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #fff;
+  font-size: 16px;
+}
+.st-btn {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background-color: #262626;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  backdrop-filter: none;
+  flex-shrink: 0;
+  transition: background-color 0.12s ease;
+}
+.st-btn:hover:not(:disabled) { background-color: #333; }
+.st-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* A settings page recasts the phone layout's rows as the settings grammar: a 16px
+   label with its explainer after it, the control flush right. The rows keep their
+   phone markup, so the explainer moves by flex order, not by DOM. */
+.st-page {
+  text-align: left;
+}
+.st-page .form-group,
+.st-page .st-line {
+  margin: 0;
+}
+.st-page .tor-card.form-group { margin-bottom: 18px; }
+.st-page .toggle-container,
+.st-page .st-line,
+.st-page .danger-option {
+  min-height: 36px;
+  margin: 0 0 10px;
+  gap: 12px;
+}
+.st-page .toggle-container > span:first-child,
+.st-page .danger-option .left-group,
+.st-page #notif-privacy-group .notif-privacy-label {
+  line-height: 19px;
+  display: inline-flex;
+  flex-direction: row-reverse;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: #fff;
+  font-size: 16px;
+}
+.st-page .st-line-label {
+  flex: 0 1 auto;
+  order: 1;
+  color: #fff;
+  font-size: 16px;
+}
+.st-page .st-line > .icon-info {
+  order: 2;
+  margin: 0 0 0 -6px !important;
+}
+.st-page .st-line > :last-child {
+  order: 3;
+  margin-left: auto !important;
+}
+.st-page .icon-info {
+  width: 16px !important;
+  height: 16px !important;
+  margin: 0 !important;
+}
+.st-page .theme-picker {
+  width: 230px;
+  margin: 0 0 0 auto;
+}
+.st-page .vselect-btn,
+.st-page .vselect-item { font-size: 12px; }
+.st-page .theme-picker .vselect-btn,
+.st-page .theme-picker .vselect-item { font-size: 16px; }
+.st-page select {
+  width: 230px;
+  height: 36px;
+  margin: 0 0 0 auto !important;
+  padding: 0 32px 0 12px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background-color: #0a0a0a;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23888'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 10px;
+  color: #fff;
+  font-size: 14px;
+  text-align: left;
+  text-align-last: left;
+}
+.st-page .select-container { margin: 0; }
+
+/* Whisper Model: label left, the delete button and the picker right, the model's
+   status beneath both. */
+.st-page .form-group:has(> .model-select-container) {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  row-gap: 8px;
+  margin: 0 0 10px !important;
+}
+.st-page .model-label {
+  gap: 6px;
+  color: #fff;
+  font-size: 16px;
+}
+.st-page .model-select-container { width: auto; }
+.st-page .model-status { grid-column: 1 / -1; }
+.st-page .model-select-container { margin: 0; }
+.st-page .model-select-container .vselect { width: 230px; }
+
+/* A faint label over a run of related rows. */
+.st-group {
+  margin: 18px 0 6px;
+  color: #474747;
+  font-size: 14px;
+  line-height: 17px;
+  text-align: left;
+}
+.cs-heading + .st-group { margin-top: 0; }
+
+
+/* Network: flat rows, a pill for where each came from, the state in words. */
+.st-page .relay-item {
+  min-height: 36px;
+  margin: 0 -8px 2px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 6px;
+  background: none;
+  transition: background-color 0.12s ease;
+}
+.st-page .relay-item:hover { background-color: #171717; border: none; }
+.st-page .relay-item.disabled { opacity: 0.55; }
+.st-page .relay-item-content { gap: 12px; }
+.st-page .relay-url { font-size: 16px; color: #fff; }
+.st-page .relay-default-badge {
+  display: inline-flex;
+  justify-content: center;
+  min-width: 64px;
+  padding: 3px 10px;
+  border: 1px solid #474747;
+  border-radius: 100px;
+  background: none;
+  color: #b2b2b2;
+  font-size: 12px;
+  text-transform: capitalize;
+  box-sizing: border-box;
+}
+.st-page .relay-custom-badge { border-color: #333; background-color: #333; }
+.st-page .relay-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 16px;
+  line-height: 19px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.st-page .relay-status::before {
+  content: '';
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  mask: url('./icons/clock.svg') no-repeat center / contain;
+  -webkit-mask: url('./icons/clock.svg') no-repeat center / contain;
+}
+.st-page .relay-status.connected { color: var(--accent-color, #59fcb3); }
+.st-page .relay-status.connected::before {
+  mask-image: url('./icons/check-circle.svg');
+  -webkit-mask-image: url('./icons/check-circle.svg');
+}
+.st-page .relay-status.disconnected,
+.st-page .relay-status.terminated,
+.st-page .relay-status.banned { color: var(--danger-color); }
+.st-page .relay-status.disconnected::before,
+.st-page .relay-status.terminated::before,
+.st-page .relay-status.banned::before {
+  mask-image: url('./icons/cancel.svg');
+  -webkit-mask-image: url('./icons/cancel.svg');
+}
+.st-page .relay-status.disabled { color: #b2b2b2; }
+.st-page .relay-status.disabled::before {
+  mask-image: url('./icons/disable.svg');
+  -webkit-mask-image: url('./icons/disable.svg');
+}
+.st-page .st-row + .relay-item { margin-top: 4px; }
+
+/* Storage: the donut beside its legend, the rows under a divider. */
+.st-page .storage-summary { display: none; }
+.st-page .form-group:has(> #storage-donut-wrap) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 48px;
+  margin-bottom: 20px;
+  padding-bottom: 28px;
+  border-bottom: 1px solid #262626;
+}
+.st-page #storage-donut-wrap {
+  width: 220px;
+  margin: 0;
+  flex-shrink: 0;
+}
+.st-page #storage-legend {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(4, auto);
+  justify-content: start;
+  gap: 14px 40px;
+  margin: 0;
+}
+.st-page .storage-legend-item { font-size: 16px; color: #fff; }
+
+/* Updates: the version as a row, the action under the rows. */
+.st-page .update-info { text-align: left; }
+.st-page .update-info > p:first-child {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.st-page .update-info > p:first-child > span:first-child { opacity: 1 !important; color: #fff; }
+.st-page #check-updates-btn { margin: 6px 0 0; }
+
+/* Blocked users: the list keeps the column's edges, names at row size. */
+.st-page .blocked-row { padding: 6px 0 !important; }
+.st-page .blocked-name { color: #fff !important; font-size: 16px !important; }
+.st-page .unblock-btn {
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 14px;
+  box-sizing: border-box;
+}
+.st-page #notif-privacy-group .vselect { flex: none; width: 230px; }
+
+.notif-sound-label { display: none; }
+.st-page .notif-sound-label {
+  display: block;
+  margin-right: auto;
+  color: #fff;
+  font-size: 16px;
+}
+.st-page .form-group:has(> .notif-sound-label) { gap: 8px !important; }
+.st-page .form-group:has(> .notif-sound-label) .notif-preview-btn { order: 1; }
+.st-page .form-group:has(> .notif-sound-label) .vselect { order: 2; width: 230px; }
+.st-page .notif-sound-label { white-space: nowrap; }
+.st-page .cancel-btn,
+.st-page .danger-option button {
+  height: 32px;
+  margin: 0 !important;
+  padding: 0 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 400;
+}
+.st-page .cancel-btn {
+  border: 1px solid #333;
+  background-color: #262626;
+  color: #fff;
+}
+.st-page .cancel-btn:hover:not(:disabled) { background-color: #333; }
 
 /* Roles: the list, dragged like the emoji pack rail, and the editor for one role. */
 .cs-heading-row {
@@ -24263,34 +24539,20 @@ body.profile-switcher-editing .profile-switcher-add {
   position: relative;
   height: 8px;
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.08);
+  background: #1a1a1a;
   overflow: hidden;
 }
 
 .voice-meter-fill {
-  height: 100%;
+  position: absolute;
+  inset: 0;
   border-radius: 4px;
-  background: var(--accent-color, #59fcb3);
-  transition: width 60ms linear, background-color 120ms linear;
-}
-
-/* Near the top the bar turns amber: loud enough to clip. */
-.voice-meter-hot .voice-meter-fill {
-  background: var(--status-fair);
+  background: linear-gradient(90deg, #6ed99e, #f7e470 80%, #ea6662);
+  transition: clip-path 60ms linear;
 }
 
 .voice-meter:not(.voice-meter-active) .voice-meter-fill {
   opacity: 0.35;
-}
-
-.voice-meter-peak {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  margin-left: -1px;
-  background: #fff;
-  opacity: 0.8;
 }
 
 .call-panel-meters {
@@ -24318,77 +24580,107 @@ body.profile-switcher-editing .profile-switcher-add {
   transform-origin: right center;
 }
 
-/* Settings: the Calls section */
-.toggle-container .settings-label,
-.calls-mic-test-row .settings-label {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  text-align: left;
-  min-width: 0;
+/* Settings: the Calls section. Its pairs sit side by side while there's room. */
+.calls-pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 20px;
+  margin-bottom: 28px;
 }
-
-.settings-label {
-  line-height: 1.15;
+@media (max-width: 600px) {
+  .calls-pair { grid-template-columns: minmax(0, 1fr); }
 }
-
-/* Outranks the container's span rule, so the hint stays dim and snug under its title. */
-.settings-hint,
-.toggle-container .settings-label .settings-hint,
-.calls-mic-test-row .settings-label .settings-hint {
-  display: block;
-  font-size: 12px;
-  line-height: 1.2;
-  color: #8a8a8a;
-  margin: 1px 0 0;
-}
-
-.calls-mic-test {
+.calls-field {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.calls-mic-test-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.calls-mic-test-btn {
-  flex: none;
-  padding: 7px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-color, #f6f6f6);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.calls-mic-test-btn:hover {
-  background: rgba(255, 255, 255, 0.12);
-}
-
-.calls-mic-test-on {
-  border-color: var(--accent-color, #59fcb3);
-  color: var(--accent-color, #59fcb3);
-}
-
-.calls-device-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  min-width: 0;
   text-align: left;
 }
-
-.calls-device-row .settings-label {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+.calls-field-label {
+  color: #b2b2b2;
+  font-size: 14px;
+  line-height: 17px;
 }
 
-.calls-device-row select.form-control {
+/* The test button, then the meter across the rest of the row. */
+.calls-mic-bench {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  margin-bottom: 16px;
+}
+.calls-mic-bench .voice-meter {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+}
+/* One width for both labels, so starting a test moves nothing. */
+.calls-mic-test-btn {
+  flex: none;
+  width: 86px;
+  height: 32px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 6px;
+  background-color: #333;
+  backdrop-filter: none;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+.calls-mic-test-btn:hover { background-color: #3d3d3d; }
+.calls-mic-live {
+  flex: none;
+  color: #b2b2b2;
+  font-size: 14px;
+}
+
+/* A settings slider: a thin track filled to its value, a round white handle. The page
+   sets --slider-pct from the value, so the fill needs no script of its own. */
+.st-slider {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
+  height: 20px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  outline: none;
+}
+.st-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right,
+    var(--slider-fill, var(--icon-color-primary)) var(--slider-pct, 0%),
+    #1a1a1a var(--slider-pct, 0%));
+}
+.st-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: -7px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.st-slider::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: linear-gradient(to right,
+    var(--slider-fill, var(--icon-color-primary)) var(--slider-pct, 0%),
+    #1a1a1a var(--slider-pct, 0%));
+}
+.st-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
 }

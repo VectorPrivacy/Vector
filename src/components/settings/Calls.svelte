@@ -1,9 +1,12 @@
 <script>
-    // The Calls section: the three voice processing switches, applied at once, and a
-    // microphone test that shows what the other side would hear.
+    // The Calls section: the devices and their volumes, a microphone test that shows
+    // what the other side would hear, then the voice processing switches. Every change
+    // applies at once, mid-call included.
     import { callAudio, callState } from '../lib/calls.svelte.js';
     import VoiceMeter from '../calls/VoiceMeter.svelte';
-    let { h } = $props();   // h: setAudio(patch), micTestStart(), micTestStop(), loadDevices(), setDevice(kind, name)
+    import Select from '../ui/Select.svelte';
+    import InfoIcon from './InfoIcon.svelte';
+    let { h } = $props();   // h: setAudio(patch), explain(kind), micTestStart(), micTestStop(), loadDevices(), setDevice(kind, name)
     const a = callAudio();
     const c = callState();
     const inCall = $derived(!!c.id && c.phase !== 'ended');
@@ -13,62 +16,88 @@
     // Leaving the screen stops the test.
     $effect(() => () => { if (a.micTest) h.micTestStop(); });
     $effect(() => { h.loadDevices(); });
-    const pick = (kind) => (e) => h.setDevice(kind, e.currentTarget.value === '' ? null : e.currentTarget.value);
+    // '' is the system default: it follows the OS rather than naming a device.
+    const byDefault = (name) => name ? `System Default - ${name}` : 'System Default';
+    const inputs = $derived([{ value: '', label: byDefault(dev.defaultInput) },
+        ...dev.inputs.map((name) => ({ value: name, label: name }))]);
+    const outputs = $derived([{ value: '', label: byDefault(dev.defaultOutput) },
+        ...dev.outputs.map((name) => ({ value: name, label: name }))]);
+    const pick = (kind) => (v) => h.setDevice(kind, v === '' ? null : v);
+
+    const SWITCHES = [
+        { key: 'autoGain', label: 'Automatic Gain' },
+        { key: 'echoCancel', label: 'Echo Cancellation' },
+        { key: 'noiseSuppress', label: 'Noise Suppression' },
+    ];
+    const VOLUMES = [
+        { key: 'micVolume', label: 'Microphone Volume' },
+        { key: 'speakerVolume', label: 'Speaker Volume' },
+    ];
+
+    // A drag moves the slider every frame; the engine hears it a few times a second.
+    let pending = null;
+    let timer = null;
+    function setVolume(key, v) {
+        a[key] = v;
+        pending = { ...pending, [key]: v };
+        if (timer) return;
+        timer = setTimeout(() => {
+            const patch = pending;
+            pending = null;
+            timer = null;
+            h.setAudio(patch);
+        }, 80);
+    }
+    const pct = (v) => `${Math.round(v * 100)}%`;
 </script>
 
-<div class="form-group">
-    <label class="toggle-container">
-        <span class="settings-label">Automatic gain<span class="settings-hint">Lifts a quiet microphone so nobody has to shout</span></span>
-        <input type="checkbox" checked={a.autoGain} onchange={(e) => h.setAudio({ autoGain: e.currentTarget.checked })}>
-        <span class="neon-toggle"></span>
-    </label>
-</div>
-<div class="form-group">
-    <label class="toggle-container">
-        <span class="settings-label">Echo cancellation<span class="settings-hint">Keeps your speaker out of your microphone</span></span>
-        <input type="checkbox" checked={a.echoCancel} onchange={(e) => h.setAudio({ echoCancel: e.currentTarget.checked })}>
-        <span class="neon-toggle"></span>
-    </label>
-</div>
-<div class="form-group">
-    <label class="toggle-container">
-        <span class="settings-label">Noise suppression<span class="settings-hint">Fans, keyboards and hum, taken down</span></span>
-        <input type="checkbox" checked={a.noiseSuppress} onchange={(e) => h.setAudio({ noiseSuppress: e.currentTarget.checked })}>
-        <span class="neon-toggle"></span>
-    </label>
-</div>
+{#snippet micLead()}<span class="icon icon-mic-on"></span>{/snippet}
+{#snippet speakerLead()}<span class="icon icon-volume-max"></span>{/snippet}
 
 {#if hasDevices}
-    <div class="form-group calls-device-row">
-        <label for="calls-mic-device" class="settings-label">Microphone<span class="settings-hint">System default follows the OS; a named device is used whenever it is plugged in</span></label>
-        <select id="calls-mic-device" class="form-control" value={dev.input ?? ''} onchange={pick('input')}>
-            <option value="">System default{dev.defaultInput ? ` (${dev.defaultInput})` : ''}</option>
-            {#each dev.inputs as name (name)}
-                <option value={name}>{name}</option>
-            {/each}
-        </select>
-    </div>
-    <div class="form-group calls-device-row">
-        <label for="calls-speaker-device" class="settings-label">Speaker</label>
-        <select id="calls-speaker-device" class="form-control" value={dev.output ?? ''} onchange={pick('output')}>
-            <option value="">System default{dev.defaultOutput ? ` (${dev.defaultOutput})` : ''}</option>
-            {#each dev.outputs as name (name)}
-                <option value={name}>{name}</option>
-            {/each}
-        </select>
+    <div class="calls-pair">
+        <div class="calls-field">
+            <span class="calls-field-label">Microphone</span>
+            <Select class="vselect-fill" options={inputs} value={dev.input ?? ''} lead={micLead} onchange={pick('input')} />
+        </div>
+        <div class="calls-field">
+            <span class="calls-field-label">Speaker</span>
+            <Select class="vselect-fill" options={outputs} value={dev.output ?? ''} lead={speakerLead} onchange={pick('output')} />
+        </div>
     </div>
 {/if}
 
-<div class="form-group calls-mic-test">
-    <div class="calls-mic-test-row">
-        <span class="settings-label">Your voice<span class="settings-hint">{inCall ? 'Shown on the call while one is up' : a.micTest ? 'Speak normally: this is what they hear' : 'Test how you sound with the switches above'}</span></span>
-        {#if !inCall}
-            <button class="calls-mic-test-btn" class:calls-mic-test-on={a.micTest} onclick={() => a.micTest ? h.micTestStop() : h.micTestStart()}>
-                {a.micTest ? 'Stop' : 'Test microphone'}
-            </button>
-        {/if}
-    </div>
+<div class="calls-pair">
+    {#each VOLUMES as v (v.key)}
+        <label class="calls-field">
+            <span class="calls-field-label">{v.label}</span>
+            <input type="range" class="st-slider" min="0" max="100" step="1"
+                   value={Math.round(a[v.key] * 100)} style:--slider-pct={pct(a[v.key])}
+                   oninput={(e) => setVolume(v.key, e.currentTarget.valueAsNumber / 100)}>
+        </label>
+    {/each}
+</div>
+
+<div class="calls-mic-bench">
+    {#if inCall}
+        <span class="calls-mic-live">On a call</span>
+    {:else}
+        <button class="calls-mic-test-btn" onclick={() => a.micTest ? h.micTestStop() : h.micTestStart()}>
+            {a.micTest ? 'Stop Test' : 'Test Mic'}
+        </button>
+    {/if}
     <VoiceMeter level={inCall ? c.levels.mic : a.micLevel} active={inCall || a.micTest} />
 </div>
 
-<!-- No <style>: the .calls-* and .settings-hint rules live in styles.css. -->
+<p class="st-group">Microphone</p>
+{#each SWITCHES as s (s.key)}
+    <div class="form-group">
+        <label class="toggle-container">
+            <span><InfoIcon onclick={() => h.explain(s.key)} />{s.label}</span>
+            <input type="checkbox" checked={a[s.key]} onchange={(e) => h.setAudio({ [s.key]: e.currentTarget.checked })}>
+            <span class="neon-toggle"></span>
+        </label>
+    </div>
+{/each}
+
+<!-- No <style>: the .calls-* rules live in styles.css. -->

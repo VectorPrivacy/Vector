@@ -3,6 +3,7 @@
     // custom-sound chip, derived from notif state. Writes go through `h` so the
     // desktop (settings blob) and mobile (per-key) persistence stay in the app.
     import { notifState } from '../lib/settings.svelte.js';
+    import Select from '../ui/Select.svelte';
     let { h } = $props();   // h: saveSounds({globalMute, muteEveryone, sound}), saveMuteEveryone, savePrivacy, pickCustom, preview, explain(kind)
 
     const n = notifState();
@@ -22,8 +23,19 @@
         n.muteEveryone = e.target.checked;
         if (n.sounds) persistSounds(); else h.saveMuteEveryone(n.muteEveryone);
     }
-    function onSound(e) {
-        choice = e.target.value;
+    const PRIVACY = [
+        { value: 'full', label: 'Show sender and message' },
+        { value: 'hide_content', label: 'Hide message' },
+        { value: 'hide_all', label: 'Hide sender and message' },
+    ];
+    const SOUNDS = [
+        { value: 'default', label: 'Prélude' },
+        { value: 'techno', label: 'Techno' },
+        { value: 'none', label: 'None' },
+        { value: 'custom', label: 'Custom...' },
+    ];
+    function onSound(v) {
+        choice = v;
         if (choice === 'custom') {
             if (n.sound.path) { n.sound = { type: 'Custom', path: n.sound.path }; persistSounds(); }
             return;
@@ -70,26 +82,15 @@
 <div class="form-group" id="notif-privacy-group">
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
     <span class="notif-privacy-label"><span class="icon icon-info btn notif-info" style="margin-right: 8px;" onclick={info('privacy')}></span>Content Privacy</span>
-    <div class="select-container">
-        <select id="notif-privacy-select" value={n.privacy} onchange={(e) => { n.privacy = e.target.value; h.savePrivacy(n.privacy); }}>
-            <option value="full">Show sender and message</option>
-            <option value="hide_content">Hide message</option>
-            <option value="hide_all">Hide sender and message</option>
-        </select>
-    </div>
+    <Select options={PRIVACY} value={n.privacy}
+            onchange={(v) => { n.privacy = v; h.savePrivacy(v); }} />
 </div>
 
 {#if n.sounds}
     <div class="form-group" style="display: flex; align-items: center; gap: 5px;">
-        <div class="select-container" style="margin: 0; flex: 1">
-            <select id="notif-sound-select" style="margin-bottom: 0 !important;" value={choice} onchange={onSound}>
-                <option value="default">Prélude</option>
-                <option value="techno">Techno</option>
-                <option value="none">None</option>
-                <option value="custom">Custom...</option>
-            </select>
-        </div>
-        <button class="btn cancel-btn" style="margin: 0; padding: 0 10px; min-width: 42px; height: 42px; display: flex; align-items: center; justify-content: center;" title="Preview Sound" onclick={() => h.preview(n.sound)}>
+        <span class="notif-sound-label">Notification Sound</span>
+        <Select class="vselect-fill" options={SOUNDS} value={choice} onchange={onSound} />
+        <button class="notif-preview-btn" title="Preview Sound" onclick={() => h.preview(n.sound)}>
             <img src="./icons/speaker_volume.svg" alt="Preview" style="width: 18px; height: 18px;">
         </button>
     </div>

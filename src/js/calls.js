@@ -1,13 +1,15 @@
 // Native calls: the overlay's helper bag, the backend's events, and the reload hydrate.
 // The engine lives in Rust; this side only asks and renders.
 
-/** The voice processing switches: applied by the backend mid-call, then saved. */
+/** The voice processing switches and volumes: applied by the backend mid-call, then saved. */
 async function setCallAudioSettings(patch) {
     const a = VectorSvelte.callAudio();
     const next = {
         auto_gain: patch.autoGain ?? a.autoGain,
         echo_cancel: patch.echoCancel ?? a.echoCancel,
         noise_suppress: patch.noiseSuppress ?? a.noiseSuppress,
+        mic_volume: patch.micVolume ?? a.micVolume,
+        speaker_volume: patch.speakerVolume ?? a.speakerVolume,
     };
     VectorSvelte.setCallAudio(next);
     try {
@@ -50,8 +52,15 @@ async function setAudioDevice(kind, name) {
 }
 
 // The Settings screen's Calls section takes the same helpers; the bag is settings.js's.
+const CALL_EXPLAINERS = {
+    autoGain: ['Automatic Gain', 'Lifts a quiet microphone so nobody has to shout, and eases off a loud one.'],
+    echoCancel: ['Echo Cancellation', 'Keeps your speakers out of your microphone, so the other side never hears themselves back.'],
+    noiseSuppress: ['Noise Suppression', 'Takes down fans, keyboards and hum while you talk.'],
+};
+
 SETTINGS_HELPERS.calls = {
     setAudio: (patch) => setCallAudioSettings(patch),
+    explain: (kind) => popupConfirm(...CALL_EXPLAINERS[kind], true),
     micTestStart: () => micTestStart(),
     micTestStop: () => micTestStop(),
     loadDevices: () => loadAudioDevices(),

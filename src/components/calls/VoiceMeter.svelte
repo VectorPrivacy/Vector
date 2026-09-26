@@ -1,22 +1,11 @@
 <script>
-    // A loudness bar, 0 to 1: green through the speaking range, amber near the top.
-    // The peak holds for a moment so a word leaves a mark.
+    // A loudness bar, 0 to 1. The gradient spans the whole track, green through the
+    // speaking range to red where a voice clips; the level uncovers as much of it as it
+    // reaches, so a colour always means the same loudness.
     let { level = 0, active = false } = $props();
-    let peak = $state(0);
-    let peakTimer = null;
-    $effect(() => {
-        if (level >= peak) {
-            peak = level;
-            clearTimeout(peakTimer);
-            peakTimer = setTimeout(() => { peak = 0; }, 900);
-        }
-        return () => clearTimeout(peakTimer);
-    });
+    const hidden = $derived(100 - Math.round(Math.max(0, Math.min(1, level)) * 100));
 </script>
 
-<div class="voice-meter" class:voice-meter-active={active} class:voice-meter-hot={level > 0.88}>
-    <div class="voice-meter-fill" style="width: {Math.round(level * 100)}%"></div>
-    {#if active && peak > 0.02}
-        <div class="voice-meter-peak" style="left: {Math.round(peak * 100)}%"></div>
-    {/if}
+<div class="voice-meter" class:voice-meter-active={active}>
+    <div class="voice-meter-fill" style:clip-path="inset(0 {hidden}% 0 0 round 4px)"></div>
 </div>
