@@ -188,7 +188,8 @@ cpal = "0.16.0"
 opus = "0.4"
 bytes = "1"
 hound = "3.5.1"
-symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis"] }
+# opt-simd: AAC/Vorbis IMDCT on rustfft (runtime-dispatched SSE/AVX/NEON), 1.1-1.3x per decode
+symphonia = { version = "0.5.5", features = ["mp3", "wav", "flac", "pcm", "aac", "isomp4", "ogg", "vorbis", "opt-simd"] }
 rustfft = "6.2"
 lofty = "0.24"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -201,7 +202,9 @@ libc = "0.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 
 # Mini Apps (WebXDC) support
-zip = { version = "2.4", default-features = false, features = ["deflate-zlib"] }
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+# zlib-rs over C zlib: SIMD checksums and matching, 1.4-1.8x inflate. Any C backend enabled anywhere wins over it.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 toml = "0.8.23"
 anyhow = "1.0.99"
 http = "1.3"

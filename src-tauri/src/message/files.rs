@@ -974,10 +974,10 @@ fn zip_directory_blocking(dir_path: &str, my_generation: u64) -> Result<ZipDirec
     let buf_writer = BufWriter::new(file);
     let mut zip_writer = zip::ZipWriter::new(buf_writer);
 
-    // Level 1 (fastest deflate) — ~2-3x faster than default (6) with ~10-15% larger output
+    // Level 2: zlib-rs's level 1 is deflate_quick (up to ~20% larger); 2 still beats C zlib's 1 on speed and size
     let options: SimpleFileOptions = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
-        .compression_level(Some(1));
+        .compression_level(Some(2));
 
     let mut file_list: Vec<ZipEntry> = Vec::new();
     let mut file_count: u32 = 0;
