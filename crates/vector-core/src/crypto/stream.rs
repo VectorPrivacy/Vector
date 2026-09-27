@@ -9,10 +9,8 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
-use aes::cipher::{BlockCipherEncrypt, KeyInit, KeyIvInit, StreamCipher};
-use aes::Aes256;
-use ghash::universal_hash::UniversalHash;
-use ghash::GHash;
+use super::gcm;
+use zeroize::Zeroize;
 use sha2::{Digest, Sha256};
 
 use super::hex;
@@ -66,47 +64,6 @@ pub fn decrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_h
     result
 }
 
-/// The GCM state for one message: the keystream (positioned past the tag's block),
-/// the tag's mask, and a GHASH ready for the ciphertext.
-fn gcm_start(key_hex: &str, nonce_hex: &str) -> Result<(ctr::Ctr32BE<Aes256>, [u8; 16], GHash), String> {
-    let key: [u8; 32] = hex::decode(key_hex)
-        .map_err(|e| format!("Invalid key: {}", e))?
-        .try_into()
-        .map_err(|_| "Invalid decryption key".to_string())?;
-    let nonce = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {}", e))?;
-    if nonce.len() != 16 {
-        return Err("Invalid nonce length".to_string());
-    }
-    // H = E_K(0^128); a 16-byte nonce derives J0 through GHASH (SP 800-38D 7.1).
-    let cipher = Aes256::new(&key.into());
-    let mut h = ghash::Block::default();
-    cipher.encrypt_block(&mut h);
-    let mut j0_hash = GHash::new(&h);
-    j0_hash.update_padded(&nonce);
-    let mut len_block = ghash::Block::default();
-    len_block[8..].copy_from_slice(&((nonce.len() as u64) * 8).to_be_bytes());
-    j0_hash.update(&[len_block]);
-    let j0 = j0_hash.finalize();
-
-    // Keystream block 0 masks the tag; the payload starts at block 1.
-    let mut ctr = ctr::Ctr32BE::<Aes256>::new(&key.into(), &j0);
-    let mut tag_mask = [0u8; 16];
-    ctr.apply_keystream(&mut tag_mask);
-    Ok((ctr, tag_mask, GHash::new(&h)))
-}
-
-/// The tag over `ciphertext_len` bytes already fed to `ghash`.
-fn gcm_tag(mut ghash: GHash, tag_mask: [u8; 16], ciphertext_len: u64) -> [u8; 16] {
-    let mut lengths = ghash::Block::default();
-    lengths[8..].copy_from_slice(&(ciphertext_len * 8).to_be_bytes());
-    ghash.update(&[lengths]);
-    let mut tag = [0u8; 16];
-    for (t, (s, m)) in tag.iter_mut().zip(ghash.finalize().iter().zip(tag_mask)) {
-        *t = s ^ m;
-    }
-    tag
-}
-
 /// Encrypt `src` into `dst` (ciphertext || tag), the counterpart of [`decrypt_file`].
 /// Returns the SHA-256 and length of what was written: the blob a server will hold.
 pub fn encrypt_file(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str) -> Result<(String, u64), String> {
@@ -129,12 +86,14 @@ pub fn encrypt_file_with_progress(src: &Path, dst: &Path, key_hex: &str, nonce_h
 const GCM_MAX_PLAINTEXT: u64 = (1 << 36) - 32;
 
 fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<(String, u64), String> {
-    let (mut ctr, tag_mask, mut ghash) = gcm_start(key_hex, nonce_hex)?;
+    let (mut key, nonce) = super::attachment_params(key_hex, nonce_hex, "Invalid decryption key")?;
     let mut input = std::fs::File::open(src).map_err(|e| format!("open file: {e}"))?;
     let total = input.metadata().map(|m| m.len()).unwrap_or(0);
     if total > GCM_MAX_PLAINTEXT {
         return Err("File too large to encrypt as one attachment (over 64 GiB)".to_string());
     }
+    let mut gcm = gcm::Stream::new(&key, &nonce);
+    key.zeroize();
     let mut reported = 0u8;
     let mut output = std::io::BufWriter::with_capacity(
         CHUNK,
@@ -157,8 +116,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
             break;
         }
         let chunk = &mut buf[..n];
-        ctr.apply_keystream(chunk);
-        ghash.update_padded(chunk);
+        gcm.encrypt(chunk);
         blob_hash.update(&*chunk);
         output.write_all(chunk).map_err(|e| format!("write ciphertext: {e}"))?;
         len += n as u64;
@@ -169,7 +127,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
             break;
         }
     }
-    let tag = gcm_tag(ghash, tag_mask, len);
+    let tag = gcm.finish();
     blob_hash.update(tag);
     output.write_all(&tag).map_err(|e| format!("write ciphertext: {e}"))?;
     let file = output.into_inner().map_err(|e| format!("write ciphertext: {e}"))?;
@@ -178,7 +136,7 @@ fn encrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
 }
 
 fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, progress: &mut dyn FnMut(u8) -> bool) -> Result<StreamedFile, String> {
-    let (mut ctr, tag_mask, mut tag_hash) = gcm_start(key_hex, nonce_hex)?;
+    let (mut key, nonce) = super::attachment_params(key_hex, nonce_hex, "Invalid decryption key")?;
     let mut input = std::fs::File::open(src).map_err(|e| format!("open download: {e}"))?;
     let total = input.metadata().map_err(|e| format!("stat download: {e}"))?.len();
     if total < 16 {
@@ -188,6 +146,8 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
     if ciphertext_len > GCM_MAX_PLAINTEXT {
         return Err("Invalid Input: encrypted data exceeds the AES-GCM limit".to_string());
     }
+    let mut gcm = gcm::Stream::new(&key, &nonce);
+    key.zeroize();
     let mut reported = 0u8;
 
     let mut source_hash = Sha256::new();
@@ -204,8 +164,7 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
         let chunk = &mut buf[..n];
         input.read_exact(chunk).map_err(|e| format!("read download: {e}"))?;
         source_hash.update(&*chunk);
-        tag_hash.update_padded(chunk);
-        ctr.apply_keystream(chunk);
+        gcm.decrypt(chunk);
         output_hash.update(&*chunk);
         output.write_all(chunk).map_err(|e| format!("write output: {e}"))?;
         remaining -= n as u64;
@@ -218,10 +177,7 @@ fn decrypt_file_inner(src: &Path, dst: &Path, key_hex: &str, nonce_hex: &str, pr
     input.read_exact(&mut tag).map_err(|e| format!("read download: {e}"))?;
     source_hash.update(tag);
 
-    let expected = gcm_tag(tag_hash, tag_mask, ciphertext_len);
-    // Every byte compared, whatever the first difference.
-    let mismatch = expected.iter().zip(tag).fold(0u8, |acc, (e, t)| acc | (e ^ t));
-    if mismatch != 0 {
+    if !gcm::tags_equal(&gcm.finish(), &tag) {
         return Err("Decryption failed: aead::Error (authentication tag mismatch)".to_string());
     }
 

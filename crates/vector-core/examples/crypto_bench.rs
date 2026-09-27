@@ -88,6 +88,8 @@ fn sweep() {
         println!();
     }
 
+    gcm_sweep();
+
     if !bench::poly_simd_available() {
         println!("\n(no Poly1305 lanes on this CPU)");
         return;
@@ -116,6 +118,58 @@ fn sweep() {
             .collect();
         let wins = ratios.iter().filter(|&&r| r > 1.0).count();
         println!("{len:>6} B   {:>6.3}x   lanes won {wins:>2}/{PAIRS}", median(&mut ratios));
+    }
+}
+
+/// The attachment cipher's two engines, paired per size with a fresh key each call as
+/// production does.
+fn gcm_sweep() {
+    use vector_core::crypto::gcm::bench;
+    const PAIRS: usize = 21;
+    if !bench::stitched_present() {
+        println!("\n(no stitched AES-GCM on this CPU)");
+        return;
+    }
+    println!("\n== AES-256-GCM engines: median generic/stitched time ratio, pairs stitched won of {PAIRS}");
+    println!("   (production uses stitched on this CPU: {})", bench::stitched_in_production());
+    let key = [7u8; 32];
+    let nonce = [1u8; 16];
+    for len in [0usize, 16, 64, 128, 256, 512, 1024, 4096, 65536, 1 << 20] {
+        let pt = vec![0x5au8; len];
+        let mut sealed = pt.clone();
+        let mut s = bench::stream("generic", &key, &nonce).unwrap();
+        s.encrypt(&mut sealed);
+        let tag = s.finish();
+        let iters = (2_000_000 / (len as u64 + 512)).max(16);
+        let mut buf = pt.clone();
+        let mut run = |engine: &str, open: bool| once(iters, &mut || {
+            let mut s = bench::stream(engine, &key, &nonce).unwrap();
+            if open {
+                buf.copy_from_slice(&sealed);
+                s.decrypt(&mut buf);
+                assert_eq!(s.finish(), tag);
+            } else {
+                s.encrypt(&mut buf);
+                black_box(s.finish());
+            }
+        });
+        let mut line = format!("{len:>8} B");
+        for open in [false, true] {
+            run("generic", open);
+            run("stitched", open);
+            let mut ratios: Vec<f64> = (0..PAIRS)
+                .map(|i| if i % 2 == 0 {
+                    let g = run("generic", open);
+                    g / run("stitched", open)
+                } else {
+                    let st = run("stitched", open);
+                    run("generic", open) / st
+                })
+                .collect();
+            let wins = ratios.iter().filter(|&&r| r > 1.0).count();
+            line += &format!("   {} {:>6.3}x ({wins:>2}/{PAIRS})", if open { "open" } else { "seal" }, median(&mut ratios));
+        }
+        println!("{line}");
     }
 }
 

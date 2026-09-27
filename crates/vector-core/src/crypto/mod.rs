@@ -1,4 +1,5 @@
 pub mod chachapoly;
+pub mod gcm;
 pub mod guarded_key;
 pub mod stream;
 pub use chachapoly::{wipe, wipe_vec};
@@ -137,29 +138,27 @@ pub fn generate_encryption_params() -> EncryptionParams {
     params
 }
 
+/// Parse an attachment key and 16-byte nonce from hex. `key_error` names a key of the
+/// wrong length, as encryption and decryption have always reported it.
+pub(crate) fn attachment_params(key_hex: &str, nonce_hex: &str, key_error: &str) -> Result<([u8; 32], [u8; 16]), String> {
+    let mut key_bytes = hex::decode(key_hex).map_err(|e| format!("Invalid key: {}", e))?;
+    let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {}", e))?;
+    let key: Result<[u8; 32], _> = key_bytes.as_slice().try_into();
+    key_bytes.zeroize();
+    let key = key.map_err(|_| key_error.to_string())?;
+    let nonce: [u8; 16] = nonce_bytes.try_into().map_err(|_| "Invalid nonce length".to_string())?;
+    Ok((key, nonce))
+}
+
 /// Encrypt data with AES-256-GCM using a 16-byte nonce (0xChat-compatible).
 pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, String> {
-    use aes::Aes256;
-    use aes_gcm::aead::consts::U16;
-    use aes_gcm::{AeadInOut, AesGcm, KeyInit as AesKeyInit};
-
-    let key_bytes = hex::decode(&params.key).map_err(|e| format!("Invalid key: {}", e))?;
-    let nonce_bytes = hex::decode(&params.nonce).map_err(|e| format!("Invalid nonce: {}", e))?;
-
-    let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
-        .map_err(|_| "Invalid encryption key".to_string())?;
-
-    let nonce_arr: [u8; 16] = nonce_bytes.try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
-    let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
-
+    let (mut key, nonce) = attachment_params(&params.key, &params.nonce, "Invalid encryption key")?;
     // Room for the tag up front: appending it to an exact-size copy would reallocate
     // and move the whole ciphertext a second time.
-    let mut buffer = Vec::with_capacity(data.len() + 16);
+    let mut buffer = Vec::with_capacity(data.len() + gcm::TAG_LEN);
     buffer.extend_from_slice(data);
-    let tag = cipher.encrypt_inout_detached(&nonce, &[], buffer.as_mut_slice().into())
-        .map_err(|_| "Encryption failed".to_string())?;
-
+    let tag = gcm::seal(&key, &nonce, &mut buffer);
+    key.zeroize();
     buffer.extend_from_slice(&tag);
     Ok(buffer)
 }
@@ -173,31 +172,16 @@ pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Re
 /// [`decrypt_data`] in place, for a caller that owns the ciphertext: the plaintext
 /// comes back in the same allocation, so nothing the size of the file is copied.
 pub fn decrypt_data_owned(mut data: Vec<u8>, key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
-    use aes::Aes256;
-    use aes_gcm::aead::consts::U16;
-    use aes_gcm::{AeadInOut, AesGcm, KeyInit as AesKeyInit};
-
-    if data.len() < 16 {
+    if data.len() < gcm::TAG_LEN {
         return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", data.len()));
     }
-
-    let key_bytes = hex::decode(key_hex).map_err(|e| format!("Invalid key: {}", e))?;
-    let nonce_bytes = hex::decode(nonce_hex).map_err(|e| format!("Invalid nonce: {}", e))?;
-
-    let cipher = AesGcm::<Aes256, U16>::new_from_slice(&key_bytes)
-        .map_err(|_| "Invalid decryption key".to_string())?;
-
-    let nonce_arr: [u8; 16] = nonce_bytes.try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
-    let nonce = aes_gcm::Nonce::<U16>::from(nonce_arr);
-    let tag_arr: [u8; 16] = data[data.len() - 16..].try_into()
-        .map_err(|_| "Invalid tag length".to_string())?;
-    let tag = aes_gcm::Tag::<U16>::from(tag_arr);
-
-    data.truncate(data.len() - 16);
-    cipher.decrypt_inout_detached(&nonce, &[], data.as_mut_slice().into(), &tag)
-        .map_err(|e| e.to_string())?;
-
+    let (mut key, nonce) = attachment_params(key_hex, nonce_hex, "Invalid decryption key")?;
+    let body = data.len() - gcm::TAG_LEN;
+    let tag: [u8; gcm::TAG_LEN] = data[body..].try_into().unwrap();
+    data.truncate(body);
+    let opened = gcm::open(&key, &nonce, &mut data, &tag);
+    key.zeroize();
+    opened.map_err(|_| "aead::Error".to_string())?;
     Ok(data)
 }
 

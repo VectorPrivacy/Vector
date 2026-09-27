@@ -54,8 +54,7 @@ serde_json = "1.0"
 
 # Crypto
 aes = "0.9"
-aes-gcm = "0.11"
-# The same cipher streamed over a file: aes-gcm builds on these two.
+# The attachment cipher's generic engine (crypto::gcm) builds on these two.
 ctr = "0.10"
 ghash = "0.6"
 argon2 = "0.5.3"
@@ -112,7 +111,8 @@ default = []
 tor = ["dep:arti-client", "dep:tor-rtcompat", "dep:tokio-util", "dep:tor-circmgr", "dep:tor-dirmgr", "dep:tor-linkspec", "dep:tor-guardmgr"]
 
 [dev-dependencies]
-# Reference oracles for the differential tests of crypto::chachapoly.
+# Reference oracles for the differential tests of crypto::chachapoly and crypto::gcm.
+aes-gcm = "0.11"
 chacha20poly1305 = "0.10.1"
 poly1305 = "0.8"
 tempfile = "3"
