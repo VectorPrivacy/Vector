@@ -221,6 +221,20 @@ pub(crate) fn set_test_signer(signer: Option<ActiveSigner>) {
     }
 }
 
+/// Unwrap a NIP-59 gift wrap with the active session's signer. A local key opens it
+/// under one vault read; remote signers go through their round-trips.
+pub async fn unwrap_gift_wrap(gift_wrap: &Event) -> Result<UnwrappedGift, String> {
+    #[cfg(test)]
+    let overridden = TEST_SIGNER.read().is_ok_and(|g| g.is_some());
+    #[cfg(not(test))]
+    let overridden = false;
+    if !overridden && signer_kind() == SignerKind::Local {
+        return crate::crypto::GuardedSigner::unwrap_gift_wrap(gift_wrap).map_err(|e| e.to_string());
+    }
+    let signer = active_signer()?;
+    UnwrappedGift::from_gift_wrap_async(&signer, gift_wrap).await.map_err(|e| e.to_string())
+}
+
 /// Resolve the active session's signer.
 ///
 /// Fails CLOSED on identity mismatch: a remote-signer account's vault holds its

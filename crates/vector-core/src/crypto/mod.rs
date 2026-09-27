@@ -958,23 +958,19 @@ mod at_rest_batch_tests {
         ]
     }
 
-    #[tokio::test]
-    async fn a_batch_answers_every_row_as_maybe_decrypt_does() {
+    #[test]
+    fn a_batch_answers_every_row_as_maybe_decrypt_does() {
+        use futures_util::FutureExt;
         let key = [0x55u8; 32];
-        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-        crate::state::ENCRYPTION_KEY.set(key, &[]);
         let rows = rows(&key);
         for enabled in [true, false] {
-            crate::state::set_encryption_enabled(enabled);
-            let mut expected = Vec::new();
-            for row in rows.clone() {
-                expected.push(maybe_decrypt(row).await);
-            }
-            let batched = open_batch(|at_rest| rows.clone().into_iter().map(|r| at_rest.open(r)).collect::<Vec<_>>());
-            assert_eq!(batched, expected, "encryption enabled: {enabled}");
+            with_vault(Some(key), enabled, || {
+                // maybe_decrypt never suspends, so it completes on the first poll.
+                let expected: Vec<_> = rows.iter().map(|r| maybe_decrypt(r.clone()).now_or_never().unwrap()).collect();
+                let batched = open_batch(|at_rest| rows.iter().map(|r| at_rest.open(r.clone())).collect::<Vec<_>>());
+                assert_eq!(batched, expected, "encryption enabled: {enabled}");
+            });
         }
-        crate::state::set_encryption_enabled(false);
-        crate::state::ENCRYPTION_KEY.clear(&[]);
     }
 
     #[test]

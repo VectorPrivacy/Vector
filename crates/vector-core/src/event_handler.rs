@@ -388,13 +388,7 @@ pub async fn prepare_event(
 
     // Unwrap gift wrap (CPU-bound ECDH + ChaCha20Poly1305)
     let unwrap_start = std::time::Instant::now();
-    let signer = match crate::signer::active_signer() {
-        Ok(s) => s,
-        Err(_) => return PreparedEvent::ErrorSkip {
-            wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
-        },
-    };
-    let (rumor, sender) = match UnwrappedGift::from_gift_wrap_async(&signer, &event).await {
+    let (rumor, sender) = match crate::signer::unwrap_gift_wrap(&event).await {
         Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
         Err(_) => return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,

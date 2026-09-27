@@ -214,7 +214,13 @@ async fn main() {
         black_box(UnwrappedGift::from_gift_wrap(&guarded, &wrap).unwrap());
     }
     let g_ns = t.elapsed().as_nanos() as f64 / n as f64;
-    println!("{:<52} {:>10.2} µs", "unwrap via active_signer + GuardedSigner (prod)", g_ns / 1000.0);
+    println!("{:<52} {:>10.2} µs", "unwrap via active_signer + GuardedSigner (old)", g_ns / 1000.0);
+    let t = Instant::now();
+    for _ in 0..n {
+        black_box(vector_core::signer::unwrap_gift_wrap(&wrap).await.unwrap());
+    }
+    let p_ns = t.elapsed().as_nanos() as f64 / n as f64;
+    println!("{:<52} {:>10.2} µs", "unwrap via signer::unwrap_gift_wrap (prod)", p_ns / 1000.0);
 
     println!("-- unwrap breakdown (raw keys)");
     let seal = Event::from_json(nostr_sdk::prelude::nip44::decrypt(me.secret_key(), &wrap.pubkey, &wrap.content).unwrap()).unwrap();
