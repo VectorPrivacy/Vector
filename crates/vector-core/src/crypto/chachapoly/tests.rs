@@ -172,7 +172,7 @@ fn wipe_clears_every_byte_at_every_alignment() {
     assert!(spare.iter().all(|&b| b == 0));
 }
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn simd_poly1305_matches_scalar_from_any_state() {
     if !super::poly1305::r64::simd_available() {

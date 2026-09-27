@@ -420,7 +420,7 @@ pub(super) enum Backend {
     Sse2,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     Avx2,
-    /// aarch64 production policy: picks among the three below by blocks wanted.
+    /// aarch64 production policy: picks among `Portable` and the three below by blocks wanted.
     #[cfg(target_arch = "aarch64")]
     Neon,
     #[cfg(target_arch = "aarch64")]
@@ -431,13 +431,7 @@ pub(super) enum Backend {
     Neon6,
 }
 
-/// Largest block count the two-block scalar path serves on aarch64. 0 until an
-/// on-device sweep (`crypto_bench sweep`) proves a crossover.
-#[cfg(target_arch = "aarch64")]
-const SCALAR2_MAX_BLOCKS: usize = 0;
-/// Smallest block count the NEON+scalar hybrid serves on aarch64; off until measured.
-#[cfg(target_arch = "aarch64")]
-const NEON6_MIN_BLOCKS: usize = usize::MAX;
+
 
 impl Backend {
     #[inline]
@@ -491,14 +485,17 @@ impl Backend {
                     }
                 }
             }
+            // Per pass, by blocks still wanted, from an M4 Max sweep (`crypto_bench sweep`):
+            // one block alone, two interleaved on the integer units (1.4x over a NEON
+            // pass), three or four in one NEON pass, five and up in the 4+2 hybrid
+            // (1.25-1.45x). Cortex cores may place these differently.
             #[cfg(target_arch = "aarch64")]
             Backend::Neon => {
-                let pick = if want <= SCALAR2_MAX_BLOCKS {
-                    Backend::Scalar2
-                } else if want >= NEON6_MIN_BLOCKS {
-                    Backend::Neon6
-                } else {
-                    Backend::Neon4
+                let pick = match want {
+                    0 | 1 => Backend::Portable,
+                    2 => Backend::Scalar2,
+                    3 | 4 => Backend::Neon4,
+                    _ => Backend::Neon6,
                 };
                 pick.keystream(st, counter, want, out)
             }

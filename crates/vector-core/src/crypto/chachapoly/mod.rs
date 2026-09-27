@@ -266,7 +266,7 @@ pub mod bench {
     /// Poly1305 over `data` (a nonzero multiple of 64 bytes) with the lanes, or None
     /// where this CPU has none.
     pub fn poly1305_simd(key: &[u8; 32], data: &[u8]) -> Option<[u8; 16]> {
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        #[cfg(target_arch = "x86_64")]
         if r64::simd_available() && !data.is_empty() && data.len().is_multiple_of(64) {
             let mut p = Poly1305::new(key);
             // SAFETY: lanes available; the length is a nonzero multiple of 64.

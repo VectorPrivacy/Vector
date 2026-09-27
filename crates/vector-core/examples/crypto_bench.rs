@@ -97,7 +97,7 @@ fn sweep() {
     println!("   (ChaCha20 on the production backend, {chacha})");
     let off = bench::cipher(&key, chacha, usize::MAX).unwrap();
     let on = bench::cipher(&key, chacha, 64).unwrap();
-    for len in [256usize, 320, 384, 448, 512, 576, 640, 704, 768, 896, 1024, 1536, 2048, 4096, 16384, 65536] {
+    for len in [256usize, 384, 512, 640, 704, 768, 896, 960, 1024, 1088, 1152, 1280, 1408, 1536, 2048, 4096, 16384, 65536] {
         let mut buf = vec![0x61u8; len];
         let iters = (2_000_000 / (len as u64 + 256)).max(32);
         let seal = |c: &vector_core::crypto::chachapoly::ChaCha20Poly1305, buf: &mut Vec<u8>| {
