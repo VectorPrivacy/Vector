@@ -1,12 +1,14 @@
+pub mod chachapoly;
 pub mod guarded_key;
 pub mod stream;
+pub use chachapoly::{wipe, wipe_vec};
 pub use guarded_key::GuardedKey;
 
 mod signer;
 pub use signer::GuardedSigner;
 
 use argon2::Argon2;
-use chacha20poly1305::{aead::Aead, ChaCha20Poly1305, KeyInit};
+use chachapoly::{ChaCha20Poly1305, NONCE_LEN, TAG_LEN};
 use zeroize::Zeroize;
 
 /// Derive a 32-byte key from a password using Argon2id.
@@ -31,45 +33,45 @@ pub async fn hash_pass(password: &str) -> [u8; 32] {
     }).await.unwrap()
 }
 
-/// Encrypt a string with the global ENCRYPTION_KEY (ChaCha20-Poly1305).
-pub fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> Result<String, String> {
-    use chacha20poly1305::aead::OsRng;
-    use chacha20poly1305::AeadCore;
-
-    let cipher = ChaCha20Poly1305::new(key.into());
-    let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-
-    let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes())
-        .map_err(|e| format!("Encryption failed: {}", e))?;
-
-    // SIMD hex-encode nonce || ciphertext in one pass (matches maybe_encrypt_inner) —
-    // one buffer + one encode instead of two scalar hex::encode calls + a concat.
-    let mut buffer = Vec::with_capacity(nonce.len() + ciphertext.len());
-    buffer.extend_from_slice(&nonce);
-    buffer.extend_from_slice(&ciphertext);
-    Ok(crate::simd::hex::bytes_to_hex_string(&buffer))
+/// Seal `plaintext` as `nonce(12) || ciphertext || tag(16)` under a fresh nonce.
+fn seal_framed(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, chachapoly::Error> {
+    use rand::Rng;
+    let nonce: [u8; NONCE_LEN] = rand::thread_rng().gen();
+    let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + TAG_LEN);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(plaintext);
+    let tag = ChaCha20Poly1305::new(key).seal_in_place(&nonce, &[], &mut out[NONCE_LEN..])?;
+    out.extend_from_slice(&tag);
+    Ok(out)
 }
 
-/// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext with a key. Mirrors
-/// `maybe_decrypt_inner`'s fast path: SIMD hex decode, no plaintext copy, and
-/// `from_utf8_unchecked`.
+/// Open `nonce || ciphertext || tag`, leaving the plaintext at the front of the same allocation.
+fn open_framed(mut framed: Vec<u8>, key: &[u8; 32]) -> Option<Vec<u8>> {
+    let len = ChaCha20Poly1305::new(key).open_framed_in_place(&mut framed).ok()?.len();
+    framed.copy_within(NONCE_LEN..NONCE_LEN + len, 0);
+    framed.truncate(len);
+    Some(framed)
+}
+
+/// Open a hex at-rest string into its plaintext, decrypting inside the decode buffer.
+fn open_hex(hex_data: &str, key: &[u8; 32]) -> Option<String> {
+    let plaintext = open_framed(crate::simd::hex::hex_string_to_bytes(hex_data), key)?;
+    // SAFETY: at-rest text is UTF-8 when sealed, and Poly1305 authenticates it unchanged.
+    Some(unsafe { String::from_utf8_unchecked(plaintext) })
+}
+
+/// Encrypt a string with an explicit key (ChaCha20-Poly1305), hex `nonce || ct || tag`.
+pub fn encrypt_with_key(plaintext: &str, key: &[u8; 32]) -> Result<String, String> {
+    let framed = seal_framed(plaintext.as_bytes(), key).map_err(|e| format!("Encryption failed: {}", e))?;
+    Ok(crate::simd::hex::bytes_to_hex_string(&framed))
+}
+
+/// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext with an explicit key.
 pub fn decrypt_with_key(hex_data: &str, key: &[u8; 32]) -> Result<String, String> {
-    let bytes = crate::simd::hex::hex_string_to_bytes(hex_data);
-    if bytes.len() < 12 {
+    if hex_data.len() < 2 * NONCE_LEN {
         return Err("Ciphertext too short".to_string());
     }
-    let (nonce_bytes, ciphertext) = bytes.split_at(12);
-    let nonce_arr: [u8; 12] = nonce_bytes.try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
-    let nonce = chacha20poly1305::Nonce::from(nonce_arr);
-    let cipher = ChaCha20Poly1305::new(key.into());
-
-    let plaintext = cipher.decrypt(&nonce, ciphertext)
-        .map_err(|_| "Decryption failed (wrong key or corrupted data)".to_string())?;
-
-    // SAFETY: the content was valid UTF-8 when encrypted and Poly1305 authenticates the
-    // ciphertext, so these bytes are exactly what was stored — no re-validation needed.
-    Ok(unsafe { String::from_utf8_unchecked(plaintext) })
+    open_hex(hex_data, key).ok_or_else(|| "Decryption failed (wrong key or corrupted data)".to_string())
 }
 
 /// Check if encryption is enabled in the database.
@@ -130,8 +132,8 @@ pub fn generate_encryption_params() -> EncryptionParams {
 /// Encrypt data with AES-256-GCM using a 16-byte nonce (0xChat-compatible).
 pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, String> {
     use aes::Aes256;
-    use aes::cipher::typenum::U16;
-    use aes_gcm::{AesGcm, AeadInPlace, KeyInit as AesKeyInit};
+    use aes_gcm::aead::consts::U16;
+    use aes_gcm::{AeadInOut, AesGcm, KeyInit as AesKeyInit};
 
     let key_bytes = hex::decode(&params.key).map_err(|e| format!("Invalid key: {}", e))?;
     let nonce_bytes = hex::decode(&params.nonce).map_err(|e| format!("Invalid nonce: {}", e))?;
@@ -147,7 +149,7 @@ pub fn encrypt_data(data: &[u8], params: &EncryptionParams) -> Result<Vec<u8>, S
     // and move the whole ciphertext a second time.
     let mut buffer = Vec::with_capacity(data.len() + 16);
     buffer.extend_from_slice(data);
-    let tag = cipher.encrypt_in_place_detached(&nonce, &[], &mut buffer)
+    let tag = cipher.encrypt_inout_detached(&nonce, &[], buffer.as_mut_slice().into())
         .map_err(|_| "Encryption failed".to_string())?;
 
     buffer.extend_from_slice(&tag);
@@ -164,8 +166,8 @@ pub fn decrypt_data(encrypted_data: &[u8], key_hex: &str, nonce_hex: &str) -> Re
 /// comes back in the same allocation, so nothing the size of the file is copied.
 pub fn decrypt_data_owned(mut data: Vec<u8>, key_hex: &str, nonce_hex: &str) -> Result<Vec<u8>, String> {
     use aes::Aes256;
-    use aes::cipher::typenum::U16;
-    use aes_gcm::{AesGcm, AeadInPlace, KeyInit as AesKeyInit};
+    use aes_gcm::aead::consts::U16;
+    use aes_gcm::{AeadInOut, AesGcm, KeyInit as AesKeyInit};
 
     if data.len() < 16 {
         return Err(format!("Invalid Input: encrypted data too small ({} bytes, minimum 16 bytes required for authentication tag)", data.len()));
@@ -185,7 +187,7 @@ pub fn decrypt_data_owned(mut data: Vec<u8>, key_hex: &str, nonce_hex: &str) -> 
     let tag = aes_gcm::Tag::<U16>::from(tag_arr);
 
     data.truncate(data.len() - 16);
-    cipher.decrypt_in_place_detached(&nonce, &[], &mut data, &tag)
+    cipher.decrypt_inout_detached(&nonce, &[], data.as_mut_slice().into(), &tag)
         .map_err(|e| e.to_string())?;
 
     Ok(data)
@@ -643,9 +645,6 @@ pub fn mime_from_magic_bytes(bytes: &[u8]) -> &'static str {
 // Conditional Encryption — maybe_encrypt / maybe_decrypt
 // ============================================================================
 
-use rand::Rng;
-use chacha20poly1305::Nonce;
-
 /// Check if a string looks like encrypted content (hex-encoded ChaCha20 output).
 /// Minimum (empty message): 12 + 0 + 16 = 28 bytes = 56 hex chars.
 #[inline]
@@ -731,21 +730,9 @@ pub async fn maybe_encrypt_inner(mut input: String, password: Option<String>) ->
         Some(password) => hash_pass(&password).await,
     };
 
-    let mut rng = rand::thread_rng();
-    let nonce_bytes: [u8; 12] = rng.gen();
-
-    let cipher = ChaCha20Poly1305::new_from_slice(&key)
-        .expect("Key should be valid");
-    let nonce: Nonce = nonce_bytes.into();
-
-    let ciphertext = cipher
-        .encrypt(&nonce, input.as_bytes())
-        .expect("Encryption should not fail");
-    input.zeroize();
-
-    let mut buffer = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
-    buffer.extend_from_slice(&nonce_bytes);
-    buffer.extend_from_slice(&ciphertext);
+    let framed = seal_framed(input.as_bytes(), &key).expect("Encryption should not fail");
+    // SAFETY: wiping leaves the String empty, which is valid UTF-8.
+    wipe_vec(unsafe { input.as_mut_vec() });
 
     if !crate::state::ENCRYPTION_KEY.has_key() {
         crate::state::ENCRYPTION_KEY.set(key, &[&crate::state::MY_SECRET_KEY]);
@@ -753,7 +740,7 @@ pub async fn maybe_encrypt_inner(mut input: String, password: Option<String>) ->
 
     key.zeroize();
 
-    crate::simd::hex::bytes_to_hex_string(&buffer)
+    crate::simd::hex::bytes_to_hex_string(&framed)
 }
 
 /// Decrypt a hex-encoded ChaCha20-Poly1305 ciphertext using ENCRYPTION_KEY vault.
@@ -770,27 +757,9 @@ pub async fn maybe_decrypt_inner(ciphertext: String, password: Option<String>) -
         }
     };
 
-    let encrypted_data = crate::simd::hex::hex_string_to_bytes(ciphertext.as_str());
-    if encrypted_data.len() < 12 {
+    let Some(plaintext) = open_hex(&ciphertext, &key) else {
         key.zeroize();
         return Err(());
-    }
-
-    let (nonce_bytes, actual_ciphertext) = encrypted_data.split_at(12);
-
-    let cipher = match ChaCha20Poly1305::new_from_slice(&key) {
-        Ok(c) => c,
-        Err(_) => { key.zeroize(); return Err(()) }
-    };
-
-    let nonce_arr: [u8; 12] = match nonce_bytes.try_into() {
-        Ok(n) => n,
-        Err(_) => { key.zeroize(); return Err(()) }
-    };
-    let nonce: Nonce = nonce_arr.into();
-    let plaintext = match cipher.decrypt(&nonce, actual_ciphertext) {
-        Ok(pt) => pt,
-        Err(_) => { key.zeroize(); return Err(()) }
     };
 
     if has_password && !crate::state::ENCRYPTION_KEY.has_key() {
@@ -798,9 +767,7 @@ pub async fn maybe_decrypt_inner(ciphertext: String, password: Option<String>) -
     }
 
     key.zeroize();
-
-    // SAFETY: plaintext was originally valid UTF-8, authenticated decryption ensures integrity
-    unsafe { Ok(String::from_utf8_unchecked(plaintext)) }
+    Ok(plaintext)
 }
 
 /// Conditionally encrypt content based on encryption_enabled setting.
@@ -815,23 +782,22 @@ pub async fn maybe_encrypt(input: String) -> String {
 /// Conditionally decrypt content. Handles crash recovery — if decryption fails
 /// on non-encrypted-looking content, returns it as-is.
 pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
-    if crate::state::is_encryption_enabled_fast() {
-        match maybe_decrypt_inner(input.clone(), None).await {
-            Ok(decrypted) => Ok(decrypted),
-            Err(_) => {
-                if looks_encrypted(&input) { Err(()) } else { Ok(input) }
-            }
-        }
-    } else {
-        if looks_encrypted(&input) {
-            match maybe_decrypt_inner(input.clone(), None).await {
-                Ok(decrypted) => Ok(decrypted),
-                Err(_) => Ok(input),
-            }
-        } else {
-            Ok(input)
-        }
+    // Only lowercase hex of at least nonce+tag can be our ciphertext, so anything
+    // else skips the vault read.
+    if !looks_encrypted(&input) {
+        return Ok(input);
     }
+    if let Some(plaintext) = open_with_vault(&input) {
+        return Ok(plaintext);
+    }
+    if crate::state::is_encryption_enabled_fast() { Err(()) } else { Ok(input) }
+}
+
+fn open_with_vault(hex_data: &str) -> Option<String> {
+    let mut key = crate::state::ENCRYPTION_KEY.get()?;
+    let out = open_hex(hex_data, &key);
+    key.zeroize();
+    out
 }
 
 // ============================================================================
@@ -847,31 +813,15 @@ pub async fn maybe_decrypt(input: String) -> Result<String, ()> {
 
 /// ChaCha20-Poly1305 encrypt raw bytes with an explicit key → `nonce(12) || ct || tag(16)`.
 pub fn encrypt_blob_with_key(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
-    use rand::Rng;
-    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
-    let nonce_bytes: [u8; 12] = rand::thread_rng().gen();
-    let nonce = chacha20poly1305::Nonce::from(nonce_bytes);
-    let ct = cipher
-        .encrypt(&nonce, plaintext)
-        .map_err(|e| format!("blob encryption failed: {}", e))?;
-    let mut out = Vec::with_capacity(12 + ct.len());
-    out.extend_from_slice(&nonce_bytes);
-    out.extend_from_slice(&ct);
-    Ok(out)
+    seal_framed(plaintext, key).map_err(|e| format!("blob encryption failed: {}", e))
 }
 
 /// ChaCha20-Poly1305 decrypt `nonce(12) || ct || tag(16)` with an explicit key.
 pub fn decrypt_blob_with_key(stored: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, String> {
-    if stored.len() < 12 + 16 {
+    if stored.len() < NONCE_LEN + TAG_LEN {
         return Err("blob too short to be ciphertext".to_string());
     }
-    let cipher = ChaCha20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
-    let (nonce_bytes, ct) = stored.split_at(12);
-    let nonce_arr: [u8; 12] = nonce_bytes.try_into().map_err(|_| "bad nonce".to_string())?;
-    let nonce = chacha20poly1305::Nonce::from(nonce_arr);
-    cipher
-        .decrypt(&nonce, ct)
-        .map_err(|_| "blob decryption failed (wrong key or corrupted)".to_string())
+    open_framed(stored.to_vec(), key).ok_or_else(|| "blob decryption failed (wrong key or corrupted)".to_string())
 }
 
 /// Encrypt a secret key BLOB for at-rest storage. Off → unchanged. Enabled but
@@ -933,6 +883,36 @@ pub fn maybe_decrypt_text(stored: &str) -> String {
             out
         }
         None => stored.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod attachment_cipher_tests {
+    use super::*;
+
+    /// Ciphertexts sealed by aes-gcm 0.10.3: files already on Blossom servers must keep opening.
+    const PINNED: [(usize, &str); 6] = [
+        (0, "022f841c702b66b0bec8111f67de221d"),
+        (1, "292017643f9281af327f9487e3df3e3d7c"),
+        (15, "29a932a407ebe042f8dc56e1ba4ae84d9c12aa8198954368a48d9deebb7ab9"),
+        (16, "29a932a407ebe042f8dc56e1ba4ae8fc890ce0e3fa7321a07ba4f5bedc8e26e7"),
+        (17, "29a932a407ebe042f8dc56e1ba4ae8fcf1bed63597cf6053bc96b53c32185e0ecd"),
+        (100, "29a932a407ebe042f8dc56e1ba4ae8fcf13fc2f1f1a2cc0856a0d376defbf35bef7b179b6ad5b2a9f52b19922f7cf2bc4960c60abb73d0a56dabe7c406cb1555ca5427dad72a529c7f8f0c592ce2d0c49b46f9f9011bda808e760db92ad6ecc171a88a1ce072e4f68ec1b5cc3a5e23c37c645be7"),
+    ];
+
+    #[test]
+    fn attachment_cipher_matches_pinned_vectors() {
+        let params = EncryptionParams {
+            key: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string(),
+            nonce: "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf".to_string(),
+        };
+        for (len, want) in PINNED {
+            let pt: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+            let sealed = encrypt_data(&pt, &params).unwrap();
+            assert_eq!(hex::encode(&sealed), want, "seal len={len}");
+            let ct = hex::decode(want).unwrap();
+            assert_eq!(decrypt_data(&ct, &params.key, &params.nonce).unwrap(), pt, "open len={len}");
+        }
     }
 }
 

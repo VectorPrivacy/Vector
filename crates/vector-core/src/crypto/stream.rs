@@ -9,7 +9,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
-use aes::cipher::{BlockEncrypt, KeyInit, KeyIvInit, StreamCipher};
+use aes::cipher::{BlockCipherEncrypt, KeyInit, KeyIvInit, StreamCipher};
 use aes::Aes256;
 use ghash::universal_hash::UniversalHash;
 use ghash::GHash;

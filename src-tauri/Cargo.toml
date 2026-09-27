@@ -44,8 +44,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.aes]
 opt-level = 3
-[profile.dev.package.chacha20poly1305]
-opt-level = 3
 [profile.dev.package.chacha20]
 opt-level = 3
 [profile.dev.package.sha2]
@@ -164,11 +162,8 @@ semver = "1"
 # previews fetching HTML). `socks` is required for the Tor proxy — without it
 # reqwest accepts a `socks5://` Proxy URL but silently does nothing.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "socks", "http2"] }
-aes = "0.8.4"
-aes-gcm = "0.10.3"
 sha2 = "0.10.9"
 argon2 = "0.5.3"
-chacha20poly1305 = "0.10.1"
 tauri-plugin-opener = "2.5.3"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-dialog = "2.6.0"

@@ -6,12 +6,6 @@
 //! - encrypt_with_key/decrypt_with_key for re-keying flows
 //! - Re-exports for backward compatibility
 
-use ::rand::Rng;
-use crate::util::{bytes_to_hex_string, hex_string_to_bytes};
-use chacha20poly1305::{
-    aead::Aead,
-    ChaCha20Poly1305, KeyInit, Nonce
-};
 use zeroize::Zeroize;
 
 // Re-export from vector-core. `is_encryption_enabled` is intentionally NOT
@@ -33,46 +27,12 @@ pub async fn hash_pass(mut password: String) -> [u8; 32] {
 
 /// Encrypt with an explicit key (for re-keying — doesn't touch ENCRYPTION_KEY global).
 pub fn encrypt_with_key(input: &str, key: &[u8; 32]) -> String {
-    let mut rng = ::rand::thread_rng();
-    let nonce_bytes: [u8; 12] = rng.gen();
-
-    let cipher = ChaCha20Poly1305::new_from_slice(key)
-        .expect("Key should be valid");
-    let nonce: Nonce = nonce_bytes.into();
-    let ciphertext = cipher
-        .encrypt(&nonce, input.as_bytes())
-        .expect("Encryption should not fail");
-
-    let mut buffer = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
-    buffer.extend_from_slice(&nonce_bytes);
-    buffer.extend_from_slice(&ciphertext);
-
-    bytes_to_hex_string(&buffer)
+    vector_core::crypto::encrypt_with_key(input, key).expect("Encryption should not fail")
 }
 
 /// Decrypt with an explicit key (for re-keying — doesn't touch ENCRYPTION_KEY global).
 pub fn decrypt_with_key(ciphertext: &str, key: &[u8; 32]) -> Result<String, ()> {
-    let encrypted_data = hex_string_to_bytes(ciphertext);
-    if encrypted_data.len() < 12 {
-        return Err(());
-    }
-
-    let (nonce_bytes, actual_ciphertext) = encrypted_data.split_at(12);
-
-    let cipher = match ChaCha20Poly1305::new_from_slice(key) {
-        Ok(c) => c,
-        Err(_) => return Err(()),
-    };
-
-    let nonce_arr: [u8; 12] = nonce_bytes.try_into().map_err(|_| ())?;
-    let nonce: Nonce = nonce_arr.into();
-    let plaintext = match cipher.decrypt(&nonce, actual_ciphertext) {
-        Ok(pt) => pt,
-        Err(_) => return Err(()),
-    };
-
-    // SAFETY: plaintext was originally valid UTF-8, authenticated decryption ensures integrity
-    unsafe { Ok(String::from_utf8_unchecked(plaintext)) }
+    vector_core::crypto::decrypt_with_key(ciphertext, key).map_err(|_| ())
 }
 
 // Backward-compat aliases — these now delegate to vector-core
