@@ -50,6 +50,24 @@ async fn main() {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    {
+        use vector_core::crypto::chachapoly::bench::{poly1305_avx2, poly1305_scalar, AVX2_MIN};
+        println!("-- Poly1305 alone, scalar vs AVX2 lanes (the AEAD switches at {AVX2_MIN} B, set from the full AEAD)");
+        let key = [0x5au8; 32];
+        let data = vec![0xa7u8; 4096];
+        if poly1305_avx2(&key, &data[..64]).is_some() {
+            for len in (256..=768).step_by(64).chain([1024, 4096]) {
+                let d = &data[..len];
+                let s = bench(&format!("  scalar {len} B"), 100_000, || { black_box(poly1305_scalar(&key, black_box(d))); });
+                let a = bench(&format!("  avx2   {len} B"), 100_000, || { black_box(poly1305_avx2(&key, black_box(d))); });
+                println!("  -> {:.2}x{}", s / a, if a < s { "  (avx2 wins)" } else { "" });
+            }
+        } else {
+            println!("  no AVX2 on this CPU");
+        }
+    }
+
     println!("-- attachments: AES-256-GCM, 16-byte nonce (hardware AES: {})", aes::hardware_accelerated());
     {
         let params = vector_core::crypto::generate_encryption_params();

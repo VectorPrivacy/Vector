@@ -9,12 +9,17 @@
 pub(super) mod r64 {
     use zeroize::Zeroize;
 
+    /// Shortest input for which the 4-lane AVX2 path makes the whole AEAD faster, measured
+    /// as interleaved same-process pairs on a Cascade Lake Xeon: 704 bytes won 23 of 31
+    /// twice, 512-640 was a coin flip. Poly1305 alone breaks even earlier (~448), but
+    /// right after the ChaCha20 pass the lanes pay more to start.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) const AVX2_MIN: usize = 704;
+
     pub(crate) struct Poly1305 {
         r0: u64,
         r1: u64,
-        h0: u64,
-        h1: u64,
-        h2: u64,
+        h: [u64; 3],
         s: [u64; 2],
     }
 
@@ -23,15 +28,49 @@ pub(super) mod r64 {
         u64::from_le_bytes(b[..8].try_into().unwrap())
     }
 
+    /// `h * r`, partially reduced: the result is below 2^130 plus a few units of p.
+    #[inline(always)]
+    fn mul(h: [u64; 3], r0: u64, r1: u64) -> [u64; 3] {
+        // r1's low two bits are clamped to zero, so r1 * 5/4 is exact.
+        let s1 = r1 + (r1 >> 2);
+        let [h0, h1, h2] = h;
+        let d0 = (h0 as u128) * (r0 as u128) + (h1 as u128) * (s1 as u128);
+        let mut d1 = (h0 as u128) * (r1 as u128) + (h1 as u128) * (r0 as u128) + (h2.wrapping_mul(s1)) as u128;
+        let mut h2 = h2.wrapping_mul(r0);
+        let h0 = d0 as u64;
+        d1 += d0 >> 64;
+        let h1 = d1 as u64;
+        h2 = h2.wrapping_add((d1 >> 64) as u64);
+
+        // Fold bits ≥ 2^130 back in as ×5.
+        let c = (h2 >> 2) + (h2 & !3);
+        h2 &= 3;
+        let (h0, c0) = h0.overflowing_add(c);
+        let (h1, c1) = h1.overflowing_add(c0 as u64);
+        [h0, h1, h2 + c1 as u64]
+    }
+
+    /// Canonical `h mod p` for a partially reduced `h`, without branching on it.
+    #[inline(always)]
+    fn reduce(h: [u64; 3]) -> [u64; 3] {
+        let [h0, h1, h2] = h;
+        let t = h0 as u128 + 5;
+        let g0 = t as u64;
+        let t = h1 as u128 + (t >> 64);
+        let g1 = t as u64;
+        let g2 = h2.wrapping_add((t >> 64) as u64);
+        // h + 5 - 2^130 ≥ 0 ⇔ h ≥ p.
+        let mask = 0u64.wrapping_sub(g2 >> 2);
+        [(h0 & !mask) | (g0 & mask), (h1 & !mask) | (g1 & mask), (h2 & !mask) | ((g2 & 3) & mask)]
+    }
+
     impl Poly1305 {
         #[inline]
         pub(crate) fn new(key: &[u8; 32]) -> Self {
             Self {
                 r0: le64(&key[0..]) & 0x0fff_fffc_0fff_ffff,
                 r1: le64(&key[8..]) & 0x0fff_fffc_0fff_fffc,
-                h0: 0,
-                h1: 0,
-                h2: 0,
+                h: [0; 3],
                 s: [le64(&key[16..]), le64(&key[24..])],
             }
         }
@@ -41,46 +80,27 @@ pub(super) mod r64 {
         pub(crate) fn blocks(&mut self, data: &[u8]) {
             debug_assert!(data.len().is_multiple_of(16));
             let (r0, r1) = (self.r0, self.r1);
-            // r1's low two bits are clamped to zero, so r1 * 5/4 is exact.
-            let s1 = r1 + (r1 >> 2);
-            let (mut h0, mut h1, mut h2) = (self.h0, self.h1, self.h2);
-
+            let mut h = self.h;
             for m in data.chunks_exact(16) {
-                let d0 = h0 as u128 + le64(&m[0..]) as u128;
-                h0 = d0 as u64;
-                let d1 = h1 as u128 + le64(&m[8..]) as u128 + (d0 >> 64);
-                h1 = d1 as u64;
-                h2 = h2.wrapping_add((d1 >> 64) as u64 + 1);
-
-                let d0 = (h0 as u128) * (r0 as u128) + (h1 as u128) * (s1 as u128);
-                let mut d1 = (h0 as u128) * (r1 as u128)
-                    + (h1 as u128) * (r0 as u128)
-                    + (h2.wrapping_mul(s1)) as u128;
-                h2 = h2.wrapping_mul(r0);
-
-                h0 = d0 as u64;
-                d1 += d0 >> 64;
-                h1 = d1 as u64;
-                h2 = h2.wrapping_add((d1 >> 64) as u64);
-
-                // Fold bits ≥ 2^130 back in as ×5.
-                let c = (h2 >> 2) + (h2 & !3);
-                h2 &= 3;
-                let (t0, c0) = h0.overflowing_add(c);
-                h0 = t0;
-                let (t1, c1) = h1.overflowing_add(c0 as u64);
-                h1 = t1;
-                h2 += c1 as u64;
+                let d0 = h[0] as u128 + le64(&m[0..]) as u128;
+                let d1 = h[1] as u128 + le64(&m[8..]) as u128 + (d0 >> 64);
+                h = mul([d0 as u64, d1 as u64, h[2].wrapping_add((d1 >> 64) as u64 + 1)], r0, r1);
             }
-
-            self.h0 = h0;
-            self.h1 = h1;
-            self.h2 = h2;
+            self.h = h;
         }
 
         /// Absorb `data` zero-padded to a 16-byte boundary.
         #[inline]
         pub(crate) fn padded(&mut self, data: &[u8]) {
+            #[allow(unused_mut)]
+            let mut data = data;
+            #[cfg(target_arch = "x86_64")]
+            if data.len() >= AVX2_MIN && std::arch::is_x86_feature_detected!("avx2") {
+                let n = data.len() & !63;
+                // SAFETY: AVX2 was just detected; `n` is a nonzero multiple of 64.
+                unsafe { self.blocks_avx2(&data[..n]) };
+                data = &data[n..];
+            }
             let full = data.len() & !15;
             self.blocks(&data[..full]);
             if full != data.len() {
@@ -90,19 +110,31 @@ pub(super) mod r64 {
             }
         }
 
+        /// r^1..r^4 as 26-bit limbs. Partially reduced is enough: a top limb under
+        /// 2^27 keeps every lane product under 2^56.
+        #[cfg(target_arch = "x86_64")]
+        fn powers(&self) -> [[u64; 5]; 4] {
+            let r = [self.r0, self.r1, 0];
+            let mut p = [r; 4];
+            for i in 1..4 {
+                p[i] = mul(p[i - 1], self.r0, self.r1);
+            }
+            let out = p.map(super::avx2::to_limbs);
+            p.zeroize();
+            out
+        }
+
+        /// SAFETY: requires AVX2; `data.len()` must be a nonzero multiple of 64.
+        #[cfg(target_arch = "x86_64")]
+        pub(crate) unsafe fn blocks_avx2(&mut self, data: &[u8]) {
+            let mut pw = self.powers();
+            self.h = super::avx2::blocks(self.h, &pw, data);
+            pw.zeroize();
+        }
+
         #[inline]
         pub(crate) fn finish(mut self) -> [u8; 16] {
-            let (h0, h1, h2) = (self.h0, self.h1, self.h2);
-            // h + 5 - 2^130 ≥ 0 ⇔ h ≥ p; select without branching.
-            let t = h0 as u128 + 5;
-            let g0 = t as u64;
-            let t = h1 as u128 + (t >> 64);
-            let g1 = t as u64;
-            let g2 = h2.wrapping_add((t >> 64) as u64);
-            let mask = 0u64.wrapping_sub(g2 >> 2);
-            let h0 = (h0 & !mask) | (g0 & mask);
-            let h1 = (h1 & !mask) | (g1 & mask);
-
+            let [h0, h1, _] = reduce(self.h);
             let t = h0 as u128 + self.s[0] as u128;
             let o0 = t as u64;
             let o1 = (h1 as u128 + self.s[1] as u128 + (t >> 64)) as u64;
@@ -118,9 +150,7 @@ pub(super) mod r64 {
         fn zeroize_state(&mut self) {
             self.r0.zeroize();
             self.r1.zeroize();
-            self.h0.zeroize();
-            self.h1.zeroize();
-            self.h2.zeroize();
+            self.h.zeroize();
             self.s.zeroize();
         }
     }
@@ -129,6 +159,164 @@ pub(super) mod r64 {
         fn drop(&mut self) {
             self.zeroize_state();
         }
+    }
+}
+
+/// Four Poly1305 lanes in radix 2^26, one 64-bit lane per block. Lane j takes blocks
+/// j, j+4, … and multiplies by r^4 per step; the last step multiplies each lane by
+/// the power that lands its blocks where the serial evaluation would, so the lanes
+/// simply sum.
+#[cfg(target_arch = "x86_64")]
+pub(super) mod avx2 {
+    use core::arch::x86_64::*;
+
+    const M26: u64 = 0x3ff_ffff;
+
+    /// A partially reduced 130-bit value to five 26-bit limbs.
+    #[inline(always)]
+    pub(crate) fn to_limbs(h: [u64; 3]) -> [u64; 5] {
+        let [h0, h1, h2] = h;
+        [h0 & M26, (h0 >> 26) & M26, ((h0 >> 52) | (h1 << 12)) & M26, (h1 >> 14) & M26, (h1 >> 40) | (h2 << 24)]
+    }
+
+    /// Five limbs (each below 2^32) back to a partially reduced radix-2^64 value.
+    #[inline(always)]
+    fn from_limbs(mut l: [u64; 5]) -> [u64; 3] {
+        for i in 0..4 {
+            l[i + 1] += l[i] >> 26;
+            l[i] &= M26;
+        }
+        l[0] += (l[4] >> 26) * 5;
+        l[4] &= M26;
+        l[1] += l[0] >> 26;
+        l[0] &= M26;
+        let a = l[0] as u128 + ((l[1] as u128) << 26) + ((l[2] as u128) << 52);
+        let b = (a >> 64) + ((l[3] as u128) << 14) + ((l[4] as u128) << 40);
+        [a as u64, b as u64, (b >> 64) as u64]
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn splat(x: u64) -> __m256i {
+        _mm256_set1_epi64x(x as i64)
+    }
+
+    /// `vpmuludq`, pinned: `_mm256_mul_epu32` is spelled as masks around a 64-bit
+    /// multiply, and LLVM can fold the masks away and emit three multiplies.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn mul32(x: __m256i, y: __m256i) -> __m256i {
+        let out: __m256i;
+        core::arch::asm!(
+            "vpmuludq {out}, {x}, {y}",
+            out = lateout(ymm_reg) out,
+            x = in(ymm_reg) x,
+            y = in(ymm_reg) y,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        out
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn add(x: __m256i, y: __m256i) -> __m256i {
+        _mm256_add_epi64(x, y)
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn sum5(p: [__m256i; 5]) -> __m256i {
+        add(add(add(p[0], p[1]), add(p[2], p[3])), p[4])
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn carry(from: &mut __m256i, into: &mut __m256i) {
+        *into = add(*into, _mm256_srli_epi64(*from, 26));
+        *from = _mm256_and_si256(*from, splat(M26));
+    }
+
+    /// `a * r` per lane. Products stay below 2^59; the two interleaved carry chains
+    /// leave every limb under 2^26 + 2^7, inside the 32 bits the next multiply reads.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn mul(a: &mut [__m256i; 5], r: &[__m256i; 5], s: &[__m256i; 5]) {
+        let [a0, a1, a2, a3, a4] = *a;
+        let [mut d0, mut d1, mut d2, mut d3, mut d4] = [
+            sum5([mul32(a0, r[0]), mul32(a1, s[4]), mul32(a2, s[3]), mul32(a3, s[2]), mul32(a4, s[1])]),
+            sum5([mul32(a0, r[1]), mul32(a1, r[0]), mul32(a2, s[4]), mul32(a3, s[3]), mul32(a4, s[2])]),
+            sum5([mul32(a0, r[2]), mul32(a1, r[1]), mul32(a2, r[0]), mul32(a3, s[4]), mul32(a4, s[3])]),
+            sum5([mul32(a0, r[3]), mul32(a1, r[2]), mul32(a2, r[1]), mul32(a3, r[0]), mul32(a4, s[4])]),
+            sum5([mul32(a0, r[4]), mul32(a1, r[3]), mul32(a2, r[2]), mul32(a3, r[1]), mul32(a4, r[0])]),
+        ];
+        carry(&mut d0, &mut d1);
+        carry(&mut d3, &mut d4);
+        carry(&mut d1, &mut d2);
+        // d4's carry wraps to d0 as ×5.
+        let c = _mm256_srli_epi64(d4, 26);
+        d4 = _mm256_and_si256(d4, splat(M26));
+        d0 = add(d0, add(c, _mm256_slli_epi64(c, 2)));
+        carry(&mut d2, &mut d3);
+        carry(&mut d0, &mut d1);
+        carry(&mut d3, &mut d4);
+        *a = [d0, d1, d2, d3, d4];
+    }
+
+    /// Four blocks as limbs. The unpack leaves lanes holding blocks 0, 2, 1, 3.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    unsafe fn load4(p: *const u8) -> [__m256i; 5] {
+        let v0 = _mm256_loadu_si256(p as *const __m256i);
+        let v1 = _mm256_loadu_si256(p.add(32) as *const __m256i);
+        let lo = _mm256_unpacklo_epi64(v0, v1);
+        let hi = _mm256_unpackhi_epi64(v0, v1);
+        let mask = splat(M26);
+        [
+            _mm256_and_si256(lo, mask),
+            _mm256_and_si256(_mm256_srli_epi64(lo, 26), mask),
+            _mm256_and_si256(_mm256_or_si256(_mm256_srli_epi64(lo, 52), _mm256_slli_epi64(hi, 12)), mask),
+            _mm256_and_si256(_mm256_srli_epi64(hi, 14), mask),
+            _mm256_or_si256(_mm256_srli_epi64(hi, 40), splat(1 << 24)),
+        ]
+    }
+
+    /// Absorb `data` (a nonzero multiple of 64 bytes) into `h`; `pw` is r^1..r^4 as limbs.
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn blocks(h: [u64; 3], pw: &[[u64; 5]; 4], data: &[u8]) -> [u64; 3] {
+        debug_assert!(!data.is_empty() && data.len().is_multiple_of(64));
+        let [r1, r2, r3, r4] = pw;
+        let five = |x: __m256i| _mm256_add_epi64(x, _mm256_slli_epi64(x, 2));
+        let step_r: [__m256i; 5] = core::array::from_fn(|i| splat(r4[i]));
+        let step_s = step_r.map(five);
+        // Lanes hold blocks 0, 2, 1, 3 of each group of four.
+        let last_r: [__m256i; 5] = core::array::from_fn(|i| {
+            _mm256_setr_epi64x(r4[i] as i64, r2[i] as i64, r3[i] as i64, r1[i] as i64)
+        });
+        let last_s = last_r.map(five);
+
+        let hl = to_limbs(h);
+        let mut a: [__m256i; 5] = core::array::from_fn(|i| _mm256_setr_epi64x(hl[i] as i64, 0, 0, 0));
+        let (body, last) = data.split_at(data.len() - 64);
+        for group in body.chunks_exact(64) {
+            let m = load4(group.as_ptr());
+            for i in 0..5 {
+                a[i] = add(a[i], m[i]);
+            }
+            mul(&mut a, &step_r, &step_s);
+        }
+        let m = load4(last.as_ptr());
+        for i in 0..5 {
+            a[i] = add(a[i], m[i]);
+        }
+        mul(&mut a, &last_r, &last_s);
+
+        let mut lanes = [[0u64; 4]; 5];
+        for i in 0..5 {
+            _mm256_storeu_si256(lanes[i].as_mut_ptr() as *mut __m256i, a[i]);
+        }
+        let out = from_limbs(lanes.map(|l| l.iter().sum()));
+        zeroize::Zeroize::zeroize(&mut lanes);
+        out
     }
 }
 

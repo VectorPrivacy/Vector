@@ -2,6 +2,7 @@ use super::*;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 
 fn backends() -> Vec<Backend> {
+    #[allow(unused_mut)]
     let mut v = vec![Backend::Portable];
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -182,4 +183,29 @@ fn wipe_clears_every_byte_at_every_alignment() {
     // SAFETY: wipe_vec zeroed the full capacity, so every byte is initialised.
     let spare = unsafe { std::slice::from_raw_parts(v.as_ptr(), v.capacity()) };
     assert!(spare.iter().all(|&b| b == 0));
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn avx2_poly1305_matches_scalar_from_any_state() {
+    if !std::arch::is_x86_feature_detected!("avx2") {
+        return;
+    }
+    let mut rng = StdRng::seed_from_u64(0xa5a5);
+    for trial in 0..400 {
+        let key: [u8; 32] = if trial < 4 { [0xff; 32] } else { rng.gen() };
+        let prefix = 16 * rng.gen_range(0..6);
+        let groups = rng.gen_range(1..20);
+        let mut data = vec![0xffu8; prefix + 64 * groups];
+        if trial % 3 != 0 {
+            rng.fill_bytes(&mut data);
+        }
+        let mut serial = super::poly1305::r64::Poly1305::new(&key);
+        serial.blocks(&data);
+        let mut lanes = super::poly1305::r64::Poly1305::new(&key);
+        lanes.blocks(&data[..prefix]);
+        // SAFETY: AVX2 detected above; the remainder is a nonzero multiple of 64.
+        unsafe { lanes.blocks_avx2(&data[prefix..]) };
+        assert_eq!(serial.finish(), lanes.finish(), "trial {trial} prefix {prefix} groups {groups}");
+    }
 }

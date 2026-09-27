@@ -216,6 +216,34 @@ fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
     core::hint::black_box(folded) == 0
 }
 
+/// Poly1305 with its path forced, for measuring where the SIMD path starts to pay.
+#[doc(hidden)]
+#[cfg(target_arch = "x86_64")]
+pub mod bench {
+    use super::poly1305::r64::Poly1305;
+
+    pub const AVX2_MIN: usize = super::poly1305::r64::AVX2_MIN;
+
+    /// Poly1305 over `data` (a multiple of 64 bytes) with the scalar loop.
+    pub fn poly1305_scalar(key: &[u8; 32], data: &[u8]) -> [u8; 16] {
+        let mut p = Poly1305::new(key);
+        p.blocks(data);
+        p.finish()
+    }
+
+    /// Poly1305 over `data` (a nonzero multiple of 64 bytes) with the AVX2 lanes, or
+    /// None without AVX2.
+    pub fn poly1305_avx2(key: &[u8; 32], data: &[u8]) -> Option<[u8; 16]> {
+        if !std::arch::is_x86_feature_detected!("avx2") || data.is_empty() || !data.len().is_multiple_of(64) {
+            return None;
+        }
+        let mut p = Poly1305::new(key);
+        // SAFETY: AVX2 detected; the length is a nonzero multiple of 64.
+        unsafe { p.blocks_avx2(data) };
+        Some(p.finish())
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
