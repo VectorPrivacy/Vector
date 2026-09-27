@@ -877,7 +877,7 @@ fn ban_filter_sql(param: usize) -> String {
 }
 
 /// Get events for a chat with pagination, optionally filtered by kind.
-/// Message/edit content is decrypted via maybe_decrypt.
+/// Message/edit content is decrypted in one at-rest batch.
 pub async fn get_events(
     chat_id: i64,
     kinds: Option<&[u16]>,
@@ -951,14 +951,13 @@ pub async fn get_events(
     };
 
     // Decrypt message content
-    let mut decrypted = Vec::with_capacity(events.len());
-    for mut event in events {
+    let decrypted: Vec<StoredEvent> = crate::crypto::open_batch(|at_rest| events.into_iter().map(|mut event| {
         if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
-            event.content = crate::crypto::maybe_decrypt(event.content).await
+            event.content = at_rest.open(event.content)
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
         }
-        decrypted.push(event);
-    }
+        event
+    }).collect());
 
     Ok(decrypted)
 }
@@ -1080,57 +1079,59 @@ pub async fn get_reply_contexts(
 
     // Decrypt and build contexts
     let mut contexts = HashMap::new();
-    for (id, kind, original_content, npub, tags) in events {
-        let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
-        let latest_edit = latest_edits.get(&id);
-        let content_to_decrypt = latest_edit
-            .map(|(c, _)| c.clone())
-            .unwrap_or(original_content);
+    crate::crypto::open_batch(|at_rest| {
+        for (id, kind, original_content, npub, tags) in events {
+            let has_attachment = kind == event_kind::FILE_ATTACHMENT as i32;
+            let latest_edit = latest_edits.get(&id);
+            let content_to_decrypt = latest_edit
+                .map(|(c, _)| c.clone())
+                .unwrap_or(original_content);
 
-        // Same rule as the message loader: an edit's tags replace the
-        // original's, so the quote's emoji match the content it shows.
-        let parse_emoji = |json: &Option<String>| -> Vec<crate::types::EmojiTag> {
-            json.as_deref()
-                .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
-                .map(|parsed| crate::types::EmojiTag::extract_from_stored(&parsed))
-                .unwrap_or_default()
-        };
-        let emoji_tags = match latest_edit {
-            Some((_, edit_tags)) => parse_emoji(edit_tags),
-            None => parse_emoji(&tags),
-        };
-
-        let decrypted_content = if kind == event_kind::CHAT_MESSAGE as i32
-            || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
-        {
-            crate::crypto::maybe_decrypt(content_to_decrypt).await
-                .unwrap_or_else(|_| "[Decryption failed]".to_string())
-        } else {
-            String::new()
-        };
-
-        // The first attachment's extension lets the quote show the file type. From the table, with a
-        // legacy-tag fallback for an un-backfilled pre-migration row.
-        let extension = if has_attachment {
-            atts_by_event.get(&id)
-                .and_then(|atts| atts.first())
-                .map(|a| a.extension.to_lowercase())
-                .filter(|e| !e.is_empty())
-                .or_else(|| tags.as_deref()
+            // Same rule as the message loader: an edit's tags replace the
+            // original's, so the quote's emoji match the content it shows.
+            let parse_emoji = |json: &Option<String>| -> Vec<crate::types::EmojiTag> {
+                json.as_deref()
                     .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
-                    .and_then(|parsed| parsed.into_iter()
-                        .find(|t| t.first().map(|k| k == "attachments").unwrap_or(false))
-                        .and_then(|t| t.into_iter().nth(1)))
-                    .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
-                    .and_then(|atts| atts.into_iter().next())
-                    .and_then(|a| a.get("extension").and_then(|e| e.as_str()).map(str::to_lowercase))
-                    .filter(|e| !e.is_empty()))
-        } else {
-            None
-        };
+                    .map(|parsed| crate::types::EmojiTag::extract_from_stored(&parsed))
+                    .unwrap_or_default()
+            };
+            let emoji_tags = match latest_edit {
+                Some((_, edit_tags)) => parse_emoji(edit_tags),
+                None => parse_emoji(&tags),
+            };
 
-        contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension, emoji_tags });
-    }
+            let decrypted_content = if kind == event_kind::CHAT_MESSAGE as i32
+                || kind == event_kind::PRIVATE_DIRECT_MESSAGE as i32
+            {
+                at_rest.open(content_to_decrypt)
+                    .unwrap_or_else(|_| "[Decryption failed]".to_string())
+            } else {
+                String::new()
+            };
+
+            // The first attachment's extension lets the quote show the file type. From the table, with a
+            // legacy-tag fallback for an un-backfilled pre-migration row.
+            let extension = if has_attachment {
+                atts_by_event.get(&id)
+                    .and_then(|atts| atts.first())
+                    .map(|a| a.extension.to_lowercase())
+                    .filter(|e| !e.is_empty())
+                    .or_else(|| tags.as_deref()
+                        .and_then(|t| serde_json::from_str::<Vec<Vec<String>>>(t).ok())
+                        .and_then(|parsed| parsed.into_iter()
+                            .find(|t| t.first().map(|k| k == "attachments").unwrap_or(false))
+                            .and_then(|t| t.into_iter().nth(1)))
+                        .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
+                        .and_then(|atts| atts.into_iter().next())
+                        .and_then(|a| a.get("extension").and_then(|e| e.as_str()).map(str::to_lowercase))
+                        .filter(|e| !e.is_empty()))
+            } else {
+                None
+            };
+
+            contexts.insert(id, ReplyContext { content: decrypted_content, npub, has_attachment, extension, emoji_tags });
+        }
+    });
 
     Ok(contexts)
 }
@@ -1294,35 +1295,37 @@ async fn compose_message_views(message_events: Vec<StoredEvent>) -> Result<Vec<M
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
     let mut edits_by_msg: HashMap<String, Vec<(u64, String, Vec<crate::types::EmojiTag>)>> = HashMap::new();
 
-    for event in related_events {
-        if let Some(ref_id) = &event.reference_id {
-            match event.kind {
-                k if k == event_kind::REACTION => {
-                    let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
-                    let reaction = Reaction {
-                        id: event.id.clone(),
-                        reference_id: ref_id.clone(),
-                        author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
-                        emoji: event.content.clone(),
-                        emoji_url,
-                    };
-                    // Rows predating the (author, emoji) rule — or written by a client
-                    // that never had it — must not resurrect a double count on reload.
-                    let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
-                    if !slot.iter().any(|r| r.same_slot(&reaction)) {
-                        slot.push(reaction);
+    crate::crypto::open_batch(|at_rest| {
+        for event in related_events {
+            if let Some(ref_id) = &event.reference_id {
+                match event.kind {
+                    k if k == event_kind::REACTION => {
+                        let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
+                        let reaction = Reaction {
+                            id: event.id.clone(),
+                            reference_id: ref_id.clone(),
+                            author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
+                            emoji: event.content.clone(),
+                            emoji_url,
+                        };
+                        // Rows predating the (author, emoji) rule — or written by a client
+                        // that never had it — must not resurrect a double count on reload.
+                        let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
+                        if !slot.iter().any(|r| r.same_slot(&reaction)) {
+                            slot.push(reaction);
+                        }
                     }
+                    k if k == event_kind::MESSAGE_EDIT => {
+                        let decrypted = at_rest.open(event.content.clone())
+                            .unwrap_or_else(|_| event.content.clone());
+                        let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
+                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
+                    }
+                    _ => {}
                 }
-                k if k == event_kind::MESSAGE_EDIT => {
-                    let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
-                        .unwrap_or_else(|_| event.content.clone());
-                    let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
-                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
-                }
-                _ => {}
             }
         }
-    }
+    });
 
     for edits in edits_by_msg.values_mut() {
         edits.sort_by_key(|(ts, _, _)| *ts);
@@ -1541,14 +1544,13 @@ pub async fn get_messages_around(
     };
 
     // Decrypt message content (mirror get_events).
-    let mut decrypted = Vec::with_capacity(message_events.len());
-    for mut event in message_events {
+    let decrypted: Vec<StoredEvent> = crate::crypto::open_batch(|at_rest| message_events.into_iter().map(|mut event| {
         if event.kind == event_kind::CHAT_MESSAGE || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE {
-            event.content = crate::crypto::maybe_decrypt(event.content).await
+            event.content = at_rest.open(event.content)
                 .unwrap_or_else(|_| "[Decryption failed]".to_string());
         }
-        decrypted.push(event);
-    }
+        event
+    }).collect());
 
     compose_message_views(decrypted).await
 }
@@ -1608,34 +1610,36 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     let mut reactions_by_msg: HashMap<String, Vec<Reaction>> = HashMap::new();
     let mut edits_by_msg: HashMap<String, Vec<(u64, String, Vec<crate::types::EmojiTag>)>> = HashMap::new();
 
-    for event in related_events {
-        if let Some(ref_id) = &event.reference_id {
-            match event.kind {
-                k if k == event_kind::REACTION => {
-                    let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
-                    let reaction = Reaction {
-                        id: event.id.clone(), reference_id: ref_id.clone(),
-                        author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
-                        emoji: event.content.clone(),
-                        emoji_url,
-                    };
-                    // Rows predating the (author, emoji) rule — or written by a client
-                    // that never had it — must not resurrect a double count on reload.
-                    let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
-                    if !slot.iter().any(|r| r.same_slot(&reaction)) {
-                        slot.push(reaction);
+    crate::crypto::open_batch(|at_rest| {
+        for event in related_events {
+            if let Some(ref_id) = &event.reference_id {
+                match event.kind {
+                    k if k == event_kind::REACTION => {
+                        let emoji_url = extract_reaction_emoji_url(&event.tags, &event.content);
+                        let reaction = Reaction {
+                            id: event.id.clone(), reference_id: ref_id.clone(),
+                            author_id: normalize_reaction_author(event.npub.clone().unwrap_or_default()),
+                            emoji: event.content.clone(),
+                            emoji_url,
+                        };
+                        // Rows predating the (author, emoji) rule — or written by a client
+                        // that never had it — must not resurrect a double count on reload.
+                        let slot = reactions_by_msg.entry(ref_id.clone()).or_default();
+                        if !slot.iter().any(|r| r.same_slot(&reaction)) {
+                            slot.push(reaction);
+                        }
                     }
+                    k if k == event_kind::MESSAGE_EDIT => {
+                        let decrypted = at_rest.open(event.content.clone())
+                            .unwrap_or_else(|_| event.content.clone());
+                        let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
+                        edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
+                    }
+                    _ => {}
                 }
-                k if k == event_kind::MESSAGE_EDIT => {
-                    let decrypted = crate::crypto::maybe_decrypt(event.content.clone()).await
-                        .unwrap_or_else(|_| event.content.clone());
-                    let edit_emoji = crate::types::EmojiTag::extract_from_stored(&event.tags);
-                    edits_by_msg.entry(ref_id.clone()).or_default().push((event.created_at * 1000, decrypted, edit_emoji));
-                }
-                _ => {}
             }
         }
-    }
+    });
     for edits in edits_by_msg.values_mut() {
         edits.sort_by_key(|(ts, _, _)| *ts);
     }
@@ -1666,55 +1670,57 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
     // Step 4: Compose Messages grouped by chat_identifier
     let mut result: HashMap<String, Vec<Message>> = HashMap::new();
 
-    for (chat_identifier, event, tags_json) in message_events {
-        let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
-        let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
-        let replied_to = extract_reply_tag_from_json(&tags_json).unwrap_or_default();
+    crate::crypto::open_batch(|at_rest| {
+        for (chat_identifier, event, tags_json) in message_events {
+            let reactions = reactions_by_msg.remove(&event.id).unwrap_or_default();
+            let attachments = attachments_by_msg.remove(&event.id).unwrap_or_default();
+            let replied_to = extract_reply_tag_from_json(&tags_json).unwrap_or_default();
 
-        // Decrypt content
-        let original_content = if event.kind == event_kind::CHAT_MESSAGE
-            || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
-        {
-            crate::crypto::maybe_decrypt(event.content.clone()).await
-                .unwrap_or_else(|_| "[Decryption failed]".to_string())
-        } else {
-            String::new()
-        };
+            // Decrypt content
+            let original_content = if event.kind == event_kind::CHAT_MESSAGE
+                || event.kind == event_kind::PRIVATE_DIRECT_MESSAGE
+            {
+                at_rest.open(event.content.clone())
+                    .unwrap_or_else(|_| "[Decryption failed]".to_string())
+            } else {
+                String::new()
+            };
 
-        let stored_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json).unwrap_or_default();
-        let original_emoji = crate::types::EmojiTag::extract_from_stored(&stored_tags);
-        let addressed_bots = extract_bot_tags(&stored_tags);
-        let expiration = extract_expiration_tag(&stored_tags);
-        // Newest edit's emoji tags win so the latest content renders correctly.
-        let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
-            let (latest, latest_emoji) = edits.last()
-                .map(|(_, c, e)| (c.clone(), e.clone()))
-                .unwrap_or_else(|| (original_content.clone(), original_emoji.clone()));
-            let history: Vec<crate::types::EditEntry> = std::iter::once(crate::types::EditEntry {
-                content: original_content, edited_at: event.created_at * 1000,
-            }).chain(edits.into_iter().map(|(ts, c, _)| crate::types::EditEntry { content: c, edited_at: ts }))
-            .collect();
-            (latest, true, Some(history), latest_emoji)
-        } else {
-            (original_content, false, None, original_emoji)
-        };
+            let stored_tags = serde_json::from_str::<Vec<Vec<String>>>(&tags_json).unwrap_or_default();
+            let original_emoji = crate::types::EmojiTag::extract_from_stored(&stored_tags);
+            let addressed_bots = extract_bot_tags(&stored_tags);
+            let expiration = extract_expiration_tag(&stored_tags);
+            // Newest edit's emoji tags win so the latest content renders correctly.
+            let (content, edited, edit_history, emoji_tags) = if let Some(edits) = edits_by_msg.remove(&event.id) {
+                let (latest, latest_emoji) = edits.last()
+                    .map(|(_, c, e)| (c.clone(), e.clone()))
+                    .unwrap_or_else(|| (original_content.clone(), original_emoji.clone()));
+                let history: Vec<crate::types::EditEntry> = std::iter::once(crate::types::EditEntry {
+                    content: original_content, edited_at: event.created_at * 1000,
+                }).chain(edits.into_iter().map(|(ts, c, _)| crate::types::EditEntry { content: c, edited_at: ts }))
+                .collect();
+                (latest, true, Some(history), latest_emoji)
+            } else {
+                (original_content, false, None, original_emoji)
+            };
 
-        let preview_metadata = event.preview_metadata
-            .and_then(|json| serde_json::from_str(&json).ok());
+            let preview_metadata = event.preview_metadata
+                .and_then(|json| serde_json::from_str(&json).ok());
 
-        result.entry(chat_identifier).or_default().push(Message {
-            expiration,
-            id: event.id, content, replied_to,
-            replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
-            replied_to_attachment_extension: None, replied_to_emoji_tags: None,
-            preview_metadata, attachments, reactions, at: event.created_at * 1000,
-            pending: event.pending, failed: event.failed, mine: event.mine,
-            npub: event.npub, wrapper_event_id: event.wrapper_event_id,
-            edited, edit_history,
-            emoji_tags,
-            addressed_bots,
-        });
-    }
+            result.entry(chat_identifier).or_default().push(Message {
+                expiration,
+                id: event.id, content, replied_to,
+                replied_to_content: None, replied_to_npub: None, replied_to_has_attachment: None,
+                replied_to_attachment_extension: None, replied_to_emoji_tags: None,
+                preview_metadata, attachments, reactions, at: event.created_at * 1000,
+                pending: event.pending, failed: event.failed, mine: event.mine,
+                npub: event.npub, wrapper_event_id: event.wrapper_event_id,
+                edited, edit_history,
+                emoji_tags,
+                addressed_bots,
+            });
+        }
+    });
 
     // Step 5: Reply context — the openChat pre-paint renders this boot last-message
     // synchronously (before the richer get_message_views load lands), so without

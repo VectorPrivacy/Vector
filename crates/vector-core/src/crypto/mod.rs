@@ -46,8 +46,12 @@ fn seal_framed(plaintext: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, chachapoly::
 }
 
 /// Open `nonce || ciphertext || tag`, leaving the plaintext at the front of the same allocation.
-fn open_framed(mut framed: Vec<u8>, key: &[u8; 32]) -> Option<Vec<u8>> {
-    let len = ChaCha20Poly1305::new(key).open_framed_in_place(&mut framed).ok()?.len();
+fn open_framed(framed: Vec<u8>, key: &[u8; 32]) -> Option<Vec<u8>> {
+    open_framed_with(&ChaCha20Poly1305::new(key), framed)
+}
+
+fn open_framed_with(cipher: &ChaCha20Poly1305, mut framed: Vec<u8>) -> Option<Vec<u8>> {
+    let len = cipher.open_framed_in_place(&mut framed).ok()?.len();
     framed.copy_within(NONCE_LEN..NONCE_LEN + len, 0);
     framed.truncate(len);
     Some(framed)
@@ -55,7 +59,11 @@ fn open_framed(mut framed: Vec<u8>, key: &[u8; 32]) -> Option<Vec<u8>> {
 
 /// Open a hex at-rest string into its plaintext, decrypting inside the decode buffer.
 fn open_hex(hex_data: &str, key: &[u8; 32]) -> Option<String> {
-    let plaintext = open_framed(crate::simd::hex::hex_string_to_bytes(hex_data), key)?;
+    open_hex_with(&ChaCha20Poly1305::new(key), hex_data)
+}
+
+fn open_hex_with(cipher: &ChaCha20Poly1305, hex_data: &str) -> Option<String> {
+    let plaintext = open_framed_with(cipher, crate::simd::hex::hex_string_to_bytes(hex_data))?;
     // SAFETY: at-rest text is UTF-8 when sealed, and Poly1305 authenticates it unchanged.
     Some(unsafe { String::from_utf8_unchecked(plaintext) })
 }
@@ -800,6 +808,41 @@ fn open_with_vault(hex_data: &str) -> Option<String> {
     out
 }
 
+/// Opens many at-rest strings for one vault read and one key schedule, where
+/// `maybe_decrypt` pays both per string (the vault read is nearly all of it). Sync, and the
+/// opener cannot leave the closure, so the key never crosses an `await`.
+pub fn open_batch<R>(f: impl FnOnce(&mut AtRestOpener) -> R) -> R {
+    f(&mut AtRestOpener { cipher: None, loaded: false })
+}
+
+/// The per-string half of [`open_batch`]; the vault is read at the first ciphertext, so
+/// a batch of plaintext rows never touches it.
+pub struct AtRestOpener {
+    cipher: Option<ChaCha20Poly1305>,
+    loaded: bool,
+}
+
+impl AtRestOpener {
+    /// `maybe_decrypt` for one string, sharing the batch's cipher.
+    #[allow(clippy::result_unit_err)] // maybe_decrypt's own contract, which every caller already handles
+    pub fn open(&mut self, input: String) -> Result<String, ()> {
+        if !looks_encrypted(&input) {
+            return Ok(input);
+        }
+        if !self.loaded {
+            self.loaded = true;
+            if let Some(mut key) = crate::state::ENCRYPTION_KEY.get() {
+                self.cipher = Some(ChaCha20Poly1305::new(&key));
+                key.zeroize();
+            }
+        }
+        if let Some(plaintext) = self.cipher.as_ref().and_then(|c| open_hex_with(c, &input)) {
+            return Ok(plaintext);
+        }
+        if crate::state::is_encryption_enabled_fast() { Err(()) } else { Ok(input) }
+    }
+}
+
 // ============================================================================
 // Synchronous at-rest helpers (Concord tables, sync DB code)
 // ============================================================================
@@ -883,6 +926,70 @@ pub fn maybe_decrypt_text(stored: &str) -> String {
             out
         }
         None => stored.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod at_rest_batch_tests {
+    use super::*;
+
+    /// The vault and the enabled flag are process globals; the db-test guard serializes them.
+    fn with_vault<R>(key: Option<[u8; 32]>, enabled: bool, f: impl FnOnce() -> R) -> R {
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        match key {
+            Some(k) => crate::state::ENCRYPTION_KEY.set(k, &[]),
+            None => crate::state::ENCRYPTION_KEY.clear(&[]),
+        }
+        crate::state::set_encryption_enabled(enabled);
+        let out = f();
+        crate::state::set_encryption_enabled(false);
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+        out
+    }
+
+    fn rows(key: &[u8; 32]) -> Vec<String> {
+        vec![
+            encrypt_with_key("first", key).unwrap(),
+            "plain row".to_string(),
+            encrypt_with_key("", key).unwrap(),
+            encrypt_with_key(&"long ".repeat(300), key).unwrap(),
+            encrypt_with_key("wrong key", &[9u8; 32]).unwrap(),
+            "cafe".repeat(20),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_batch_answers_every_row_as_maybe_decrypt_does() {
+        let key = [0x55u8; 32];
+        let _guard = crate::db::DB_TEST_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        crate::state::ENCRYPTION_KEY.set(key, &[]);
+        let rows = rows(&key);
+        for enabled in [true, false] {
+            crate::state::set_encryption_enabled(enabled);
+            let mut expected = Vec::new();
+            for row in rows.clone() {
+                expected.push(maybe_decrypt(row).await);
+            }
+            let batched = open_batch(|at_rest| rows.clone().into_iter().map(|r| at_rest.open(r)).collect::<Vec<_>>());
+            assert_eq!(batched, expected, "encryption enabled: {enabled}");
+        }
+        crate::state::set_encryption_enabled(false);
+        crate::state::ENCRYPTION_KEY.clear(&[]);
+    }
+
+    #[test]
+    fn plaintext_rows_never_need_the_key() {
+        let got = with_vault(None, true, || open_batch(|at_rest| vec![at_rest.open("hello".into()), at_rest.open("a b c".into())]));
+        assert_eq!(got, vec![Ok("hello".to_string()), Ok("a b c".to_string())]);
+    }
+
+    #[test]
+    fn a_ciphertext_with_no_key_in_the_vault_is_refused_while_encryption_is_on() {
+        let sealed = encrypt_with_key("secret", &[0x55u8; 32]).unwrap();
+        let on = with_vault(None, true, || open_batch(|at_rest| at_rest.open(sealed.clone())));
+        assert_eq!(on, Err(()));
+        let off = with_vault(None, false, || open_batch(|at_rest| at_rest.open(sealed.clone())));
+        assert_eq!(off, Ok(sealed), "encryption off: an undecryptable row reads through as-is");
     }
 }
 
