@@ -11,7 +11,7 @@ use std::path::Path;
 
 use super::gcm;
 use zeroize::Zeroize;
-use sha2::{Digest, Sha256};
+use super::sha256::Sha256;
 
 use super::hex;
 

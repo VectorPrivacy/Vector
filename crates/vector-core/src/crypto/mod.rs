@@ -1,6 +1,7 @@
 pub mod chachapoly;
 pub mod gcm;
 pub mod guarded_key;
+pub mod sha256;
 pub mod stream;
 pub use chachapoly::{wipe, wipe_vec};
 pub use guarded_key::GuardedKey;
@@ -187,10 +188,7 @@ pub fn decrypt_data_owned(mut data: Vec<u8>, key_hex: &str, nonce_hex: &str) -> 
 
 /// Calculate SHA-256 hash of data, returned as hex string.
 pub fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(&hasher.finalize())
+    hex::encode(&sha256::digest(data))
 }
 
 /// Identity basis for a RECEIVED attachment: the sender's `ox` (plaintext

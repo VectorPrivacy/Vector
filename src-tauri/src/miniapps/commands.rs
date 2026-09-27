@@ -729,10 +729,7 @@ fn load_info_from_bytes(bytes: &[u8], file_name: &str) -> Result<MiniAppInfo, Er
         .to_string();
 
     // Compute SHA-256 hash of the bytes for permission identification
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let file_hash = bytes_to_hex_string(&hasher.finalize());
+    let file_hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(bytes));
 
     let (manifest, icon_bytes) = MiniAppPackage::load_info_from_bytes(bytes, &fallback_name)?;
 
@@ -2298,11 +2295,7 @@ async fn resolve_url_xdc_inner(
     MiniAppPackage::validate_bytes_openable(&bytes)?;
     let (manifest, _icon) = MiniAppPackage::load_info_from_bytes(&bytes, &fallback)?;
 
-    let hash = {
-        let mut h = Sha256::new();
-        h.update(&bytes);
-        bytes_to_hex_string(&h.finalize())
-    };
+    let hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(&bytes));
     std::fs::create_dir_all(&dir).map_err(Error::Io)?;
     let path = dir.join(format!("{}.xdc", hash));
     // Temp + atomic rename: a crash mid-write must never leave a truncated

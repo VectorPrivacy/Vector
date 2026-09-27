@@ -82,10 +82,7 @@ impl MiniAppPackage {
         }
         let file_data = std::fs::read(&path)?;
 
-        use sha2::{Sha256, Digest};
-        let mut hasher = Sha256::new();
-        hasher.update(&file_data);
-        let file_hash = bytes_to_hex_string(&hasher.finalize());
+        let file_hash = bytes_to_hex_string(&vector_core::crypto::sha256::digest(&file_data));
         use std::io::Cursor;
         let cursor = Cursor::new(&file_data);
         let mut archive = zip::ZipArchive::new(cursor)?;
