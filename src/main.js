@@ -2006,6 +2006,8 @@ window.addEventListener("DOMContentLoaded", async () => {
             }
         }
 
+        if (!account_exists) VectorSvelte.loginScreen('start');
+
         // PIVX default flip: a FRESH install (no account has ever existed on this
         // device) gets the wallet hidden until it's summoned via the Mini Apps
         // search. A device that has run Vector before keeps its state — visible

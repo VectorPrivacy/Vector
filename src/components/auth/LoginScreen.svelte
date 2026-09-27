@@ -1,9 +1,10 @@
 <script>
-    // The login screen inside #login-form: the back bar, the pre-login account picker, the
-    // start / import / bunker / invite / welcome / encrypt screens. Painted from
-    // lib/login.svelte.js; every control answers through `h` (js/auth.js).
+    // The login screen inside #login-form: the lockup and pre-login account picker on top,
+    // one centred step at a time (start / import / bunker / invite / welcome / encrypt),
+    // the credits and links along the bottom, and the illustration behind it all. Painted
+    // from lib/login.svelte.js; every control answers through `h` (js/auth.js).
     import { untrack } from 'svelte';
-    import { loginState, bunkerState, pickerState, encryptState } from '../lib/login.svelte.js';
+    import { loginState, bunkerState, pickerState, encryptState, toggleLoginBg } from '../lib/login.svelte.js';
     import PinInput from '../ui/PinInput.svelte';
     import AccountRows from '../people/AccountRows.svelte';
     import Avatar from '../ui/Avatar.svelte';
@@ -21,6 +22,11 @@
     $effect(() => {
         if (p.open && pill && list) list.style.top = `${Math.round(pill.getBoundingClientRect().bottom + 8)}px`;
     });
+
+    // ── the way back, wherever a step has one ──
+    const back = $derived(l.bunker && b.fromImport ? { prompt: 'Have a private key?', label: 'Use nsec instead' }
+        : b.mode === 'reauth' && l.bunker || l.screen === 'start' ? { prompt: 'Changed your mind?', label: 'Go Back' }
+        : { prompt: 'Want to change accounts?', label: 'Back to Login' });
 
     // ── bunker ──
     // The countdown owns the status line while a link is live; a status write shows otherwise.
@@ -44,6 +50,7 @@
     // ── encrypt ──
     let pinRow = $state(null);
     let passwordEl = $state(null);
+    let reveal = $state(false);
     $effect(() => { e.pinTick; untrack(() => pinRow?.clear(e.pinFocus)); });
     $effect(() => {
         e.focusTick;
@@ -52,181 +59,215 @@
             else if (e.passwordShown) passwordEl?.focus();
         });
     });
+    // A fresh password step starts masked.
+    $effect(() => { if (!e.passwordShown) reveal = false; });
     function submitPassword(ev) { ev.preventDefault(); h.encrypt.submitPassword(); }
+    const onEnter = (fn) => (ev) => { if (ev.key === 'Enter' || ev.code === 'NumpadEnter') { ev.preventDefault(); fn(); } };
 </script>
 
-{#if l.backBar}
-    <div id="login-back-bar" class="chat-new-header">
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div class="btn chat-new-back-text-btn" onclick={() => h.back()}>
-            <span class="icon icon-chevron-double-left nav-icon"></span>
-            <p class="chat-new-back-text">Back</p>
-        </div>
-    </div>
-{/if}
+<svelte:window onkeydown={(ev) => { if (b.qrOpen && ev.key === 'Escape') { ev.preventDefault(); h.bunker.closeQr(); } }} />
 
-{#if p.shown}
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-    <div id="login-account-picker" class="login-account-picker" class:open={p.open} bind:this={pill} onclick={() => h.picker.toggle()}>
-        <Avatar src={p.avatar} size={36} />
-        <span id="login-account-picker-name" class="login-account-picker-name">{p.label}</span>
-        <svg class="login-account-picker-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-    </div>
-{/if}
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div id="login-account-list-backdrop" class="login-account-list-backdrop" class:visible={p.open} onclick={() => h.picker.close()}></div>
-<div id="login-account-list" class="login-account-list" class:open={p.open} role="dialog" aria-label="Pick account" bind:this={list}>
-    {#if p.open}
-        <!-- The active account stays in the pill; only the alternates are rows. -->
-        <AccountRows accounts={p.accounts.filter(m => m.npub !== p.activeNpub)} h={h.picker.rowHelpers()} onPick={(m) => h.picker.pick(m)} />
+{#snippet goBack()}
+    {#if l.backBar}
+        <p class="lg-back">{back.prompt} <button type="button" onclick={() => h.back()}>{back.label}</button></p>
     {/if}
+{/snippet}
+
+{#snippet enterIcon()}<img src="./icons/login/enter.svg" alt="" width="22" height="22">{/snippet}
+
+<div class="lg-art" class:hidden={l.bgHidden} aria-hidden="true">
+    <img src="./icons/login/cctv.png" alt="">
+</div>
+<div class="lg-aggro-bg" class:shown={l.screen === 'encrypt' && !!e.wrong} aria-hidden="true">
+    <img class="lg-aggro-bg-1" src="./icons/login/aggro-bg-1.svg" alt="" width="226" height="224">
+    <img class="lg-aggro-bg-2" src="./icons/login/aggro-bg-2.svg" alt="" width="128" height="127">
+    <img class="lg-aggro-bg-3" src="./icons/login/aggro-bg-3.svg" alt="" width="98" height="97">
+    <img class="lg-aggro-bg-4" src="./icons/login/aggro-bg-4.svg" alt="" width="60" height="59">
 </div>
 
-{#if l.screen !== 'welcome'}
-    <img src="./icons/vector-logo.svg" class="login-logo" alt="">
-    <h4 class="startup-subtext-gradient login-subtext">Private & Encrypted Messenger</h4>
-{/if}
-
-{#if l.screen === 'start'}
-    <div id="login-start">
-        <button class="login-create-btn" onclick={() => h.createAccount()}>Create Account</button>
-        <br>
-        <button class="login-login-btn" onclick={() => h.openImport()}>Login</button>
-        <br>
-        <img src="./icons/by-formlesslabs.svg" class="login-credits" alt="">
-    </div>
-{:else if l.screen === 'import'}
-    <div class="login-import-container">
-        <img src="./icons/by-formlesslabs.svg" class="login-credits" alt="">
-        <div class="row input-box login-input-container">
-            <div class="row chat-input-container">
-                <input type="password" class="login-input" id="login-input" placeholder="Enter nsec or Seed Phrase..." bind:value={l.importKey} />
-                <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                <svg class="btn login-btn" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" onclick={() => h.importKey()}>
-                    <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-            </div>
-        </div>
-        <div class="login-signer-links">
-            <button class="login-bunker-link-btn" type="button" disabled={b.busy} onclick={() => h.bunker.open()}>
-                <img src="./icons/key.svg" class="login-bunker-link-icon" alt="">
-                <span>Use a Remote Signer</span>
+<div class="lg">
+    <header class="lg-head">
+        <img class="lg-lockup" src="./icons/login/lockup.svg" alt="Vector">
+        {#if p.shown}
+            <button type="button" id="login-account-picker" class="lg-account" class:open={p.open} bind:this={pill} onclick={() => h.picker.toggle()}>
+                <Avatar src={p.avatar} size={44} />
+                <span class="lg-account-name">{p.label}</span>
+                <img class="lg-account-chevron" src="./icons/login/chevron.svg" alt="" width="10" height="6">
             </button>
-            {#if l.nip55Shown}
-                <button class="login-bunker-link-btn" type="button" disabled={l.nip55Busy} onclick={() => h.nip55()}>
-                    <img src="./icons/key.svg" class="login-bunker-link-icon" alt="">
-                    <span>Sign in with Amber (Offline)</span>
-                </button>
-            {/if}
-        </div>
-    </div>
-{:else if l.screen === 'invite'}
-    <div class="login-invite-container">
-        <div class="login-invite-header">
-            <h3 class="login-invite-title">Enter Invite Code</h3>
-        </div>
-        <p class="login-invite-description">Enter your invite code to join Vector Beta</p>
-        <div class="row input-box login-input-container">
-            <div class="row chat-input-container">
-                <!-- svelte-ignore a11y_autofocus -->
-                <input type="text" class="login-input" placeholder="Invite code..." autofocus bind:value={l.inviteCode}
-                       onkeydown={(ev) => { if (ev.code === 'Enter' || ev.code === 'NumpadEnter') { ev.preventDefault(); h.invite(); } }} />
-                <button class="btn login-btn" aria-label="Submit invite code" onclick={() => h.invite()}>
-                    <svg width="100%" height="100%" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                </button>
-            </div>
-        </div>
-    </div>
-{:else if l.screen === 'welcome'}
-    <div class="login-welcome-container">
-        <div class="login-welcome-content">
-            <span class="icon icon-vector-check login-welcome-icon"></span>
-            <h1 class="login-welcome-title" style="font-size: 20px; margin-bottom: 4px; color: #33db98;">Welcome to</h1>
-            <h1 class="login-welcome-title">Vector Beta!</h1>
-            <p class="login-welcome-subtitle">Congratulations! You're now part of the exclusive Vector Beta community.</p>
-            <p class="login-welcome-footer">Setting up your account...</p>
-        </div>
-    </div>
-{:else if l.screen === 'encrypt'}
-    <div id="login-encrypt" class="login-encrypt-container">
-        {#if e.headerShown}
-            <div class="login-encrypt-header">
-                {#if e.lockShown}<img src="./icons/lock.svg" class="login-lock-icon" alt="">{/if}
-                <h3 id="login-encrypt-title" class="login-encrypt-title" class:startup-subtext-gradient={e.gradient} class:typing-indicator-text={e.typing} style:color={e.error ? 'red' : ''}>{e.title}</h3>
-            </div>
         {/if}
-        {#if e.typeSelectShown}
-            <div>
-                <div class="security-type-options">
-                    <button class="security-type-option-btn" onclick={() => h.encrypt.choose('skip')}>Skip Encryption</button>
-                    <button class="security-type-option-btn" onclick={() => h.encrypt.choose('password')}>Create Password</button>
-                    <p class="security-type-recommended">{e.recommended}</p>
-                    <button class="security-type-option-btn accent" onclick={() => h.encrypt.choose('pin')}>Create PIN</button>
-                    {#if e.bioOptionShown}
-                        <button class="security-type-option-btn accent" onclick={() => h.encrypt.choose('biometric')}>{e.bioOptionLabel}</button>
-                    {/if}
+    </header>
+
+    <main class="lg-stage">
+        {#if l.screen === 'start'}
+            <div id="login-start" class="lg-block">
+                <div class="lg-buttons">
+                    <button type="button" class="lg-btn primary" onclick={() => h.createAccount()}>Create Account</button>
+                    <button type="button" class="lg-btn accent" onclick={() => h.openImport()}>Login</button>
                 </div>
-                <img src="./icons/by-formlesslabs.svg" class="login-credits" alt="">
+                {@render goBack()}
             </div>
-        {/if}
-        {#if e.pinShown}
-            <PinInput bind:this={pinRow} id="login-encrypt-pins" cls="row pin-row input-box" inputIds={['pin-0', 'pin-1', 'pin-2', 'pin-3', 'pin-4', 'pin-5']}
-                    onFull={(pin) => h.encrypt.pinFull(pin)} onBackspace={() => h.encrypt.pinBackspace()} />
-        {/if}
-        {#if e.passwordShown}
-            <div id="login-encrypt-password" class="login-encrypt-password">
-                <div class="row input-box login-input-container">
-                    <div class="row chat-input-container">
+        {:else if l.screen === 'import'}
+            <div class="lg-block">
+                <div class="lg-title"><img src="./icons/login/lock.svg" alt="" width="22" height="29"><h3>Enter Your Private Key</h3></div>
+                <div class="lg-field-row lg-field-row-offset">
+                    <div class="lg-field">
+                        <input type="password" class="lg-input" id="login-input" placeholder="Enter nsec or Seed Phrase..."
+                               autocomplete="off" spellcheck="false" bind:value={l.importKey} onkeydown={onEnter(() => h.importKey())}>
+                        <button type="button" class="lg-field-go" aria-label="Login" onclick={() => h.importKey()}>{@render enterIcon()}</button>
+                    </div>
+                    <button type="button" class="lg-side-btn" title="Use a Remote Signer" aria-label="Use a Remote Signer"
+                            disabled={b.busy} onclick={() => h.bunker.open()}>
+                        <img src="./icons/login/swap.svg" alt="" width="18" height="20">
+                    </button>
+                </div>
+                {@render goBack()}
+                {#if l.nip55Shown}
+                    <button type="button" class="lg-link" disabled={l.nip55Busy} onclick={() => h.nip55()}>Sign in with Amber (Offline)</button>
+                {/if}
+            </div>
+        {:else if l.screen === 'invite'}
+            <div class="lg-block">
+                <div class="lg-title"><h3>Enter Invite Code</h3></div>
+                <p class="lg-note">Enter your invite code to join Vector Beta</p>
+                <div class="lg-field-row">
+                    <div class="lg-field">
                         <!-- svelte-ignore a11y_autofocus -->
-                        <input type="password" class="login-input" placeholder="Enter your password" autocomplete="off" autofocus
-                               bind:this={passwordEl} bind:value={e.password} onkeydown={(ev) => { if (ev.key === 'Enter') submitPassword(ev); }}>
-                        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                        <svg class="btn login-btn" width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" onclick={submitPassword}>
-                            <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
+                        <input type="text" class="lg-input" placeholder="Invite code..." autofocus bind:value={l.inviteCode} onkeydown={onEnter(() => h.invite())}>
+                        <button type="button" class="lg-field-go" aria-label="Submit invite code" onclick={() => h.invite()}>{@render enterIcon()}</button>
                     </div>
                 </div>
             </div>
+        {:else if l.screen === 'welcome'}
+            <div class="lg-block lg-welcome">
+                <span class="icon icon-vector-check lg-welcome-icon"></span>
+                <p class="lg-welcome-kicker">Welcome to</p>
+                <h1 class="lg-welcome-title">Vector Beta!</h1>
+                <p class="lg-note">Congratulations! You're now part of the exclusive Vector Beta community.</p>
+                <p class="lg-note">Setting up your account...</p>
+            </div>
+        {:else if l.screen === 'encrypt'}
+            <div id="login-encrypt" class="lg-block">
+                {#if e.wrong}
+                    <div class="lg-aggro" role="alert">
+                        <div class="lg-aggro-art">
+                            <img class="lg-aggro-face" src="./icons/login/aggroboi.svg" alt="" width="136" height="136">
+                            <img class="lg-aggro-warn" src="./icons/login/warning.svg" alt="" width="79" height="70">
+                        </div>
+                        <p class="lg-aggro-oops">Oops! You entered the wrong {e.wrong}!</p>
+                        <h3 class="lg-aggro-title">Enter the Correct {e.wrong === 'pin' ? 'Pin' : 'Password'}.</h3>
+                    </div>
+                {:else if e.headerShown}
+                    <div class="lg-title" class:error={e.error}>
+                        {#if e.lockShown}<img src="./icons/login/lock.svg" alt="" width="22" height="29">{/if}
+                        <h3 id="login-encrypt-title" class:startup-subtext-gradient={e.gradient} class:typing-indicator-text={e.typing}>{e.title}</h3>
+                    </div>
+                {/if}
+                {#if e.typeSelectShown}
+                    <div class="lg-buttons">
+                        <button type="button" class="lg-btn" onclick={() => h.encrypt.choose('skip')}>Skip Encryption</button>
+                        <button type="button" class="lg-btn" onclick={() => h.encrypt.choose('password')}>Create Password</button>
+                        <p class="lg-recommended">{e.recommended}</p>
+                        <button type="button" class="lg-btn primary" onclick={() => h.encrypt.choose('pin')}>Create PIN</button>
+                        {#if e.bioOptionShown}
+                            <button type="button" class="lg-btn primary" onclick={() => h.encrypt.choose('biometric')}>{e.bioOptionLabel}</button>
+                        {/if}
+                    </div>
+                {/if}
+                {#if e.pinShown}
+                    <PinInput bind:this={pinRow} id="login-encrypt-pins" cls="lg-pins" inputIds={['pin-0', 'pin-1', 'pin-2', 'pin-3', 'pin-4', 'pin-5']}
+                              onFull={(pin) => h.encrypt.pinFull(pin)} onBackspace={() => h.encrypt.pinBackspace()} />
+                {/if}
+                {#if e.passwordShown}
+                    <div id="login-encrypt-password" class="lg-field-row">
+                        <div class="lg-field">
+                            <!-- svelte-ignore a11y_autofocus -->
+                            <input type={reveal ? 'text' : 'password'} class="lg-input" class:masked={!reveal} placeholder="Enter Password..." autocomplete="off" autofocus
+                                   bind:this={passwordEl} bind:value={e.password} onkeydown={(ev) => { if (ev.key === 'Enter') submitPassword(ev); }}>
+                            <button type="button" class="lg-field-eye" aria-label={reveal ? 'Hide password' : 'Show password'} onclick={() => { reveal = !reveal; passwordEl?.focus(); }}>
+                                {#if reveal}<span class="icon icon-eye-off"></span>{:else}<img src="./icons/login/eye.svg" alt="" width="22" height="16">{/if}
+                            </button>
+                            <button type="button" class="lg-field-go" aria-label="Continue" onclick={submitPassword}>{@render enterIcon()}</button>
+                        </div>
+                    </div>
+                {/if}
+                {#if e.bioBtnShown}
+                    <button type="button" class="lg-btn lg-bio" onclick={() => h.encrypt.biometric()}>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                            <path d="M5.80688 18.5304C5.82459 18.5005 5.84273 18.4709 5.8613 18.4413C7.2158 16.2881 7.99991 13.7418 7.99991 11C7.99991 8.79086 9.79077 7 11.9999 7C14.209 7 15.9999 8.79086 15.9999 11C15.9999 12.017 15.9307 13.0186 15.7966 14M13.6792 20.8436C14.2909 19.6226 14.7924 18.3369 15.1707 17M19.0097 18.132C19.6547 15.8657 20 13.4732 20 11C20 6.58172 16.4183 3 12 3C10.5429 3 9.17669 3.38958 8 4.07026M3 15.3641C3.64066 14.0454 4 12.5646 4 11C4 9.54285 4.38958 8.17669 5.07026 7M11.9999 11C11.9999 14.5172 10.9911 17.7988 9.24707 20.5712" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        <span>{e.bioBtnLabel}</span>
+                    </button>
+                {/if}
+                {#if !e.typeSelectShown && (e.pinShown || e.passwordShown)}{@render goBack()}{/if}
+            </div>
         {/if}
-        {#if e.bioBtnShown}
-            <button class="security-type-option-btn" style="margin-top: 18px; margin-bottom: calc(28px + env(safe-area-inset-bottom, 0px));" onclick={() => h.encrypt.biometric()}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: -4px; margin-right: 8px;">
-                    <path d="M5.80688 18.5304C5.82459 18.5005 5.84273 18.4709 5.8613 18.4413C7.2158 16.2881 7.99991 13.7418 7.99991 11C7.99991 8.79086 9.79077 7 11.9999 7C14.209 7 15.9999 8.79086 15.9999 11C15.9999 12.017 15.9307 13.0186 15.7966 14M13.6792 20.8436C14.2909 19.6226 14.7924 18.3369 15.1707 17M19.0097 18.132C19.6547 15.8657 20 13.4732 20 11C20 6.58172 16.4183 3 12 3C10.5429 3 9.17669 3.38958 8 4.07026M3 15.3641C3.64066 14.0454 4 12.5646 4 11C4 9.54285 4.38958 8.17669 5.07026 7M11.9999 11C11.9999 14.5172 10.9911 17.7988 9.24707 20.5712" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg><span>{e.bioBtnLabel}</span>
-            </button>
+
+        {#if l.bunker}
+            <div class="lg-block">
+                <div class="lg-title">
+                    <img src="./icons/login/lock.svg" alt="" width="22" height="29">
+                    <h3>{b.mode === 'reauth' ? 'Reconnect Your Remote Signer' : 'Login with Remote Signer'}</h3>
+                </div>
+                <div class="lg-field-row">
+                    <div class="lg-field">
+                        <input type="text" class="lg-input" placeholder="bunker:// from Amber, etc." autocomplete="off" autocapitalize="none" spellcheck="false"
+                               disabled={b.busy} bind:value={b.urlInput} onkeydown={onEnter(() => h.bunker.connect())}>
+                        <button type="button" class="lg-field-go" aria-label="Connect" disabled={b.busy} onclick={() => h.bunker.connect()}>{@render enterIcon()}</button>
+                    </div>
+                    <button type="button" class="lg-side-btn bare" title="Pair with a QR code" aria-label="Pair with a QR code" onclick={() => h.bunker.openQr()}>
+                        <img src="./icons/login/qr.svg" alt="" width="40" height="40">
+                    </button>
+                </div>
+                {#if !b.qrOpen && line.text}<p class="lg-status {line.kind}">{line.text}</p>{/if}
+                {@render goBack()}
+            </div>
+        {/if}
+    </main>
+
+    <!-- In the steps' own layer, so the pill can rise above this backdrop. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div id="login-account-list-backdrop" class="login-account-list-backdrop" class:visible={p.open} onclick={() => h.picker.close()}></div>
+    <div id="login-account-list" class="login-account-list" class:open={p.open} role="dialog" aria-label="Pick account" bind:this={list}>
+        {#if p.open}
+            <!-- The active account stays in the pill; only the alternates are rows. -->
+            <AccountRows accounts={p.accounts.filter(m => m.npub !== p.activeNpub)} h={h.picker.rowHelpers()} onPick={(m) => h.picker.pick(m)} />
         {/if}
     </div>
-{/if}
 
-{#if l.bunker}
-    <div class="login-bunker-container">
-        <div class="login-bunker-fields">
-            <div class="login-bunker-heading">
-                <img src="./icons/key.svg" class="login-bunker-title-icon" alt="">
-                <h3 class="login-bunker-title">Connect Remote Signer</h3>
+    <footer class="lg-foot">
+        <div class="lg-credit" aria-label="Developed by Formless Labs">
+            <img class="lg-credit-text" src="./icons/login/credit-text.svg" alt="" width="174" height="10">
+            <img class="lg-credit-mark" src="./icons/login/credit-mark.svg" alt="" width="13" height="20">
+        </div>
+        <p class="lg-links">
+            <button type="button" onclick={() => h.openLink('website')}>Website</button><span>|</span>
+            <button type="button" onclick={() => h.openLink('gitbook')}>Documentation</button><span>|</span>
+            <button type="button" onclick={() => h.openLink('privacy')}>Privacy Policy</button><span>|</span>
+            <button type="button" onclick={() => h.openLink('donate')}>Donate</button>
+        </p>
+    </footer>
+
+    <button type="button" class="lg-bg-toggle" onclick={toggleLoginBg}>
+        <span class="lg-bg-icon">
+            {#if l.bgHidden}<img src="./icons/login/eye.svg" alt="" width="17" height="12">{:else}<img src="./icons/login/hide.svg" alt="" width="17" height="16">{/if}
+        </span>
+        <span>{l.bgHidden ? 'Show Background' : 'Hide Background'}</span>
+    </button>
+</div>
+
+
+{#if b.qrOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="lg-qr-overlay" onclick={(ev) => { if (ev.target === ev.currentTarget) h.bunker.closeQr(); }}>
+        <div class="lg-qr-card" role="dialog" aria-label="Pair with a QR code">
+            <div class="lg-qr" class:ready={b.qrReady}>
+                <div class="lg-qr-code" aria-label="Nostr Connect QR code" use:qr={b.url}></div>
+                <p class="lg-qr-loading">{line.kind === 'error' ? line.text : 'Generating connection link…'}</p>
             </div>
-            <p class="login-bunker-helper">Scan in your signer app, or copy the link to paste.</p>
-            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-            <div class="login-bunker-qr-wrap" class:ready={b.qrReady} onclick={() => h.bunker.openQr()}>
-                <div class="login-bunker-qr" aria-label="Nostr Connect QR code" use:qr={b.url}></div>
-                <div class="login-bunker-qr-loading">Generating connection link…</div>
-            </div>
-            <button class="login-bunker-copy-btn" class:copied={b.copied} type="button" disabled={!b.url || b.busy} onclick={() => h.bunker.copy()}>
-                {b.copied ? 'Copied — paste in your signer' : 'Copy connection link'}
-            </button>
-            <p class="login-bunker-status {line.kind}">{line.text}</p>
-            <div class="login-bunker-divider"><span>or paste a bunker URL</span></div>
-            <div class="login-bunker-field login-bunker-field-action">
-                <input type="text" class="login-input login-bunker-input" placeholder="bunker:// from Amber, etc." autocomplete="off" autocapitalize="none" spellcheck="false" disabled={b.busy} bind:value={b.urlInput} />
-                <button class="login-bunker-connect-btn" type="button" aria-label="Connect" disabled={b.busy} onclick={() => h.bunker.connect()}>
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M15 3H16.2C17.8802 3 18.7202 3 19.362 3.32698C19.9265 3.6146 20.3854 4.07354 20.673 4.63803C21 5.27976 21 6.11985 21 7.8V16.2C21 17.8802 21 18.7202 20.673 19.362C20.3854 19.9265 19.9265 20.3854 19.362 20.673C18.7202 21 17.8802 21 16.2 21H15M10 7L15 12M15 12L10 17M15 12L3 12" stroke="#000" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                </button>
+            <p class="lg-qr-status">{b.qrReady ? line.text : ''}</p>
+            <div class="lg-qr-actions">
+                <button type="button" class="lg-qr-copy" class:copied={b.copied} disabled={!b.url || b.busy} onclick={() => h.bunker.copy()}>{b.copied ? 'Copied' : 'Copy Link'}</button>
+                <button type="button" class="lg-qr-close" onclick={() => h.bunker.closeQr()}>Close</button>
             </div>
         </div>
     </div>

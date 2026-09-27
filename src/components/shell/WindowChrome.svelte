@@ -5,7 +5,10 @@
     import { chromeState } from '../lib/chrome.svelte.js';
     import { shellScreens } from '../lib/shell.svelte.js';
     import { updatesState } from '../lib/settings.svelte.js';
+    import { loginState } from '../lib/login.svelte.js';
     const chrome = chromeState();
+    // The login screens carry their own lockup, centred; the strip keeps only its controls.
+    const login = loginState();
     const screens = shellScreens();
     const updates = updatesState();
     const h = $derived(screens.chrome?.h);   // h: ChromeHelpers (js/chrome.js)
@@ -13,11 +16,11 @@
 
 {#if chrome.on}
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<header id="window-chrome" onmousedown={(e) => { if ((e.target === e.currentTarget || e.target.id === 'chrome-left') && e.button === 0) h?.dragStart(e.detail); }}>
+<header id="window-chrome" class:login={login.shown} onmousedown={(e) => { if ((e.target === e.currentTarget || e.target.id === 'chrome-left') && e.button === 0) h?.dragStart(e.detail); }}>
     <!-- The left cell spans the rail while widescreen. -->
     <div id="chrome-left">
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <div id="chrome-lockup" class="btn" title="Direct Messages" onclick={() => h?.openDmHome()}>
+        <div id="chrome-lockup" class="btn" class:login-hidden={login.shown} title="Direct Messages" onclick={() => h?.openDmHome()}>
         <svg id="chrome-mark" viewBox="26.2 7 29.3 50.5" xmlns="http://www.w3.org/2000/svg" aria-label="Vector">
             <defs>
             <linearGradient id="ws-logo-grad" x1="40.88" y1="53.75" x2="40.88" y2="15.48" gradientUnits="userSpaceOnUse">

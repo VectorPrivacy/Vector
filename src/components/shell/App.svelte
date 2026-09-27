@@ -118,7 +118,6 @@ import CallOverlay from '../calls/CallOverlay.svelte';
     <Navbar />
     <!-- Boots with the fade-in; the class drops once it has played. -->
     <div id="login-form" class="fadein-anim" style:display={login.shown ? null : 'none'}
-         class:has-back-bar={login.backBar} class:bunker-active={login.bunker}
          bind:this={loginEl} use:reveal={['login', reveals.login]}
          onanimationend={(e) => { if (e.target === e.currentTarget) e.currentTarget.classList.remove('fadein-anim'); }}>
         {#if screens.login}<LoginScreen h={screens.login.h} />{/if}

@@ -14,8 +14,7 @@ let strBunkerNostrConnectUrl = '';
 let bunkerFormMode = 'new';
 
 // Bunker connection URL is single-use and the backend's NostrConnect uses
-// a 120s timeout — pair this client-side so the user sees a live countdown
-// and we auto-reroll a fresh QR + URL when it expires.
+// a 120s timeout: the QR popup lives exactly as long as its link, and closes when it expires.
 const BUNKER_SESSION_TIMEOUT_MS = 120 * 1000;
 let bunkerSessionDeadline = 0;
 let bunkerSessionTimerHandle = null;
@@ -29,14 +28,23 @@ function stopBunkerSessionTimer() {
     VectorSvelte.bunkerDeadline(0);
 }
 
-/** One tick of the live countdown; at expiry the link is single-use, so a fresh one rolls. */
+/** One tick of the live countdown; at expiry the single-use link is spent, so its popup goes. */
 function tickBunkerSession() {
     if (bunkerSessionDeadline - Date.now() > 0) {
         VectorSvelte.bunkerTick(Date.now());
         return;
     }
     stopBunkerSessionTimer();
-    VectorSvelte.bunkerStatus('Refreshing connection link…', 'connecting');
+    strBunkerNostrConnectUrl = '';
+    VectorSvelte.bunkerLink('');
+    VectorSvelte.bunkerQrOpen(false);
+    VectorSvelte.bunkerStatus('', '');
+}
+
+/** The QR popup: a live link is shown again as it is; otherwise a fresh session starts. */
+function openBunkerQr() {
+    VectorSvelte.bunkerQrOpen(true);
+    if (strBunkerNostrConnectUrl && bunkerSessionDeadline > Date.now()) return;
     startBunkerSession();
 }
 
@@ -122,6 +130,7 @@ let bunkerReauthOrigin = null;
  */
 function showBunkerForm(mode = 'new') {
     bunkerFormMode = mode;
+    const fromImport = mode === 'new' && VectorSvelte.loginState().screen === 'import';
     // Reauth enters from inside the main app, where Settings (or another
     // panel) is rendered behind #login-form and shows through. Snapshot the
     // visible panel and hide every major view so the bunker form gets the
@@ -138,11 +147,11 @@ function showBunkerForm(mode = 'new') {
     } else {
         bunkerReauthOrigin = null;
     }
-    // The overlay replaces every screen and shows the form + back bar, so the reauth
-    // path can enter from anywhere in the main app.
-    VectorSvelte.loginShowBunker(mode);
-    // Fresh URL per open — single-use, can't be cached.
-    startBunkerSession();
+    // The overlay replaces every screen and shows the form with its way back, so the
+    // reauth path can enter from anywhere in the main app.
+    VectorSvelte.loginShowBunker(mode, fromImport);
+    // A new login pastes or asks for the QR; a reauth is here to re-pair, so its QR opens at once.
+    if (mode === 'reauth') openBunkerQr();
 }
 window.showBunkerForm = showBunkerForm;
 
@@ -438,7 +447,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     // existing accounts before entering their PIN/password.
     if (!fUnlock) loginPicker.hide();
     VectorSvelte.patchEncrypt({
-        gradient: false, typing: false, error: false, headerShown: true, lockShown: true,
+        gradient: false, typing: false, error: false, wrong: '', headerShown: true, lockShown: true,
         typeSelectShown: false, pinShown: false, passwordShown: false, password: '',
         bioOptionShown: false, bioOptionLabel: 'Use Biometrics', recommended: '*Recommended Option',
         bioBtnShown: false, bioBtnLabel: 'Unlock with Biometrics',
@@ -656,9 +665,9 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
     function startPinFlow() {
         let strPinLast = [];
 
-        const DECRYPTION_PROMPT = `Enter your Decryption Pin`;
-        const INITIAL_ENCRYPTION_PROMPT = `Enter your Pin`;
-        const RE_ENTER_PROMPT = `Re-enter your Pin`;
+        const DECRYPTION_PROMPT = `Enter Your Decryption Pin`;
+        const INITIAL_ENCRYPTION_PROMPT = `Create Your Pin`;
+        const RE_ENTER_PROMPT = `Re-enter Your Pin`;
         const DECRYPTING_MSG = `Decrypting your keys...`;
         const ENCRYPTING_MSG = `Encrypting your keys...`;
         const INCORRECT_PIN_MSG = `Incorrect pin, try again`;
@@ -684,7 +693,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     loginPicker.show(loginPicker.activeNpub);
                 }
             }
-            VectorSvelte.patchEncrypt({ passwordShown: false });
+            VectorSvelte.patchEncrypt({ passwordShown: false, wrong: message === INCORRECT_PIN_MSG ? 'pin' : '' });
         }
 
         function revertErrorTitle() {
@@ -788,9 +797,9 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
         let lastPassword = '';
         let passwordProcessing = false;
 
-        const DECRYPTION_PROMPT = `Enter your Password`;
-        const INITIAL_ENCRYPTION_PROMPT = `Choose a Password`;
-        const RE_ENTER_PROMPT = `Re-enter your Password`;
+        const DECRYPTION_PROMPT = `Enter Your Password`;
+        const INITIAL_ENCRYPTION_PROMPT = `Create Your Password`;
+        const RE_ENTER_PROMPT = `Re-enter Your Password`;
         const DECRYPTING_MSG = `Decrypting your keys...`;
         const ENCRYPTING_MSG = `Encrypting your keys...`;
         const INCORRECT_MSG = `Incorrect password, try again`;
@@ -811,7 +820,7 @@ function openEncryptionFlow(fUnlock = false, securityType = 'pin') {
                     loginPicker.show(loginPicker.activeNpub);
                 }
             }
-            VectorSvelte.patchEncrypt({ pinShown: false });
+            VectorSvelte.patchEncrypt({ pinShown: false, wrong: message === INCORRECT_MSG ? 'password' : '' });
         }
 
         function clearAndFocus() {
@@ -1036,6 +1045,16 @@ async function connectBunkerUrl() {
 }
 
 async function loginBack() {
+    // A signer reached from the private key step swaps back to it, whatever flow is around it.
+    const bunker = VectorSvelte.bunkerState();
+    if (VectorSvelte.loginState().bunker && bunker.fromImport) {
+        invoke('cancel_bunker_session').catch((err) => {
+            console.warn('[back] cancel_bunker_session failed:', err);
+        });
+        hideBunkerForm();
+        VectorSvelte.loginScreen('import', true);
+        return;
+    }
     // Add Profile flow back has two cases — independent of which sub-
     // screen the user happens to be on (start / import / encryption /
     // welcome).
@@ -1115,8 +1134,9 @@ async function loginBack() {
  * @property {() => void} importKey
  * @property {() => void} invite
  * @property {() => void} nip55
+ * @property {(key: string) => void} openLink
  * @property {{ toggle: () => void, close: () => void, pick: (meta: object) => void, rowHelpers: () => object }} picker
- * @property {{ open: () => void, copy: () => void, openQr: () => void, renderQr: (node: Element, url: string) => void, connect: () => void }} bunker
+ * @property {{ open: () => void, copy: () => void, openQr: () => void, closeQr: () => void, renderQr: (node: Element, url: string) => void, connect: () => void }} bunker
  * @property {{ choose: (type: string) => void, pinFull: (pin: string) => void, pinBackspace: () => void, submitPassword: () => void, biometric: () => void }} encrypt
  */
 const LOGIN_HELPERS = {
@@ -1126,6 +1146,7 @@ const LOGIN_HELPERS = {
     importKey: () => importKey(),
     invite: () => submitInvite(),
     nip55: () => loginWithNip55(),
+    openLink: (key) => openUrl(SETTINGS_LINKS[key]),
     picker: {
         toggle: () => loginPicker.toggle(),
         close: () => loginPicker.close(),
@@ -1136,8 +1157,8 @@ const LOGIN_HELPERS = {
         // Bunker is a login flow (the signer is the identity), so it lives under Login.
         open: () => showBunkerForm('new'),
         copy: () => copyBunkerLink(),
-        // Blow the QR up fullscreen; openQrOverlay no-ops while the link is still generating.
-        openQr: () => openQrOverlay(strBunkerNostrConnectUrl),
+        openQr: () => openBunkerQr(),
+        closeQr: () => VectorSvelte.bunkerQrOpen(false),
         renderQr: (node, url) => renderQrInto(node, url),
         connect: () => connectBunkerUrl(),
     },

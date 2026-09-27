@@ -1,23 +1,38 @@
 // The login screen's state: which screen is up (start, import, invite, welcome, encrypt,
-// or none), the back bar, whether the form is shown at all, the bunker (remote signer)
-// overlay with its session, the pre-login account picker, and the encrypt screen (title,
-// which input is up, the biometric offers). The flows only set state; one component paints it.
+// or none), whether it offers a way back, whether the form is shown at all, the bunker
+// (remote signer) screen with its session and QR popup, the pre-login account picker, and
+// the encrypt screen (title, which input is up, the biometric offers). The flows only set
+// state; one component paints it.
 import { flushSync } from 'svelte';
 
+const BG_KEY = 'vector_login_hide_bg';
+function readBgHidden() {
+    try { return localStorage.getItem(BG_KEY) === '1'; } catch { return false; }
+}
+
+// No step until boot has read what is on disk: Start would flash up before an unlock step.
 const l = $state({
-    screen: 'start', backBar: false, shown: true, bunker: false,
+    screen: 'none', backBar: false, shown: true, bunker: false,
     importKey: '', inviteCode: '',
     nip55Shown: false, nip55Busy: false,
+    // The illustration behind the screens; a per-device preference, so it lives in the browser.
+    bgHidden: readBgHidden(),
 });
 const b = $state({
     mode: 'new', url: '', qrReady: false, status: '', kind: '', copied: false, busy: false, urlInput: '',
     // A countdown to the single-use link's expiry; `now` ticks from the session timer.
     deadline: 0, now: 0,
+    // The QR popup: the pairing link shows only while it is open.
+    qrOpen: false,
+    // Opened by the private key step's swap button, so its way back leads there.
+    fromImport: false,
 });
 // The pill above the start / unlock screens, shown only when there is a choice to make.
 const picker = $state({ shown: false, open: false, label: '', avatar: null, accounts: [], activeNpub: null });
 const enc = $state({
     title: '', gradient: false, typing: false, error: false,
+    // 'pin' or 'password' while the last unlock attempt was wrong: Aggroboi takes the title.
+    wrong: '',
     headerShown: true, lockShown: true,
     typeSelectShown: false, pinShown: false, passwordShown: false, password: '',
     bioOptionShown: false, bioOptionLabel: 'Use Biometrics', recommended: '*Recommended Option',
@@ -43,17 +58,22 @@ export function loginScreen(screen, backBar) {
     if (backBar !== undefined) l.backBar = !!backBar;
 }
 export function loginShowForm(shown) { l.shown = !!shown; }
+export function toggleLoginBg() {
+    l.bgHidden = !l.bgHidden;
+    try { localStorage.setItem(BG_KEY, l.bgHidden ? '1' : '0'); } catch { /* the choice lasts this session */ }
+}
 /** The main app is up: the form and every screen go. */
 export function loginHide() { l.shown = false; l.screen = 'none'; }
 
-/** The bunker overlay replaces the screens; the back bar shows above it. */
-export function loginShowBunker(mode) {
-    b.mode = mode; l.screen = 'none'; l.bunker = true; l.backBar = true; l.shown = true;
-    b.status = ''; b.kind = ''; b.url = ''; b.qrReady = false; b.copied = false; b.busy = false; b.deadline = 0;
+/** The bunker overlay replaces the screens, with a way back. */
+export function loginShowBunker(mode, fromImport = false) {
+    b.mode = mode; b.fromImport = !!fromImport; l.screen = 'none'; l.bunker = true; l.backBar = true; l.shown = true;
+    b.status = ''; b.kind = ''; b.url = ''; b.qrReady = false; b.copied = false; b.busy = false; b.deadline = 0; b.qrOpen = false;
 }
 export function loginHideBunker() {
-    l.bunker = false; b.url = ''; b.qrReady = false; b.copied = false; b.busy = false; b.deadline = 0; b.urlInput = '';
+    l.bunker = false; b.url = ''; b.qrReady = false; b.copied = false; b.busy = false; b.deadline = 0; b.urlInput = ''; b.qrOpen = false;
 }
+export function bunkerQrOpen(open) { b.qrOpen = !!open; }
 
 export function bunkerStatus(text, kind = '') { b.status = text || ''; b.kind = kind || ''; }
 export function bunkerLink(url) { b.url = url || ''; if (!url) b.qrReady = false; }

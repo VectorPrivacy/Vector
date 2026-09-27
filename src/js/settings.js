@@ -1795,6 +1795,7 @@ const SETTINGS_HELP = {
 // vanilla bridges are essentially abandoned by The Tor Project.
 const SETTINGS_LINKS = {
     torAttribution: 'https://torproject.org',
+    website: 'https://vectorapp.io',
     bridges: 'https://bridges.torproject.org/bridges/en?transport=obfs4',
     donate: 'https://vector-privacy.gitbook.io/vector-privacy/vector-messenger/more/donations',
     gitbook: 'https://docs.vectorapp.io',

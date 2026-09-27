@@ -7696,20 +7696,8 @@ audio {
   border: none;
 }
 
-#login-form.has-back-bar {
-    padding-top: 40px;
-}
 
-#login-encrypt-pins {
-  background: linear-gradient(90deg, #59fcb3 0%, #2b976c 100%);
-  -webkit-box-shadow: 
-    0 10px 20px 5px #59fcb33c,
-    0 8px 12px 20px rgba(90, 252, 180, 0.36);
-}
 
-#login-input {
-  margin-right: 5px;
-}
 
 #settings {
   font-family: Rubik, sans-serif;
@@ -10178,41 +10166,12 @@ select:disabled:hover {
   margin-bottom: 0;
 }
 
-.login-logo {
-  /* Fluid scaling: 260px at >=700px height, shrinks to 30vh at small heights */
-  width: clamp(120px, 38vh, 260px);
-  /* Fluid margin: 50px at >=700px height, shrinks to 0 at small heights */
-  margin-top: clamp(0px, 7vh, 50px);
-}
 
-.login-subtext {
-  font-size: clamp(10px, 2.4vh, 16px);
-}
-
-@media (max-height: 325px) {
-  .login-logo {
-    display: none;
-  }
-
-  .login-subtext {
-    display: none;
-  }
-}
 
 @media (max-height: 500px) {
-  .login-logo {
-    margin-top: 0px;
-  }
 
-  .login-import-container {
-      position: absolute;
-      bottom: 0;
-      width: 100%;
-  }
 
-  #login-start {
-    bottom: 10px !important;
-  }
+
 
   .chat-new-center-content .chat-new-icon,
   .chat-new-center-content .chat-new-subtitle,
@@ -10221,372 +10180,58 @@ select:disabled:hover {
   }
 }
 
-@media (max-height: 625px) {
-  .login-credits {
-    display: none;
-  }
 
-  /* Credits provided the bottom breathing room; reclaim it on the
-     button stack so Login doesn't kiss the viewport edge. */
-  #login-start {
-    padding-bottom: 16px;
-  }
-}
 
-#login-start {
-  position: absolute;
-  width: 100%;
-  bottom: 0;
-}
 
-.login-subtext {
-  margin-top: 5px;
-}
 
-.login-create-btn {
-  background-color: #59fcb3;
-  color: black;
-  font-weight: 600;
-  width: 225px;
-}
 
-.login-login-btn {
-  background-color: transparent;
-  border-color: #59fcb3;
-  margin-top: 10px;
-  width: 225px;
-}
 
-/* Tertiary action — Remote Signer (NIP-46) entry from the Login screen.
-   Niche feature (98% of users don't use signers), so it lives below the
-   primary nsec/seed input as a small underlined link, not a button. Bunker
-   is a login flow only — the signer is the identity, so there's no parallel
-   "create" path that would justify entry-screen prominence. */
-.login-signer-links {
-  /* Pin above the absolute-positioned input row inside login-import (its glow
-     halo sits at bottom: 0); column-stack so multiple signer links don't overlap. */
-  position: absolute;
-  bottom: 84px;
-  left: 0;
-  right: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-.login-bunker-link-btn {
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 13px;
-  padding: 6px 12px;
-  cursor: pointer;
-  transition: color 0.15s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-}
-.login-bunker-link-btn span {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-.login-bunker-link-icon {
-  width: 16px;
-  height: 16px;
-  opacity: 0.7;
-  /* Key SVG uses currentColor stroke; the parent button's color flows in. */
-  filter: brightness(0) invert(1);
-  /* Match the parent button's color transition so the icon brightens in
-     sync with the text on hover instead of snapping ahead of it. */
-  transition: opacity 0.15s ease;
-}
-.login-bunker-link-btn:hover { color: rgba(255, 255, 255, 0.9); }
-.login-bunker-link-btn:hover .login-bunker-link-icon { opacity: 1; }
 
-/* Remote-signer login screen. Mirrors `.login-import-container`'s
-   bottom-anchored layout — fields land in the same screen region as the
-   Create/Login buttons and the nsec input, so the user's eye doesn't have
-   to retarget when they switch flows. Compact on short viewports. */
-/* Bunker screen claims the whole viewport below the back-bar — the QR is
-   the centrepiece, so the Vector logo + subtext (siblings outside this
-   container) are hidden via `bunker-active` on `#login-form`. The top
-   inset matches the fixed `.chat-new-header` back-bar height (60px) so
-   the heading row can't slide under it on short viewports. */
-.login-bunker-container {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  width: 100%;
-  padding-top: 60px;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.login-bunker-container.is-hidden {
-  display: none !important;
-}
 
-/* Hide the Vector wordmark + tagline while bunker is active — the QR
-   needs the screen space. Toggled by show/hideBunkerForm() in main.js. */
-#login-form.bunker-active .login-logo,
-#login-form.bunker-active .login-subtext {
-  display: none !important;
-}
 
-/* On short viewports the Vector logo + subtext would overlap the bunker
-   heading. The logo is brand-critical and stays — the subtext is a tagline
-   we can drop. Threshold chosen empirically: at 700px the bunker heading
-   sits clear of the subtext; below that the two start touching. */
-@media (max-height: 700px) {
-  #login-form.bunker-active .login-subtext {
-    display: none;
-  }
-}
-.login-bunker-fields {
-  width: 100%;
-  max-width: 360px;
-  padding: 16px 18px;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-}
-.login-bunker-qr-wrap {
-  position: relative;
-  /* 220px on tall viewports (≥650px), scales linearly via vh below that,
-     floors at 120px so the QR stays scannable on extremely short screens. */
-  width: clamp(120px, 33.8vh, 220px);
-  height: clamp(120px, 33.8vh, 220px);
-  background: #fff;
-  border-radius: 12px;
-  padding: 10px;
-  box-sizing: border-box;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.login-bunker-qr-wrap.ready { cursor: pointer; }
-.login-bunker-qr { width: 100%; height: 100%; }
-.login-bunker-qr svg { width: 100%; height: 100%; display: block; }
-.login-bunker-qr-loading {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: rgba(0, 0, 0, 0.55);
-  font-size: 12.5px;
-  background: #fff;
-  border-radius: 12px;
-}
-.login-bunker-qr-wrap.ready .login-bunker-qr-loading { display: none; }
-.login-bunker-copy-btn {
-  background: rgba(89, 252, 179, 0.12);
-  border: 1px solid rgba(89, 252, 179, 0.4);
-  color: #59fcb3;
-  padding: 10px 16px;
-  border-radius: 10px;
-  font-size: 13.5px;
-  font-weight: 600;
-  cursor: pointer;
-  width: 100%;
-  max-width: 220px;
-  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
-}
-.login-bunker-copy-btn:hover:not(:disabled) {
-  background: rgba(89, 252, 179, 0.2);
-  border-color: rgba(89, 252, 179, 0.6);
-}
-.login-bunker-copy-btn:disabled { opacity: 0.5; cursor: default; }
-.login-bunker-copy-btn.copied {
-  background: rgba(89, 252, 179, 0.3);
-  border-color: rgba(89, 252, 179, 0.7);
-}
-.login-bunker-divider {
-  width: 100%;
-  max-width: 320px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 4px 0 2px 0;
-  color: rgba(255, 255, 255, 0.35);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-.login-bunker-divider::before,
-.login-bunker-divider::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: rgba(255, 255, 255, 0.1);
-}
-/* Key icon + title on one line so the heading row stays compact on small
-   viewports (Android phones, narrow desktop windows). */
-.login-bunker-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.login-bunker-title-icon {
-  width: 22px;
-  height: 22px;
-  filter: brightness(0) invert(1);
-  opacity: 0.95;
-  flex-shrink: 0;
-}
-.login-bunker-title {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 600;
-}
-.login-bunker-helper {
-  margin: 0 0 4px 0;
-  font-size: 12.5px;
-  line-height: 1.4;
-  color: rgba(255, 255, 255, 0.6);
-  text-align: center;
-  max-width: 340px;
-}
-.login-bunker-field {
-  display: flex;
-  width: 100%;
-  max-width: 360px;
-  align-items: center;
-  gap: 6px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 10px;
-  padding: 4px 4px 4px 12px;
-  box-sizing: border-box;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-.login-bunker-field:focus-within {
-  border-color: rgba(89, 252, 179, 0.55);
-  background: rgba(89, 252, 179, 0.06);
-}
-.login-bunker-input {
-  flex: 1;
-  background: transparent;
-  border: none;
-  outline: none;
-  color: white;
-  font-size: 14px;
-  padding: 9px 0;
-  min-width: 0;
-  height: auto;
-}
-.login-bunker-input::placeholder {
-  color: rgba(255, 255, 255, 0.4);
-}
-.login-bunker-connect-btn {
-  flex-shrink: 0;
-  background: #59fcb3;
-  border: none;
-  border-radius: 8px;
-  width: 40px;
-  height: 34px;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: filter 0.15s ease, opacity 0.15s ease;
-}
-.login-bunker-connect-btn svg {
-  display: block;
-}
-.login-bunker-connect-btn:hover { filter: brightness(1.1); }
-.login-bunker-connect-btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-  filter: none;
-}
-.login-bunker-status {
-  margin: 2px 0 0 0;
-  font-size: 12px;
-  min-height: 16px;
-  color: rgba(255, 255, 255, 0.6);
-  text-align: center;
-  max-width: 360px;
-  word-break: break-word;
-}
-.login-bunker-status.error { color: #ff6b6b; }
-.login-bunker-status.connecting { color: #ffb84d; }
-.login-bunker-status.online { color: #59fcb3; }
 
-.login-credits {
-  width: 275px;
-}
 
-.login-input-container {
-  position: absolute;
-  bottom: 0;
-  width: 100%;
-  padding-top: 5px;
-  padding-bottom: 5px;
-}
 
-.login-input {
-  width: -webkit-fill-available;
-  height: 20px;
-  padding: 10px;
-  padding-left: 14px;
-  line-height: inherit;
-  border: none;
-  background: transparent;
-  color: white;
-  font-size: 15px;
-}
 
-.login-btn {
-  width: 32px;
-  height: 32px;
-  padding: 6px;
-  margin: 0;
-  margin-right: 8px;
-  background: transparent;
-  color: var(--icon-color-primary);
-}
 
-.login-encrypt-container {
-  position: absolute;
-  width: 100%;
-  bottom: 0px;
-}
 
-.login-encrypt-password {
-  width: 100%;
-}
 
-.login-encrypt-password .login-input-container {
-  position: relative;
-}
 
-.login-encrypt-password .chat-input-container {
-  margin-top: 0;
-  margin-bottom: 0;
-}
 
-.login-encrypt-header {
-  display: inline-flex;
-}
 
-.login-lock-icon {
-  width: 35px;
-  height: 35px;
-}
 
-.login-encrypt-title {
-  margin-bottom: 25px;
-  margin-top: 10px;
-  margin-left: 8px;
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 .security-type-selector {
   display: flex;
@@ -10613,50 +10258,11 @@ select:disabled:hover {
   color: #fff;
 }
 
-.security-type-options {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-}
 
-.security-type-option-btn {
-  width: 225px;
-  padding: 12px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: #030303;
-  color: rgba(255, 255, 255, 0.85);
-  cursor: pointer;
-  font-size: 15px;
-  font-family: inherit;
-  font-weight: 600;
-  transition: all 0.2s;
-}
 
-.security-type-option-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.25);
-}
 
-.security-type-option-btn.accent {
-  background: #59fcb3;
-  border-color: #59fcb3;
-  color: #000;
-}
 
-.security-type-option-btn.accent:hover {
-  background: #4de0a0;
-  border-color: #4de0a0;
-}
 
-.security-type-recommended {
-  color: #59fcb3;
-  font-size: 12px;
-  font-style: italic;
-  margin: 0;
-}
 
 .login-encrypt-description {
   color: rgba(255, 255, 255, 0.5);
@@ -10664,43 +10270,11 @@ select:disabled:hover {
   margin-bottom: 16px;
 }
 
-.login-encrypt-password {
-  margin-bottom: 0;
-}
 
-/* Login Invite Styles */
-.login-invite-container {
-  position: absolute;
-  width: 100%;
-  bottom: 0px;
-}
 
-.login-invite-header {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-}
 
-.login-invite-icon {
-  width: 35px;
-  height: 35px;
-  margin-right: 10px;
-}
 
-.login-invite-title {
-  margin: 0;
-  font-size: 24px;
-  letter-spacing: 0.5px;
-}
 
-.login-invite-description {
-  text-align: center;
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 14px;
-  margin-bottom: 30px;
-  padding: 0 20px;
-}
 
 .login-skip-btn {
   background: transparent;
@@ -10718,24 +10292,7 @@ select:disabled:hover {
   color: rgba(255, 255, 255, 0.9);
 }
 
-/* Login Welcome Styles */
-.login-welcome-container {
-  position: absolute;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #030303;
-  animation: fadeInWithoutTransform 0.5s cubic-bezier(.46,.03,.52,.96) forwards;
-}
 
-.login-welcome-content {
-  text-align: center;
-  padding: 40px;
-  max-width: 500px;
-  animation: welcomeContentSlide 0.8s cubic-bezier(.46,.03,.52,.96) forwards;
-}
 
 @keyframes welcomeContentSlide {
   0% { 
@@ -10748,15 +10305,6 @@ select:disabled:hover {
   }
 }
 
-.login-welcome-icon {
-  width: 111px;
-  height: 111px;
-  margin: 0 auto 30px;
-  display: block;
-  position: relative;
-  background-color: #59fcb3;
-  animation: checkPulse 2s ease-in-out infinite;
-}
 
 @keyframes checkPulse {
   0%, 100% { 
@@ -10769,27 +10317,8 @@ select:disabled:hover {
   }
 }
 
-.login-welcome-title {
-  font-size: 36px;
-  font-weight: 600;
-  margin: 0 0 20px 0;
-  color: #59fcb3;
-  letter-spacing: 1px;
-}
 
-.login-welcome-subtitle {
-  font-size: 18px;
-  color: rgba(255, 255, 255, 0.9);
-  margin: 0 0 40px 0;
-  line-height: 1.5;
-}
 
-.login-welcome-footer {
-  font-size: 14px;
-  color: rgba(255, 255, 255, 0.6);
-  margin: 0;
-  animation: loadingPulse 1.5s ease-in-out infinite;
-}
 
 @keyframes loadingPulse {
   0%, 100% { opacity: 0.6; }
@@ -20519,6 +20048,594 @@ body.profile-switcher-editing .profile-switcher-add {
   -webkit-user-select: text;
 }
 
+/* ── Login: the start, unlock and sign-in steps ──────────────────────────────
+   Laid out on the design's 1280×720 frame: the lockup and account pill on top,
+   one centred step, the credits along the bottom, and the illustration behind.
+   The grid's outer rows share the spare height, so a step sits at the window's
+   centre however tall the window is, and never under the header or footer. */
+#login-form {
+  font-family: Rubik, sans-serif;
+}
+#chrome-lockup.login-hidden {
+  visibility: hidden;
+}
+/* Over the login screens the strip is only its controls, on the same art as the rest. */
+#window-chrome.login {
+  background: transparent;
+  border-bottom-color: transparent;
+}
+
+.lg-art {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+.lg-art.hidden { opacity: 0; }
+.lg-art img {
+  position: absolute;
+  left: -9.35%;
+  top: -15.08%;
+  width: 116.79%;
+  height: 116.79%;
+  object-fit: cover;
+  opacity: 0.2;
+}
+/* Fades the camera out towards the centre, where the steps sit. */
+.lg-art::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to right, #030303 57.19%, rgba(3, 3, 3, 0) 91.56%);
+}
+
+/* Spans the window from its top edge, so centring matches the design's frame; only
+   its children take pointer events, leaving the title strip's controls reachable. */
+.lg {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: minmax(max-content, 1fr) auto minmax(max-content, 1fr);
+  justify-items: center;
+  color: #fff;
+  text-align: center;
+  pointer-events: none;
+}
+.lg-head,
+.lg-stage,
+.lg-foot,
+.lg-bg-toggle,
+.login-account-list { pointer-events: auto; }
+
+.lg-head {
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 23px;
+  margin-top: max(51px, calc(var(--chrome-h) + 16px));
+}
+.lg-lockup {
+  display: block;
+  width: min(429.72px, calc(100vw - 48px));
+  height: auto;
+}
+.lg-account {
+  position: relative;
+  z-index: 970;   /* above the account list's backdrop */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 40px);
+  padding: 0;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  cursor: pointer;
+}
+.lg-account-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #fff;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.lg-account-chevron {
+  flex-shrink: 0;
+  margin-left: 2px;
+  transition: transform 0.16s ease;
+}
+.lg-account.open .lg-account-chevron { transform: rotate(180deg); }
+
+.lg-stage {
+  align-self: center;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 24px 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.lg-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.lg-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 25px;
+}
+.lg-title h3 {
+  margin: 0;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 1.6px;
+}
+.lg-title.error h3 { color: var(--danger-color, #ff2ea9); }
+
+.lg-buttons {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+#login-start .lg-buttons { gap: 13px; }
+.lg-btn {
+  width: 250px;
+  max-width: calc(100vw - 48px);
+  height: 50px;
+  margin: 0;
+  padding: 0 16px;
+  border: 1px solid #393b3c;
+  border-radius: 7px;
+  background: transparent;
+  backdrop-filter: none;
+  color: #fff;
+  font-family: inherit;
+  font-size: 20px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
+}
+.lg-btn:hover { border-color: #5b6060; }
+.lg-btn.primary {
+  border-color: #33db98;
+  background-color: #33db98;
+  color: #030303;
+}
+.lg-btn.primary:hover { filter: brightness(1.08); }
+.lg-btn.accent { border-color: #33db98; }
+.lg-btn.accent:hover { background-color: rgba(51, 219, 152, 0.08); }
+.lg-recommended {
+  margin: -4px 0;
+  color: #59fcb3;
+  font-size: 10px;
+}
+.lg-bio {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+  font-size: 16px;
+}
+
+.lg-pins {
+  display: flex;
+  gap: 11.7px;
+}
+.lg-pins input {
+  width: 40px;
+  height: 40px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 2px solid #5b6060;
+  border-radius: 7px;
+  background: #030303;
+  color: #fff;
+  caret-color: #33db98;
+  font-family: inherit;
+  font-size: 20px;
+  text-align: center;
+  outline: none;
+  box-shadow: none;
+  transition: border-color 0.12s ease;
+}
+.lg-pins input:focus { border-color: #33db98; }
+
+.lg-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+/* A wrong unlock: Aggroboi, glaring, takes the title's place until the next try. */
+.lg-aggro {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 25px;
+  animation: lgAggroIn 0.32s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes lgAggroIn {
+  from { opacity: 0; transform: scale(0.9); }
+}
+.lg-aggro-art {
+  position: relative;
+  width: 172px;
+  height: 179px;
+}
+.lg-aggro-face {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+}
+/* The sign's stroke overhangs its 71×62 slot by 4px a side, as drawn. */
+.lg-aggro-warn {
+  position: absolute;
+  right: -4px;
+  top: -4px;
+}
+.lg-aggro-oops {
+  margin: 14px 0 0;
+  color: #ff2ea9;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 1.4px;
+}
+.lg-aggro-title {
+  margin: 8px 0 0;
+  color: #fff;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 2.4px;
+}
+/* Its outline faces, scattered faintly behind everything while it glares. */
+.lg-aggro-bg {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+.lg-aggro-bg.shown { opacity: 1; }
+.lg-aggro-bg img { position: absolute; }
+.lg-aggro-bg-1 { left: 49.4%; top: 66.9%; }
+.lg-aggro-bg-2 { left: 2%; top: 12.2%; }
+.lg-aggro-bg-3 { left: 85.7%; top: 44.5%; }
+.lg-aggro-bg-4 { left: 5.1%; top: 82.3%; }
+
+/* Keeps the field itself centred, with its side button hanging off to the right. */
+.lg-field-row-offset { margin-left: 48px; }
+.lg-field {
+  display: flex;
+  align-items: center;
+  width: 306px;
+  max-width: calc(100vw - 96px);
+  height: 40px;
+  box-sizing: border-box;
+  border: 2px solid #33db98;
+  border-radius: 7px;
+  background: #030303;
+}
+.lg-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0 0 0 11px;
+  border: none;
+  background: none;
+  color: #fff;
+  font-family: inherit;
+  font-size: 14px;
+  outline: none;
+  box-shadow: none;
+}
+.lg-input::placeholder { color: #b2b2b2; }
+.lg-input[type="password"]:not(:placeholder-shown) { font-size: 20px; }
+.lg-input:disabled { opacity: 0.5; }
+.lg-field-go,
+.lg-field-eye {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin: 0;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  cursor: pointer;
+}
+.lg-field-go { padding: 0 6px 0 4px; }
+.lg-field-eye { padding: 0 6px; }
+.lg-field-go:disabled { opacity: 0.4; cursor: default; }
+.lg-field-eye .icon {
+  position: relative;
+  inset: auto;
+  width: 22px;
+  height: 18px;
+  margin: 0;
+  background-color: #959899;
+}
+.lg-side-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 2px solid #474747;
+  border-radius: 7px;
+  background: #030303;
+  backdrop-filter: none;
+  cursor: pointer;
+  transition: border-color 0.12s ease;
+}
+.lg-side-btn:hover:not(:disabled) { border-color: #5b6060; }
+.lg-side-btn:disabled { opacity: 0.5; cursor: default; }
+.lg-side-btn.bare {
+  border: none;
+  background: none;
+}
+.lg-side-btn img { display: block; }
+
+.lg-back {
+  margin: 25px 0 0;
+  color: #b2b2b2;
+  font-size: 11px;
+  letter-spacing: 1.1px;
+}
+.lg-back button,
+.lg-link {
+  padding: 0;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  color: #33db98;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.lg-back button:hover,
+.lg-link:hover:not(:disabled) { text-decoration: underline; }
+.lg-link {
+  margin-top: 14px;
+  font-size: 11px;
+  letter-spacing: 1.1px;
+}
+.lg-link:disabled { opacity: 0.5; cursor: default; }
+.lg-status {
+  max-width: 340px;
+  margin: 12px 0 0;
+  color: #b2b2b2;
+  font-size: 12px;
+}
+.lg-status.error { color: var(--danger-color, #ff2ea9); }
+.lg-status.connecting { color: #ffb84d; }
+.lg-status.online { color: #59fcb3; }
+.lg-note {
+  max-width: 320px;
+  margin: 0 0 16px;
+  color: #b2b2b2;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.lg-welcome-icon {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  margin: 0 0 16px;
+  background-color: #33db98;
+}
+.lg-welcome-kicker {
+  margin: 0;
+  color: #33db98;
+  font-size: 20px;
+  font-weight: 700;
+}
+.lg-welcome-title {
+  margin: 0 0 12px;
+  font-size: 28px;
+  font-weight: 700;
+}
+
+.lg-foot {
+  align-self: end;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 17px;
+  margin-bottom: calc(25px + env(safe-area-inset-bottom, 0px));
+}
+.lg-credit {
+  position: relative;
+  width: 173.78px;
+  height: 10.47px;
+}
+.lg-credit-text {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.lg-credit-mark {
+  position: absolute;
+  left: 77.7px;
+  top: -5.6px;
+  width: 13.16px;
+  height: 20px;
+}
+.lg-links {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: #b2b2b2;
+  font-size: 8px;
+  letter-spacing: 0.8px;
+}
+.lg-links button {
+  padding: 0;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  color: #33db98;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.lg-links button:hover { color: #59fcb3; }
+
+/* A fixed width with its icon in a fixed box, so neither moves when the label changes. */
+.lg-bg-toggle {
+  position: fixed;
+  right: 12px;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  width: 114px;
+  height: 24px;
+  white-space: nowrap;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  line-height: 1;
+  margin: 0;
+  padding: 4px;
+  border: none;
+  background: none;
+  backdrop-filter: none;
+  color: #474747;
+  font-family: inherit;
+  font-size: 8px;
+  font-weight: 400;
+  letter-spacing: 0.8px;
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.lg-bg-toggle:hover { color: #5b6060; }
+/* Narrow windows have no corner to spare: the toggle joins the footer's column. */
+@media (max-width: 640px) {
+  .lg-foot { margin-bottom: 6px; }
+  .lg-bg-toggle {
+    position: static;
+    justify-self: center;
+    margin-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+}
+.lg-bg-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* The QR popup: the pairing link, for as long as it lives. */
+.lg-qr-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 980;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  animation: lgFadeIn 0.16s ease-out;
+}
+@keyframes lgFadeIn { from { opacity: 0; } }
+.lg-qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 352px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
+  padding: 20px 20px 22px;
+  border: 1px solid #474747;
+  border-radius: 9px;
+  background: rgba(3, 3, 3, 0.95);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  animation: qr-overlay-pop 0.16s ease-out;
+}
+.lg-qr {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  box-sizing: border-box;
+  padding: 16px;
+  border-radius: 16px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lg-qr-code { width: 100%; height: 100%; }
+.lg-qr-code svg { display: block; width: 100%; height: 100%; }
+.lg-qr-loading {
+  position: absolute;
+  margin: 0;
+  padding: 0 24px;
+  color: #5b6060;
+  font-size: 13px;
+}
+.lg-qr.ready .lg-qr-loading { display: none; }
+.lg-qr-status {
+  min-height: 16px;
+  margin: 12px 0 12px;
+  color: #b2b2b2;
+  font-size: 12px;
+}
+.lg-qr-actions {
+  display: flex;
+  gap: 10px;
+}
+.lg-qr-close,
+.lg-qr-copy {
+  width: 100px;
+  height: 38px;
+  margin: 0;
+  padding: 0;
+  border-radius: 6px;
+  backdrop-filter: none;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.lg-qr-close {
+  border: none;
+  background: #59fcb3;
+  color: #000;
+}
+.lg-qr-copy {
+  border: 1px solid #474747;
+  background: transparent;
+  color: #fff;
+}
+.lg-qr-copy.copied { border-color: #33db98; color: #59fcb3; }
+.lg-qr-copy:disabled { opacity: 0.5; cursor: default; }
+
 /* Pre-login: fullscreen account-list takeover. Triggered by clicking the
    pill above the logo; covers the entire viewport, blurs+darkens the
    underlying login screen, and lays out account rows full-width. The
@@ -20528,9 +20645,9 @@ body.profile-switcher-editing .profile-switcher-add {
 .login-account-list-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(3, 3, 3, 0.9);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
   transition: opacity 160ms ease;
@@ -20548,9 +20665,18 @@ body.profile-switcher-editing .profile-switcher-add {
   top: 72px;
   left: 0;
   right: 0;
+  width: min(420px, 100%);
+  margin: 0 auto;
+  box-sizing: border-box;
   z-index: 960;
   display: none;
   flex-direction: column;
+  overflow: hidden;
+  border: 2px solid #030303;
+  border-radius: 10px;
+  background: rgba(3, 3, 3, 0.5);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 .login-account-list.open {
   display: flex;
@@ -20568,15 +20694,22 @@ body.profile-switcher-editing .profile-switcher-add {
    Default row background is a partial-opacity black so rows stay visible
    against the blurred backdrop instead of disappearing into it. */
 .login-account-list .profile-switcher-row {
-  padding: 8px 24px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 21px;
+  border-bottom: none;
   border-left: 3px solid transparent;
-  background: rgba(0, 0, 0, 0.4);
+  background: transparent;
   transition: background-color 120ms ease, border-left-color 120ms ease;
 }
 .login-account-list .profile-switcher-row:hover {
-  background: color-mix(in srgb, var(--accent-color, #59fcb3) 13%, rgba(0, 0, 0, 0.4));
-  border-left-color: var(--accent-color, #59fcb3);
+  background: rgba(89, 252, 179, 0.1);
+  border-left-color: #59fcb3;
+}
+.login-account-list .profile-switcher-npub {
+  font-family: inherit;
+  font-size: 10px;
+  color: #5b6060;
 }
 .login-account-list .profile-switcher-active-dot {
   display: none;
@@ -20585,62 +20718,17 @@ body.profile-switcher-editing .profile-switcher-add {
    longer needs to override it; kept for documentation. The inline style
    wins regardless. */
 .login-account-list .profile-switcher-name {
+  color: #fff;
   font-size: 14px;
 }
 
-/* Pre-login picker — silent button. No pill chrome, no hover effects,
-   no border. Just [avatar] [name] [chevron] in plain text, large and
-   readable, with click semantics still applied via JS. */
-.login-account-picker {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  width: fit-content;
-  max-width: calc(100% - 40px);
-  margin: 24px auto 0;
-  padding: 0;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-}
-.login-account-picker.single {
-  cursor: default;
-}
-.login-account-picker img {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  object-fit: cover;
-}
-.login-account-picker-name {
-  font-size: 20px;
-  font-weight: 500;
-  color: #f7f4f4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
-.login-account-picker-chevron {
-  width: 16px;
-  height: 16px;
-  color: rgba(255, 255, 255, 0.7);
-  flex-shrink: 0;
-  transition: transform 160ms ease;
-}
-.login-account-picker.open .login-account-picker-chevron {
-  transform: rotate(180deg);
-}
-.login-account-picker.single .login-account-picker-chevron {
-  display: none;
-}
-/* Lift the pill above the fullscreen backdrop while expanded so the
-   active account stays visible at the top of the takeover. */
-.login-account-picker {
-  position: relative;
-  z-index: 970;
-}
+
+
+
+
+
+
+
 
 
 /* ── Community invite panel (settings → Invite) ───────────────────────────── */
