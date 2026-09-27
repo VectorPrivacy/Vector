@@ -2,6 +2,10 @@
 //! vault reads and gift-wrap unwrap.
 //!
 //! Usage: cargo run --release -p vector-core --example crypto_bench
+//!        cargo run --release -p vector-core --example crypto_bench -- sweep
+//!
+//! `sweep` races every ChaCha20 backend this CPU has per message length, then pairs the
+//! AEAD with Poly1305 lanes off and on, in interleaved rounds, to find crossovers.
 
 use nostr_sdk::prelude::*;
 use std::hint::black_box;
@@ -22,8 +26,105 @@ fn bench<F: FnMut()>(name: &str, iters: u64, mut f: F) -> f64 {
     ns
 }
 
+/// One timed run of `iters` calls, in ns per call.
+fn once<F: FnMut()>(iters: u64, f: &mut F) -> f64 {
+    let t = Instant::now();
+    for _ in 0..iters {
+        f();
+    }
+    t.elapsed().as_nanos() as f64 / iters as f64
+}
+
+fn median(v: &mut [f64]) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+fn sweep() {
+    use vector_core::crypto::chachapoly::bench;
+    const ROUNDS: usize = 15;
+    const PAIRS: usize = 31;
+    let key = [7u8; 32];
+    let nonce = [1u8; 12];
+    let backends = bench::chacha_backends();
+    let poly_min = bench::poly_simd_min();
+    println!("arch {}; ChaCha20 backends {:?}; production Poly1305 lanes from {}",
+        std::env::consts::ARCH, backends,
+        if poly_min == usize::MAX { "never".to_string() } else { format!("{poly_min} B") });
+
+    println!("\n== ChaCha20 backend per message length: median ns per seal, rounds won of {ROUNDS}");
+    println!("   (blocks = keystream blocks the first pass wants: 1 for the Poly1305 key + data)");
+    print!("{:>6} {:>6}", "bytes", "blocks");
+    for b in &backends {
+        print!("  {b:>16}");
+    }
+    println!();
+    for len in [0usize, 16, 32, 48, 64, 96, 128, 160, 192, 224, 256, 320, 384, 448, 512, 768, 1024, 2048, 4096, 16384] {
+        let ciphers: Vec<_> = backends.iter().map(|b| bench::cipher(&key, b, poly_min).unwrap()).collect();
+        let mut buf = vec![0x61u8; len];
+        let iters = (2_000_000 / (len as u64 + 128)).max(32);
+        let mut times = vec![Vec::with_capacity(ROUNDS); backends.len()];
+        let mut wins = vec![0usize; backends.len()];
+        for c in &ciphers {
+            once(iters / 4 + 1, &mut || { black_box(c.seal_in_place(&nonce, &[], black_box(&mut buf[..])).unwrap()); });
+        }
+        for round in 0..ROUNDS {
+            let mut row = vec![0.0; backends.len()];
+            for k in 0..backends.len() {
+                let i = (k + round) % backends.len();
+                let c = &ciphers[i];
+                row[i] = once(iters, &mut || { black_box(c.seal_in_place(&nonce, &[], black_box(&mut buf[..])).unwrap()); });
+            }
+            let best = (0..row.len()).min_by(|&a, &b| row[a].partial_cmp(&row[b]).unwrap()).unwrap();
+            wins[best] += 1;
+            for i in 0..row.len() {
+                times[i].push(row[i]);
+            }
+        }
+        print!("{len:>6} {:>6}", 1 + len.div_ceil(64));
+        for i in 0..backends.len() {
+            print!("  {:>9.1} ({:>2}/{ROUNDS})", median(&mut times[i]), wins[i]);
+        }
+        println!();
+    }
+
+    if !bench::poly_simd_available() {
+        println!("\n(no Poly1305 lanes on this CPU)");
+        return;
+    }
+    println!("\n== Poly1305 lanes in the whole AEAD: median of scalar/lanes time ratio, pairs lanes won of {PAIRS}");
+    let chacha = bench::default_chacha_backend();
+    println!("   (ChaCha20 on the production backend, {chacha})");
+    let off = bench::cipher(&key, chacha, usize::MAX).unwrap();
+    let on = bench::cipher(&key, chacha, 64).unwrap();
+    for len in [256usize, 320, 384, 448, 512, 576, 640, 704, 768, 896, 1024, 1536, 2048, 4096, 16384, 65536] {
+        let mut buf = vec![0x61u8; len];
+        let iters = (2_000_000 / (len as u64 + 256)).max(32);
+        let seal = |c: &vector_core::crypto::chachapoly::ChaCha20Poly1305, buf: &mut Vec<u8>| {
+            once(iters, &mut || { black_box(c.seal_in_place(&nonce, &[], black_box(&mut buf[..])).unwrap()); })
+        };
+        seal(&off, &mut buf);
+        seal(&on, &mut buf);
+        let mut ratios: Vec<f64> = (0..PAIRS)
+            .map(|i| if i % 2 == 0 {
+                let a = seal(&off, &mut buf);
+                a / seal(&on, &mut buf)
+            } else {
+                let b = seal(&on, &mut buf);
+                seal(&off, &mut buf) / b
+            })
+            .collect();
+        let wins = ratios.iter().filter(|&&r| r > 1.0).count();
+        println!("{len:>6} B   {:>6.3}x   lanes won {wins:>2}/{PAIRS}", median(&mut ratios));
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    if std::env::args().any(|a| a == "sweep") {
+        sweep();
+        return;
+    }
     let me = Keys::generate();
     let sender = Keys::generate();
     MY_SECRET_KEY.store_from_keys(&me, &[&ENCRYPTION_KEY]);
@@ -50,21 +151,21 @@ async fn main() {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
     {
-        use vector_core::crypto::chachapoly::bench::{poly1305_avx2, poly1305_scalar, AVX2_MIN};
-        println!("-- Poly1305 alone, scalar vs AVX2 lanes (the AEAD switches at {AVX2_MIN} B, set from the full AEAD)");
+        use vector_core::crypto::chachapoly::bench::{poly1305_scalar, poly1305_simd, poly_simd_min};
+        println!("-- Poly1305 alone, scalar vs lanes (`sweep` measures the AEAD switch point)");
         let key = [0x5au8; 32];
         let data = vec![0xa7u8; 4096];
-        if poly1305_avx2(&key, &data[..64]).is_some() {
-            for len in (256..=768).step_by(64).chain([1024, 4096]) {
+        if poly1305_simd(&key, &data[..64]).is_some() {
+            let _ = poly_simd_min();
+            for len in [256usize, 512, 1024, 4096] {
                 let d = &data[..len];
                 let s = bench(&format!("  scalar {len} B"), 100_000, || { black_box(poly1305_scalar(&key, black_box(d))); });
-                let a = bench(&format!("  avx2   {len} B"), 100_000, || { black_box(poly1305_avx2(&key, black_box(d))); });
-                println!("  -> {:.2}x{}", s / a, if a < s { "  (avx2 wins)" } else { "" });
+                let a = bench(&format!("  lanes  {len} B"), 100_000, || { black_box(poly1305_simd(&key, black_box(d))); });
+                println!("  -> {:.2}x", s / a);
             }
         } else {
-            println!("  no AVX2 on this CPU");
+            println!("  no lanes on this CPU");
         }
     }
 

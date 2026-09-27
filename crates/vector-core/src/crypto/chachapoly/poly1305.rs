@@ -15,6 +15,27 @@ pub(super) mod r64 {
     /// right after the ChaCha20 pass the lanes pay more to start.
     #[cfg(target_arch = "x86_64")]
     pub(crate) const AVX2_MIN: usize = 704;
+    /// The NEON lanes' switch point on aarch64: off until an on-device sweep
+    /// (`crypto_bench sweep`) proves one.
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) const NEON_MIN: usize = usize::MAX;
+
+    /// Whether this CPU can run the 4-lane path.
+    #[inline]
+    pub(crate) fn simd_available() -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            std::arch::is_x86_feature_detected!("avx2")
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            true
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            false
+        }
+    }
 
     pub(crate) struct Poly1305 {
         r0: u64,
@@ -89,18 +110,21 @@ pub(super) mod r64 {
             self.h = h;
         }
 
-        /// Absorb `data` zero-padded to a 16-byte boundary.
+        /// Absorb `data` zero-padded to a 16-byte boundary, handing whole groups of four
+        /// blocks to the lanes when `data` is at least `simd_min` long.
         #[inline]
-        pub(crate) fn padded(&mut self, data: &[u8]) {
+        pub(crate) fn padded(&mut self, data: &[u8], simd_min: usize) {
             #[allow(unused_mut)]
             let mut data = data;
-            #[cfg(target_arch = "x86_64")]
-            if data.len() >= AVX2_MIN && std::arch::is_x86_feature_detected!("avx2") {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            if data.len() >= simd_min.max(64) && simd_available() {
                 let n = data.len() & !63;
-                // SAFETY: AVX2 was just detected; `n` is a nonzero multiple of 64.
-                unsafe { self.blocks_avx2(&data[..n]) };
+                // SAFETY: the lanes were just detected; `n` is a nonzero multiple of 64.
+                unsafe { self.blocks_simd(&data[..n]) };
                 data = &data[n..];
             }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+            let _ = simd_min;
             let full = data.len() & !15;
             self.blocks(&data[..full]);
             if full != data.len() {
@@ -112,23 +136,30 @@ pub(super) mod r64 {
 
         /// r^1..r^4 as 26-bit limbs. Partially reduced is enough: a top limb under
         /// 2^27 keeps every lane product under 2^56.
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
         fn powers(&self) -> [[u64; 5]; 4] {
             let r = [self.r0, self.r1, 0];
             let mut p = [r; 4];
             for i in 1..4 {
                 p[i] = mul(p[i - 1], self.r0, self.r1);
             }
-            let out = p.map(super::avx2::to_limbs);
+            let out = p.map(super::limbs::to_limbs);
             p.zeroize();
             out
         }
 
-        /// SAFETY: requires AVX2; `data.len()` must be a nonzero multiple of 64.
-        #[cfg(target_arch = "x86_64")]
-        pub(crate) unsafe fn blocks_avx2(&mut self, data: &[u8]) {
+        /// SAFETY: requires `simd_available()`; `data.len()` must be a nonzero multiple of 64.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        pub(crate) unsafe fn blocks_simd(&mut self, data: &[u8]) {
             let mut pw = self.powers();
-            self.h = super::avx2::blocks(self.h, &pw, data);
+            #[cfg(target_arch = "x86_64")]
+            {
+                self.h = super::avx2::blocks(self.h, &pw, data);
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                self.h = super::neon::blocks(self.h, &pw, data);
+            }
             pw.zeroize();
         }
 
@@ -162,15 +193,10 @@ pub(super) mod r64 {
     }
 }
 
-/// Four Poly1305 lanes in radix 2^26, one 64-bit lane per block. Lane j takes blocks
-/// j, j+4, … and multiplies by r^4 per step; the last step multiplies each lane by
-/// the power that lands its blocks where the serial evaluation would, so the lanes
-/// simply sum.
-#[cfg(target_arch = "x86_64")]
-pub(super) mod avx2 {
-    use core::arch::x86_64::*;
-
-    const M26: u64 = 0x3ff_ffff;
+/// Radix-2^26 conversions shared by the lane paths.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+pub(super) mod limbs {
+    pub(crate) const M26: u64 = 0x3ff_ffff;
 
     /// A partially reduced 130-bit value to five 26-bit limbs.
     #[inline(always)]
@@ -181,7 +207,7 @@ pub(super) mod avx2 {
 
     /// Five limbs (each below 2^32) back to a partially reduced radix-2^64 value.
     #[inline(always)]
-    fn from_limbs(mut l: [u64; 5]) -> [u64; 3] {
+    pub(crate) fn from_limbs(mut l: [u64; 5]) -> [u64; 3] {
         for i in 0..4 {
             l[i + 1] += l[i] >> 26;
             l[i] &= M26;
@@ -194,6 +220,17 @@ pub(super) mod avx2 {
         let b = (a >> 64) + ((l[3] as u128) << 14) + ((l[4] as u128) << 40);
         [a as u64, b as u64, (b >> 64) as u64]
     }
+}
+
+/// Four Poly1305 lanes in radix 2^26, one 64-bit lane per block. Lane j takes blocks
+/// j, j+4, … and multiplies by r^4 per step; the last step multiplies each lane by
+/// the power that lands its blocks where the serial evaluation would, so the lanes
+/// simply sum.
+#[cfg(target_arch = "x86_64")]
+pub(super) mod avx2 {
+    use core::arch::x86_64::*;
+
+    use super::limbs::{from_limbs, to_limbs, M26};
 
     #[inline]
     #[target_feature(enable = "avx2")]
@@ -320,6 +357,110 @@ pub(super) mod avx2 {
     }
 }
 
+/// The same four lanes on NEON: each limb is two registers of two 64-bit lanes,
+/// A holding blocks 0 and 1 of every group of four, B blocks 2 and 3. `umlal` fuses
+/// each product into its sum.
+#[cfg(target_arch = "aarch64")]
+pub(super) mod neon {
+    use super::limbs::{from_limbs, to_limbs, M26};
+    use core::arch::aarch64::*;
+
+    #[inline(always)]
+    unsafe fn split(lo: uint64x2_t, hi: uint64x2_t) -> [uint64x2_t; 5] {
+        let mask = vdupq_n_u64(M26);
+        [
+            vandq_u64(lo, mask),
+            vandq_u64(vshrq_n_u64::<26>(lo), mask),
+            vandq_u64(vorrq_u64(vshrq_n_u64::<52>(lo), vshlq_n_u64::<12>(hi)), mask),
+            vandq_u64(vshrq_n_u64::<14>(hi), mask),
+            vorrq_u64(vshrq_n_u64::<40>(hi), vdupq_n_u64(1 << 24)),
+        ]
+    }
+
+    /// Four blocks as limbs for lanes A (blocks 0, 1) and B (blocks 2, 3).
+    #[inline(always)]
+    unsafe fn load4(p: *const u8) -> ([uint64x2_t; 5], [uint64x2_t; 5]) {
+        let block = |i: usize| vreinterpretq_u64_u8(vld1q_u8(p.add(16 * i)));
+        let (b0, b1, b2, b3) = (block(0), block(1), block(2), block(3));
+        (split(vzip1q_u64(b0, b1), vzip2q_u64(b0, b1)), split(vzip1q_u64(b2, b3), vzip2q_u64(b2, b3)))
+    }
+
+    #[inline(always)]
+    unsafe fn carry(from: &mut uint64x2_t, into: &mut uint64x2_t) {
+        *into = vaddq_u64(*into, vshrq_n_u64::<26>(*from));
+        *from = vandq_u64(*from, vdupq_n_u64(M26));
+    }
+
+    /// `a * r` per lane. Limbs enter under 2^32, so narrowing loses nothing; products
+    /// stay below 2^59 and the carry chains leave every limb under 2^26 + 2^7.
+    #[inline(always)]
+    unsafe fn mul(a: &mut [uint64x2_t; 5], r: &[uint32x2_t; 5], s: &[uint32x2_t; 5]) {
+        let [a0, a1, a2, a3, a4] = [vmovn_u64(a[0]), vmovn_u64(a[1]), vmovn_u64(a[2]), vmovn_u64(a[3]), vmovn_u64(a[4])];
+        let dot = |x: [(uint32x2_t, uint32x2_t); 5]| {
+            let mut d = vmull_u32(x[0].0, x[0].1);
+            for &(p, q) in &x[1..] {
+                d = vmlal_u32(d, p, q);
+            }
+            d
+        };
+        let mut d0 = dot([(a0, r[0]), (a1, s[4]), (a2, s[3]), (a3, s[2]), (a4, s[1])]);
+        let mut d1 = dot([(a0, r[1]), (a1, r[0]), (a2, s[4]), (a3, s[3]), (a4, s[2])]);
+        let mut d2 = dot([(a0, r[2]), (a1, r[1]), (a2, r[0]), (a3, s[4]), (a4, s[3])]);
+        let mut d3 = dot([(a0, r[3]), (a1, r[2]), (a2, r[1]), (a3, r[0]), (a4, s[4])]);
+        let mut d4 = dot([(a0, r[4]), (a1, r[3]), (a2, r[2]), (a3, r[1]), (a4, r[0])]);
+        carry(&mut d0, &mut d1);
+        carry(&mut d3, &mut d4);
+        carry(&mut d1, &mut d2);
+        // d4's carry wraps to d0 as ×5.
+        let c = vshrq_n_u64::<26>(d4);
+        d4 = vandq_u64(d4, vdupq_n_u64(M26));
+        d0 = vaddq_u64(d0, vaddq_u64(c, vshlq_n_u64::<2>(c)));
+        carry(&mut d2, &mut d3);
+        carry(&mut d0, &mut d1);
+        carry(&mut d3, &mut d4);
+        *a = [d0, d1, d2, d3, d4];
+    }
+
+    /// Absorb `data` (a nonzero multiple of 64 bytes) into `h`; `pw` is r^1..r^4 as limbs.
+    pub(crate) unsafe fn blocks(h: [u64; 3], pw: &[[u64; 5]; 4], data: &[u8]) -> [u64; 3] {
+        debug_assert!(!data.is_empty() && data.len().is_multiple_of(64));
+        let [r1, r2, r3, r4] = pw;
+        let both = |x: u64, y: u64| vcreate_u32(x | (y << 32));
+        let step_r: [uint32x2_t; 5] = core::array::from_fn(|i| both(r4[i], r4[i]));
+        let step_s: [uint32x2_t; 5] = core::array::from_fn(|i| both(r4[i] * 5, r4[i] * 5));
+        let last_ra: [uint32x2_t; 5] = core::array::from_fn(|i| both(r4[i], r3[i]));
+        let last_sa: [uint32x2_t; 5] = core::array::from_fn(|i| both(r4[i] * 5, r3[i] * 5));
+        let last_rb: [uint32x2_t; 5] = core::array::from_fn(|i| both(r2[i], r1[i]));
+        let last_sb: [uint32x2_t; 5] = core::array::from_fn(|i| both(r2[i] * 5, r1[i] * 5));
+
+        let hl = to_limbs(h);
+        let mut a: [uint64x2_t; 5] = core::array::from_fn(|i| vcombine_u64(vcreate_u64(hl[i]), vcreate_u64(0)));
+        let mut b: [uint64x2_t; 5] = [vdupq_n_u64(0); 5];
+        let (body, last) = data.split_at(data.len() - 64);
+        for group in body.chunks_exact(64) {
+            let (ma, mb) = load4(group.as_ptr());
+            for i in 0..5 {
+                a[i] = vaddq_u64(a[i], ma[i]);
+                b[i] = vaddq_u64(b[i], mb[i]);
+            }
+            mul(&mut a, &step_r, &step_s);
+            mul(&mut b, &step_r, &step_s);
+        }
+        let (ma, mb) = load4(last.as_ptr());
+        for i in 0..5 {
+            a[i] = vaddq_u64(a[i], ma[i]);
+            b[i] = vaddq_u64(b[i], mb[i]);
+        }
+        mul(&mut a, &last_ra, &last_sa);
+        mul(&mut b, &last_rb, &last_sb);
+
+        let mut lanes: [u64; 5] = core::array::from_fn(|i| vaddvq_u64(vaddq_u64(a[i], b[i])));
+        let out = from_limbs(lanes);
+        zeroize::Zeroize::zeroize(&mut lanes);
+        out
+    }
+}
+
 #[cfg(any(test, not(target_pointer_width = "64")))]
 pub(super) mod r26 {
     use zeroize::Zeroize;
@@ -391,7 +532,7 @@ pub(super) mod r26 {
         }
 
         #[inline]
-        pub(crate) fn padded(&mut self, data: &[u8]) {
+        pub(crate) fn padded(&mut self, data: &[u8], _simd_min: usize) {
             let full = data.len() & !15;
             self.blocks(&data[..full]);
             if full != data.len() {
@@ -459,3 +600,16 @@ pub(super) mod r26 {
 pub(super) use r64::Poly1305;
 #[cfg(not(target_pointer_width = "64"))]
 pub(super) use r26::Poly1305;
+
+/// The length from which the AEAD hands Poly1305 input to the lanes on this CPU;
+/// `usize::MAX` keeps it scalar.
+pub(super) fn simd_min() -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if r64::simd_available() {
+        return r64::AVX2_MIN;
+    }
+    #[cfg(target_arch = "aarch64")]
+    return r64::NEON_MIN;
+    #[allow(unreachable_code)]
+    usize::MAX
+}

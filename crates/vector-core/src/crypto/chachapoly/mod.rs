@@ -34,6 +34,8 @@ impl std::error::Error for Error {}
 pub struct ChaCha20Poly1305 {
     key: [u32; 8],
     backend: Backend,
+    /// Poly1305 input length from which the SIMD lanes take over.
+    poly_min: usize,
 }
 
 impl Drop for ChaCha20Poly1305 {
@@ -48,7 +50,7 @@ impl ChaCha20Poly1305 {
         for (w, c) in k.iter_mut().zip(key.chunks_exact(4)) {
             *w = u32::from_le_bytes(c.try_into().unwrap());
         }
-        Self { key: k, backend: Backend::detect() }
+        Self { key: k, backend: Backend::detect(), poly_min: poly1305::simd_min() }
     }
 
     #[cfg(test)]
@@ -74,9 +76,9 @@ impl ChaCha20Poly1305 {
         let st = self.state(nonce);
         let mut ks = [0u8; BUF];
         let (mut mac, first) = self.first_pass(&st, buf.len(), &mut ks);
-        mac.padded(aad);
+        mac.padded(aad, self.poly_min);
         let used = self.xor_stream(&st, buf, &mut ks, first);
-        mac.padded(buf);
+        mac.padded(buf, self.poly_min);
         let tag = finish(mac, aad.len(), buf.len());
         wipe(&mut ks[..used]);
         Ok(tag)
@@ -96,8 +98,8 @@ impl ChaCha20Poly1305 {
         let st = self.state(nonce);
         let mut ks = [0u8; BUF];
         let (mut mac, first) = self.first_pass(&st, buf.len(), &mut ks);
-        mac.padded(aad);
-        mac.padded(buf);
+        mac.padded(aad, self.poly_min);
+        mac.padded(buf, self.poly_min);
         let expected = finish(mac, aad.len(), buf.len());
         if !ct_eq(&expected, tag) {
             wipe(&mut ks[..64 * first]);
@@ -216,13 +218,43 @@ fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
     core::hint::black_box(folded) == 0
 }
 
-/// Poly1305 with its path forced, for measuring where the SIMD path starts to pay.
+/// The AEAD and Poly1305 with their paths forced, for measuring crossovers on a device.
 #[doc(hidden)]
-#[cfg(target_arch = "x86_64")]
 pub mod bench {
-    use super::poly1305::r64::Poly1305;
+    use super::chacha::Backend;
+    use super::poly1305::r64::{self, Poly1305};
+    use super::ChaCha20Poly1305;
 
-    pub const AVX2_MIN: usize = super::poly1305::r64::AVX2_MIN;
+    /// ChaCha20 backends this CPU can run, by name.
+    pub fn chacha_backends() -> Vec<&'static str> {
+        Backend::available().into_iter().map(|(n, _)| n).collect()
+    }
+
+    /// The ChaCha20 backend production picks on this CPU.
+    pub fn default_chacha_backend() -> &'static str {
+        let chosen = Backend::detect();
+        Backend::available().into_iter().find(|(_, b)| *b == chosen).map_or("portable", |(n, _)| n)
+    }
+
+    /// Whether this CPU has the Poly1305 lanes.
+    pub fn poly_simd_available() -> bool {
+        r64::simd_available()
+    }
+
+    /// The production Poly1305 lanes threshold on this CPU (`usize::MAX`: lanes off).
+    pub fn poly_simd_min() -> usize {
+        super::poly1305::simd_min()
+    }
+
+    /// An AEAD on the named ChaCha20 backend with the given Poly1305 lanes threshold, or
+    /// None if this CPU can't run that backend.
+    pub fn cipher(key: &[u8; 32], chacha: &str, poly_simd_min: usize) -> Option<ChaCha20Poly1305> {
+        let (_, backend) = Backend::available().into_iter().find(|(n, _)| *n == chacha)?;
+        let mut c = ChaCha20Poly1305::new(key);
+        c.backend = backend;
+        c.poly_min = poly_simd_min;
+        Some(c)
+    }
 
     /// Poly1305 over `data` (a multiple of 64 bytes) with the scalar loop.
     pub fn poly1305_scalar(key: &[u8; 32], data: &[u8]) -> [u8; 16] {
@@ -231,16 +263,18 @@ pub mod bench {
         p.finish()
     }
 
-    /// Poly1305 over `data` (a nonzero multiple of 64 bytes) with the AVX2 lanes, or
-    /// None without AVX2.
-    pub fn poly1305_avx2(key: &[u8; 32], data: &[u8]) -> Option<[u8; 16]> {
-        if !std::arch::is_x86_feature_detected!("avx2") || data.is_empty() || !data.len().is_multiple_of(64) {
-            return None;
+    /// Poly1305 over `data` (a nonzero multiple of 64 bytes) with the lanes, or None
+    /// where this CPU has none.
+    pub fn poly1305_simd(key: &[u8; 32], data: &[u8]) -> Option<[u8; 16]> {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        if r64::simd_available() && !data.is_empty() && data.len().is_multiple_of(64) {
+            let mut p = Poly1305::new(key);
+            // SAFETY: lanes available; the length is a nonzero multiple of 64.
+            unsafe { p.blocks_simd(data) };
+            return Some(p.finish());
         }
-        let mut p = Poly1305::new(key);
-        // SAFETY: AVX2 detected; the length is a nonzero multiple of 64.
-        unsafe { p.blocks_avx2(data) };
-        Some(p.finish())
+        let _ = (key, data);
+        None
     }
 }
 

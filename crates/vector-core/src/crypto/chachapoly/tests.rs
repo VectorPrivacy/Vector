@@ -2,20 +2,7 @@ use super::*;
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 
 fn backends() -> Vec<Backend> {
-    #[allow(unused_mut)]
-    let mut v = vec![Backend::Portable];
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if std::arch::is_x86_feature_detected!("sse2") {
-            v.push(Backend::Sse2);
-        }
-        if std::arch::is_x86_feature_detected!("avx2") {
-            v.push(Backend::Avx2);
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    v.push(Backend::Neon);
-    v
+    Backend::available().into_iter().map(|(_, b)| b).collect()
 }
 
 fn reference_seal(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], pt: &[u8]) -> (Vec<u8>, [u8; 16]) {
@@ -111,10 +98,10 @@ fn poly1305_matches_reference_on_adversarial_inputs() {
             theirs.update_padded(m);
             let want = <[u8; 16]>::from(theirs.finalize());
             let mut r64 = super::poly1305::r64::Poly1305::new(k);
-            r64.padded(m);
+            r64.padded(m, usize::MAX);
             assert_eq!(r64.finish(), want, "radix 2^64");
             let mut r26 = super::poly1305::r26::Poly1305::new(k);
-            r26.padded(m);
+            r26.padded(m, usize::MAX);
             assert_eq!(r26.finish(), want, "radix 2^26");
         }
     }
@@ -185,10 +172,10 @@ fn wipe_clears_every_byte_at_every_alignment() {
     assert!(spare.iter().all(|&b| b == 0));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
-fn avx2_poly1305_matches_scalar_from_any_state() {
-    if !std::arch::is_x86_feature_detected!("avx2") {
+fn simd_poly1305_matches_scalar_from_any_state() {
+    if !super::poly1305::r64::simd_available() {
         return;
     }
     let mut rng = StdRng::seed_from_u64(0xa5a5);
@@ -204,8 +191,40 @@ fn avx2_poly1305_matches_scalar_from_any_state() {
         serial.blocks(&data);
         let mut lanes = super::poly1305::r64::Poly1305::new(&key);
         lanes.blocks(&data[..prefix]);
-        // SAFETY: AVX2 detected above; the remainder is a nonzero multiple of 64.
-        unsafe { lanes.blocks_avx2(&data[prefix..]) };
+        // SAFETY: lanes available (checked above); the remainder is a nonzero multiple of 64.
+        unsafe { lanes.blocks_simd(&data[prefix..]) };
         assert_eq!(serial.finish(), lanes.finish(), "trial {trial} prefix {prefix} groups {groups}");
+    }
+}
+
+#[test]
+fn matches_reference_with_poly_lanes_forced_on() {
+    let mut rng = StdRng::seed_from_u64(0x1a2e);
+    for len in (0..=1100usize).step_by(7).chain([4096, 65_536]) {
+        let key: [u8; 32] = rng.gen();
+        let nonce: [u8; 12] = rng.gen();
+        let mut pt = vec![0u8; len];
+        rng.fill_bytes(&mut pt);
+        let (ct_ref, tag_ref) = reference_seal(&key, &nonce, b"", &pt);
+        for (name, _) in Backend::available() {
+            let c = super::bench::cipher(&key, name, 64).unwrap();
+            let mut buf = pt.clone();
+            let tag = c.seal_in_place(&nonce, &[], &mut buf).unwrap();
+            assert!(buf == ct_ref && tag == tag_ref, "len={len} {name}");
+            c.open_in_place(&nonce, &[], &mut buf, &tag).unwrap();
+            assert!(buf == pt, "roundtrip len={len} {name}");
+        }
+    }
+}
+
+#[test]
+fn two_block_scalar_matches_single_blocks() {
+    let st = State { key: [0x0123_4567, 0x89ab_cdef, 7, 8, 9, 10, 11, 12], nonce: [1, 2, 3] };
+    for counter in [0u32, 1, 41, u32::MAX - 1] {
+        let mut pair = [0u8; 128];
+        super::chacha::pair_blocks(&st, counter, &mut pair);
+        let mut single = [0u8; super::chacha::BUF];
+        Backend::Portable.keystream(&st, counter, 2, &mut single);
+        assert_eq!(&pair[..], &single[..128], "counter {counter}");
     }
 }

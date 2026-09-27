@@ -96,6 +96,37 @@ impl Lanes for u32 {
     }
 }
 
+/// Two blocks interleaved on the integer units, for cores wide enough that a vector
+/// pass computing blocks nobody needs costs more.
+#[cfg(any(test, target_arch = "aarch64"))]
+#[derive(Clone, Copy)]
+pub(super) struct Pair(u32, u32);
+
+#[cfg(any(test, target_arch = "aarch64"))]
+impl Lanes for Pair {
+    #[inline(always)] unsafe fn splat(x: u32) -> Self { Pair(x, x) }
+    #[inline(always)] unsafe fn counters(base: u32) -> Self { Pair(base, base.wrapping_add(1)) }
+    #[inline(always)] unsafe fn add(a: Self, b: Self) -> Self { Pair(a.0.wrapping_add(b.0), a.1.wrapping_add(b.1)) }
+    #[inline(always)] unsafe fn xor(a: Self, b: Self) -> Self { Pair(a.0 ^ b.0, a.1 ^ b.1) }
+    #[inline(always)] unsafe fn rotl16(a: Self) -> Self { Pair(a.0.rotate_left(16), a.1.rotate_left(16)) }
+    #[inline(always)] unsafe fn rotl12(a: Self) -> Self { Pair(a.0.rotate_left(12), a.1.rotate_left(12)) }
+    #[inline(always)] unsafe fn rotl8(a: Self) -> Self { Pair(a.0.rotate_left(8), a.1.rotate_left(8)) }
+    #[inline(always)] unsafe fn rotl7(a: Self) -> Self { Pair(a.0.rotate_left(7), a.1.rotate_left(7)) }
+    #[inline(always)]
+    unsafe fn store(x: &[Self; 16], out: &mut [u8]) {
+        for (i, w) in x.iter().enumerate() {
+            out[4 * i..4 * i + 4].copy_from_slice(&w.0.to_le_bytes());
+            out[64 + 4 * i..64 + 4 * i + 4].copy_from_slice(&w.1.to_le_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn pair_blocks(st: &State, counter: u32, out: &mut [u8]) {
+    // SAFETY: plain integer arithmetic.
+    unsafe { blocks::<Pair>(st, counter, out) }
+}
+
 // ---------------------------------------------------------------------------
 // x86 / x86_64
 // ---------------------------------------------------------------------------
@@ -338,9 +369,43 @@ mod arm {
         }
     }
 
+    /// Four NEON blocks and two integer-unit blocks in one instruction stream, so the
+    /// vector and scalar pipes both work: blocks 0-3 in NEON, 4-5 in `Pair`.
+    #[derive(Clone, Copy)]
+    pub(super) struct Hybrid(Neon, super::Pair);
+
+    impl Lanes for Hybrid {
+        #[inline(always)] unsafe fn splat(x: u32) -> Self { Hybrid(Neon::splat(x), super::Pair::splat(x)) }
+        #[inline(always)] unsafe fn counters(b: u32) -> Self {
+            Hybrid(Neon::counters(b), super::Pair::counters(b.wrapping_add(4)))
+        }
+        #[inline(always)] unsafe fn add(a: Self, b: Self) -> Self { Hybrid(Neon::add(a.0, b.0), super::Pair::add(a.1, b.1)) }
+        #[inline(always)] unsafe fn xor(a: Self, b: Self) -> Self { Hybrid(Neon::xor(a.0, b.0), super::Pair::xor(a.1, b.1)) }
+        #[inline(always)] unsafe fn rotl16(a: Self) -> Self { Hybrid(Neon::rotl16(a.0), super::Pair::rotl16(a.1)) }
+        #[inline(always)] unsafe fn rotl12(a: Self) -> Self { Hybrid(Neon::rotl12(a.0), super::Pair::rotl12(a.1)) }
+        #[inline(always)] unsafe fn rotl8(a: Self) -> Self { Hybrid(Neon::rotl8(a.0), super::Pair::rotl8(a.1)) }
+        #[inline(always)] unsafe fn rotl7(a: Self) -> Self { Hybrid(Neon::rotl7(a.0), super::Pair::rotl7(a.1)) }
+        #[inline(always)]
+        unsafe fn store(x: &[Self; 16], out: &mut [u8]) {
+            debug_assert!(out.len() >= 384);
+            Neon::store(&x.map(|h| h.0), &mut out[..256]);
+            super::Pair::store(&x.map(|h| h.1), &mut out[256..384]);
+        }
+    }
+
     pub(super) fn neon(st: &super::State, ctr: u32, out: &mut [u8]) {
         // SAFETY: NEON is mandatory on aarch64.
         unsafe { super::blocks::<Neon>(st, ctr, out) }
+    }
+
+    pub(super) fn hybrid(st: &super::State, ctr: u32, out: &mut [u8]) {
+        // SAFETY: NEON is mandatory on aarch64.
+        unsafe { super::blocks::<Hybrid>(st, ctr, out) }
+    }
+
+    pub(super) fn pair(st: &super::State, ctr: u32, out: &mut [u8]) {
+        // SAFETY: plain integer arithmetic.
+        unsafe { super::blocks::<super::Pair>(st, ctr, out) }
     }
 }
 
@@ -355,9 +420,24 @@ pub(super) enum Backend {
     Sse2,
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     Avx2,
+    /// aarch64 production policy: picks among the three below by blocks wanted.
     #[cfg(target_arch = "aarch64")]
     Neon,
+    #[cfg(target_arch = "aarch64")]
+    Neon4,
+    #[cfg(target_arch = "aarch64")]
+    Scalar2,
+    #[cfg(target_arch = "aarch64")]
+    Neon6,
 }
+
+/// Largest block count the two-block scalar path serves on aarch64. 0 until an
+/// on-device sweep (`crypto_bench sweep`) proves a crossover.
+#[cfg(target_arch = "aarch64")]
+const SCALAR2_MAX_BLOCKS: usize = 0;
+/// Smallest block count the NEON+scalar hybrid serves on aarch64; off until measured.
+#[cfg(target_arch = "aarch64")]
+const NEON6_MIN_BLOCKS: usize = usize::MAX;
 
 impl Backend {
     #[inline]
@@ -413,9 +493,54 @@ impl Backend {
             }
             #[cfg(target_arch = "aarch64")]
             Backend::Neon => {
+                let pick = if want <= SCALAR2_MAX_BLOCKS {
+                    Backend::Scalar2
+                } else if want >= NEON6_MIN_BLOCKS {
+                    Backend::Neon6
+                } else {
+                    Backend::Neon4
+                };
+                pick.keystream(st, counter, want, out)
+            }
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon4 => {
                 arm::neon(st, counter, out);
                 4
             }
+            #[cfg(target_arch = "aarch64")]
+            Backend::Scalar2 => {
+                arm::pair(st, counter, out);
+                2
+            }
+            #[cfg(target_arch = "aarch64")]
+            Backend::Neon6 => {
+                arm::hybrid(st, counter, out);
+                6
+            }
         }
+    }
+
+    /// Every backend this CPU can run, by name: the tests cover each, and the bench
+    /// forces each to find crossovers.
+    pub(super) fn available() -> Vec<(&'static str, Backend)> {
+        #[allow(unused_mut)]
+        let mut v = vec![("portable", Backend::Portable)];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("sse2") {
+                v.push(("sse2", Backend::Sse2));
+            }
+            if std::arch::is_x86_feature_detected!("avx2") {
+                v.push(("avx2", Backend::Avx2));
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        v.extend([
+            ("neon", Backend::Neon),
+            ("neon4", Backend::Neon4),
+            ("scalar2", Backend::Scalar2),
+            ("neon6", Backend::Neon6),
+        ]);
+        v
     }
 }
