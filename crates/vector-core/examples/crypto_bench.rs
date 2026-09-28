@@ -5,7 +5,8 @@
 //!        cargo run --release -p vector-core --example crypto_bench -- sweep
 //!
 //! `sweep` races every ChaCha20 backend this CPU has per message length, then pairs the
-//! AEAD with Poly1305 lanes off and on, in interleaved rounds, to find crossovers.
+//! AEAD with Poly1305 lanes off and on, in interleaved rounds, to find crossovers; then
+//! AES-GCM engines and gift-wrap unwrap paths the same way.
 
 use nostr_sdk::prelude::*;
 use std::hint::black_box;
@@ -173,10 +174,62 @@ fn gcm_sweep() {
     }
 }
 
+/// Gift-wrap unwrap per wrap, one vault read per wrap against one per batch, with every
+/// DM from a different sender or all from one. "prior" adds back the outer signature check
+/// the production path no longer repeats.
+fn gift_sweep() {
+    const ROUNDS: usize = 21;
+    let me = Keys::generate();
+    MY_SECRET_KEY.store_from_keys(&me, &[]);
+    let n = vector_core::event_handler::UNWRAP_BATCH;
+    let batch_of = |senders: usize| -> Vec<Event> {
+        let from: Vec<Keys> = (0..senders).map(|_| Keys::generate()).collect();
+        (0..n)
+            .map(|i| {
+                let r = EventBuilder::new(Kind::PrivateDirectMessage, "hey! are we still on for tomorrow?")
+                    .tag(Tag::public_key(me.public_key()))
+                    .finalize_unsigned(from[i % senders].public_key());
+                GiftWrapBuilder::new(me.public_key(), r).finalize(&from[i % senders]).unwrap()
+            })
+            .collect()
+    };
+    let (many, one) = (batch_of(n), batch_of(1));
+    let (many, one): (Vec<&Event>, Vec<&Event>) = (many.iter().collect(), one.iter().collect());
+    type Case<'a> = (&'static str, Box<dyn Fn() + 'a>);
+    let cases: Vec<Case> = vec![
+        ("prior: verify + vault read per wrap", Box::new(|| for w in &many {
+            black_box(w.verify().is_ok());
+            black_box(GuardedSigner::unwrap_gift_wrap(w).unwrap());
+        })),
+        ("single: vault read per wrap", Box::new(|| for w in &many {
+            black_box(GuardedSigner::unwrap_gift_wrap(w).unwrap());
+        })),
+        ("batch, every wrap a new sender", Box::new(|| { black_box(GuardedSigner::unwrap_batch(&many)); })),
+        ("batch, one sender", Box::new(|| { black_box(GuardedSigner::unwrap_batch(&one)); })),
+    ];
+    let mut times: Vec<Vec<f64>> = vec![Vec::new(); cases.len()];
+    for round in 0..ROUNDS {
+        for k in 0..cases.len() {
+            let i = (k + round) % cases.len();
+            let t = Instant::now();
+            (cases[i].1)();
+            times[i].push(t.elapsed().as_nanos() as f64 / n as f64 / 1000.0);
+        }
+    }
+    println!("\n== Gift-wrap unwrap: median µs per wrap over {ROUNDS} interleaved rounds of {n}");
+    let base = median(&mut times[0].clone());
+    for ((name, _), t) in cases.iter().zip(times.iter_mut()) {
+        let m = median(t);
+        println!("   {name:<40} {m:>8.1} µs   {:>5.2}x", base / m);
+    }
+    MY_SECRET_KEY.clear(&[]);
+}
+
 #[tokio::main]
 async fn main() {
     if std::env::args().any(|a| a == "sweep") {
         sweep();
+        gift_sweep();
         return;
     }
     let me = Keys::generate();
@@ -275,6 +328,29 @@ async fn main() {
     }
     let p_ns = t.elapsed().as_nanos() as f64 / n as f64;
     println!("{:<52} {:>10.2} µs", "unwrap via signer::unwrap_gift_wrap (prod)", p_ns / 1000.0);
+
+    let batch_of = |senders: usize| -> Vec<Event> {
+        let from: Vec<Keys> = (0..senders).map(|_| Keys::generate()).collect();
+        (0..vector_core::event_handler::UNWRAP_BATCH)
+            .map(|i| {
+                let r = EventBuilder::new(Kind::PrivateDirectMessage, msg.clone())
+                    .tag(Tag::public_key(me.public_key()))
+                    .finalize_unsigned(from[i % senders].public_key());
+                GiftWrapBuilder::new(me.public_key(), r).finalize(&from[i % senders]).unwrap()
+            })
+            .collect()
+    };
+    for senders in [vector_core::event_handler::UNWRAP_BATCH, 4, 1] {
+        let wraps = batch_of(senders);
+        let refs: Vec<&Event> = wraps.iter().collect();
+        let rounds = 40u64;
+        let t = Instant::now();
+        for _ in 0..rounds {
+            black_box(vector_core::signer::unwrap_gift_wraps(&refs).await);
+        }
+        let per = t.elapsed().as_nanos() as f64 / (rounds as f64 * refs.len() as f64);
+        println!("{:<52} {:>10.2} µs", format!("batch of {}, {} sender(s), per wrap", refs.len(), senders), per / 1000.0);
+    }
 
     println!("-- unwrap breakdown (raw keys)");
     let seal = Event::from_json(nostr_sdk::prelude::nip44::decrypt(me.secret_key(), &wrap.pubkey, &wrap.content).unwrap()).unwrap();

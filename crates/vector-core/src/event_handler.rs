@@ -363,39 +363,85 @@ pub async fn prepare_event(
     _client: &Client,
     my_public_key: PublicKey,
 ) -> PreparedEvent {
+    if let Some(skip) = dedup_skip(&event).await {
+        return skip;
+    }
+    let unwrap_start = std::time::Instant::now();
+    let unwrapped = crate::signer::unwrap_gift_wrap(&event).await;
+    finish_prepare(&event, unwrapped, unwrap_start.elapsed().as_nanos() as u64, my_public_key)
+}
+
+/// Wraps opened per vault read on bulk paths. It bounds how long the key stays
+/// materialised: two ECDHs per wrap, about 1.5 ms per batch on a desktop core.
+pub const UNWRAP_BATCH: usize = 16;
+
+/// [`prepare_event`] for many events, one result per event in order. The wraps that pass
+/// dedup are opened together, under one vault read for a local key.
+pub async fn prepare_events(events: &[Event], my_public_key: PublicKey) -> Vec<PreparedEvent> {
+    let mut out: Vec<Option<PreparedEvent>> = Vec::with_capacity(events.len());
+    for event in events {
+        out.push(dedup_skip(event).await);
+    }
+    let todo: Vec<&Event> = events.iter().zip(&out).filter(|(_, o)| o.is_none()).map(|(e, _)| e).collect();
+    if !todo.is_empty() {
+        let unwrap_start = std::time::Instant::now();
+        let unwrapped = crate::signer::unwrap_gift_wraps(&todo).await;
+        let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64 / todo.len() as u64;
+        let mut unwrapped = unwrapped.into_iter();
+        for (event, slot) in events.iter().zip(out.iter_mut()) {
+            if slot.is_none() {
+                let u = unwrapped.next().unwrap_or_else(|| Err("missing unwrap result".into()));
+                *slot = Some(finish_prepare(event, u, unwrap_ns, my_public_key));
+            }
+        }
+    }
+    out.into_iter().flatten().collect()
+}
+
+/// `Some(DedupSkip)` when this wrap has been seen before.
+async fn dedup_skip(event: &Event) -> Option<PreparedEvent> {
     let wrapper_created_at = event.created_at.as_secs();
     let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
-    let wrapper_event_id = event.id.to_hex();
+    let skip = || Some(PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at });
 
     // Dedup: in-memory cache first, then DB fallback
     {
         let cache = WRAPPER_ID_CACHE.lock().await;
         if cache.contains(&wrapper_event_id_bytes) {
-            return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+            return skip();
         }
     }
 
-    if let Ok(true) = crate::db::events::wrapper_event_exists(&wrapper_event_id) {
-        return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+    if let Ok(true) = crate::db::events::wrapper_event_exists(&event.id.to_hex()) {
+        return skip();
     }
 
     // The persistent ledger too, not just the events table: a DELETED message has no
     // events row, so without this a wrap re-served after a restart (relays ignore
     // NIP-09 freely) re-processes cleanly and resurrects the message.
     if crate::db::wrappers::processed_wrapper_exists(&wrapper_event_id_bytes) {
-        return PreparedEvent::DedupSkip { wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at };
+        return skip();
     }
+    None
+}
 
-    // Unwrap gift wrap (CPU-bound ECDH + ChaCha20Poly1305)
-    let unwrap_start = std::time::Instant::now();
-    let (rumor, sender) = match crate::signer::unwrap_gift_wrap(&event).await {
+/// Everything after the unwrap: classify the rumor and parse it.
+fn finish_prepare(
+    event: &Event,
+    unwrapped: Result<UnwrappedGift, String>,
+    unwrap_ns: u64,
+    my_public_key: PublicKey,
+) -> PreparedEvent {
+    let wrapper_created_at = event.created_at.as_secs();
+    let wrapper_event_id_bytes: [u8; 32] = event.id.to_bytes();
+    let wrapper_event_id = event.id.to_hex();
+
+    let (rumor, sender) = match unwrapped {
         Ok(UnwrappedGift { rumor, sender }) => (rumor, sender),
         Err(_) => return PreparedEvent::ErrorSkip {
             wrapper_id_bytes: wrapper_event_id_bytes, wrapper_created_at,
         },
     };
-
-    let unwrap_ns = unwrap_start.elapsed().as_nanos() as u64;
 
     // Inner rumor send time (seconds). The outer wrapper's `created_at` is NIP-59
     // backdated up to 2 days, so it can't order an invite against a decline tombstone.

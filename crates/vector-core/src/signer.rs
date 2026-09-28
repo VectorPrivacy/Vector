@@ -235,6 +235,26 @@ pub async fn unwrap_gift_wrap(gift_wrap: &Event) -> Result<UnwrappedGift, String
     UnwrappedGift::from_gift_wrap_async(&signer, gift_wrap).await.map_err(|e| e.to_string())
 }
 
+/// [`unwrap_gift_wrap`] for many wraps, one result per wrap in order. A local key opens
+/// the whole batch under one vault read.
+pub async fn unwrap_gift_wraps(gift_wraps: &[&Event]) -> Vec<Result<UnwrappedGift, String>> {
+    #[cfg(test)]
+    let overridden = TEST_SIGNER.read().is_ok_and(|g| g.is_some());
+    #[cfg(not(test))]
+    let overridden = false;
+    if !overridden && signer_kind() == SignerKind::Local {
+        return crate::crypto::GuardedSigner::unwrap_batch(gift_wraps)
+            .into_iter()
+            .map(|r| r.map_err(|e| e.to_string()))
+            .collect();
+    }
+    let mut out = Vec::with_capacity(gift_wraps.len());
+    for wrap in gift_wraps {
+        out.push(unwrap_gift_wrap(wrap).await);
+    }
+    out
+}
+
 /// Resolve the active session's signer.
 ///
 /// Fails CLOSED on identity mismatch: a remote-signer account's vault holds its

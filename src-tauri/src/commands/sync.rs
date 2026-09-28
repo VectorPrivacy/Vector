@@ -125,19 +125,22 @@ async fn windowed_req_catchup(
     .timeout(vector_core::relay_request_timeout(std::time::Duration::from_secs(20)))
     .await {
         Ok(stream) => {
+            let stream = stream.ready_chunks(vector_core::event_handler::UNWRAP_BATCH);
             tokio::pin!(stream);
-            while let Some((_relay, res)) = stream.next().await {
-                let Ok(event) = res else { continue };
-                if !seen.insert(event.id.to_bytes()) { continue; }
-                fetched += 1;
-                let prepared = vector_core::event_handler::prepare_event(
-                    event, client, my_public_key,
-                ).await;
-                if crate::services::tauri_commit_prepared_event_with(prepared, is_new, &batcher).await {
-                    new_count += 1;
-                }
-                if batcher.buffered() >= PERSIST_BATCH {
-                    batcher.flush().await;
+            while let Some(chunk) = stream.next().await {
+                let events: Vec<Event> = chunk
+                    .into_iter()
+                    .filter_map(|(_relay, res)| res.ok())
+                    .filter(|event| seen.insert(event.id.to_bytes()))
+                    .collect();
+                fetched += events.len() as u32;
+                for prepared in vector_core::event_handler::prepare_events(&events, my_public_key).await {
+                    if crate::services::tauri_commit_prepared_event_with(prepared, is_new, &batcher).await {
+                        new_count += 1;
+                    }
+                    if batcher.buffered() >= PERSIST_BATCH {
+                        batcher.flush().await;
+                    }
                 }
             }
             batcher.flush().await;
@@ -430,22 +433,22 @@ pub async fn fetch_messages<R: Runtime>(
                     .timeout(std::time::Duration::from_secs(30),
                     ).await {
                         Ok(stream) => {
-                            let client_clone = client.clone();
                             let prepared_stream = stream
                                 .filter_map(|(_relay, res)| async move { res.ok() })
-                                .map(move |event| {
-                                    let c = client_clone.clone();
+                                .ready_chunks(vector_core::event_handler::UNWRAP_BATCH)
+                                .map(move |events| {
                                     vector_core::db::spawn_bound(async move {
-                                        vector_core::event_handler::prepare_event(event, &c, my_public_key).await
+                                        vector_core::event_handler::prepare_events(&events, my_public_key).await
                                     })
                                 })
                                 .buffer_unordered(8);
                             tokio::pin!(prepared_stream);
-                            while let Some(result) = prepared_stream.next().await {
-                                if vector_core::db::session_stopped() {
-                                    break;
-                                }
-                                if let Ok(prepared) = result {
+                            'batches: while let Some(result) = prepared_stream.next().await {
+                                let Ok(batch) = result else { continue };
+                                for prepared in batch {
+                                    if vector_core::db::session_stopped() {
+                                        break 'batches;
+                                    }
                                     // `is_new: true` — this is the mid-session reconnect catch-up
                                     // (gated on `!is_syncing`, never the initial sync), so these
                                     // arrived while we were disconnected and are new to the user.
@@ -940,19 +943,16 @@ pub async fn fetch_messages<R: Runtime>(
             let Some((events, complete)) = result else { continue };
             any_eose = true;
             first_eose.get_or_insert_with(std::time::Instant::now);
-            for event in events {
-                if !seen.insert(event.id.to_bytes()) {
-                    continue;
-                }
-                fetched += 1;
-                let prepared = vector_core::event_handler::prepare_event(
-                    event, &client, my_public_key,
-                ).await;
-                if crate::services::tauri_commit_prepared_event_with(prepared, false, &batcher).await {
-                    new_messages_count += 1;
-                }
-                if batcher.buffered() >= PERSIST_BATCH {
-                    flushes_ok &= batcher.try_flush().await.is_ok();
+            let events: Vec<Event> = events.into_iter().filter(|e| seen.insert(e.id.to_bytes())).collect();
+            fetched += events.len() as u32;
+            for chunk in events.chunks(vector_core::event_handler::UNWRAP_BATCH) {
+                for prepared in vector_core::event_handler::prepare_events(chunk, my_public_key).await {
+                    if crate::services::tauri_commit_prepared_event_with(prepared, false, &batcher).await {
+                        new_messages_count += 1;
+                    }
+                    if batcher.buffered() >= PERSIST_BATCH {
+                        flushes_ok &= batcher.try_flush().await.is_ok();
+                    }
                 }
             }
             // Cursor birth stays archive-only: a windowed pass cannot vouch for
@@ -971,7 +971,6 @@ pub async fn fetch_messages<R: Runtime>(
         // Detached stragglers: same pipeline, own batcher/flush gate, off-path.
         if !relay_futs.is_empty() {
             println!("[Sync] detaching {} quick straggler(s)", relay_futs.len());
-            let det_client = client.clone();
             vector_core::db::spawn_bound(async move {
                 let inner = crate::services::event_handler::TauriEventHandler;
                 let batcher = vector_core::event_handler::BatchingPersist::new(&inner);
@@ -982,18 +981,15 @@ pub async fn fetch_messages<R: Runtime>(
                 while let Some((url, result, had_cursor)) = futs.next().await {
                     let Some((events, complete)) = result else { continue };
                     let mut n = 0u32;
-                    for event in events {
-                        if !seen.insert(event.id.to_bytes()) {
-                            continue;
-                        }
-                        let prepared = vector_core::event_handler::prepare_event(
-                            event, &det_client, my_public_key,
-                        ).await;
-                        if crate::services::tauri_commit_prepared_event_with(prepared, false, &batcher).await {
-                            n += 1;
-                        }
-                        if batcher.buffered() >= PERSIST_BATCH {
-                            ok &= batcher.try_flush().await.is_ok();
+                    let events: Vec<Event> = events.into_iter().filter(|e| seen.insert(e.id.to_bytes())).collect();
+                    for chunk in events.chunks(vector_core::event_handler::UNWRAP_BATCH) {
+                        for prepared in vector_core::event_handler::prepare_events(chunk, my_public_key).await {
+                            if crate::services::tauri_commit_prepared_event_with(prepared, false, &batcher).await {
+                                n += 1;
+                            }
+                            if batcher.buffered() >= PERSIST_BATCH {
+                                ok &= batcher.try_flush().await.is_ok();
+                            }
                         }
                     }
                     if n > 0 {
@@ -1337,15 +1333,15 @@ pub async fn fetch_messages<R: Runtime>(
                             .timeout(std::time::Duration::from_secs(30))
                             .await {
                                 Ok(stream) => {
+                                    let stream = stream.ready_chunks(vector_core::event_handler::UNWRAP_BATCH);
                                     tokio::pin!(stream);
-                                    while let Some((_relay, res)) = stream.next().await {
-                                        let Ok(event) = res else { continue };
-                                        let prepared = vector_core::event_handler::prepare_event(
-                                            event, &det_client, my_public_key,
-                                        ).await;
-                                        crate::services::tauri_commit_prepared_event_with(prepared, false, &det_batcher).await;
-                                        if det_batcher.buffered() >= PERSIST_BATCH {
-                                            det_batcher.flush().await;
+                                    while let Some(chunk) = stream.next().await {
+                                        let events: Vec<Event> = chunk.into_iter().filter_map(|(_relay, res)| res.ok()).collect();
+                                        for prepared in vector_core::event_handler::prepare_events(&events, my_public_key).await {
+                                            crate::services::tauri_commit_prepared_event_with(prepared, false, &det_batcher).await;
+                                            if det_batcher.buffered() >= PERSIST_BATCH {
+                                                det_batcher.flush().await;
+                                            }
                                         }
                                     }
                                 }
@@ -1385,29 +1381,31 @@ pub async fn fetch_messages<R: Runtime>(
                     .timeout(std::time::Duration::from_secs(30),
                         ).await {
                             Ok(stream) => {
+                                let stream = stream.ready_chunks(vector_core::event_handler::UNWRAP_BATCH);
                                 tokio::pin!(stream);
-                                while let Some((_relay, res)) = stream.next().await {
-                                    let Ok(event) = res else { continue };
-                                    if want.contains(&event.id) {
-                                        received.insert(event.id);
+                                while let Some(chunk) = stream.next().await {
+                                    let events: Vec<Event> = chunk.into_iter().filter_map(|(_relay, res)| res.ok()).collect();
+                                    for event in &events {
+                                        if want.contains(&event.id) {
+                                            received.insert(event.id);
+                                        }
                                     }
-                                    let prepared = vector_core::event_handler::prepare_event(
-                                        event, &bg_client, my_public_key,
-                                    ).await;
-                                    processed += 1;
-                                    if processed.is_multiple_of(250) {
-                                        vector_core::emit_event("sync_progress", &serde_json::json!({
-                                            "mode": "Syncing",
-                                            "current": processed,
-                                            "total": missing_total,
-                                            "new_messages": archive_new,
-                                        }));
-                                    }
-                                    if crate::services::tauri_commit_prepared_event_with(prepared, false, &archive_batcher).await {
-                                        archive_new += 1;
-                                    }
-                                    if archive_batcher.buffered() >= PERSIST_BATCH {
-                                        flushes_ok &= archive_batcher.try_flush().await.is_ok();
+                                    for prepared in vector_core::event_handler::prepare_events(&events, my_public_key).await {
+                                        processed += 1;
+                                        if processed.is_multiple_of(250) {
+                                            vector_core::emit_event("sync_progress", &serde_json::json!({
+                                                "mode": "Syncing",
+                                                "current": processed,
+                                                "total": missing_total,
+                                                "new_messages": archive_new,
+                                            }));
+                                        }
+                                        if crate::services::tauri_commit_prepared_event_with(prepared, false, &archive_batcher).await {
+                                            archive_new += 1;
+                                        }
+                                        if archive_batcher.buffered() >= PERSIST_BATCH {
+                                            flushes_ok &= archive_batcher.try_flush().await.is_ok();
+                                        }
                                     }
                                 }
                             }

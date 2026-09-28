@@ -5159,17 +5159,22 @@ impl VectorCore {
                 {
                     Ok(stream) => {
                         let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+                        let stream = stream.ready_chunks(event_handler::UNWRAP_BATCH);
                         tokio::pin!(stream);
-                        while let Some((_relay, res)) = stream.next().await {
-                            let Ok(event) = res else { continue };
+                        while let Some(chunk) = stream.next().await {
                             // Straddles the stream: a swap mid-drain must not push
                             // the old account's wrappers through the new account's
                             // pipeline (ErrorSkip would ledger them there).
-                            if !seen.insert(event.id.to_bytes()) { continue; }
-                            total_events += 1;
-                            let prepared = event_handler::prepare_event(event, &client, my_pk).await;
-                            if event_handler::commit_prepared_event(prepared, false, handler).await {
-                                new_messages += 1;
+                            let events: Vec<Event> = chunk
+                                .into_iter()
+                                .filter_map(|(_relay, res)| res.ok())
+                                .filter(|event| seen.insert(event.id.to_bytes()))
+                                .collect();
+                            total_events += events.len() as u32;
+                            for prepared in event_handler::prepare_events(&events, my_pk).await {
+                                if event_handler::commit_prepared_event(prepared, false, handler).await {
+                                    new_messages += 1;
+                                }
                             }
                         }
                     }
@@ -5202,21 +5207,21 @@ impl VectorCore {
                     .await
                 {
                     Ok(stream) => {
-                        let client_clone = client.clone();
                         let prepared_stream = stream
                             .filter_map(|(_relay, res)| async move { res.ok() })
-                            .map(move |event| {
-                                let c = client_clone.clone();
+                            .ready_chunks(event_handler::UNWRAP_BATCH)
+                            .map(move |events| {
                                 db::spawn_bound(async move {
-                                    event_handler::prepare_event(event, &c, my_pk).await
+                                    event_handler::prepare_events(&events, my_pk).await
                                 })
                             })
                             .buffer_unordered(8);
                         tokio::pin!(prepared_stream);
 
                         while let Some(result) = prepared_stream.next().await {
-                            total_events += 1;
-                            if let Ok(prepared) = result {
+                            let Ok(batch) = result else { continue };
+                            total_events += batch.len() as u32;
+                            for prepared in batch {
                                 if event_handler::commit_prepared_event(prepared, false, handler).await {
                                     new_messages += 1;
                                 }
