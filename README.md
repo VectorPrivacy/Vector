@@ -234,3 +234,9 @@ Vector is released under the [MIT License](LICENSE).
 
 You are free to use, copy, modify, merge, publish, distribute, sublicense, and build upon this project for any purpose, commercial or personal, as long as the original license notice is included. This project is provided as-is, without warranty of any kind.
 
+---
+
+**Trademark notice:** This license covers the source code only. The Vector
+name, logo, and branding are trademarks of Formless Labs and are not
+licensed under the MIT License above. See [TRADEMARK.md](TRADEMARK.md).
+
