@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS events (
     FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES profiles(id) ON DELETE SET NULL
 );
-CREATE INDEX IF NOT EXISTS idx_events_chat_time ON events(chat_id, created_at DESC);
+-- Pages a chat newest-first with no sort step, rejecting other kinds without reading the row.
+CREATE INDEX IF NOT EXISTS idx_events_chat_page ON events(chat_id, created_at DESC, received_at DESC, kind);
 CREATE INDEX IF NOT EXISTS idx_events_kind ON events(kind);
 -- Covers the community member fold (authors + newest activity per channel) without touching rows.
 CREATE INDEX IF NOT EXISTS idx_events_chat_kind_npub ON events(chat_id, kind, npub, created_at);
@@ -143,7 +144,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 /// applies on first run, then this build reads its own database as newer and
 /// refuses to open it. The `debug_assert` in [`run_atomic_migration`] and
 /// `highest_migration_id_matches_the_runner` both catch that before release.
-pub const HIGHEST_MIGRATION_ID: u32 = 93;
+pub const HIGHEST_MIGRATION_ID: u32 = 94;
 
 /// Highest migration id recorded in this DB; 0 for a fresh or pre-tracking one.
 ///
@@ -1390,6 +1391,16 @@ pub fn run_migrations(conn: &mut rusqlite::Connection) -> Result<(), String> {
         )
         .map_err(|e| format!("seed notify_prefs from mutes: {e}"))?;
         Ok(())
+    })?;
+
+    // The page query skipped rows by reading each one for its kind, then sorted ties on
+    // received_at; the wider index answers both from the index alone.
+    run_atomic_migration(conn, 94, "Chat page index covers received_at and kind", |tx| {
+        tx.execute_batch(
+            "DROP INDEX IF EXISTS idx_events_chat_time;
+             CREATE INDEX IF NOT EXISTS idx_events_chat_page ON events(chat_id, created_at DESC, received_at DESC, kind);",
+        )
+        .map_err(|e| format!("rebuild chat page index: {e}"))
     })?;
 
     Ok(())
