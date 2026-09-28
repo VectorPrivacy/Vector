@@ -175,8 +175,8 @@ fn gcm_sweep() {
 }
 
 /// Gift-wrap unwrap per wrap, one vault read per wrap against one per batch, with every
-/// DM from a different sender or all from one. "prior" adds back the outer signature check
-/// the production path no longer repeats.
+/// DM from a different sender or all from one. "prior" adds back the two wrap signature
+/// checks (nostr-sdk's on arrival, then the unwrap's) that the ID checks replaced.
 fn gift_sweep() {
     const ROUNDS: usize = 21;
     let me = Keys::generate();
@@ -197,9 +197,13 @@ fn gift_sweep() {
     let (many, one): (Vec<&Event>, Vec<&Event>) = (many.iter().collect(), one.iter().collect());
     type Case<'a> = (&'static str, Box<dyn Fn() + 'a>);
     let cases: Vec<Case> = vec![
-        ("prior: verify + vault read per wrap", Box::new(|| for w in &many {
+        ("prior: sdk verify + verify + read per wrap", Box::new(|| for w in &many {
+            black_box(w.verify().is_ok());
             black_box(w.verify().is_ok());
             black_box(GuardedSigner::unwrap_gift_wrap(w).unwrap());
+        })),
+        ("sdk arrival check: id only (now)", Box::new(|| for w in &many {
+            black_box(w.verify_id());
         })),
         ("single: vault read per wrap", Box::new(|| for w in &many {
             black_box(GuardedSigner::unwrap_gift_wrap(w).unwrap());

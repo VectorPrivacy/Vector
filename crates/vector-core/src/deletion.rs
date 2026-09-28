@@ -218,6 +218,13 @@ pub async fn delete_own_reaction(
     recipient: PublicKey,
 ) -> Result<DeleteOutcome, String> {
     let client = nostr_client().ok_or("Not logged in")?;
+    // Durable tombstone first, as for messages: a surviving self-wrap re-served later
+    // would otherwise bring the reaction back.
+    let reaction_hex = reaction_id.to_hex();
+    if let Err(e) = crate::db::events::add_message_tombstone(&reaction_hex) {
+        crate::log_warn!("[reaction delete] tombstone write failed: {}", e);
+    }
+    crate::state::note_message_deleted(&reaction_hex);
     let keys = crate::db::nip17_keys::get_wrap_keys_for_rumor(reaction_id)
         .unwrap_or_default();
 

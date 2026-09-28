@@ -631,6 +631,25 @@ fn expired_invite(expires_at: u64, rumor_created_at: u64) -> bool {
 }
 
 #[cfg(test)]
+mod revoked_reaction_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_revoked_reaction_is_refused_under_any_wrapper() {
+        let id = "7".repeat(64);
+        let reaction = crate::types::Reaction {
+            id: id.clone(),
+            reference_id: "message".into(),
+            author_id: "author".into(),
+            emoji: "+".into(),
+            emoji_url: None,
+        };
+        crate::state::note_message_deleted(&id);
+        assert!(!commit_reaction(reaction, "contact", false, "any-wrapper", &NoOpEventHandler).await);
+    }
+}
+
+#[cfg(test)]
 mod invite_expiry_tests {
     use super::*;
 
@@ -1091,6 +1110,11 @@ async fn commit_reaction(
     wrapper_event_id: &str,
     handler: &dyn InboundEventHandler,
 ) -> bool {
+    // A revoked reaction can come back under a new wrapper id; its own id is the stable key.
+    if crate::state::was_message_deleted(&reaction.id) {
+        return false;
+    }
+
     // Add to STATE
     let msg_for_emit = {
         let mut state = crate::state::STATE.lock().await;
@@ -1302,6 +1326,11 @@ async fn commit_reaction_deletion(target_reaction_id: &str, sender: &PublicKey) 
             sender.to_hex(), target_reaction_id
         );
         return false;
+    }
+
+    crate::state::note_message_deleted(target_reaction_id);
+    if let Err(e) = crate::db::events::add_message_tombstone(target_reaction_id) {
+        crate::log_warn!("[reaction-delete] tombstone write failed: {}", e);
     }
 
     let updated = {

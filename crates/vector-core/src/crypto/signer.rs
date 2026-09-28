@@ -68,8 +68,8 @@ impl GuardedSigner {
                 if wrap.kind != Kind::GiftWrap {
                     return Err(SignerError::from("not a gift wrap"));
                 }
-                // nostr-sdk verified the signature on arrival; its cache trusts ids, so the id must
-                // match. Every wrap here comes from its relay pool: any other source must verify().
+                // A wrap's signature is a throwaway key's and proves nothing (NIP-59); the seal's
+                // does. Its id must still match its fields: dedup and the ledger key on it.
                 if !wrap.verify_id() {
                     return Err(SignerError::from("gift wrap id does not match its content"));
                 }
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wrap_signature_is_left_to_the_relay_pool_but_its_id_is_not() {
+    fn a_wrap_is_checked_for_its_id_but_not_its_signature() {
         let (me, sender) = (Keys::generate(), Keys::generate());
         let good = wrap(&seal(&sender, &rumor(&sender.public_key(), &me.public_key()), &me.public_key()), &me.public_key());
         let forged_sig = flip_sig(good.clone());

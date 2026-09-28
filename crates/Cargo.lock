@@ -2526,7 +2526,7 @@ checksum = "f6b8866ec53810a9a4b3d434a29801e78c707430a9ae11c2db4b8b62bb9675a0"
 [[package]]
 name = "nostr"
 version = "0.45.1"
-source = "git+https://github.com/VectorPrivacy/nostr.git?branch=zeroize-secretkey-v0.45.1#416e5a5a97a225e17666ff2f96d13873e1a0bc23"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
 dependencies = [
  "aes 0.8.4",
  "base64",
@@ -2579,9 +2579,8 @@ dependencies = [
 
 [[package]]
 name = "nostr-database"
-version = "0.45.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81c7ffd33114d62c737dd2b8f77ffec4693c64b7a1c6090cab0d0009f9986e22"
+version = "0.45.1"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
 dependencies = [
  "nostr",
  "opaquerr",
@@ -2590,8 +2589,7 @@ dependencies = [
 [[package]]
 name = "nostr-gossip"
 version = "0.45.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa07539e52a71cb91fe0d693facaa298f03fcf9edcd66a521094e18e286e2336"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
 dependencies = [
  "nostr",
  "opaquerr",
@@ -2600,8 +2598,7 @@ dependencies = [
 [[package]]
 name = "nostr-sdk"
 version = "0.45.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26c86342f367bd9b173ec4a697e936e3a82d6dad5b4aa06c0d35d9b4f88a8e72"
+source = "git+https://github.com/VectorPrivacy/nostr.git?branch=vector-v0.45.1#0e31128072f1f4d1dafb68e7f5e1d47c4d8335da"
 dependencies = [
  "async-utility",
  "async-wsocket",

@@ -203,6 +203,21 @@ fn slot() -> &'static Mutex<Option<Call>> {
     CALL.get_or_init(|| Mutex::new(None))
 }
 
+/// Offers seen within `OFFER_TTL_SECS`: a relay can re-serve one under a new wrapper id, and
+/// it must not ring again once its call ended. Call ids are random, so no per-account scope.
+static SEEN_OFFERS: Mutex<Vec<(String, u64)>> = Mutex::new(Vec::new());
+
+/// True the first time `call_id` is offered within the TTL window.
+fn first_offer(call_id: &str, now: u64) -> bool {
+    let mut seen = SEEN_OFFERS.lock().unwrap_or_else(|e| e.into_inner());
+    seen.retain(|(_, at)| at + OFFER_TTL_SECS >= now);
+    if seen.iter().any(|(id, _)| id == call_id) {
+        return false;
+    }
+    seen.push((call_id.to_string(), now));
+    true
+}
+
 fn with_call<R>(f: impl FnOnce(&mut Call) -> R) -> Option<R> {
     let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
     guard.as_mut().map(f)
@@ -708,6 +723,9 @@ pub async fn on_signal(sender: &str, call_id: &str, signal: &str, node_addr: Opt
                 log_warn!("[CALLS] Offer without a usable address");
                 return;
             }
+            if !first_offer(call_id, now) {
+                return;
+            }
             let state = {
                 let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
                 match guard.as_ref() {
@@ -1069,5 +1087,19 @@ async fn attach(id: &str, conn: Connection, send: SendStream, mut recv: RecvStre
             t.abort();
         }
         end(id, "hangup");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_offer_rings_once_until_its_ttl_passes() {
+        let id = format!("{:032x}", rand::random::<u128>());
+        assert!(first_offer(&id, 1_000));
+        assert!(!first_offer(&id, 1_000 + OFFER_TTL_SECS));
+        assert!(first_offer(&format!("{id}x"), 1_000));
+        assert!(first_offer(&id, 1_001 + OFFER_TTL_SECS));
     }
 }
