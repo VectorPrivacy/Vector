@@ -5,7 +5,6 @@
 
 use image::{DynamicImage, ExtendedColorType};
 use image::codecs::png::{PngEncoder, CompressionType, FilterType};
-use image::codecs::jpeg::JpegEncoder;
 use image::ImageEncoder;
 use std::io::Cursor;
 
@@ -95,19 +94,81 @@ fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
 /// # Returns
 /// Encoded JPEG bytes or an error string
 pub fn encode_jpeg(pixels: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>, String> {
+    let (w, h) = (
+        u16::try_from(width).map_err(|_| "JPEG width exceeds 65535".to_string())?,
+        u16::try_from(height).map_err(|_| "JPEG height exceeds 65535".to_string())?,
+    );
     // Pre-allocate: JPEG is typically 5-15% of raw RGB size depending on quality
-    // Use ~10% as a reasonable estimate
-    let estimated_size = pixels.len() / 10;
-    let mut jpeg_data = Vec::with_capacity(estimated_size.max(1024));
-    let mut cursor = Cursor::new(&mut jpeg_data);
-    let encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
-    encoder.write_image(
-        pixels,
-        width,
-        height,
-        ExtendedColorType::Rgb8
-    ).map_err(|e| format!("Failed to encode JPEG: {}", e))?;
+    let mut jpeg_data = Vec::with_capacity((pixels.len() / 10).max(1024));
+    let mut encoder = jpeg_encoder::Encoder::new(&mut jpeg_data, quality);
+    // 4:4:4 keeps the image crate's quality at a given setting; optimized tables make it smaller.
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
+    encoder.set_optimized_huffman_tables(true);
+    encoder
+        .encode(pixels, w, h, jpeg_encoder::ColorType::Rgb)
+        .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
     Ok(jpeg_data)
+}
+
+/// `DynamicImage::resize` on fast_image_resize: fits within `max_w` x `max_h` keeping the aspect
+/// ratio, with the image crate's rounding.
+pub fn resize_fit(img: &DynamicImage, max_w: u32, max_h: u32, filter: image::imageops::FilterType) -> DynamicImage {
+    if (max_w, max_h) == (img.width(), img.height()) {
+        return img.clone();
+    }
+    let (w, h) = fit_dimensions(img, max_w, max_h);
+    resize_exact(img, w, h, filter)
+}
+
+/// The image crate's fit-within dimensions: aspect kept, each side rounded, at least 1.
+fn fit_dimensions(img: &DynamicImage, max_w: u32, max_h: u32) -> (u32, u32) {
+    let ratio = f64::min(f64::from(max_w) / f64::from(img.width()), f64::from(max_h) / f64::from(img.height()));
+    let side = |v: u32| ((f64::from(v) * ratio).round() as u64).clamp(1, u64::from(u32::MAX)) as u32;
+    (side(img.width()), side(img.height()))
+}
+
+/// `DynamicImage::resize_exact` on fast_image_resize for 8-bit layouts; others take the image
+/// crate's path. Alpha is resampled premultiplied, which keeps transparent edges free of fringes.
+pub fn resize_exact(img: &DynamicImage, width: u32, height: u32, filter: image::imageops::FilterType) -> DynamicImage {
+    use fast_image_resize::{FilterType as R, ResizeAlg};
+    use image::imageops::FilterType as F;
+    let alg = match filter {
+        F::Nearest => ResizeAlg::Nearest,
+        F::Triangle => ResizeAlg::Convolution(R::Bilinear),
+        F::CatmullRom => ResizeAlg::Convolution(R::CatmullRom),
+        F::Gaussian => ResizeAlg::Convolution(R::Gaussian),
+        F::Lanczos3 => ResizeAlg::Convolution(R::Lanczos3),
+    };
+    simd_resize(img, width, height, alg).unwrap_or_else(|| img.resize_exact(width, height, filter))
+}
+
+/// `DynamicImage::thumbnail` (area average, fits within the box) on fast_image_resize.
+pub fn thumbnail(img: &DynamicImage, max_w: u32, max_h: u32) -> DynamicImage {
+    let (w, h) = fit_dimensions(img, max_w, max_h);
+    let alg = fast_image_resize::ResizeAlg::Convolution(fast_image_resize::FilterType::Box);
+    simd_resize(img, w, h, alg).unwrap_or_else(|| img.thumbnail(max_w, max_h))
+}
+
+/// None for layouts fast_image_resize doesn't take (16-bit, float).
+fn simd_resize(img: &DynamicImage, width: u32, height: u32, alg: fast_image_resize::ResizeAlg) -> Option<DynamicImage> {
+    use fast_image_resize as fr;
+    let (pixel, raw): (fr::PixelType, &[u8]) = match img {
+        DynamicImage::ImageRgb8(b) => (fr::PixelType::U8x3, b.as_raw()),
+        DynamicImage::ImageRgba8(b) => (fr::PixelType::U8x4, b.as_raw()),
+        DynamicImage::ImageLuma8(b) => (fr::PixelType::U8, b.as_raw()),
+        DynamicImage::ImageLumaA8(b) => (fr::PixelType::U8x2, b.as_raw()),
+        _ => return None,
+    };
+    let src = fr::images::ImageRef::new(img.width(), img.height(), raw, pixel).ok()?;
+    let mut dst = fr::images::Image::new(width, height, pixel);
+    fr::Resizer::new().resize(&src, &mut dst, &fr::ResizeOptions::new().resize_alg(alg)).ok()?;
+    let out = dst.into_vec();
+    match pixel {
+        fr::PixelType::U8x3 => image::RgbImage::from_raw(width, height, out).map(DynamicImage::ImageRgb8),
+        fr::PixelType::U8x4 => image::RgbaImage::from_raw(width, height, out).map(DynamicImage::ImageRgba8),
+        fr::PixelType::U8 => image::GrayImage::from_raw(width, height, out).map(DynamicImage::ImageLuma8),
+        _ => image::GrayAlphaImage::from_raw(width, height, out).map(DynamicImage::ImageLumaA8),
+    }
 }
 
 /// Encode a DynamicImage choosing PNG or JPEG based on alpha transparency.
@@ -134,7 +195,10 @@ pub fn encode_image_auto(img: &DynamicImage, jpeg_quality: u8) -> Result<Encoded
         DynamicImage::ImageLuma8(_) |
         DynamicImage::ImageLuma16(_) => {
             // No alpha channel possible - encode as JPEG directly
-            let rgb = img.to_rgb8();
+            let rgb = match img.as_rgb8() {
+                Some(rgb) => std::borrow::Cow::Borrowed(rgb),
+                None => std::borrow::Cow::Owned(img.to_rgb8()),
+            };
             let bytes = encode_jpeg(rgb.as_raw(), width, height, jpeg_quality)?;
             return Ok(EncodedImage {
                 bytes,
@@ -180,7 +244,7 @@ pub fn encode_image_auto(img: &DynamicImage, jpeg_quality: u8) -> Result<Encoded
 pub fn compress_image(img: &DynamicImage, max_dimension: u32, jpeg_quality: u8) -> Result<EncodedImage, String> {
     // Resize if needed, maintaining aspect ratio
     if img.width() > max_dimension || img.height() > max_dimension {
-        let resized = img.resize(max_dimension, max_dimension, image::imageops::FilterType::Lanczos3);
+        let resized = resize_fit(img, max_dimension, max_dimension, image::imageops::FilterType::Lanczos3);
         encode_image_auto(&resized, jpeg_quality)
     } else {
         // No resize needed - encode directly without cloning
@@ -196,7 +260,7 @@ fn fit_within<'a>(
     filter: ::image::imageops::FilterType,
 ) -> std::borrow::Cow<'a, DynamicImage> {
     if img.width() > max_dim || img.height() > max_dim {
-        std::borrow::Cow::Owned(img.resize(max_dim, max_dim, filter))
+        std::borrow::Cow::Owned(resize_fit(img, max_dim, max_dim, filter))
     } else {
         std::borrow::Cow::Borrowed(img)
     }
@@ -453,8 +517,7 @@ fn transcode_animated_opts(
         };
         let fit = |buf: image::RgbaImage| -> image::RgbaImage {
             if buf.width() > max_dim || buf.height() > max_dim {
-                DynamicImage::ImageRgba8(buf)
-                    .resize(max_dim, max_dim, ::image::imageops::FilterType::Triangle)
+                resize_fit(&DynamicImage::ImageRgba8(buf), max_dim, max_dim, ::image::imageops::FilterType::Triangle)
                     .into_rgba8()
             } else {
                 buf
@@ -1700,3 +1763,79 @@ mod lossless_strip_tests {
 }
 
 
+
+#[cfg(test)]
+mod simd_resize_tests {
+    use super::{encode_jpeg, resize_exact, resize_fit};
+    use image::imageops::FilterType;
+    use image::DynamicImage;
+
+    fn psnr(a: &[u8], b: &[u8]) -> f64 {
+        let mse = a.iter().zip(b).map(|(x, y)| (*x as f64 - *y as f64).powi(2)).sum::<f64>() / a.len() as f64;
+        10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
+    }
+
+    /// Smooth gradients plus deterministic grain, like a camera photo.
+    fn photo(w: u32, h: u32) -> image::RgbImage {
+        let mut seed = 0x9e37_79b9u32;
+        image::RgbImage::from_fn(w, h, |x, y| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let n = (seed % 17) as i32 - 8;
+            let px = |v: u32| (v as i32 + n).clamp(0, 255) as u8;
+            image::Rgb([px(x * 255 / w), px(y * 255 / h), px((x + y) * 127 / (w + h))])
+        })
+    }
+
+    #[test]
+    fn fits_to_the_same_dimensions_as_the_image_crate() {
+        let img = DynamicImage::ImageRgb8(photo(8, 8));
+        for (w, h) in [(4032, 3024), (3024, 4032), (1921, 1080), (1, 5000), (777, 333), (100, 100)] {
+            let src = DynamicImage::new_rgb8(w, h);
+            for (bw, bh) in [(1920, 1920), (512, 512), (100, 75), (5000, 5000), (1, 1)] {
+                let ours = resize_fit(&src, bw, bh, FilterType::Nearest);
+                let theirs = src.resize(bw, bh, FilterType::Nearest);
+                assert_eq!((ours.width(), ours.height()), (theirs.width(), theirs.height()), "{w}x{h} into {bw}x{bh}");
+                if bw <= w && bh <= h {
+                    let ours = super::thumbnail(&src, bw, bh);
+                    let theirs = src.thumbnail(bw, bh);
+                    assert_eq!((ours.width(), ours.height()), (theirs.width(), theirs.height()), "thumb {w}x{h} into {bw}x{bh}");
+                }
+            }
+        }
+        assert_eq!(resize_fit(&img, 8, 8, FilterType::Lanczos3).as_bytes(), img.as_bytes());
+    }
+
+    #[test]
+    fn resamples_like_the_image_crate() {
+        let rgb = photo(1200, 900);
+        let rgba = DynamicImage::ImageRgb8(rgb.clone()).to_rgba8();
+        let luma = DynamicImage::ImageRgb8(rgb.clone()).to_luma8();
+        let luma_a = DynamicImage::ImageRgb8(rgb.clone()).to_luma_alpha8();
+        for img in [
+            DynamicImage::ImageRgb8(rgb),
+            DynamicImage::ImageRgba8(rgba),
+            DynamicImage::ImageLuma8(luma),
+            DynamicImage::ImageLumaA8(luma_a),
+        ] {
+            for filter in [FilterType::Lanczos3, FilterType::CatmullRom, FilterType::Triangle] {
+                let ours = resize_exact(&img, 400, 300, filter);
+                let theirs = img.resize_exact(400, 300, filter);
+                assert_eq!(ours.color(), theirs.color());
+                let p = psnr(ours.as_bytes(), theirs.as_bytes());
+                assert!(p > 45.0, "{:?} {filter:?}: {p:.1} dB", img.color());
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_round_trips_at_the_expected_quality() {
+        let img = photo(640, 480);
+        let jpeg = encode_jpeg(img.as_raw(), 640, 480, 85).unwrap();
+        let back = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(back.dimensions(), (640, 480));
+        assert!(psnr(img.as_raw(), back.as_raw()) > 30.0);
+        assert!(encode_jpeg(&[0; 3], 70_000, 1, 85).is_err());
+    }
+}

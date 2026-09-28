@@ -38,7 +38,7 @@ pub(crate) fn prepare_outbound_image(
 ) -> Result<CachedCompressedImage, String> {
     use crate::shared::image::{
         calculate_resize_dimensions, encode_rgba_auto, reattach_exif_jpeg,
-        MAX_DIMENSION, JPEG_QUALITY_STANDARD, JPEG_QUALITY_HIGH,
+        MAX_DIMENSION, JPEG_QUALITY_STANDARD, JPEG_QUALITY_HIGH, SMALL_IMAGE_THRESHOLD,
     };
 
     let original_size = bytes.len() as u64;
@@ -110,22 +110,30 @@ pub(crate) fn prepare_outbound_image(
         (w, h)
     };
     let resized = if nw != w || nh != h {
-        img.resize(nw, nh, ::image::imageops::FilterType::Lanczos3)
+        crate::shared::image::resize_fit(&img, nw, nh, ::image::imageops::FilterType::Lanczos3)
     } else {
         img
     };
     let (aw, ah) = (resized.width(), resized.height());
     let img_meta = meta_from(&resized);
-    let rgba = resized.to_rgba8();
     // Full-resolution sends (compression declined) use higher quality, and keep
     // a PNG source lossless rather than re-encoding a screenshot to JPEG just to
     // strip its metadata. Compression still picks the smaller format by content.
     let (out_bytes, out_ext): (Vec<u8>, &'static str) = if !compress && extension.eq_ignore_ascii_case("png") {
-        (crate::shared::image::encode_png(rgba.as_raw(), aw, ah)?, "png")
+        (crate::shared::image::encode_png(resized.to_rgba8().as_raw(), aw, ah)?, "png")
     } else {
         let quality = if compress { JPEG_QUALITY_STANDARD } else { JPEG_QUALITY_HIGH };
-        let encoded = encode_rgba_auto(rgba.as_raw(), aw, ah, quality)?;
-        (encoded.bytes, encoded.extension)
+        let small = aw < SMALL_IMAGE_THRESHOLD && ah < SMALL_IMAGE_THRESHOLD;
+        match &resized {
+            // No alpha channel to find: skip the RGBA copy, its scan and the strip back to RGB.
+            ::image::DynamicImage::ImageRgb8(rgb) if !small => {
+                (crate::shared::image::encode_jpeg(rgb.as_raw(), aw, ah, quality)?, "jpg")
+            }
+            _ => {
+                let encoded = encode_rgba_auto(resized.to_rgba8().as_raw(), aw, ah, quality)?;
+                (encoded.bytes, encoded.extension)
+            }
+        }
     };
     let mut out_bytes = out_bytes;
 

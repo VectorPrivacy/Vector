@@ -350,7 +350,7 @@ pub fn generate_thumbhash_from_image(img: &image::DynamicImage) -> Option<String
         ((THUMBHASH_SIZE * width / height).max(1), THUMBHASH_SIZE)
     };
 
-    let thumbnail = img.thumbnail(thumb_w, thumb_h);
+    let thumbnail = crate::shared::image::thumbnail(img, thumb_w, thumb_h);
     let rgba = thumbnail.to_rgba8();
     let hash = rgba_to_thumb_hash(rgba.width() as usize, rgba.height() as usize, rgba.as_raw());
     Some(base91_encode(&hash))
