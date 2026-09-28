@@ -1092,7 +1092,7 @@ body.ws #group-overview .group-overview-body > div > div:first-child {
 /* The header centres its own contents; a channel's name belongs at the start of
    the row, level with the messages under it. */
 body.ws.ws-community-pane #chat > .chat-header {
-  justify-content: flex-start;
+  grid-template-columns: 0 minmax(0, 1fr) max-content;
 }
 
 body.ws.ws-community-pane #chat > .chat-header .profile-header-info {

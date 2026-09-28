@@ -3421,10 +3421,36 @@ body.mobile #chat-new-scan-btn { display: block; }
 }
 
 .chat-header .profile-header-info {
-  /* Centered, so BOTH sides must clear the wider rail: call + pins + menu
-     occupy the right 130px. 280 = 2 x (130 + 10px breathing room). */
   max-width: min(70%, calc(100% - 280px));
   overflow: hidden;
+}
+
+/* Centred while the name fits; past that each side shrinks to its own buttons and
+   the name takes everything between them. */
+#chat > .chat-header {
+  display: grid;
+  grid-template-columns: minmax(max-content, 1fr) minmax(0, max-content) minmax(max-content, 1fr);
+}
+
+#chat > .chat-header > #chat-back-btn {
+  grid-column: 1;
+  justify-self: start;
+  position: relative;
+  inset: auto;
+}
+
+#chat > .chat-header > .profile-header-info {
+  grid-column: 2;
+  max-width: none;
+  padding: 0 10px;
+}
+
+#chat > .chat-header > .chat-header-actions {
+  grid-column: 3;
+  justify-self: end;
+  position: relative;
+  inset: auto;
+  margin-right: 10px;
 }
 
 .chat-header #chat-contact-status,
@@ -24222,6 +24248,11 @@ body.profile-switcher-editing .profile-switcher-add {
 
 .call-pill {
   transition: width 0.18s ease;
+}
+
+/* Only while opening or closing: a drag must follow the pointer exactly. */
+.call-pill-sliding {
+  transition: width 0.18s ease, left 0.18s ease;
 }
 
 .call-pill,

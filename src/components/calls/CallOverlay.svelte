@@ -184,8 +184,7 @@
         const v = parseFloat(getComputedStyle(document.body).getPropertyValue('--chrome-h'));
         return Number.isFinite(v) ? v : 0;
     }
-    function clamp(p) {
-        const w = pill?.offsetWidth || 300;
+    function clamp(p, w = pill?.offsetWidth || 300) {
         const hgt = pill?.offsetHeight || 48;
         const top = chromeHeight() + 8;
         const x = Math.min(Math.max(8, p.x), Math.max(8, window.innerWidth - w - 8));
@@ -213,7 +212,7 @@
         if (!drag) return;
         const moved = drag.moved;
         drag = null;
-        if (moved) savePos();
+        if (moved) { home = null; savePos(); }
         else toggle();
     }
 
@@ -227,6 +226,10 @@
     let width = $state(null);
     let collapsedW = 0;
     let release = null;
+    // Opening near the right edge slides the pill left for the room; closing returns it.
+    let home = null;
+    let sliding = $state(false);
+    let slideEnd = null;
     // Measured only while unpinned, so a mid-flight width never poses as the resting one.
     $effect(() => {
         if (!expanded && width == null && pill) collapsedW = pill.offsetWidth;
@@ -242,6 +245,13 @@
         requestAnimationFrame(() => requestAnimationFrame(() => {
             if (opening !== expanded) return;
             width = opening ? openW : (collapsedW || from);
+            if (pos) {
+                sliding = true;
+                if (opening) { home = pos; pos = clamp(pos, openW); }
+                else if (home) { pos = clamp(home, collapsedW || from); home = null; }
+                clearTimeout(slideEnd);
+                slideEnd = setTimeout(() => { sliding = false; }, WIDTH_MS + 40);
+            }
             // Released on a clock, not the transition's end event: a close that lands
             // on its current width never transitions, and the meters' end events bubble.
             if (!opening) release = setTimeout(() => { if (!expanded) width = null; }, WIDTH_MS + 40);
@@ -265,7 +275,10 @@
     });
     $effect(() => {
         pictures;
-        untrack(() => { if (width != null) width = expanded ? openW : null; });
+        untrack(() => {
+            if (width != null) width = expanded ? openW : null;
+            if (expanded && pos) pos = clamp(pos, openW);
+        });
     });
     const placement = $derived((pos ? `left:${pos.x}px; top:${pos.y}px; transform:none;` : '') + (width != null ? ` width:${width}px;` : ''));
 
@@ -383,7 +396,7 @@
         </div>
     {/if}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live} class:call-pill-video={pictures} class:call-pill-under={!!max}
+    <div class="call-pill" class:call-pill-open={expanded} class:call-pill-ended={c.phase === 'ended'} class:call-pill-live={live} class:call-pill-video={pictures} class:call-pill-under={!!max} class:call-pill-sliding={sliding}
          style={placement} bind:this={pill}>
         <!-- Only the header row drags or toggles; what is below is for its controls. -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
