@@ -37,8 +37,8 @@ pub(crate) fn prepare_outbound_image(
     thumbhash_hint: Option<&str>,
 ) -> Result<CachedCompressedImage, String> {
     use crate::shared::image::{
-        calculate_resize_dimensions, encode_rgba_auto, reattach_exif_jpeg,
-        MAX_DIMENSION, JPEG_QUALITY_STANDARD, JPEG_QUALITY_HIGH, SMALL_IMAGE_THRESHOLD,
+        calculate_resize_dimensions, reattach_exif_jpeg,
+        MAX_DIMENSION, JPEG_QUALITY_STANDARD, JPEG_QUALITY_HIGH,
     };
 
     let original_size = bytes.len() as u64;
@@ -123,17 +123,8 @@ pub(crate) fn prepare_outbound_image(
         (crate::shared::image::encode_png(resized.to_rgba8().as_raw(), aw, ah)?, "png")
     } else {
         let quality = if compress { JPEG_QUALITY_STANDARD } else { JPEG_QUALITY_HIGH };
-        let small = aw < SMALL_IMAGE_THRESHOLD && ah < SMALL_IMAGE_THRESHOLD;
-        match &resized {
-            // No alpha channel to find: skip the RGBA copy, its scan and the strip back to RGB.
-            ::image::DynamicImage::ImageRgb8(rgb) if !small => {
-                (crate::shared::image::encode_jpeg(rgb.as_raw(), aw, ah, quality)?, "jpg")
-            }
-            _ => {
-                let encoded = encode_rgba_auto(resized.to_rgba8().as_raw(), aw, ah, quality)?;
-                (encoded.bytes, encoded.extension)
-            }
-        }
+        let encoded = crate::shared::image::encode_decoded_auto(&resized, quality)?;
+        (encoded.bytes, encoded.extension)
     };
     let mut out_bytes = out_bytes;
 
@@ -197,7 +188,7 @@ pub(super) fn compress_bytes_internal(
 
     // Resize if needed
     let resized_img = if new_width != width || new_height != height {
-        img.resize(new_width, new_height, ::image::imageops::FilterType::Lanczos3)
+        crate::shared::image::resize_fit(&img, new_width, new_height, ::image::imageops::FilterType::Lanczos3)
     } else {
         img
     };
@@ -216,11 +207,9 @@ pub(super) fn compress_bytes_internal(
     // Keep reference to original metadata for fallback path
     let img_meta = final_meta.clone();
 
-    let rgba_img = resized_img.to_rgba8();
-
     // Encode as PNG (alpha/small) or JPEG (standard)
-    use crate::shared::image::{encode_rgba_auto, JPEG_QUALITY_STANDARD};
-    let encoded = encode_rgba_auto(rgba_img.as_raw(), actual_width, actual_height, JPEG_QUALITY_STANDARD)?;
+    use crate::shared::image::JPEG_QUALITY_STANDARD;
+    let encoded = crate::shared::image::encode_decoded_auto(&resized_img, JPEG_QUALITY_STANDARD)?;
     let compressed_bytes = encoded.bytes;
     let new_extension = encoded.extension;
 
@@ -324,13 +313,13 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let img = vector_core::crypto::decode_image_bounded(&file_data)?;
 
         // Determine target dimensions (max 1920px on longest side)
-        use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, encode_rgba_auto, JPEG_QUALITY_STANDARD};
+        use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};
         let (width, height) = (img.width(), img.height());
         let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
 
         // Resize if needed
         let resized_img = if new_width != width || new_height != height {
-            img.resize(new_width, new_height, ::image::imageops::FilterType::Lanczos3)
+            crate::shared::image::resize_fit(&img, new_width, new_height, ::image::imageops::FilterType::Lanczos3)
         } else {
             img
         };
@@ -345,8 +334,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
                 height: actual_height,
             });
 
-        let rgba_img = resized_img.to_rgba8();
-        let encoded = encode_rgba_auto(rgba_img.as_raw(), actual_width, actual_height, JPEG_QUALITY_STANDARD)?;
+        let encoded = crate::shared::image::encode_decoded_auto(&resized_img, JPEG_QUALITY_STANDARD)?;
         let compressed_bytes = encoded.bytes;
         let extension = encoded.extension;
 
@@ -403,13 +391,13 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         let img = vector_core::crypto::decode_image_bounded(&bytes)?;
 
         // Determine target dimensions (max 1920px on longest side)
-        use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, encode_rgba_auto, JPEG_QUALITY_STANDARD};
+        use crate::shared::image::{calculate_resize_dimensions, MAX_DIMENSION, JPEG_QUALITY_STANDARD};
         let (width, height) = (img.width(), img.height());
         let (new_width, new_height) = calculate_resize_dimensions(width, height, MAX_DIMENSION);
 
         // Resize if needed
         let resized_img = if new_width != width || new_height != height {
-            img.resize(new_width, new_height, ::image::imageops::FilterType::Lanczos3)
+            crate::shared::image::resize_fit(&img, new_width, new_height, ::image::imageops::FilterType::Lanczos3)
         } else {
             img
         };
@@ -424,8 +412,7 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
                 height: actual_height,
             });
 
-        let rgba_img = resized_img.to_rgba8();
-        let encoded = encode_rgba_auto(rgba_img.as_raw(), actual_width, actual_height, JPEG_QUALITY_STANDARD)?;
+        let encoded = crate::shared::image::encode_decoded_auto(&resized_img, JPEG_QUALITY_STANDARD)?;
         let compressed_bytes = encoded.bytes;
         let extension = encoded.extension;
 

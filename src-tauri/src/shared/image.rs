@@ -728,6 +728,19 @@ pub fn upload_mime_for(extension: &str) -> &'static str {
 ///
 /// # Returns
 /// EncodedImage with bytes and format extension, or an error string
+/// `encode_rgba_auto(img.to_rgba8())`, byte for byte, without the RGBA copy, alpha scan and strip
+/// back to RGB when the image has no alpha channel.
+pub fn encode_decoded_auto(img: &DynamicImage, jpeg_quality: u8) -> Result<EncodedImage, String> {
+    let (width, height) = (img.width(), img.height());
+    if let DynamicImage::ImageRgb8(rgb) = img {
+        if width >= SMALL_IMAGE_THRESHOLD || height >= SMALL_IMAGE_THRESHOLD {
+            let bytes = encode_jpeg(rgb.as_raw(), width, height, jpeg_quality)?;
+            return Ok(EncodedImage { bytes, extension: "jpg" });
+        }
+    }
+    encode_rgba_auto(img.to_rgba8().as_raw(), width, height, jpeg_quality)
+}
+
 pub fn encode_rgba_auto(pixels: &[u8], width: u32, height: u32, jpeg_quality: u8) -> Result<EncodedImage, String> {
     let has_alpha = crate::util::has_alpha_transparency(pixels);
     let is_small = width < SMALL_IMAGE_THRESHOLD && height < SMALL_IMAGE_THRESHOLD;
@@ -1826,6 +1839,25 @@ mod simd_resize_tests {
                 let p = psnr(ours.as_bytes(), theirs.as_bytes());
                 assert!(p > 45.0, "{:?} {filter:?}: {p:.1} dB", img.color());
             }
+        }
+    }
+
+    #[test]
+    fn encode_decoded_auto_matches_the_rgba_path_byte_for_byte() {
+        let big = photo(640, 480);
+        let small = photo(120, 90);
+        let mut holed = DynamicImage::ImageRgb8(big.clone()).to_rgba8();
+        holed.get_pixel_mut(3, 3).0[3] = 0;
+        for img in [
+            DynamicImage::ImageRgb8(big.clone()),
+            DynamicImage::ImageRgb8(small),
+            DynamicImage::ImageRgba8(DynamicImage::ImageRgb8(big.clone()).to_rgba8()),
+            DynamicImage::ImageRgba8(holed),
+            DynamicImage::ImageLuma8(DynamicImage::ImageRgb8(big).to_luma8()),
+        ] {
+            let ours = super::encode_decoded_auto(&img, 85).unwrap();
+            let theirs = super::encode_rgba_auto(img.to_rgba8().as_raw(), img.width(), img.height(), 85).unwrap();
+            assert_eq!((ours.extension, &ours.bytes), (theirs.extension, &theirs.bytes), "{:?}", img.color());
         }
     }
 
