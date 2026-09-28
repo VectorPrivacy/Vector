@@ -1765,33 +1765,36 @@ pub async fn get_all_chats_last_messages() -> Result<std::collections::HashMap<S
 /// channel sends the reader to look for a message the client will not render.
 pub async fn unread_counts() -> Result<std::collections::HashMap<String, u32>, String> {
     let conn = super::get_db_connection_guard_static()?;
-    // Anchor computed once per chat in the CTE so the count scan doesn't re-derive it per row. The
-    // anchor filter rides the LEFT JOIN's ON clause so a never-read chat still yields a row (anchor
-    // 0 via COALESCE) and counts all its messages; in WHERE it would drop those chats. The
-    // `last_read` anchor is kind-agnostic: a "read to here" marker can land on a system event (kind
-    // 30078) and must still cut the count by its timestamp. Only the own-message anchor is kind-filtered.
+    // Anchor: newest own message, or the chat's `last_read` event of any kind. A max per kind reads
+    // the end of idx_events_unread rather than the whole chat; MATERIALIZED runs each CTE once.
     let mut stmt = conn
         .prepare(
-            "WITH anchors AS ( \
-                SELECT c.id AS chat_id, c.chat_identifier AS chat_identifier, \
-                       COALESCE(MAX(e.created_at), 0) AS anchor_ts \
+            "WITH anchors AS MATERIALIZED ( \
+                SELECT c.id AS chat_id, c.chat_identifier AS chat_identifier, MAX( \
+                    COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?1), 0), \
+                    COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?2), 0), \
+                    COALESCE((SELECT MAX(created_at) FROM events WHERE chat_id = c.id AND mine = 1 AND kind = ?3), 0), \
+                    COALESCE((SELECT created_at FROM events WHERE id = c.last_read AND chat_id = c.id), 0) \
+                ) AS anchor_ts \
                 FROM chats c \
-                LEFT JOIN events e ON e.chat_id = c.id \
-                  AND ((e.mine = 1 AND e.kind IN (?1, ?2, ?3)) OR e.id = c.last_read) \
-                GROUP BY c.id \
+             ), \
+             counts AS MATERIALIZED ( \
+                SELECT a.chat_identifier AS chat_identifier, ( \
+                    SELECT COUNT(*) FROM events e \
+                    WHERE e.chat_id = a.chat_id AND e.mine = 0 AND e.kind IN (?1, ?2, ?3) \
+                      AND e.created_at > a.anchor_ts \
+                      AND (e.npub IS NULL OR e.npub NOT IN ( \
+                            SELECT chat_identifier FROM chats WHERE muted = 1 \
+                            UNION \
+                            SELECT npub FROM profiles WHERE is_blocked = 1)) \
+                      AND NOT EXISTS ( \
+                            SELECT 1 FROM community_channels cc \
+                            JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
+                            WHERE cc.channel_id = a.chat_identifier) \
+                ) AS unread \
+                FROM anchors a \
              ) \
-             SELECT a.chat_identifier, COUNT(*) AS unread \
-             FROM events e JOIN anchors a ON a.chat_id = e.chat_id \
-             WHERE e.kind IN (?1, ?2, ?3) AND e.mine = 0 AND e.created_at > a.anchor_ts \
-               AND (e.npub IS NULL OR e.npub NOT IN ( \
-                     SELECT chat_identifier FROM chats WHERE muted = 1 \
-                     UNION \
-                     SELECT npub FROM profiles WHERE is_blocked = 1)) \
-               AND NOT EXISTS ( \
-                     SELECT 1 FROM community_channels cc \
-                     JOIN community_bans b ON b.community_id = cc.community_id AND b.npub = e.npub \
-                     WHERE cc.channel_id = a.chat_identifier) \
-             GROUP BY a.chat_identifier",
+             SELECT chat_identifier, unread FROM counts WHERE unread > 0",
         )
         .map_err(|e| format!("prepare unread_counts: {e}"))?;
     let rows = stmt

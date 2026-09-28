@@ -1112,6 +1112,10 @@ fn open_connection(path: &PathBuf) -> Result<rusqlite::Connection, String> {
     // memory instead of spilling to disk.
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA cache_size=-16000; PRAGMA temp_store=MEMORY;")
         .map_err(|e| format!("Failed to set pragmas: {}", e))?;
+    // Memory-mapped reads skip a copy and a syscall per page. 64-bit only: each pooled connection
+    // maps the file separately, which a 32-bit address space can't spare.
+    #[cfg(target_pointer_width = "64")]
+    let _ = conn.execute_batch("PRAGMA mmap_size=268435456;");
 
     Ok(conn)
 }
