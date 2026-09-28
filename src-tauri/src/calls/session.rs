@@ -283,6 +283,33 @@ async fn send_signal(peer: &str, call_id: &str, signal: &str, addr: Option<&str>
 
 /// Tears the call down and tells the UI why. Idempotent: a second end is a no-op.
 pub fn end(id: &str, reason: &str) {
+    if take_down(id, reason) {
+        play_ended_chime();
+    }
+}
+
+/// Account swap or shutdown: whatever is up comes down without a signal.
+pub fn end_all(reason: &str) {
+    if let Some(id) = with_call(|c| c.id.clone()) {
+        take_down(&id, reason);
+    }
+}
+
+/// The ended chime rides the shared engine as a oneshot, so it plays over whatever
+/// else is sounding and needs no device of its own.
+static ENDED_WAV: &[u8] = include_bytes!("ended.wav");
+
+fn play_ended_chime() {
+    let Ok(engine) = crate::audio_engine::AudioEngine::get() else { return };
+    let Some((samples, rate)) = crate::audio::wav_fast_decode_for_engine(ENDED_WAV) else { return };
+    let played = crate::audio::resample_mono_f32(samples, rate, engine.device_sample_rate())
+        .and_then(|s| engine.play_oneshot(s));
+    if let Err(e) = played {
+        log_warn!("[CALLS] Ended chime failed: {e}");
+    }
+}
+
+fn take_down(id: &str, reason: &str) -> bool {
     let call = {
         let mut guard = slot().lock().unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
@@ -290,7 +317,7 @@ pub fn end(id: &str, reason: &str) {
             _ => None,
         }
     };
-    let Some(mut call) = call else { return };
+    let Some(mut call) = call else { return false };
     log_info!("[CALLS] Call {} ended: {reason}", call.id);
     for t in call.tasks.drain(..) {
         t.abort();
@@ -305,13 +332,7 @@ pub fn end(id: &str, reason: &str) {
     }
     call.phase = Phase::Ended;
     emit_state(&call.state(Some(reason.to_string())));
-}
-
-/// Account swap or shutdown: whatever is up comes down without a signal.
-pub fn end_all(reason: &str) {
-    if let Some(id) = with_call(|c| c.id.clone()) {
-        end(&id, reason);
-    }
+    true
 }
 
 pub async fn start(peer: String, video: bool) -> Result<CallState, String> {
@@ -1101,5 +1122,12 @@ mod tests {
         assert!(!first_offer(&id, 1_000 + OFFER_TTL_SECS));
         assert!(first_offer(&format!("{id}x"), 1_000));
         assert!(first_offer(&id, 1_001 + OFFER_TTL_SECS));
+    }
+
+    // The engine's WAV fast path is mono-only: a stereo replacement would go silent.
+    #[test]
+    fn the_ended_chime_decodes() {
+        let (samples, rate) = crate::audio::wav_fast_decode_for_engine(ENDED_WAV).expect("mono WAV");
+        assert!(rate > 0 && !samples.is_empty());
     }
 }

@@ -803,9 +803,8 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Play a oneshot sound (for notifications). Auto-removes when finished.
+    /// Play a oneshot sound (notifications, call chimes). Auto-removes when finished.
     /// Expects samples pre-resampled to device sample rate (rate_ratio = 1.0).
-    #[allow(dead_code)] // Called from #[cfg(desktop)] notification sound code
     pub fn play_oneshot(&self, samples: Vec<f32>) -> Result<(), String> {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let duration_ms = (samples.len() as u64 * 1000) / self.shared.device_sample_rate.load(Ordering::Relaxed) as u64;
@@ -848,7 +847,6 @@ impl AudioEngine {
     }
 
     /// Get the device sample rate
-    #[allow(dead_code)]
     pub fn device_sample_rate(&self) -> u32 {
         self.shared.device_sample_rate.load(Ordering::Relaxed)
     }
