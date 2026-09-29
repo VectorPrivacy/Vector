@@ -58,6 +58,34 @@ fn video_encoder() -> Option<ffmpeg::Codec> {
     ENCODERS.iter().find_map(|name| encoder::find_by_name(name))
 }
 
+/// Open the encoder with its per-platform options. Media Foundation defaults to Microsoft's
+/// software encoder, so the GPU's is asked for first; `camera_record` keeps it from dropping
+/// frames, and VBR spends the bitrate where the picture needs it.
+fn open_video_encoder(
+    codec: ffmpeg::Codec,
+    configured: impl Fn() -> Result<encoder::video::Video, String>,
+) -> Result<encoder::video::Encoder, String> {
+    let attempts: &[&[(&str, &str)]] = match codec.name() {
+        "h264_mf" => &[
+            &[("hw_encoding", "1"), ("rate_control", "u_vbr"), ("scenario", "camera_record")],
+            &[("rate_control", "u_vbr"), ("scenario", "camera_record")],
+        ],
+        _ => &[&[]],
+    };
+    let mut last = String::new();
+    for opts in attempts {
+        let mut dict = Dictionary::new();
+        for (k, v) in opts.iter() {
+            dict.set(k, v);
+        }
+        match configured()?.open_as_with(codec, dict) {
+            Ok(enc) => return Ok(enc),
+            Err(e) => last = format!("open video encoder: {e}"),
+        }
+    }
+    Err(last)
+}
+
 /// Whether this build can compress video at all.
 pub fn available() -> bool {
     init().is_ok() && video_encoder().is_some()
@@ -101,28 +129,31 @@ pub fn compress(input: &Path, output: &Path, cancel: &AtomicBool, mut progress: 
         .and_then(|v| v.formats())
         .and_then(|mut f| f.find(|p| matches!(p, Pixel::YUV420P | Pixel::NV12)))
         .unwrap_or(Pixel::YUV420P);
-    let mut venc = codec::context::Context::new_with_codec(vcodec).encoder().video().map_err(err("video encoder"))?;
-    venc.set_width(w);
-    venc.set_height(h);
-    venc.set_format(pix);
-    // One tick a frame: encoders' rate control budgets per tick. Variable-rate sources land
-    // on the nearest tick.
     let enc_tb = fps.invert();
-    venc.set_time_base(enc_tb);
-    venc.set_frame_rate(Some(fps));
-    venc.set_aspect_ratio(decoder.aspect_ratio());
-    // Scaling keeps the samples' meaning, so the output carries the source's colour tags.
-    venc.set_color_range(decoder.color_range());
-    venc.set_colorspace(decoder.color_space());
-    venc.set_color_primaries(decoder.color_primaries());
-    venc.set_color_transfer_characteristic(decoder.color_transfer_characteristic());
     let fps_f = f64::from(fps.numerator()) / f64::from(fps.denominator());
-    venc.set_bit_rate((f64::from(w * h) * fps_f.min(60.0) * BITS_PER_PIXEL) as usize);
-    venc.set_gop((fps_f * 2.0).round().max(1.0) as u32);
-    if global_header {
-        venc.set_flags(codec::Flags::GLOBAL_HEADER);
-    }
-    let mut venc = venc.open_as_with(vcodec, Dictionary::new()).map_err(err("open video encoder"))?;
+    let configured = || -> Result<encoder::video::Video, String> {
+        let mut venc = codec::context::Context::new_with_codec(vcodec).encoder().video().map_err(err("video encoder"))?;
+        venc.set_width(w);
+        venc.set_height(h);
+        venc.set_format(pix);
+        // One tick a frame: encoders' rate control budgets per tick. Variable-rate sources land
+        // on the nearest tick.
+        venc.set_time_base(enc_tb);
+        venc.set_frame_rate(Some(fps));
+        venc.set_aspect_ratio(decoder.aspect_ratio());
+        // Scaling keeps the samples' meaning, so the output carries the source's colour tags.
+        venc.set_color_range(decoder.color_range());
+        venc.set_colorspace(decoder.color_space());
+        venc.set_color_primaries(decoder.color_primaries());
+        venc.set_color_transfer_characteristic(decoder.color_transfer_characteristic());
+        venc.set_bit_rate((f64::from(w * h) * fps_f.min(60.0) * BITS_PER_PIXEL) as usize);
+        venc.set_gop((fps_f * 2.0).round().max(1.0) as u32);
+        if global_header {
+            venc.set_flags(codec::Flags::GLOBAL_HEADER);
+        }
+        Ok(venc)
+    };
+    let mut venc = open_video_encoder(vcodec, configured)?;
     let vout_index = {
         let mut ost = octx.add_stream(vcodec).map_err(err("video stream"))?;
         ost.set_parameters(&venc);

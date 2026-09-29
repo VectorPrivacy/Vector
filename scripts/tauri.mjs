@@ -53,7 +53,7 @@ function enableVideo(args) {
     if (!process.env.FFMPEG_DIR) {
         const root = join(dirname(fileURLToPath(import.meta.url)), '..');
         const dir = join(root, 'src-tauri', 'native-deps', 'ffmpeg', target || '');
-        if (!target || !existsSync(join(dir, 'lib', 'libavcodec.a'))) return;
+        if (!target || !['libavcodec.a', 'avcodec.lib'].some(f => existsSync(join(dir, 'lib', f)))) return;
         process.env.FFMPEG_DIR = dir;
     }
     // bindgen needs the macOS SDK named when another clang (the NDK's) is first on PATH.

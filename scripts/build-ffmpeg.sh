@@ -7,12 +7,15 @@
 # Usage: scripts/build-ffmpeg.sh [rust-target ...]   (default: the host)
 #   aarch64-apple-darwin | x86_64-apple-darwin          (macOS, VideoToolbox)
 #   aarch64-linux-android | armv7-linux-androideabi | x86_64-linux-android  (NDK, MediaCodec)
+#   x86_64-pc-windows-msvc                              (Media Foundation; from MSYS2, below)
 #   x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu (no hardware encoder yet)
 # Env: ANDROID_NDK_HOME/NDK_HOME for Android; FFMPEG_TEST_ENCODER=1 adds FFmpeg's own MPEG-4
 # Part 2 encoder (and its decoder, to read the output back) so the pipeline can be tested where
 # no hardware encoder exists.
 #
 # Prerequisites: a C toolchain, make, pkg-config; nasm on x86 hosts (else x86 SIMD is off).
+# Windows: an MSYS2 shell (make, nasm, diffutils) started with MSYS2_PATH_TYPE=inherit from a
+# Visual Studio x64 developer prompt, so cl.exe and its INCLUDE/LIB are in reach.
 
 set -e
 
@@ -64,6 +67,7 @@ host_target() {
         Darwin-x86_64) echo x86_64-apple-darwin ;;
         Linux-x86_64) echo x86_64-unknown-linux-gnu ;;
         Linux-aarch64) echo aarch64-unknown-linux-gnu ;;
+        MINGW64*-x86_64 | MSYS*-x86_64) echo x86_64-pc-windows-msvc ;;
         *) echo "unsupported host $(uname -s)-$(uname -m)" >&2; exit 1 ;;
     esac
 }
@@ -85,7 +89,7 @@ build_ffmpeg() {
     local flags=("${COMMON_FLAGS[@]}")
     local out="$OUTPUT_ROOT/$target"
     local jobs
-    jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+    jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu)
 
     case "$target" in
         *-apple-darwin)
@@ -118,6 +122,16 @@ build_ffmpeg() {
             [ "$arch" = x86_64 ] && flags+=(--disable-x86asm)
             [ "$arch" = arm ] && flags+=(--enable-neon)
             ;;
+        x86_64-pc-windows-msvc)
+            if ! command -v cl.exe >/dev/null; then
+                echo "Error: cl.exe not found. Run from MSYS2 inheriting a Visual Studio x64 environment." >&2
+                exit 1
+            fi
+            # FFmpeg's Media Foundation encoder is written against D3D11. -MD: Rust's CRT.
+            flags+=(--toolchain=msvc --target-os=win64 --arch=x86_64
+                --enable-mediafoundation --enable-d3d11va --enable-encoder=h264_mf
+                --extra-cflags=-MD)
+            ;;
         x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu)
             ;;
         *)
@@ -145,6 +159,14 @@ build_ffmpeg() {
         make install
     )
     rm -rf "$src" "$out/share"
+    # MSVC's linker looks for avcodec.lib where FFmpeg installs libavcodec.a.
+    if [[ "$target" == *-windows-msvc ]]; then
+        for a in "$out"/lib/lib*.a; do
+            local name
+            name=$(basename "$a" .a)
+            mv "$a" "$out/lib/${name#lib}.lib"
+        done
+    fi
     echo "Done: $out"
 }
 

@@ -1,0 +1,89 @@
+name: Video
+
+# Video compression on Windows: the MSVC FFmpeg build, its link into the app, and a real encode
+# through Media Foundation. Runs when the pipeline changes.
+on:
+  push:
+    paths:
+      - 'scripts/build-ffmpeg.sh'
+      - 'src-tauri/build.rs'
+      - 'src-tauri/src/video.rs'
+      - 'src-tauri/src/message/video_compression.rs'
+      - '.github/workflows/video.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: video-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: windows (Media Foundation)
+    runs-on: windows-2022
+    env:
+      FFMPEG_TARGET: x86_64-pc-windows-msvc
+      CARGO_TARGET_DIR: C:\cargo-target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/native-deps/ffmpeg/${{ env.FFMPEG_TARGET }}
+          key: ffmpeg-${{ env.FFMPEG_TARGET }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+
+      - uses: msys2/setup-msys2@v2
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        with:
+          msystem: MSYS
+          path-type: inherit
+          install: make nasm diffutils
+
+      - name: Build FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: scripts/build-ffmpeg.sh "$FFMPEG_TARGET"
+
+      - name: OpenSSL and fixtures
+        run: |
+          vcpkg install openssl:x64-windows-static
+          echo "OPENSSL_DIR=C:\vcpkg\installed\x64-windows-static" >> $env:GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+          echo "FFMPEG_DIR=$env:GITHUB_WORKSPACE\src-tauri\native-deps\ffmpeg\$env:FFMPEG_TARGET" >> $env:GITHUB_ENV
+          echo "VIDEO_FIXTURES=$env:RUNNER_TEMP\vid" >> $env:GITHUB_ENV
+          choco install ffmpeg -y --no-progress
+          $d = "$env:RUNNER_TEMP\vid"
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          $src = @('-f', 'lavfi', '-i', 'testsrc2=size=1920x1080:rate=30:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4')
+          ffmpeg -loglevel error @src -c:v libx264 -b:v 12M -c:a aac "$d\h264_1080.mp4"
+          ffmpeg -loglevel error @src -c:v libx265 -b:v 8M -c:a aac -tag:v hvc1 "$d\hevc_1080.mov"
+          ffmpeg -loglevel error @src -c:v libvpx-vp9 -b:v 6M -c:a libopus "$d\vp9_1080.webm"
+          Get-ChildItem $d | Format-Table Name, Length
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: build frontend
+        run: |
+          npm ci
+          node scripts/build-frontend.mjs --copy
+
+      - name: test
+        working-directory: src-tauri
+        run: cargo test --no-default-features --features video --lib -- --include-ignored --nocapture video

@@ -280,8 +280,10 @@ fn link_ffmpeg_system_libs() {
             while let Some(t) = tokens.next() {
                 let lib = if t == "-framework" {
                     tokens.next().map(|f| format!("framework={f}"))
-                } else if let Some(l) = t.strip_prefix("-l") {
-                    (!l.starts_with("av") && !l.starts_with("sw")).then(|| l.to_string())
+                } else if let Some(l) = t.strip_prefix("-l").or_else(|| t.strip_suffix(".lib")) {
+                    // MSVC keeps libm and atomics in its CRT.
+                    let crt = target_os == "windows" && matches!(l, "m" | "atomic");
+                    (!l.starts_with("av") && !l.starts_with("sw") && !crt).then(|| l.to_string())
                 } else if t == "-pthread" && target_os == "linux" {
                     Some("pthread".into())
                 } else {
