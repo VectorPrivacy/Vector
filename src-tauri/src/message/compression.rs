@@ -24,7 +24,8 @@ use crate::android::filesystem;
 /// - full-res + strip  -> re-encode at full resolution (metadata dropped, orientation baked)
 /// - full-res + keep   -> ship the original bytes untouched (all metadata + orientation intact)
 ///
-/// GIFs keep their animation: compressing re-encodes them smaller, otherwise they ship as-is.
+/// Animations (GIF, animated WebP, APNG) keep moving: compressing re-encodes them smaller,
+/// otherwise they ship as-is.
 ///
 /// `thumbhash_hint` is a thumbhash already made from these pixels (the preview's
 /// pre-compression): a branch that keeps the pixels as they are pairs it with the
@@ -67,14 +68,15 @@ pub(crate) fn prepare_outbound_image(
             })
     };
 
-    // GIFs carry no EXIF, so only the compress choice applies.
-    if extension == "gif" && compress {
-        return Ok(compress_gif(bytes));
-    }
-    if extension == "gif" {
+    // Stripping or re-encoding as a still would drop every frame but the first, so an
+    // animation takes only the compress choice.
+    if crate::shared::image::animated_format(&bytes).is_some() {
+        if compress {
+            return Ok(compress_animation(bytes, extension));
+        }
         let img_meta = meta_opt(&bytes);
         return Ok(CachedCompressedImage {
-            bytes, extension: "gif".to_string(), img_meta,
+            bytes, extension: extension.to_string(), img_meta,
             original_size, compressed_size: original_size,
         });
     }
@@ -151,20 +153,22 @@ pub(crate) fn prepare_outbound_image(
     })
 }
 
-/// A GIF compressed for sending, or the original when re-encoding doesn't save at least a
-/// tenth: an already optimised GIF near the size cap rarely shrinks, and would only lose detail.
-fn compress_gif(bytes: Arc<Vec<u8>>) -> CachedCompressedImage {
+/// An animation compressed for sending (always a GIF), or the original when re-encoding
+/// doesn't save at least a tenth: an already optimised GIF under the size cap rarely shrinks,
+/// an animated WebP almost never does, and either would only lose detail.
+fn compress_animation(bytes: Arc<Vec<u8>>, extension: &str) -> CachedCompressedImage {
     let original_size = bytes.len() as u64;
     let smaller = crate::shared::image::compress_animated_for_send(&bytes)
         .ok()
         .filter(|e| (e.bytes.len() as u64) * 10 <= original_size * 9);
+    let extension = if smaller.is_some() { "gif" } else { extension };
     let bytes = smaller.map(|e| Arc::new(e.bytes)).unwrap_or(bytes);
     // The first frame gives the preview; a decode failure only costs the placeholder.
     let img_meta = crate::shared::image::decode_image(&bytes, 100).ok().and_then(|img| {
         let (width, height) = (img.width(), img.height());
         crate::util::generate_thumbhash_from_image(&img).map(|thumbhash| ImageMetadata { thumbhash, width, height })
     });
-    CachedCompressedImage { compressed_size: bytes.len() as u64, bytes, extension: "gif".to_string(), img_meta, original_size }
+    CachedCompressedImage { compressed_size: bytes.len() as u64, bytes, extension: extension.to_string(), img_meta, original_size }
 }
 
 /// Internal function to compress bytes
@@ -178,8 +182,8 @@ pub(super) fn compress_bytes_internal(
 ) -> Result<CachedCompressedImage, String> {
     let original_size = bytes.len() as u64;
 
-    if extension == "gif" {
-        return Ok(compress_gif(bytes));
+    if crate::shared::image::animated_format(&bytes).is_some() {
+        return Ok(compress_animation(bytes, extension));
     }
 
     // Determine target dimensions (max 1920px on longest side)
@@ -288,8 +292,8 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
 
         let original_size = file_data.len() as u64;
 
-        if extension == "gif" {
-            return Ok(compress_gif(Arc::new(file_data)));
+        if crate::shared::image::animated_format(&file_data).is_some() {
+            return Ok(compress_animation(Arc::new(file_data), &extension));
         }
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
@@ -347,8 +351,8 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
         };
         let original_size = bytes.len() as u64;
 
-        if extension == "gif" {
-            return Ok(compress_gif(bytes));
+        if crate::shared::image::animated_format(&bytes).is_some() {
+            return Ok(compress_animation(bytes, &extension));
         }
 
         // Try to load and decode the image (EXIF orientation baked into pixels)
@@ -432,6 +436,29 @@ mod gif_send_tests {
         assert_eq!(w.max(h), crate::shared::image::ANIMATED_SEND_MAX_DIM);
         let meta = sent.img_meta.expect("preview metadata");
         assert_eq!((meta.width, meta.height), (w, h));
+    }
+
+    fn animated_webp(w: u32, h: u32, frames: u32) -> Vec<u8> {
+        let cfg = webp::WebPConfig::new().unwrap();
+        let px: Vec<Vec<u8>> = (0..frames).map(|i| (0..w * h).flat_map(|p| [(p % w * 2 + i * 40) as u8, (p / w) as u8, 90, 255]).collect()).collect();
+        let mut enc = webp::AnimEncoder::new(w, h, &cfg);
+        enc.set_loop_count(0);
+        for (i, f) in px.iter().enumerate() {
+            enc.add_frame(webp::AnimFrame::from_rgba(f, w, h, i as i32 * 100));
+        }
+        enc.try_encode().unwrap().to_vec()
+    }
+
+    /// Every combination of the send options keeps an animated WebP moving.
+    #[test]
+    fn an_animated_webp_is_never_flattened_to_a_still() {
+        let src = animated_webp(300, 200, 4);
+        assert_eq!(crate::shared::image::animated_format(&src), Some("webp"));
+        for (compress, keep) in [(true, false), (true, true), (false, false), (false, true)] {
+            let sent = prepare_outbound_image(Arc::new(src.clone()), "webp", compress, keep, None).unwrap();
+            assert!(crate::shared::image::animated_format(&sent.bytes).is_some(), "compress {compress}, keep {keep}: flattened to {}", sent.extension);
+        }
+        assert!(crate::shared::image::animated_format(&compress_bytes_internal(Arc::new(src), "webp", None).unwrap().bytes).is_some());
     }
 
     #[test]
