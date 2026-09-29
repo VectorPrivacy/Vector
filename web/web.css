@@ -2,10 +2,11 @@
 .vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }
 
 /* iOS Safari blurs its status bar unless a fixed, coloured box spans the top edge.
-   The tabs' own headers do where they are fixed; this stands in where they aren't,
-   beneath those headers and matching what it covers. */
+   Screens with a fixed header already have one; this stands in on the two without,
+   matching what it covers. Only there: an isolated pane's header can't rise above it. */
 .edge-cap { display: none; }
-body.mobile .edge-cap {
+body.mobile:has(#chat[style*="none"]):has(#chats:not([style*="none"]) > .account) .edge-cap,
+body.mobile:has(#chat[style*="none"]):has(#settings:not([style*="none"])) .edge-cap {
     display: block;
     position: fixed;
     top: 0;
@@ -15,7 +16,7 @@ body.mobile .edge-cap {
     z-index: 99;
     background-color: #030303;
 }
-body.mobile:has(#chats:not([style*="none"]) > .account) .edge-cap { background-color: #131313; }
+body.mobile:has(#chat[style*="none"]):has(#chats:not([style*="none"]) > .account) .edge-cap { background-color: #131313; }
 
 /* Mini app windows (web/miniapps.js) */
 .xdc-window {
