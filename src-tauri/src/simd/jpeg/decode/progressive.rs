@@ -15,9 +15,12 @@ use rayon::prelude::*;
 
 use DecodeError::{Corrupt, Unsupported};
 
-/// Coefficient blocks (kernel order) of one component over its padded MCU grid.
+/// One component's coefficients over its padded MCU grid. DC and AC live apart so DC scans
+/// and each component's AC scans can decode in parallel without sharing memory.
 struct Coefs {
-    data: Vec<i16>,
+    dc: Vec<i16>,
+    /// 64 per block in kernel order; index 0 unused.
+    ac: Vec<i16>,
     /// Blocks per row, as the MCU grid pads it.
     bw: usize,
     /// Blocks a non-interleaved scan visits: the component's own extent.
@@ -25,12 +28,21 @@ struct Coefs {
     vis_h: usize,
 }
 
-impl Coefs {
-    #[inline(always)]
-    fn block(&mut self, bx: usize, by: usize) -> &mut [i16; 64] {
-        let at = (by * self.bw + bx) * 64;
-        (&mut self.data[at..at + 64]).try_into().unwrap()
-    }
+/// A scan with the tables and restart interval in force where it appeared.
+struct Scan {
+    spec: ScanSpec,
+    entropy: Entropy,
+    dc: [Option<Box<Huff>>; 4],
+    ac: [Option<Box<Huff>>; 4],
+    restart: usize,
+}
+
+/// Block geometry a scan walks, per component.
+#[derive(Clone, Copy)]
+struct Grid {
+    bw: usize,
+    vis_w: usize,
+    vis_h: usize,
 }
 
 struct ScanSpec {
@@ -53,11 +65,12 @@ pub(super) fn decode(data: &[u8], header: Header, denom: usize, backend: Backend
         .map(|c| {
             let (bw, bh) = (frame.mcux * c.h, frame.mcuy * c.v);
             let (cw, ch) = ((header.width * c.h).div_ceil(hmax), (header.height * c.v).div_ceil(vmax));
-            Coefs { data: vec![0; bw * bh * 64], bw, vis_w: cw.div_ceil(8), vis_h: ch.div_ceil(8) }
+            Coefs { dc: vec![0; bw * bh], ac: vec![0; bw * bh * 64], bw, vis_w: cw.div_ceil(8), vis_h: ch.div_ceil(8) }
         })
         .collect();
     let (mut dc, mut ac) = (header.dc, header.ac);
     let mut restart = header.restart;
+    let mut scans = Vec::new();
     let mut i = header.first_scan;
     loop {
         if data.get(i) != Some(&0xFF) {
@@ -84,9 +97,10 @@ pub(super) fn decode(data: &[u8], header: Header, denom: usize, backend: Backend
             0xDA => {
                 let spec = scan_spec(seg, &frame)?;
                 let entropy = destuff(&data[i..]);
-                decode_scan(&frame, &spec, &entropy, &dc, &ac, restart, &mut coefs)?;
                 i += entropy.stop;
-                if entropy.next_marker.is_none() {
+                let more = entropy.next_marker.is_some();
+                scans.push(Scan { spec, entropy, dc: dc.clone(), ac: ac.clone(), restart });
+                if !more {
                     break;
                 }
             }
@@ -94,6 +108,24 @@ pub(super) fn decode(data: &[u8], header: Header, denom: usize, backend: Backend
         }
     }
     frame.restart = restart;
+
+    // DC scans touch only coefficient 0 of every component, AC scans only their one
+    // component's 1..63: each group decodes in order, the groups in parallel.
+    let grids: Vec<Grid> = coefs.iter().map(|c| Grid { bw: c.bw, vis_w: c.vis_w, vis_h: c.vis_h }).collect();
+    let (mut dcs, mut acs): (Vec<&mut Vec<i16>>, Vec<&mut Vec<i16>>) = coefs.iter_mut().map(|c| (&mut c.dc, &mut c.ac)).unzip();
+    let dc_scans: Vec<&Scan> = scans.iter().filter(|s| s.spec.ss == 0).collect();
+    let frame_ref = &frame;
+    let grids_ref = &grids;
+    let jobs: Vec<Box<dyn FnOnce() -> Result<(), DecodeError> + Send + '_>> = std::iter::once(Box::new(move || {
+        dc_scans.iter().try_for_each(|s| decode_dc_scan(frame_ref, grids_ref, s, &mut dcs))
+    }) as Box<dyn FnOnce() -> Result<(), DecodeError> + Send>)
+    .chain(acs.iter_mut().enumerate().map(|(c, ac)| {
+        let mine: Vec<&Scan> = scans.iter().filter(|s| s.spec.ss > 0 && s.spec.comps[0] == c).collect();
+        let grid = grids[c];
+        Box::new(move || mine.iter().try_for_each(|s| decode_ac_scan(grid, s, ac))) as Box<dyn FnOnce() -> Result<(), DecodeError> + Send>
+    }))
+    .collect();
+    jobs.into_par_iter().map(|job| job()).collect::<Result<Vec<()>, DecodeError>>()?;
 
     let mut planes: Vec<Plane> = frame
         .comps
@@ -109,16 +141,17 @@ pub(super) fn decode(data: &[u8], header: Header, denom: usize, backend: Backend
         let stride = plane.stride;
         let (q8, qraw) = (&frame.qs[c], &frame.qraw[c]);
         let basis = &frame.basis;
-        plane.data.par_chunks_mut(stride * bh).zip(coef.data.par_chunks(coef.bw * 64)).for_each(|(out, row)| {
+        let rows = coef.ac.par_chunks(coef.bw * 64).zip(coef.dc.par_chunks(coef.bw));
+        plane.data.par_chunks_mut(stride * bh).zip(rows).for_each(|(out, (row, dc))| {
             // SAFETY: each backend runs only where `Backend::detect` found its features; `out`
             // holds one block row of `bh` lines at `stride`, `bw` pixels per block.
             unsafe {
                 match backend {
                     #[cfg(target_arch = "x86_64")]
-                    Backend::Avx2 => idct_row_avx2(row, q8, qraw, basis, bw, bh, out, stride),
+                    Backend::Avx2 => idct_row_avx2(row, dc, q8, qraw, basis, bw, bh, out, stride),
                     #[cfg(target_arch = "aarch64")]
-                    Backend::Neon => idct_row_neon(row, q8, qraw, basis, bw, bh, out, stride),
-                    Backend::Scalar => idct_row::<Scalar>(row, q8, qraw, basis, bw, bh, out, stride),
+                    Backend::Neon => idct_row_neon(row, dc, q8, qraw, basis, bw, bh, out, stride),
+                    Backend::Scalar => idct_row::<Scalar>(row, dc, q8, qraw, basis, bw, bh, out, stride),
                 }
             }
         });
@@ -155,42 +188,34 @@ fn scan_spec(seg: &[u8], frame: &Frame) -> Result<ScanSpec, DecodeError> {
     Ok(ScanSpec { comps, tables, ss, se, ah, al })
 }
 
-fn decode_scan(
+/// Walk a scan's units (MCUs when interleaved, else the component's blocks), restarting
+/// where the interval says, and hand each block to `f` with its component and block index.
+fn walk_scan(
     frame: &Frame,
-    spec: &ScanSpec,
-    e: &Entropy,
-    dc: &[Option<Box<Huff>>; 4],
-    ac: &[Option<Box<Huff>>; 4],
-    restart: usize,
-    coefs: &mut [Coefs],
+    grids: &[Grid],
+    scan: &Scan,
+    mut f: impl FnMut(&mut Bits, usize, usize, bool),
 ) -> Result<(), DecodeError> {
-    let first = spec.ah == 0;
-    let mut tables = Vec::with_capacity(spec.comps.len());
-    for &(td, ta) in &spec.tables {
-        // A DC refinement reads raw bits; every other scan needs its table.
-        let d = if spec.ss == 0 && first { Some(dc[td].as_deref().ok_or(Corrupt("missing Huffman table"))?) } else { None };
-        let a = if spec.ss > 0 { Some(ac[ta].as_deref().ok_or(Corrupt("missing Huffman table"))?) } else { None };
-        tables.push((d, a));
-    }
+    let spec = &scan.spec;
+    let e = &scan.entropy;
     let interleaved = spec.comps.len() > 1;
     let (units_x, units_y) = if interleaved {
         (frame.mcux, frame.mcuy)
     } else {
-        let c = &coefs[spec.comps[0]];
-        (c.vis_w, c.vis_h)
+        let g = grids[spec.comps[0]];
+        (g.vis_w, g.vis_h)
     };
     let mut b = Bits::new(e);
-    let mut pred = [0i32; 4];
-    let mut eobrun = 0u32;
-    let (mut interval, mut left) = (0, restart);
+    let (mut interval, mut left) = (0, scan.restart);
     for uy in 0..units_y {
         for ux in 0..units_x {
-            if restart > 0 {
+            let mut restarted = false;
+            if scan.restart > 0 {
                 if left == 0 {
                     b.jump(*e.restarts.get(interval).ok_or(Corrupt("missing restart marker"))?);
-                    (pred, eobrun) = ([0; 4], 0);
+                    restarted = true;
                     interval += 1;
-                    left = restart;
+                    left = scan.restart;
                 }
                 left -= 1;
             }
@@ -198,18 +223,8 @@ fn decode_scan(
                 let (h, v) = if interleaved { (frame.comps[c].h, frame.comps[c].v) } else { (1, 1) };
                 for by in 0..v {
                     for bx in 0..h {
-                        let blk = coefs[c].block(ux * h + bx, uy * v + by);
-                        match (spec.ss, tables[k]) {
-                            (0, (Some(d), _)) => dc_first(&mut b, d, &mut pred[k], spec.al, blk),
-                            (0, _) => {
-                                if b.bits(1) == 1 {
-                                    blk[0] |= 1 << spec.al;
-                                }
-                            }
-                            (_, (_, Some(a))) if first => ac_first(&mut b, a, spec, &mut eobrun, blk),
-                            (_, (_, Some(a))) => ac_refine(&mut b, a, spec, &mut eobrun, blk),
-                            _ => unreachable!("tables resolved above"),
-                        }
+                        f(&mut b, k, (uy * v + by) * grids[c].bw + ux * h + bx, restarted);
+                        restarted = false;
                     }
                 }
             }
@@ -221,8 +236,75 @@ fn decode_scan(
     Ok(())
 }
 
+fn decode_dc_scan(frame: &Frame, grids: &[Grid], scan: &Scan, dcs: &mut [&mut Vec<i16>]) -> Result<(), DecodeError> {
+    let spec = &scan.spec;
+    let tables: Vec<Option<&Huff>> = if spec.ah == 0 {
+        spec.tables.iter().map(|&(td, _)| scan.dc[td].as_deref().ok_or(Corrupt("missing Huffman table")).map(Some)).collect::<Result<_, _>>()?
+    } else {
+        vec![None; spec.comps.len()]
+    };
+    let mut pred = [0i32; 4];
+    walk_scan(frame, grids, scan, |b, k, block, restarted| {
+        if restarted {
+            pred = [0; 4];
+        }
+        let coef = &mut dcs[spec.comps[k]][block];
+        match tables[k] {
+            Some(d) => dc_first(b, d, &mut pred[k], spec.al, coef),
+            None => {
+                if b.bits(1) == 1 {
+                    *coef |= 1 << spec.al;
+                }
+            }
+        }
+    })
+}
+
+fn decode_ac_scan(grid: Grid, scan: &Scan, ac: &mut [i16]) -> Result<(), DecodeError> {
+    let spec = &scan.spec;
+    let a = scan.ac[spec.tables[0].1].as_deref().ok_or(Corrupt("missing Huffman table"))?;
+    let mut eobrun = 0u32;
+    walk_single(&grid, scan, |b, block, restarted| {
+        if restarted {
+            eobrun = 0;
+        }
+        let blk: &mut [i16; 64] = (&mut ac[block * 64..block * 64 + 64]).try_into().unwrap();
+        if spec.ah == 0 {
+            ac_first(b, a, spec, &mut eobrun, blk);
+        } else {
+            ac_refine(b, a, spec, &mut eobrun, blk);
+        }
+    })
+}
+
+/// [`walk_scan`] for a one-component scan, which needs no frame geometry.
+fn walk_single(grid: &Grid, scan: &Scan, mut f: impl FnMut(&mut Bits, usize, bool)) -> Result<(), DecodeError> {
+    let e = &scan.entropy;
+    let mut b = Bits::new(e);
+    let (mut interval, mut left) = (0, scan.restart);
+    for by in 0..grid.vis_h {
+        for bx in 0..grid.vis_w {
+            let mut restarted = false;
+            if scan.restart > 0 {
+                if left == 0 {
+                    b.jump(*e.restarts.get(interval).ok_or(Corrupt("missing restart marker"))?);
+                    restarted = true;
+                    interval += 1;
+                    left = scan.restart;
+                }
+                left -= 1;
+            }
+            f(&mut b, by * grid.bw + bx, restarted);
+            if b.bad {
+                return Err(Corrupt("invalid entropy data"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[inline(always)]
-fn dc_first(b: &mut Bits, d: &Huff, pred: &mut i32, al: u32, blk: &mut [i16; 64]) {
+fn dc_first(b: &mut Bits, d: &Huff, pred: &mut i32, al: u32, coef: &mut i16) {
     if b.cnt < 32 {
         b.refill();
     }
@@ -234,7 +316,7 @@ fn dc_first(b: &mut Bits, d: &Huff, pred: &mut i32, al: u32, blk: &mut [i16; 64]
     if s > 0 {
         *pred = pred.wrapping_add(b.extend(s));
     }
-    blk[0] = pred.wrapping_shl(al) as i16;
+    *coef = pred.wrapping_shl(al) as i16;
 }
 
 /// First pass over an AC band: values scaled by `2^al`, with end-of-band runs across blocks.
@@ -333,23 +415,25 @@ fn ac_refine(b: &mut Bits, a: &Huff, spec: &ScanSpec, eobrun: &mut u32, blk: &mu
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn idct_row_avx2(row: &[i16], q8: &[f32; 64], qraw: &[f32; 64], basis: &[[f32; 64]; 4], bw: usize, bh: usize, out: &mut [u8], stride: usize) {
-    idct_row::<Avx2>(row, q8, qraw, basis, bw, bh, out, stride)
+unsafe fn idct_row_avx2(row: &[i16], dc: &[i16], q8: &[f32; 64], qraw: &[f32; 64], basis: &[[f32; 64]; 4], bw: usize, bh: usize, out: &mut [u8], stride: usize) {
+    idct_row::<Avx2>(row, dc, q8, qraw, basis, bw, bh, out, stride)
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn idct_row_neon(row: &[i16], q8: &[f32; 64], qraw: &[f32; 64], basis: &[[f32; 64]; 4], bw: usize, bh: usize, out: &mut [u8], stride: usize) {
-    idct_row::<Neon>(row, q8, qraw, basis, bw, bh, out, stride)
+unsafe fn idct_row_neon(row: &[i16], dc: &[i16], q8: &[f32; 64], qraw: &[f32; 64], basis: &[[f32; 64]; 4], bw: usize, bh: usize, out: &mut [u8], stride: usize) {
+    idct_row::<Neon>(row, dc, q8, qraw, basis, bw, bh, out, stride)
 }
 
 /// One row of coefficient blocks into `bh` lines of pixels, `bw` pixels a block.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-unsafe fn idct_row<S: Simd>(row: &[i16], q8: &[f32; 64], qraw: &[f32; 64], basis: &[[f32; 64]; 4], bw: usize, bh: usize, out: &mut [u8], stride: usize) {
-    for (bx, blk) in row.chunks_exact(64).enumerate() {
-        let blk: &[i16; 64] = blk.try_into().unwrap();
+unsafe fn idct_row<S: Simd>(row: &[i16], dc: &[i16], q8: &[f32; 64], qraw: &[f32; 64], basis: &[[f32; 64]; 4], bw: usize, bh: usize, out: &mut [u8], stride: usize) {
+    for (bx, (ac, &dc)) in row.chunks_exact(64).zip(dc).enumerate() {
+        let mut blk: [i16; 64] = ac.try_into().unwrap();
+        blk[0] = dc;
+        let blk = &blk;
         let dst = out.as_mut_ptr().add(bx * bw);
         if blk[1..].iter().all(|&c| c == 0) {
             dc_block(blk[0], q8[0], dst, stride, bw, bh);
