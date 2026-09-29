@@ -48,18 +48,34 @@ const TYPES = {
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
 
-// The package is parsed once per load; the host says when a new one lands.
+// The host page hands the package over; this worker keeps it (in memory, and in
+// its own Cache Storage for when it is restarted) and answers once it's parsed.
 let current = null;
+
+async function store(bytes, meta) {
+    const blob = new Blob([bytes]);
+    const entries = await readDirectory(blob);
+    const cache = await caches.open(STORE);
+    await cache.put(PKG, new Response(blob));
+    await cache.put(META, new Response(JSON.stringify(meta), { headers: { 'Content-Type': 'application/json' } }));
+    current = { blob, meta, entries };
+}
+
 self.addEventListener('message', (e) => {
-    if (e.data?.t === 'reset') current = null;
-    e.ports?.[0]?.postMessage('ok');
+    const reply = e.ports?.[0];
+    if (e.data?.t !== 'store') return;
+    e.waitUntil(store(e.data.bytes, e.data.meta).then(
+        () => reply?.postMessage({ ok: true }),
+        (err) => reply?.postMessage({ ok: false, error: String(err?.message || err) }),
+    ));
 });
 
 async function load() {
     if (current) return current;
     const cache = await caches.open(STORE);
     const [pkg, meta] = await Promise.all([cache.match(PKG), cache.match(META)]);
-    if (!pkg || !meta) throw new Error('no package');
+    if (!pkg) throw new Error('no stored package');
+    if (!meta) throw new Error('no stored metadata');
     const blob = await pkg.blob();
     current = { blob, meta: await meta.json(), entries: await readDirectory(blob) };
     return current;
@@ -168,7 +184,7 @@ const MARKUP = /^(text\/html|image\/svg\+xml|application\/xml)/;
 
 async function serve(request, path) {
     let pkg;
-    try { pkg = await load(); } catch { return new Response('Mini app not loaded', { status: 503 }); }
+    try { pkg = await load(); } catch (e) { return new Response(`Mini app not loaded: ${e?.message || e}`, { status: 503 }); }
     const { blob, meta, entries } = pkg;
     if (path === '/webxdc.js') {
         const src = (await (await fetch('/__vector/bridge.js')).text())
