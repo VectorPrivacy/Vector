@@ -45,10 +45,9 @@ pub fn dispatch<'a>(cmd: &'a str, a: &'a Args) -> Pin<Box<dyn Future<Output = Op
             }
             "clear_active_account" => db::clear_active_account_file().map(|_| Value::Null),
             "verify_credential" => verify_credential(a).await,
-            // The whole-database re-encrypt lives in src-tauri, not core.
-            "disable_encryption" | "enable_encryption" | "rekey_encryption" => {
-                Err("Changing local encryption is not available on Vector Web yet".into())
-            }
+            "disable_encryption" => crate::encryption::disable().map(|_| Value::Null),
+            "enable_encryption" => crate::encryption::enable_cmd(a).await,
+            "rekey_encryption" => crate::encryption::rekey_cmd(a).await,
 
             // --- Invites & badges ---
             "get_or_create_invite_code" => get_or_create_invite_code().await,

@@ -21,6 +21,7 @@ mod events;
 mod files;
 mod images;
 mod emitter;
+mod encryption;
 mod messaging;
 mod sync;
 
