@@ -569,6 +569,10 @@ pub async fn fetch_messages<R: Runtime>(
 
                         // Pre-allocate capacity for chats (avoids reallocations during push)
                         state.chats.reserve(slim_chats.len());
+                        // Chats already in STATE (from concurrent event processing); DB rows are
+                        // unique, so the ones pushed below never need looking up again.
+                        let preexisting: std::collections::HashMap<String, usize> =
+                            state.chats.iter().enumerate().map(|(i, c)| (c.id.clone(), i)).collect();
 
                         // Convert slim chats to full chats and merge last messages
                         #[cfg(debug_assertions)]
@@ -595,7 +599,7 @@ pub async fn fetch_messages<R: Runtime>(
                             let messages_to_add = last_messages_map.remove(&chat_id);
 
                             // Check if this chat already exists in STATE (e.g. created by concurrent event processing)
-                            let existing_idx = state.chats.iter().position(|c| c.id == chat_id);
+                            let existing_idx = preexisting.get(&chat_id).copied();
 
                             if let Some(idx) = existing_idx {
                                 // Merge DB-loaded messages into the existing chat
