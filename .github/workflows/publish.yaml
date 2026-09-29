@@ -17,8 +17,10 @@ jobs:
         include:
           - platform: 'macos-latest' # for Arm based macs (M1 and above).
             args: '--target aarch64-apple-darwin'
+            ffmpeg: 'aarch64-apple-darwin'
           - platform: 'macos-latest' # for Intel based macs.
             args: '--target x86_64-apple-darwin'
+            ffmpeg: 'x86_64-apple-darwin'
           - platform: 'ubuntu-22.04'
             args: ''
           - platform: 'windows-2022'
@@ -89,6 +91,23 @@ jobs:
         shell: pwsh
         run: echo "CARGO_TARGET_DIR=C:\cargo-target" >> $env:GITHUB_ENV
 
+      # Video compression (VideoToolbox) needs a selective FFmpeg; `npm run tauri` turns the
+      # feature on when it is present. A failed FFmpeg build ships the app without it.
+      - name: Cache FFmpeg
+        if: matrix.ffmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/native-deps/ffmpeg/${{ matrix.ffmpeg }}
+          key: ffmpeg-${{ matrix.ffmpeg }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
+      - name: Build FFmpeg
+        if: matrix.ffmpeg && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          brew install nasm
+          scripts/build-ffmpeg.sh ${{ matrix.ffmpeg }}
+
       - name: install frontend dependencies
         run: npm install
 
@@ -121,6 +140,7 @@ jobs:
           releaseBody: 'A new Vector release arrives! If you can see this, the changelog has not been written yet, wait around to see whats new!'
           releaseDraft: true
           prerelease: ${{ steps.channel.outputs.prerelease }}
+          tauriScript: npm run tauri
           args: ${{ matrix.args }} ${{ steps.channel.outputs.config }}
 
   # Android APK Build

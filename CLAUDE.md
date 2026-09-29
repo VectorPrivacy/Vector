@@ -33,6 +33,11 @@ npm run android:build    # Android release (tauri android build)
 scripts/fdroid-build.sh  # F-Droid flavour: source-only, unsigned, no in-app updater (docs/fdroid/)
 ```
 
+Video compression (`video` feature): `scripts/build-ffmpeg.sh [rust-target]` builds a selective
+static FFmpeg into `src-tauri/native-deps/ffmpeg/<target>/`; `scripts/tauri.mjs` then sets
+`FFMPEG_DIR` (+ `SDKROOT` on macOS) and adds `--features video` to dev/build. `VECTOR_VIDEO=0` opts out.
+Only the macOS release builds it today (VideoToolbox); Linux has no hardware encoder wired.
+
 Frontend build: `node scripts/build-frontend.mjs` copies `src/` to `dist/` with optional minification (terser + lightningcss in release).
 
 Vector Core test suite: `cd crates && cargo test -p vector-core`.
