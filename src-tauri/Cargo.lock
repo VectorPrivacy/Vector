@@ -11528,6 +11528,7 @@ dependencies = [
  "iroh-gossip",
  "jni 0.21.1",
  "libc",
+ "libwebp-sys",
  "little_exif",
  "lofty",
  "memchr",

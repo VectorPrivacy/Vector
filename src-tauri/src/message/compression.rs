@@ -24,8 +24,8 @@ use crate::android::filesystem;
 /// - full-res + strip  -> re-encode at full resolution (metadata dropped, orientation baked)
 /// - full-res + keep   -> ship the original bytes untouched (all metadata + orientation intact)
 ///
-/// Animations (GIF, animated WebP, APNG) keep moving: compressing re-encodes them smaller,
-/// otherwise they ship as-is.
+/// Animations (GIF, animated WebP, APNG) keep moving: compressing re-encodes them as animated
+/// WebP, otherwise they ship as-is.
 ///
 /// `thumbhash_hint` is a thumbhash already made from these pixels (the preview's
 /// pre-compression): a branch that keeps the pixels as they are pairs it with the
@@ -153,16 +153,17 @@ pub(crate) fn prepare_outbound_image(
     })
 }
 
-/// An animation compressed for sending (always a GIF), or the original when re-encoding
-/// doesn't save at least a tenth: an already optimised GIF under the size cap rarely shrinks,
-/// an animated WebP almost never does, and either would only lose detail.
+/// An animation compressed for sending (animated WebP), or the original when that doesn't save
+/// at least a tenth, where re-encoding would only cost detail.
 fn compress_animation(bytes: Arc<Vec<u8>>, extension: &str) -> CachedCompressedImage {
     let original_size = bytes.len() as u64;
     let smaller = crate::shared::image::compress_animated_for_send(&bytes)
         .ok()
         .filter(|e| (e.bytes.len() as u64) * 10 <= original_size * 9);
-    let extension = if smaller.is_some() { "gif" } else { extension };
-    let bytes = smaller.map(|e| Arc::new(e.bytes)).unwrap_or(bytes);
+    let (bytes, extension) = match smaller {
+        Some(e) => (Arc::new(e.bytes), e.extension),
+        None => (bytes, extension),
+    };
     // The first frame gives the preview; a decode failure only costs the placeholder.
     let img_meta = crate::shared::image::decode_image(&bytes, 100).ok().and_then(|img| {
         let (width, height) = (img.width(), img.height());
@@ -399,7 +400,6 @@ pub(super) fn compress_image_internal(file_path: &str) -> Result<CachedCompresse
 #[cfg(test)]
 mod gif_send_tests {
     use super::*;
-    use image::AnimationDecoder;
 
     fn gif(w: u16, h: u16, frames: u32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -427,12 +427,12 @@ mod gif_send_tests {
     fn a_large_gif_is_sent_smaller_and_still_animated() {
         let src = gif(1100, 620, 6);
         let sent = prepare_outbound_image(Arc::new(src.clone()), "gif", true, false, None).unwrap();
-        assert_eq!(sent.extension, "gif");
+        assert_eq!(sent.extension, "webp");
         assert!(sent.compressed_size * 10 <= sent.original_size * 9, "{} of {}", sent.compressed_size, sent.original_size);
-        let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&sent.bytes[..])).unwrap().into_frames().collect_frames().unwrap();
+        let frames: Vec<(image::RgbaImage, u32)> = crate::shared::animated_webp::Decoder::new(&sent.bytes).unwrap().collect::<Result<_, _>>().unwrap();
         assert_eq!(frames.len(), 6, "every frame kept");
-        assert!(frames.iter().all(|f| f.delay().numer_denom_ms() == (70, 1)), "timing kept");
-        let (w, h) = frames[0].buffer().dimensions();
+        assert!(frames.iter().all(|(_, ms)| *ms == 70), "timing kept");
+        let (w, h) = frames[0].0.dimensions();
         assert_eq!(w.max(h), crate::shared::image::ANIMATED_SEND_MAX_DIM);
         let meta = sent.img_meta.expect("preview metadata");
         assert_eq!((meta.width, meta.height), (w, h));
@@ -463,7 +463,7 @@ mod gif_send_tests {
 
     #[test]
     fn a_gif_that_would_not_shrink_ships_untouched() {
-        let src = gif(120, 90, 3);
+        let src = gif(6, 4, 2);
         for compress in [true, false] {
             let sent = prepare_outbound_image(Arc::new(src.clone()), "gif", compress, false, None).unwrap();
             assert_eq!(*sent.bytes, src);

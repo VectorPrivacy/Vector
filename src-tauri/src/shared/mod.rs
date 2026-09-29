@@ -8,6 +8,7 @@
 //! Note: These utilities are set up for future refactoring to eliminate
 //! duplicate patterns across the codebase.
 
+pub mod animated_webp;
 #[allow(dead_code)]
 pub mod error;
 #[allow(dead_code)]

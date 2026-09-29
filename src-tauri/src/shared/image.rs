@@ -439,10 +439,10 @@ pub fn transcode_animated(bytes: &[u8], max_dim: u32, max_frames: usize) -> Resu
 /// Longest side an animation is compressed to for sending.
 pub const ANIMATED_SEND_MAX_DIM: u32 = 640;
 
-/// An animation re-encoded for sending: every frame kept, and a tolerance that absorbs
-/// dither noise between frames while keeping every frame near 41 dB.
+/// An animation re-encoded for sending, as animated WebP: every frame kept, lossy at the
+/// photo path's quality, lossless wherever a frame is smaller that way (flat and pixel art).
 pub fn compress_animated_for_send(bytes: &[u8]) -> Result<EncodedImage, String> {
-    transcode_animated_opts(bytes, ANIMATED_SEND_MAX_DIM, usize::MAX, 5, 1)
+    encode_animated_webp(bytes, ANIMATED_SEND_MAX_DIM, 85.0)
 }
 
 /// Escalate through quality rungs until the animation fits `byte_budget`:
@@ -514,32 +514,7 @@ fn transcode_animated_opts(
     tolerance: i16,
     frame_step: usize,
 ) -> Result<EncodedImage, String> {
-    use image::AnimationDecoder;
-
-    type Frames<'a> = Box<dyn Iterator<Item = Result<(image::RgbaImage, image::Delay), String>> + 'a>;
-    fn frames_of<'a>(f: image::Frames<'a>) -> Frames<'a> {
-        Box::new(f.map(|f| {
-            let f = f.map_err(|e| format!("frame decode: {e}"))?;
-            let delay = f.delay();
-            Ok((f.into_buffer(), delay))
-        }))
-    }
-    let cursor = Cursor::new(bytes);
-    let frames: Frames = if bytes.starts_with(b"GIF8") {
-        let canvas = GifCanvas::new(bytes)?;
-        check_animated_dims((canvas.w as u32, canvas.h as u32))?;
-        Box::new(canvas)
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        let dec = image::codecs::webp::WebPDecoder::new(cursor).map_err(|e| format!("webp decode: {e}"))?;
-        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
-        frames_of(dec.into_frames())
-    } else if bytes.starts_with(b"\x89PNG") {
-        let dec = image::codecs::png::PngDecoder::new(cursor).map_err(|e| format!("png decode: {e}"))?;
-        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
-        frames_of(dec.apng().map_err(|e| format!("apng decode: {e}"))?.into_frames())
-    } else {
-        return Err("not an animated format".into());
-    };
+    let frames = animation_frames(bytes)?;
 
     let mut out: Vec<u8> = Vec::new();
     {
@@ -653,6 +628,126 @@ fn transcode_animated_opts(
         })?;
     }
     Ok(EncodedImage { bytes: out, extension: "gif" })
+}
+
+type Frames<'a> = Box<dyn Iterator<Item = Result<(image::RgbaImage, image::Delay), String>> + 'a>;
+
+/// Composited frames of a GIF, animated WebP or APNG, streamed one at a time.
+fn animation_frames(bytes: &[u8]) -> Result<Frames<'_>, String> {
+    use image::AnimationDecoder;
+    if bytes.starts_with(b"GIF8") {
+        let canvas = GifCanvas::new(bytes)?;
+        check_animated_dims((canvas.w as u32, canvas.h as u32))?;
+        Ok(Box::new(canvas))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let dec = super::animated_webp::Decoder::new(bytes)?;
+        check_animated_dims(dec.dimensions())?;
+        Ok(Box::new(dec.map(|f| f.map(|(img, ms)| (img, image::Delay::from_numer_denom_ms(ms, 1))))))
+    } else if bytes.starts_with(b"\x89PNG") {
+        let dec = image::codecs::png::PngDecoder::new(Cursor::new(bytes)).map_err(|e| format!("png decode: {e}"))?;
+        check_animated_dims(image::ImageDecoder::dimensions(&dec))?;
+        let frames = dec.apng().map_err(|e| format!("apng decode: {e}"))?.into_frames();
+        Ok(Box::new(frames.map(|f| {
+            let f = f.map_err(|e| format!("frame decode: {e}"))?;
+            let delay = f.delay();
+            Ok((f.into_buffer(), delay))
+        })))
+    } else {
+        Err("not an animated format".into())
+    }
+}
+
+/// An animation as lossy animated WebP, fit within `max_dim`, every frame and its timing kept.
+/// Alpha stays eight-bit, unlike GIF's one. libwebp's encoder runs on one core, so runs of
+/// frames encode on separate cores and are joined; when a run can't be joined (its opening
+/// frame was cropped to a transparent sprite) the whole animation encodes as one run.
+fn encode_animated_webp(bytes: &[u8], max_dim: u32, quality: f32) -> Result<EncodedImage, String> {
+    use rayon::prelude::*;
+    use super::animated_webp::{concat, Encoder};
+    type Run = Vec<(image::RgbaImage, u32)>;
+    fn encode_run(run: &Run, quality: f32) -> Result<(Vec<u8>, u32), String> {
+        let (w, h) = run[0].0.dimensions();
+        let mut enc = Encoder::new(w, h, quality)?;
+        for (img, ms) in run {
+            enc.add(img.as_raw(), *ms)?;
+        }
+        Ok((enc.finish()?, run.iter().map(|(_, ms)| ms).sum()))
+    }
+    // A run opens on a keyframe, which costs bytes on still-heavy animations: one run per
+    // core, none shorter than 24 frames.
+    let threads = rayon::current_num_threads().max(1);
+    let run_len = gif_frame_count(bytes).map_or(24, |n| n.div_ceil(threads).clamp(24, 96));
+    // Decoded frames held while runs encode.
+    const HELD_BYTES: usize = 192 << 20;
+
+    let mut parts: Vec<(Vec<u8>, u32)> = Vec::new();
+    let mut pending: Vec<Run> = Vec::with_capacity(threads);
+    let mut run: Run = Vec::with_capacity(run_len);
+    let mut canvas = None;
+    let encode = |pending: &mut Vec<Run>, parts: &mut Vec<(Vec<u8>, u32)>| -> Result<(), String> {
+        let done: Vec<Result<(Vec<u8>, u32), String>> = pending.par_drain(..).map(|r| encode_run(&r, quality)).collect();
+        for d in done {
+            parts.push(d?);
+        }
+        Ok(())
+    };
+    for frame in animation_frames(bytes)? {
+        let (img, delay) = frame?;
+        let img = if img.width() > max_dim || img.height() > max_dim {
+            resize_fit(&DynamicImage::ImageRgba8(img), max_dim, max_dim, image::imageops::FilterType::Triangle).into_rgba8()
+        } else {
+            img
+        };
+        if *canvas.get_or_insert(img.dimensions()) != img.dimensions() {
+            return Err("frame dimensions changed mid-animation".into());
+        }
+        let (n, d) = displayed_delay(delay).numer_denom_ms();
+        run.push((img, n / d.max(1)));
+        if run.len() == run_len {
+            pending.push(std::mem::replace(&mut run, Vec::with_capacity(run_len)));
+            let held = pending.len() * run_len * w_h_bytes(canvas);
+            if pending.len() == threads || held + run_len * w_h_bytes(canvas) > HELD_BYTES {
+                encode(&mut pending, &mut parts)?;
+            }
+        }
+    }
+    if !run.is_empty() {
+        pending.push(run);
+    }
+    encode(&mut pending, &mut parts)?;
+    let (w, h) = canvas.ok_or("no frames decoded")?;
+    let bytes = match parts.len() {
+        1 => parts.pop().map(|(b, _)| b).unwrap_or_default(),
+        _ => match concat(&parts, w, h) {
+            Some(b) => b,
+            None => return encode_animated_webp_serial(bytes, max_dim, quality),
+        },
+    };
+    Ok(EncodedImage { bytes, extension: "webp" })
+}
+
+fn w_h_bytes(canvas: Option<(u32, u32)>) -> usize {
+    canvas.map_or(0, |(w, h)| w as usize * h as usize * 4)
+}
+
+fn encode_animated_webp_serial(bytes: &[u8], max_dim: u32, quality: f32) -> Result<EncodedImage, String> {
+    let mut enc: Option<super::animated_webp::Encoder> = None;
+    for frame in animation_frames(bytes)? {
+        let (img, delay) = frame?;
+        let img = if img.width() > max_dim || img.height() > max_dim {
+            resize_fit(&DynamicImage::ImageRgba8(img), max_dim, max_dim, image::imageops::FilterType::Triangle).into_rgba8()
+        } else {
+            img
+        };
+        let enc = match &mut enc {
+            Some(e) => e,
+            None => enc.insert(super::animated_webp::Encoder::new(img.width(), img.height(), quality)?),
+        };
+        let (n, d) = displayed_delay(delay).numer_denom_ms();
+        enc.add(img.as_raw(), n / d.max(1))?;
+    }
+    let bytes = enc.ok_or("no frames decoded")?.finish()?;
+    Ok(EncodedImage { bytes, extension: "webp" })
 }
 
 /// GIF frames composited the way `image`'s GifDecoder does (same disposal, transparency
@@ -1855,6 +1950,49 @@ mod animated_tests {
             let re = transcode_animated(&gif_of(&frames, cs), 160, ANIMATED_MAX_FRAMES).unwrap();
             for f in decoded_frames(&re.bytes) {
                 assert_eq!(f.delay().numer_denom_ms(), (100, 1));
+            }
+        }
+    }
+
+    fn webp_frames(bytes: &[u8]) -> Vec<(RgbaImage, u32)> {
+        crate::shared::animated_webp::Decoder::new(bytes).unwrap().collect::<Result<_, _>>().unwrap()
+    }
+
+    /// Enough frames for several runs on separate cores: joined, they play as the source does.
+    #[test]
+    fn a_long_animation_encodes_in_runs_and_joins_seamlessly() {
+        let frames: Vec<RgbaImage> = (0..70u32)
+            .map(|i| RgbaImage::from_fn(96, 64, |x, y| image::Rgba([((x + i * 3) * 2) as u8, (y * 4) as u8, (i * 3) as u8, 255])))
+            .collect();
+        let src = gif_of(&frames, 6);
+        let want = decoded_frames(&src);
+        let out = encode_animated_webp(&src, 640, 85.0).unwrap();
+        assert_eq!(out.extension, "webp");
+        let got = webp_frames(&out.bytes);
+        assert_eq!(got.len(), 70);
+        assert!(got.iter().all(|(_, ms)| *ms == 60), "timing kept");
+        for (i, ((g, _), w)) in got.iter().zip(&want).enumerate() {
+            let err: u64 = g.pixels().zip(w.buffer().pixels()).map(|(a, b)| (0..3).map(|c| u64::from(a[c].abs_diff(b[c]))).sum::<u64>()).sum();
+            assert!(err / (96 * 64 * 3) < 6, "frame {i} drifted: mean error {}", err / (96 * 64 * 3));
+        }
+    }
+
+    /// A sprite on a clear canvas can't be split into runs (each would open on a cropped
+    /// frame); it encodes as one run and keeps its transparency.
+    #[test]
+    fn a_transparent_animation_keeps_its_clear_pixels_as_webp() {
+        let frames: Vec<RgbaImage> = (0..40u32)
+            .map(|i| RgbaImage::from_fn(120, 80, |x, y| {
+                if (i * 2..i * 2 + 20).contains(&x) && (30..50).contains(&y) { image::Rgba([220, 40, 30, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+            }))
+            .collect();
+        let src = gif_of(&frames, 5);
+        let want = decoded_frames(&src);
+        let got = webp_frames(&encode_animated_webp(&src, 640, 85.0).unwrap().bytes);
+        assert_eq!(got.len(), want.len());
+        for (i, ((g, _), w)) in got.iter().zip(&want).enumerate() {
+            for (gp, wp) in g.pixels().zip(w.buffer().pixels()) {
+                assert_eq!(gp[3] < 128, wp[3] < 128, "frame {i}: clear pixels differ");
             }
         }
     }
