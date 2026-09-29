@@ -1,7 +1,9 @@
 /* Vector Web: a browser tab has no window to minimise, maximise or close. */
 .vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }
 
-/* The status-bar cap (web/chrome.js paints it); under the pane headers it matches. */
+/* The status-bar cap (web/chrome.js paints it). iOS colours the status bar from
+   an opaque fixed box at the very top edge, and only a simple one, so the cap is
+   always that box, in a strip the title-bar inset reserves so it hides nothing. */
 .edge-cap {
     position: fixed;
     top: 0;
@@ -10,6 +12,11 @@
     height: 12px;
     z-index: 99;
 }
+body.mobile { --chrome-h: 12px; }
+body.mobile > main.container { margin-top: var(--chrome-h); }
+/* Opaque, so the strip above in their colour reads as part of them. */
+body.mobile .chat-header,
+body.mobile .profile-header { background-color: rgb(22, 22, 22); }
 .edge-cap[hidden] { display: none; }
 
 /* The floor: a Home Screen app runs under the home indicator (web/chrome.js). */

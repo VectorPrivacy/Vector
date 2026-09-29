@@ -76,6 +76,7 @@ const META = [
     '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">',
     '<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">',
     '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">',
+    '<link rel="manifest" href="/manifest.webmanifest">',
     '<meta name="apple-mobile-web-app-title" content="Vector">',
     '<meta property="og:type" content="website">',
     '<meta property="og:site_name" content="Vector">',
@@ -99,6 +100,9 @@ const indexPath = join(OUT, 'index.html');
 const html = readFileSync(indexPath, 'utf8');
 writeFileSync(indexPath, html
     .replace('<html', `<html data-version="${VERSION}"`)
+    // Link previews (Discord's embed stripe) take the first theme-color; media="print"
+    // keeps it off the browser chrome, which falls through to the page's dark one.
+    .replace('<meta name="theme-color"', '<meta name="theme-color" content="#59fcb3" media="print">\n    <meta name="theme-color"')
     .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/chrome.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
     .replace('</head>', `    <link rel="stylesheet" href="/web/web.css" />\n${META}  </head>`)
     .replace('<body>', '<body>\n    <div class="edge-cap" aria-hidden="true" hidden></div>\n  '));

@@ -27,6 +27,22 @@
         return usable();
     }
 
+    // Extensions word a refusal their own way ("Insufficient permissions, required 1");
+    // say what happened and what to do instead.
+    const REFUSED = /permission|denied|deny|reject|refus|not allowed|declin|cancel|unauthori[sz]ed|blocked/i;
+    const ASKED = {
+        getPublicKey: 'share your public key',
+        signEvent: 'sign for Vector',
+        'nip44.encrypt': 'encrypt your message',
+        'nip44.decrypt': 'decrypt your messages',
+        'nip04.encrypt': 'encrypt your message',
+        'nip04.decrypt': 'decrypt your messages',
+    };
+    function explain(method, raw) {
+        if (!REFUSED.test(raw)) return raw;
+        return `Your signer extension declined to ${ASKED[method] || 'answer'}. Open the extension, allow Vector, then try again.`;
+    }
+
     async function answer({ id, method, params }) {
         const reply = (ok, value, error) => backend('nip07_reply', { id, ok, value, error }).catch(() => {});
         const run = METHODS[method];
@@ -40,7 +56,7 @@
             ]);
             reply(true, value);
         } catch (e) {
-            reply(false, null, String(e?.message ?? e ?? 'Browser signer refused'));
+            reply(false, null, explain(method, String(e?.message ?? e ?? 'refused')));
         } finally {
             clearTimeout(timer);
         }

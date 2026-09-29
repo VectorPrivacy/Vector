@@ -41,9 +41,9 @@
     addEventListener('scroll', fit, { passive: true });
 
     // ─── Top edge ───────────────────────────────────────────────────────────
-    // iOS Safari tints its status bar from an opaque fixed box spanning the top
-    // edge, and blurs or blackens it otherwise: a translucent header doesn't count.
-    // The cap is that box on every screen, in the colour the top edge shows.
+    // iOS colours the status bar from an opaque fixed box at the top edge (a
+    // screen's own header is skipped). The cap is that box, over a strip kept
+    // clear by the title-bar inset, in the colour of what begins below it.
     const alphaOf = (c) => { const m = /rgba?\(([^)]+)\)/.exec(c); if (!m) return 0; const p = m[1].split(/[ ,/]+/).filter(Boolean); return p.length > 3 ? parseFloat(p[3]) : 1; };
     const channels = (c) => /rgba?\(([^)]+)\)/.exec(c)[1].split(/[ ,/]+/).filter(Boolean).map(parseFloat);
 
@@ -62,12 +62,14 @@
         if (!document.body.classList.contains('mobile')) { show(false); return; }
         // Topmost first: stack the translucent layers down to the first opaque one.
         const layers = [];
-        for (const hit of document.elementsFromPoint(innerWidth / 2, 4)) {
+        // Just below the reserved strip: what the cap continues.
+        const below = (parseFloat(getComputedStyle(document.body).getPropertyValue('--chrome-h')) || 0) + 4;
+        for (const hit of document.elementsFromPoint(innerWidth / 2, below)) {
             if (hit === cap || hit === root) continue;
-            const bg = getComputedStyle(hit).backgroundColor;
-            const a = alphaOf(bg);
+            const cs = getComputedStyle(hit);
+            const a = alphaOf(cs.backgroundColor);
             if (a <= 0) continue;
-            layers.push(bg);
+            layers.push(cs.backgroundColor);
             if (a >= 1) break;
         }
         let colour = getComputedStyle(root).backgroundColor;
