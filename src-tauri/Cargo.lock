@@ -11509,6 +11509,7 @@ dependencies = [
  "bytes",
  "cc",
  "clipboard-win",
+ "color_quant",
  "cpal",
  "crc32fast",
  "dispatch2",

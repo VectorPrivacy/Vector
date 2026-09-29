@@ -4,6 +4,7 @@
 //! - [`image`] - Image operations (~9x faster with parallel SIMD)
 //! - [`jpeg`] - Baseline JPEG codec (AVX2 / NEON, multi-core)
 //! - [`png`] - PNG encoder (vectorised filters, strips deflated in parallel)
+//! - [`neuquant`] - NeuQuant palette quantiser for GIF frames (vectorised, memoised)
 //! - [`audio`] - Audio sample conversion (2.3x faster f32→i16)
 //! - [`url`] - URL delimiter scanning (4.7-5.2x faster)
 //!
@@ -13,6 +14,7 @@ pub mod audio;
 pub mod html_meta;
 pub mod image;
 pub mod jpeg;
+pub mod neuquant;
 pub mod png;
 pub mod url;
 

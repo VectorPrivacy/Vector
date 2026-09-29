@@ -715,8 +715,7 @@ struct FrameJob {
 impl FrameJob {
     fn encode(self) -> gif::Frame<'static> {
         let FrameJob { mut rgba, dims: (sw, sh), at: (x0, y0), delay } = self;
-        // Speed 10 ≈ good quantization at a fraction of best-quality cost.
-        let mut f = gif::Frame::from_rgba_speed(sw as u16, sh as u16, &mut rgba, 10);
+        let mut f = quantise_frame(sw as u16, sh as u16, &mut rgba);
         f.left = x0 as u16;
         f.top = y0 as u16;
         let (ms, _) = delay.numer_denom_ms();
@@ -724,6 +723,54 @@ impl FrameJob {
         f.dispose = gif::DisposalMethod::Keep;
         f.make_lzw_pre_encoded();
         f
+    }
+}
+
+/// `gif::Frame::from_rgba_speed(.., 10)` to the byte: an exact palette when a frame has at
+/// most 256 colours, else NeuQuant (speed 10 ≈ good quantization at a fraction of
+/// best-quality cost), through the in-house port with its memoised lookup.
+fn quantise_frame(width: u16, height: u16, pixels: &mut [u8]) -> gif::Frame<'static> {
+    use crate::simd::neuquant::{IndexCache, NeuQuant};
+    let px = |p: &[u8]| [p[0], p[1], p[2], p[3]];
+    let mut transparent: Option<[u8; 4]> = None;
+    for p in pixels.chunks_exact_mut(4) {
+        if p[3] != 0 {
+            p[3] = 0xFF;
+        } else if let Some(t) = transparent {
+            p.copy_from_slice(&t);
+        } else {
+            transparent = Some(px(p));
+        }
+    }
+    let mut colors = std::collections::HashSet::with_capacity(512);
+    let mut few = true;
+    for p in pixels.chunks_exact(4) {
+        if colors.insert(u32::from_be_bytes(px(p))) && colors.len() > 256 {
+            few = false;
+            break;
+        }
+    }
+    let (buffer, palette, transparent) = if few {
+        // Big-endian keys sort like the reference's (r, g, b, a) tuples.
+        let mut sorted: Vec<u32> = colors.into_iter().collect();
+        sorted.sort_unstable();
+        let index_of = |p: [u8; 4]| sorted.binary_search(&u32::from_be_bytes(p)).unwrap_or(0) as u8;
+        let buffer = pixels.chunks_exact(4).map(|p| index_of(px(p))).collect();
+        let palette = sorted.iter().flat_map(|c| { let [r, g, b, _] = c.to_be_bytes(); [r, g, b] }).collect();
+        (buffer, palette, transparent.map(index_of))
+    } else {
+        let nq = NeuQuant::new(10, pixels);
+        let mut memo = IndexCache::new(&nq);
+        let buffer = pixels.chunks_exact(4).map(|p| memo.index_of(px(p))).collect();
+        (buffer, nq.color_map_rgb(), transparent.map(|t| nq.index_of(t)))
+    };
+    gif::Frame {
+        width,
+        height,
+        buffer: std::borrow::Cow::Owned(buffer),
+        palette: Some(palette),
+        transparent,
+        ..gif::Frame::default()
     }
 }
 

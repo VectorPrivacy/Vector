@@ -285,6 +285,8 @@ tauri-plugin-mcp-bridge = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+# Reference for the in-house NeuQuant, which must match it bit for bit.
+color_quant = "1.1"
 
 # Cross-compilation fix: whisper-rs-sys build.rs uses cfg!(target_os = "macos") which
 # checks the HOST OS, not the cross-compilation target. Our fork fixes this so Android
