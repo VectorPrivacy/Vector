@@ -335,6 +335,17 @@ function reorderChatlist() {
     VectorSvelte.reorderChatlist();
 }
 
+let chatlistReorderTimer = 0;
+
+/** `reorderChatlist` at most once a frame, for callers that fire in bursts. */
+function scheduleChatlistReorder() {
+    if (chatlistReorderTimer) return;
+    chatlistReorderTimer = setTimeout(() => {
+        chatlistReorderTimer = 0;
+        reorderChatlist();
+    }, 16);
+}
+
 /**
  * Register every chat, DM profile and community key with the signal layer before a
  * row can read it: a key that is first read inside a derived would not be tracked.

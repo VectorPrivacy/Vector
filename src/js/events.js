@@ -773,12 +773,6 @@ async function setupRustListeners() {
             }
         }
 
-        // Newest-first chat list order (independent of how the message landed in
-        // chat.messages): the list re-diffs only if a row actually moved.
-        if (newMessage.at >= (chat.messages[chat.messages.length - 1]?.at ?? 0)) {
-            reorderChatlist();
-        }
-
         // If this user has the open chat, then update the chat too
         if (strOpenChat === chat.id) {
             // Any row already rendered quoting THIS message can now draw its strip:
@@ -872,10 +866,10 @@ async function setupRustListeners() {
             if (lastContactMsg) markAsRead(chat, lastContactMsg);
         }
 
-        // One row re-derives and the order re-diffs; cheap enough to run with a chat
-        // open too, which is what keeps the widescreen list live.
+        // One row re-derives now; the order re-diffs once per burst, since a sync can
+        // land hundreds of messages back to back.
         touchChatRow(chat);
-        reorderChatlist();
+        scheduleChatlistReorder();
 
         // Re-derive unread badges from the DB (a new arrival, or an open-chat auto-read, both move
         // the count). Debounced so a burst of arrivals is one query.

@@ -895,15 +895,25 @@ async function ensurePinnedLoaded() {
  */
 function sortChats() {
     ensurePinnedLoaded();
-    arrChats.sort((a, b) => {
-        const ra = chatPinRank(a), rb = chatPinRank(b);
-        if (ra !== rb) {
-            if (ra === -1) return 1;
-            if (rb === -1) return -1;
-            return ra - rb;
+    // Keys once per chat, not per comparison: a community row's key spans its siblings,
+    // which inside the comparator made every sort quadratic in the chat count.
+    const communityNewest = new Map();
+    for (const c of arrChats) {
+        const cid = c.chat_type === 'Community' && c.metadata?.custom_fields?.community_id;
+        if (!cid) continue;
+        const t = getChatOwnSortTimestamp(c);
+        communityNewest.set(cid, communityNewest.has(cid) ? Math.max(communityNewest.get(cid), t) : t);
+    }
+    const keyed = arrChats.map(c => ({ c, rank: chatPinRank(c), ts: getChatSortTimestamp(c, communityNewest) }));
+    keyed.sort((a, b) => {
+        if (a.rank !== b.rank) {
+            if (a.rank === -1) return 1;
+            if (b.rank === -1) return -1;
+            return a.rank - b.rank;
         }
-        return getChatSortTimestamp(b) - getChatSortTimestamp(a);
+        return b.ts - a.ts;
     });
+    for (let i = 0; i < keyed.length; i++) arrChats[i] = keyed[i].c;
 }
 
 /**
@@ -946,14 +956,18 @@ function getChatOwnSortTimestamp(chat) {
  * activity across ALL its channels — otherwise a busy secondary channel leaves the
  * community stranded at the bottom of the list behind its own quiet primary row.
  * @param {Chat} chat
+ * @param {Map<string, number>} [communityNewest] - newest own timestamp per community, when
+ *   the caller has already computed it for every chat
  * @returns {number}
  */
-function getChatSortTimestamp(chat) {
+function getChatSortTimestamp(chat, communityNewest) {
     let lastActivity = getChatOwnSortTimestamp(chat);
     const communityId = chatIsGroup(chat) && isPrimaryChannelChat(chat)
         ? chat.metadata?.custom_fields?.community_id
         : null;
-    if (communityId) {
+    if (communityId && communityNewest?.has(communityId)) {
+        lastActivity = Math.max(lastActivity, communityNewest.get(communityId));
+    } else if (communityId) {
         for (const sibling of arrChats) {
             if (sibling === chat || sibling.chat_type !== 'Community') continue;
             if (sibling.metadata?.custom_fields?.community_id !== communityId) continue;
