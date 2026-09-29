@@ -309,6 +309,17 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         }
         "decode_thumbhash" => Ok(json!(files::thumbhash_data_url(&a.str("thumbhash")?))),
 
+        "get_or_cache_image" => {
+            let kind = crate::images::Kind::parse(&a.str("imageType")?).ok_or("Invalid image type")?;
+            Ok(json!(crate::images::cache(&a.str("url")?, kind).await?))
+        }
+        "cache_url_image" => {
+            let url = a.str("url")?;
+            let path = crate::images::cache(&url, crate::images::Kind::InlineImage).await?;
+            vector_core::emit_event("inline_image_cached", &json!({ "url": url, "path": path }));
+            Ok(json!(path))
+        }
+
         // --- Communities ---
         "list_communities" => cm::list_communities(),
         "get_community" => cm::get_community(&a.str("communityId")?),

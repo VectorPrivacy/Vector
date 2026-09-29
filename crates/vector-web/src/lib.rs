@@ -14,6 +14,7 @@ mod commands;
 mod community;
 mod events;
 mod files;
+mod images;
 mod emitter;
 mod messaging;
 mod sync;

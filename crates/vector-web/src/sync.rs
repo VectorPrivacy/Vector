@@ -10,10 +10,12 @@ use crate::emitter;
 pub struct WebProfileSyncHandler;
 
 impl vector_core::ProfileSyncHandler for WebProfileSyncHandler {
-    fn on_profile_fetched(&self, slim: &SlimProfile, _avatar_url: &str, _banner_url: &str) {
+    fn on_profile_fetched(&self, slim: &SlimProfile, avatar_url: &str, banner_url: &str) {
         let slim = slim.clone();
+        let (avatar, banner) = (avatar_url.to_string(), banner_url.to_string());
         db::spawn_bound(async move {
             let _ = db::profiles::set_profile(&slim);
+            crate::images::cache_profile_images(&slim.id, &avatar, &banner).await;
         });
     }
 }
@@ -58,6 +60,7 @@ async fn hydrate_and_announce() {
     let profiles: Vec<SlimProfile> = state.profiles.iter().map(|p| SlimProfile::from_profile(p, &state.interner)).collect();
     drop(state);
     emitter::emit("init_finished", &serde_json::json!({ "profiles": profiles, "chats": chats }));
+    db::spawn_bound(crate::images::cache_all_profile_images());
 }
 
 pub async fn fetch_messages(init: bool) -> Result<(), String> {
