@@ -12,6 +12,30 @@ use crate::emitter;
 /// Accounts created but not yet committed (the PIN step is still ahead).
 static PENDING_ACCOUNT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
+/// The npub of a keypair generated this session, armed for its one empty kind-0.
+static FRESH_ACCOUNT_NPUB: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Publish an empty kind-0 tagged `client: vector` for a keypair generated
+/// moments ago, so NIP-89 readers (Magnitude's upload gate) recognise it.
+/// Never for an imported or unlocked identity: a kind-0 replaces what exists.
+fn stamp_fresh_account_profile() {
+    let armed = FRESH_ACCOUNT_NPUB.lock().unwrap().take();
+    let Some(client) = state::nostr_client() else { return };
+    let current = vector_core::my_public_key().and_then(|pk| pk.to_bech32().ok());
+    if armed.is_none() || armed != current {
+        return;
+    }
+    db::spawn_bound(async move {
+        let builder = EventBuilder::new(Kind::Metadata, "{}").tag(Tag::custom("client", vec!["vector"]));
+        if let Ok(event) = vector_core::sign_builder(builder).await {
+            let relays = state::active_trusted_relays().await;
+            if let Err(e) = client.send_event(&event).to(relays).await {
+                vector_core::log_warn!("[Account] new-account profile stamp failed: {e}");
+            }
+        }
+    });
+}
+
 fn install_client() {
     let client = vector_core::nostr_client_builder().monitor(Monitor::new(1024)).build();
     state::set_nostr_client_if_absent(client);
@@ -61,26 +85,50 @@ pub fn get_encryption_status() -> Value {
     json!({ "enabled": enabled, "account_exists": db::get_current_account().is_ok(), "security_type": security_type })
 }
 
+fn account_metadata(npub: &str) -> Value {
+    let mut meta = json!({
+        "npub": npub, "display_name": null, "avatar_url": null,
+        "avatar_cached": null, "has_encryption": false, "last_active": null,
+    });
+    let Ok(path) = db::account_dir(npub).map(|d| d.join("vector.db")) else { return meta };
+    let Ok(conn) = rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return meta;
+    };
+    if let Ok((nickname, display, name, avatar)) = conn.query_row(
+        "SELECT nickname, display_name, name, avatar FROM profiles WHERE npub = ?1",
+        [npub],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
+    ) {
+        meta["display_name"] = json!([nickname, display, name].into_iter().find(|s| !s.is_empty()));
+        if !avatar.is_empty() {
+            meta["avatar_url"] = json!(avatar);
+        }
+    }
+    let setting = |key: &str| {
+        conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get::<_, String>(0)).ok()
+    };
+    meta["has_encryption"] =
+        json!(state::resolve_encryption_enabled(setting("encryption_enabled").as_deref(), setting("security_type").as_deref()));
+    meta["last_active"] = json!(setting("last_active").and_then(|v| v.parse::<i64>().ok()));
+    meta
+}
+
 pub fn list_accounts_with_metadata() -> Value {
-    let accounts = db::get_accounts().unwrap_or_default();
-    Value::Array(
-        accounts
-            .into_iter()
-            .map(|npub| {
-                json!({
-                    "npub": npub,
-                    "display_name": null,
-                    "avatar_url": null,
-                    "avatar_cached": null,
-                    "has_encryption": false,
-                    "last_active": 0,
-                })
-            })
-            .collect(),
-    )
+    let mut accounts: Vec<Value> = db::get_accounts().unwrap_or_default().iter().map(|n| account_metadata(n)).collect();
+    accounts.sort_by_key(|m| std::cmp::Reverse(m["last_active"].as_i64().unwrap_or(0)));
+    Value::Array(accounts)
+}
+
+fn touch_last_active() {
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = db::set_sql_setting("last_active".into(), now.to_string());
 }
 
 pub async fn login(mut import_key: String) -> Result<Value, String> {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
     if state::nostr_client().is_some() {
         let keys = Keys::parse(&import_key).map_err(|_| "Invalid key — could not parse".to_string())?;
         import_key.zeroize();
@@ -133,38 +181,68 @@ pub async fn create_account() -> Result<Value, String> {
     insert_own_profile(&npub).await;
     *MNEMONIC_SEED.lock().unwrap() = Some(phrase);
     *PENDING_ACCOUNT.lock().unwrap() = Some(npub.clone());
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = Some(npub.clone());
     Ok(json!({ "public": npub, "existing": false }))
 }
 
-/// Commit the pending account with its key stored in plaintext.
-pub async fn skip_encryption() -> Result<(), String> {
+/// Commit the pending account: its key sealed under `password`, or plaintext without one.
+async fn commit_pending_account(password: Option<&str>, security_type: Option<&str>) -> Result<(), String> {
+    if password.is_some_and(|p| p.trim().is_empty()) {
+        return Err("Password must not be empty.".into());
+    }
     let nsec = Zeroizing::new(PENDING_NSEC.lock().unwrap().clone().ok_or("No pending key — call create_account or login first")?);
     let seed = MNEMONIC_SEED.lock().unwrap().clone().map(Zeroizing::new);
+
+    // Sealing with the password derives the key once and leaves it in the vault,
+    // where the seed and every later at-rest write pick it up.
+    let stored_key = match password {
+        Some(pwd) => {
+            let sealed = vector_core::crypto::maybe_encrypt_inner(nsec.to_string(), Some(pwd.to_string())).await;
+            state::set_encryption_enabled(true);
+            sealed
+        }
+        None => nsec.to_string(),
+    };
+    let stored_seed = match seed.as_ref() {
+        Some(s) => Some(vector_core::crypto::maybe_encrypt(s.to_string()).await),
+        None => None,
+    };
 
     if let Some(npub) = PENDING_ACCOUNT.lock().unwrap().take() {
         db::init_database(&npub)?;
         db::set_current_account(npub)?;
     }
 
-    db::settings::commit_account_setup(&nsec, false, None, seed.as_deref().map(|s| s.as_str()), None)?;
+    db::settings::commit_account_setup(&stored_key, password.is_some(), security_type, stored_seed.as_deref(), None)?;
 
-    if let Some(s) = PENDING_NSEC.lock().unwrap().as_mut() {
-        s.zeroize();
+    for slot in [&PENDING_NSEC, &MNEMONIC_SEED] {
+        let mut guard = slot.lock().unwrap();
+        if let Some(s) = guard.as_mut() {
+            s.zeroize();
+        }
+        *guard = None;
     }
-    *PENDING_NSEC.lock().unwrap() = None;
-    if let Some(s) = MNEMONIC_SEED.lock().unwrap().as_mut() {
-        s.zeroize();
-    }
-    *MNEMONIC_SEED.lock().unwrap() = None;
 
-    state::set_encryption_enabled(false);
+    state::set_encryption_enabled(password.is_some());
+    touch_last_active();
     vector_core::blossom_servers::refresh_cache();
+    stamp_fresh_account_profile();
     Ok(())
+}
+
+pub async fn skip_encryption() -> Result<(), String> {
+    commit_pending_account(None, None).await
+}
+
+pub async fn setup_encryption(password: String, security_type: String) -> Result<(), String> {
+    let password = Zeroizing::new(password);
+    commit_pending_account(Some(&password), Some(&security_type)).await
 }
 
 /// Unlock the stored account. Local keys only: bunker and NIP-55 need
 /// transports the browser doesn't have yet.
 pub async fn login_from_stored_key(password: Option<String>) -> Result<String, String> {
+    *FRESH_ACCOUNT_NPUB.lock().unwrap() = None;
     state::init_encryption_enabled();
 
     if state::nostr_client().is_some() {
@@ -180,8 +258,6 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
 
     let stored = db::get_pkey()?.ok_or("No private key found")?;
     let mut nsec = if let Some(pwd) = password {
-        let key = vector_core::crypto::hash_pass(&pwd).await;
-        vector_core::ENCRYPTION_KEY.set(key, &[&MY_SECRET_KEY]);
         vector_core::crypto::maybe_decrypt_inner(stored, Some(pwd))
             .await
             .map_err(|_| "Incorrect password".to_string())?
@@ -198,6 +274,7 @@ pub async fn login_from_stored_key(password: Option<String>) -> Result<String, S
     insert_own_profile(&npub).await;
     match db::init_database(&npub).and_then(|_| db::set_current_account(npub.clone())) {
         Ok(()) => {
+            touch_last_active();
             state::init_encryption_enabled();
             vector_core::blossom_servers::refresh_cache();
         }

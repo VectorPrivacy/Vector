@@ -100,6 +100,9 @@ pub async fn dispatch(cmd: &str, a: Args) -> Result<Value, String> {
         "login" => account::login(a.str("importKey")?).await,
         "create_account" => account::create_account().await,
         "skip_encryption" => account::skip_encryption().await.map(|_| Value::Null),
+        "setup_encryption" => account::setup_encryption(a.str("password")?, a.opt_str("securityType").unwrap_or_else(|| "pin".into()))
+            .await
+            .map(|_| Value::Null),
         "login_from_stored_key" => to_value(account::login_from_stored_key(a.opt_str("password")).await?),
         "connect" => Ok(json!(account::connect().await)),
 

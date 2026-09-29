@@ -6276,6 +6276,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "nostr-sdk",
+ "rusqlite",
  "serde",
  "serde_json",
  "sqlite-wasm-rs",

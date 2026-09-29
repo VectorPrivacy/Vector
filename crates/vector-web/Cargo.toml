@@ -24,6 +24,7 @@ universal-time = "0.3"
 web-time = "1"
 bip39 = "2.2.2"
 zeroize = "1.8"
+rusqlite = { version = "0.38", default-features = false }
 # The OPFS pool VFS must link against the same SQLite build rusqlite uses.
 sqlite-wasm-rs = "=0.5.5"
 sqlite-wasm-vfs = "=0.2.0"
