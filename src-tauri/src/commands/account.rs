@@ -1110,6 +1110,14 @@ pub async fn start_nostrconnect_session<R: Runtime>(
             }
         };
 
+        // Clones don't share the pairing, so the slot takes the paired instance,
+        // unless the attempt was abandoned meanwhile.
+        if vector_core::bunker_signer().is_none() {
+            let _ = signer.shutdown().await;
+            return;
+        }
+        vector_core::set_bunker_signer(signer);
+
         // Same staging block as connect_bunker — extract any further if
         // a third entry point ever appears. Wraps the side-effects so a
         // failure here can roll back cleanly.
