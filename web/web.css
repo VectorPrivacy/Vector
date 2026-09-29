@@ -1,0 +1,2 @@
+/* Vector Web: a browser tab has no window to minimise, maximise or close. */
+.vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }

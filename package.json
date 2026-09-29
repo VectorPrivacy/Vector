@@ -23,7 +23,9 @@
     "check:globals": "node scripts/check-globals.mjs",
     "svelte:watch": "node scripts/build-svelte.mjs --watch",
     "test:cache": "node --test \"tests/event-cache/*.test.mjs\"",
-    "android:emu": "./scripts/android-emu.sh"
+    "android:emu": "./scripts/android-emu.sh",
+    "web:build": "node scripts/build-web.mjs",
+    "web:serve": "node web/serve.mjs"
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^16.0.3",

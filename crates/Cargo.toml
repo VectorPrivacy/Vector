@@ -1,5 +1,5 @@
 [workspace]
-members = ["vector-calls", "vector-core", "vector-cli", "vector-agent", "concord-cli", "vector-sdk"]
+members = ["vector-calls", "vector-core", "vector-cli", "vector-agent", "concord-cli", "vector-sdk", "vector-web"]
 resolver = "2"
 
 # Dependencies compile OPTIMIZED even in dev/test; our own crates stay unoptimized
@@ -9,6 +9,11 @@ resolver = "2"
 # Same code, same results: this changes compilation, never behaviour.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Vector Web: the OPFS pool VFS tracks open files in a set and debug-asserts on
+# the second close when two connections share a database, as core's pool does.
+[profile.dev.package.sqlite-wasm-vfs]
+debug-assertions = false
 
 [profile.test.package."*"]
 opt-level = 3

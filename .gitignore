@@ -50,3 +50,7 @@ memory.sqlite
 memory.sqlite-shm
 memory.sqlite-wal
 stray.toml
+
+# Vector Web build output
+dist-web
+web/pkg
