@@ -555,6 +555,7 @@ fn transcode_animated_opts(
             }
         };
         let mut shown = fit(first);
+        binarize_alpha(&mut shown);
         let canvas = shown.dimensions();
 
         // Quantising and LZW-packing a frame is independent of every other frame; only the
@@ -583,7 +584,10 @@ fn transcode_animated_opts(
             let send = |job: FrameJob| tx.send(job).map_err(|_| String::from("gif encoder stopped"));
 
             let produced = (|| -> Result<(), String> {
-                send(FrameJob { rgba: shown.as_raw().clone(), dims: canvas, at: (0, 0), delay: first_delay })?;
+                // One frame is held back: a frame that uncovers the canvas rewrites the one
+                // before it to clear on its way out.
+                let first_delay = displayed_delay(first_delay);
+                let mut held = FrameJob::full(shown.as_raw().clone(), canvas, first_delay);
 
                 // Inter-frame differencing: emit only pixels that changed beyond the
                 // tolerance since what the viewer displays; the rest go transparent
@@ -599,31 +603,40 @@ fn transcode_animated_opts(
                         break;
                     }
                     let (frame, frame_delay) = frame?;
-                    let (ms, _) = frame_delay.numer_denom_ms();
+                    let (ms, _) = displayed_delay(frame_delay).numer_denom_ms();
                     if frame_step > 1 && (i + 1) % frame_step != 0 {
                         skipped_ms += ms;
                         continue;
                     }
                     let delay = image::Delay::from_numer_denom_ms(ms + skipped_ms, 1);
                     skipped_ms = 0;
-                    let resized = fit(frame);
+                    let mut resized = fit(frame);
                     if resized.dimensions() != canvas {
                         return Err("frame dimensions changed mid-animation".into());
                     }
+                    let clears = binarize_alpha(&mut resized) && uncovers(&shown, &resized);
                     // Keyframe flush: tolerance lets slow drift go stale, and over
                     // enough frames the reused patches read as a dirty window. A full
                     // frame at intervals bounds how long any residue can live.
-                    if count.is_multiple_of(12) {
+                    let job = if clears {
+                        // Keep-disposal can't make a shown pixel clear again: the held frame
+                        // becomes the whole canvas and clears after showing, and this one
+                        // draws onto the empty canvas.
+                        held = FrameJob { dispose: gif::DisposalMethod::Background, ..FrameJob::full(shown.as_raw().clone(), canvas, held.delay) };
                         shown = resized.clone();
-                        send(FrameJob { rgba: resized.into_raw(), dims: canvas, at: (0, 0), delay })?;
+                        FrameJob::full(resized.into_raw(), canvas, delay)
+                    } else if count.is_multiple_of(12) {
+                        shown = resized.clone();
+                        FrameJob::full(resized.into_raw(), canvas, delay)
                     } else {
                         let (sub, x0, y0) = delta_frame(&mut shown, &resized, tolerance);
                         let dims = sub.dimensions();
-                        send(FrameJob { rgba: sub.into_raw(), dims, at: (x0, y0), delay })?;
-                    }
+                        FrameJob { at: (x0, y0), ..FrameJob::full(sub.into_raw(), dims, delay) }
+                    };
+                    send(std::mem::replace(&mut held, job))?;
                     count += 1;
                 }
-                Ok(())
+                send(held)
             })();
             drop(tx);
             encoder.join().map_err(|_| String::from("gif encoder panicked"))??;
@@ -710,17 +723,22 @@ struct FrameJob {
     dims: (u32, u32),
     at: (u32, u32),
     delay: image::Delay,
+    dispose: gif::DisposalMethod,
 }
 
 impl FrameJob {
+    fn full(rgba: Vec<u8>, dims: (u32, u32), delay: image::Delay) -> Self {
+        FrameJob { rgba, dims, at: (0, 0), delay, dispose: gif::DisposalMethod::Keep }
+    }
+
     fn encode(self) -> gif::Frame<'static> {
-        let FrameJob { mut rgba, dims: (sw, sh), at: (x0, y0), delay } = self;
+        let FrameJob { mut rgba, dims: (sw, sh), at: (x0, y0), delay, dispose } = self;
         let mut f = quantise_frame(sw as u16, sh as u16, &mut rgba);
         f.left = x0 as u16;
         f.top = y0 as u16;
         let (ms, _) = delay.numer_denom_ms();
         f.delay = (ms / 10).clamp(2, u32::from(u16::MAX)) as u16;
-        f.dispose = gif::DisposalMethod::Keep;
+        f.dispose = dispose;
         f.make_lzw_pre_encoded();
         f
     }
@@ -789,6 +807,32 @@ pub fn animated_dims(bytes: &[u8]) -> Option<(u32, u32)> {
 /// comparison is always against the composited display, never the prior delta.
 const DELTA_TOLERANCE: i16 = 8;
 
+/// GIF transparency is one bit: under half alpha a pixel is clear (zeroed, so clear pixels
+/// compare equal), otherwise opaque. Returns whether any pixel is clear.
+fn binarize_alpha(img: &mut image::RgbaImage) -> bool {
+    let mut any = false;
+    for p in img.chunks_exact_mut(4) {
+        if p[3] < 128 {
+            p.fill(0);
+            any = true;
+        } else {
+            p[3] = 255;
+        }
+    }
+    any
+}
+
+/// Whether a pixel the viewer shows opaque is clear in `next`.
+fn uncovers(shown: &image::RgbaImage, next: &image::RgbaImage) -> bool {
+    shown.chunks_exact(4).zip(next.chunks_exact(4)).any(|(s, n)| s[3] != 0 && n[3] == 0)
+}
+
+/// The delay viewers actually play: browsers show frames of 10 ms or less for 100 ms.
+fn displayed_delay(d: image::Delay) -> image::Delay {
+    let (n, den) = d.numer_denom_ms();
+    if n <= 10 * den { image::Delay::from_numer_denom_ms(100, 1) } else { d }
+}
+
 /// Encode the difference between what a decoder currently displays (`shown`)
 /// and the next true frame: unchanged-within-tolerance pixels go transparent
 /// (GIF keep-disposal shows the old pixel through), the rest are emitted and
@@ -803,7 +847,7 @@ fn delta_frame(shown: &mut image::RgbaImage, next: &image::RgbaImage, tolerance:
     // Pass 1: which pixels must be re-emitted, one flag each, then their bounding box.
     // Byte-wise compare first (a plain lane loop), then fold each pixel's colour flags.
     let over: Vec<u8> = shown.as_raw().iter().zip(next.as_raw()).map(|(&a, &b)| u8::from(a.abs_diff(b) > tol)).collect();
-    let mask: Vec<u8> = over.chunks_exact(4).map(|p| p[0] | p[1] | p[2]).collect();
+    let mask: Vec<u8> = over.chunks_exact(4).map(|p| p[0] | p[1] | p[2] | p[3]).collect();
     let (mut x0, mut y0, mut x1, mut y1) = (wu, h as usize, 0usize, 0usize);
     for (y, row) in mask.chunks_exact(wu).enumerate() {
         if let Some(first) = row.iter().position(|&m| m != 0) {
@@ -1713,6 +1757,66 @@ mod animated_tests {
         use image::AnimationDecoder;
         let dec = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).unwrap();
         dec.into_frames().collect_frames().unwrap()
+    }
+
+    /// Full canvas frames through the raw encoder, each clearing after it shows.
+    fn gif_of(frames: &[RgbaImage], delay_cs: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let (w, h) = frames[0].dimensions();
+            let mut enc = gif::Encoder::new(&mut out, w as u16, h as u16, &[]).unwrap();
+            enc.set_repeat(gif::Repeat::Infinite).unwrap();
+            for f in frames {
+                let mut px = f.as_raw().clone();
+                let mut frame = gif::Frame::from_rgba_speed(w as u16, h as u16, &mut px, 10);
+                frame.delay = delay_cs;
+                frame.dispose = gif::DisposalMethod::Background;
+                enc.write_frame(&frame).unwrap();
+            }
+        }
+        out
+    }
+
+    /// A sprite crossing a clear canvas, and one that vanishes: every output frame
+    /// composites to the source's, clear pixels included, with no trail behind.
+    #[test]
+    fn transparent_animations_leave_no_trails() {
+        let frames: Vec<RgbaImage> = (0..16u32)
+            .map(|i| {
+                RgbaImage::from_fn(120, 80, |x, y| {
+                    let sprite = (i * 6..i * 6 + 20).contains(&x) && (30..50).contains(&y);
+                    let blinker = i % 4 < 2 && (100..110).contains(&x) && y < 10;
+                    if sprite || blinker { image::Rgba([220, 40, 30, 255]) } else { image::Rgba([0, 0, 0, 0]) }
+                })
+            })
+            .collect();
+        let src = gif_of(&frames, 8);
+        let want = decoded_frames(&src);
+        for tolerance in [0, DELTA_TOLERANCE] {
+            let re = transcode_animated_opts(&src, 160, ANIMATED_MAX_FRAMES, tolerance, 1).unwrap();
+            let got = decoded_frames(&re.bytes);
+            assert_eq!(got.len(), want.len());
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                for (gp, wp) in g.buffer().pixels().zip(w.buffer().pixels()) {
+                    assert_eq!(gp[3] == 0, wp[3] == 0, "frame {i}: clear pixels differ");
+                    if wp[3] != 0 {
+                        assert!((0..3).all(|c| gp[c].abs_diff(wp[c]) <= 12), "frame {i}: colour {gp:?} vs {wp:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Viewers play frames of 10 ms or less for 100 ms; re-encoding keeps that speed.
+    #[test]
+    fn zero_delay_frames_keep_the_speed_viewers_play_them_at() {
+        let frames: Vec<RgbaImage> = (0..4u8).map(|i| RgbaImage::from_pixel(40, 30, image::Rgba([i * 60, 90, 200, 255]))).collect();
+        for cs in [0, 1] {
+            let re = transcode_animated(&gif_of(&frames, cs), 160, ANIMATED_MAX_FRAMES).unwrap();
+            for f in decoded_frames(&re.bytes) {
+                assert_eq!(f.delay().numer_denom_ms(), (100, 1));
+            }
+        }
     }
 
     /// The whole point: a big animation comes back smaller, still moving, with
