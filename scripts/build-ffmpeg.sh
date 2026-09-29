@@ -15,7 +15,7 @@
 #
 # Prerequisites: a C toolchain, make, pkg-config; nasm on x86 hosts (else x86 SIMD is off).
 # Windows: an MSYS2 shell (make, nasm, diffutils) started with MSYS2_PATH_TYPE=inherit from a
-# Visual Studio x64 developer prompt, so cl.exe and its INCLUDE/LIB are in reach.
+# Visual Studio x64 developer prompt, so link.exe and its INCLUDE/LIB are in reach, plus clang-cl.
 
 set -e
 
@@ -127,8 +127,13 @@ build_ffmpeg() {
                 echo "Error: cl.exe not found. Run from MSYS2 inheriting a Visual Studio x64 environment." >&2
                 exit 1
             fi
+            # clang-cl compiles, MSVC links: cl.exe 14.44 hits an internal compiler error on FFmpeg 8.
+            if ! command -v clang-cl >/dev/null; then
+                echo "Error: clang-cl not found. Install LLVM or Visual Studio's C++ Clang tools." >&2
+                exit 1
+            fi
             # FFmpeg's Media Foundation encoder is written against D3D11. -MD: Rust's CRT.
-            flags+=(--toolchain=msvc --target-os=win64 --arch=x86_64
+            flags+=(--toolchain=msvc --cc=clang-cl --target-os=win64 --arch=x86_64
                 --enable-mediafoundation --enable-d3d11va --enable-encoder=h264_mf
                 --extra-cflags=-MD)
             ;;
