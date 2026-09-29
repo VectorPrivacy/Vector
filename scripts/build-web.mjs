@@ -34,10 +34,12 @@ await buildSvelte({ dev: !release });
 
 rmSync(OUT, { recursive: true, force: true });
 cpSync(join(ROOT, 'src'), OUT, { recursive: true, dereference: true });
-for (const f of ['tauri-shim.js', 'media.js', 'signer.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
+for (const f of ['tauri-shim.js', 'media.js', 'signer.js', 'miniapps.js', 'worker.js', 'web.css']) cpSync(join(ROOT, 'web', f), join(OUT, 'web', f));
 cpSync(join(ROOT, 'web', 'pkg'), join(OUT, 'web', 'pkg'), { recursive: true });
 // Root scope, so it can answer `/vfs/…` for the whole page.
 cpSync(join(ROOT, 'web', 'sw.js'), join(OUT, 'sw.js'));
+// Mini app origins are served from here; see serve.mjs.
+cpSync(join(ROOT, 'web', 'xdc'), join(OUT, '__vector'), { recursive: true });
 
 // Desktop's policy, minus Tauri's schemes. Remote images are allowed because
 // without a media proxy the page loads them directly, as desktop does.
@@ -49,6 +51,9 @@ export const CSP = [
     "style-src 'self' 'unsafe-inline'",
     "connect-src 'self' https://gifverse.net",
     "worker-src 'self'",
+    // Mini apps run on subdomains of whatever host serves Vector; the server narrows
+    // this to its own `*.xdc.<host>` with a header, and both policies apply.
+    "frame-src http://*.localhost:* https:",
     "base-uri 'self'",
     "object-src 'none'",
     "form-action 'none'",
@@ -58,7 +63,7 @@ export const CSP = [
 const indexPath = join(OUT, 'index.html');
 const html = readFileSync(indexPath, 'utf8');
 writeFileSync(indexPath, html
-    .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>`)
+    .replace('<head>', `<head>\n    <meta http-equiv="Content-Security-Policy" content="${CSP}">\n    <script src="/web/tauri-shim.js"></script>\n    <script src="/web/media.js"></script>\n    <script src="/web/signer.js"></script>\n    <script src="/web/miniapps.js"></script>`)
     .replace('</head>', '    <link rel="stylesheet" href="/web/web.css" />\n  </head>'));
 
 console.log(`[build-web] → ${OUT}`);

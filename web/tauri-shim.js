@@ -41,9 +41,12 @@
             case 'result':
                 settle(data.id, data.ok, data.ok ? data.value : data.error);
                 break;
-            case 'event':
-                dispatchEvent(data.name, data.json === undefined ? null : JSON.parse(data.json));
+            case 'event': {
+                const payload = data.json === undefined ? null : JSON.parse(data.json);
+                if (data.bytes) payload.bytes = data.bytes;
+                dispatchEvent(data.name, payload);
                 break;
+            }
         }
     };
 

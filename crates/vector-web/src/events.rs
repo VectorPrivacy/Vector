@@ -137,6 +137,14 @@ impl InboundEventHandler for WebEventHandler {
         });
     }
 
+    fn on_webxdc_signal(&self, contact: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        crate::miniapps::on_signal(contact.into(), npub.into(), topic_id.into(), node_addr.map(Into::into), event_id.into(), created_at);
+    }
+
+    fn on_community_webxdc(&self, chat_id: &str, npub: &str, topic_id: &str, node_addr: Option<&str>, event_id: &str, created_at: u64) {
+        crate::miniapps::on_signal(chat_id.into(), npub.into(), topic_id.into(), node_addr.map(Into::into), event_id.into(), created_at);
+    }
+
     fn on_community_typing(&self, chat_id: &str, npub: &str, until: u64) {
         let (chat_id, npub) = (chat_id.to_string(), npub.to_string());
         db::spawn_bound(async move {

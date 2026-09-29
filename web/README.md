@@ -27,6 +27,12 @@ Needs `wasm-pack` and the `wasm32-unknown-unknown` target.
   the account, with takeover.
 - **`web/media.js`**: commands the page answers itself: audio playback with spectrum
   waveforms, WAV voice recording, notifications, saving and copying attachments.
+- **`web/miniapps.js`** + **`web/xdc/`**: mini apps. Each runs in a sandboxed iframe on its
+  own origin, `<partition>.xdc.<vector host>`, so its localStorage and IndexedDB are its own
+  and persist; marketplace apps keep one partition across versions, as on desktop. That
+  origin's service worker (`xdc/sw.js`) serves the app out of its `.xdc` under an offline
+  CSP and the desktop Permissions-Policy; `xdc/bridge.js` is `window.webxdc`. Realtime
+  channels run on Iroh in the worker, relay-only and wire-compatible with desktop.
 - **`web/signer.js`**: the page half of NIP-07. Extensions inject `window.nostr` into pages
   only, so core's signer sends each request out as a `nip07_request` event and this answers
   it through `nip07_reply`.
@@ -44,10 +50,20 @@ profiles and avatars (edit, upload, blocks, nicknames), Concord v2 communities (
 invite, join, channels, history, live messages, reactions, roles, moderation, pins,
 images), relays and Blossom settings, notification levels and mutes, cross-device sync of
 pins, blocks, mutes, nicknames and the community list, browser notifications, emoji and
-GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animated pack emoji.
+GIF pickers, DM wallpapers, emoji pack creation, editing, reordering and animated pack emoji,
+mini apps (from chats, history and the Nexus marketplace; per-app storage; permissions;
+realtime multiplayer over Iroh).
 
 ## Not yet
 
-Mini apps, calls, the PIVX wallet, transcription, Tor, NIP-55 (Amber, Android-only), legacy (v1)
+Calls, the PIVX wallet, transcription, Tor, NIP-55 (Amber, Android-only), legacy (v1)
 community writes. Avatars and images load through the media proxy; without one, hosts
 that send no CORS headers are shown by URL.
+
+## Hosting
+
+Mini apps need Vector served by host name, with every `*.xdc.<host>` subdomain reaching
+the same server: `serve.mjs` answers those with only the mini app host page, its service
+worker and the bridge template. On localhost that works as is (`*.localhost` resolves to
+the machine); a deployment needs wildcard DNS and a wildcard certificate for
+`*.xdc.<host>`, and should send the page `frame-src <scheme>://*.xdc.<host>` as serve.mjs does.

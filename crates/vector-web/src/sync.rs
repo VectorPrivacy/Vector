@@ -66,6 +66,7 @@ async fn hydrate_and_announce() {
 pub async fn fetch_messages(init: bool) -> Result<(), String> {
     if init {
         hydrate_and_announce().await;
+        db::spawn_bound(crate::miniapps::preload_marketplace());
     }
     // History arrives behind the painted list; `sync_finished` repaints what it added.
     db::spawn_bound(async {

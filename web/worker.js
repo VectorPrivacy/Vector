@@ -6,7 +6,7 @@ const VERSION = 'web';
 
 const booted = (async () => {
     await init();
-    set_event_sink((name, json) => postMessage({ t: 'event', name, json }));
+    set_event_sink((name, json, bytes) => postMessage({ t: 'event', name, json, bytes }, bytes ? [bytes.buffer] : []));
     // A tab that just stepped aside may still be closing its storage handles.
     for (let attempt = 0; ; attempt++) {
         try {

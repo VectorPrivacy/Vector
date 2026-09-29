@@ -25,6 +25,7 @@ mod emitter;
 mod emoji_ops;
 mod encryption;
 mod messaging;
+mod miniapps;
 mod sync;
 
 use std::path::PathBuf;
@@ -34,7 +35,7 @@ use std::pin::Pin;
 type Module = for<'a> fn(&'a str, &'a commands::Args) -> Pin<Box<dyn std::future::Future<Output = Option<Result<serde_json::Value, String>>> + 'a>>;
 
 /// Consulted in order for commands the core dispatcher doesn't answer.
-const MODULES: &[Module] = &[signers::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch];
+const MODULES: &[Module] = &[signers::dispatch, miniapps::dispatch, emoji_ops::dispatch, chat_ops::dispatch, profile_ops::dispatch, network_ops::dispatch, community_ops::dispatch];
 
 use wasm_bindgen::prelude::*;
 
@@ -113,6 +114,10 @@ pub async fn invoke_bytes(cmd: String, bytes: Vec<u8>, headers: String) -> Resul
                 .unwrap_or_default();
             Ok(files::cache_bytes(bytes, name, header("extension")).to_string())
         }
+        "miniapp_rt_send" => match miniapps::rt_send(&header("label"), bytes).await {
+            Ok(_) => Ok("null".into()),
+            Err(e) => Err(JsValue::from_str(&e)),
+        },
         _ => Err(JsValue::from_str(&format!("`{cmd}` does not take a raw body on Vector Web"))),
     }
 }

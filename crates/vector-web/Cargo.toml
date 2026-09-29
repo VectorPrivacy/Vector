@@ -29,12 +29,21 @@ rusqlite = { version = "0.38", default-features = false }
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "ico", "bmp"] }
 fast-thumbhash = "0.2"
 base64-simd = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["stream", "query"] }
 futures-util = "0.3"
 tokio = { version = "1.49.0", default-features = false, features = ["sync"] }
 # The OPFS pool VFS must link against the same SQLite build rusqlite uses.
 sqlite-wasm-rs = "=0.5.5"
 sqlite-wasm-vfs = "=0.2.0"
+# Mini app realtime: relay-only in a browser, wire-compatible with desktop.
+iroh = { version = "1.0", default-features = false, features = ["tls-ring"] }
+iroh-gossip = { version = "0.101", default-features = false, features = ["net"] }
+noq-proto = "1.1"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }
+toml = "0.8"
+anyhow = "1"
+sha2 = "0.10"
 
 [package.metadata.wasm-pack.profile.dev]
 wasm-opt = false

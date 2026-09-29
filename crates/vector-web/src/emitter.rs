@@ -21,6 +21,17 @@ pub fn emit_raw(event: &str, json: &str) {
     });
 }
 
+/// An event carrying binary data alongside its JSON payload, handed over without copying.
+pub fn emit_bytes(event: &str, payload: &impl serde::Serialize, bytes: &[u8]) {
+    let Ok(json) = serde_json::to_string(payload) else { return };
+    SINK.with(|s| {
+        if let Some(f) = s.borrow().as_ref() {
+            let data = js_sys::Uint8Array::from(bytes);
+            let _ = f.call3(&JsValue::NULL, &JsValue::from_str(event), &JsValue::from_str(&json), &data);
+        }
+    });
+}
+
 /// For events the Tauri shell emits directly rather than through core.
 pub fn emit(event: &str, payload: &impl serde::Serialize) {
     if let Ok(json) = serde_json::to_string(payload) {

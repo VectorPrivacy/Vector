@@ -205,6 +205,11 @@ pub fn cache_bytes(bytes: Vec<u8>, name: String, extension: String) -> Value {
     json!({ "size": size, "name": name, "extension": extension })
 }
 
+/// The pasted file's bytes and name, for previews that read it in place.
+pub fn pasted_bytes() -> Option<(Arc<Vec<u8>>, String)> {
+    PASTED.with(|p| p.borrow().as_ref().map(|p| (p.bytes.clone(), p.name.clone())))
+}
+
 pub fn cached_info() -> Value {
     PASTED.with(|p| {
         p.borrow()

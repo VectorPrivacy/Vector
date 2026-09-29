@@ -1,2 +1,65 @@
 /* Vector Web: a browser tab has no window to minimise, maximise or close. */
 .vector-web #window-chrome .chrome-ctl:not(.chrome-help) { display: none; }
+
+/* Mini app windows (web/miniapps.js) */
+.xdc-window {
+    position: fixed;
+    width: 480px;
+    height: 640px;
+    min-width: 320px;
+    min-height: 360px;
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    display: flex;
+    flex-direction: column;
+    background: #0a0a0a;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+    resize: both;
+}
+.xdc-window.xdc-max {
+    inset: 0 !important;
+    width: auto !important;
+    height: auto !important;
+    max-width: none;
+    max-height: none;
+    border-radius: 0;
+    resize: none;
+}
+.xdc-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 6px 0 10px;
+    flex-shrink: 0;
+    background: #141414;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    color: #e5e5e5;
+    font: 600 13px system-ui, sans-serif;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+}
+.xdc-dragging .xdc-bar { cursor: grabbing; }
+.xdc-dragging .xdc-frame { pointer-events: none; }
+.xdc-icon { width: 20px; height: 20px; border-radius: 5px; object-fit: cover; }
+.xdc-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xdc-btn {
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #bdbdbd;
+    font-size: 14px;
+    cursor: pointer;
+}
+.xdc-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+.xdc-close:hover { background: #c0392b; }
+.xdc-frame { flex: 1; width: 100%; border: 0; background: #0a0a0a; }
+@media (max-width: 700px) {
+    .xdc-window { inset: 0 !important; width: auto; height: auto; max-width: none; max-height: none; border-radius: 0; resize: none; }
+}
